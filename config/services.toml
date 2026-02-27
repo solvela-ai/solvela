@@ -1,0 +1,16 @@
+# x402 Service Marketplace Registry
+# Phase 6: Registered x402-compatible services available through the gateway.
+
+[services.llm-gateway]
+name = "LLM Intelligence"
+endpoint = "/v1/chat/completions"
+category = "intelligence"
+x402_enabled = true
+internal = true
+
+[services.image-gen]
+name = "Image Generation"
+endpoint = "/v1/images/generations"
+category = "media"
+x402_enabled = true
+internal = true

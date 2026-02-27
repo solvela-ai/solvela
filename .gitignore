@@ -1,0 +1,43 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keys / secrets
+*.key
+*.pem
+wallet.json
+
+# Docker volumes
+docker-data/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+sdks/python/dist/
+sdks/python/build/
+sdks/python/.venv/
+.ruff_cache/
+
+# TypeScript SDK
+sdks/typescript/node_modules/
+sdks/typescript/dist/
+
+# Go SDK
+sdks/go/vendor/

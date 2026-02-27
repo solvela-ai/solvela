@@ -1,0 +1,18 @@
+# RustyClawRouter Gateway Configuration
+
+[server]
+host = "0.0.0.0"
+port = 8402
+
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+recipient_wallet = ""  # Set via RCR_SOLANA_RECIPIENT_WALLET env var
+usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+# Provider API keys are loaded from environment variables:
+#   OPENAI_API_KEY
+#   ANTHROPIC_API_KEY
+#   GOOGLE_API_KEY
+#   XAI_API_KEY
+#   DEEPSEEK_API_KEY
+[providers]

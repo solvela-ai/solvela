@@ -1,0 +1,24 @@
+{
+  "name": "@rustyclawrouter/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for RustyClawRouter — AI agent payments with USDC on Solana",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test tests/client.test.ts"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.3.2",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "@solana/web3.js": "^1.87.0"
+  },
+  "peerDependenciesMeta": {
+    "@solana/web3.js": {
+      "optional": true
+    }
+  }
+}

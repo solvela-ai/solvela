@@ -1,0 +1,22 @@
+[package]
+name = "rustyclawrouter-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rcr"
+path = "src/main.rs"
+
+[dependencies]
+rcr-common = { workspace = true }
+x402 = { workspace = true }
+router = { workspace = true }
+
+clap = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+bs58 = { workspace = true }
+chrono = { workspace = true }
