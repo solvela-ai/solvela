@@ -45,3 +45,8 @@ sdks/mcp/dist/
 
 # Go SDK
 sdks/go/vendor/
+
+# Dashboard (Next.js)
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
