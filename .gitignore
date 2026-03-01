@@ -39,5 +39,9 @@ sdks/python/.venv/
 sdks/typescript/node_modules/
 sdks/typescript/dist/
 
+# MCP server
+sdks/mcp/node_modules/
+sdks/mcp/dist/
+
 # Go SDK
 sdks/go/vendor/
