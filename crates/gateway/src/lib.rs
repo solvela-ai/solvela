@@ -19,6 +19,7 @@ use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+use rcr_common::services::ServiceRegistry;
 use router::models::ModelRegistry;
 use x402::facilitator::Facilitator;
 
@@ -29,6 +30,7 @@ use crate::providers::ProviderRegistry;
 pub struct AppState {
     pub config: config::AppConfig,
     pub model_registry: ModelRegistry,
+    pub service_registry: ServiceRegistry,
     pub providers: ProviderRegistry,
     pub facilitator: Facilitator,
     pub usage: usage::UsageTracker,
@@ -49,6 +51,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(routes::images::image_generations),
         )
         .route("/v1/models", get(routes::models::list_models))
+        .route("/v1/services", get(routes::services::list_services))
         .route("/v1/supported", get(routes::supported::supported))
         .route("/pricing", get(routes::pricing::pricing))
         .route("/health", get(routes::health::health))

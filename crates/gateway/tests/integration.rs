@@ -15,6 +15,7 @@ use gateway::config::AppConfig;
 use gateway::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
 use gateway::providers::ProviderRegistry;
 use gateway::{build_router, AppState};
+use rcr_common::services::ServiceRegistry;
 use router::models::ModelRegistry;
 use x402::traits::{Error as X402Error, PaymentVerifier};
 use x402::types::{PaymentPayload, SettlementResult, VerificationResult, SOLANA_NETWORK};
@@ -58,6 +59,25 @@ impl PaymentVerifier for AlwaysPassVerifier {
     }
 }
 
+const TEST_SERVICES_TOML: &str = r#"
+[services.llm-gateway]
+name = "LLM Intelligence"
+endpoint = "/v1/chat/completions"
+category = "intelligence"
+x402_enabled = true
+internal = true
+description = "OpenAI-compatible LLM inference"
+pricing_label = "per-token (see /pricing)"
+
+[services.web-search]
+name = "Web Search"
+endpoint = "https://search.example.com/v1/query"
+category = "search"
+x402_enabled = true
+internal = false
+pricing_label = "$0.005/query"
+"#;
+
 const TEST_MODELS_TOML: &str = r#"
 [models.openai-gpt-4o]
 provider = "openai"
@@ -98,6 +118,7 @@ supports_vision = true
 /// (non-base64, non-JSON) are still correctly rejected by the route handler.
 fn test_app() -> axum::Router {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
 
     // Use the always-pass mock verifier so tests exercise the full request path
     let facilitator = x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
@@ -105,6 +126,7 @@ fn test_app() -> axum::Router {
     let state = Arc::new(AppState {
         config: AppConfig::default(),
         model_registry,
+        service_registry,
         providers: ProviderRegistry::from_env(), // No keys set in test env
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -728,4 +750,164 @@ async fn test_pricing_endpoint() {
     assert!(m["pricing"]["input_per_million_usdc"].is_number());
     assert!(m["pricing"]["platform_fee_percent"].is_number());
     assert!(m["example_1k_token_request"]["total_usdc"].is_string());
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/services  (Phase 6 — x402 Service Marketplace)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_services_endpoint_returns_all() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/services")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["object"], "list");
+
+    let data = json["data"].as_array().unwrap();
+    // TEST_SERVICES_TOML has 2 services
+    assert_eq!(data.len(), 2);
+    assert_eq!(json["total"], 2);
+}
+
+#[tokio::test]
+async fn test_services_each_entry_has_required_fields() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/services")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let data = json["data"].as_array().unwrap();
+
+    for svc in data {
+        assert!(svc["id"].is_string(), "missing id");
+        assert!(svc["name"].is_string(), "missing name");
+        assert!(svc["category"].is_string(), "missing category");
+        assert!(svc["endpoint"].is_string(), "missing endpoint");
+        assert!(svc["x402_enabled"].is_boolean(), "missing x402_enabled");
+        assert!(svc["internal"].is_boolean(), "missing internal");
+        assert!(svc["pricing"].is_string(), "missing pricing");
+        let chains = svc["chains"].as_array().unwrap();
+        assert!(
+            chains.iter().any(|c| c == "solana"),
+            "chains must include solana"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_services_filter_by_category() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/services?category=intelligence")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let data = json["data"].as_array().unwrap();
+
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["id"], "llm-gateway");
+    assert_eq!(data[0]["category"], "intelligence");
+}
+
+#[tokio::test]
+async fn test_services_filter_by_internal_true() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/services?internal=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let data = json["data"].as_array().unwrap();
+
+    // Only llm-gateway is internal in TEST_SERVICES_TOML
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["internal"], true);
+}
+
+#[tokio::test]
+async fn test_services_filter_by_internal_false() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/services?internal=false")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let data = json["data"].as_array().unwrap();
+
+    // Only web-search is external in TEST_SERVICES_TOML
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["id"], "web-search");
+    assert_eq!(data[0]["internal"], false);
+}
+
+#[tokio::test]
+async fn test_services_unknown_category_returns_empty() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/services?category=doesnotexist")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 0);
+    assert_eq!(json["total"], 0);
 }

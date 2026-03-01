@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use gateway::{build_router, config, providers::ProviderRegistry, AppState};
+use rcr_common::services::ServiceRegistry;
 use router::models::ModelRegistry;
 
 #[tokio::main]
@@ -24,6 +25,18 @@ async fn main() -> anyhow::Result<()> {
     let model_registry = ModelRegistry::from_toml(&models_toml)?;
 
     let model_count = model_registry.all().len();
+
+    // Load service registry from config file
+    let services_toml = std::fs::read_to_string("config/services.toml")
+        .unwrap_or_else(|_| include_str!("../../../config/services.toml").to_string());
+    let service_registry = ServiceRegistry::from_toml(&services_toml).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "failed to parse services.toml, using empty registry");
+        ServiceRegistry::empty()
+    });
+    info!(
+        services = service_registry.all().len(),
+        "loaded service registry"
+    );
 
     // Initialize provider registry from environment API keys
     let providers = ProviderRegistry::from_env();
@@ -79,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         config: app_config.clone(),
         model_registry,
+        service_registry,
         providers,
         facilitator,
         usage,
