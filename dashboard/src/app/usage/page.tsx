@@ -2,7 +2,7 @@ import { Topbar } from "@/components/layout/topbar";
 import { ModelPie } from "@/components/charts/model-pie";
 import { SpendChart } from "@/components/charts/spend-chart";
 import { Badge } from "@/components/ui/badge";
-import { MODEL_USAGE, generateSpendHistory } from "@/lib/mock-data";
+import { MODEL_USAGE, SPEND_HISTORY } from "@/lib/mock-data";
 import {
   formatUSDC,
   formatNumber,
@@ -10,7 +10,7 @@ import {
 } from "@/lib/utils";
 
 export default function UsagePage() {
-  const history = generateSpendHistory();
+  const history = SPEND_HISTORY;
 
   return (
     <div className="flex flex-col h-full">

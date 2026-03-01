@@ -11,11 +11,11 @@ import { StatCard } from "@/components/ui/stat-card";
 import { SpendChart } from "@/components/charts/spend-chart";
 import { RequestsBar } from "@/components/charts/requests-bar";
 import { StatusDot } from "@/components/ui/status-dot";
-import { DASHBOARD_STATS, generateSpendHistory } from "@/lib/mock-data";
+import { DASHBOARD_STATS, SPEND_HISTORY } from "@/lib/mock-data";
 import { formatUSDC, formatNumber } from "@/lib/utils";
 
 export default function OverviewPage() {
-  const history = generateSpendHistory();
+  const history = SPEND_HISTORY;
   const s = DASHBOARD_STATS;
 
   return (

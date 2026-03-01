@@ -1,13 +1,22 @@
-import { Copy, ExternalLink, ArrowDownLeft, ArrowUpRight } from "lucide-react";
+import { Copy, ExternalLink, ArrowUpRight } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { StatusDot } from "@/components/ui/status-dot";
 import { WALLET_TXS, DASHBOARD_STATS } from "@/lib/mock-data";
 import { formatUSDC } from "@/lib/utils";
 
+// Read from server-side env var — never a client-side public var (no private key here,
+// but the recipient wallet address is also fine as a non-secret display field).
+const RECIPIENT_WALLET =
+  process.env.RCR_SOLANA_RECIPIENT_WALLET ??
+  "Configure RCR_SOLANA_RECIPIENT_WALLET in .env";
+
 export default function WalletPage() {
   const balance = DASHBOARD_STATS.walletBalance;
-  const addr = "7xKpFqR9mVz3NbW8yLcJ2sUoTdGiAeHfYpX4wMk5nRt";
-  const short = `${addr.slice(0, 8)}...${addr.slice(-8)}`;
+  const addr = RECIPIENT_WALLET;
+  const isConfigured = addr.length > 20 && !addr.startsWith("Configure");
+  const short = isConfigured
+    ? `${addr.slice(0, 8)}...${addr.slice(-8)}`
+    : addr;
 
   return (
     <div className="flex flex-col h-full">
