@@ -1,0 +1,8 @@
+# Anchor build artifacts
+target/
+.anchor/
+deploy/
+
+# Local keypairs and test wallets (never commit)
+*.json
+!Anchor.toml

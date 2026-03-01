@@ -1,0 +1,40 @@
+# Opt out of the parent Cargo workspace to avoid dependency version conflicts:
+# - thiserror: workspace uses "2", anchor-lang requires "^1"
+# - base64: workspace uses "0.22", anchor requires "^0.21"
+# Build with: cargo check --lib  (type checking)
+#             anchor build        (full compile + IDL generation, needs Anchor CLI)
+[workspace]
+
+[package]
+name = "rustyclawrouter-escrow"
+version = "0.1.0"
+edition = "2021"
+description = "Anchor escrow program for RustyClawRouter USDC-SPL payments"
+license = "MIT"
+
+# This crate is NOT a member of the workspace root. Anchor programs require
+# their own Cargo.lock (managed by `anchor build`) and pin dependency versions
+# that conflict with the gateway workspace (thiserror ^1 vs ^2, base64 ^0.21
+# vs ^0.22). Build with `anchor build` or `cargo check --lib` here.
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "rustyclawrouter_escrow"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
+anchor-spl = { version = "0.31.1", features = ["associated_token", "token"] }
+
+[dev-dependencies]
+anchor-lang = { version = "0.31.1" }
+# LiteSVM for fast in-process Solana program unit tests
+# Requires anchor build to produce a .so first; tests skip gracefully without it
+litesvm = "0.6.1"
+solana-sdk = "2.2"
