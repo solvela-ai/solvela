@@ -654,3 +654,78 @@ async fn test_chat_with_base64_payment_header() {
         .unwrap()
         .contains("STUB"));
 }
+
+// ---------------------------------------------------------------------------
+// POST /v1/images/generations — scaffold (501 until provider added)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_image_generations_returns_501() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "prompt": "A robot paying for an API call with USDC on Solana",
+        "model": "dall-e-3",
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "not_implemented");
+}
+
+// ---------------------------------------------------------------------------
+// GET /pricing
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_pricing_endpoint() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/pricing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Platform metadata
+    assert_eq!(json["platform"]["chain"], "solana");
+    assert_eq!(json["platform"]["token"], "USDC-SPL");
+    assert_eq!(json["platform"]["fee_percent"], 5);
+
+    // Models list is populated
+    let models = json["models"].as_array().unwrap();
+    assert!(
+        !models.is_empty(),
+        "pricing should return at least one model"
+    );
+
+    // Each model has required fields
+    let m = &models[0];
+    assert!(m["id"].is_string());
+    assert!(m["pricing"]["input_per_million_usdc"].is_number());
+    assert!(m["pricing"]["platform_fee_percent"].is_number());
+    assert!(m["example_1k_token_request"]["total_usdc"].is_string());
+}

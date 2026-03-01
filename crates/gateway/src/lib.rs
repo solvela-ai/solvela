@@ -44,8 +44,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/v1/chat/completions", post(routes::chat::chat_completions))
+        .route(
+            "/v1/images/generations",
+            post(routes::images::image_generations),
+        )
         .route("/v1/models", get(routes::models::list_models))
         .route("/v1/supported", get(routes::supported::supported))
+        .route("/pricing", get(routes::pricing::pricing))
         .route("/health", get(routes::health::health))
         .layer(axum::middleware::from_fn(
             middleware::rate_limit::rate_limit,

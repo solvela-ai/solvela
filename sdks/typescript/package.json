@@ -6,11 +6,12 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "node --test tests/client.test.ts"
+    "test": "node --import tsx --test tests/client.test.ts"
   },
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^25.3.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.0.0"
   },
   "peerDependencies": {

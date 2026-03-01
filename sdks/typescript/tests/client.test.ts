@@ -97,29 +97,30 @@ describe('createPaymentHeader', () => {
     error: 'Payment required',
   };
 
-  it('produces a valid base64 string', () => {
-    const header = createPaymentHeader(mockPaymentRequired, 'http://localhost:8402/v1/chat/completions');
+  it('produces a valid base64 string', async () => {
+    const header = await createPaymentHeader(mockPaymentRequired, 'http://localhost:8402/v1/chat/completions');
     // base64 strings only contain [A-Za-z0-9+/=]
     assert.match(header, /^[A-Za-z0-9+/=]+$/);
   });
 
-  it('roundtrips through decode', () => {
+  it('roundtrips through decode', async () => {
     const url = 'http://localhost:8402/v1/chat/completions';
-    const header = createPaymentHeader(mockPaymentRequired, url);
+    const header = await createPaymentHeader(mockPaymentRequired, url);
     const decoded = decodePaymentHeader(header) as Record<string, unknown>;
 
     assert.strictEqual(decoded.x402_version, 2);
     assert.deepStrictEqual(decoded.resource, { url, method: 'POST' });
     assert.deepStrictEqual(decoded.accepted, mockPaymentRequired.accepts[0]);
+    // No private key supplied → stub transaction
     assert.deepStrictEqual(decoded.payload, { transaction: 'STUB_BASE64_TX' });
   });
 
-  it('throws on empty accepts array', () => {
+  it('throws on empty accepts array', async () => {
     const badInfo: PaymentRequired = {
       ...mockPaymentRequired,
       accepts: [],
     };
-    assert.throws(
+    await assert.rejects(
       () => createPaymentHeader(badInfo, 'http://localhost:8402/v1/chat/completions'),
       /No payment accept options/
     );
