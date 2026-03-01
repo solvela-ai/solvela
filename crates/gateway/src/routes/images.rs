@@ -1,48 +1,27 @@
-use std::sync::Arc;
-
-use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::Deserialize;
 use serde_json::json;
-
-use crate::AppState;
-
-/// Image generation request (OpenAI-compatible subset).
-#[derive(Debug, Deserialize)]
-pub struct ImageGenerationRequest {
-    pub prompt: String,
-    pub model: Option<String>,
-    pub n: Option<u8>,
-    pub size: Option<String>,
-    pub response_format: Option<String>,
-}
 
 /// POST /v1/images/generations — image generation via x402 payment.
 ///
 /// This endpoint is scaffolded as an x402-paid route. It currently returns a
 /// `501 Not Implemented` response until a real image provider adapter is added.
-/// The 402 payment flow structure is complete — integrating a provider adapter
-/// (e.g., OpenAI DALL·E, Stability AI) is the remaining step.
-pub async fn image_generations(
-    State(_state): State<Arc<AppState>>,
-    Json(req): Json<ImageGenerationRequest>,
-) -> impl IntoResponse {
-    let model = req.model.as_deref().unwrap_or("dall-e-3");
-
+///
+/// Before removing the 501, add:
+///   1. x402 payment enforcement (same as `routes/chat.rs`)
+///   2. An image provider adapter in `crates/gateway/src/providers/`
+///   3. Prompt guard middleware coverage
+pub async fn image_generations() -> impl IntoResponse {
     (
         StatusCode::NOT_IMPLEMENTED,
         Json(json!({
             "error": {
                 "type": "not_implemented",
-                "message": format!(
-                    "Image generation is scaffolded but requires a provider adapter. \
-                     Model requested: '{}'. Integrate an image provider adapter \
-                     (e.g., openai/dall-e-3, stability-ai/stable-diffusion-xl) \
-                     in crates/gateway/src/providers/ to enable this endpoint.",
-                    model
-                ),
+                "message": "Image generation is scaffolded but requires a provider adapter. \
+                            Integrate an image provider (e.g., openai/dall-e-3, \
+                            stability-ai/stable-diffusion-xl) in \
+                            crates/gateway/src/providers/ to enable this endpoint.",
                 "docs": "https://docs.rustyclawrouter.com/images",
                 "roadmap_phase": "Phase 3 extension",
             }
