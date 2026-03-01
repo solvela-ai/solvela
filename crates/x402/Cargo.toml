@@ -17,3 +17,6 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+curve25519-dalek = { workspace = true }

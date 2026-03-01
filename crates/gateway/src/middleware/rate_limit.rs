@@ -104,15 +104,23 @@ pub async fn rate_limit(request: Request, next: Next) -> Response {
         match limiter.check(&client_id).await {
             Ok(remaining) => {
                 let mut response = next.run(request).await;
-                // Add rate limit headers
+                // Add standard rate limit headers
+                let headers = response.headers_mut();
+                if let Ok(val) = limiter.config.max_requests.to_string().parse() {
+                    headers.insert("x-ratelimit-limit", val);
+                }
                 if let Ok(val) = remaining.to_string().parse() {
-                    response.headers_mut().insert("x-ratelimit-remaining", val);
+                    headers.insert("x-ratelimit-remaining", val);
+                }
+                if let Ok(val) = limiter.config.window.as_secs().to_string().parse() {
+                    headers.insert("x-ratelimit-reset", val);
                 }
                 response
             }
             Err(()) => {
                 warn!(client_id, "rate limit exceeded");
-                (
+                let reset_secs = limiter.config.window.as_secs();
+                let mut response = (
                     StatusCode::TOO_MANY_REQUESTS,
                     axum::Json(serde_json::json!({
                         "error": {
@@ -121,7 +129,19 @@ pub async fn rate_limit(request: Request, next: Next) -> Response {
                         }
                     })),
                 )
-                    .into_response()
+                    .into_response();
+                let headers = response.headers_mut();
+                if let Ok(limit_val) = limiter.config.max_requests.to_string().parse() {
+                    headers.insert("x-ratelimit-limit", limit_val);
+                }
+                if let Ok(remaining_val) = "0".parse() {
+                    headers.insert("x-ratelimit-remaining", remaining_val);
+                }
+                if let Ok(reset_val) = reset_secs.to_string().parse::<axum::http::HeaderValue>() {
+                    headers.insert("x-ratelimit-reset", reset_val.clone());
+                    headers.insert("retry-after", reset_val);
+                }
+                response
             }
         }
     } else {
@@ -131,21 +151,33 @@ pub async fn rate_limit(request: Request, next: Next) -> Response {
 }
 
 /// Extract a client identifier from the request.
+///
+/// Priority order (most to least trustworthy):
+/// 1. Wallet address from the decoded PaymentInfo extension — cryptographically
+///    bound to the payment; cannot be spoofed without a valid signed transaction.
+/// 2. Peer socket address injected by Tower — reflects the actual TCP connection,
+///    not a header, so cannot be forged by the client.
+/// 3. `"unknown"` fallback — never `X-Forwarded-For`, which is trivially spoofed
+///    and must not be used for security-sensitive client identification.
+///
+/// Note: If this gateway is deployed behind a trusted reverse proxy and IP-based
+/// rate limiting is required, configure the proxy to strip and re-inject
+/// `X-Forwarded-For` at the proxy layer — do not rely on client-supplied headers.
 fn extract_client_id(request: &Request) -> String {
-    // Try to get wallet address from payment info extension
+    // 1. Wallet address from verified payment — strongest identity signal
     if let Some(payment_info) = request.extensions().get::<super::x402::PaymentInfo>() {
         return payment_info.payload.accepted.pay_to.clone();
     }
 
-    // Fallback to forwarded-for header or connection info
-    if let Some(forwarded) = request.headers().get("x-forwarded-for") {
-        if let Ok(ip) = forwarded.to_str() {
-            if let Some(first_ip) = ip.split(',').next() {
-                return first_ip.trim().to_string();
-            }
-        }
+    // 2. Actual TCP peer address from Tower's ConnectInfo extension
+    if let Some(addr) = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+    {
+        return addr.0.ip().to_string();
     }
 
+    // 3. Unknown — rate limit slot shared by all unknown clients (conservative)
     "unknown".to_string()
 }
 

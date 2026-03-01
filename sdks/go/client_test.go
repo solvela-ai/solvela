@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -106,7 +109,7 @@ func TestChatRequestJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var m map[string]interface{}
+	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatal(err)
 	}
@@ -168,6 +171,26 @@ func TestErrorTypes(t *testing.T) {
 	}
 }
 
+func TestErrorUnwrap(t *testing.T) {
+	sentinel := errors.New("underlying cause")
+
+	pe := &PaymentError{Message: "test", cause: sentinel}
+	if !errors.Is(pe, sentinel) {
+		t.Error("PaymentError.Unwrap should expose cause via errors.Is")
+	}
+
+	be := &BudgetExceededError{Budget: 10, Spent: 8, Cost: 3, cause: sentinel}
+	if !errors.Is(be, sentinel) {
+		t.Error("BudgetExceededError.Unwrap should expose cause via errors.Is")
+	}
+
+	// nil cause should not panic
+	pe2 := &PaymentError{Message: "no cause"}
+	if pe2.Unwrap() != nil {
+		t.Error("nil cause should return nil from Unwrap")
+	}
+}
+
 func TestSessionSpent(t *testing.T) {
 	c, _ := NewClient()
 	if c.GetSessionSpent() != 0 {
@@ -207,4 +230,163 @@ func TestChatRequiresContext(t *testing.T) {
 	_, _ = NewClient()
 	ctx := context.Background()
 	_ = ctx // Verifying it compiles with context
+}
+
+// body402 is the JSON body the gateway sends on a 402 response.
+const body402 = `{"error":{"message":"{\"x402_version\":2,\"accepts\":[{\"scheme\":\"exact\",\"network\":\"solana:mainnet\",\"amount\":\"2625\",\"asset\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"pay_to\":\"RecipWallet\",\"max_timeout_seconds\":300}],\"cost_breakdown\":{\"provider_cost\":\"0.002500\",\"platform_fee\":\"0.000125\",\"total\":\"0.002625\",\"currency\":\"USDC\",\"fee_percent\":5},\"error\":\"Payment required\"}"}}`
+
+// chatOKBody is a minimal valid ChatResponse JSON.
+const chatOKBody = `{"id":"chatcmpl-1","object":"chat.completion","created":1700000000,"model":"openai/gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}]}`
+
+func TestChatSucceeds200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(chatOKBody)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(WithAPIURL(srv.URL))
+	resp, err := c.ChatCompletion(context.Background(), ChatRequest{
+		Model:    "openai/gpt-4o",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content != "Hi" {
+		t.Errorf("unexpected response: %+v", resp)
+	}
+	if c.GetSessionSpent() != 0 {
+		t.Error("session spent should be 0 for direct 200 (no payment)")
+	}
+}
+
+func TestChat402ThenSuccess(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			// First request → 402
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusPaymentRequired)
+			w.Write([]byte(body402)) //nolint:errcheck
+			return
+		}
+		// Second request → check payment header present, return 200
+		if r.Header.Get("payment-signature") == "" {
+			t.Error("retry request missing payment-signature header")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(chatOKBody)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(WithAPIURL(srv.URL))
+	resp, err := c.ChatCompletion(context.Background(), ChatRequest{
+		Model:    "openai/gpt-4o",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Choices) == 0 {
+		t.Error("expected choices in response")
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 calls, got %d", callCount)
+	}
+	// sessionSpent should reflect the cost from the 402 response (0.002625)
+	if c.GetSessionSpent() == 0 {
+		t.Error("session spent should be non-zero after successful payment")
+	}
+}
+
+func TestChatBudgetExceeded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Always return 402 with cost 0.002625
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPaymentRequired)
+		w.Write([]byte(body402)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	// Budget lower than the 0.002625 cost
+	c, _ := NewClient(WithAPIURL(srv.URL), WithSessionBudget(0.001))
+	_, err := c.ChatCompletion(context.Background(), ChatRequest{
+		Model:    "openai/gpt-4o",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "hello"}},
+	})
+	if err == nil {
+		t.Fatal("expected BudgetExceededError, got nil")
+	}
+	var be *BudgetExceededError
+	if !errors.As(err, &be) {
+		t.Errorf("expected *BudgetExceededError, got %T: %v", err, err)
+	}
+	// sessionSpent must NOT be incremented when budget is exceeded
+	if c.GetSessionSpent() != 0 {
+		t.Errorf("session spent should remain 0, got %f", c.GetSessionSpent())
+	}
+}
+
+func TestListModelsSuccess(t *testing.T) {
+	modelsBody := `{"object":"list","data":[{"id":"openai/gpt-4o","object":"model"}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(modelsBody)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	c, _ := NewClient(WithAPIURL(srv.URL))
+	raw, err := c.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if parsed["object"] != "list" {
+		t.Errorf("object = %v", parsed["object"])
+	}
+}
+
+func TestGetSpending(t *testing.T) {
+	budget := 5.0
+	c, _ := NewClient(
+		WithSessionBudget(budget),
+	)
+
+	summary, err := c.GetSpending(context.Background())
+	if err != nil {
+		t.Fatalf("GetSpending: %v", err)
+	}
+	if summary.SessionSpentUSDC != 0 {
+		t.Errorf("initial session spent = %f, want 0", summary.SessionSpentUSDC)
+	}
+	if summary.BudgetRemaining == nil {
+		t.Fatal("BudgetRemaining should be set when budget is configured")
+	}
+	if *summary.BudgetRemaining != budget {
+		t.Errorf("BudgetRemaining = %f, want %f", *summary.BudgetRemaining, budget)
+	}
+
+	// Client with no budget should have nil BudgetRemaining
+	c2, _ := NewClient()
+	s2, err := c2.GetSpending(context.Background())
+	if err != nil {
+		t.Fatalf("GetSpending (no budget): %v", err)
+	}
+	if s2.BudgetRemaining != nil {
+		t.Error("BudgetRemaining should be nil when no budget is set")
+	}
 }

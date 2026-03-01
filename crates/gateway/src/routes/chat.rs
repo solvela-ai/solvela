@@ -13,6 +13,7 @@ use router::profiles::{self, Profile};
 use router::scorer;
 
 use crate::error::GatewayError;
+use crate::middleware::prompt_guard::{self, GuardResult, PromptGuardConfig};
 use crate::providers::fallback;
 use crate::AppState;
 
@@ -40,6 +41,25 @@ pub async fn chat_completions(
         stream = req.stream,
         "chat completion request"
     );
+
+    // Step 1b: Prompt guard — check for injection, jailbreak, and PII
+    let guard_config = PromptGuardConfig::default();
+    match prompt_guard::check(&req.messages, &guard_config) {
+        GuardResult::Blocked { reason } => {
+            warn!(reason = %reason, "request blocked by prompt guard");
+            return Err(GatewayError::BadRequest(format!(
+                "request blocked: {reason}"
+            )));
+        }
+        GuardResult::PiiDetected { fields } => {
+            // Log only (pii_block=false by default); do not reject
+            warn!(
+                pii_fields = ?fields,
+                "PII detected in request — forwarding with warning logged"
+            );
+        }
+        GuardResult::Clean => {}
+    }
 
     // Step 2: Look up model in registry for pricing
     let model_info = state
@@ -94,7 +114,28 @@ pub async fn chat_completions(
 
     match payment_payload {
         Some(payload) => {
-            // Verify and settle via Facilitator
+            // Verify the resource field matches this endpoint
+            if payload.resource.url != "/v1/chat/completions" {
+                return Err(GatewayError::InvalidPayment(format!(
+                    "payment resource '{}' does not match this endpoint",
+                    payload.resource.url
+                )));
+            }
+
+            // Replay attack prevention: atomically record this transaction
+            // signature in Redis before verifying. If it was already seen,
+            // reject immediately — same signed tx cannot be replayed.
+            if let Some(cache) = &state.cache {
+                let tx_raw = &payload.payload.transaction;
+                if cache.check_and_record_tx(tx_raw).await.is_err() {
+                    warn!(tx = %tx_raw, "replay attack detected — transaction already used");
+                    return Err(GatewayError::InvalidPayment(
+                        "transaction has already been used; each payment signature may only be submitted once".to_string()
+                    ));
+                }
+            }
+
+            // Verify and settle via Facilitator — hard enforcement
             match state.facilitator.verify_and_settle(&payload).await {
                 Ok(settlement) => {
                     info!(
@@ -104,25 +145,49 @@ pub async fn chat_completions(
                     );
                 }
                 Err(e) => {
-                    // Log the error but continue — strict enforcement will be
-                    // enabled in Phase 2 once all verifiers are production-ready.
-                    // This allows development/testing with partial infrastructure.
-                    warn!(error = %e, "payment verification failed, proceeding anyway");
+                    // Payment verification failed — reject the request
+                    warn!(error = %e, "payment verification failed");
+                    return Err(GatewayError::InvalidPayment(format!(
+                        "payment verification failed: {e}"
+                    )));
                 }
             }
         }
         None => {
-            // Header present but couldn't decode — skip verification
-            // (backwards compatibility for testing with raw string headers)
-            info!(
-                model = %req.model,
-                "payment header present but not decodable — skipping verification"
-            );
+            // Header present but could not be decoded — reject with a clear error.
+            // A malformed header is not a valid payment; never serve for free.
+            return Err(GatewayError::InvalidPayment(
+                "PAYMENT-SIGNATURE header is present but could not be decoded. \
+                 Encode a valid PaymentPayload as standard base64 JSON."
+                    .to_string(),
+            ));
         }
     }
 
-    // Extract wallet address and tx_signature from payment for usage tracking
+    // Extract tx_signature for usage tracking.
+    // Note: `accepted.pay_to` is the gateway's own recipient wallet.
+    // The payer identity is the transaction fee payer (first account in the tx),
+    // which is not decoded here — we use the tx signature as a unique identifier.
     let (wallet_address, tx_signature) = extract_payment_info(payment_header.unwrap());
+
+    // Check budget before proxying to provider
+    let estimated_cost = state
+        .model_registry
+        .estimate_cost(
+            &req.model,
+            estimate_input_tokens(&req),
+            req.max_tokens.unwrap_or(1000),
+        )
+        .map(|c| c.total.parse::<f64>().unwrap_or(0.0))
+        .unwrap_or(0.0);
+
+    if let Err(e) = state
+        .usage
+        .check_budget(&wallet_address, estimated_cost)
+        .await
+    {
+        return Err(GatewayError::BadRequest(e.to_string()));
+    }
 
     // Step 5: Proxy to provider (with cache and fallback)
     let provider_name = &model_info.provider;
@@ -331,8 +396,24 @@ fn estimate_input_tokens(req: &ChatRequest) -> u32 {
 }
 
 /// Convert a USDC decimal string to atomic units (6 decimals).
+///
+/// Uses integer arithmetic to avoid f64 precision loss on financial amounts.
+/// Splits on the decimal point and pads/truncates the fractional part to 6 digits.
 fn usdc_atomic_amount(decimal_str: &str) -> String {
-    let amount: f64 = decimal_str.parse().unwrap_or(0.0);
-    let atomic = (amount * 1_000_000.0) as u64;
+    // Parse as integer arithmetic to avoid f64 rounding errors
+    let s = decimal_str.trim();
+    let (integer_part, fractional_part) = if let Some(dot) = s.find('.') {
+        (&s[..dot], &s[dot + 1..])
+    } else {
+        (s, "")
+    };
+
+    let integer: u64 = integer_part.parse().unwrap_or(0);
+    // Pad or truncate fractional part to exactly 6 digits
+    let frac_padded = format!("{:0<6}", fractional_part);
+    let frac_6 = &frac_padded[..6.min(frac_padded.len())];
+    let fractional: u64 = frac_6.parse().unwrap_or(0);
+
+    let atomic = integer * 1_000_000 + fractional;
     atomic.to_string()
 }

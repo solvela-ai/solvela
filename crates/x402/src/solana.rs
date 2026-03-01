@@ -3,7 +3,7 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use tracing::{info, warn};
 
-use crate::solana_types::{ParsedMessage, Pubkey, VersionedTransaction};
+use crate::solana_types::{derive_ata, ParsedMessage, Pubkey, VersionedTransaction};
 use crate::traits::{Error, PaymentVerifier};
 use crate::types::{PaymentPayload, SettlementResult, VerificationResult, SOLANA_NETWORK};
 
@@ -60,12 +60,21 @@ impl SolanaVerifier {
         })
     }
 
-    /// Decode a base64-encoded versioned transaction and perform basic validation.
+    /// Decode a base64-encoded versioned transaction and perform cryptographic validation.
+    ///
+    /// Validates:
+    /// 1. Base64 decoding succeeds
+    /// 2. Transaction deserializes correctly
+    /// 3. At least one signature is present
+    /// 4. The first signature cryptographically verifies over the message bytes
+    ///    using the first account key (fee payer / primary signer) as the public key
     fn decode_and_validate_transaction(
         &self,
         base64_tx: &str,
     ) -> Result<VersionedTransaction, Error> {
         use base64::Engine;
+        use ed25519_dalek::{Signature as Ed25519Sig, Verifier, VerifyingKey};
+
         let tx_bytes = base64::engine::general_purpose::STANDARD
             .decode(base64_tx)
             .map_err(|e| Error::InvalidEncoding(e.to_string()))?;
@@ -80,6 +89,33 @@ impl SolanaVerifier {
                 "transaction has no signatures".to_string(),
             ));
         }
+
+        // Cryptographically verify the first signature against the message bytes.
+        // The first signature must be made by the first account key (fee payer / signer).
+        // Parse the message to extract account keys.
+        let message = tx
+            .parse_message()
+            .map_err(|e| Error::InvalidTransaction(format!("failed to parse message: {e}")))?;
+
+        if message.account_keys.is_empty() {
+            return Err(Error::InvalidSignature(
+                "transaction message has no account keys".to_string(),
+            ));
+        }
+
+        // account_keys[0] is always the fee payer / primary signer
+        let signer_pubkey_bytes = &message.account_keys[0].0;
+        let sig_bytes = &tx.signatures[0].0;
+
+        let verifying_key = VerifyingKey::from_bytes(signer_pubkey_bytes)
+            .map_err(|e| Error::InvalidSignature(format!("invalid signer public key: {e}")))?;
+
+        let ed_sig = Ed25519Sig::from_bytes(sig_bytes);
+        verifying_key
+            .verify(&tx.message_bytes, &ed_sig)
+            .map_err(|e| {
+                Error::InvalidSignature(format!("ed25519 signature verification failed: {e}"))
+            })?;
 
         Ok(tx)
     }
@@ -351,21 +387,51 @@ impl PaymentVerifier for SolanaVerifier {
 
         let transfer = Self::extract_spl_transfer(&message)?;
 
-        // Step 4: Verify destination matches recipient
-        if transfer.destination != self.recipient {
-            return Err(Error::WrongRecipient {
-                expected: self.recipient.to_string(),
-                actual: transfer.destination.to_string(),
-            });
+        // Step 4: Verify destination matches the recipient's ATA for the USDC mint.
+        //
+        // SPL token transfers go between token accounts (ATAs), not wallet addresses.
+        // The destination in the transaction is an ATA — we must derive the expected
+        // ATA from our recipient wallet + USDC mint and compare, not compare against
+        // the raw wallet pubkey directly.
+        let expected_ata = derive_ata(&self.recipient, &self.usdc_mint, &Pubkey::TOKEN_PROGRAM_ID)
+            .ok_or_else(|| {
+                Error::InvalidTransaction("failed to derive expected ATA address".to_string())
+            })?;
+
+        if transfer.destination != expected_ata {
+            // Also accept if destination == raw recipient (some older integrations
+            // use the wallet address directly for wrapped SOL / native accounts).
+            if transfer.destination != self.recipient {
+                return Err(Error::WrongRecipient {
+                    expected: expected_ata.to_string(),
+                    actual: transfer.destination.to_string(),
+                });
+            }
         }
 
-        // Step 5: For TransferChecked, verify mint matches USDC mint
-        if let Some(mint) = transfer.mint {
-            if mint != self.usdc_mint {
-                return Err(Error::WrongAsset {
-                    expected: self.usdc_mint.to_string(),
-                    actual: mint.to_string(),
-                });
+        // Step 5: Verify mint.
+        // - TransferChecked includes the mint in the instruction — verify it.
+        // - Plain Transfer (discriminator 3) does NOT include the mint, so we
+        //   cannot verify which token is being transferred. Reject it outright
+        //   to prevent payments made with worthless SPL tokens instead of USDC.
+        match transfer.mint {
+            Some(mint) => {
+                if mint != self.usdc_mint {
+                    return Err(Error::WrongAsset {
+                        expected: self.usdc_mint.to_string(),
+                        actual: mint.to_string(),
+                    });
+                }
+            }
+            None => {
+                // Plain Transfer instruction — mint is unverifiable.
+                // Only accept TransferChecked (discriminator 12) for payments.
+                return Err(Error::InvalidTransaction(
+                    "plain SPL Transfer instructions are not accepted; \
+                     use TransferChecked (instruction discriminator 12) \
+                     so the USDC mint can be verified on-chain"
+                        .to_string(),
+                ));
             }
         }
 
@@ -466,15 +532,15 @@ mod tests {
 
     /// Build a minimal legacy message with an SPL Transfer instruction.
     ///
-    /// Account layout: [source, destination, authority, token_program]
-    fn build_spl_transfer_message(destination: &Pubkey, amount: u64) -> Vec<u8> {
-        let source =
-            Pubkey::from_str("9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz").expect("valid pubkey");
+    /// `signer` is placed as `account_keys[0]` (fee payer / primary signer).
+    /// Account layout: [signer/source, destination, authority, token_program]
+    fn build_spl_transfer_message(signer: &Pubkey, destination: &Pubkey, amount: u64) -> Vec<u8> {
         let authority =
             Pubkey::from_str("HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH").expect("valid pubkey");
         let token_program = Pubkey::TOKEN_PROGRAM_ID;
 
-        let account_keys = [source, *destination, authority, token_program];
+        // signer doubles as source token account for test simplicity
+        let account_keys = [*signer, *destination, authority, token_program];
 
         let mut ix_data = vec![3u8]; // Transfer discriminator
         ix_data.extend_from_slice(&amount.to_le_bytes());
@@ -487,20 +553,21 @@ mod tests {
 
     /// Build a minimal legacy message with an SPL TransferChecked instruction.
     ///
-    /// Account layout: [source, mint, destination, authority, token_program]
+    /// `signer` is placed as `account_keys[0]` (fee payer / primary signer).
+    /// Account layout: [signer/source, mint, destination, authority, token_program]
     fn build_spl_transfer_checked_message(
+        signer: &Pubkey,
         destination: &Pubkey,
         mint: &Pubkey,
         amount: u64,
         decimals: u8,
     ) -> Vec<u8> {
-        let source =
-            Pubkey::from_str("9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz").expect("valid pubkey");
         let authority =
             Pubkey::from_str("HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH").expect("valid pubkey");
         let token_program = Pubkey::TOKEN_PROGRAM_ID;
 
-        let account_keys = [source, *mint, *destination, authority, token_program];
+        // signer doubles as source token account for test simplicity
+        let account_keys = [*signer, *mint, *destination, authority, token_program];
 
         let mut ix_data = vec![12u8]; // TransferChecked discriminator
         ix_data.extend_from_slice(&amount.to_le_bytes());
@@ -545,13 +612,30 @@ mod tests {
         msg
     }
 
-    /// Wrap a message in a full transaction with compact-u16 sig count.
+    /// Wrap a message in a full transaction with a real ed25519 signature.
+    ///
+    /// Uses a deterministic test signing key (seed = `[1u8; 32]`) so the
+    /// signature is valid and `decode_and_validate_transaction` passes.
+    /// The caller must ensure `account_keys[0]` in the message matches the
+    /// verifying key produced by this seed (see `test_signer_pubkey()`).
     fn wrap_in_transaction(message: &[u8]) -> Vec<u8> {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let signature = signing_key.sign(message);
+
         let mut tx_data = Vec::new();
         tx_data.push(0x01); // compact-u16: 1 signature
-        tx_data.extend_from_slice(&[0xAA; 64]); // dummy signature
+        tx_data.extend_from_slice(&signature.to_bytes());
         tx_data.extend_from_slice(message);
         tx_data
+    }
+
+    /// Returns the 32-byte verifying key (pubkey) for the test signing key seed `[1u8; 32]`.
+    fn test_signer_pubkey() -> Pubkey {
+        use ed25519_dalek::SigningKey;
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        Pubkey(signing_key.verifying_key().to_bytes())
     }
 
     fn encode_base64(data: &[u8]) -> String {
@@ -585,8 +669,9 @@ mod tests {
 
     #[test]
     fn test_extract_spl_transfer_basic() {
+        let signer = test_signer_pubkey();
         let recipient = Pubkey::from_str(TEST_RECIPIENT).unwrap();
-        let msg_bytes = build_spl_transfer_message(&recipient, 5000);
+        let msg_bytes = build_spl_transfer_message(&signer, &recipient, 5000);
         let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
 
         let transfer = SolanaVerifier::extract_spl_transfer(&parsed).unwrap();
@@ -597,9 +682,11 @@ mod tests {
 
     #[test]
     fn test_extract_spl_transfer_checked() {
+        let signer = test_signer_pubkey();
         let recipient = Pubkey::from_str(TEST_RECIPIENT).unwrap();
         let usdc_mint = Pubkey::from_str(TEST_USDC_MINT).unwrap();
-        let msg_bytes = build_spl_transfer_checked_message(&recipient, &usdc_mint, 10000, 6);
+        let msg_bytes =
+            build_spl_transfer_checked_message(&signer, &recipient, &usdc_mint, 10000, 6);
         let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
 
         let transfer = SolanaVerifier::extract_spl_transfer(&parsed).unwrap();
@@ -625,10 +712,11 @@ mod tests {
 
     #[test]
     fn test_wrong_recipient_detected() {
-        // Build a transfer to a different recipient
+        // Build a transfer to a different recipient (not the verifier's expected recipient)
+        let signer = test_signer_pubkey();
         let wrong_recipient =
             Pubkey::from_str("9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz").unwrap();
-        let msg_bytes = build_spl_transfer_message(&wrong_recipient, 5000);
+        let msg_bytes = build_spl_transfer_message(&signer, &wrong_recipient, 5000);
         let tx_bytes = wrap_in_transaction(&msg_bytes);
         let parsed_msg = ParsedMessage::from_bytes(&msg_bytes).unwrap();
 
@@ -638,7 +726,7 @@ mod tests {
         let transfer = SolanaVerifier::extract_spl_transfer(&parsed_msg).unwrap();
         assert_ne!(transfer.destination, verifier.recipient);
 
-        // Also test decode_and_validate path
+        // Also test decode_and_validate path — signature must be valid
         let base64_tx = encode_base64(&tx_bytes);
         let tx = verifier
             .decode_and_validate_transaction(&base64_tx)
@@ -650,8 +738,9 @@ mod tests {
 
     #[test]
     fn test_insufficient_payment_detected() {
+        let signer = test_signer_pubkey();
         let recipient = Pubkey::from_str(TEST_RECIPIENT).unwrap();
-        let msg_bytes = build_spl_transfer_message(&recipient, 100); // only 100 atomic units
+        let msg_bytes = build_spl_transfer_message(&signer, &recipient, 100); // only 100 atomic units
         let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
 
         let transfer = SolanaVerifier::extract_spl_transfer(&parsed).unwrap();
@@ -667,9 +756,11 @@ mod tests {
 
     #[test]
     fn test_wrong_mint_detected() {
+        let signer = test_signer_pubkey();
         let recipient = Pubkey::from_str(TEST_RECIPIENT).unwrap();
         let wrong_mint = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
-        let msg_bytes = build_spl_transfer_checked_message(&recipient, &wrong_mint, 5000, 9);
+        let msg_bytes =
+            build_spl_transfer_checked_message(&signer, &recipient, &wrong_mint, 5000, 9);
         let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
 
         let verifier = test_verifier();
@@ -703,8 +794,9 @@ mod tests {
 
     #[test]
     fn test_full_transfer_extraction_via_transaction() {
+        let signer = test_signer_pubkey();
         let recipient = Pubkey::from_str(TEST_RECIPIENT).unwrap();
-        let msg_bytes = build_spl_transfer_message(&recipient, 7500);
+        let msg_bytes = build_spl_transfer_message(&signer, &recipient, 7500);
         let tx_bytes = wrap_in_transaction(&msg_bytes);
         let base64_tx = encode_base64(&tx_bytes);
 
@@ -721,9 +813,11 @@ mod tests {
 
     #[test]
     fn test_full_transfer_checked_extraction_via_transaction() {
+        let signer = test_signer_pubkey();
         let recipient = Pubkey::from_str(TEST_RECIPIENT).unwrap();
         let usdc_mint = Pubkey::from_str(TEST_USDC_MINT).unwrap();
-        let msg_bytes = build_spl_transfer_checked_message(&recipient, &usdc_mint, 25000, 6);
+        let msg_bytes =
+            build_spl_transfer_checked_message(&signer, &recipient, &usdc_mint, 25000, 6);
         let tx_bytes = wrap_in_transaction(&msg_bytes);
         let base64_tx = encode_base64(&tx_bytes);
 

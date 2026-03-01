@@ -134,6 +134,49 @@ impl ResponseCache {
     pub fn config(&self) -> &CacheConfig {
         &self.config
     }
+
+    /// Atomically check-and-record a transaction signature to prevent replay attacks.
+    ///
+    /// Uses Redis SET NX (set-if-not-exists) with a TTL longer than the Solana
+    /// blockhash expiry window (~90 seconds). If the signature has been seen before,
+    /// returns `Err(())`. On first sight, records it and returns `Ok(())`.
+    ///
+    /// TTL is set to 120 seconds — enough to cover the blockhash expiry window
+    /// plus settlement latency, without persisting stale entries indefinitely.
+    ///
+    /// Gracefully degrades: if Redis is unavailable, returns `Ok(())` to avoid
+    /// blocking payments on infrastructure failures. Log the warning.
+    pub async fn check_and_record_tx(&self, tx_signature: &str) -> Result<(), ()> {
+        let key = format!("rcr:txn:{}", tx_signature);
+
+        match self.client.get_multiplexed_async_connection().await {
+            Ok(mut conn) => {
+                // SET key 1 NX EX 120 — atomic: only sets if key does NOT exist
+                let result: Option<String> = redis::cmd("SET")
+                    .arg(&key)
+                    .arg("1")
+                    .arg("NX")
+                    .arg("EX")
+                    .arg(120_u64)
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap_or(None);
+
+                if result.is_some() {
+                    // Key was newly set — first time seeing this tx
+                    Ok(())
+                } else {
+                    // Key already existed — replay detected
+                    Err(())
+                }
+            }
+            Err(e) => {
+                // Redis unavailable — log and allow through (fail-open on infra error)
+                warn!(error = %e, tx = %tx_signature, "Redis unavailable for replay check, allowing payment through");
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Cache error types.

@@ -216,9 +216,11 @@ impl LLMProvider for GoogleProvider {
         // Extract Gemini model name (e.g., "google/gemini-2.5-flash" → "gemini-2.5-flash")
         let model_name = req.model.strip_prefix("google/").unwrap_or(&req.model);
 
+        // API key sent as a header (not a URL query param) to prevent key leakage
+        // in server logs, proxy logs, and browser history.
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            model_name, self.api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            model_name
         );
 
         let gemini_req = to_gemini_request(&req);
@@ -227,6 +229,7 @@ impl LLMProvider for GoogleProvider {
             .client
             .post(&url)
             .header("content-type", "application/json")
+            .header("x-goog-api-key", &self.api_key)
             .json(&gemini_req)
             .send()
             .await?;

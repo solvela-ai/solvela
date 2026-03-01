@@ -84,3 +84,11 @@ type SpendInfo struct {
 	TotalCostUSDC float64 `json:"total_cost_usdc"`
 	DailyCostUSDC float64 `json:"daily_cost_usdc"`
 }
+
+// SpendSummary contains session-level spending information returned by GetSpending.
+type SpendSummary struct {
+	WalletAddress    string   `json:"wallet_address"`
+	TotalRequests    int      `json:"total_requests"`
+	SessionSpentUSDC float64  `json:"session_usdc_spent"`
+	BudgetRemaining  *float64 `json:"budget_remaining,omitempty"`
+}

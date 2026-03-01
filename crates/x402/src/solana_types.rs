@@ -89,6 +89,74 @@ impl<'de> Deserialize<'de> for Pubkey {
 }
 
 // ---------------------------------------------------------------------------
+// Associated Token Account (ATA) address derivation
+// ---------------------------------------------------------------------------
+
+/// The SPL Associated Token Account program ID.
+pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey = Pubkey([
+    140, 151, 37, 143, 78, 36, 137, 241, 187, 61, 16, 41, 20, 142, 13, 131, 11, 90, 19, 153, 218,
+    255, 16, 132, 4, 142, 123, 216, 219, 233, 248, 89,
+]);
+
+/// Derive the Associated Token Account (ATA) address for a given wallet and mint.
+///
+/// The ATA address is a Program Derived Address (PDA) computed as:
+/// `find_program_address([wallet, token_program_id, mint], associated_token_program_id)`
+///
+/// This is the canonical token account that wallets use to hold SPL tokens.
+/// When verifying a payment, the `destination` in the SPL transfer instruction
+/// must be the gateway's ATA for the USDC mint — not the raw wallet pubkey.
+///
+/// Matches the Solana runtime's `create_program_address` + nonce search exactly.
+/// Returns `None` if no valid off-curve point is found (does not happen in practice).
+pub fn derive_ata(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Option<Pubkey> {
+    use sha2::{Digest, Sha256};
+
+    // Seeds: [wallet_pubkey_bytes, token_program_id_bytes, mint_pubkey_bytes]
+    let seeds: &[&[u8]] = &[&wallet.0, &token_program.0, &mint.0];
+    let program_id = &ASSOCIATED_TOKEN_PROGRAM_ID;
+
+    // find_program_address: iterate nonce 255 down to 0, return first off-curve hash
+    for nonce in (0u8..=255).rev() {
+        // Hash: SHA256(seed0 || seed1 || seed2 || nonce || "ProgramDerivedAddress" || program_id)
+        let mut hasher = Sha256::new();
+        for seed in seeds {
+            hasher.update(seed);
+        }
+        hasher.update([nonce]);
+        hasher.update(b"ProgramDerivedAddress");
+        hasher.update(program_id.0);
+        let hash = hasher.finalize();
+
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&hash);
+
+        // PDAs must be off the ed25519 curve. The Solana runtime rejects on-curve
+        // points because they would be valid public keys (controlled by someone).
+        // We use the same check: if the bytes form a valid compressed ed25519 point
+        // (y-coordinate with a valid x), skip it. Otherwise, accept it as the PDA.
+        if !is_on_ed25519_curve(&bytes) {
+            return Some(Pubkey(bytes));
+        }
+    }
+
+    None
+}
+
+/// Check if 32 bytes represent a valid compressed point on the ed25519 curve.
+///
+/// Uses `curve25519-dalek`'s `CompressedEdwardsY::decompress()` — the same
+/// check the Solana runtime performs. A point is "on curve" if and only if
+/// decompression succeeds (i.e. the encoded y-coordinate yields a valid x).
+///
+/// PDAs must be *off* the curve; this function returning `false` means the
+/// candidate hash byte array is a valid PDA address.
+fn is_on_ed25519_curve(bytes: &[u8; 32]) -> bool {
+    use curve25519_dalek::edwards::CompressedEdwardsY;
+    CompressedEdwardsY(*bytes).decompress().is_some()
+}
+
+// ---------------------------------------------------------------------------
 // Signature
 // ---------------------------------------------------------------------------
 

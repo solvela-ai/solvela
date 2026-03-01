@@ -1,14 +1,13 @@
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
 fn wallet_dir() -> PathBuf {
-    dirs_or_home().join(".rustyclawrouter")
+    home_dir().join(".rustyclawrouter")
 }
 
-fn dirs_or_home() -> PathBuf {
+fn home_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -28,25 +27,44 @@ pub async fn init() -> Result<()> {
         return Ok(());
     }
 
-    // Generate a random 64-byte key and encode as base58
-    let mut key_bytes = [0u8; 64];
-    getrandom_fill(&mut key_bytes);
-    let private_key = bs58::encode(&key_bytes).into_string();
-    // Derive a fake address from last 32 bytes
-    let address = bs58::encode(&key_bytes[32..]).into_string();
+    // Generate a real ed25519 keypair using the same library the gateway uses
+    // for signature verification. The 32-byte secret scalar is the private key;
+    // the corresponding 32-byte verifying key is the Solana public key.
+    let mut seed = [0u8; 32];
+    getrandom::getrandom(&mut seed).context("failed to generate random seed")?;
+
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let verifying_key = signing_key.verifying_key();
+
+    // Solana wallet convention: private key = seed || pubkey bytes (64 bytes total), base58-encoded
+    let mut full_key = [0u8; 64];
+    full_key[..32].copy_from_slice(&seed);
+    full_key[32..].copy_from_slice(verifying_key.as_bytes());
+    let private_key_b58 = bs58::encode(&full_key).into_string();
+    let address = bs58::encode(verifying_key.as_bytes()).into_string();
 
     let wallet_data = serde_json::json!({
-        "private_key": private_key,
+        "private_key": private_key_b58,
         "address": address,
         "created_at": chrono::Utc::now().to_rfc3339(),
     });
 
-    fs::write(wallet_file(), serde_json::to_string_pretty(&wallet_data)?)?;
+    fs::write(wallet_file(), serde_json::to_string_pretty(&wallet_data)?)
+        .context("failed to write wallet file")?;
+
+    // Restrict file permissions to owner-only on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(wallet_file(), fs::Permissions::from_mode(0o600))?;
+    }
 
     println!("Wallet created!");
-    println!("Address: {}", address);
-    println!("Saved to: {}", wallet_file().display());
-    println!("\nFund with USDC-SPL to start using AI models.");
+    println!("Address:   {}", address);
+    println!("Saved to:  {}", wallet_file().display());
+    println!();
+    println!("Fund this address with USDC-SPL on Solana to start using AI models.");
+    println!("Solana devnet faucet: https://faucet.solana.com");
     Ok(())
 }
 
@@ -55,51 +73,55 @@ pub async fn status(api_url: &str) -> Result<()> {
     let address = wallet["address"].as_str().unwrap_or("unknown");
 
     println!("Wallet Address: {}", address);
-    println!("Gateway: {}", api_url);
+    println!("Gateway:        {}", api_url);
 
     // Check gateway health
-    match reqwest::get(format!("{}/health", api_url)).await {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+
+    match client.get(format!("{}/health", api_url)).send().await {
         Ok(resp) if resp.status().is_success() => {
-            println!("Gateway Status: connected");
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let gw_status = body["status"].as_str().unwrap_or("ok");
+            let solana_rpc = body["solana_rpc"].as_str().unwrap_or("unknown");
+            println!("Gateway Status: {}", gw_status);
+            println!("Solana RPC:     {}", solana_rpc);
         }
-        _ => {
-            println!("Gateway Status: unreachable");
+        Ok(resp) => {
+            println!("Gateway Status: error ({})", resp.status());
+        }
+        Err(e) => {
+            println!("Gateway Status: unreachable ({})", e);
+            println!("  Start the gateway with: cargo run -p gateway");
         }
     }
 
+    println!();
+    println!(
+        "Tip: Check USDC balance at https://explorer.solana.com/address/{}",
+        address
+    );
     Ok(())
 }
 
 pub fn export() -> Result<()> {
     let wallet = load_wallet()?;
     let key = wallet["private_key"].as_str().unwrap_or("not found");
-    println!("Private Key (base58): {}", key);
-    println!("\nWARNING: Keep this key secret! Anyone with this key can spend your USDC.");
+    eprintln!("WARNING: Keep this key secret! Anyone with this key controls your funds.");
+    eprintln!();
+    println!("{}", key);
     Ok(())
 }
 
-fn load_wallet() -> Result<serde_json::Value> {
+pub(crate) fn load_wallet() -> Result<serde_json::Value> {
     let path = wallet_file();
     if !path.exists() {
-        anyhow::bail!("No wallet found. Run 'rcr wallet init' first.");
+        anyhow::bail!(
+            "No wallet found at {}.\nRun 'rcr wallet init' to create one.",
+            path.display()
+        );
     }
-    let data = fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&data)?)
-}
-
-/// Fill bytes with random data using a simple method.
-/// Note: Not cryptographically secure — production code should use `getrandom` or `rand`.
-fn getrandom_fill(buf: &mut [u8]) {
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    // Simple PRNG for wallet generation
-    let mut state = seed;
-    for byte in buf.iter_mut() {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        *byte = (state >> 33) as u8;
-    }
+    let data = fs::read_to_string(&path).context("failed to read wallet file")?;
+    serde_json::from_str(&data).context("wallet file is corrupted")
 }

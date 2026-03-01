@@ -16,6 +16,47 @@ use gateway::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
 use gateway::providers::ProviderRegistry;
 use gateway::{build_router, AppState};
 use router::models::ModelRegistry;
+use x402::traits::{Error as X402Error, PaymentVerifier};
+use x402::types::{PaymentPayload, SettlementResult, VerificationResult, SOLANA_NETWORK};
+
+// ---------------------------------------------------------------------------
+// Mock payment verifier for integration tests
+// ---------------------------------------------------------------------------
+
+/// A mock verifier that accepts all structurally-valid payment payloads.
+/// Used so integration tests can exercise the full request path without
+/// a live Solana RPC connection.
+struct AlwaysPassVerifier;
+
+#[async_trait::async_trait]
+impl PaymentVerifier for AlwaysPassVerifier {
+    fn network(&self) -> &str {
+        SOLANA_NETWORK
+    }
+
+    async fn verify_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<VerificationResult, X402Error> {
+        Ok(VerificationResult {
+            valid: true,
+            reason: None,
+            verified_amount: Some(2625),
+        })
+    }
+
+    async fn settle_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<SettlementResult, X402Error> {
+        Ok(SettlementResult {
+            success: true,
+            tx_signature: Some("MockSettledTxSig123".to_string()),
+            network: SOLANA_NETWORK.to_string(),
+            error: None,
+        })
+    }
+}
 
 const TEST_MODELS_TOML: &str = r#"
 [models.openai-gpt-4o]
@@ -51,12 +92,15 @@ supports_vision = true
 "#;
 
 /// Build a test app with the test model config (no real provider API keys).
+///
+/// Uses `AlwaysPassVerifier` so that properly-structured PaymentPayload headers
+/// pass verification without a live Solana RPC connection. Malformed headers
+/// (non-base64, non-JSON) are still correctly rejected by the route handler.
 fn test_app() -> axum::Router {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
 
-    // Create a facilitator with no verifiers for testing
-    // (payment verification is skipped for non-decodable headers in tests)
-    let facilitator = x402::facilitator::Facilitator::new(vec![]);
+    // Use the always-pass mock verifier so tests exercise the full request path
+    let facilitator = x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
 
     let state = Arc::new(AppState {
         config: AppConfig::default(),
@@ -64,10 +108,34 @@ fn test_app() -> axum::Router {
         providers: ProviderRegistry::from_env(), // No keys set in test env
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
-        cache: None, // No Redis in tests
+        cache: None, // No Redis in tests (replay check is skipped when cache=None)
         provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
     });
     build_router(state)
+}
+
+/// Build a minimal valid PaymentPayload base64-encoded header for a given model path.
+fn valid_payment_header(resource_url: &str) -> String {
+    let payload = x402::types::PaymentPayload {
+        x402_version: 2,
+        resource: x402::types::Resource {
+            url: resource_url.to_string(),
+            method: "POST".to_string(),
+        },
+        accepted: x402::types::PaymentAccept {
+            scheme: "exact".to_string(),
+            network: SOLANA_NETWORK.to_string(),
+            amount: "2625".to_string(),
+            asset: x402::types::USDC_MINT.to_string(),
+            pay_to: "GatewayRecipientWallet111111111111111111111111".to_string(),
+            max_timeout_seconds: 300,
+        },
+        payload: x402::types::SolanaPayload {
+            transaction: base64::engine::general_purpose::STANDARD.encode(b"mock_signed_tx_bytes"),
+        },
+    };
+    let json = serde_json::to_vec(&payload).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(&json)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +254,10 @@ async fn test_chat_with_payment_returns_stub() {
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .header("payment-signature", "fake-payment-for-testing")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
@@ -205,6 +276,40 @@ async fn test_chat_with_payment_returns_stub() {
         .as_str()
         .unwrap()
         .contains("STUB"));
+}
+
+#[tokio::test]
+async fn test_malformed_payment_header_returns_402() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("payment-signature", "fake-payment-for-testing")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Malformed (non-decodable) payment headers must be rejected — never served free
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "invalid_payment");
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("could not be decoded"));
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +331,10 @@ async fn test_chat_model_alias_resolution() {
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .header("payment-signature", "fake-payment")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
@@ -287,7 +395,10 @@ async fn test_chat_smart_routing_eco_profile() {
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .header("payment-signature", "fake-payment")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
@@ -417,7 +528,10 @@ async fn test_chat_stream_request_returns_ok() {
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .header("payment-signature", "fake-payment-for-testing")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
@@ -452,7 +566,10 @@ async fn test_response_has_rate_limit_headers() {
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
-                .header("payment-signature", "fake-payment-for-testing")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
@@ -523,10 +640,8 @@ async fn test_chat_with_base64_payment_header() {
         .await
         .unwrap();
 
-    // The Facilitator has no verifiers, so verification will fail with
-    // UnsupportedNetwork, but the handler gracefully proceeds anyway
-    // (strict enforcement deferred to Phase 2).
-    // Should return 200 with a stub response.
+    // The AlwaysPassVerifier accepts the payment; stub response returned
+    // because no real provider API key is configured in test env.
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();

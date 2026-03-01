@@ -1,0 +1,25 @@
+{
+  "name": "@rustyclawrouter/mcp",
+  "version": "0.1.0",
+  "description": "MCP server for RustyClawRouter — AI agents pay for LLM calls with USDC on Solana",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "rcr-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "test": "node --test tests/server.test.ts"
+  },
+  "keywords": ["mcp", "solana", "usdc", "x402", "llm", "ai-agent"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

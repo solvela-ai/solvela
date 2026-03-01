@@ -32,6 +32,9 @@ enum Commands {
         /// Model or routing profile (auto, eco, premium, free)
         #[arg(short, long, default_value = "auto")]
         model: String,
+        /// Skip the cost confirmation prompt (for scripted use)
+        #[arg(short, long)]
+        yes: bool,
     },
     /// Usage statistics
     Stats {
@@ -66,8 +69,8 @@ async fn main() -> Result<()> {
             WalletAction::Export => commands::wallet::export()?,
         },
         Commands::Models => commands::models::list(&cli.api_url).await?,
-        Commands::Chat { prompt, model } => {
-            commands::chat::run(&cli.api_url, &model, &prompt).await?
+        Commands::Chat { prompt, model, yes } => {
+            commands::chat::run(&cli.api_url, &model, &prompt, yes).await?
         }
         Commands::Stats { days } => commands::stats::show(&cli.api_url, days).await?,
         Commands::Health => commands::health::check(&cli.api_url).await?,

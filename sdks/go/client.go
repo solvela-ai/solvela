@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -46,6 +47,7 @@ type Client struct {
 	wallet        *Wallet
 	sessionBudget *float64
 	sessionSpent  float64
+	mu            sync.Mutex
 	httpClient    *http.Client
 }
 
@@ -101,20 +103,31 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
 	// Handle x402 payment flow
 	if resp.StatusCode == http.StatusPaymentRequired {
+		// Read and close the 402 body before making the retry request to avoid
+		// double-close and to free the connection for reuse.
 		paymentInfo, parseErr := c.parse402(resp)
+		resp.Body.Close()
 		if parseErr != nil {
 			return nil, &PaymentError{Message: "failed to parse 402: " + parseErr.Error()}
 		}
 
-		cost, _ := strconv.ParseFloat(paymentInfo.CostBreakdown.Total, 64)
-		if c.sessionBudget != nil && c.sessionSpent+cost > *c.sessionBudget {
+		cost, parseFloatErr := strconv.ParseFloat(paymentInfo.CostBreakdown.Total, 64)
+		if parseFloatErr != nil {
+			return nil, fmt.Errorf("invalid cost in 402 response: %w", parseFloatErr)
+		}
+
+		c.mu.Lock()
+		spent := c.sessionSpent
+		budget := c.sessionBudget
+		c.mu.Unlock()
+
+		if budget != nil && spent+cost > *budget {
 			return nil, &BudgetExceededError{
-				Budget: *c.sessionBudget,
-				Spent:  c.sessionSpent,
+				Budget: *budget,
+				Spent:  spent,
 				Cost:   cost,
 			}
 		}
@@ -137,8 +150,16 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 		}
 		defer resp2.Body.Close()
 
-		c.sessionSpent += cost
+		// Only credit spend after the retry succeeds (2xx).
+		if resp2.StatusCode >= 200 && resp2.StatusCode < 300 {
+			c.mu.Lock()
+			c.sessionSpent += cost
+			c.mu.Unlock()
+		}
+
 		resp = resp2
+	} else {
+		defer resp.Body.Close()
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -173,6 +194,12 @@ func (c *Client) ListModels(ctx context.Context) (json.RawMessage, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
+	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
@@ -181,7 +208,7 @@ func (c *Client) ListModels(ctx context.Context) (json.RawMessage, error) {
 }
 
 // Health checks the gateway health endpoint.
-func (c *Client) Health(ctx context.Context) (map[string]interface{}, error) {
+func (c *Client) Health(ctx context.Context) (map[string]any, error) {
 	url := fmt.Sprintf("%s/health", c.apiURL)
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -192,7 +219,7 @@ func (c *Client) Health(ctx context.Context) (map[string]interface{}, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
@@ -201,7 +228,64 @@ func (c *Client) Health(ctx context.Context) (map[string]interface{}, error) {
 
 // GetSessionSpent returns the total USDC spent in this session.
 func (c *Client) GetSessionSpent() float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.sessionSpent
+}
+
+// GetBalance returns the USDC balance of the configured wallet.
+// Returns 0, nil if the wallet has no address or the balance endpoint is not
+// yet implemented (404).
+func (c *Client) GetBalance(ctx context.Context) (float64, error) {
+	if c.wallet == nil || c.wallet.Address() == "" {
+		return 0, nil
+	}
+	url := fmt.Sprintf("%s/v1/wallet/balance?address=%s", c.apiURL, c.wallet.Address())
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return 0, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return 0, &APIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
+	}
+
+	var result struct {
+		Balance float64 `json:"balance"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+	return result.Balance, nil
+}
+
+// GetSpending returns in-memory session spending statistics.
+func (c *Client) GetSpending(ctx context.Context) (*SpendSummary, error) {
+	c.mu.Lock()
+	spent := c.sessionSpent
+	budget := c.sessionBudget
+	c.mu.Unlock()
+
+	summary := &SpendSummary{
+		WalletAddress:    c.wallet.Address(),
+		SessionSpentUSDC: spent,
+	}
+
+	if budget != nil {
+		remaining := *budget - spent
+		summary.BudgetRemaining = &remaining
+	}
+
+	return summary, nil
 }
 
 // GetCostEstimate returns a cost breakdown for the given model and token counts.
