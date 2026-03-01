@@ -6,8 +6,8 @@ Solana-native AI agent payment infrastructure. AI agents pay for LLM API calls w
 
 ```
 Agent → POST /v1/chat/completions → 402 Payment Required (price quote)
-Agent signs USDC-SPL transfer on Solana
-Agent → POST /v1/chat/completions + X-PAYMENT header → 200 OK (LLM response)
+Agent signs USDC-SPL TransferChecked on Solana
+Agent → POST /v1/chat/completions + PAYMENT-SIGNATURE header → 200 OK (LLM response)
 ```
 
 An AI agent requests an LLM API call, receives an HTTP 402 with the USDC price, signs a Solana transaction paying that amount, and retries with the signed payment attached. The gateway verifies the payment on-chain, proxies to the LLM provider, and returns the response.
@@ -17,27 +17,34 @@ An AI agent requests an LLM API call, receives an HTTP 402 with the USDC price, 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  CLIENT LAYER                                               │
-│  Python SDK · TypeScript SDK · Go SDK · Rust CLI            │
+│  Python SDK · TypeScript SDK · Go SDK · Rust CLI · MCP     │
 └────────────────────────┬────────────────────────────────────┘
-                         │ HTTPS + X-PAYMENT header (x402)
+                         │ HTTPS + PAYMENT-SIGNATURE header (x402 v2)
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  RUSTYCLAWROUTER GATEWAY (Rust / Axum)                      │
 │                                                             │
-│  x402 Payment Middleware    Smart Router (15-dim scorer)     │
-│  Response Cache (Redis)     Provider Fallback + Circuit Breaker │
-│  Usage Tracker (PostgreSQL) Rate Limiter (per-wallet/IP)    │
+│  x402 Payment Middleware    Smart Router (15-dim scorer)    │
+│  Prompt Guard (injection/PII)  Response Cache (Redis)       │
+│  Usage Tracker (PostgreSQL) Rate Limiter (per-wallet)       │
+│  Circuit Breaker (per-provider)  Provider Fallback          │
 │                                                             │
 │  Provider Adapters: OpenAI · Anthropic · Google · xAI · DeepSeek │
 │                                                             │
-│  POST /v1/chat/completions   GET /v1/models                 │
-│  GET /health                 GET /pricing                   │
+│  POST /v1/chat/completions        GET /v1/models            │
+│  POST /v1/images/generations*     GET /v1/supported         │
+│  GET  /pricing                    GET /health               │
+│                                                             │
+│  * scaffolded, returns 501 until image provider is added    │
 └────────────────────────┬────────────────────────────────────┘
                          │ on-chain settlement
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  SOLANA (devnet / mainnet)                                  │
-│  USDC-SPL TransferChecked · Anchor Escrow (planned)         │
+│                                                             │
+│  Phase 1: USDC-SPL TransferChecked (direct, pre-signed tx)  │
+│  Phase 4: Anchor Escrow (programs/escrow/) — scaffolded     │
+│           deposit → claim → refund with PDA vault           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -51,13 +58,16 @@ crates/
   common/      Shared types — ChatRequest, ChatResponse, CostBreakdown
   cli/         CLI tool (rcr) — wallet, models, chat, health, stats, doctor
 programs/
-  escrow/      Anchor escrow program (Phase 4 — planned)
+  escrow/      Anchor escrow program (Phase 4 scaffold)
+               deposit / claim / refund instructions + LiteSVM unit tests
+               Build with: anchor build (requires Anchor CLI + Solana toolchain)
 sdks/
-  python/      pip install rustyclawrouter
-  typescript/  npm install @rustyclawrouter/sdk
-  go/          go get github.com/rustyclawrouter/sdk-go
+  python/      pip install rustyclawrouter   (63 tests)
+  typescript/  npm install @rustyclawrouter/sdk  (19 tests)
+  go/          go get github.com/rustyclawrouter/sdk-go  (18 tests)
+  mcp/         npx @rustyclawrouter/mcp  (17 tests, Claude Code integration)
 config/
-  models.toml     Model registry + pricing (15 models, 5 providers)
+  models.toml     Model registry + pricing
   default.toml    Gateway configuration
   services.toml   x402 service marketplace registry (Phase 6)
 ```
@@ -115,6 +125,8 @@ response = client.chat("openai/gpt-4o", "Hello!")
 ```typescript
 import { LLMClient } from '@rustyclawrouter/sdk';
 
+// Real Solana signing when SOLANA_WALLET_KEY + SOLANA_RPC_URL are set
+// Gracefully stubs when @solana/web3.js is not installed
 const client = new LLMClient();
 const response = await client.chat('openai/gpt-4o', 'Hello!');
 ```
@@ -125,6 +137,35 @@ client, _ := rustyclawrouter.NewClient()
 response, _ := client.Chat(ctx, "openai/gpt-4o", "Hello!")
 ```
 
+**MCP (Claude Code)**
+```bash
+# Add to your Claude Code MCP config:
+# command: node /path/to/sdks/mcp/dist/index.js
+# Tools: chat, smart_chat, wallet_status, list_models, spending
+```
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/chat/completions` | OpenAI-compatible LLM chat (x402 paid) |
+| `POST` | `/v1/images/generations` | Image generation scaffold (501 until provider added) |
+| `GET`  | `/v1/models` | List available models with pricing |
+| `GET`  | `/v1/supported` | x402 ecosystem payment method discovery |
+| `GET`  | `/pricing` | Detailed per-model USDC cost breakdown with examples |
+| `GET`  | `/health` | Gateway health check |
+
+### Example: Check pricing
+
+```bash
+curl http://localhost:8402/pricing | jq '.models[0]'
+# {
+#   "id": "openai/gpt-4o",
+#   "pricing": { "input_per_million_usdc": 2.5, "platform_fee_percent": 5 },
+#   "example_1k_token_request": { "total_usdc": "0.006563" }
+# }
+```
+
 ## Build & Test
 
 ```bash
@@ -132,15 +173,22 @@ response, _ := client.Chat(ctx, "openai/gpt-4o", "Hello!")
 cargo build                  # Debug
 cargo build --release        # Release
 
-# Test
-cargo test                   # All 105 Rust tests
-cargo test -p gateway        # Gateway (39 unit + 12 integration)
+# Test (125 Rust tests)
+cargo test                   # All workspace tests
+cargo test -p gateway        # Gateway (56 unit + 15 integration)
 cargo test -p x402           # x402 protocol (39 tests)
 cargo test -p router         # Smart router (13 tests)
 
 # Lint
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
+
+# Escrow program (standalone — not part of workspace)
+cd programs/escrow
+OPENSSL_NO_PKG_CONFIG=1 \
+  OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu \
+  OPENSSL_INCLUDE_DIR=/usr/include/openssl \
+  cargo test   # 6 unit tests (PDA derivation, struct layout)
 ```
 
 ### SDK Tests
@@ -152,27 +200,30 @@ cd sdks/python && python -m pytest
 # TypeScript (19 tests)
 cd sdks/typescript && npm test
 
-# Go (12 tests)
+# Go (18 tests)
 cd sdks/go && go test ./...
+
+# MCP TypeScript (17 tests)
+cd sdks/mcp && npm test
 ```
 
 ## Supported Models
 
-| Provider   | Models                                      |
-|------------|---------------------------------------------|
-| OpenAI     | gpt-4o, gpt-4o-mini, o1, o1-mini           |
-| Anthropic  | claude-sonnet-4-20250514, claude-3.5-haiku              |
-| Google     | gemini-2.0-flash, gemini-2.0-pro           |
-| xAI        | grok-3, grok-3-mini                         |
-| DeepSeek   | deepseek-chat, deepseek-reasoner            |
+| Provider   | Models                                           |
+|------------|--------------------------------------------------|
+| OpenAI     | gpt-5.2, gpt-4o, gpt-4o-mini, o3, gpt-oss-120b |
+| Anthropic  | claude-opus-4, claude-sonnet-4, claude-haiku-4  |
+| Google     | gemini-2.5-pro, gemini-2.5-flash                |
+| xAI        | grok-3, grok-3-mini                              |
+| DeepSeek   | deepseek-r2, deepseek-v3                         |
 
-All prices include a 5% platform fee. See `config/models.toml` for full pricing.
+All prices include a 5% platform fee on top of provider cost. Run `GET /pricing` for full breakdown or see `config/models.toml`.
 
 ## Smart Router
 
 The smart router scores requests across 15 dimensions and picks the best model automatically:
 
-- **Profiles**: `speed` (cheapest fast model), `balanced`, `quality` (best available), `reasoning` (chain-of-thought)
+- **Profiles**: `speed` (cheapest fast model), `balanced`, `quality` (best available), `reasoning`
 - **Aliases**: `auto`, `fast`, `cheap`, `smart`, `best`, `reason`, `code`, `creative`, `analyze`, `eco`
 
 ```bash
@@ -181,6 +232,34 @@ curl -X POST http://localhost:8402/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "auto", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
+
+## Anchor Escrow Program (Phase 4)
+
+Located in `programs/escrow/`. Trustless USDC-SPL escrow for production payment settlement:
+
+```
+Agent → deposit(max_amount, service_id, expiry_slot)  →  USDC locked in PDA vault
+Gateway delivers LLM response
+Gateway → claim(actual_cost)  →  actual_cost to provider, refund remainder to agent
+OR (if timed out):
+Agent → refund()  →  full deposit returned after expiry_slot
+```
+
+To build and deploy (requires Anchor CLI + Solana toolchain):
+```bash
+cd programs/escrow
+anchor build            # Compiles to .so + generates IDL
+anchor deploy           # Deploy to localnet/devnet
+```
+
+## Security
+
+- **Payment verification**: ed25519 signature + ATA derivation + TransferChecked discriminator enforcement
+- **Replay prevention**: Redis `SET NX EX 120` on tx signature
+- **Prompt guard**: injection, jailbreak, and PII detection middleware
+- **Rate limiting**: per-wallet (pubkey), not spoofable via `X-Forwarded-For`
+- **CORS**: explicit allowlist, no wildcard
+- **Private keys**: zeroed in memory after signing (TypeScript SDK); never logged
 
 ## Environment Variables
 
@@ -191,11 +270,15 @@ See [`.env.example`](.env.example) for all configuration options.
 | `RCR_SERVER_PORT` | Gateway port (default: 8402) |
 | `RCR_SOLANA_RPC_URL` | Solana RPC endpoint |
 | `RCR_SOLANA_RECIPIENT_WALLET` | Payment destination wallet |
+| `RCR_CORS_ORIGINS` | Comma-separated allowed CORS origins |
 | `OPENAI_API_KEY` | OpenAI provider key |
 | `ANTHROPIC_API_KEY` | Anthropic provider key |
 | `GOOGLE_API_KEY` | Google/Gemini provider key |
+| `XAI_API_KEY` | xAI/Grok provider key |
+| `DEEPSEEK_API_KEY` | DeepSeek provider key |
 | `DATABASE_URL` | PostgreSQL connection string |
 | `REDIS_URL` | Redis connection string |
+| `SOLANA_RPC_URL` | RPC URL for SDK tx signing |
 
 ## License
 
