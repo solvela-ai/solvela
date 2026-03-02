@@ -1,24 +1,54 @@
 version: "3.9"
 
-services:
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
+# RustyClawRouter local development stack
+#
+# Services:
+#   postgres  — spend logs, wallet budgets
+#   redis     — response cache, rate limiting, replay protection
+#
+# Usage:
+#   docker compose up -d          # start in background
+#   docker compose down           # stop
+#   docker compose down -v        # stop + delete volumes (full reset)
+#
+# Migrations in migrations/ are applied automatically on first start.
+# DATABASE_URL=postgres://rcr:rcr_dev_password@localhost:5432/rustyclawrouter
+# REDIS_URL=redis://localhost:6379
 
+services:
   postgres:
     image: postgres:16-alpine
-    ports:
-      - "5432:5432"
+    container_name: rcr_postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: rustyclawrouter
       POSTGRES_USER: rcr
       POSTGRES_PASSWORD: rcr_dev_password
+      POSTGRES_DB: rustyclawrouter
+    ports:
+      - "5432:5432"
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
+      # SQL files in migrations/ are run in filename order on first start
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rcr -d rustyclawrouter"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: rcr_redis
+    restart: unless-stopped
+    # LRU eviction when memory limit is hit; no RDB persistence (cache is ephemeral)
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --save ""
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
-  redis-data:
-  postgres-data:
+  postgres_data:

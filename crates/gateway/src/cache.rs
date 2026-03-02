@@ -37,10 +37,18 @@ pub struct ResponseCache {
 }
 
 impl ResponseCache {
-    /// Create a new cache connected to Redis.
+    /// Create a new cache connected to Redis at the given URL.
     pub fn new(redis_url: &str, config: CacheConfig) -> Result<Self, CacheError> {
         let client =
             redis::Client::open(redis_url).map_err(|e| CacheError::Connection(e.to_string()))?;
+        Ok(Self { client, config })
+    }
+
+    /// Create a cache from an already-opened Redis client.
+    ///
+    /// Use this when the caller has already verified connectivity (e.g. `main.rs`
+    /// probes the connection before building the cache so we don't duplicate effort).
+    pub fn from_client(client: redis::Client, config: CacheConfig) -> Result<Self, CacheError> {
         Ok(Self { client, config })
     }
 
