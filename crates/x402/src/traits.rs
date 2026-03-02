@@ -12,6 +12,9 @@ pub trait PaymentVerifier: Send + Sync {
     /// Returns the network identifier (e.g., "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp").
     fn network(&self) -> &str;
 
+    /// Returns the payment scheme this verifier handles (e.g. "exact", "escrow").
+    fn scheme(&self) -> &str;
+
     /// Verify that a payment payload is valid without settling it.
     ///
     /// Checks:
@@ -65,4 +68,13 @@ pub enum Error {
 
     #[error("unsupported network: {0}")]
     UnsupportedNetwork(String),
+
+    #[error("escrow deposit not confirmed: {0}")]
+    EscrowNotConfirmed(String),
+
+    #[error("escrow claim failed: {0}")]
+    EscrowClaimFailed(String),
+
+    #[error("payload type mismatch: {0}")]
+    PayloadMismatch(String),
 }

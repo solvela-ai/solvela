@@ -22,7 +22,10 @@ pub struct ServerConfig {
 }
 
 /// Solana network settings.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Debug` is manually implemented to redact `fee_payer_key` — an ed25519
+/// private key that must never appear in log output or panic messages.
+#[derive(Clone, Deserialize)]
 pub struct SolanaConfig {
     /// Solana RPC endpoint URL.
     pub rpc_url: String,
@@ -31,6 +34,27 @@ pub struct SolanaConfig {
     /// USDC-SPL mint address.
     #[serde(default = "default_usdc_mint")]
     pub usdc_mint: String,
+    /// Escrow program ID (base58). Set to enable escrow payment mode.
+    #[serde(default)]
+    pub escrow_program_id: Option<String>,
+    /// Hot wallet private key (base58, 64 bytes) for signing claim transactions.
+    #[serde(default)]
+    pub fee_payer_key: Option<String>,
+}
+
+impl fmt::Debug for SolanaConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SolanaConfig")
+            .field("rpc_url", &self.rpc_url)
+            .field("recipient_wallet", &self.recipient_wallet)
+            .field("usdc_mint", &self.usdc_mint)
+            .field("escrow_program_id", &self.escrow_program_id)
+            .field(
+                "fee_payer_key",
+                &self.fee_payer_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 /// Provider API key configuration.
@@ -63,6 +87,8 @@ impl Default for AppConfig {
                 rpc_url: "https://api.devnet.solana.com".to_string(),
                 recipient_wallet: String::new(),
                 usdc_mint: default_usdc_mint(),
+                escrow_program_id: None,
+                fee_payer_key: None,
             },
             providers: ProvidersConfig {
                 openai_api_key: None,

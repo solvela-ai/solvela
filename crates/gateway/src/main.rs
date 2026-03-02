@@ -59,7 +59,46 @@ async fn main() -> anyhow::Result<()> {
         .expect("default verifier config must be valid")
     });
 
-    let facilitator = x402::facilitator::Facilitator::new(vec![Arc::new(solana_verifier)]);
+    // Build verifiers list — always include the direct SolanaVerifier
+    let mut verifiers: Vec<Arc<dyn x402::traits::PaymentVerifier>> =
+        vec![Arc::new(solana_verifier)];
+
+    // Conditionally build EscrowVerifier + EscrowClaimer if configured
+    let escrow_claimer = if let (Some(prog_id), Some(fee_payer_key)) = (
+        &app_config.solana.escrow_program_id,
+        &app_config.solana.fee_payer_key,
+    ) {
+        let escrow_verifier = x402::escrow::EscrowVerifier {
+            rpc_url: app_config.solana.rpc_url.clone(),
+            recipient_wallet: app_config.solana.recipient_wallet.clone(),
+            usdc_mint: app_config.solana.usdc_mint.clone(),
+            escrow_program_id: prog_id.clone(),
+            http_client: reqwest::Client::new(),
+        };
+        verifiers.push(Arc::new(escrow_verifier));
+
+        match x402::escrow::EscrowClaimer::new(
+            app_config.solana.rpc_url.clone(),
+            fee_payer_key,
+            prog_id,
+            &app_config.solana.recipient_wallet,
+            &app_config.solana.usdc_mint,
+        ) {
+            Ok(claimer) => {
+                info!("escrow payment mode enabled");
+                Some(Arc::new(claimer))
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to init EscrowClaimer — escrow disabled");
+                None
+            }
+        }
+    } else {
+        info!("escrow payment mode disabled (set RCR_SOLANA_ESCROW_PROGRAM_ID + RCR_SOLANA_FEE_PAYER_KEY to enable)");
+        None
+    };
+
+    let facilitator = x402::facilitator::Facilitator::new(verifiers);
 
     // ── PostgreSQL connection (optional — gracefully degrades to noop) ──────────
     //
@@ -145,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
         usage,
         cache: response_cache,
         provider_health,
+        escrow_claimer,
     });
 
     // Build router

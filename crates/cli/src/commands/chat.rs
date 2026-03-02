@@ -81,10 +81,10 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
             method: "POST".to_string(),
         },
         accepted,
-        payload: SolanaPayload {
+        payload: x402::types::PayloadData::Direct(SolanaPayload {
             // Real versioned-transaction construction is out of scope here.
             transaction: "STUB_BASE64_TX".to_string(),
-        },
+        }),
     };
 
     // Encode as base64(JSON(payload)).

@@ -5,7 +5,9 @@ use tracing::{info, warn};
 
 use crate::solana_types::{derive_ata, ParsedMessage, Pubkey, VersionedTransaction};
 use crate::traits::{Error, PaymentVerifier};
-use crate::types::{PaymentPayload, SettlementResult, VerificationResult, SOLANA_NETWORK};
+use crate::types::{
+    PayloadData, PaymentPayload, SettlementResult, VerificationResult, SOLANA_NETWORK,
+};
 
 // ---------------------------------------------------------------------------
 // SPL Transfer info extracted from a parsed message
@@ -363,6 +365,10 @@ impl PaymentVerifier for SolanaVerifier {
         SOLANA_NETWORK
     }
 
+    fn scheme(&self) -> &str {
+        "exact"
+    }
+
     async fn verify_payment(&self, payload: &PaymentPayload) -> Result<VerificationResult, Error> {
         info!(
             network = SOLANA_NETWORK,
@@ -370,8 +376,18 @@ impl PaymentVerifier for SolanaVerifier {
             "verifying solana payment"
         );
 
+        // Extract the direct payload variant — reject escrow payloads
+        let solana_payload = match &payload.payload {
+            PayloadData::Direct(p) => p,
+            PayloadData::Escrow(_) => {
+                return Err(Error::PayloadMismatch(
+                    "SolanaVerifier received escrow payload; expected direct".to_string(),
+                ));
+            }
+        };
+
         // Step 1: Decode and validate transaction structure
-        let tx = self.decode_and_validate_transaction(&payload.payload.transaction)?;
+        let tx = self.decode_and_validate_transaction(&solana_payload.transaction)?;
 
         // Step 2: Parse required amount from the payment accept
         let required_amount: u64 = payload
@@ -444,7 +460,7 @@ impl PaymentVerifier for SolanaVerifier {
         }
 
         // Step 7: Simulate transaction via RPC
-        self.simulate_transaction(&payload.payload.transaction)
+        self.simulate_transaction(&solana_payload.transaction)
             .await?;
 
         info!(
@@ -468,12 +484,22 @@ impl PaymentVerifier for SolanaVerifier {
             "settling solana payment"
         );
 
+        // Extract the direct payload variant
+        let solana_payload = match &payload.payload {
+            PayloadData::Direct(p) => p,
+            PayloadData::Escrow(_) => {
+                return Err(Error::PayloadMismatch(
+                    "SolanaVerifier received escrow payload; expected direct".to_string(),
+                ));
+            }
+        };
+
         // Validate the transaction can be decoded
-        let _tx = self.decode_and_validate_transaction(&payload.payload.transaction)?;
+        let _tx = self.decode_and_validate_transaction(&solana_payload.transaction)?;
 
         // Broadcast the transaction
         let signature = self
-            .send_transaction(&payload.payload.transaction)
+            .send_transaction(&solana_payload.transaction)
             .await
             .map_err(|e| Error::SettlementFailed(format!("send failed: {e}")))?;
 
@@ -488,6 +514,7 @@ impl PaymentVerifier for SolanaVerifier {
                     tx_signature: Some(signature),
                     network: SOLANA_NETWORK.to_string(),
                     error: None,
+                    verified_amount: None,
                 })
             }
             Err(e) => {
@@ -501,6 +528,7 @@ impl PaymentVerifier for SolanaVerifier {
                     tx_signature: Some(signature),
                     network: SOLANA_NETWORK.to_string(),
                     error: Some(e.to_string()),
+                    verified_amount: None,
                 })
             }
         }

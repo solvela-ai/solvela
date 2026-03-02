@@ -20,20 +20,25 @@ impl Facilitator {
         Self { verifiers }
     }
 
-    /// Find the verifier for a given network.
-    fn verifier_for(&self, network: &str) -> Result<&Arc<dyn PaymentVerifier>, Error> {
+    /// Find the verifier for a given network and scheme combination.
+    fn verifier_for(
+        &self,
+        network: &str,
+        scheme: &str,
+    ) -> Result<&Arc<dyn PaymentVerifier>, Error> {
         self.verifiers
             .iter()
-            .find(|v| v.network() == network)
-            .ok_or_else(|| Error::UnsupportedNetwork(network.to_string()))
+            .find(|v| v.network() == network && v.scheme() == scheme)
+            .ok_or_else(|| Error::UnsupportedNetwork(format!("{network}/{scheme}")))
     }
 
     /// Verify a payment payload.
     pub async fn verify(&self, payload: &PaymentPayload) -> Result<VerificationResult, Error> {
         let network = &payload.accepted.network;
-        info!(network, "routing verification to chain verifier");
+        let scheme = &payload.accepted.scheme;
+        info!(network, scheme, "routing verification to chain verifier");
 
-        let verifier = self.verifier_for(network)?;
+        let verifier = self.verifier_for(network, scheme)?;
         verifier.verify_payment(payload).await
     }
 
@@ -43,9 +48,10 @@ impl Facilitator {
         payload: &PaymentPayload,
     ) -> Result<SettlementResult, Error> {
         let network = &payload.accepted.network;
-        info!(network, "routing settlement to chain verifier");
+        let scheme = &payload.accepted.scheme;
+        info!(network, scheme, "routing settlement to chain verifier");
 
-        let verifier = self.verifier_for(network)?;
+        let verifier = self.verifier_for(network, scheme)?;
 
         // Verify first
         let verification = verifier.verify_payment(payload).await?;
@@ -65,7 +71,7 @@ impl Facilitator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{PaymentAccept, Resource, SolanaPayload, SOLANA_NETWORK};
+    use crate::types::{PayloadData, PaymentAccept, Resource, SolanaPayload, SOLANA_NETWORK};
 
     /// A mock verifier for testing the facilitator dispatch logic.
     struct MockVerifier;
@@ -74,6 +80,10 @@ mod tests {
     impl PaymentVerifier for MockVerifier {
         fn network(&self) -> &str {
             SOLANA_NETWORK
+        }
+
+        fn scheme(&self) -> &str {
+            "exact"
         }
 
         async fn verify_payment(
@@ -96,6 +106,7 @@ mod tests {
                 tx_signature: Some("MockTxSig123".to_string()),
                 network: SOLANA_NETWORK.to_string(),
                 error: None,
+                verified_amount: None,
             })
         }
     }
@@ -114,10 +125,11 @@ mod tests {
                 asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
                 pay_to: "RecipientPubkey".to_string(),
                 max_timeout_seconds: 300,
+                escrow_program_id: None,
             },
-            payload: SolanaPayload {
+            payload: PayloadData::Direct(SolanaPayload {
                 transaction: "base64encodedtx".to_string(),
-            },
+            }),
         }
     }
 

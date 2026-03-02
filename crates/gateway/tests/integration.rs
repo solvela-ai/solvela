@@ -24,7 +24,7 @@ use x402::types::{PaymentPayload, SettlementResult, VerificationResult, SOLANA_N
 // Mock payment verifier for integration tests
 // ---------------------------------------------------------------------------
 
-/// A mock verifier that accepts all structurally-valid payment payloads.
+/// A mock verifier that accepts all structurally-valid payment payloads (scheme="exact").
 /// Used so integration tests can exercise the full request path without
 /// a live Solana RPC connection.
 struct AlwaysPassVerifier;
@@ -33,6 +33,10 @@ struct AlwaysPassVerifier;
 impl PaymentVerifier for AlwaysPassVerifier {
     fn network(&self) -> &str {
         SOLANA_NETWORK
+    }
+
+    fn scheme(&self) -> &str {
+        "exact"
     }
 
     async fn verify_payment(
@@ -55,6 +59,45 @@ impl PaymentVerifier for AlwaysPassVerifier {
             tx_signature: Some("MockSettledTxSig123".to_string()),
             network: SOLANA_NETWORK.to_string(),
             error: None,
+            verified_amount: None,
+        })
+    }
+}
+
+/// A mock verifier for the escrow scheme.
+struct AlwaysPassEscrowVerifier;
+
+#[async_trait::async_trait]
+impl PaymentVerifier for AlwaysPassEscrowVerifier {
+    fn network(&self) -> &str {
+        SOLANA_NETWORK
+    }
+
+    fn scheme(&self) -> &str {
+        "escrow"
+    }
+
+    async fn verify_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<VerificationResult, X402Error> {
+        Ok(VerificationResult {
+            valid: true,
+            reason: None,
+            verified_amount: Some(2625),
+        })
+    }
+
+    async fn settle_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<SettlementResult, X402Error> {
+        Ok(SettlementResult {
+            success: true,
+            tx_signature: Some("MockEscrowSettledTxSig123".to_string()),
+            network: SOLANA_NETWORK.to_string(),
+            error: None,
+            verified_amount: Some(2625),
         })
     }
 }
@@ -132,6 +175,56 @@ fn test_app() -> axum::Router {
         usage: gateway::usage::UsageTracker::noop(),
         cache: None, // No Redis in tests (replay check is skipped when cache=None)
         provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+    });
+    build_router(state)
+}
+
+/// Build a test app with escrow support enabled.
+fn test_app_with_escrow() -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+
+    // Include both exact and escrow verifiers
+    let facilitator = x402::facilitator::Facilitator::new(vec![
+        Arc::new(AlwaysPassVerifier),
+        Arc::new(AlwaysPassEscrowVerifier),
+    ]);
+
+    let mut config = AppConfig::default();
+    config.solana.escrow_program_id =
+        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+
+    // Create a dummy claimer — won't actually submit claims in tests
+    // We need a valid 64-byte key. Use a test keypair.
+    let test_keypair = {
+        use ed25519_dalek::SigningKey;
+        let sk = SigningKey::from_bytes(&[1u8; 32]);
+        let mut kp = [0u8; 64];
+        kp[..32].copy_from_slice(&[1u8; 32]);
+        kp[32..].copy_from_slice(sk.verifying_key().as_bytes());
+        bs58::encode(&kp).into_string()
+    };
+
+    let escrow_claimer = x402::escrow::EscrowClaimer::new(
+        "https://api.devnet.solana.com".to_string(),
+        &test_keypair,
+        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "11111111111111111111111111111111",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    )
+    .expect("test claimer must be valid");
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry,
+        providers: ProviderRegistry::from_env(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: Some(Arc::new(escrow_claimer)),
     });
     build_router(state)
 }
@@ -151,10 +244,38 @@ fn valid_payment_header(resource_url: &str) -> String {
             asset: x402::types::USDC_MINT.to_string(),
             pay_to: "GatewayRecipientWallet111111111111111111111111".to_string(),
             max_timeout_seconds: 300,
+            escrow_program_id: None,
         },
-        payload: x402::types::SolanaPayload {
+        payload: x402::types::PayloadData::Direct(x402::types::SolanaPayload {
             transaction: base64::engine::general_purpose::STANDARD.encode(b"mock_signed_tx_bytes"),
+        }),
+    };
+    let json = serde_json::to_vec(&payload).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(&json)
+}
+
+/// Build a valid escrow PaymentPayload header.
+fn valid_escrow_payment_header(resource_url: &str) -> String {
+    let payload = x402::types::PaymentPayload {
+        x402_version: 2,
+        resource: x402::types::Resource {
+            url: resource_url.to_string(),
+            method: "POST".to_string(),
         },
+        accepted: x402::types::PaymentAccept {
+            scheme: "escrow".to_string(),
+            network: SOLANA_NETWORK.to_string(),
+            amount: "2625".to_string(),
+            asset: x402::types::USDC_MINT.to_string(),
+            pay_to: "GatewayRecipientWallet111111111111111111111111".to_string(),
+            max_timeout_seconds: 300,
+            escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+        },
+        payload: x402::types::PayloadData::Escrow(x402::types::EscrowPayload {
+            deposit_tx: base64::engine::general_purpose::STANDARD.encode(b"mock_deposit_tx_bytes"),
+            service_id: base64::engine::general_purpose::STANDARD.encode([0u8; 32]),
+            agent_pubkey: "11111111111111111111111111111111".to_string(),
+        }),
     };
     let json = serde_json::to_vec(&payload).unwrap();
     base64::engine::general_purpose::STANDARD.encode(&json)
@@ -635,10 +756,11 @@ async fn test_chat_with_base64_payment_header() {
             asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
             pay_to: "TestRecipientWallet".to_string(),
             max_timeout_seconds: 300,
+            escrow_program_id: None,
         },
-        payload: x402::types::SolanaPayload {
+        payload: x402::types::PayloadData::Direct(x402::types::SolanaPayload {
             transaction: "dGVzdHRyYW5zYWN0aW9u".to_string(), // base64("testtransaction")
-        },
+        }),
     };
 
     let json_bytes = serde_json::to_vec(&payment_payload).unwrap();
@@ -910,4 +1032,164 @@ async fn test_services_unknown_category_returns_empty() {
     let data = json["data"].as_array().unwrap();
     assert_eq!(data.len(), 0);
     assert_eq!(json["total"], 0);
+}
+
+// ---------------------------------------------------------------------------
+// Escrow integration tests  (Phase 4.2)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_402_offers_escrow_when_configured() {
+    let app = test_app_with_escrow();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error_msg = json["error"]["message"].as_str().unwrap();
+    let pr: serde_json::Value = serde_json::from_str(error_msg).unwrap();
+
+    let accepts = pr["accepts"].as_array().unwrap();
+    assert_eq!(
+        accepts.len(),
+        2,
+        "should offer both exact and escrow schemes"
+    );
+    assert_eq!(accepts[0]["scheme"], "exact");
+    assert_eq!(accepts[1]["scheme"], "escrow");
+    assert!(
+        accepts[1]["escrow_program_id"].is_string(),
+        "escrow accept should include escrow_program_id"
+    );
+}
+
+#[tokio::test]
+async fn test_402_no_escrow_when_not_configured() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error_msg = json["error"]["message"].as_str().unwrap();
+    let pr: serde_json::Value = serde_json::from_str(error_msg).unwrap();
+
+    let accepts = pr["accepts"].as_array().unwrap();
+    assert_eq!(accepts.len(), 1, "should only offer exact scheme");
+    assert_eq!(accepts[0]["scheme"], "exact");
+}
+
+#[tokio::test]
+async fn test_escrow_payment_header_accepted() {
+    let app = test_app_with_escrow();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_escrow_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should return 200 with a stub response (escrow verifier passes)
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["object"], "chat.completion");
+    assert!(json["choices"].is_array());
+}
+
+#[tokio::test]
+async fn test_escrow_scheme_dispatches_to_escrow_verifier() {
+    // Build a facilitator with both verifiers and verify routing
+    let exact_verifier = Arc::new(AlwaysPassVerifier);
+    let escrow_verifier = Arc::new(AlwaysPassEscrowVerifier);
+
+    let facilitator = x402::facilitator::Facilitator::new(vec![exact_verifier, escrow_verifier]);
+
+    // Build an escrow payload
+    let payload = x402::types::PaymentPayload {
+        x402_version: 2,
+        resource: x402::types::Resource {
+            url: "/v1/chat/completions".to_string(),
+            method: "POST".to_string(),
+        },
+        accepted: x402::types::PaymentAccept {
+            scheme: "escrow".to_string(),
+            network: SOLANA_NETWORK.to_string(),
+            amount: "2625".to_string(),
+            asset: x402::types::USDC_MINT.to_string(),
+            pay_to: "TestRecipient".to_string(),
+            max_timeout_seconds: 300,
+            escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+        },
+        payload: x402::types::PayloadData::Escrow(x402::types::EscrowPayload {
+            deposit_tx: base64::engine::general_purpose::STANDARD.encode(b"mock_deposit_tx"),
+            service_id: base64::engine::general_purpose::STANDARD.encode([0u8; 32]),
+            agent_pubkey: "11111111111111111111111111111111".to_string(),
+        }),
+    };
+
+    // Verify routes to escrow verifier
+    let result = facilitator.verify(&payload).await;
+    assert!(result.is_ok());
+    assert!(result.unwrap().valid);
+
+    // Verify and settle routes to escrow verifier
+    let result = facilitator.verify_and_settle(&payload).await;
+    assert!(result.is_ok());
+    let settlement = result.unwrap();
+    assert!(settlement.success);
+    assert_eq!(
+        settlement.tx_signature,
+        Some("MockEscrowSettledTxSig123".to_string())
+    );
 }

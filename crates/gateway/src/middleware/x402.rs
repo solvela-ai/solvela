@@ -98,7 +98,7 @@ fn decode_payment_header(header: &str) -> Result<PaymentPayload, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use x402::types::{PaymentAccept, PaymentPayload, Resource, SolanaPayload};
+    use x402::types::{PayloadData, PaymentAccept, PaymentPayload, Resource, SolanaPayload};
 
     /// Build a valid test PaymentPayload.
     fn sample_payload() -> PaymentPayload {
@@ -115,10 +115,11 @@ mod tests {
                 asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
                 pay_to: "RecipientWallet123".to_string(),
                 max_timeout_seconds: 300,
+                escrow_program_id: None,
             },
-            payload: SolanaPayload {
+            payload: PayloadData::Direct(SolanaPayload {
                 transaction: "base64encodedtx".to_string(),
-            },
+            }),
         }
     }
 
@@ -164,6 +165,9 @@ mod tests {
         let decoded =
             decode_payment_header(&encoded).expect("should decode URL-safe base64 payload");
         assert_eq!(decoded.x402_version, 2);
-        assert_eq!(decoded.payload.transaction, "base64encodedtx");
+        match &decoded.payload {
+            PayloadData::Direct(p) => assert_eq!(p.transaction, "base64encodedtx"),
+            PayloadData::Escrow(_) => panic!("expected Direct variant"),
+        }
     }
 }

@@ -36,6 +36,7 @@ pub struct AppState {
     pub usage: usage::UsageTracker,
     pub cache: Option<cache::ResponseCache>,
     pub provider_health: providers::health::ProviderHealthTracker,
+    pub escrow_claimer: Option<Arc<x402::escrow::EscrowClaimer>>,
 }
 
 /// Build the Axum router with all routes and middleware.

@@ -1,3 +1,4 @@
+pub mod escrow;
 pub mod facilitator;
 pub mod solana;
 pub mod solana_types;
