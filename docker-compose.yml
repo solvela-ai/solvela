@@ -22,6 +22,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: rcr
+      # WARNING: Default credentials — for local development only. Never use in production.
       POSTGRES_PASSWORD: rcr_dev_password
       POSTGRES_DB: rustyclawrouter
     ports:

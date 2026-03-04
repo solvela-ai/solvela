@@ -57,6 +57,17 @@ impl RateLimiter {
     /// Check if a request from the given client should be allowed.
     /// Returns `Ok(remaining)` or `Err(())` if rate limited.
     pub async fn check(&self, client_id: &str) -> Result<u32, ()> {
+        // Emergency cleanup: if the map has grown too large, evict expired
+        // entries before acquiring the write lock for this request.
+        {
+            let entries = self.entries.lock().await;
+            let too_large = entries.len() > 100_000;
+            drop(entries);
+            if too_large {
+                self.cleanup().await;
+            }
+        }
+
         let mut entries = self.entries.lock().await;
         let now = Instant::now();
 

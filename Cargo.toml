@@ -22,7 +22,7 @@ async-trait = "0.1"
 # Web framework
 axum = "0.8"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "timeout"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "limit", "set-header"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -50,7 +50,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-config = "0.14"
 sha2 = "0.10"
 futures = "0.3"
 
@@ -60,6 +59,9 @@ clap = { version = "4", features = ["derive", "env"] }
 # Error handling
 thiserror = "2"
 anyhow = "1"
+
+# Security
+zeroize = { version = "1", features = ["derive"] }
 
 # Workspace crates
 rcr-common = { path = "crates/common" }

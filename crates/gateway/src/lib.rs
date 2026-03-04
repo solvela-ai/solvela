@@ -3,6 +3,7 @@
 //! This module exposes the gateway internals for integration testing.
 //! The binary entry point is in `main.rs`.
 
+pub mod balance_monitor;
 pub mod cache;
 pub mod config;
 pub mod error;
@@ -13,17 +14,19 @@ pub mod usage;
 
 use std::sync::Arc;
 
-use axum::http::{HeaderValue, Method};
+use axum::http::{HeaderName, HeaderValue, Method};
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use rcr_common::services::ServiceRegistry;
 use router::models::ModelRegistry;
 use x402::facilitator::Facilitator;
 
-use crate::middleware::rate_limit::{RateLimitConfig, RateLimiter};
+use crate::middleware::rate_limit::RateLimiter;
 use crate::providers::ProviderRegistry;
 
 /// Shared application state passed to all route handlers.
@@ -37,14 +40,18 @@ pub struct AppState {
     pub cache: Option<cache::ResponseCache>,
     pub provider_health: providers::health::ProviderHealthTracker,
     pub escrow_claimer: Option<Arc<x402::escrow::EscrowClaimer>>,
+    /// Hot wallet pool for fee payer rotation. `None` when no fee payer keys are configured.
+    pub fee_payer_pool: Option<Arc<x402::fee_payer::FeePayerPool>>,
+    /// Durable nonce account pool. `None` when no nonce accounts are configured.
+    pub nonce_pool: Option<Arc<x402::nonce_pool::NoncePool>>,
 }
 
 /// Build the Axum router with all routes and middleware.
 ///
 /// This is used by both `main.rs` and integration tests.
-pub fn build_router(state: Arc<AppState>) -> Router {
-    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
-
+/// The `rate_limiter` is passed in so callers can retain a clone for background
+/// cleanup tasks (see `main.rs`).
+pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(routes::chat::chat_completions))
         .route(
@@ -54,6 +61,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/models", get(routes::models::list_models))
         .route("/v1/services", get(routes::services::list_services))
         .route("/v1/supported", get(routes::supported::supported))
+        .route("/v1/nonce", get(routes::nonce::get_nonce))
         .route("/pricing", get(routes::pricing::pricing))
         .route("/health", get(routes::health::health))
         .layer(axum::middleware::from_fn(
@@ -64,8 +72,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             state.clone(),
             middleware::x402::extract_payment,
         ))
+        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10 MB
         .layer(TraceLayer::new_for_http())
         .layer(build_cors())
+        // Security headers — applied to every response
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("no-referrer"),
+        ))
         .with_state(state)
 }
 
@@ -110,6 +132,8 @@ fn build_cors() -> CorsLayer {
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
             // x402 custom header
-            "payment-signature".parse().unwrap(),
+            "payment-signature"
+                .parse()
+                .expect("'payment-signature' is a valid header name"),
         ])
 }

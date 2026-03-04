@@ -1,34 +1,25 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
+use crate::nonce_pool::NoncePool;
 use crate::solana_types::{derive_ata, ParsedMessage, Pubkey, VersionedTransaction};
+use crate::spl_transfer::extract_spl_transfer;
 use crate::traits::{Error, PaymentVerifier};
 use crate::types::{
     PayloadData, PaymentPayload, SettlementResult, VerificationResult, SOLANA_NETWORK,
 };
-
-// ---------------------------------------------------------------------------
-// SPL Transfer info extracted from a parsed message
-// ---------------------------------------------------------------------------
-
-/// Information extracted from an SPL Token transfer instruction.
-#[derive(Debug, Clone)]
-struct SplTransferInfo {
-    /// The destination token account.
-    destination: Pubkey,
-    /// Transfer amount in atomic units.
-    amount: u64,
-    /// Mint address (only present for TransferChecked).
-    mint: Option<Pubkey>,
-}
 
 /// Solana-specific x402 payment verifier.
 ///
 /// Verifies and settles USDC-SPL payments on Solana by introspecting
 /// pre-signed versioned transactions. Uses reqwest for JSON-RPC calls
 /// instead of solana-client (which has dependency conflicts with solana-sdk 2.x).
+///
+/// Supports both:
+/// - Recent blockhash transactions (normal, expire ~60 seconds)
+/// - Durable nonce transactions (pre-signed, never expire)
 pub struct SolanaVerifier {
     /// Solana RPC endpoint URL.
     rpc_url: String,
@@ -38,6 +29,9 @@ pub struct SolanaVerifier {
     recipient: Pubkey,
     /// The USDC mint pubkey.
     usdc_mint: Pubkey,
+    /// Optional durable nonce pool for validating nonce-based transactions.
+    /// When `None`, all nonce-based transactions are accepted (trusted to network).
+    nonce_pool: Option<std::sync::Arc<NoncePool>>,
 }
 
 impl SolanaVerifier {
@@ -59,7 +53,46 @@ impl SolanaVerifier {
             http_client: reqwest::Client::new(),
             recipient,
             usdc_mint,
+            nonce_pool: None,
         })
+    }
+
+    /// Attach a durable nonce pool for validating nonce-based transactions.
+    ///
+    /// When a nonce pool is attached, the verifier will check that the nonce account
+    /// referenced in the `AdvanceNonceAccount` instruction belongs to the pool.
+    pub fn with_nonce_pool(mut self, pool: std::sync::Arc<NoncePool>) -> Self {
+        self.nonce_pool = Some(pool);
+        self
+    }
+
+    /// Detect whether the transaction uses a durable nonce.
+    ///
+    /// A nonce transaction is identified by its FIRST instruction being a
+    /// SystemProgram `AdvanceNonceAccount` instruction:
+    /// - Program ID: `11111111111111111111111111111111` (SystemProgram, all zeros)
+    /// - Instruction data: starts with `[4, 0, 0, 0]` (AdvanceNonceAccount discriminator)
+    ///
+    /// Returns the nonce account pubkey if found, `None` if the tx uses a recent blockhash.
+    pub fn is_nonce_transaction(message: &ParsedMessage) -> Option<Pubkey> {
+        let first_ix = message.instructions.first()?;
+
+        // The program must be the SystemProgram (index into account_keys)
+        let program_idx = first_ix.program_id_index as usize;
+        let program = message.account_keys.get(program_idx)?;
+        if *program != Pubkey::SYSTEM_PROGRAM {
+            return None;
+        }
+
+        // AdvanceNonceAccount discriminator is [4, 0, 0, 0]
+        if first_ix.data.len() < 4 || first_ix.data[0..4] != [4, 0, 0, 0] {
+            return None;
+        }
+
+        // The nonce account is the first account referenced by this instruction
+        let nonce_account_idx = *first_ix.accounts.first()? as usize;
+        let nonce_account = message.account_keys.get(nonce_account_idx)?;
+        Some(*nonce_account)
     }
 
     /// Decode a base64-encoded versioned transaction and perform cryptographic validation.
@@ -122,114 +155,16 @@ impl SolanaVerifier {
         Ok(tx)
     }
 
-    /// Extract SPL Token transfer information from a parsed message.
-    ///
-    /// Searches for SPL Token `Transfer` (discriminator 3) or `TransferChecked`
-    /// (discriminator 12) instructions. Returns the first matching transfer.
-    fn extract_spl_transfer(message: &ParsedMessage) -> Result<SplTransferInfo, Error> {
-        for ix in &message.instructions {
-            let program_id_index = ix.program_id_index as usize;
-            if program_id_index >= message.account_keys.len() {
-                continue;
-            }
-
-            let program_id = &message.account_keys[program_id_index];
-
-            // Check if this is an SPL Token program instruction
-            let is_token_program = *program_id == Pubkey::TOKEN_PROGRAM_ID
-                || *program_id == Pubkey::TOKEN_2022_PROGRAM_ID;
-            if !is_token_program {
-                continue;
-            }
-
-            if ix.data.is_empty() {
-                continue;
-            }
-
-            match ix.data[0] {
-                // Transfer: discriminator=3, data[1..9]=amount(u64 LE)
-                // accounts: [source, destination, authority]
-                3 => {
-                    if ix.data.len() < 9 {
-                        return Err(Error::InvalidTransaction(
-                            "SPL Transfer instruction data too short".to_string(),
-                        ));
-                    }
-                    if ix.accounts.len() < 2 {
-                        return Err(Error::InvalidTransaction(
-                            "SPL Transfer instruction missing accounts".to_string(),
-                        ));
-                    }
-
-                    let amount = u64::from_le_bytes(ix.data[1..9].try_into().map_err(|_| {
-                        Error::InvalidTransaction("failed to parse transfer amount".to_string())
-                    })?);
-
-                    let dest_index = ix.accounts[1] as usize;
-                    if dest_index >= message.account_keys.len() {
-                        return Err(Error::InvalidTransaction(
-                            "destination account index out of bounds".to_string(),
-                        ));
-                    }
-                    let destination = message.account_keys[dest_index];
-
-                    return Ok(SplTransferInfo {
-                        destination,
-                        amount,
-                        mint: None,
-                    });
-                }
-                // TransferChecked: discriminator=12, data[1..9]=amount(u64 LE)
-                // accounts: [source, mint, destination, authority]
-                12 => {
-                    if ix.data.len() < 9 {
-                        return Err(Error::InvalidTransaction(
-                            "SPL TransferChecked instruction data too short".to_string(),
-                        ));
-                    }
-                    if ix.accounts.len() < 3 {
-                        return Err(Error::InvalidTransaction(
-                            "SPL TransferChecked instruction missing accounts".to_string(),
-                        ));
-                    }
-
-                    let amount = u64::from_le_bytes(ix.data[1..9].try_into().map_err(|_| {
-                        Error::InvalidTransaction("failed to parse transfer amount".to_string())
-                    })?);
-
-                    let mint_index = ix.accounts[1] as usize;
-                    if mint_index >= message.account_keys.len() {
-                        return Err(Error::InvalidTransaction(
-                            "mint account index out of bounds".to_string(),
-                        ));
-                    }
-                    let mint = message.account_keys[mint_index];
-
-                    let dest_index = ix.accounts[2] as usize;
-                    if dest_index >= message.account_keys.len() {
-                        return Err(Error::InvalidTransaction(
-                            "destination account index out of bounds".to_string(),
-                        ));
-                    }
-                    let destination = message.account_keys[dest_index];
-
-                    return Ok(SplTransferInfo {
-                        destination,
-                        amount,
-                        mint: Some(mint),
-                    });
-                }
-                _ => continue,
-            }
-        }
-
-        Err(Error::InvalidTransaction(
-            "no SPL Token transfer instruction found".to_string(),
-        ))
-    }
-
     /// Simulate a transaction via RPC to validate it would succeed.
-    async fn simulate_transaction(&self, base64_tx: &str) -> Result<(), Error> {
+    ///
+    /// For nonce-based transactions, `replace_recent_blockhash` must be `false`
+    /// because the nonce value IS in the blockhash field — replacing it would
+    /// invalidate the `AdvanceNonceAccount` instruction.
+    async fn simulate_transaction(
+        &self,
+        base64_tx: &str,
+        replace_recent_blockhash: bool,
+    ) -> Result<(), Error> {
         let result = self
             .rpc_request(
                 "simulateTransaction",
@@ -238,7 +173,7 @@ impl SolanaVerifier {
                     {
                         "encoding": "base64",
                         "commitment": "confirmed",
-                        "replaceRecentBlockhash": true
+                        "replaceRecentBlockhash": replace_recent_blockhash
                     }
                 ]),
             )
@@ -401,7 +336,7 @@ impl PaymentVerifier for SolanaVerifier {
             .parse_message()
             .map_err(|e| Error::InvalidTransaction(format!("failed to parse message: {e}")))?;
 
-        let transfer = Self::extract_spl_transfer(&message)?;
+        let transfer = extract_spl_transfer(&message)?;
 
         // Step 4: Verify destination matches the recipient's ATA for the USDC mint.
         //
@@ -459,9 +394,41 @@ impl PaymentVerifier for SolanaVerifier {
             });
         }
 
-        // Step 7: Simulate transaction via RPC
-        self.simulate_transaction(&solana_payload.transaction)
-            .await?;
+        // Step 7: Detect nonce-based transactions and simulate accordingly.
+        //
+        // For durable nonce transactions:
+        // - The first instruction MUST be AdvanceNonceAccount (SystemProgram ix #4)
+        // - The blockhash field contains the nonce value — do NOT replace it
+        // - If a nonce pool is configured, verify the nonce account is in the pool
+        // - If no pool, trust the Solana network to reject invalid nonces
+        let is_nonce = Self::is_nonce_transaction(&message);
+        if let Some(nonce_account) = is_nonce {
+            debug!(
+                nonce_account = %nonce_account,
+                "detected durable nonce transaction — skipping blockhash recency check"
+            );
+
+            // If a nonce pool is configured, verify the nonce account is registered
+            if let Some(pool) = &self.nonce_pool {
+                let nonce_account_b58 = nonce_account.to_string();
+                let is_known = pool
+                    .entries_iter()
+                    .any(|e| e.nonce_account == nonce_account_b58);
+                if !is_known {
+                    return Err(Error::InvalidTransaction(format!(
+                        "nonce account {nonce_account_b58} is not registered in the gateway nonce pool"
+                    )));
+                }
+            }
+
+            // Simulate WITHOUT replacing the blockhash (nonce tx must keep its nonce value)
+            self.simulate_transaction(&solana_payload.transaction, false)
+                .await?;
+        } else {
+            // Normal recent-blockhash transaction: replace for simulation safety
+            self.simulate_transaction(&solana_payload.transaction, true)
+                .await?;
+        }
 
         info!(
             required_amount,
@@ -538,7 +505,7 @@ impl PaymentVerifier for SolanaVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::solana_types::Pubkey;
+    use crate::solana_types::{ParsedMessage, Pubkey};
 
     // -----------------------------------------------------------------------
     // Helpers for building test transactions
@@ -702,7 +669,7 @@ mod tests {
         let msg_bytes = build_spl_transfer_message(&signer, &recipient, 5000);
         let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
 
-        let transfer = SolanaVerifier::extract_spl_transfer(&parsed).unwrap();
+        let transfer = extract_spl_transfer(&parsed).unwrap();
         assert_eq!(transfer.destination, recipient);
         assert_eq!(transfer.amount, 5000);
         assert!(transfer.mint.is_none());
@@ -717,7 +684,7 @@ mod tests {
             build_spl_transfer_checked_message(&signer, &recipient, &usdc_mint, 10000, 6);
         let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
 
-        let transfer = SolanaVerifier::extract_spl_transfer(&parsed).unwrap();
+        let transfer = extract_spl_transfer(&parsed).unwrap();
         assert_eq!(transfer.destination, recipient);
         assert_eq!(transfer.amount, 10000);
         assert_eq!(transfer.mint, Some(usdc_mint));
@@ -730,7 +697,7 @@ mod tests {
         let msg_bytes = build_legacy_message_raw(&keys, &[(0, &[1], &[0x02, 0x00])]);
         let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
 
-        let result = SolanaVerifier::extract_spl_transfer(&parsed);
+        let result = extract_spl_transfer(&parsed);
         assert!(result.is_err());
     }
 
@@ -751,7 +718,7 @@ mod tests {
         let verifier = test_verifier();
 
         // The verifier's recipient is TEST_RECIPIENT (system program)
-        let transfer = SolanaVerifier::extract_spl_transfer(&parsed_msg).unwrap();
+        let transfer = extract_spl_transfer(&parsed_msg).unwrap();
         assert_ne!(transfer.destination, verifier.recipient);
 
         // Also test decode_and_validate path — signature must be valid
@@ -760,7 +727,7 @@ mod tests {
             .decode_and_validate_transaction(&base64_tx)
             .unwrap();
         let message = tx.parse_message().unwrap();
-        let transfer = SolanaVerifier::extract_spl_transfer(&message).unwrap();
+        let transfer = extract_spl_transfer(&message).unwrap();
         assert_ne!(transfer.destination, verifier.recipient);
     }
 
@@ -771,7 +738,7 @@ mod tests {
         let msg_bytes = build_spl_transfer_message(&signer, &recipient, 100); // only 100 atomic units
         let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
 
-        let transfer = SolanaVerifier::extract_spl_transfer(&parsed).unwrap();
+        let transfer = extract_spl_transfer(&parsed).unwrap();
         let required_amount: u64 = 5000;
 
         assert!(
@@ -792,7 +759,7 @@ mod tests {
         let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
 
         let verifier = test_verifier();
-        let transfer = SolanaVerifier::extract_spl_transfer(&parsed).unwrap();
+        let transfer = extract_spl_transfer(&parsed).unwrap();
 
         assert!(transfer.mint.is_some());
         assert_ne!(transfer.mint.unwrap(), verifier.usdc_mint);
@@ -833,10 +800,145 @@ mod tests {
             .decode_and_validate_transaction(&base64_tx)
             .unwrap();
         let message = tx.parse_message().unwrap();
-        let transfer = SolanaVerifier::extract_spl_transfer(&message).unwrap();
+        let transfer = extract_spl_transfer(&message).unwrap();
 
         assert_eq!(transfer.destination, recipient);
         assert_eq!(transfer.amount, 7500);
+    }
+
+    // -----------------------------------------------------------------------
+    // is_nonce_transaction tests
+    // -----------------------------------------------------------------------
+
+    /// Build a message with AdvanceNonceAccount as the first instruction,
+    /// followed by an SPL TransferChecked instruction.
+    ///
+    /// Account layout:
+    ///   [0] signer/fee-payer (authority)
+    ///   [1] nonce account
+    ///   [2] system program
+    ///   [3] mint
+    ///   [4] destination
+    ///   [5] token program
+    fn build_nonce_tx_message(
+        signer: &Pubkey,
+        nonce_account: &Pubkey,
+        destination: &Pubkey,
+        mint: &Pubkey,
+        amount: u64,
+        decimals: u8,
+    ) -> Vec<u8> {
+        let system_program = Pubkey::SYSTEM_PROGRAM;
+        let token_program = Pubkey::TOKEN_PROGRAM_ID;
+
+        let account_keys = [
+            *signer,
+            *nonce_account,
+            system_program,
+            *mint,
+            *destination,
+            token_program,
+        ];
+
+        // AdvanceNonceAccount discriminator = [4, 0, 0, 0]
+        let advance_nonce_data: &[u8] = &[4, 0, 0, 0];
+        // AdvanceNonceAccount accounts: nonce_account (idx 1), signer/authority (idx 0), system_program (idx 2)
+        let advance_nonce_accounts: &[u8] = &[1, 0, 2];
+
+        // TransferChecked: source=signer(0), mint=mint(3), dest=dest(4), authority=signer(0), program=token_program(5)
+        let mut transfer_data = vec![12u8]; // TransferChecked discriminator
+        transfer_data.extend_from_slice(&amount.to_le_bytes());
+        transfer_data.push(decimals);
+        let transfer_accounts: &[u8] = &[0, 3, 4, 0]; // source, mint, dest, authority
+
+        build_legacy_message_raw(
+            &account_keys,
+            &[
+                (2, advance_nonce_accounts, advance_nonce_data), // SystemProgram at idx 2
+                (5, transfer_accounts, &transfer_data),          // TokenProgram at idx 5
+            ],
+        )
+    }
+
+    #[test]
+    fn test_is_nonce_transaction_detects_advance_nonce() {
+        let signer = test_signer_pubkey();
+        let nonce_account =
+            Pubkey::from_str("9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz").unwrap();
+        let usdc_mint = Pubkey::from_str(TEST_USDC_MINT).unwrap();
+        let recipient = Pubkey::from_str(TEST_RECIPIENT).unwrap();
+
+        let msg_bytes =
+            build_nonce_tx_message(&signer, &nonce_account, &recipient, &usdc_mint, 5000, 6);
+        let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
+
+        let result = SolanaVerifier::is_nonce_transaction(&parsed);
+        assert!(
+            result.is_some(),
+            "transaction with AdvanceNonceAccount first should be detected as nonce tx"
+        );
+        assert_eq!(
+            result.unwrap(),
+            nonce_account,
+            "should return the nonce account pubkey"
+        );
+    }
+
+    #[test]
+    fn test_is_nonce_transaction_returns_none_for_normal_tx() {
+        // A normal SPL transfer has no AdvanceNonceAccount instruction
+        let signer = test_signer_pubkey();
+        let recipient = Pubkey::from_str(TEST_RECIPIENT).unwrap();
+        let msg_bytes = build_spl_transfer_message(&signer, &recipient, 5000);
+        let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
+
+        let result = SolanaVerifier::is_nonce_transaction(&parsed);
+        assert!(
+            result.is_none(),
+            "normal SPL transfer must not be detected as nonce tx, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_is_nonce_transaction_wrong_discriminator() {
+        // Build a SystemProgram instruction with wrong data (not AdvanceNonceAccount)
+        let signer = test_signer_pubkey();
+        let system = Pubkey::SYSTEM_PROGRAM;
+
+        // Discriminator [0, 0, 0, 0] = CreateAccount (not AdvanceNonce)
+        let create_account_data: &[u8] =
+            &[0, 0, 0, 0, 0x40, 0x42, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let account_keys = [signer, system];
+        let msg_bytes = build_legacy_message_raw(
+            &account_keys,
+            &[(1, &[0, 1], create_account_data)], // SystemProgram at idx 1
+        );
+        let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
+
+        let result = SolanaVerifier::is_nonce_transaction(&parsed);
+        assert!(
+            result.is_none(),
+            "wrong system program discriminator must not be detected as nonce tx"
+        );
+    }
+
+    #[test]
+    fn test_is_nonce_transaction_first_ix_not_system_program() {
+        // When the first instruction is NOT the system program, it's not a nonce tx
+        let signer = test_signer_pubkey();
+        let recipient = Pubkey::from_str(TEST_RECIPIENT).unwrap();
+        let usdc_mint = Pubkey::from_str(TEST_USDC_MINT).unwrap();
+        // TransferChecked first (no AdvanceNonce)
+        let msg_bytes =
+            build_spl_transfer_checked_message(&signer, &recipient, &usdc_mint, 5000, 6);
+        let parsed = ParsedMessage::from_bytes(&msg_bytes).unwrap();
+
+        let result = SolanaVerifier::is_nonce_transaction(&parsed);
+        assert!(
+            result.is_none(),
+            "TransferChecked first must not be nonce tx"
+        );
     }
 
     #[test]
@@ -854,7 +956,7 @@ mod tests {
             .decode_and_validate_transaction(&base64_tx)
             .unwrap();
         let message = tx.parse_message().unwrap();
-        let transfer = SolanaVerifier::extract_spl_transfer(&message).unwrap();
+        let transfer = extract_spl_transfer(&message).unwrap();
 
         assert_eq!(transfer.destination, recipient);
         assert_eq!(transfer.amount, 25000);

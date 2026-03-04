@@ -154,7 +154,7 @@ mod tests {
                 max_timeout_seconds: MAX_TIMEOUT_SECONDS,
                 escrow_program_id: None,
             }],
-            cost_breakdown: rcr_common::types::CostBreakdown {
+            cost_breakdown: CostBreakdown {
                 provider_cost: "0.002500".to_string(),
                 platform_fee: "0.000125".to_string(),
                 total: "0.002625".to_string(),

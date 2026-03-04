@@ -188,15 +188,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1579,12 +1570,10 @@ dependencies = [
 name = "rcr-common"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "serde",
  "serde_json",
  "thiserror",
  "toml",
- "uuid",
 ]
 
 [[package]]
@@ -2459,6 +2448,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "iri-string",
  "pin-project-lite",
  "tokio",
@@ -3234,9 +3224,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
- "bincode",
  "bs58",
- "chrono",
  "curve25519-dalek",
  "ed25519-dalek",
  "rcr-common",
@@ -3247,6 +3235,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -3318,6 +3307,20 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85a5b4158499876c763cb03bc4e49185d3cccbabb15b33c627f7884f43db852e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "zerotrie"

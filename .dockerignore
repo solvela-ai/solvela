@@ -1,0 +1,17 @@
+target/
+.env
+.env.local
+.env.*.local
+.env.development
+.env.test
+.env.production
+.env.staging
+node_modules/
+programs/
+.claude/
+dashboard/
+sdks/
+.github/
+*.md
+!AGENTS.md
+migrations/

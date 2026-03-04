@@ -50,8 +50,14 @@ pub enum UsageError {
     #[error("database error: {0}")]
     Database(String),
 
-    #[error("budget exceeded: {0}")]
-    BudgetExceeded(String),
+    #[error(
+        "budget exceeded for wallet {wallet}: estimated ${spent:.4} exceeds limit ${limit:.2}"
+    )]
+    BudgetExceeded {
+        wallet: String,
+        limit: f64,
+        spent: f64,
+    },
 
     #[error("redis error: {0}")]
     Redis(String),
@@ -189,13 +195,31 @@ impl UsageTracker {
 
     /// Check if a wallet's budget allows a request with the estimated cost.
     ///
-    /// Returns Ok(()) if within budget, Err if budget exceeded.
+    /// Returns `Ok(())` if within budget, `Err(UsageError::BudgetExceeded)` if not.
+    ///
+    /// **No-Redis fallback**: when Redis is unavailable and no client is configured,
+    /// a conservative per-request cap of $1.00 USDC is applied to prevent runaway
+    /// spend on high-cost models.  Requests with an estimated cost at or below $1.00
+    /// are allowed through; above that they are rejected.
     pub async fn check_budget(
         &self,
         wallet_address: &str,
         estimated_cost_usdc: f64,
     ) -> Result<(), UsageError> {
-        // Try Redis first (hot path)
+        // No Redis configured — apply a conservative per-request hard cap.
+        if self.redis_client.is_none() {
+            const NO_REDIS_REQUEST_CAP_USDC: f64 = 1.0;
+            if estimated_cost_usdc > NO_REDIS_REQUEST_CAP_USDC {
+                return Err(UsageError::BudgetExceeded {
+                    wallet: wallet_address.to_string(),
+                    limit: NO_REDIS_REQUEST_CAP_USDC,
+                    spent: estimated_cost_usdc,
+                });
+            }
+            return Ok(());
+        }
+
+        // Try Redis hot-path budget check.
         if let Some(client) = &self.redis_client {
             if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
                 let day_key = format!("spend:{}:{}", wallet_address, Utc::now().format("%Y-%m-%d"));
@@ -206,12 +230,13 @@ impl UsageTracker {
                     .unwrap_or(0.0);
 
                 // Default daily limit: $100 USDC
-                let daily_limit = 100.0;
-                if daily_spend + estimated_cost_usdc > daily_limit {
-                    return Err(UsageError::BudgetExceeded(format!(
-                        "daily spend ${:.4} + estimated ${:.4} exceeds limit ${:.2}",
-                        daily_spend, estimated_cost_usdc, daily_limit
-                    )));
+                const DAILY_LIMIT_USDC: f64 = 100.0;
+                if daily_spend + estimated_cost_usdc > DAILY_LIMIT_USDC {
+                    return Err(UsageError::BudgetExceeded {
+                        wallet: wallet_address.to_string(),
+                        limit: DAILY_LIMIT_USDC,
+                        spent: daily_spend + estimated_cost_usdc,
+                    });
                 }
             }
         }
@@ -381,10 +406,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_noop_tracker_check_budget_passes() {
+    async fn test_noop_tracker_check_budget_passes_at_cap() {
+        // Without Redis, the conservative cap is $1.00.  A cost of exactly $1.00
+        // (not strictly greater) must be allowed through.
         let tracker = UsageTracker::noop();
         let result = tracker.check_budget("wallet123", 1.0).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "cost equal to cap should be allowed");
+    }
+
+    #[tokio::test]
+    async fn test_noop_tracker_check_budget_rejects_above_cap() {
+        // Without Redis, requests exceeding $1.00 must be rejected to prevent
+        // runaway spend on high-cost models.
+        let tracker = UsageTracker::noop();
+        let result = tracker.check_budget("wallet123", 1.01).await;
+        assert!(
+            matches!(result, Err(UsageError::BudgetExceeded { .. })),
+            "cost above cap should be rejected when Redis is unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_noop_tracker_check_budget_passes_below_cap() {
+        let tracker = UsageTracker::noop();
+        let result = tracker.check_budget("wallet123", 0.50).await;
+        assert!(result.is_ok(), "cost below cap should be allowed");
     }
 
     #[tokio::test]
@@ -402,8 +448,13 @@ mod tests {
         let err = UsageError::Database("connection refused".to_string());
         assert_eq!(err.to_string(), "database error: connection refused");
 
-        let err = UsageError::BudgetExceeded("daily limit".to_string());
-        assert_eq!(err.to_string(), "budget exceeded: daily limit");
+        let err = UsageError::BudgetExceeded {
+            wallet: "wallet123".to_string(),
+            limit: 100.0,
+            spent: 150.0,
+        };
+        assert!(err.to_string().contains("budget exceeded"));
+        assert!(err.to_string().contains("wallet123"));
 
         let err = UsageError::Redis("timeout".to_string());
         assert_eq!(err.to_string(), "redis error: timeout");

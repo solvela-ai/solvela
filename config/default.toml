@@ -9,6 +9,13 @@ rpc_url = "https://api.devnet.solana.com"
 recipient_wallet = ""  # Set via RCR_SOLANA_RECIPIENT_WALLET env var
 usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
+# Balance monitor — checks fee-payer wallet SOL balances periodically.
+# Emits tracing::warn! below warn_threshold_sol, tracing::error! below critical.
+[monitor]
+warn_threshold_sol = 0.1
+critical_threshold_sol = 0.02
+check_interval_secs = 300
+
 # Provider API keys are loaded from environment variables:
 #   OPENAI_API_KEY
 #   ANTHROPIC_API_KEY

@@ -14,6 +14,7 @@ use router::scorer;
 
 use crate::error::GatewayError;
 use crate::middleware::prompt_guard::{self, GuardResult, PromptGuardConfig};
+use crate::middleware::x402::decode_payment_header;
 use crate::providers::fallback;
 use crate::AppState;
 
@@ -258,42 +259,17 @@ pub async fn chat_completions(
         .await
         {
             Ok(stream) => {
-                // FIX 8: Fire escrow claim before returning the stream.
+                // Fire escrow claim before returning the stream.
                 // For streaming, use the estimated cost (conservative = max_tokens)
                 // since actual token count is only known post-stream.
-                if payment_scheme == "escrow" {
-                    if let Some(claimer) = &state.escrow_claimer {
-                        if let (Some(ref sid_b64), Some(ref agent_b58)) =
-                            (&escrow_service_id, &escrow_agent_pubkey)
-                        {
-                            let estimated_atomic = {
-                                let cost = state
-                                    .model_registry
-                                    .estimate_cost(
-                                        &req.model,
-                                        estimate_input_tokens(&req),
-                                        req.max_tokens.unwrap_or(1000),
-                                    )
-                                    .ok();
-                                cost.and_then(|c| c.total.parse::<f64>().ok())
-                                    .map(|f| (f * 1_000_000.0) as u64)
-                                    .unwrap_or(0)
-                            };
-
-                            // Cap claim amount to the verified deposit amount
-                            let claim_amount = match escrow_deposited_amount {
-                                Some(deposited) => estimated_atomic.min(deposited),
-                                None => estimated_atomic,
-                            };
-
-                            if let (Ok(sid), Ok(agent_bytes)) =
-                                (decode_service_id(sid_b64), decode_agent_pubkey(agent_b58))
-                            {
-                                claimer.claim_async(sid, agent_bytes, claim_amount);
-                            }
-                        }
-                    }
-                }
+                fire_escrow_claim(
+                    &state,
+                    &payment_scheme,
+                    &escrow_service_id,
+                    &escrow_agent_pubkey,
+                    escrow_deposited_amount,
+                    estimated_atomic_cost(&state.model_registry, &req.model, &req),
+                );
 
                 let sse_stream = stream.map(|result| match result {
                     Ok(chunk) => {
@@ -349,46 +325,24 @@ pub async fn chat_completions(
                 }
 
                 // Fire escrow claim if this was an escrow payment
-                if payment_scheme == "escrow" {
-                    if let Some(claimer) = &state.escrow_claimer {
-                        if let (Some(ref sid_b64), Some(ref agent_b58)) =
-                            (&escrow_service_id, &escrow_agent_pubkey)
-                        {
-                            let actual_atomic = if let Some(usage) = &response.usage {
-                                compute_actual_atomic_cost(
-                                    usage.prompt_tokens,
-                                    usage.completion_tokens,
-                                    model_info,
-                                )
-                            } else {
-                                // Fall back to estimated cost
-                                let cost = state
-                                    .model_registry
-                                    .estimate_cost(
-                                        &req.model,
-                                        estimate_input_tokens(&req),
-                                        req.max_tokens.unwrap_or(1000),
-                                    )
-                                    .ok();
-                                cost.and_then(|c| c.total.parse::<f64>().ok())
-                                    .map(|f| (f * 1_000_000.0) as u64)
-                                    .unwrap_or(0)
-                            };
-
-                            // FIX 3: Cap claim amount to the verified deposit amount
-                            let claim_amount = match escrow_deposited_amount {
-                                Some(deposited) => actual_atomic.min(deposited),
-                                None => actual_atomic,
-                            };
-
-                            if let (Ok(sid), Ok(agent_bytes)) =
-                                (decode_service_id(sid_b64), decode_agent_pubkey(agent_b58))
-                            {
-                                claimer.claim_async(sid, agent_bytes, claim_amount);
-                            }
-                        }
-                    }
-                }
+                let claim_atomic = if let Some(usage) = &response.usage {
+                    compute_actual_atomic_cost(
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                        model_info,
+                    )
+                } else {
+                    // Fall back to estimated cost
+                    estimated_atomic_cost(&state.model_registry, &req.model, &req)
+                };
+                fire_escrow_claim(
+                    &state,
+                    &payment_scheme,
+                    &escrow_service_id,
+                    &escrow_agent_pubkey,
+                    escrow_deposited_amount,
+                    claim_atomic,
+                );
 
                 let response_json = serde_json::to_value(&response)
                     .map_err(|e| GatewayError::Internal(e.to_string()))?;
@@ -438,33 +392,10 @@ pub async fn chat_completions(
 ///
 /// Returns `None` if decoding fails — this is intentional for backwards
 /// compatibility with raw string headers used in tests (e.g., "fake-payment-for-testing").
+///
+/// Delegates to the shared `decode_payment_header` in the x402 middleware.
 fn decode_payment_from_header(header: &str) -> Option<x402::types::PaymentPayload> {
-    use base64::Engine;
-
-    // Try base64-encoded JSON
-    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(header) {
-        if let Ok(json_str) = String::from_utf8(decoded) {
-            if let Ok(payload) = serde_json::from_str(&json_str) {
-                return Some(payload);
-            }
-        }
-    }
-
-    // Try URL-safe base64
-    if let Ok(decoded) = base64::engine::general_purpose::URL_SAFE.decode(header) {
-        if let Ok(json_str) = String::from_utf8(decoded) {
-            if let Ok(payload) = serde_json::from_str(&json_str) {
-                return Some(payload);
-            }
-        }
-    }
-
-    // Try raw JSON
-    if let Ok(payload) = serde_json::from_str(header) {
-        return Some(payload);
-    }
-
-    None
+    decode_payment_header(header).ok()
 }
 
 /// Extract wallet address and transaction signature from the payment header.
@@ -505,6 +436,57 @@ fn resolve_model_id(req: &ChatRequest, state: &AppState) -> Result<String, Gatew
     }
 
     Err(GatewayError::ModelNotFound(req.model.clone()))
+}
+
+/// Estimate cost in atomic USDC units using the model registry's cost breakdown.
+///
+/// Used as a fallback when actual token usage is unavailable (e.g., streaming).
+fn estimated_atomic_cost(
+    registry: &router::models::ModelRegistry,
+    model: &str,
+    req: &ChatRequest,
+) -> u64 {
+    registry
+        .estimate_cost(
+            model,
+            estimate_input_tokens(req),
+            req.max_tokens.unwrap_or(1000),
+        )
+        .ok()
+        .and_then(|c| c.total.parse::<f64>().ok())
+        .map(|f| (f * 1_000_000.0) as u64)
+        .unwrap_or(0)
+}
+
+/// Fire an escrow claim transaction (fire-and-forget) if the payment scheme is escrow.
+///
+/// Caps the claim amount to the verified deposit to prevent over-claiming.
+fn fire_escrow_claim(
+    state: &Arc<AppState>,
+    payment_scheme: &str,
+    escrow_service_id: &Option<String>,
+    escrow_agent_pubkey: &Option<String>,
+    escrow_deposited_amount: Option<u64>,
+    claim_atomic: u64,
+) {
+    if payment_scheme != "escrow" {
+        return;
+    }
+    if let Some(claimer) = &state.escrow_claimer {
+        if let (Some(ref sid_b64), Some(ref agent_b58)) = (escrow_service_id, escrow_agent_pubkey) {
+            // Cap claim amount to the verified deposit amount
+            let claim_amount = match escrow_deposited_amount {
+                Some(deposited) => claim_atomic.min(deposited),
+                None => claim_atomic,
+            };
+
+            if let (Ok(sid), Ok(agent_bytes)) =
+                (decode_service_id(sid_b64), decode_agent_pubkey(agent_b58))
+            {
+                claimer.claim_async(sid, agent_bytes, claim_amount);
+            }
+        }
+    }
 }
 
 /// Rough token estimate: ~4 chars per token.
@@ -577,4 +559,386 @@ fn usdc_atomic_amount(decimal_str: &str) -> String {
 
     let atomic = integer * 1_000_000 + fractional;
     atomic.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rcr_common::types::{ChatMessage, ModelInfo, Role};
+
+    fn user_msg(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: Role::User,
+            content: content.to_string(),
+            name: None,
+        }
+    }
+
+    fn make_request(model: &str, messages: Vec<ChatMessage>) -> ChatRequest {
+        ChatRequest {
+            model: model.to_string(),
+            messages,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: false,
+        }
+    }
+
+    // =========================================================================
+    // usdc_atomic_amount — Financial calculation (100% coverage required)
+    // =========================================================================
+
+    #[test]
+    fn test_usdc_atomic_basic_decimal() {
+        // 1.50 USDC = 1,500,000 atomic
+        assert_eq!(usdc_atomic_amount("1.50"), "1500000");
+    }
+
+    #[test]
+    fn test_usdc_atomic_small_amount() {
+        // 0.002625 USDC = 2,625 atomic
+        assert_eq!(usdc_atomic_amount("0.002625"), "2625");
+    }
+
+    #[test]
+    fn test_usdc_atomic_whole_number() {
+        // 5 USDC = 5,000,000 atomic
+        assert_eq!(usdc_atomic_amount("5"), "5000000");
+    }
+
+    #[test]
+    fn test_usdc_atomic_zero() {
+        assert_eq!(usdc_atomic_amount("0"), "0");
+        assert_eq!(usdc_atomic_amount("0.0"), "0");
+        assert_eq!(usdc_atomic_amount("0.000000"), "0");
+    }
+
+    #[test]
+    fn test_usdc_atomic_max_precision() {
+        // 0.000001 USDC = 1 atomic (smallest unit)
+        assert_eq!(usdc_atomic_amount("0.000001"), "1");
+    }
+
+    #[test]
+    fn test_usdc_atomic_truncates_beyond_6_decimals() {
+        // 0.0000019 should truncate to 0.000001 = 1 atomic
+        assert_eq!(usdc_atomic_amount("0.0000019"), "1");
+    }
+
+    #[test]
+    fn test_usdc_atomic_large_amount() {
+        // 1000.000000 USDC = 1,000,000,000 atomic
+        assert_eq!(usdc_atomic_amount("1000.000000"), "1000000000");
+    }
+
+    #[test]
+    fn test_usdc_atomic_whitespace_trimmed() {
+        assert_eq!(usdc_atomic_amount("  1.50  "), "1500000");
+    }
+
+    #[test]
+    fn test_usdc_atomic_exact_six_decimals() {
+        assert_eq!(usdc_atomic_amount("0.123456"), "123456");
+    }
+
+    #[test]
+    fn test_usdc_atomic_fewer_decimals_pads() {
+        // 0.5 should pad to 0.500000 = 500,000 atomic
+        assert_eq!(usdc_atomic_amount("0.5"), "500000");
+    }
+
+    #[test]
+    fn test_usdc_atomic_empty_string() {
+        assert_eq!(usdc_atomic_amount(""), "0");
+    }
+
+    #[test]
+    fn test_usdc_atomic_typical_llm_costs() {
+        // GPT-4o: ~$0.002625 for a typical request
+        assert_eq!(usdc_atomic_amount("0.002625"), "2625");
+        // DeepSeek: ~$0.000042 for a small request
+        assert_eq!(usdc_atomic_amount("0.000042"), "42");
+        // Claude Opus: ~$0.015750 for a complex request
+        assert_eq!(usdc_atomic_amount("0.015750"), "15750");
+    }
+
+    // =========================================================================
+    // estimate_input_tokens
+    // =========================================================================
+
+    #[test]
+    fn test_estimate_input_tokens_simple() {
+        // "Hello" = 5 chars → 5/4 = 1 token
+        let req = make_request("m", vec![user_msg("Hello")]);
+        assert_eq!(estimate_input_tokens(&req), 1);
+    }
+
+    #[test]
+    fn test_estimate_input_tokens_longer_message() {
+        // 100 chars → 25 tokens
+        let msg = "a".repeat(100);
+        let req = make_request("m", vec![user_msg(&msg)]);
+        assert_eq!(estimate_input_tokens(&req), 25);
+    }
+
+    #[test]
+    fn test_estimate_input_tokens_multiple_messages() {
+        // 50 + 50 = 100 chars → 25 tokens
+        let req = make_request(
+            "m",
+            vec![user_msg(&"b".repeat(50)), user_msg(&"c".repeat(50))],
+        );
+        assert_eq!(estimate_input_tokens(&req), 25);
+    }
+
+    #[test]
+    fn test_estimate_input_tokens_empty_message_returns_at_least_one() {
+        let req = make_request("m", vec![user_msg("")]);
+        assert_eq!(estimate_input_tokens(&req), 1, "minimum should be 1 token");
+    }
+
+    // =========================================================================
+    // compute_actual_atomic_cost — Financial calculation (100% coverage)
+    // =========================================================================
+
+    #[test]
+    fn test_compute_actual_atomic_cost_basic() {
+        let model_info = ModelInfo {
+            id: "openai/gpt-4o".to_string(),
+            provider: "openai".to_string(),
+            model_id: "gpt-4o".to_string(),
+            display_name: "GPT-4o".to_string(),
+            input_cost_per_million: 2.50,
+            output_cost_per_million: 10.00,
+            context_window: 128_000,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_vision: true,
+            reasoning: false,
+        };
+
+        // 1000 input tokens, 500 output tokens
+        // Input: 1000/1M * 2.50 = 0.0025
+        // Output: 500/1M * 10.00 = 0.005
+        // Provider: 0.0075
+        // Total: 0.0075 * 1.05 = 0.007875
+        // Atomic: 0.007875 * 1,000,000 = 7875
+        let atomic = compute_actual_atomic_cost(1000, 500, &model_info);
+        assert_eq!(atomic, 7875);
+    }
+
+    #[test]
+    fn test_compute_actual_atomic_cost_zero_tokens() {
+        let model_info = ModelInfo {
+            id: "test/model".to_string(),
+            provider: "test".to_string(),
+            model_id: "model".to_string(),
+            display_name: "Test".to_string(),
+            input_cost_per_million: 2.50,
+            output_cost_per_million: 10.00,
+            context_window: 128_000,
+            supports_streaming: true,
+            supports_tools: false,
+            supports_vision: false,
+            reasoning: false,
+        };
+
+        assert_eq!(compute_actual_atomic_cost(0, 0, &model_info), 0);
+    }
+
+    #[test]
+    fn test_compute_actual_atomic_cost_includes_5_percent_fee() {
+        let model_info = ModelInfo {
+            id: "test/model".to_string(),
+            provider: "test".to_string(),
+            model_id: "model".to_string(),
+            display_name: "Test".to_string(),
+            input_cost_per_million: 1_000_000.0, // $1 per token for easy math
+            output_cost_per_million: 0.0,
+            context_window: 128_000,
+            supports_streaming: true,
+            supports_tools: false,
+            supports_vision: false,
+            reasoning: false,
+        };
+
+        // 1 input token at $1/token = $1.00 provider cost
+        // Total: $1.00 * 1.05 = $1.05
+        // Atomic: 1.05 * 1,000,000 = 1,050,000
+        let atomic = compute_actual_atomic_cost(1, 0, &model_info);
+        assert_eq!(atomic, 1_050_000);
+    }
+
+    // =========================================================================
+    // decode_service_id
+    // =========================================================================
+
+    #[test]
+    fn test_decode_service_id_valid() {
+        use base64::Engine;
+        let bytes = [42u8; 32];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let result = decode_service_id(&b64);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), bytes);
+    }
+
+    #[test]
+    fn test_decode_service_id_wrong_length() {
+        use base64::Engine;
+        let bytes = [42u8; 16]; // 16 bytes, not 32
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let result = decode_service_id(&b64);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("32 bytes"));
+    }
+
+    #[test]
+    fn test_decode_service_id_invalid_base64() {
+        let result = decode_service_id("not-valid-base64!!!");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("base64"));
+    }
+
+    // =========================================================================
+    // decode_agent_pubkey
+    // =========================================================================
+
+    #[test]
+    fn test_decode_agent_pubkey_valid() {
+        // All-ones pubkey = "11111111111111111111111111111111" (base58)
+        let result = decode_agent_pubkey("11111111111111111111111111111111");
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert_eq!(bytes.len(), 32);
+    }
+
+    #[test]
+    fn test_decode_agent_pubkey_wrong_length() {
+        // Encode a 16-byte value as base58
+        let short_bytes = [1u8; 16];
+        let b58 = bs58::encode(&short_bytes).into_string();
+        let result = decode_agent_pubkey(&b58);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("32 bytes"));
+    }
+
+    #[test]
+    fn test_decode_agent_pubkey_invalid_base58() {
+        // '0', 'I', 'O', 'l' are not in base58 alphabet
+        let result = decode_agent_pubkey("00000InvalidBase58lII");
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // decode_payment_from_header
+    // =========================================================================
+
+    #[test]
+    fn test_decode_payment_from_header_valid_base64() {
+        use base64::Engine;
+        let payload = x402::types::PaymentPayload {
+            x402_version: 2,
+            resource: x402::types::Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: x402::types::PaymentAccept {
+                scheme: "exact".to_string(),
+                network: x402::types::SOLANA_NETWORK.to_string(),
+                amount: "2625".to_string(),
+                asset: x402::types::USDC_MINT.to_string(),
+                pay_to: "TestWallet".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: x402::types::PayloadData::Direct(x402::types::SolanaPayload {
+                transaction: "dGVzdA==".to_string(),
+            }),
+        };
+        let json = serde_json::to_vec(&payload).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&json);
+
+        let result = decode_payment_from_header(&encoded);
+        assert!(result.is_some());
+        let decoded = result.unwrap();
+        assert_eq!(decoded.x402_version, 2);
+        assert_eq!(decoded.accepted.scheme, "exact");
+    }
+
+    #[test]
+    fn test_decode_payment_from_header_raw_json() {
+        let payload = x402::types::PaymentPayload {
+            x402_version: 2,
+            resource: x402::types::Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: x402::types::PaymentAccept {
+                scheme: "exact".to_string(),
+                network: x402::types::SOLANA_NETWORK.to_string(),
+                amount: "2625".to_string(),
+                asset: x402::types::USDC_MINT.to_string(),
+                pay_to: "TestWallet".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: x402::types::PayloadData::Direct(x402::types::SolanaPayload {
+                transaction: "dGVzdA==".to_string(),
+            }),
+        };
+        let json_str = serde_json::to_string(&payload).unwrap();
+
+        let result = decode_payment_from_header(&json_str);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_decode_payment_from_header_invalid_returns_none() {
+        assert!(decode_payment_from_header("garbage-data").is_none());
+        assert!(decode_payment_from_header("").is_none());
+        assert!(decode_payment_from_header("fake-payment-for-testing").is_none());
+    }
+
+    // =========================================================================
+    // extract_payment_info
+    // =========================================================================
+
+    #[test]
+    fn test_extract_payment_info_invalid_header() {
+        let (wallet, tx_sig) = extract_payment_info("not-a-valid-payment");
+        assert_eq!(wallet, "unknown");
+        assert!(tx_sig.is_none());
+    }
+
+    #[test]
+    fn test_extract_payment_info_valid_header() {
+        use base64::Engine;
+        let payload = x402::types::PaymentPayload {
+            x402_version: 2,
+            resource: x402::types::Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: x402::types::PaymentAccept {
+                scheme: "exact".to_string(),
+                network: x402::types::SOLANA_NETWORK.to_string(),
+                amount: "2625".to_string(),
+                asset: x402::types::USDC_MINT.to_string(),
+                pay_to: "MyWallet123".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: x402::types::PayloadData::Direct(x402::types::SolanaPayload {
+                transaction: "dGVzdHR4".to_string(),
+            }),
+        };
+        let json = serde_json::to_vec(&payload).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&json);
+
+        let (wallet, tx_sig) = extract_payment_info(&encoded);
+        assert_eq!(wallet, "MyWallet123");
+        assert_eq!(tx_sig, Some("dGVzdHR4".to_string()));
+    }
 }

@@ -68,7 +68,10 @@ pub async fn extract_payment(
 ///
 /// The header is base64-encoded JSON containing a `PaymentPayload`.
 /// Some clients may send raw JSON (not base64-encoded), so we try both.
-fn decode_payment_header(header: &str) -> Result<PaymentPayload, String> {
+///
+/// Returns `Ok(payload)` on success, `Err(reason)` if the header cannot be decoded.
+/// Used by both the extraction middleware and the chat route handler.
+pub fn decode_payment_header(header: &str) -> Result<PaymentPayload, String> {
     // Try standard base64 decode first
     if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(header) {
         if let Ok(json_str) = String::from_utf8(decoded) {

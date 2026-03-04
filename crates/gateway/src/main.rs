@@ -2,7 +2,13 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use gateway::{build_router, cache, config, providers::ProviderRegistry, AppState};
+use gateway::{
+    balance_monitor::BalanceMonitor,
+    build_router, cache, config,
+    middleware::rate_limit::{RateLimitConfig, RateLimiter},
+    providers::ProviderRegistry,
+    AppState,
+};
 use rcr_common::services::ServiceRegistry;
 use router::models::ModelRegistry;
 
@@ -115,7 +121,11 @@ async fn main() -> anyhow::Result<()> {
                 Some(pool)
             }
             Err(e) => {
-                warn!(error = %e, url = %url, "PostgreSQL connection failed — spend logging disabled");
+                warn!(
+                    error = %e,
+                    url = %redact_connection_url(&url),
+                    "PostgreSQL connection failed — spend logging disabled"
+                );
                 None
             }
         },
@@ -141,7 +151,11 @@ async fn main() -> anyhow::Result<()> {
                     Some(client)
                 }
                 Err(e) => {
-                    warn!(error = %e, url = %redis_url, "Redis connection failed — cache disabled");
+                    warn!(
+                        error = %e,
+                        url = %redact_connection_url(&redis_url),
+                        "Redis connection failed — cache disabled"
+                    );
                     None
                 }
             }
@@ -174,6 +188,61 @@ async fn main() -> anyhow::Result<()> {
         gateway::providers::health::CircuitBreakerConfig::default(),
     );
 
+    // ── Fee payer pool (hot wallet rotation) ──────────────────────────────────
+    //
+    // Build a FeePayerPool from all configured fee payer keys.
+    // Falls back to env-var scanning (RCR_SOLANA__FEE_PAYER_KEY[_N]) when the
+    // merged config list is empty.
+    let fee_payer_pool = {
+        let merged_keys = app_config.solana.all_fee_payer_keys();
+        if merged_keys.is_empty() {
+            // Try loading directly from env vars as a fallback
+            match x402::fee_payer::FeePayerPool::from_env() {
+                Ok(pool) => {
+                    info!(
+                        wallets = pool.len(),
+                        "fee payer pool initialized from env vars"
+                    );
+                    Some(Arc::new(pool))
+                }
+                Err(_) => {
+                    info!("no fee payer keys configured — fee payer pool disabled");
+                    None
+                }
+            }
+        } else {
+            match x402::fee_payer::FeePayerPool::from_keys(&merged_keys) {
+                Ok(pool) => {
+                    info!(
+                        wallets = pool.len(),
+                        "fee payer pool initialized from config"
+                    );
+                    Some(Arc::new(pool))
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to init FeePayerPool — pool disabled");
+                    None
+                }
+            }
+        }
+    };
+
+    // ── Durable nonce pool ────────────────────────────────────────────────────
+    //
+    // Build a NoncePool from environment variables. Returns an empty pool
+    // (not an error) if no nonce accounts are configured — clients fall back
+    // to using a recent blockhash in that case.
+    let nonce_pool = {
+        let pool = x402::nonce_pool::NoncePool::from_env();
+        if pool.is_empty() {
+            info!("nonce pool empty — clients will use recent blockhash (set RCR_SOLANA__NONCE_ACCOUNT to enable)");
+            None
+        } else {
+            info!(accounts = pool.len(), "durable nonce pool initialized");
+            Some(Arc::new(pool))
+        }
+    };
+
     // Build shared state
     let state = Arc::new(AppState {
         config: app_config.clone(),
@@ -185,10 +254,65 @@ async fn main() -> anyhow::Result<()> {
         cache: response_cache,
         provider_health,
         escrow_claimer,
+        fee_payer_pool,
+        nonce_pool,
+    });
+
+    // ── Balance monitor (fire-and-forget background task) ─────────────────────
+    //
+    // Monitors SOL balances of the fee-payer wallet(s) and emits structured
+    // tracing events when balances drop below configured thresholds.
+    // Uses the RPC URL from monitor config, falling back to the Solana config RPC URL.
+    {
+        let mut wallet_pubkeys: Vec<String> = Vec::new();
+
+        // Monitor the recipient wallet (always configured)
+        if !app_config.solana.recipient_wallet.is_empty() {
+            wallet_pubkeys.push(app_config.solana.recipient_wallet.clone());
+        }
+
+        if wallet_pubkeys.is_empty() {
+            info!("balance monitor disabled — no wallet pubkeys configured");
+        } else {
+            let mut monitor_config = app_config.monitor.clone();
+            // If the monitor RPC URL is still the default, use the Solana config RPC URL
+            // so operators only need to set one RPC URL.
+            if monitor_config.rpc_url == "https://api.devnet.solana.com"
+                && app_config.solana.rpc_url != "https://api.devnet.solana.com"
+            {
+                monitor_config.rpc_url = app_config.solana.rpc_url.clone();
+            }
+
+            let monitor = Arc::new(BalanceMonitor::new(monitor_config, wallet_pubkeys));
+            info!(
+                wallets = monitor.wallet_count(),
+                interval_secs = app_config.monitor.check_interval_secs,
+                warn_sol = %app_config.monitor.warn_threshold_sol,
+                critical_sol = %app_config.monitor.critical_threshold_sol,
+                "balance monitor started"
+            );
+            // Fire-and-forget — we intentionally drop the handle so the background
+            // task runs independently for the lifetime of the process.
+            drop(BalanceMonitor::spawn(monitor));
+        }
+    }
+
+    // ── Rate limiter + periodic cleanup ───────────────────────────────────────
+    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
+
+    // Spawn periodic cleanup task — removes expired entries every 60 seconds
+    // to prevent the in-memory HashMap from growing without bound.
+    let rl_clone = rate_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            rl_clone.cleanup().await;
+        }
     });
 
     // Build router
-    let app = build_router(state);
+    let app = build_router(state, rate_limiter);
 
     let addr = format!("{}:{}", app_config.server.host, app_config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -214,4 +338,30 @@ async fn run_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         .await?;
     info!("database migrations applied");
     Ok(())
+}
+
+/// Redact credentials from a connection URL before logging.
+///
+/// Replaces everything between `://` and `@` (userinfo) with `[REDACTED]`
+/// so that passwords are never written to log sinks.
+///
+/// # Examples
+/// ```
+/// assert_eq!(
+///     redact_connection_url("postgres://rcr:secret@localhost:5432/db"),
+///     "postgres://[REDACTED]@localhost:5432/db"
+/// );
+/// assert_eq!(
+///     redact_connection_url("redis://localhost:6379"),
+///     "redis://localhost:6379"
+/// );
+/// ```
+fn redact_connection_url(url: &str) -> String {
+    if let Some(at_pos) = url.find('@') {
+        if let Some(scheme_end) = url.find("://") {
+            return format!("{}://[REDACTED]@{}", &url[..scheme_end], &url[at_pos + 1..]);
+        }
+    }
+    // No credentials found — safe to log as-is (e.g., redis://localhost:6379)
+    url.to_string()
 }

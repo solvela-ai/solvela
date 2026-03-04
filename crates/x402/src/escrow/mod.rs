@@ -1,0 +1,13 @@
+//! EscrowVerifier — verifies on-chain escrow deposits and fires claim transactions.
+//!
+//! The EscrowVerifier handles scheme="escrow" payments where agents deposit
+//! to a PDA vault rather than sending a direct SPL transfer. After the gateway
+//! proxies the request to the LLM provider, the EscrowClaimer fires a
+//! fire-and-forget claim transaction to collect the actual cost from the vault.
+
+mod claimer;
+mod pda;
+mod verifier;
+
+pub use claimer::EscrowClaimer;
+pub use verifier::EscrowVerifier;

@@ -1,0 +1,28 @@
+app = "rustyclawrouter-gateway"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8402"
+  RUST_LOG = "gateway=info,tower_http=info"
+
+[http_service]
+  internal_port = 8402
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "15s"
+    method = "GET"
+    path = "/health"
+    protocol = "http"
+    timeout = "5s"
+
+[vm]
+  size = "shared-cpu-1x"
+  memory = "512mb"
