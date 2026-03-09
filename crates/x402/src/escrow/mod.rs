@@ -5,6 +5,9 @@
 //! proxies the request to the LLM provider, the EscrowClaimer fires a
 //! fire-and-forget claim transaction to collect the actual cost from the vault.
 
+#[cfg(feature = "postgres")]
+pub mod claim_queue;
+
 mod claimer;
 mod pda;
 mod verifier;
