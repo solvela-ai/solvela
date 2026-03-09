@@ -16,6 +16,7 @@ use crate::error::GatewayError;
 use crate::middleware::prompt_guard::{self, GuardResult, PromptGuardConfig};
 use crate::middleware::x402::decode_payment_header;
 use crate::providers::fallback;
+use crate::providers::heartbeat::{HeartbeatConfig, HeartbeatItem, HeartbeatStream};
 use crate::AppState;
 
 /// POST /v1/chat/completions — OpenAI-compatible chat endpoint.
@@ -271,15 +272,19 @@ pub async fn chat_completions(
                     estimated_atomic_cost(&state.model_registry, &req.model, &req),
                 );
 
-                let sse_stream = stream.map(|result| match result {
-                    Ok(chunk) => {
+                // Wrap with adaptive heartbeat to prevent proxy/client timeouts
+                let heartbeat_stream = HeartbeatStream::new(stream, HeartbeatConfig::default());
+
+                let sse_stream = heartbeat_stream.map(|item| match item {
+                    HeartbeatItem::Chunk(Ok(chunk)) => {
                         let json = serde_json::to_string(&chunk).unwrap_or_default();
                         Ok::<_, Infallible>(sse::Event::default().data(json))
                     }
-                    Err(e) => {
+                    HeartbeatItem::Chunk(Err(e)) => {
                         warn!(error = %e, "stream chunk error");
                         Ok(sse::Event::default().data(format!("{{\"error\": \"{e}\"}}")))
                     }
+                    HeartbeatItem::KeepAlive => Ok(sse::Event::default().comment("keep-alive")),
                 });
                 return Ok(sse::Sse::new(sse_stream).into_response());
             }
@@ -1038,5 +1043,17 @@ mod tests {
     fn test_build_session_token_with_empty_secret() {
         let token = build_session_token("wallet123", b"");
         assert!(token.is_some());
+    }
+
+    // =========================================================================
+    // heartbeat integration
+    // =========================================================================
+
+    #[test]
+    fn test_heartbeat_sentinel_is_defined() {
+        assert_eq!(
+            crate::providers::heartbeat::HEARTBEAT_SENTINEL,
+            "__heartbeat__"
+        );
     }
 }
