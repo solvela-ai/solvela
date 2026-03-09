@@ -273,6 +273,141 @@ pub async fn stream_with_fallback(
     Err(last_error.unwrap_or_else(|| "no available providers for streaming".into()))
 }
 
+/// Execute a chat completion using an explicit model chain.
+pub async fn chat_with_chain(
+    providers: &ProviderRegistry,
+    health: &ProviderHealthTracker,
+    chain: &[(String, String)],
+    original_model: &str,
+    req: ChatRequest,
+) -> Result<FallbackResult<ChatResponse>, ProviderError> {
+    let mut last_error: Option<ProviderError> = None;
+
+    for (prov, model_id) in chain {
+        let provider = match providers.get(prov) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if !health.is_model_available(prov, model_id).await {
+            info!(provider = %prov, model = %model_id, "skipping model (circuit open)");
+            continue;
+        }
+        if !health.is_available(prov).await {
+            info!(provider = %prov, "skipping provider (circuit open)");
+            continue;
+        }
+
+        let mut model_req = req.clone();
+        model_req.model = model_id.to_string();
+
+        let start = Instant::now();
+        match provider.chat_completion(model_req).await {
+            Ok(response) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                health
+                    .record_model_success(prov, model_id, latency_ms)
+                    .await;
+                let was_fallback = model_id != original_model;
+                if was_fallback {
+                    info!(
+                        original_model,
+                        fallback_provider = %prov, fallback_model = %model_id,
+                        latency_ms,
+                        "served from fallback model (agent preference)"
+                    );
+                }
+                return Ok(FallbackResult {
+                    data: response,
+                    original_model: original_model.to_string(),
+                    actual_model: model_id.to_string(),
+                    actual_provider: prov.to_string(),
+                    was_fallback,
+                });
+            }
+            Err(e) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                health
+                    .record_model_failure(prov, model_id, latency_ms)
+                    .await;
+                warn!(
+                    provider = %prov, model = %model_id,
+                    error = %e, latency_ms,
+                    "model request failed, trying next in chain"
+                );
+                last_error = Some(e);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "no available models in chain".into()))
+}
+
+/// Execute a streaming chat completion using an explicit model chain.
+pub async fn stream_with_chain(
+    providers: &ProviderRegistry,
+    health: &ProviderHealthTracker,
+    chain: &[(String, String)],
+    original_model: &str,
+    req: ChatRequest,
+) -> Result<FallbackResult<ChatStream>, ProviderError> {
+    let mut last_error: Option<ProviderError> = None;
+
+    for (prov, model_id) in chain {
+        let provider = match providers.get(prov) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if !health.is_model_available(prov, model_id).await {
+            info!(provider = %prov, model = %model_id, "skipping model for streaming (circuit open)");
+            continue;
+        }
+        if !health.is_available(prov).await {
+            info!(provider = %prov, "skipping provider for streaming (circuit open)");
+            continue;
+        }
+
+        let mut model_req = req.clone();
+        model_req.model = model_id.to_string();
+
+        let start = Instant::now();
+        match provider.chat_completion_stream(model_req).await {
+            Ok(stream) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                health
+                    .record_model_success(prov, model_id, latency_ms)
+                    .await;
+                let was_fallback = model_id != original_model;
+                if was_fallback {
+                    info!(
+                        original_model,
+                        fallback_provider = %prov, fallback_model = %model_id,
+                        "streaming from fallback model (agent preference)"
+                    );
+                }
+                return Ok(FallbackResult {
+                    data: stream,
+                    original_model: original_model.to_string(),
+                    actual_model: model_id.to_string(),
+                    actual_provider: prov.to_string(),
+                    was_fallback,
+                });
+            }
+            Err(e) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                health
+                    .record_model_failure(prov, model_id, latency_ms)
+                    .await;
+                warn!(provider = %prov, model = %model_id, error = %e, "streaming model fallback, trying next");
+                last_error = Some(e);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "no available models for streaming in chain".into()))
+}
+
 /// Get the ordered fallback list for a provider.
 ///
 /// The primary provider is always first. If it fails, try these alternatives

@@ -244,18 +244,43 @@ pub async fn chat_completions(
         }
     }
 
+    // Check for agent-specified fallback preferences
+    let fallback_pref = headers
+        .get("x-rcr-fallback-preference")
+        .and_then(|v| v.to_str().ok());
+
     if req.stream {
         info!(provider = provider_name, model = %req.model, "streaming to provider (with model fallback)");
 
-        match fallback::stream_with_model_fallback(
-            &state.providers,
-            &state.provider_health,
-            provider_name,
-            &req.model,
-            req.clone(),
-        )
-        .await
-        {
+        let result = if let Some(pref) = fallback_pref {
+            let mut chain: Vec<(String, String)> =
+                vec![(provider_name.to_string(), req.model.clone())];
+            for (p, m) in parse_fallback_preference(pref) {
+                let entry = (p.to_string(), m.to_string());
+                if !chain.contains(&entry) {
+                    chain.push(entry);
+                }
+            }
+            fallback::stream_with_chain(
+                &state.providers,
+                &state.provider_health,
+                &chain,
+                &req.model,
+                req.clone(),
+            )
+            .await
+        } else {
+            fallback::stream_with_model_fallback(
+                &state.providers,
+                &state.provider_health,
+                provider_name,
+                &req.model,
+                req.clone(),
+            )
+            .await
+        };
+
+        match result {
             Ok(result) => {
                 fire_escrow_claim(
                     &state,
@@ -303,15 +328,35 @@ pub async fn chat_completions(
     } else {
         info!(provider = provider_name, model = %req.model, "proxying to provider (with model fallback)");
 
-        match fallback::chat_with_model_fallback(
-            &state.providers,
-            &state.provider_health,
-            provider_name,
-            &req.model,
-            req.clone(),
-        )
-        .await
-        {
+        let result = if let Some(pref) = fallback_pref {
+            let mut chain: Vec<(String, String)> =
+                vec![(provider_name.to_string(), req.model.clone())];
+            for (p, m) in parse_fallback_preference(pref) {
+                let entry = (p.to_string(), m.to_string());
+                if !chain.contains(&entry) {
+                    chain.push(entry);
+                }
+            }
+            fallback::chat_with_chain(
+                &state.providers,
+                &state.provider_health,
+                &chain,
+                &req.model,
+                req.clone(),
+            )
+            .await
+        } else {
+            fallback::chat_with_model_fallback(
+                &state.providers,
+                &state.provider_health,
+                provider_name,
+                &req.model,
+                req.clone(),
+            )
+            .await
+        };
+
+        match result {
             Ok(result) => {
                 if let Some(cache) = &state.cache {
                     cache.set(&req, &result.data).await;
@@ -605,6 +650,27 @@ fn decode_agent_pubkey(b58: &str) -> Result<[u8; 32], String> {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
     Ok(arr)
+}
+
+/// Parse the X-RCR-Fallback-Preference header value.
+///
+/// Format: "provider/model,provider/model,..."
+/// Returns (provider, model) tuples. Invalid entries are silently skipped.
+fn parse_fallback_preference(header: &str) -> Vec<(&str, &str)> {
+    header
+        .split(',')
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            let (provider, model) = trimmed.split_once('/')?;
+            let provider = provider.trim();
+            let model = model.trim();
+            if provider.is_empty() || model.is_empty() {
+                None
+            } else {
+                Some((provider, model))
+            }
+        })
+        .collect()
 }
 
 /// Convert a USDC decimal string to atomic units (6 decimals).
@@ -1076,5 +1142,36 @@ mod tests {
         use axum::http::HeaderName;
         let name = HeaderName::from_static("x-rcr-fallback");
         assert_eq!(name.as_str(), "x-rcr-fallback");
+    }
+
+    // =========================================================================
+    // parse_fallback_preference
+    // =========================================================================
+
+    #[test]
+    fn test_parse_fallback_preference_valid() {
+        let prefs = parse_fallback_preference("openai/gpt-4.1,anthropic/claude-sonnet-4.6");
+        assert_eq!(prefs.len(), 2);
+        assert_eq!(prefs[0], ("openai", "gpt-4.1"));
+        assert_eq!(prefs[1], ("anthropic", "claude-sonnet-4.6"));
+    }
+
+    #[test]
+    fn test_parse_fallback_preference_empty() {
+        let prefs = parse_fallback_preference("");
+        assert!(prefs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_fallback_preference_invalid_entries_skipped() {
+        let prefs = parse_fallback_preference("openai/gpt-4.1,invalid,anthropic/claude-sonnet-4.6");
+        assert_eq!(prefs.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_fallback_preference_whitespace_trimmed() {
+        let prefs = parse_fallback_preference(" openai/gpt-4.1 , anthropic/claude-sonnet-4.6 ");
+        assert_eq!(prefs.len(), 2);
+        assert_eq!(prefs[0], ("openai", "gpt-4.1"));
     }
 }
