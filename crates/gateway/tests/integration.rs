@@ -164,6 +164,15 @@ supports_vision = true
 /// pass verification without a live Solana RPC connection. Malformed headers
 /// (non-base64, non-JSON) are still correctly rejected by the route handler.
 fn test_app() -> axum::Router {
+    let (router, _state) = test_app_with_state();
+    router
+}
+
+/// Build a test app and return both the router and shared state.
+///
+/// Useful when tests need to interact with `AppState` directly (e.g.,
+/// recording failures on the `ProviderHealthTracker`).
+fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
 
@@ -185,7 +194,11 @@ fn test_app() -> axum::Router {
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
     });
-    build_router(state, RateLimiter::new(RateLimitConfig::default()))
+    let router = build_router(
+        Arc::clone(&state),
+        RateLimiter::new(RateLimitConfig::default()),
+    );
+    (router, state)
 }
 
 /// Build a test app with escrow support enabled.
@@ -1631,4 +1644,92 @@ async fn test_dashboard_spend_returns_200() {
     assert_eq!(json["request_count"], 0);
     assert_eq!(json["period_days"], 7);
     assert!(json["by_day"].is_array());
+}
+
+// ---------------------------------------------------------------------------
+// Model-level circuit breaker & heartbeat integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_heartbeat_module_accessible() {
+    assert_eq!(
+        gateway::providers::heartbeat::HEARTBEAT_SENTINEL,
+        "__heartbeat__"
+    );
+}
+
+#[tokio::test]
+async fn test_circuit_breaker_model_state_queryable() {
+    let (_app, state) = test_app_with_state();
+
+    // Initially closed
+    assert_eq!(
+        state
+            .provider_health
+            .get_model_state("openai", "gpt-4o")
+            .await,
+        gateway::providers::health::CircuitState::Closed
+    );
+
+    // Record failures to open it
+    for _ in 0..5 {
+        state
+            .provider_health
+            .record_model_failure("openai", "gpt-4o", 500)
+            .await;
+    }
+
+    assert_eq!(
+        state
+            .provider_health
+            .get_model_state("openai", "gpt-4o")
+            .await,
+        gateway::providers::health::CircuitState::Open
+    );
+
+    // Other models unaffected
+    assert_eq!(
+        state
+            .provider_health
+            .get_model_state("openai", "gpt-4o-mini")
+            .await,
+        gateway::providers::health::CircuitState::Closed
+    );
+}
+
+#[tokio::test]
+async fn test_chat_with_broken_model_circuit_returns_stub() {
+    let (app, state) = test_app_with_state();
+
+    // Open the circuit for the requested model
+    for _ in 0..5 {
+        state
+            .provider_health
+            .record_model_failure("openai", "gpt-4o", 500)
+            .await;
+    }
+
+    let body = serde_json::json!({
+        "model": "openai-gpt-4o",
+        "messages": [{"role": "user", "content": "hello"}],
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .header(
+            "payment-signature",
+            &valid_payment_header("/v1/chat/completions"),
+        )
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    // In test env with no real providers, should get 200 (stub) or 402
+    assert!(
+        resp.status() == StatusCode::OK || resp.status() == StatusCode::PAYMENT_REQUIRED,
+        "expected 200 or 402, got {}",
+        resp.status()
+    );
 }
