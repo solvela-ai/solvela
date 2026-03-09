@@ -97,6 +97,14 @@ pub fn resolve_alias(alias: &str) -> Option<&'static str> {
         "deepseek" | "ds" => Some("deepseek/deepseek-chat"),
         "deepseek-r" | "reasoner" => Some("deepseek/deepseek-reasoner"),
         "free" | "oss" => Some("openai/gpt-oss-120b"),
+        "o3-mini" | "o3mini" => Some("openai/o3-mini"),
+        "o4-mini" | "o4mini" => Some("openai/o4-mini"),
+        "gpt4.1" | "gpt-4.1" | "gpt41" => Some("openai/gpt-4.1"),
+        "gpt4.1-mini" | "gpt-4.1-mini" => Some("openai/gpt-4.1-mini"),
+        "gpt4.1-nano" | "gpt-4.1-nano" => Some("openai/gpt-4.1-nano"),
+        "sonnet4.5" | "sonnet-4.5" => Some("anthropic/claude-sonnet-4.5"),
+        "grok3" | "grok-3" => Some("xai/grok-3"),
+        "grok3-mini" | "grok-3-mini" => Some("xai/grok-3-mini"),
         _ => None,
     }
 }
