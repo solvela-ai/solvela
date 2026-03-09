@@ -1533,3 +1533,68 @@ async fn test_nonce_endpoint_with_pool_returns_correct_fields_or_503() {
         assert!(json["error"].is_string(), "503 must include error field");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tool call passthrough
+// ---------------------------------------------------------------------------
+
+/// Verify that a chat request containing `tools` and `tool_choice` fields
+/// parses successfully (no deserialization error) and returns 402 when no
+/// payment header is present.
+#[tokio::test]
+async fn test_chat_with_tools_returns_402() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "What is the weather in Tokyo?"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather for a location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "City name"
+                            }
+                        },
+                        "required": ["location"]
+                    }
+                }
+            }
+        ],
+        "tool_choice": "auto"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should return 402 Payment Required — NOT a 400/422 deserialization error
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // The error message contains the serialized PaymentRequired JSON
+    let error_msg = json["error"]["message"].as_str().unwrap();
+    let payment_info: serde_json::Value = serde_json::from_str(error_msg).unwrap();
+
+    assert_eq!(payment_info["x402_version"], 2);
+    assert!(payment_info["accepts"].is_array());
+    assert!(payment_info["cost_breakdown"]["total"].is_string());
+    assert_eq!(payment_info["cost_breakdown"]["currency"], "USDC");
+    assert_eq!(payment_info["cost_breakdown"]["fee_percent"], 5);
+}
