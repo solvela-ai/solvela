@@ -76,10 +76,11 @@ impl ProviderHealth {
     }
 }
 
-/// Tracks health and manages circuit breakers for all providers.
+/// Tracks health and manages circuit breakers for all providers and models.
 #[derive(Clone)]
 pub struct ProviderHealthTracker {
     providers: Arc<RwLock<HashMap<String, ProviderHealth>>>,
+    models: Arc<RwLock<HashMap<String, ProviderHealth>>>,
     config: CircuitBreakerConfig,
 }
 
@@ -87,8 +88,13 @@ impl ProviderHealthTracker {
     pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
             providers: Arc::new(RwLock::new(HashMap::new())),
+            models: Arc::new(RwLock::new(HashMap::new())),
             config,
         }
+    }
+
+    fn model_key(provider: &str, model: &str) -> String {
+        format!("{provider}:{model}")
     }
 
     /// Record a successful request to a provider.
@@ -212,6 +218,140 @@ impl ProviderHealthTracker {
                 failures as f64 / recent.len() as f64
             }
             None => 0.0,
+        }
+    }
+
+    /// Record a successful request for a specific model.
+    ///
+    /// Updates model-level health, then cascades to provider-level tracking.
+    pub async fn record_model_success(&self, provider: &str, model: &str, latency_ms: u64) {
+        let key = Self::model_key(provider, model);
+        {
+            let mut models = self.models.write().await;
+            let health = models.entry(key.clone()).or_insert_with(ProviderHealth::new);
+
+            let now = Instant::now();
+            health.outcomes.push((now, true, latency_ms));
+
+            health.ewma_latency_ms = health.ewma_alpha * latency_ms as f64
+                + (1.0 - health.ewma_alpha) * health.ewma_latency_ms;
+
+            if health.state == CircuitState::HalfOpen {
+                info!(
+                    provider,
+                    model, "model circuit breaker: half-open → closed (probe succeeded)"
+                );
+                health.state = CircuitState::Closed;
+                health.opened_at = None;
+            }
+
+            self.cleanup_old_outcomes(health);
+        }
+        // Cascade to provider level (models lock is dropped)
+        self.record_success(provider, latency_ms).await;
+    }
+
+    /// Record a failed request for a specific model.
+    ///
+    /// Updates model-level health, then cascades to provider-level tracking.
+    pub async fn record_model_failure(&self, provider: &str, model: &str, latency_ms: u64) {
+        let key = Self::model_key(provider, model);
+        {
+            let mut models = self.models.write().await;
+            let health = models.entry(key.clone()).or_insert_with(ProviderHealth::new);
+
+            let now = Instant::now();
+            health.outcomes.push((now, false, latency_ms));
+
+            health.ewma_latency_ms = health.ewma_alpha * latency_ms as f64
+                + (1.0 - health.ewma_alpha) * health.ewma_latency_ms;
+
+            if health.state == CircuitState::HalfOpen {
+                info!(
+                    provider,
+                    model, "model circuit breaker: half-open → open (probe failed)"
+                );
+                health.state = CircuitState::Open;
+                health.opened_at = Some(now);
+                // Drop lock before cascading, then cascade
+                drop(models);
+                self.record_failure(provider, latency_ms).await;
+                return;
+            }
+
+            self.cleanup_old_outcomes(health);
+            self.evaluate_model_circuit(provider, model, health);
+        }
+        // Cascade to provider level (models lock is dropped)
+        self.record_failure(provider, latency_ms).await;
+    }
+
+    /// Check if a specific model is available (circuit is not open).
+    pub async fn is_model_available(&self, provider: &str, model: &str) -> bool {
+        let key = Self::model_key(provider, model);
+        let mut models = self.models.write().await;
+        let health = match models.get_mut(&key) {
+            Some(h) => h,
+            None => return true, // Unknown model is assumed available
+        };
+
+        match health.state {
+            CircuitState::Closed => true,
+            CircuitState::HalfOpen => true,
+            CircuitState::Open => {
+                if let Some(opened_at) = health.opened_at {
+                    if opened_at.elapsed() >= self.config.cooldown {
+                        info!(
+                            provider,
+                            model, "model circuit breaker: open → half-open (cooldown elapsed)"
+                        );
+                        health.state = CircuitState::HalfOpen;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Get the current circuit state for a specific model.
+    pub async fn get_model_state(&self, provider: &str, model: &str) -> CircuitState {
+        let key = Self::model_key(provider, model);
+        let models = self.models.read().await;
+        models
+            .get(&key)
+            .map(|h| h.state)
+            .unwrap_or(CircuitState::Closed)
+    }
+
+    fn evaluate_model_circuit(&self, provider: &str, model: &str, health: &mut ProviderHealth) {
+        let now = Instant::now();
+        let window_start = now - self.config.window;
+        let recent: Vec<_> = health
+            .outcomes
+            .iter()
+            .filter(|(t, _, _)| *t >= window_start)
+            .collect();
+
+        if (recent.len() as u32) < self.config.min_requests {
+            return;
+        }
+
+        let failures = recent.iter().filter(|(_, success, _)| !success).count();
+        let failure_rate = failures as f64 / recent.len() as f64;
+
+        if failure_rate >= self.config.failure_threshold && health.state == CircuitState::Closed {
+            warn!(
+                provider,
+                model,
+                failure_rate = format!("{:.1}%", failure_rate * 100.0),
+                "model circuit breaker: closed → open"
+            );
+            health.state = CircuitState::Open;
+            health.opened_at = Some(now);
         }
     }
 
@@ -389,5 +529,122 @@ mod tests {
 
         // Circuit should still be closed (40% < 50% threshold)
         assert_eq!(tracker.get_state("openai").await, CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_model_circuit_starts_closed() {
+        let tracker = ProviderHealthTracker::new(test_config());
+
+        assert_eq!(
+            tracker.get_model_state("anthropic", "opus").await,
+            CircuitState::Closed
+        );
+        assert!(tracker.is_model_available("anthropic", "opus").await);
+    }
+
+    #[tokio::test]
+    async fn test_model_circuit_opens_independently() {
+        let tracker = ProviderHealthTracker::new(test_config());
+
+        // 5 failures on opus — should open opus circuit
+        for _ in 0..5 {
+            tracker
+                .record_model_failure("anthropic", "opus", 500)
+                .await;
+        }
+
+        assert_eq!(
+            tracker.get_model_state("anthropic", "opus").await,
+            CircuitState::Open
+        );
+        assert!(!tracker.is_model_available("anthropic", "opus").await);
+
+        // Sonnet should still be closed
+        assert_eq!(
+            tracker.get_model_state("anthropic", "sonnet").await,
+            CircuitState::Closed
+        );
+        assert!(tracker.is_model_available("anthropic", "sonnet").await);
+
+        // Provider should still be available (5 failures < threshold when
+        // provider also needs min_requests, but here they cascade so provider
+        // has 5 failures too — however provider circuit may open).
+        // With 5 failures at provider level and min_requests=5, provider opens.
+        // The key test is that sonnet stays independent of opus.
+        // Provider availability depends on its own circuit state.
+        // Let's verify sonnet independence is the main assertion.
+        assert!(tracker.is_model_available("anthropic", "sonnet").await);
+    }
+
+    #[tokio::test]
+    async fn test_model_success_closes_half_open_circuit() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 0.5,
+            cooldown: Duration::from_millis(20),
+            window: Duration::from_secs(60),
+            min_requests: 5,
+        };
+        let tracker = ProviderHealthTracker::new(config);
+
+        // Open the model circuit
+        for _ in 0..5 {
+            tracker
+                .record_model_failure("anthropic", "opus", 500)
+                .await;
+        }
+        assert_eq!(
+            tracker.get_model_state("anthropic", "opus").await,
+            CircuitState::Open
+        );
+
+        // Wait for cooldown
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // Should transition to half-open
+        assert!(tracker.is_model_available("anthropic", "opus").await);
+        assert_eq!(
+            tracker.get_model_state("anthropic", "opus").await,
+            CircuitState::HalfOpen
+        );
+
+        // Success should close
+        tracker
+            .record_model_success("anthropic", "opus", 100)
+            .await;
+        assert_eq!(
+            tracker.get_model_state("anthropic", "opus").await,
+            CircuitState::Closed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_model_failure_also_records_provider_level() {
+        let tracker = ProviderHealthTracker::new(test_config());
+
+        // Record model failures
+        for _ in 0..3 {
+            tracker
+                .record_model_failure("openai", "gpt-4", 500)
+                .await;
+        }
+
+        // Provider should reflect the failures
+        let rate = tracker.get_failure_rate("openai").await;
+        assert!(
+            (rate - 1.0).abs() < 0.01,
+            "expected 100% failure rate at provider level, got {rate}"
+        );
+
+        // Add a model success
+        tracker
+            .record_model_success("openai", "gpt-4", 100)
+            .await;
+
+        // Provider failure rate should drop: 3 failures, 1 success = 75%
+        let rate = tracker.get_failure_rate("openai").await;
+        assert!(
+            (rate - 0.75).abs() < 0.01,
+            "expected 75% failure rate at provider level, got {rate}"
+        );
     }
 }
