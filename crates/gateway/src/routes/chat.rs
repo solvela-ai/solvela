@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::{sse, IntoResponse, Response};
 use axum::Json;
 use futures::StreamExt;
@@ -346,7 +346,16 @@ pub async fn chat_completions(
 
                 let response_json = serde_json::to_value(&response)
                     .map_err(|e| GatewayError::Internal(e.to_string()))?;
-                return Ok(Json(response_json).into_response());
+
+                // Issue a session token after successful paid response
+                let mut resp = Json(response_json).into_response();
+                if let Some(token) = build_session_token(&wallet_address, &state.session_secret) {
+                    if let Ok(hv) = HeaderValue::from_str(&token) {
+                        resp.headers_mut()
+                            .insert(HeaderName::from_static("x-rcr-session"), hv);
+                    }
+                }
+                return Ok(resp);
             }
             Err(_) => {
                 // All providers failed or none configured — fall through to stub
@@ -507,6 +516,27 @@ fn fire_escrow_claim(
             }
         }
     }
+}
+
+/// Build a session token for the given wallet, valid for 1 hour.
+///
+/// Returns `None` if token creation fails — callers should silently skip the
+/// header rather than failing the request.
+fn build_session_token(wallet: &str, secret: &[u8]) -> Option<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+
+    let claims = crate::session::SessionClaims {
+        wallet: wallet.to_string(),
+        budget_remaining: 0, // exact-scheme payment — no remaining budget
+        issued_at: now,
+        expires_at: now + 3600, // 1 hour
+        allowed_models: vec![], // all models allowed
+    };
+
+    crate::session::create_session_token(&claims, secret).ok()
 }
 
 /// Rough token estimate: ~4 chars per token.
@@ -973,5 +1003,40 @@ mod tests {
         let (wallet, tx_sig) = extract_payment_info(&encoded);
         assert_eq!(wallet, "MyWallet123");
         assert_eq!(tx_sig, Some("dGVzdHR4".to_string()));
+    }
+
+    // =========================================================================
+    // build_session_token
+    // =========================================================================
+
+    #[test]
+    fn test_build_session_token_returns_valid_token() {
+        let secret = b"test-session-secret-32-bytes!!!!";
+        let token = build_session_token("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU", secret);
+        assert!(token.is_some(), "should produce a token");
+
+        let token_str = token.unwrap();
+        assert_eq!(
+            token_str.matches('.').count(),
+            1,
+            "token should have exactly one dot separator"
+        );
+
+        let claims =
+            crate::session::verify_session_token(&token_str, secret).expect("token should verify");
+        assert_eq!(
+            claims.wallet,
+            "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+        );
+        assert_eq!(claims.budget_remaining, 0);
+        assert!(claims.allowed_models.is_empty());
+        assert!(claims.expires_at > claims.issued_at);
+        assert_eq!(claims.expires_at - claims.issued_at, 3600);
+    }
+
+    #[test]
+    fn test_build_session_token_with_empty_secret() {
+        let token = build_session_token("wallet123", b"");
+        assert!(token.is_some());
     }
 }
