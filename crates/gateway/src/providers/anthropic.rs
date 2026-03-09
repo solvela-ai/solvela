@@ -89,7 +89,7 @@ fn to_anthropic_request(req: &ChatRequest) -> AnthropicRequest {
         let system_msgs: Vec<&str> = req
             .messages
             .iter()
-            .filter(|m| m.role == Role::System)
+            .filter(|m| m.role == Role::System || m.role == Role::Developer)
             .map(|m| m.content.as_str())
             .collect();
 
@@ -443,6 +443,54 @@ mod tests {
         assert_eq!(anthropic_req.messages.len(), 1);
         assert_eq!(anthropic_req.messages[0].role, "user");
         assert_eq!(anthropic_req.model, "claude-sonnet-4.6");
+    }
+
+    #[test]
+    fn test_developer_role_extracted_as_system() {
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4.6".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::System,
+                    content: "You are a helpful assistant.".to_string(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                ChatMessage {
+                    role: Role::Developer,
+                    content: "Always respond in JSON.".to_string(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: "Hello!".to_string(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            ],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let anthropic_req = to_anthropic_request(&req);
+
+        // Both System and Developer messages should be extracted into the system param
+        assert_eq!(
+            anthropic_req.system,
+            Some("You are a helpful assistant.\n\nAlways respond in JSON.".to_string())
+        );
+        // Only the User message should remain in messages
+        assert_eq!(anthropic_req.messages.len(), 1);
+        assert_eq!(anthropic_req.messages[0].role, "user");
+        assert_eq!(anthropic_req.messages[0].content, "Hello!");
     }
 
     #[test]

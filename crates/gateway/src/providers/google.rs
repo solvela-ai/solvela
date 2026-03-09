@@ -98,7 +98,7 @@ fn to_gemini_request(req: &ChatRequest) -> GeminiRequest {
         let system_text: Vec<&str> = req
             .messages
             .iter()
-            .filter(|m| m.role == Role::System)
+            .filter(|m| m.role == Role::System || m.role == Role::Developer)
             .map(|m| m.content.as_str())
             .collect();
 
@@ -118,13 +118,13 @@ fn to_gemini_request(req: &ChatRequest) -> GeminiRequest {
     let contents: Vec<GeminiContent> = req
         .messages
         .iter()
-        .filter(|m| m.role != Role::System)
+        .filter(|m| m.role != Role::System && m.role != Role::Developer)
         .map(|m| GeminiContent {
             role: Some(match m.role {
                 Role::User => "user".to_string(),
                 Role::Assistant => "model".to_string(),
+                Role::System | Role::Developer => "user".to_string(), // filtered above, but safe fallback
                 Role::Tool => "user".to_string(), // Gemini uses "user" for tool results
-                _ => "user".to_string(),
             }),
             parts: vec![GeminiPart {
                 text: m.content.clone(),
@@ -294,6 +294,47 @@ mod tests {
                 .max_output_tokens,
             Some(100)
         );
+    }
+
+    #[test]
+    fn test_developer_role_extracted_as_system_instruction() {
+        let req = ChatRequest {
+            model: "google/gemini-2.5-flash".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::Developer,
+                    content: "Always respond in JSON.".to_string(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: "Hello!".to_string(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            ],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let gemini_req = to_gemini_request(&req);
+
+        // Developer message should be extracted as system_instruction
+        assert!(gemini_req.system_instruction.is_some());
+        assert_eq!(
+            gemini_req.system_instruction.unwrap().parts[0].text,
+            "Always respond in JSON."
+        );
+        // Only the User message should remain in contents
+        assert_eq!(gemini_req.contents.len(), 1);
+        assert_eq!(gemini_req.contents[0].role.as_deref(), Some("user"));
     }
 
     #[test]
