@@ -244,25 +244,19 @@ pub async fn chat_completions(
         }
     }
 
-    // Build fallback chain for this provider
-    let fallback_providers = fallback::fallback_chain(provider_name);
-
     if req.stream {
-        // Streaming response via SSE with fallback
-        info!(provider = provider_name, model = %req.model, "streaming to provider (with fallback)");
+        info!(provider = provider_name, model = %req.model, "streaming to provider (with model fallback)");
 
-        match fallback::stream_with_fallback(
+        match fallback::stream_with_model_fallback(
             &state.providers,
             &state.provider_health,
-            &fallback_providers,
+            provider_name,
+            &req.model,
             req.clone(),
         )
         .await
         {
-            Ok(stream) => {
-                // Fire escrow claim before returning the stream.
-                // For streaming, use the estimated cost (conservative = max_tokens)
-                // since actual token count is only known post-stream.
+            Ok(result) => {
                 fire_escrow_claim(
                     &state,
                     &payment_scheme,
@@ -272,8 +266,9 @@ pub async fn chat_completions(
                     estimated_atomic_cost(&state.model_registry, &req.model, &req),
                 );
 
-                // Wrap with adaptive heartbeat to prevent proxy/client timeouts
-                let heartbeat_stream = HeartbeatStream::new(stream, HeartbeatConfig::default());
+                // Wrap with adaptive heartbeat
+                let heartbeat_stream =
+                    HeartbeatStream::new(result.data, HeartbeatConfig::default());
 
                 let sse_stream = heartbeat_stream.map(|item| match item {
                     HeartbeatItem::Chunk(Ok(chunk)) => {
@@ -286,32 +281,43 @@ pub async fn chat_completions(
                     }
                     HeartbeatItem::KeepAlive => Ok(sse::Event::default().comment("keep-alive")),
                 });
-                return Ok(sse::Sse::new(sse_stream).into_response());
+
+                let mut resp = sse::Sse::new(sse_stream).into_response();
+
+                // Add fallback header if served by a different model
+                if result.was_fallback {
+                    let fallback_value =
+                        format!("{} -> {}", result.original_model, result.actual_model);
+                    if let Ok(hv) = HeaderValue::from_str(&fallback_value) {
+                        resp.headers_mut()
+                            .insert(HeaderName::from_static("x-rcr-fallback"), hv);
+                    }
+                }
+
+                return Ok(resp);
             }
             Err(_) => {
-                // All providers failed or none configured — fall through to stub
+                // All models failed — fall through to stub
             }
         }
     } else {
-        // Non-streaming JSON response with fallback
-        info!(provider = provider_name, model = %req.model, "proxying to provider (with fallback)");
+        info!(provider = provider_name, model = %req.model, "proxying to provider (with model fallback)");
 
-        match fallback::chat_with_fallback(
+        match fallback::chat_with_model_fallback(
             &state.providers,
             &state.provider_health,
-            &fallback_providers,
+            provider_name,
+            &req.model,
             req.clone(),
         )
         .await
         {
-            Ok(response) => {
-                // Cache the response (async, non-blocking)
+            Ok(result) => {
                 if let Some(cache) = &state.cache {
-                    cache.set(&req, &response).await;
+                    cache.set(&req, &result.data).await;
                 }
 
-                // Log spend asynchronously
-                if let Some(usage) = &response.usage {
+                if let Some(usage) = &result.data.usage {
                     let cost = state
                         .model_registry
                         .estimate_cost(&req.model, usage.prompt_tokens, usage.completion_tokens)
@@ -321,7 +327,7 @@ pub async fn chat_completions(
                     state.usage.log_spend(
                         wallet_address.clone(),
                         req.model.clone(),
-                        provider_name.to_string(),
+                        result.actual_provider.clone(),
                         usage.prompt_tokens,
                         usage.completion_tokens,
                         cost,
@@ -329,15 +335,13 @@ pub async fn chat_completions(
                     );
                 }
 
-                // Fire escrow claim if this was an escrow payment
-                let claim_atomic = if let Some(usage) = &response.usage {
+                let claim_atomic = if let Some(usage) = &result.data.usage {
                     compute_actual_atomic_cost(
                         usage.prompt_tokens,
                         usage.completion_tokens,
                         model_info,
                     )
                 } else {
-                    // Fall back to estimated cost
                     estimated_atomic_cost(&state.model_registry, &req.model, &req)
                 };
                 fire_escrow_claim(
@@ -349,11 +353,21 @@ pub async fn chat_completions(
                     claim_atomic,
                 );
 
-                let response_json = serde_json::to_value(&response)
+                let response_json = serde_json::to_value(&result.data)
                     .map_err(|e| GatewayError::Internal(e.to_string()))?;
 
-                // Issue a session token after successful paid response
                 let mut resp = Json(response_json).into_response();
+
+                // Add fallback header if served by a different model
+                if result.was_fallback {
+                    let fallback_value =
+                        format!("{} -> {}", result.original_model, result.actual_model);
+                    if let Ok(hv) = HeaderValue::from_str(&fallback_value) {
+                        resp.headers_mut()
+                            .insert(HeaderName::from_static("x-rcr-fallback"), hv);
+                    }
+                }
+
                 if let Some(token) = build_session_token(&wallet_address, &state.session_secret) {
                     if let Ok(hv) = HeaderValue::from_str(&token) {
                         resp.headers_mut()
@@ -363,7 +377,7 @@ pub async fn chat_completions(
                 return Ok(resp);
             }
             Err(_) => {
-                // All providers failed or none configured — fall through to stub
+                // All models failed — fall through to stub
             }
         }
     }
@@ -1055,5 +1069,12 @@ mod tests {
             crate::providers::heartbeat::HEARTBEAT_SENTINEL,
             "__heartbeat__"
         );
+    }
+
+    #[test]
+    fn test_fallback_header_name_is_valid() {
+        use axum::http::HeaderName;
+        let name = HeaderName::from_static("x-rcr-fallback");
+        assert_eq!(name.as_str(), "x-rcr-fallback");
     }
 }
