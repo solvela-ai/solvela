@@ -36,8 +36,9 @@ tracing-subscriber = { workspace = true }
 sqlx = { workspace = true }
 redis = { workspace = true }
 
-# Cache
+# Cache / crypto
 sha2 = { workspace = true }
+hmac = { workspace = true }
 
 # Utilities
 uuid = { workspace = true }

@@ -10,6 +10,7 @@ pub mod error;
 pub mod middleware;
 pub mod providers;
 pub mod routes;
+pub mod session;
 pub mod usage;
 
 use std::sync::Arc;
