@@ -121,6 +121,117 @@ pub fn fallback_chain(primary: &str) -> Vec<String> {
     chain.into_iter().map(String::from).collect()
 }
 
+/// Get the ordered fallback list for a specific model.
+///
+/// Returns (provider, model_id) tuples. The primary model is always first.
+/// Fallback models are same-capability-tier from different providers.
+pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a str, &'a str)> {
+    let chain: Vec<(&str, &str)> = match (provider, model) {
+        // --- Premium tier (reasoning, high capability) ---
+        ("anthropic", "claude-opus-4.6") => vec![
+            ("anthropic", "claude-opus-4.6"),
+            ("openai", "gpt-5.2"),
+            ("google", "gemini-3.1-pro"),
+            ("openai", "o3"),
+        ],
+        ("openai", "gpt-5.2") => vec![
+            ("openai", "gpt-5.2"),
+            ("anthropic", "claude-opus-4.6"),
+            ("google", "gemini-3.1-pro"),
+        ],
+        ("google", "gemini-3.1-pro") => vec![
+            ("google", "gemini-3.1-pro"),
+            ("anthropic", "claude-opus-4.6"),
+            ("openai", "gpt-5.2"),
+        ],
+
+        // --- Mid tier (strong general purpose) ---
+        ("anthropic", "claude-sonnet-4.6") => vec![
+            ("anthropic", "claude-sonnet-4.6"),
+            ("openai", "gpt-4.1"),
+            ("google", "gemini-3.1-pro"),
+            ("xai", "grok-3"),
+        ],
+        ("anthropic", "claude-sonnet-4.5") => vec![
+            ("anthropic", "claude-sonnet-4.5"),
+            ("openai", "gpt-4.1"),
+            ("xai", "grok-3"),
+        ],
+        ("openai", "gpt-4o") => vec![
+            ("openai", "gpt-4o"),
+            ("anthropic", "claude-sonnet-4.6"),
+            ("google", "gemini-3.1-pro"),
+            ("xai", "grok-3"),
+        ],
+        ("openai", "gpt-4.1") => vec![
+            ("openai", "gpt-4.1"),
+            ("anthropic", "claude-sonnet-4.6"),
+            ("google", "gemini-3.1-pro"),
+        ],
+        ("xai", "grok-3") => vec![
+            ("xai", "grok-3"),
+            ("anthropic", "claude-sonnet-4.6"),
+            ("openai", "gpt-4o"),
+        ],
+
+        // --- Budget tier (fast, cheap) ---
+        ("openai", "gpt-4o-mini") => vec![
+            ("openai", "gpt-4o-mini"),
+            ("anthropic", "claude-haiku-4.5"),
+            ("google", "gemini-2.5-flash"),
+            ("deepseek", "deepseek-chat"),
+        ],
+        ("openai", "gpt-4.1-mini") => vec![
+            ("openai", "gpt-4.1-mini"),
+            ("anthropic", "claude-haiku-4.5"),
+            ("google", "gemini-2.5-flash"),
+        ],
+        ("openai", "gpt-4.1-nano") => vec![
+            ("openai", "gpt-4.1-nano"),
+            ("google", "gemini-2.5-flash-lite"),
+            ("google", "gemini-2.0-flash-lite"),
+        ],
+        ("anthropic", "claude-haiku-4.5") => vec![
+            ("anthropic", "claude-haiku-4.5"),
+            ("openai", "gpt-4o-mini"),
+            ("google", "gemini-2.5-flash"),
+            ("deepseek", "deepseek-chat"),
+        ],
+        ("google", "gemini-2.5-flash") => vec![
+            ("google", "gemini-2.5-flash"),
+            ("openai", "gpt-4o-mini"),
+            ("anthropic", "claude-haiku-4.5"),
+            ("deepseek", "deepseek-chat"),
+        ],
+        ("deepseek", "deepseek-chat") => vec![
+            ("deepseek", "deepseek-chat"),
+            ("openai", "gpt-4o-mini"),
+            ("google", "gemini-2.5-flash"),
+        ],
+
+        // --- Reasoning tier ---
+        ("openai", "o3") => vec![
+            ("openai", "o3"),
+            ("anthropic", "claude-opus-4.6"),
+            ("deepseek", "deepseek-reasoner"),
+        ],
+        ("openai", "o3-mini") | ("openai", "o4-mini") => vec![
+            (provider, model),
+            ("deepseek", "deepseek-reasoner"),
+            ("xai", "grok-3-mini"),
+        ],
+        ("deepseek", "deepseek-reasoner") => vec![
+            ("deepseek", "deepseek-reasoner"),
+            ("openai", "o3-mini"),
+            ("xai", "grok-3-mini"),
+        ],
+
+        // --- Unknown model: just return itself ---
+        _ => vec![(provider, model)],
+    };
+    chain
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +275,66 @@ mod tests {
                 assert!(
                     seen.insert(name.clone()),
                     "duplicate provider '{name}' in fallback chain for '{provider}'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_model_fallback_chain_opus() {
+        let chain = model_fallback_chain("anthropic", "claude-opus-4.6");
+        assert_eq!(chain[0], ("anthropic", "claude-opus-4.6"));
+        assert!(chain.len() > 1);
+        // Must have cross-provider fallbacks
+        assert!(chain.iter().any(|(p, _)| *p != "anthropic"));
+    }
+
+    #[test]
+    fn test_model_fallback_chain_gpt4o() {
+        let chain = model_fallback_chain("openai", "gpt-4o");
+        assert_eq!(chain[0], ("openai", "gpt-4o"));
+        assert!(chain.len() > 1);
+    }
+
+    #[test]
+    fn test_model_fallback_chain_unknown_model() {
+        let chain = model_fallback_chain("openai", "totally-unknown-model");
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0], ("openai", "totally-unknown-model"));
+    }
+
+    #[test]
+    fn test_model_fallback_chain_no_self_duplicates() {
+        let known_models: Vec<(&str, &str)> = vec![
+            ("anthropic", "claude-opus-4.6"),
+            ("openai", "gpt-5.2"),
+            ("google", "gemini-3.1-pro"),
+            ("anthropic", "claude-sonnet-4.6"),
+            ("anthropic", "claude-sonnet-4.5"),
+            ("openai", "gpt-4o"),
+            ("openai", "gpt-4.1"),
+            ("xai", "grok-3"),
+            ("openai", "gpt-4o-mini"),
+            ("openai", "gpt-4.1-mini"),
+            ("openai", "gpt-4.1-nano"),
+            ("anthropic", "claude-haiku-4.5"),
+            ("google", "gemini-2.5-flash"),
+            ("deepseek", "deepseek-chat"),
+            ("openai", "o3"),
+            ("openai", "o3-mini"),
+            ("openai", "o4-mini"),
+            ("deepseek", "deepseek-reasoner"),
+        ];
+        for (provider, model) in &known_models {
+            let chain = model_fallback_chain(provider, model);
+            let mut seen = std::collections::HashSet::new();
+            for entry in &chain {
+                assert!(
+                    seen.insert(entry),
+                    "duplicate entry {:?} in model fallback chain for ({}, {})",
+                    entry,
+                    provider,
+                    model
                 );
             }
         }
