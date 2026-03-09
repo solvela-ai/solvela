@@ -720,6 +720,9 @@ mod tests {
             supports_tools: true,
             supports_vision: true,
             reasoning: false,
+            supports_structured_output: false,
+            supports_batch: false,
+            max_output_tokens: None,
         };
 
         // 1000 input tokens, 500 output tokens
@@ -746,6 +749,9 @@ mod tests {
             supports_tools: false,
             supports_vision: false,
             reasoning: false,
+            supports_structured_output: false,
+            supports_batch: false,
+            max_output_tokens: None,
         };
 
         assert_eq!(compute_actual_atomic_cost(0, 0, &model_info), 0);
@@ -765,6 +771,9 @@ mod tests {
             supports_tools: false,
             supports_vision: false,
             reasoning: false,
+            supports_structured_output: false,
+            supports_batch: false,
+            max_output_tokens: None,
         };
 
         // 1 input token at $1/token = $1.00 provider cost

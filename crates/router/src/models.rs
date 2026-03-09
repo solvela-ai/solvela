@@ -32,6 +32,12 @@ pub struct ModelEntry {
     pub supports_vision: bool,
     #[serde(default)]
     pub reasoning: bool,
+    #[serde(default)]
+    pub supports_structured_output: bool,
+    #[serde(default)]
+    pub supports_batch: bool,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
 }
 
 /// TOML top-level structure: `[models.<id>]`.
@@ -69,6 +75,9 @@ impl ModelRegistry {
                     supports_tools: entry.supports_tools,
                     supports_vision: entry.supports_vision,
                     reasoning: entry.reasoning,
+                    supports_structured_output: entry.supports_structured_output,
+                    supports_batch: entry.supports_batch,
+                    max_output_tokens: entry.max_output_tokens,
                 };
                 // Register under both the key and the canonical id
                 vec![(key, info.clone()), (id, info)]

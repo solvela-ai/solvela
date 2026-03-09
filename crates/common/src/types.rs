@@ -216,6 +216,13 @@ pub struct ModelInfo {
     pub supports_vision: bool,
     #[serde(default)]
     pub reasoning: bool,
+    #[serde(default)]
+    pub supports_structured_output: bool,
+    #[serde(default)]
+    pub supports_batch: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
 }
 
 /// Cost breakdown returned in 402 responses and receipts.
@@ -442,5 +449,52 @@ mod tests {
         assert_eq!(req.model, "openai/gpt-4o");
         assert!(req.tools.is_none());
         assert!(req.tool_choice.is_none());
+    }
+
+    #[test]
+    fn test_model_info_capability_fields() {
+        let json = r#"{
+            "id": "openai/gpt-4o",
+            "provider": "openai",
+            "model_id": "gpt-4o",
+            "display_name": "GPT-4o",
+            "input_cost_per_million": 2.5,
+            "output_cost_per_million": 10.0,
+            "context_window": 128000,
+            "supports_streaming": true,
+            "supports_tools": true,
+            "supports_vision": true,
+            "reasoning": false,
+            "supports_structured_output": true,
+            "supports_batch": true,
+            "max_output_tokens": 16384
+        }"#;
+        let info: ModelInfo = serde_json::from_str(json).unwrap();
+        assert!(info.supports_structured_output);
+        assert!(info.supports_batch);
+        assert_eq!(info.max_output_tokens, Some(16384));
+    }
+
+    #[test]
+    fn test_model_info_backward_compat() {
+        // Old JSON without new capability fields should still deserialize with defaults
+        let json = r#"{
+            "id": "openai/gpt-4o",
+            "provider": "openai",
+            "model_id": "gpt-4o",
+            "display_name": "GPT-4o",
+            "input_cost_per_million": 2.5,
+            "output_cost_per_million": 10.0,
+            "context_window": 128000
+        }"#;
+        let info: ModelInfo = serde_json::from_str(json).unwrap();
+        assert!(!info.supports_structured_output);
+        assert!(!info.supports_batch);
+        assert_eq!(info.max_output_tokens, None);
+        // Existing defaults should also work
+        assert!(!info.supports_streaming);
+        assert!(!info.supports_tools);
+        assert!(!info.supports_vision);
+        assert!(!info.reasoning);
     }
 }
