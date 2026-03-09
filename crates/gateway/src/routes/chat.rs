@@ -458,8 +458,10 @@ fn estimated_atomic_cost(
         .unwrap_or(0)
 }
 
-/// Fire an escrow claim transaction (fire-and-forget) if the payment scheme is escrow.
+/// Fire an escrow claim transaction if the payment scheme is escrow.
 ///
+/// Prefers the durable claim queue (PostgreSQL) when a DB pool is available,
+/// falling back to fire-and-forget via `claim_async` when it is not.
 /// Caps the claim amount to the verified deposit to prevent over-claiming.
 fn fire_escrow_claim(
     state: &Arc<AppState>,
@@ -472,18 +474,36 @@ fn fire_escrow_claim(
     if payment_scheme != "escrow" {
         return;
     }
-    if let Some(claimer) = &state.escrow_claimer {
-        if let (Some(ref sid_b64), Some(ref agent_b58)) = (escrow_service_id, escrow_agent_pubkey) {
-            // Cap claim amount to the verified deposit amount
-            let claim_amount = match escrow_deposited_amount {
-                Some(deposited) => claim_atomic.min(deposited),
-                None => claim_atomic,
-            };
+    if let (Some(ref sid_b64), Some(ref agent_b58)) = (escrow_service_id, escrow_agent_pubkey) {
+        // Cap claim amount to the verified deposit amount
+        let claim_amount = match escrow_deposited_amount {
+            Some(deposited) => claim_atomic.min(deposited),
+            None => claim_atomic,
+        };
 
-            if let (Ok(sid), Ok(agent_bytes)) =
-                (decode_service_id(sid_b64), decode_agent_pubkey(agent_b58))
-            {
-                claimer.claim_async(sid, agent_bytes, claim_amount);
+        if let Ok(sid) = decode_service_id(sid_b64) {
+            // Prefer durable queue if DB is available
+            if let Some(ref pool) = state.db_pool {
+                let pool = pool.clone();
+                let agent = agent_b58.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = x402::escrow::claim_queue::enqueue_claim(
+                        &pool,
+                        &sid,
+                        &agent,
+                        claim_amount,
+                        escrow_deposited_amount,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "failed to enqueue escrow claim");
+                    }
+                });
+            } else if let Some(claimer) = &state.escrow_claimer {
+                // Fallback: fire-and-forget (no DB)
+                if let Ok(agent_bytes) = decode_agent_pubkey(agent_b58) {
+                    claimer.claim_async(sid, agent_bytes, claim_amount);
+                }
             }
         }
     }

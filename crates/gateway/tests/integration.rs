@@ -182,6 +182,8 @@ fn test_app() -> axum::Router {
         escrow_claimer: None,
         fee_payer_pool: None,
         nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -233,6 +235,8 @@ fn test_app_with_escrow() -> axum::Router {
         escrow_claimer: Some(Arc::new(escrow_claimer)),
         fee_payer_pool: None,
         nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -1445,6 +1449,8 @@ fn test_app_with_nonce_pool() -> axum::Router {
         escrow_claimer: None,
         fee_payer_pool: None,
         nonce_pool: Some(Arc::new(pool)),
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -1597,4 +1603,32 @@ async fn test_chat_with_tools_returns_402() {
     assert!(payment_info["cost_breakdown"]["total"].is_string());
     assert_eq!(payment_info["cost_breakdown"]["currency"], "USDC");
     assert_eq!(payment_info["cost_breakdown"]["fee_percent"], 5);
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard spend endpoint
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dashboard_spend_returns_200() {
+    let app = test_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/dashboard/spend?wallet=test123&days=7")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["wallet"], "test123");
+    assert_eq!(json["total_usdc"], "0.000000");
+    assert_eq!(json["request_count"], 0);
+    assert_eq!(json["period_days"], 7);
+    assert!(json["by_day"].is_array());
 }

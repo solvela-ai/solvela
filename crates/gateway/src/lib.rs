@@ -45,6 +45,10 @@ pub struct AppState {
     pub fee_payer_pool: Option<Arc<x402::fee_payer::FeePayerPool>>,
     /// Durable nonce account pool. `None` when no nonce accounts are configured.
     pub nonce_pool: Option<Arc<x402::nonce_pool::NoncePool>>,
+    /// Optional PostgreSQL pool for durable claim queue and other DB operations.
+    pub db_pool: Option<sqlx::PgPool>,
+    /// HMAC secret for signing/verifying session tokens.
+    pub session_secret: Vec<u8>,
 }
 
 /// Build the Axum router with all routes and middleware.
@@ -63,6 +67,7 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .route("/v1/services", get(routes::services::list_services))
         .route("/v1/supported", get(routes::supported::supported))
         .route("/v1/nonce", get(routes::nonce::get_nonce))
+        .route("/v1/dashboard/spend", get(routes::dashboard::spend_summary))
         .route("/pricing", get(routes::pricing::pricing))
         .route("/health", get(routes::health::health))
         .layer(axum::middleware::from_fn(

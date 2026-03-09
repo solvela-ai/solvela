@@ -167,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Build usage tracker with whatever backends are available
-    let usage = gateway::usage::UsageTracker::new(db_pool, redis_client.clone());
+    let usage = gateway::usage::UsageTracker::new(db_pool.clone(), redis_client.clone());
 
     // Build response cache (requires Redis)
     let response_cache = redis_client.as_ref().and_then(|client| {
@@ -256,7 +256,36 @@ async fn main() -> anyhow::Result<()> {
         escrow_claimer,
         fee_payer_pool,
         nonce_pool,
+        db_pool,
+        session_secret: match std::env::var("RCR_SESSION_SECRET") {
+            Ok(b64) => {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD
+                    .decode(&b64)
+                    .unwrap_or_else(|e| {
+                        warn!(error = %e, "invalid RCR_SESSION_SECRET base64 — generating random secret");
+                        generate_random_secret()
+                    })
+            }
+            Err(_) => {
+                info!("RCR_SESSION_SECRET not set — generating ephemeral session secret");
+                generate_random_secret()
+            }
+        },
     });
+
+    // ── Claim processor (durable escrow claim background task) ──────────────
+    //
+    // If both PostgreSQL and an EscrowClaimer are available, start the
+    // background claim processor that polls the escrow_claim_queue table.
+    if let (Some(ref pool), Some(ref claimer)) = (&state.db_pool, &state.escrow_claimer) {
+        let _handle = x402::escrow::claim_processor::start_claim_processor(
+            pool.clone(),
+            Arc::clone(claimer),
+            std::time::Duration::from_secs(10),
+        );
+        info!("background escrow claim processor started (10s poll interval)");
+    }
 
     // ── Balance monitor (fire-and-forget background task) ─────────────────────
     //
@@ -364,4 +393,17 @@ fn redact_connection_url(url: &str) -> String {
     }
     // No credentials found — safe to log as-is (e.g., redis://localhost:6379)
     url.to_string()
+}
+
+/// Generate a random 32-byte secret using two UUIDv4 values.
+///
+/// UUIDv4 provides 122 bits of randomness per call (backed by the OS CSPRNG),
+/// so two calls give 244 bits — more than sufficient for HMAC-SHA256 keying.
+fn generate_random_secret() -> Vec<u8> {
+    let a = uuid::Uuid::new_v4();
+    let b = uuid::Uuid::new_v4();
+    let mut secret = Vec::with_capacity(32);
+    secret.extend_from_slice(a.as_bytes());
+    secret.extend_from_slice(b.as_bytes());
+    secret
 }

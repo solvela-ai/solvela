@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 rcr-common = { workspace = true }
-x402 = { workspace = true }
+x402 = { workspace = true, features = ["postgres"] }
 router = { workspace = true }
 
 # Web

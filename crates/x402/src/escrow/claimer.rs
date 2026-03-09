@@ -122,13 +122,23 @@ impl EscrowClaimer {
         };
 
         tokio::spawn(async move {
-            if let Err(e) = do_claim(&params).await {
-                warn!(
-                    error = %e,
-                    agent = %bs58::encode(&params.agent_pubkey).into_string(),
-                    amount = params.actual_amount,
-                    "escrow claim failed"
-                );
+            match do_claim(&params).await {
+                Ok(sig) => {
+                    info!(
+                        signature = %sig,
+                        agent = %bs58::encode(&params.agent_pubkey).into_string(),
+                        amount = params.actual_amount,
+                        "escrow claim succeeded (fire-and-forget)"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        agent = %bs58::encode(&params.agent_pubkey).into_string(),
+                        amount = params.actual_amount,
+                        "escrow claim failed"
+                    );
+                }
             }
         });
     }
@@ -148,8 +158,30 @@ pub(crate) struct ClaimParams {
     client: reqwest::Client,
 }
 
+/// Submit a claim and return the transaction signature.
+/// Unlike `claim_async`, this awaits the result.
+pub async fn do_claim_with_params(
+    claimer: &EscrowClaimer,
+    service_id: [u8; 32],
+    agent_pubkey: [u8; 32],
+    actual_amount_atomic: u64,
+) -> Result<String, Error> {
+    let params = ClaimParams {
+        rpc_url: claimer.rpc_url.clone(),
+        fee_payer_keypair: claimer.fee_payer_keypair,
+        escrow_program_id: claimer.escrow_program_id,
+        recipient_wallet: claimer.recipient_wallet,
+        usdc_mint: claimer.usdc_mint,
+        service_id,
+        agent_pubkey,
+        actual_amount: actual_amount_atomic,
+        client: claimer.client.clone(),
+    };
+    do_claim(&params).await
+}
+
 /// Internal: build and submit the claim transaction.
-pub(crate) async fn do_claim(params: &ClaimParams) -> Result<(), Error> {
+pub(crate) async fn do_claim(params: &ClaimParams) -> Result<String, Error> {
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
 
@@ -348,7 +380,7 @@ pub(crate) async fn do_claim(params: &ClaimParams) -> Result<(), Error> {
         "escrow claim transaction submitted"
     );
 
-    Ok(())
+    Ok(tx_sig.to_string())
 }
 
 // ---------------------------------------------------------------------------
