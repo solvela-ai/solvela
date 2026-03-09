@@ -12,6 +12,174 @@ use rcr_common::types::{ChatRequest, ChatResponse};
 use super::health::ProviderHealthTracker;
 use super::{ChatStream, ProviderError, ProviderRegistry};
 
+/// Result from a fallback-aware request. Tracks whether the response
+/// came from the originally requested model or a fallback.
+#[derive(Debug)]
+pub struct FallbackResult<T> {
+    pub data: T,
+    pub original_model: String,
+    pub actual_model: String,
+    pub actual_provider: String,
+    pub was_fallback: bool,
+}
+
+/// Execute a chat completion with model-aware fallback.
+///
+/// Uses `model_fallback_chain()` to iterate through same-tier models across
+/// providers, checking both model-level and provider-level circuit breakers.
+/// Returns a `FallbackResult` indicating whether the response came from the
+/// originally requested model or a fallback.
+pub async fn chat_with_model_fallback(
+    providers: &ProviderRegistry,
+    health: &ProviderHealthTracker,
+    primary_provider: &str,
+    primary_model: &str,
+    req: ChatRequest,
+) -> Result<FallbackResult<ChatResponse>, ProviderError> {
+    let chain = model_fallback_chain(primary_provider, primary_model);
+    let mut last_error: Option<ProviderError> = None;
+
+    for (prov, model_id) in &chain {
+        // Skip if provider is not configured
+        let provider = match providers.get(prov) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Skip if model circuit is open
+        if !health.is_model_available(prov, model_id).await {
+            info!(provider = %prov, model = %model_id, "skipping model (circuit open)");
+            continue;
+        }
+
+        // Skip if provider circuit is open
+        if !health.is_available(prov).await {
+            info!(provider = %prov, "skipping provider (circuit open)");
+            continue;
+        }
+
+        // Clone request and set the fallback model
+        let mut model_req = req.clone();
+        model_req.model = model_id.to_string();
+
+        let start = Instant::now();
+        match provider.chat_completion(model_req).await {
+            Ok(response) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                health
+                    .record_model_success(prov, model_id, latency_ms)
+                    .await;
+                let was_fallback = *prov != primary_provider || *model_id != primary_model;
+                info!(
+                    provider = %prov,
+                    model = %model_id,
+                    was_fallback,
+                    latency_ms,
+                    "model-aware request succeeded"
+                );
+                return Ok(FallbackResult {
+                    data: response,
+                    original_model: primary_model.to_string(),
+                    actual_model: model_id.to_string(),
+                    actual_provider: prov.to_string(),
+                    was_fallback,
+                });
+            }
+            Err(e) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                health
+                    .record_model_failure(prov, model_id, latency_ms)
+                    .await;
+                warn!(
+                    provider = %prov,
+                    model = %model_id,
+                    error = %e,
+                    latency_ms,
+                    "model-aware request failed, trying next"
+                );
+                last_error = Some(e);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "no available models in fallback chain".into()))
+}
+
+/// Execute a streaming chat completion with model-aware fallback.
+///
+/// Same pattern as `chat_with_model_fallback` but calls `chat_completion_stream`
+/// and returns a `FallbackResult<ChatStream>`.
+pub async fn stream_with_model_fallback(
+    providers: &ProviderRegistry,
+    health: &ProviderHealthTracker,
+    primary_provider: &str,
+    primary_model: &str,
+    req: ChatRequest,
+) -> Result<FallbackResult<ChatStream>, ProviderError> {
+    let chain = model_fallback_chain(primary_provider, primary_model);
+    let mut last_error: Option<ProviderError> = None;
+
+    for (prov, model_id) in &chain {
+        let provider = match providers.get(prov) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if !health.is_model_available(prov, model_id).await {
+            info!(provider = %prov, model = %model_id, "skipping model for streaming (circuit open)");
+            continue;
+        }
+
+        if !health.is_available(prov).await {
+            info!(provider = %prov, "skipping provider for streaming (circuit open)");
+            continue;
+        }
+
+        let mut model_req = req.clone();
+        model_req.model = model_id.to_string();
+
+        let start = Instant::now();
+        match provider.chat_completion_stream(model_req).await {
+            Ok(stream) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                health
+                    .record_model_success(prov, model_id, latency_ms)
+                    .await;
+                let was_fallback = *prov != primary_provider || *model_id != primary_model;
+                info!(
+                    provider = %prov,
+                    model = %model_id,
+                    was_fallback,
+                    latency_ms,
+                    "model-aware streaming request succeeded"
+                );
+                return Ok(FallbackResult {
+                    data: stream,
+                    original_model: primary_model.to_string(),
+                    actual_model: model_id.to_string(),
+                    actual_provider: prov.to_string(),
+                    was_fallback,
+                });
+            }
+            Err(e) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                health
+                    .record_model_failure(prov, model_id, latency_ms)
+                    .await;
+                warn!(
+                    provider = %prov,
+                    model = %model_id,
+                    error = %e,
+                    "model-aware streaming fallback, trying next"
+                );
+                last_error = Some(e);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "no available models for streaming in fallback chain".into()))
+}
+
 /// Execute a chat completion with fallback.
 ///
 /// Tries providers in the given order, skipping any whose circuit is open.
@@ -301,6 +469,32 @@ mod tests {
         let chain = model_fallback_chain("openai", "totally-unknown-model");
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0], ("openai", "totally-unknown-model"));
+    }
+
+    #[test]
+    fn test_fallback_result_type_exists() {
+        let result: FallbackResult<String> = FallbackResult {
+            data: "test".to_string(),
+            original_model: "gpt-4o".to_string(),
+            actual_model: "gpt-4o".to_string(),
+            actual_provider: "openai".to_string(),
+            was_fallback: false,
+        };
+        assert!(!result.was_fallback);
+        assert_eq!(result.original_model, result.actual_model);
+    }
+
+    #[test]
+    fn test_fallback_result_indicates_fallback() {
+        let result: FallbackResult<String> = FallbackResult {
+            data: "test".to_string(),
+            original_model: "claude-opus-4.6".to_string(),
+            actual_model: "gpt-5.2".to_string(),
+            actual_provider: "openai".to_string(),
+            was_fallback: true,
+        };
+        assert!(result.was_fallback);
+        assert_ne!(result.original_model, result.actual_model);
     }
 
     #[test]

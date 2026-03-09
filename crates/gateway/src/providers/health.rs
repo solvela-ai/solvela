@@ -228,7 +228,9 @@ impl ProviderHealthTracker {
         let key = Self::model_key(provider, model);
         {
             let mut models = self.models.write().await;
-            let health = models.entry(key.clone()).or_insert_with(ProviderHealth::new);
+            let health = models
+                .entry(key.clone())
+                .or_insert_with(ProviderHealth::new);
 
             let now = Instant::now();
             health.outcomes.push((now, true, latency_ms));
@@ -258,7 +260,9 @@ impl ProviderHealthTracker {
         let key = Self::model_key(provider, model);
         {
             let mut models = self.models.write().await;
-            let health = models.entry(key.clone()).or_insert_with(ProviderHealth::new);
+            let health = models
+                .entry(key.clone())
+                .or_insert_with(ProviderHealth::new);
 
             let now = Instant::now();
             health.outcomes.push((now, false, latency_ms));
@@ -548,9 +552,7 @@ mod tests {
 
         // 5 failures on opus — should open opus circuit
         for _ in 0..5 {
-            tracker
-                .record_model_failure("anthropic", "opus", 500)
-                .await;
+            tracker.record_model_failure("anthropic", "opus", 500).await;
         }
 
         assert_eq!(
@@ -588,9 +590,7 @@ mod tests {
 
         // Open the model circuit
         for _ in 0..5 {
-            tracker
-                .record_model_failure("anthropic", "opus", 500)
-                .await;
+            tracker.record_model_failure("anthropic", "opus", 500).await;
         }
         assert_eq!(
             tracker.get_model_state("anthropic", "opus").await,
@@ -608,9 +608,7 @@ mod tests {
         );
 
         // Success should close
-        tracker
-            .record_model_success("anthropic", "opus", 100)
-            .await;
+        tracker.record_model_success("anthropic", "opus", 100).await;
         assert_eq!(
             tracker.get_model_state("anthropic", "opus").await,
             CircuitState::Closed
@@ -623,9 +621,7 @@ mod tests {
 
         // Record model failures
         for _ in 0..3 {
-            tracker
-                .record_model_failure("openai", "gpt-4", 500)
-                .await;
+            tracker.record_model_failure("openai", "gpt-4", 500).await;
         }
 
         // Provider should reflect the failures
@@ -636,9 +632,7 @@ mod tests {
         );
 
         // Add a model success
-        tracker
-            .record_model_success("openai", "gpt-4", 100)
-            .await;
+        tracker.record_model_success("openai", "gpt-4", 100).await;
 
         // Provider failure rate should drop: 3 failures, 1 success = 75%
         let rate = tracker.get_failure_rate("openai").await;
