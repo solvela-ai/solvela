@@ -571,6 +571,8 @@ mod tests {
             role: Role::User,
             content: content.to_string(),
             name: None,
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 
@@ -582,6 +584,8 @@ mod tests {
             temperature: None,
             top_p: None,
             stream: false,
+            tools: None,
+            tool_choice: None,
         }
     }
 

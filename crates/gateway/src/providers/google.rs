@@ -190,6 +190,8 @@ fn from_gemini_response(resp: GeminiResponse, original_model: &str) -> ChatRespo
                 role: Role::Assistant,
                 content,
                 name: None,
+                tool_calls: None,
+                tool_call_id: None,
             },
             finish_reason,
         }],
@@ -256,17 +258,23 @@ mod tests {
                     role: Role::System,
                     content: "Be concise.".to_string(),
                     name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
                 },
                 ChatMessage {
                     role: Role::User,
                     content: "Hello!".to_string(),
                     name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
                 },
             ],
             max_tokens: Some(100),
             temperature: Some(0.7),
             top_p: None,
             stream: false,
+            tools: None,
+            tool_choice: None,
         };
 
         let gemini_req = to_gemini_request(&req);

@@ -162,6 +162,8 @@ fn from_anthropic_response(resp: AnthropicResponse, original_model: &str) -> Cha
                 role: Role::Assistant,
                 content,
                 name: None,
+                tool_calls: None,
+                tool_call_id: None,
             },
             finish_reason,
         }],
@@ -263,6 +265,7 @@ fn spawn_anthropic_sse_parser(response: reqwest::Response, model: String) -> Cha
                                             delta: ChatDelta {
                                                 role: Some(Role::Assistant),
                                                 content: None,
+                                                tool_calls: None,
                                             },
                                             finish_reason: None,
                                         }],
@@ -286,6 +289,7 @@ fn spawn_anthropic_sse_parser(response: reqwest::Response, model: String) -> Cha
                                             delta: ChatDelta {
                                                 role: None,
                                                 content: cbd.delta.text,
+                                                tool_calls: None,
                                             },
                                             finish_reason: None,
                                         }],
@@ -315,6 +319,7 @@ fn spawn_anthropic_sse_parser(response: reqwest::Response, model: String) -> Cha
                                             delta: ChatDelta {
                                                 role: None,
                                                 content: None,
+                                                tool_calls: None,
                                             },
                                             finish_reason,
                                         }],
@@ -411,17 +416,23 @@ mod tests {
                     role: Role::System,
                     content: "You are a helpful assistant.".to_string(),
                     name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
                 },
                 ChatMessage {
                     role: Role::User,
                     content: "Hello!".to_string(),
                     name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
                 },
             ],
             max_tokens: Some(100),
             temperature: None,
             top_p: None,
             stream: false,
+            tools: None,
+            tool_choice: None,
         };
 
         let anthropic_req = to_anthropic_request(&req);

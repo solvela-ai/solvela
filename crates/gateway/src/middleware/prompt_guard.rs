@@ -276,6 +276,8 @@ mod tests {
             role: Role::User,
             content: content.to_string(),
             name: None,
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 
