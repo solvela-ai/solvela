@@ -3,6 +3,7 @@ pub mod deepseek;
 pub mod fallback;
 pub mod google;
 pub mod health;
+pub mod heartbeat;
 pub mod openai;
 pub mod xai;
 
