@@ -685,6 +685,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "futures",
+ "hmac",
  "http-body-util",
  "rcr-common",
  "redis",
@@ -1574,6 +1575,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "toml",
+ "x402-solana",
 ]
 
 [[package]]
@@ -3232,10 +3234,21 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "thiserror",
  "tokio",
  "tracing",
+ "x402-solana",
  "zeroize",
+]
+
+[[package]]
+name = "x402-solana"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

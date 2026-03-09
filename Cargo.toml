@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/gateway",
     "crates/x402",
+    "crates/x402-solana",
     "crates/router",
     "crates/common",
     "crates/cli",
@@ -67,4 +68,5 @@ zeroize = { version = "1", features = ["derive"] }
 # Workspace crates
 rcr-common = { path = "crates/common" }
 x402 = { path = "crates/x402" }
+x402-solana = { path = "crates/x402-solana" }
 router = { path = "crates/router" }
