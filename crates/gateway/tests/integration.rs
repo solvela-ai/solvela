@@ -15,8 +15,8 @@ use gateway::config::AppConfig;
 use gateway::middleware::rate_limit::{RateLimitConfig, RateLimiter};
 use gateway::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
 use gateway::providers::ProviderRegistry;
-use gateway::{build_router, AppState};
 use gateway::services::ServiceRegistry;
+use gateway::{build_router, AppState};
 use router::models::ModelRegistry;
 use x402::traits::{Error as X402Error, PaymentVerifier};
 use x402::types::{

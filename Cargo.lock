@@ -688,10 +688,10 @@ dependencies = [
  "hmac",
  "http-body-util",
  "pin-project-lite",
- "rcr-common",
  "redis",
  "reqwest",
  "router",
+ "rustyclaw-protocol",
  "serde",
  "serde_json",
  "sha2",
@@ -699,6 +699,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
+ "toml",
  "tower",
  "tower-http",
  "tracing",
@@ -1570,17 +1571,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rcr-common"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
- "toml",
- "x402-solana",
-]
-
-[[package]]
 name = "redis"
 version = "0.27.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1698,7 +1688,7 @@ dependencies = [
 name = "router"
 version = "0.1.0"
 dependencies = [
- "rcr-common",
+ "rustyclaw-protocol",
  "serde",
  "serde_json",
  "thiserror",
@@ -1802,7 +1792,6 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "getrandom 0.2.17",
- "rcr-common",
  "reqwest",
  "router",
  "serde",
@@ -3240,8 +3229,8 @@ dependencies = [
  "bs58",
  "curve25519-dalek",
  "ed25519-dalek",
- "rcr-common",
  "reqwest",
+ "rustyclaw-protocol",
  "serde",
  "serde_json",
  "sha2",
@@ -3249,17 +3238,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "x402-solana",
  "zeroize",
-]
-
-[[package]]
-name = "x402-solana"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

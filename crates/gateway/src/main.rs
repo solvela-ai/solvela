@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
+use gateway::services::ServiceRegistry;
 use gateway::{
     balance_monitor::BalanceMonitor,
     build_router, cache, config,
@@ -9,7 +10,6 @@ use gateway::{
     providers::ProviderRegistry,
     AppState,
 };
-use gateway::services::ServiceRegistry;
 use router::models::ModelRegistry;
 
 #[tokio::main]

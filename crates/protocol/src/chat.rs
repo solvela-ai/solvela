@@ -75,7 +75,7 @@ pub struct ChatResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::{FunctionCall, ToolCall, FunctionDefinitionInner, ToolDefinition};
+    use crate::tools::{FunctionCall, FunctionDefinitionInner, ToolCall, ToolDefinition};
 
     #[test]
     fn test_chat_request_serialization() {
@@ -120,7 +120,10 @@ mod tests {
             tool_calls: Some(vec![ToolCall {
                 id: "call_1".to_string(),
                 r#type: "function".to_string(),
-                function: FunctionCall { name: "search".to_string(), arguments: "{}".to_string() },
+                function: FunctionCall {
+                    name: "search".to_string(),
+                    arguments: "{}".to_string(),
+                },
             }]),
             tool_call_id: None,
         };
@@ -172,16 +175,24 @@ mod tests {
         let req = ChatRequest {
             model: "openai/gpt-4o".to_string(),
             messages: vec![ChatMessage {
-                role: Role::User, content: "What's the weather?".to_string(),
-                name: None, tool_calls: None, tool_call_id: None,
+                role: Role::User,
+                content: "What's the weather?".to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
             }],
-            max_tokens: None, temperature: None, top_p: None, stream: false,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: false,
             tools: Some(vec![ToolDefinition {
                 r#type: "function".to_string(),
                 function: FunctionDefinitionInner {
                     name: "get_weather".to_string(),
                     description: Some("Get weather for a location".to_string()),
-                    parameters: Some(serde_json::json!({"type":"object","properties":{"location":{"type":"string"}}})),
+                    parameters: Some(
+                        serde_json::json!({"type":"object","properties":{"location":{"type":"string"}}}),
+                    ),
                 },
             }]),
             tool_choice: Some(serde_json::json!("auto")),

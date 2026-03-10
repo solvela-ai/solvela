@@ -8,9 +8,9 @@ use axum::Json;
 use futures::StreamExt;
 use tracing::{info, warn};
 
-use rustyclaw_protocol::ChatRequest;
 use router::profiles::{self, Profile};
 use router::scorer;
+use rustyclaw_protocol::ChatRequest;
 
 use crate::error::GatewayError;
 use crate::middleware::prompt_guard::{self, GuardResult, PromptGuardConfig};
