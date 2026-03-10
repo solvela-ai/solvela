@@ -9,10 +9,22 @@
 Build the **RustyClaw ecosystem** — a self-sovereign, Solana-native AI agent payment stack:
 
 1. **RustyClawRouter** (gateway server) — verifies x402 payments, routes to LLM providers, settles on Solana. **This repo.**
-2. **RustyClawClient** (client library) — holds wallet, signs payments, makes LLM calls transparent. **✅ Complete.** Repo: `~/projects/RustyClawClient/` ([GitHub](https://github.com/sky64/RustyClawClient))
+2. **RustyClawClient** (client library + proxy) — holds wallet, signs payments, makes LLM calls transparent. **Repo:** `~/projects/RustyClawClient/` ([GitHub](https://github.com/sky64/RustyClawClient))
 3. **rustyclaw-protocol** (shared wire format) — x402 + chat types used by both. **✅ Complete.** Lives in `crates/protocol/`.
 
 Kenneth is building this for his **trading platform** and **AI assistant platform** (telsi.ai).
+
+**Production gateway target:** Fly.io at `https://rustyclawrouter-gateway.fly.dev` (fly.toml + Dockerfile already configured, account set up)
+
+---
+
+## IMMEDIATE NEXT STEP: Phase E — Smart Features
+
+**Phase D (CLI Tool) is COMPLETE.** All 12 tasks done, 74 tests passing, clippy clean.
+
+**Next up:** Phase E: Smart Features (sessions, cache, degraded detection, free fallback).
+
+**Alternatively:** Remaining RustyClawRouter phases (8, 9, 12, 13, 14) or Phase F (SDKs).
 
 ---
 
@@ -20,201 +32,197 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ### What's Complete in RustyClawRouter
 
-**Phases 1-7 of the ecosystem upgrade plan** (`docs/plans/2026-03-09-ecosystem-upgrade-plan.md`):
-- Phase 1: Wire format foundation (Developer role, tool calls, vision types, streaming deltas)
-- Phase 2: Durable escrow claim queue (PostgreSQL-backed, 5-retry limit)
-- Phase 3: Expanded model registry (16 → 27 models, 5 providers)
-- Phase 4: Session tokens (HMAC-SHA256, `SessionClaims` with wallet/budget/models/expiry)
-- Phase 5: ~~Extracted `x402-solana` crate~~ → Now `rustyclaw-protocol` (see Phase A below)
-- Phase 6: ElizaOS plugin (`integrations/elizaos/`)
-- Phase 7: Dashboard API stub (`GET /v1/dashboard/spend`)
+**Phases 1-7, 10-11, Phase A** — all complete (304+ tests).
 
-**Phases 10-11 (SSE Heartbeat + Provider Failover):**
-- Adaptive SSE heartbeat stream wrapper (5s → 2s after 10s silence)
-- Per-model circuit breaker + model-level fallback chains
-- `X-RCR-Fallback` and `X-RCR-Fallback-Preference` headers
-
-**Phase A: rustyclaw-protocol extraction** — ✅ complete:
-- Merged payment types (from `x402-solana`) and chat/LLM types (from `rcr-common`) into `crates/protocol/`
-- Deleted both `x402-solana` and `rcr-common` crates
-- Moved `ServiceRegistry` into `gateway`
-- 304 tests passing, clippy clean
+**Security audit completed this session** — 6 critical/high findings fixed:
+- LRU cache replaces HashSet for replay protection (no full-clear gap)
+- 50KB size limit on PAYMENT-SIGNATURE header
+- Rate limit cleanup 60-second cooldown
+- Session secret length validation (>= 32 bytes)
 
 ### What's Complete in RustyClawClient
 
-**Phase B: Core Client Library** — ✅ complete:
-- **Repo:** `~/projects/RustyClawClient/` — https://github.com/sky64/RustyClawClient
-- **10 commits** on main (7 implementation + 1 fmt fix + 1 review fixes + 1 initial scaffold fix)
-- **41 tests** (34 unit + 7 integration), clippy clean
-- **Code review completed**, all 5 findings fixed
+**Phase B: Core Client Library** — ✅ complete (51 tests)
+**Phase C: Proxy Sidecar** — ✅ complete (58 tests total, clippy clean)
+**Phase D: CLI Tool (`rcc`)** — ✅ complete (74 tests total, clippy clean)
+
+**Phase D delivered:**
+- `rcc` CLI binary — 4 commands: `wallet`, `chat`, `models`, `doctor`
+- `rustyclawclient-cli-args` shared crate — `WalletArgs`, `GatewayArgs`, `RpcArgs` + `load_wallet()`/`save_wallet()` (used by both proxy and CLI)
+- `wallet create` — BIP39 mnemonic generation, Solana CLI byte-array format, `0o600` permissions
+- `wallet import` — `--mnemonic` or `--keypair` (base58), with `--force` overwrite
+- `wallet balance` — USDC-SPL balance via JSON-RPC (`getTokenAccountBalance`)
+- `wallet address` — Print public key
+- `wallet export` — Print base58 keypair with confirmation prompt
+- `chat` — Streaming by default (SSE via `reqwest-eventsource`), `--no-stream`, TTY-aware output (stream in TTY, JSON when piped), cost info to stderr
+- `models` — Table format in TTY, JSON when piped, `--provider` filter, `--json` flag
+- `doctor` — 6 sequential checks: wallet, gateway, models, RPC, balance, payment flow (pass/fail/warn/skip)
+- `chat_stream()` on `RustyClawClient` — returns `impl Stream<Item = Result<ChatChunk, ClientError>>`
+- `usdc_balance()` / `usdc_balance_of()` on `RustyClawClient` — query USDC-SPL balance via JSON-RPC
+- `Wallet::to_keypair_bytes()` / `to_keypair_b58()` — export methods for wallet persistence
+- Proxy refactored to use shared `rustyclawclient-cli-args` (75 lines deleted, 16 added)
 
 **Crate structure:**
 ```
 crates/rustyclaw-client/src/
 ├── lib.rs       — Module declarations + pub use re-exports
-├── error.rs     — WalletError, SignerError, ClientError (thiserror)
+├── error.rs     — WalletError, SignerError, ClientError, BalanceError (thiserror)
 ├── config.rs    — ClientConfig + ClientBuilder
-├── wallet.rs    — Wallet wrapping solana_sdk::Keypair, BIP39, zeroize
-├── signer.rs    — sign_exact_payment, build_payment_payload, encode_payment_header
-└── client.rs    — RustyClawClient with chat(), models(), estimate_cost()
+├── wallet.rs    — Wallet (Keypair, BIP39, from_keypair_bytes, to_keypair_bytes/b58, zeroize)
+├── signer.rs    — sign_exact_payment, build_payment_payload, encode_payment_header, associated_token_address (pub(crate))
+└── client.rs    — RustyClawClient with chat(), chat_stream(), models(), estimate_cost(), sign_payment_for_402(), usdc_balance(), usdc_balance_of()
 tests/
-└── integration.rs — 7 wiremock-based end-to-end tests
+└── integration.rs — 9 wiremock-based tests
+
+crates/rustyclawclient-cli-args/src/
+└── lib.rs       — WalletArgs, GatewayArgs, RpcArgs (clap Args), load_wallet(), save_wallet(), expand_home()
+
+crates/rustyclawclient-cli/src/
+├── main.rs      — Cli struct, Commands enum, dispatch
+└── commands/
+    ├── wallet.rs  — create, import, balance, address, export
+    ├── chat.rs    — streaming chat with TTY detection
+    ├── models.rs  — table/JSON output with provider filter
+    └── doctor.rs  — 6 diagnostic checks
+
+crates/rustyclawclient-proxy/src/
+├── lib.rs       — Re-exports ProxyState + build_proxy_router
+├── main.rs      — CLI (clap) + shared args + server startup
+└── proxy.rs     — Catch-all handler, 402 interception, streaming passthrough
+tests/
+└── integration.rs — 7 wiremock + tower::oneshot tests
 ```
 
-**Key dependency workarounds discovered:**
-- `solana-client` and `spl-associated-token-account` conflict with `solana-sdk 2.2` via transitive `zeroize` version incompatibilities
-- **Solution:** Manual ATA derivation via `Pubkey::find_program_address`, reqwest JSON-RPC for blockhash fetching
-- `zeroize` must NOT have `derive` feature (conflicts with `curve25519-dalek v3`)
-- OpenSSL env vars required on this machine: `OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl`
+### Phase C Design Decisions (from brainstorming)
 
-### Current Workspace (RustyClawRouter — 5 crates)
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 26 | Catch-all reverse proxy (not endpoint-specific) | Simpler, works for all endpoints, no body parsing on non-402 |
+| 27 | Axum for proxy server | Already in workspace, gives routing + body limits + shutdown |
+| 28 | Passthrough streaming | Most SDKs default `stream: true`; passthrough is simplest |
+| 29 | Body clone via `Bytes` | Simple, bounded by 10MB limit, needed for 402 retry |
+| 30 | Wallet: env var priority, file fallback | Max flexibility; env var standard for CI, file for dev |
+| 31 | Wallet file = Solana CLI byte-array format | Compatible with `solana-keygen`, no new format |
+| 32 | Bind `127.0.0.1` only | Local proxy must never be network-accessible |
+| 33 | Gateway default `https://rustyclawrouter-gateway.fly.dev` | Production-ready; proxy and gateway on different machines |
+| 34 | Security flags as CLI args | Easy per-invocation, leverages existing ClientConfig |
+| 35 | Strip caller's PAYMENT-SIGNATURE | Prevents injection of fraudulent payment proofs |
+| 36 | Structured JSON error responses | Caller can programmatically handle errors |
 
-```
-crates/
-├── protocol/    — rustyclaw-protocol: shared wire-format types (payment + chat + constants)
-├── gateway/     — The only binary (Axum HTTP server) + ServiceRegistry
-├── x402/        — Payment verification, Solana, escrow, fee payer (re-exports rustyclaw-protocol)
-├── router/      — 15-dim scorer, routing profiles, model registry
-└── cli/         — rcr CLI binary (clap derive)
-```
+### Phase D Design Decisions (from brainstorming)
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 37 | Shared `rustyclawclient-cli-args` crate | Follows Solana `clap-utils` / Foundry `foundry-cli` pattern; DRY across proxy + CLI |
+| 38 | Balance on `RustyClawClient`, not `Wallet` | Industry standard (Solana SDK, ethers-rs): Wallet = signing, Client = I/O |
+| 39 | SSE streaming via `reqwest-eventsource` | 763k downloads/month, used by aichat + async-openai; probe+stream pattern for 402 |
+| 40 | TTY-aware output (`std::io::IsTerminal`) | Stable since Rust 1.70; stream in TTY, JSON when piped (follows `mods` pattern) |
+| 41 | Table in TTY, JSON when piped for models | Standard CLI UX (gh, kubectl, docker); `--json` flag for explicit override |
+| 42 | Binary name `rcc` | Short, memorable, follows `rcr` (router) naming convention |
+| 43 | Solana CLI wallet format (JSON byte array) | Compatible with `solana-keygen`, no custom format, industry standard |
+| 44 | Mnemonic shown once, never stored | Security best practice (solana-keygen, cast wallet new) |
+| 45 | `0o600` file permissions on wallet | Unix security standard for sensitive files |
+| 46 | Doctor command with 6 sequential checks | Follows `rustyclawrouter doctor`, progressive diagnostics with skip on failure |
+
+---
 
 ### What's NOT Done Yet
-
-**Remaining RustyClawRouter phases:**
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 8: Agent Delegation | Scoped session tokens + PDA sub-accounts | Not started |
-| 9: x402 V2 Alignment | CAIP-2, wallet identity, Bazaar discovery | Not started |
-| 12: Context Compression | Server-side prompt compression | Not started |
-| 13: Staking-for-Capacity | DeFi primitive for inference allocation | Not started |
-| 14: Cloudflare Workers Backend | x402 facilitator for CF Workers | Not started |
 
 **RustyClawClient ecosystem** (master plan: `.claude/plan/rustyclaw-ecosystem.md`):
 | Phase | Description | Status |
 |-------|-------------|--------|
 | A: Extract Protocol Crate | `rustyclaw-protocol` | ✅ Complete |
 | B: Core Client Library | Wallet, signer, client | ✅ Complete |
-| C: Proxy Sidecar | localhost OpenAI-compat proxy | Not started |
-| D: CLI | `rustyclawclient` commands | Not started |
+| C: Proxy Sidecar | localhost OpenAI-compat proxy | ✅ Complete (58 tests) |
+| D: CLI (`rcc`) | wallet, chat, models, doctor commands | ✅ Complete (74 tests) |
 | E: Smart Features | Sessions, cache, degraded detection, free fallback | Not started |
 | F: SDKs | Python, TS, Go client SDKs | Not started |
 | G: Gateway Changes | Debug headers, session ID, stats endpoint | G.3 (heartbeat) ✅, rest not started |
 
+**Remaining RustyClawRouter phases:** 8, 9, 12, 13, 14 (see ecosystem plan)
+
 ---
 
-## Next Steps (Pick One)
+## Key Dependency Workarounds
 
-### Option 1: Phase C — Proxy Sidecar
-A localhost proxy that speaks OpenAI format, so any existing OpenAI SDK client can use RustyClawRouter without code changes. Most impactful for adoption.
-
-### Option 2: Phase D — CLI
-`rustyclawclient` CLI binary for wallet management, chat, and cost estimation. Good for developer experience.
-
-### Option 3: Gateway Phase 8 — Agent Delegation
-Scoped session tokens with PDA sub-accounts. Now unblocked by RustyClawClient.
-
-### Option 4: Phase E — Smart Features
-Sessions, caching, degraded provider detection, free-tier fallback. Makes the client production-ready.
+- `solana-client` and `spl-associated-token-account` conflict with `solana-sdk 2.2` via transitive `zeroize` version incompatibilities
+- **Solution:** Manual ATA derivation via `Pubkey::find_program_address`, reqwest JSON-RPC for blockhash fetching
+- `zeroize` must NOT have `derive` feature (conflicts with `curve25519-dalek v3`)
+- OpenSSL env vars required on this machine: `OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl`
+- RustyClawClient remote uses SSH: `git@github.com:sky64/RustyClawClient.git`
 
 ---
 
 ## What Worked (Cumulative)
 
-- **Subagent-Driven Development** — fresh subagent per task with two-stage review. Kenneth's preferred execution approach.
-- **Brainstorming skill before implementation** — one-question-at-a-time design. Kenneth prefers this.
+- **Subagent-Driven Development** — fresh subagent per task with two-stage review. Kenneth's preferred approach.
+- **Brainstorming skill before implementation** — one-question-at-a-time design.
 - **Parallel subagent dispatch** — safe when tasks modify different files.
-- **Research-backed design decisions** — Kenneth values this: "they are smart and if you look deep enough you will see the purpose."
-- **Batching trivial sequential tasks** — Tasks 1-4 (all needed before first compile) dispatched as one batch. Saved context.
-- **Doing trivial tasks directly** — single-line changes done by controller, not subagent.
-- **Manual ATA derivation** — cleaner and lighter than pulling in `spl-associated-token-account` with its dep conflicts.
-- **reqwest JSON-RPC for blockhash** — avoids `solana-client` entirely, no QUIC/rustls conflicts.
+- **Security audit before Phase C** — caught 6 critical/high issues across both repos.
+- **Manual ATA derivation** — cleaner than `spl-associated-token-account` with dep conflicts.
+- **reqwest JSON-RPC for blockhash** — avoids `solana-client` entirely.
+- **Two-stage code review (spec then quality)** — caught 7 hardening issues in Phase C proxy.
+- **Extracting `sign_payment_for_402()`** — decoupled signing from ChatRequest/ChatResponse, enabling proxy reuse.
+- **Shared CLI args crate** — `rustyclawclient-cli-args` eliminated duplication between proxy and CLI binaries.
+- **Industry research before design decisions** — parallel research agents for each decision (CLI patterns, streaming, wallet formats, balance APIs).
+- **Probe+stream pattern for 402 payment** — non-streaming probe to get 402, then stream with payment header. Clean SSE integration.
+- **TTY-aware output** — `std::io::IsTerminal` for smart defaults (stream/table in TTY, JSON when piped).
+
+**Phase D commit history (RustyClawClient):**
+```
+eedac45 feat: implement doctor command with 6 diagnostic checks
+c2bfe58 feat: implement chat command with streaming, TTY detection, and JSON pipe output
+bde7809 feat: implement models command with table/JSON output and provider filter
+2f76325 feat: implement wallet create, import, balance, address, export commands
+693cb04 feat: scaffold rcc CLI binary with command stubs
+e3d57db refactor: proxy uses shared cli-args crate for wallet loading and common args
+43874cb feat: add rustyclawclient-cli-args shared crate with WalletArgs, GatewayArgs, load_wallet
+4ce1b50 feat: add chat_stream() with SSE support to RustyClawClient
+1fe646e feat: add usdc_balance() and usdc_balance_of() to RustyClawClient
+448d009 chore: add reqwest-eventsource to workspace dependencies
+```
+
+**Phase C commit history (RustyClawClient):**
+```
+92af973 fix: address code review findings for proxy hardening
+c385253 refactor: move reqwest::Client to ProxyState and extract forward_headers helper
+9aaeb08 docs: add Phase C proxy sidecar implementation plan
+fc4b0d6 test: add integration tests for proxy handler
+abbbd2c feat: implement catch-all proxy handler with 402 interception
+4d2d737 feat: add CLI args, wallet loading, and server startup for proxy
+6a84c4a chore: scaffold rustyclawclient-proxy binary crate
+692517c feat: add sign_payment_for_402() and Wallet::from_keypair_bytes()
+```
 
 ## What Didn't Work (Cumulative)
 
-- **Concurrent agents modifying the same files** — parallel agents modified `lib.rs` and `integration.rs` simultaneously. Solution: never dispatch parallel agents that touch the same files.
-- **`git add -A` in subagents** — swept up untracked docs/skills files. Solution: use specific `git add` paths.
-- **Plan specified wrong migration number** — plan said `006_` but only `001_` existed. Agents adapted, but plans should verify existing state.
-- **`solana-client` dep with `solana-sdk 2.2`** — transitive zeroize conflicts. Solution: use reqwest JSON-RPC directly.
-- **`spl-associated-token-account` dep** — same conflict chain. Solution: manual ATA derivation via PDA.
-- **`zeroize` derive feature** — conflicts with `curve25519-dalek v3`. Solution: omit `derive` feature.
-- **Stale `GITHUB_TOKEN` in `.bashrc`** — overrode `gh auth login` credentials. Solution: removed env var.
-- **`Keypair::to_bytes()` for zeroize** — returns a copy, not mutable internals. Documented as best-effort.
-- **`expect()` in library code** — violated project conventions. Fixed by returning `Result` with `ClientError::Config`.
+- **Concurrent agents modifying same files** — never dispatch parallel agents that touch same files.
+- **`git add -A` in subagents** — use specific `git add` paths.
+- **`solana-client` dep with `solana-sdk 2.2`** — transitive zeroize conflicts.
+- **`spl-associated-token-account` dep** — same conflict chain.
+- **`zeroize` derive feature** — conflicts with `curve25519-dalek v3`.
+- **`expect()` in library code** — violated project conventions; return `Result` instead.
+- **RustyClawClient HTTPS remote** — auth failed; switched to SSH.
 
 ---
 
-## Architecture Quick Reference
+## Test Commands
 
-### RustyClawRouter Workspace (this repo)
-
-```
-crates/
-├── protocol/    — rustyclaw-protocol (serde, serde_json, thiserror only)
-├── gateway/     — Binary: rustyclawrouter. Axum server + ServiceRegistry
-├── x402/        — PaymentVerifier trait, SolanaVerifier, Facilitator, escrow, fee payer
-├── router/      — Scorer, profiles (eco/auto/premium/free), model registry
-└── cli/         — rcr CLI binary
-```
-
-### Key Files
-- `CLAUDE.md` — Project instructions, architecture rules, code conventions
-- `.claude/plan/rustyclaw-ecosystem.md` — Master ecosystem plan (RustyClawClient phases A-G)
-- `docs/plans/2026-03-10-extract-rustyclaw-protocol.md` — Protocol extraction plan (completed)
-- `config/models.toml` — 27 models across 5 providers with pricing
-
-### Test Commands
 ```bash
-# RustyClawRouter
-cargo test                            # 304 tests total
-cargo test -p gateway                 # 199 tests (161 unit + 38 integration)
-cargo test -p x402                    # 74 tests
-cargo test -p rustyclaw-protocol      # 18 tests
-cargo test -p router                  # 13 tests
+# RustyClawRouter (~/projects/RustyClawRouter/)
+cargo test                            # 304+ tests
 cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings
 
 # RustyClawClient (~/projects/RustyClawClient/)
 cd ~/projects/RustyClawClient
-OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl cargo test  # 41 tests
+OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl cargo test  # 74 tests (47 unit + 9 client integration + 5 cli-args + 6 cli + 7 proxy integration)
 OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl cargo clippy --all-targets --all-features -- -D warnings
 ```
-
----
-
-## Decision Log (Cumulative)
-
-| # | Decision | Rationale |
-|---|----------|-----------|
-| 1 | Per-model circuit breaker (hybrid) | Model-specific outages more common than full provider outages |
-| 2 | Smart default fallback chains + agent override | Sensible defaults reduce friction, override gives power |
-| 3 | Adaptive heartbeat (5s → 2s) | Balances overhead vs timeout prevention |
-| 4 | Transparent fallback via X-RCR-Fallback header | Least complexity — works without client changes |
-| 5 | Integrated middleware in gateway crate | Features naturally live where streaming/provider calls happen |
-| 6 | Session sticking is client-side | Gateway stays stateless; session is per-agent context |
-| 7 | Prefer escrow payment scheme | Safer for agent — only pays actual cost |
-| 8 | Separate repos (client vs gateway) | Different deployment targets, release cycles, users |
-| 9 | Shared protocol crate on crates.io | Single source of truth for wire format |
-| 10 | HMAC-SHA256 session tokens (not JWT) | Simpler, no external deps |
-| 11 | Payment + Chat types in one protocol crate | Client needs both; one crate guarantees wire compat |
-| 12 | Protocol crate lives in RustyClawRouter repo | Atomic changes with gateway; publish when needed |
-| 13 | Delete both x402-solana and rcr-common | Industry pattern: no "common" alongside protocol crate |
-| 14 | Named `rustyclaw-protocol` | Communicates purpose (contract), already in ecosystem plan |
-| 15 | Flat module structure with top-level re-exports | Simplest, easy to navigate, flat imports |
-| 16 | No error types in protocol crate | Pure types crate; each consumer defines own errors |
-| 17 | ServiceRegistry moved to gateway | Server-internal; every production project does this |
-| 18 | Wrap solana_sdk::Keypair in Wallet | Gets Signer trait for free |
-| 19 | Path dep for rustyclaw-protocol in client | Standard multi-repo dev pattern |
-| 20 | solana-sdk 2.2 for client | Matches gateway, battle-tested |
-| 21 | Manual ATA derivation (no spl-associated-token-account) | Avoids zeroize dep conflicts with solana-sdk 2.2 |
-| 22 | reqwest JSON-RPC for blockhash (no solana-client) | Avoids QUIC/rustls/zeroize conflicts |
-| 23 | Edition 2021 for client (not 2024) | solana-sdk compatibility |
-| 24 | Only "exact" payment scheme (escrow filtered) | Escrow signing not yet implemented |
-| 25 | prefer_escrow defaults to false | Until escrow signing is implemented |
 
 ## User Preferences
 
 - Prefers **subagent-driven execution** (option 1) over parallel sessions
-- Wants **deep competitive analysis** before building
+- Wants **brainstorming before implementation** (one question at a time)
 - Building for **production** use on trading platform + telsi.ai
 - Prefers **adaptive/smart defaults** with user overrides
-- Prefers **transparent behavior** (least complexity for everyone)
 - Rust edition 2021, MSRV 1.85, clippy pedantic
