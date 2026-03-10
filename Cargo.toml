@@ -7,6 +7,7 @@ members = [
     "crates/router",
     "crates/common",
     "crates/cli",
+    "crates/protocol",
 ]
 
 [workspace.package]
@@ -70,3 +71,4 @@ rcr-common = { path = "crates/common" }
 x402 = { path = "crates/x402" }
 x402-solana = { path = "crates/x402-solana" }
 router = { path = "crates/router" }
+rustyclaw-protocol = { path = "crates/protocol" }
