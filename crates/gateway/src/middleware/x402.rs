@@ -40,23 +40,34 @@ pub async fn extract_payment(
     {
         let raw = header_value.to_string();
 
-        // The header value is base64-encoded JSON
-        match decode_payment_header(&raw) {
-            Ok(payload) => {
-                info!(
-                    network = %payload.accepted.network,
-                    resource = %payload.resource.url,
-                    "payment signature extracted"
-                );
-                request.extensions_mut().insert(PaymentInfo {
-                    payload,
-                    raw_header: raw,
-                });
-            }
-            Err(e) => {
-                // If header is present but invalid, still let the request through.
-                // The route handler will see no PaymentInfo and return 402.
-                warn!(error = %e, "failed to decode payment signature header");
+        // Security: limit header size to prevent DoS via oversized base64 payloads
+        const MAX_PAYMENT_HEADER_BYTES: usize = 50_000; // 50KB
+        if raw.len() > MAX_PAYMENT_HEADER_BYTES {
+            warn!(
+                size = raw.len(),
+                max = MAX_PAYMENT_HEADER_BYTES,
+                "payment signature header exceeds size limit"
+            );
+            // Don't decode — let handler return 402
+        } else {
+            // The header value is base64-encoded JSON
+            match decode_payment_header(&raw) {
+                Ok(payload) => {
+                    info!(
+                        network = %payload.accepted.network,
+                        resource = %payload.resource.url,
+                        "payment signature extracted"
+                    );
+                    request.extensions_mut().insert(PaymentInfo {
+                        payload,
+                        raw_header: raw,
+                    });
+                }
+                Err(e) => {
+                    // If header is present but invalid, still let the request through.
+                    // The route handler will see no PaymentInfo and return 402.
+                    warn!(error = %e, "failed to decode payment signature header");
+                }
             }
         }
     }
@@ -157,6 +168,16 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("unable to decode payment header"));
+    }
+
+    #[test]
+    fn test_decode_oversized_header_rejected() {
+        // Create a header larger than 50KB
+        let oversized = "A".repeat(50_001);
+        // The decode function itself doesn't enforce the limit — the middleware does.
+        // But we verify that an oversized garbage string does not decode successfully.
+        let result = decode_payment_header(&oversized);
+        assert!(result.is_err(), "oversized header should not decode");
     }
 
     #[test]

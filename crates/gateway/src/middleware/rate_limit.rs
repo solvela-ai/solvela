@@ -44,6 +44,7 @@ struct RateLimitEntry {
 pub struct RateLimiter {
     config: RateLimitConfig,
     entries: Arc<Mutex<HashMap<String, RateLimitEntry>>>,
+    last_emergency_cleanup: Arc<tokio::sync::Mutex<Option<Instant>>>,
 }
 
 impl RateLimiter {
@@ -51,6 +52,7 @@ impl RateLimiter {
         Self {
             config,
             entries: Arc::new(Mutex::new(HashMap::new())),
+            last_emergency_cleanup: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -58,13 +60,20 @@ impl RateLimiter {
     /// Returns `Ok(remaining)` or `Err(())` if rate limited.
     pub async fn check(&self, client_id: &str) -> Result<u32, ()> {
         // Emergency cleanup: if the map has grown too large, evict expired
-        // entries before acquiring the write lock for this request.
+        // entries — but only if at least 60 seconds have passed since the last
+        // emergency cleanup to prevent cleanup storms under sustained load.
         {
             let entries = self.entries.lock().await;
             let too_large = entries.len() > 100_000;
             drop(entries);
             if too_large {
-                self.cleanup().await;
+                let mut last = self.last_emergency_cleanup.lock().await;
+                let should_cleanup = last.is_none_or(|t| t.elapsed() >= Duration::from_secs(60));
+                if should_cleanup {
+                    *last = Some(Instant::now());
+                    drop(last);
+                    self.cleanup().await;
+                }
             }
         }
 
