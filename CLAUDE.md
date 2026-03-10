@@ -17,12 +17,12 @@ cargo check                       # faster — prefer for iteration
 cargo check -p gateway            # single crate
 cargo build --release             # release build
 
-# Test (139 tests total)
+# Test (304 tests total)
 cargo test                        # all workspace tests
-cargo test -p gateway             # 77 tests (56 unit + 21 integration)
-cargo test -p x402                # 39 tests
+cargo test -p gateway             # 199 tests (161 unit + 38 integration)
+cargo test -p x402                # 74 tests
 cargo test -p router              # 13 tests
-cargo test -p rcr-common          # 10 tests
+cargo test -p rustyclaw-protocol  # 18 tests
 
 # Single test
 cargo test -p gateway test_health_endpoint -- --exact
@@ -62,10 +62,10 @@ Migrations in `migrations/` are applied automatically by `docker compose up` and
 
 ### Workspace Crates (`crates/`)
 
-- **gateway** — The only binary. Axum HTTP server with routes, middleware, provider proxies, usage tracking, and caching. Binary name: `rustyclawrouter`.
-- **x402** — Pure protocol library (no Axum dependency). Payment types, Solana verification, escrow integration, fee payer pool, nonce pool. Chain-agnostic `PaymentVerifier` trait for future EVM support.
+- **gateway** — The only binary. Axum HTTP server with routes, middleware, provider proxies, usage tracking, caching, and `ServiceRegistry`. Binary name: `rustyclawrouter`.
+- **x402** — Pure protocol library (no Axum dependency). Solana verification, escrow integration, fee payer pool, nonce pool. Chain-agnostic `PaymentVerifier` trait for future EVM support. Payment wire-format types re-exported from `rustyclaw-protocol`.
 - **router** — 15-dimension rule-based request scorer (`scorer.rs`), routing profiles (`profiles.rs`: eco/auto/premium/free), and model registry (`models.rs` loads `config/models.toml`).
-- **common** (`rcr-common`) — Shared types: `ChatRequest`, `ChatResponse`, `ChatMessage`, `ModelInfo`, `CostBreakdown`, `ServiceRegistry`.
+- **protocol** (`rustyclaw-protocol`) — Shared wire-format types for the RustyClaw ecosystem. Payment protocol types (`PaymentRequired`, `PaymentPayload`, `CostBreakdown`), OpenAI-compatible chat types (`ChatRequest`, `ChatResponse`, streaming), model info, and constants. Published to crates.io. Zero workspace dependencies.
 - **cli** (`rcr-cli`) — `rcr` CLI binary (clap derive): wallet, chat, models, health, stats, doctor commands.
 
 ### Standalone Anchor Program (`programs/escrow/`)
@@ -152,7 +152,7 @@ use axum::{Router, routing::{get, post}};   // 2. External crates (alphabetical)
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use rcr_common::services::ServiceRegistry;  // 3. Workspace crates
+use rustyclaw_protocol::ChatRequest;         // 3. Workspace crates
 
 use crate::config::AppConfig;               // 4. Crate-internal modules
 ```
@@ -198,7 +198,7 @@ These skills contain patterns, checklists, and constraints specific to this proj
 | `domain-web` | Axum routes, middleware, Tower layers, SSE streaming, CORS, request/response handling | `routes/`, `middleware/`, `providers/`, `lib.rs` (`build_router`) |
 | `m07-concurrency` | Async patterns, tokio::spawn, fire-and-forget, background tasks, Arc sharing | `usage.rs`, `cache.rs`, `balance_monitor.rs`, `escrow/claimer.rs`, `main.rs` |
 | `api-design` | Adding/changing HTTP endpoints, 402 response shape, OpenAI compatibility, query params | `routes/chat.rs`, `routes/services.rs`, `routes/models.rs`, x402 types |
-| `tdd-workflow` | Any new feature or bugfix — write tests first | All crates (139 existing tests, integration tests in `gateway/tests/`) |
+| `tdd-workflow` | Any new feature or bugfix — write tests first | All crates (304 existing tests, integration tests in `gateway/tests/`) |
 | `docker-patterns` | Container config, compose services, multi-stage builds | `Dockerfile`, `docker-compose.yml` |
 | `deployment-patterns` | Deploy config, CI/CD, infrastructure | `Dockerfile`, `fly.toml` |
 
