@@ -26,3 +26,30 @@ pub struct ModelInfo {
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_info_capability_fields() {
+        let json = r#"{"id":"openai/gpt-4o","provider":"openai","model_id":"gpt-4o","display_name":"GPT-4o","input_cost_per_million":2.5,"output_cost_per_million":10.0,"context_window":128000,"supports_streaming":true,"supports_tools":true,"supports_vision":true,"reasoning":false,"supports_structured_output":true,"supports_batch":true,"max_output_tokens":16384}"#;
+        let info: ModelInfo = serde_json::from_str(json).unwrap();
+        assert!(info.supports_structured_output);
+        assert!(info.supports_batch);
+        assert_eq!(info.max_output_tokens, Some(16384));
+    }
+
+    #[test]
+    fn test_model_info_backward_compat() {
+        let json = r#"{"id":"openai/gpt-4o","provider":"openai","model_id":"gpt-4o","display_name":"GPT-4o","input_cost_per_million":2.5,"output_cost_per_million":10.0,"context_window":128000}"#;
+        let info: ModelInfo = serde_json::from_str(json).unwrap();
+        assert!(!info.supports_structured_output);
+        assert!(!info.supports_batch);
+        assert_eq!(info.max_output_tokens, None);
+        assert!(!info.supports_streaming);
+        assert!(!info.supports_tools);
+        assert!(!info.supports_vision);
+        assert!(!info.reasoning);
+    }
+}

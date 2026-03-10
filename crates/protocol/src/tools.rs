@@ -54,3 +54,23 @@ pub struct ToolDefinition {
     pub r#type: String,
     pub function: FunctionDefinitionInner,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tool_call_serde_roundtrip() {
+        let tc = ToolCall {
+            id: "call_abc123".to_string(),
+            r#type: "function".to_string(),
+            function: FunctionCall { name: "get_weather".to_string(), arguments: r#"{"location":"NYC"}"#.to_string() },
+        };
+        let json = serde_json::to_string(&tc).unwrap();
+        let deser: ToolCall = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, tc);
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(val.get("type").is_some());
+        assert!(val.get("r#type").is_none());
+    }
+}

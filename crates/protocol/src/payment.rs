@@ -79,3 +79,116 @@ pub struct PaymentPayload {
     pub accepted: PaymentAccept,
     pub payload: PayloadData,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::*;
+    use crate::cost::CostBreakdown;
+
+    #[test]
+    fn test_payment_required_serialization() {
+        let pr = PaymentRequired {
+            x402_version: X402_VERSION,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepts: vec![PaymentAccept {
+                scheme: "exact".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "2625".to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: "RecipientWalletPubkeyHere".to_string(),
+                max_timeout_seconds: MAX_TIMEOUT_SECONDS,
+                escrow_program_id: None,
+            }],
+            cost_breakdown: CostBreakdown {
+                provider_cost: "0.002500".to_string(),
+                platform_fee: "0.000125".to_string(),
+                total: "0.002625".to_string(),
+                currency: "USDC".to_string(),
+                fee_percent: 5,
+            },
+            error: "Payment required".to_string(),
+        };
+        let json = serde_json::to_string_pretty(&pr).unwrap();
+        assert!(json.contains("x402_version"));
+        assert!(json.contains("solana:"));
+        assert!(json.contains("cost_breakdown"));
+    }
+
+    #[test]
+    fn test_payment_accept_escrow_serialization() {
+        let accept = PaymentAccept {
+            scheme: "escrow".to_string(),
+            network: SOLANA_NETWORK.to_string(),
+            amount: "5000".to_string(),
+            asset: USDC_MINT.to_string(),
+            pay_to: "RecipientWalletPubkeyHere".to_string(),
+            max_timeout_seconds: MAX_TIMEOUT_SECONDS,
+            escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+        };
+        let json = serde_json::to_string(&accept).unwrap();
+        assert!(json.contains("escrow_program_id"));
+        assert!(json.contains("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy"));
+    }
+
+    #[test]
+    fn test_payment_accept_exact_no_escrow_field() {
+        let accept = PaymentAccept {
+            scheme: "exact".to_string(),
+            network: SOLANA_NETWORK.to_string(),
+            amount: "2625".to_string(),
+            asset: USDC_MINT.to_string(),
+            pay_to: "RecipientWalletPubkeyHere".to_string(),
+            max_timeout_seconds: MAX_TIMEOUT_SECONDS,
+            escrow_program_id: None,
+        };
+        let json = serde_json::to_string(&accept).unwrap();
+        assert!(!json.contains("escrow_program_id"), "escrow_program_id should be absent when None");
+    }
+
+    #[test]
+    fn test_payload_data_direct_roundtrip() {
+        let direct = PayloadData::Direct(SolanaPayload { transaction: "dGVzdA==".to_string() });
+        let json = serde_json::to_string(&direct).unwrap();
+        let deserialized: PayloadData = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            PayloadData::Direct(p) => assert_eq!(p.transaction, "dGVzdA=="),
+            PayloadData::Escrow(_) => panic!("expected Direct variant"),
+        }
+    }
+
+    #[test]
+    fn test_payload_data_escrow_roundtrip() {
+        let escrow = PayloadData::Escrow(EscrowPayload {
+            deposit_tx: "dGVzdA==".to_string(),
+            service_id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+            agent_pubkey: "11111111111111111111111111111111".to_string(),
+        });
+        let json = serde_json::to_string(&escrow).unwrap();
+        let deserialized: PayloadData = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            PayloadData::Escrow(p) => {
+                assert_eq!(p.deposit_tx, "dGVzdA==");
+                assert_eq!(p.agent_pubkey, "11111111111111111111111111111111");
+            }
+            PayloadData::Direct(_) => panic!("expected Escrow variant"),
+        }
+    }
+
+    #[test]
+    fn test_escrow_payload_serde_roundtrip() {
+        let ep = EscrowPayload {
+            deposit_tx: "abc123".to_string(),
+            service_id: "c2VydmljZTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNA==".to_string(),
+            agent_pubkey: "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz".to_string(),
+        };
+        let json = serde_json::to_string(&ep).unwrap();
+        let deserialized: EscrowPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.deposit_tx, ep.deposit_tx);
+        assert_eq!(deserialized.service_id, ep.service_id);
+        assert_eq!(deserialized.agent_pubkey, ep.agent_pubkey);
+    }
+}
