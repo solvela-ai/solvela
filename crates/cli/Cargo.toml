@@ -8,7 +8,6 @@ name = "rcr"
 path = "src/main.rs"
 
 [dependencies]
-rcr-common = { workspace = true }
 x402 = { workspace = true }
 router = { workspace = true }
 
