@@ -26,7 +26,7 @@ const WEIGHTS: [f64; 15] = [
 ///
 /// The scorer is purely rule-based with zero external calls, targeting
 /// <1 microsecond per classification.
-pub fn classify(messages: &[rcr_common::types::ChatMessage], has_tools: bool) -> ScorerResult {
+pub fn classify(messages: &[rustyclaw_protocol::ChatMessage], has_tools: bool) -> ScorerResult {
     let text = concatenate_user_content(messages);
     let word_count = text.split_whitespace().count();
     let msg_count = messages.len();
@@ -217,10 +217,10 @@ pub struct ScorerResult {
 // ---------------------------------------------------------------------------
 
 /// Concatenate all user message content into a single lowercase string.
-fn concatenate_user_content(messages: &[rcr_common::types::ChatMessage]) -> String {
+fn concatenate_user_content(messages: &[rustyclaw_protocol::ChatMessage]) -> String {
     messages
         .iter()
-        .filter(|m| m.role == rcr_common::types::Role::User)
+        .filter(|m| m.role == rustyclaw_protocol::Role::User)
         .map(|m| m.content.as_str())
         .collect::<Vec<_>>()
         .join(" ")
@@ -271,7 +271,7 @@ fn score_math_presence(text: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rcr_common::types::{ChatMessage, Role};
+    use rustyclaw_protocol::{ChatMessage, Role};
 
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {
