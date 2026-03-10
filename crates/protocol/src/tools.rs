@@ -64,7 +64,10 @@ mod tests {
         let tc = ToolCall {
             id: "call_abc123".to_string(),
             r#type: "function".to_string(),
-            function: FunctionCall { name: "get_weather".to_string(), arguments: r#"{"location":"NYC"}"#.to_string() },
+            function: FunctionCall {
+                name: "get_weather".to_string(),
+                arguments: r#"{"location":"NYC"}"#.to_string(),
+            },
         };
         let json = serde_json::to_string(&tc).unwrap();
         let deser: ToolCall = serde_json::from_str(&json).unwrap();

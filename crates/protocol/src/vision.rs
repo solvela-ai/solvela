@@ -23,8 +23,15 @@ mod tests {
     #[test]
     fn test_content_part_text_and_image() {
         let parts = vec![
-            ContentPart::Text { text: "What's in this image?".to_string() },
-            ContentPart::ImageUrl { image_url: ImageUrl { url: "https://example.com/img.png".to_string(), detail: Some("high".to_string()) } },
+            ContentPart::Text {
+                text: "What's in this image?".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "https://example.com/img.png".to_string(),
+                    detail: Some("high".to_string()),
+                },
+            },
         ];
         let json = serde_json::to_string(&parts).unwrap();
         let deser: Vec<ContentPart> = serde_json::from_str(&json).unwrap();

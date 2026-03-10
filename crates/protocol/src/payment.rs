@@ -146,12 +146,17 @@ mod tests {
             escrow_program_id: None,
         };
         let json = serde_json::to_string(&accept).unwrap();
-        assert!(!json.contains("escrow_program_id"), "escrow_program_id should be absent when None");
+        assert!(
+            !json.contains("escrow_program_id"),
+            "escrow_program_id should be absent when None"
+        );
     }
 
     #[test]
     fn test_payload_data_direct_roundtrip() {
-        let direct = PayloadData::Direct(SolanaPayload { transaction: "dGVzdA==".to_string() });
+        let direct = PayloadData::Direct(SolanaPayload {
+            transaction: "dGVzdA==".to_string(),
+        });
         let json = serde_json::to_string(&direct).unwrap();
         let deserialized: PayloadData = serde_json::from_str(&json).unwrap();
         match deserialized {
