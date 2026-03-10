@@ -4,8 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rcr-common = { workspace = true }
-x402-solana = { workspace = true }
+rustyclaw-protocol = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
