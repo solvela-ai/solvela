@@ -12,7 +12,7 @@ name = "rustyclawrouter"
 path = "src/main.rs"
 
 [dependencies]
-rcr-common = { workspace = true }
+rustyclaw-protocol = { workspace = true }
 x402 = { workspace = true, features = ["postgres"] }
 router = { workspace = true }
 
@@ -47,6 +47,9 @@ base64 = { workspace = true }
 bs58 = { workspace = true }
 futures = { workspace = true }
 pin-project-lite = "0.2"
+
+# Config parsing
+toml = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }

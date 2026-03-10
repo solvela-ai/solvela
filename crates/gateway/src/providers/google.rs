@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use rcr_common::types::{
+use rustyclaw_protocol::{
     ChatChoice, ChatMessage, ChatRequest, ChatResponse, ModelInfo, Role, Usage,
 };
 

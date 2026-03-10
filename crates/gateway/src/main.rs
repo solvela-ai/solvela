@@ -9,7 +9,7 @@ use gateway::{
     providers::ProviderRegistry,
     AppState,
 };
-use rcr_common::services::ServiceRegistry;
+use gateway::services::ServiceRegistry;
 use router::models::ModelRegistry;
 
 #[tokio::main]

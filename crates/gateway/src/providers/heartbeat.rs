@@ -14,7 +14,7 @@ use futures::Stream;
 use pin_project_lite::pin_project;
 use tokio::time::{Instant, Sleep};
 
-use rcr_common::types::ChatChunk;
+use rustyclaw_protocol::ChatChunk;
 
 use super::ProviderError;
 
@@ -146,7 +146,7 @@ mod tests {
     use futures::StreamExt;
     use tokio_stream::wrappers::ReceiverStream;
 
-    use rcr_common::types::{ChatChunk, ChatChunkChoice, ChatDelta};
+    use rustyclaw_protocol::{ChatChunk, ChatChunkChoice, ChatDelta};
 
     use super::*;
 

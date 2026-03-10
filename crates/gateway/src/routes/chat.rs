@@ -8,7 +8,7 @@ use axum::Json;
 use futures::StreamExt;
 use tracing::{info, warn};
 
-use rcr_common::types::ChatRequest;
+use rustyclaw_protocol::ChatRequest;
 use router::profiles::{self, Profile};
 use router::scorer;
 
@@ -613,7 +613,7 @@ fn estimate_input_tokens(req: &ChatRequest) -> u32 {
 fn compute_actual_atomic_cost(
     prompt_tokens: u32,
     completion_tokens: u32,
-    model_info: &rcr_common::types::ModelInfo,
+    model_info: &rustyclaw_protocol::ModelInfo,
 ) -> u64 {
     let input_cost = (prompt_tokens as f64 / 1_000_000.0) * model_info.input_cost_per_million;
     let output_cost = (completion_tokens as f64 / 1_000_000.0) * model_info.output_cost_per_million;
@@ -699,7 +699,7 @@ fn usdc_atomic_amount(decimal_str: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rcr_common::types::{ChatMessage, ModelInfo, Role};
+    use rustyclaw_protocol::{ChatMessage, ModelInfo, Role};
 
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {

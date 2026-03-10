@@ -14,7 +14,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::Stream;
 
-use rcr_common::types::{ChatChunk, ChatRequest, ChatResponse, ModelInfo};
+use rustyclaw_protocol::{ChatChunk, ChatRequest, ChatResponse, ModelInfo};
 
 /// Error type for provider operations.
 pub type ProviderError = Box<dyn std::error::Error + Send + Sync>;

@@ -10,6 +10,7 @@ pub mod error;
 pub mod middleware;
 pub mod providers;
 pub mod routes;
+pub mod services;
 pub mod session;
 pub mod usage;
 
@@ -23,7 +24,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
-use rcr_common::services::ServiceRegistry;
+use crate::services::ServiceRegistry;
 use router::models::ModelRegistry;
 use x402::facilitator::Facilitator;
 

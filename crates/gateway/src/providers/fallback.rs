@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use tracing::{info, warn};
 
-use rcr_common::types::{ChatRequest, ChatResponse};
+use rustyclaw_protocol::{ChatRequest, ChatResponse};
 
 use super::health::ProviderHealthTracker;
 use super::{ChatStream, ProviderError, ProviderRegistry};

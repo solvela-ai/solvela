@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use rcr_common::types::{ChatRequest, ChatResponse, ModelInfo};
+use rustyclaw_protocol::{ChatRequest, ChatResponse, ModelInfo};
 
 use super::{ChatStream, LLMProvider, ProviderError};
 

@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-use rcr_common::types::{ChatRequest, ChatResponse};
+use rustyclaw_protocol::{ChatRequest, ChatResponse};
 
 /// Cache configuration.
 #[derive(Debug, Clone)]
@@ -259,7 +259,7 @@ pub enum CacheError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rcr_common::types::{ChatMessage, Role};
+    use rustyclaw_protocol::{ChatMessage, Role};
 
     /// Helper to build a ChatRequest for testing.
     fn make_request(
