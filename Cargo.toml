@@ -63,6 +63,7 @@ anyhow = "1"
 
 # Security
 zeroize = { version = "1", features = ["derive"] }
+lru = "0.12"
 
 # Workspace crates
 x402 = { path = "crates/x402" }

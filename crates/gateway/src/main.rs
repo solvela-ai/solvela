@@ -257,19 +257,30 @@ async fn main() -> anyhow::Result<()> {
         fee_payer_pool,
         nonce_pool,
         db_pool,
-        session_secret: match std::env::var("RCR_SESSION_SECRET") {
-            Ok(b64) => {
-                use base64::Engine;
-                base64::engine::general_purpose::STANDARD
-                    .decode(&b64)
-                    .unwrap_or_else(|e| {
-                        warn!(error = %e, "invalid RCR_SESSION_SECRET base64 — generating random secret");
-                        generate_random_secret()
-                    })
-            }
-            Err(_) => {
-                info!("RCR_SESSION_SECRET not set — generating ephemeral session secret");
+        session_secret: {
+            let secret = match std::env::var("RCR_SESSION_SECRET") {
+                Ok(b64) => {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(&b64)
+                        .unwrap_or_else(|e| {
+                            warn!(error = %e, "invalid RCR_SESSION_SECRET base64 — generating random secret");
+                            generate_random_secret()
+                        })
+                }
+                Err(_) => {
+                    warn!("RCR_SESSION_SECRET not set — generating ephemeral session secret (sessions will not survive restarts)");
+                    generate_random_secret()
+                }
+            };
+            if secret.len() < 32 {
+                warn!(
+                    len = secret.len(),
+                    "session secret is shorter than 32 bytes — this is cryptographically weak; generating random secret"
+                );
                 generate_random_secret()
+            } else {
+                secret
             }
         },
     });

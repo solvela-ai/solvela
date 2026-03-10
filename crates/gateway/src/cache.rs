@@ -4,8 +4,10 @@
 //! TTL: 10min default, configurable per model.
 //! Expected hit rate: 15–30%.
 
-use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
+
+use lru::LruCache;
 
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -36,15 +38,15 @@ impl Default for CacheConfig {
 /// Streaming requests (stream=true) are NOT cached.
 ///
 /// When Redis is unavailable, replay protection degrades to an in-memory
-/// `HashSet` bounded to `fallback_replay_max` entries. This prevents replay
-/// attacks during brief Redis outages without failing closed on every payment.
+/// LRU cache bounded to 10,000 entries. The LRU cache automatically evicts
+/// the oldest entries when full, eliminating the clear-on-overflow gap that
+/// a `HashSet` would have.
 pub struct ResponseCache {
     client: redis::Client,
     config: CacheConfig,
     /// In-memory replay protection fallback used when Redis is unreachable.
-    fallback_replay_set: Mutex<HashSet<String>>,
-    /// Maximum entries kept in the fallback replay set before it is cleared.
-    fallback_replay_max: usize,
+    /// LRU eviction ensures oldest entries are dropped first — no full clears.
+    fallback_replay_set: Mutex<LruCache<String, ()>>,
 }
 
 impl ResponseCache {
@@ -55,8 +57,9 @@ impl ResponseCache {
         Ok(Self {
             client,
             config,
-            fallback_replay_set: Mutex::new(HashSet::new()),
-            fallback_replay_max: 10_000,
+            fallback_replay_set: Mutex::new(LruCache::new(
+                NonZeroUsize::new(10_000).expect("nonzero"),
+            )),
         })
     }
 
@@ -68,8 +71,9 @@ impl ResponseCache {
         Ok(Self {
             client,
             config,
-            fallback_replay_set: Mutex::new(HashSet::new()),
-            fallback_replay_max: 10_000,
+            fallback_replay_set: Mutex::new(LruCache::new(
+                NonZeroUsize::new(10_000).expect("nonzero"),
+            )),
         })
     }
 
@@ -169,11 +173,9 @@ impl ResponseCache {
     /// plus settlement latency, without persisting stale entries indefinitely.
     ///
     /// **Degraded mode**: if Redis is unavailable, the method falls back to an
-    /// in-memory `HashSet` (bounded to `fallback_replay_max` entries).  A warning
-    /// is emitted so operators know protection is degraded.  When the set grows
-    /// beyond its limit it is cleared entirely — a brief gap in protection is
-    /// preferable to permanently failing all payments.  This is strictly better
-    /// than the old fail-open behaviour that provided *no* protection.
+    /// in-memory LRU cache (bounded to 10,000 entries).  A warning is emitted
+    /// so operators know protection is degraded.  The LRU cache automatically
+    /// evicts the oldest entries when full, so there is no clear-on-overflow gap.
     pub async fn check_and_record_tx(&self, tx_signature: &str) -> Result<(), CacheError> {
         let key = format!("rcr:txn:{}", tx_signature);
 
@@ -205,35 +207,23 @@ impl ResponseCache {
                     "Redis unavailable for replay check — falling back to in-memory replay protection (degraded)"
                 );
 
-                // Degraded fallback: use in-memory HashSet for replay protection.
-                // This is safe for single-instance deployments and provides meaningful
-                // protection during brief Redis outages.
-                let mut set = self
+                // LRU cache automatically evicts oldest entries when full —
+                // no clearing needed, no replay window gaps.
+                let mut cache = self
                     .fallback_replay_set
                     .lock()
                     .expect("fallback replay set mutex poisoned");
 
-                // Bound the set to prevent unbounded memory growth.
-                // Clearing on overflow is a brief gap in protection but avoids OOM.
-                if set.len() >= self.fallback_replay_max {
-                    warn!(
-                        limit = self.fallback_replay_max,
-                        "fallback replay set full — clearing to prevent OOM; \
-                         brief replay window possible until Redis recovers"
-                    );
-                    set.clear();
-                }
-
-                if set.insert(tx_signature.to_string()) {
-                    // Not seen before — allow through with degraded protection warning
+                if cache.get(tx_signature).is_some() {
+                    // Already seen — replay detected
+                    Err(CacheError::Replay)
+                } else {
+                    cache.put(tx_signature.to_string(), ());
                     warn!(
                         tx = %tx_signature,
                         "payment accepted under degraded in-memory replay protection"
                     );
                     Ok(())
-                } else {
-                    // Already in fallback set — replay detected
-                    Err(CacheError::Replay)
                 }
             }
         }
@@ -390,7 +380,7 @@ mod tests {
         assert_eq!(err.to_string(), "cache unavailable");
     }
 
-    /// Test the in-memory fallback replay set directly (no Redis connection needed).
+    /// Test the in-memory fallback LRU cache directly (no Redis connection needed).
     ///
     /// This exercises the same logic that `check_and_record_tx` delegates to when
     /// Redis is unavailable, without incurring a network timeout.
@@ -400,63 +390,64 @@ mod tests {
             .expect("client creation should not connect");
 
         let sig = "test_tx_signature_abc123";
-        let mut set = cache.fallback_replay_set.lock().unwrap();
+        let mut lru = cache.fallback_replay_set.lock().unwrap();
 
-        // First insert — signature is new, HashSet::insert returns true
+        // First lookup — signature is new, get returns None
         assert!(
-            set.insert(sig.to_string()),
-            "first insert of a new signature should return true"
+            lru.get(sig).is_none(),
+            "first lookup of a new signature should return None"
+        );
+        lru.put(sig.to_string(), ());
+
+        // Second lookup — signature already present, get returns Some
+        assert!(
+            lru.get(sig).is_some(),
+            "duplicate lookup should return Some (replay detected)"
         );
 
-        // Second insert — signature already present, HashSet::insert returns false
+        // Different signature — should not be found
         assert!(
-            !set.insert(sig.to_string()),
-            "duplicate insert should return false (replay detected)"
-        );
-
-        // Different signature — should succeed
-        assert!(
-            set.insert("different_sig_xyz789".to_string()),
-            "a new distinct signature should be insertable"
+            lru.get("different_sig_xyz789").is_none(),
+            "a new distinct signature should not be found"
         );
     }
 
-    /// Verify default fallback set capacity is 10,000.
+    /// When the fallback LRU cache reaches its capacity limit, the oldest entry
+    /// is evicted (not the entire set), so recent entries remain protected.
     #[test]
-    fn test_fallback_replay_set_default_max() {
-        let cache = ResponseCache::new("redis://127.0.0.1:1", CacheConfig::default())
-            .expect("client creation should not connect");
-        assert_eq!(cache.fallback_replay_max, 10_000);
-    }
-
-    /// When the fallback set reaches its capacity limit it is cleared, allowing
-    /// the next insertion (brief window of no in-memory protection).
-    #[test]
-    fn test_fallback_replay_set_cleared_at_limit() {
+    fn test_fallback_replay_set_lru_eviction() {
         let cache = ResponseCache::new("redis://127.0.0.1:1", CacheConfig::default())
             .expect("client creation should not connect");
 
-        // Fill the set to its exact capacity via direct mutex access.
-        {
-            let mut set = cache.fallback_replay_set.lock().unwrap();
-            for i in 0..cache.fallback_replay_max {
-                set.insert(format!("sig_{i}"));
-            }
-            assert_eq!(set.len(), cache.fallback_replay_max);
-        }
+        let mut lru = cache.fallback_replay_set.lock().unwrap();
+        let cap = lru.cap().get();
 
-        // Simulate the clear-and-insert logic from `check_and_record_tx`.
-        let new_sig = "after_clear_sig";
-        {
-            let mut set = cache.fallback_replay_set.lock().unwrap();
-            if set.len() >= cache.fallback_replay_max {
-                set.clear();
-            }
-            let inserted = set.insert(new_sig.to_string());
-            assert!(inserted, "new tx should be accepted after set is cleared");
+        // Fill the LRU cache to its exact capacity.
+        for i in 0..cap {
+            lru.put(format!("sig_{i}"), ());
         }
+        assert_eq!(lru.len(), cap);
 
-        let set_len = cache.fallback_replay_set.lock().unwrap().len();
-        assert_eq!(set_len, 1, "only the new entry should remain after clear");
+        // Insert one more — should evict the oldest (sig_0).
+        lru.put("new_sig".to_string(), ());
+        assert_eq!(lru.len(), cap, "LRU cache should stay at capacity");
+
+        // The oldest entry (sig_0) should have been evicted.
+        assert!(
+            lru.get("sig_0").is_none(),
+            "oldest entry should be evicted by LRU"
+        );
+
+        // The newest entry should still be present.
+        assert!(
+            lru.get("new_sig").is_some(),
+            "newest entry should remain in LRU cache"
+        );
+
+        // A recent entry (sig_9999) should still be present.
+        assert!(
+            lru.get(&format!("sig_{}", cap - 1)).is_some(),
+            "recent entries should remain in LRU cache"
+        );
     }
 }
