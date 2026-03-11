@@ -18,13 +18,13 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ---
 
-## IMMEDIATE NEXT STEP: Phase E — Smart Features
+## IMMEDIATE NEXT STEP: Phase F — SDKs
 
-**Phase D (CLI Tool) is COMPLETE.** All 12 tasks done, 74 tests passing, clippy clean.
+**Phase E (Smart Features) is COMPLETE.** All 10 tasks done, 121 tests passing, clippy clean.
 
-**Next up:** Phase E: Smart Features (sessions, cache, degraded detection, free fallback).
+**Next up:** Phase F: SDKs (Python, TypeScript, Go client SDKs).
 
-**Alternatively:** Remaining RustyClawRouter phases (8, 9, 12, 13, 14) or Phase F (SDKs).
+**Alternatively:** Remaining RustyClawRouter phases (8, 9, 12, 13, 14).
 
 ---
 
@@ -45,6 +45,17 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 **Phase B: Core Client Library** — ✅ complete (51 tests)
 **Phase C: Proxy Sidecar** — ✅ complete (58 tests total, clippy clean)
 **Phase D: CLI Tool (`rcc`)** — ✅ complete (74 tests total, clippy clean)
+
+**Phase E delivered:**
+- `ResponseCache` — `Mutex<LruCache>`, 200 entries, 10min TTL, 30s dedup window
+- `SessionStore` — `RwLock<HashMap>`, configurable TTL, three-strike escalation
+- `BalanceMonitor` — opt-in background poller, `Arc<AtomicU64>` shared state, low-balance callback with transition debouncing
+- Degraded response detection — `EmptyContent`, `RepetitiveLoop`, `TruncatedMidWord`, `KnownErrorPhrase`
+- Free tier fallback — auto-swap model when wallet balance is zero
+- Smart `chat()` flow — cache check → balance guard → session lookup → send → degraded retry → cache store + session update
+- Smart `chat_stream()` flow — balance guard + session lookup (cache/degraded skipped for streaming)
+- All features opt-in via `ClientBuilder` flags (default: off)
+- Cache key computed after model finalization (prevents cross-model pollution)
 
 **Phase D delivered:**
 - `rcc` CLI binary — 4 commands: `wallet`, `chat`, `models`, `doctor`
@@ -70,7 +81,11 @@ crates/rustyclaw-client/src/
 ├── config.rs    — ClientConfig + ClientBuilder
 ├── wallet.rs    — Wallet (Keypair, BIP39, from_keypair_bytes, to_keypair_bytes/b58, zeroize)
 ├── signer.rs    — sign_exact_payment, build_payment_payload, encode_payment_header, associated_token_address (pub(crate))
-└── client.rs    — RustyClawClient with chat(), chat_stream(), models(), estimate_cost(), sign_payment_for_402(), usdc_balance(), usdc_balance_of()
+├── client.rs    — RustyClawClient with chat(), chat_stream(), models(), estimate_cost(), sign_payment_for_402(), usdc_balance(), usdc_balance_of(), last_known_balance(), balance_state()
+├── cache.rs     — ResponseCache (Mutex<LruCache>, TTL, dedup window) (pub(crate))
+├── session.rs   — SessionStore (RwLock<HashMap>, TTL, three-strike) (pub(crate))
+├── quality.rs   — is_degraded() + DegradedReason enum (pub(crate))
+└── balance.rs   — BalanceMonitor (pub) — opt-in background poller with Arc<AtomicU64>
 tests/
 └── integration.rs — 9 wiremock-based tests
 
@@ -109,6 +124,21 @@ tests/
 | 35 | Strip caller's PAYMENT-SIGNATURE | Prevents injection of fraudulent payment proofs |
 | 36 | Structured JSON error responses | Caller can programmatically handle errors |
 
+### Phase E Design Decisions (from brainstorming)
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 47 | `Mutex<LruCache>` for caches, not DashMap | Short critical sections; matches mini-redis, hyper-util patterns |
+| 48 | `RwLock<HashMap>` for sessions | Reads dominate writes; matches Solana client pattern |
+| 49 | Opt-in `BalanceMonitor`, no auto-spawn | No client library auto-spawns background tasks (researched Solana, ethers-rs, Stripe, AWS) |
+| 50 | `Arc<AtomicU64>` shared balance state | Lock-free reads on every request; sentinel `u64::MAX` = unknown |
+| 51 | Gateway-driven fallback for degraded responses | Client detects, sends `X-RCR-Retry-Reason: degraded`, gateway picks next model |
+| 52 | Free tier fallback via `openai/gpt-oss-120b` | Zero-cost model in gateway config; client swaps when balance is zero |
+| 53 | Three-strike escalation on sessions | 3+ identical request hashes in last 10 → `escalated: true` (tracked, not yet acted on) |
+| 54 | Cache key after model finalization | Prevents cross-model pollution when balance guard or session changes model |
+| 55 | Low-balance callback with transition debouncing | Only fires on not-low→low transition, not every tick |
+| 56 | Skip cache/degraded for streaming | Caching streams is complex; degraded detection requires full response |
+
 ### Phase D Design Decisions (from brainstorming)
 
 | # | Decision | Rationale |
@@ -135,7 +165,7 @@ tests/
 | B: Core Client Library | Wallet, signer, client | ✅ Complete |
 | C: Proxy Sidecar | localhost OpenAI-compat proxy | ✅ Complete (58 tests) |
 | D: CLI (`rcc`) | wallet, chat, models, doctor commands | ✅ Complete (74 tests) |
-| E: Smart Features | Sessions, cache, degraded detection, free fallback | Not started |
+| E: Smart Features | Sessions, cache, degraded detection, free fallback | ✅ Complete (121 tests) |
 | F: SDKs | Python, TS, Go client SDKs | Not started |
 | G: Gateway Changes | Debug headers, session ID, stats endpoint | G.3 (heartbeat) ✅, rest not started |
 
@@ -167,6 +197,21 @@ tests/
 - **Industry research before design decisions** — parallel research agents for each decision (CLI patterns, streaming, wallet formats, balance APIs).
 - **Probe+stream pattern for 402 payment** — non-streaming probe to get 402, then stream with payment header. Clean SSE integration.
 - **TTY-aware output** — `std::io::IsTerminal` for smart defaults (stream/table in TTY, JSON when piped).
+
+**Phase E commit history (RustyClawClient):**
+```
+a413f39 feat: integrate balance guard and session lookup into chat_stream()
+e0107c7 fix: compute cache key after model finalization to prevent cross-model pollution
+a8143f4 feat: integrate smart features into chat() request flow
+cf38659 refactor: address review feedback on BalanceMonitor
+65f46d5 feat: add opt-in BalanceMonitor with polling and low-balance callback
+2d7741a feat: add shared balance state and optional smart feature stores to RustyClawClient
+a34009d feat: add smart feature config fields to ClientConfig and ClientBuilder
+d1f06ba feat: add degraded response detection with DegradedReason enum
+02c49c7 feat: add SessionStore with TTL and three-strike escalation
+03fdaca feat: add ResponseCache with LRU eviction and TTL
+0a368cd chore: add lru crate to workspace dependencies
+```
 
 **Phase D commit history (RustyClawClient):**
 ```
@@ -215,7 +260,7 @@ cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings
 
 # RustyClawClient (~/projects/RustyClawClient/)
 cd ~/projects/RustyClawClient
-OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl cargo test  # 74 tests (47 unit + 9 client integration + 5 cli-args + 6 cli + 7 proxy integration)
+OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl cargo test  # 121 tests (93 unit + 9 client integration + 5 cli + 6 cli-args + 7 proxy integration + 1 doc-test)
 OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl cargo clippy --all-targets --all-features -- -D warnings
 ```
 
