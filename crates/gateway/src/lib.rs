@@ -29,6 +29,7 @@ use router::models::ModelRegistry;
 use x402::facilitator::Facilitator;
 
 use crate::middleware::rate_limit::RateLimiter;
+use crate::middleware::request_id::RequestIdLayer;
 use crate::providers::ProviderRegistry;
 
 /// Shared application state passed to all route handlers.
@@ -95,6 +96,8 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             HeaderName::from_static("referrer-policy"),
             HeaderValue::from_static("no-referrer"),
         ))
+        // Request ID — outermost layer, always attaches X-RCR-Request-Id
+        .layer(RequestIdLayer)
         .with_state(state)
 }
 
@@ -142,5 +145,15 @@ fn build_cors() -> CorsLayer {
             "payment-signature"
                 .parse()
                 .expect("'payment-signature' is a valid header name"),
+            // Debug + request correlation headers
+            "x-request-id"
+                .parse()
+                .expect("'x-request-id' is a valid header name"),
+            "x-rcr-debug"
+                .parse()
+                .expect("'x-rcr-debug' is a valid header name"),
+            "x-session-id"
+                .parse()
+                .expect("'x-session-id' is a valid header name"),
         ])
 }
