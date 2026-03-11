@@ -23,6 +23,9 @@ Thumbs.db
 *.pem
 wallet.json
 
+# Worktrees
+.worktrees/
+
 # Docker volumes
 docker-data/
 
