@@ -18,13 +18,11 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ---
 
-## IMMEDIATE NEXT STEP: Phase F — SDKs
+## IMMEDIATE NEXT STEP: Remaining RustyClawRouter Phases (8, 9, 12, 13, 14)
 
-**Phase E (Smart Features) is COMPLETE.** All 10 tasks done, 121 tests passing, clippy clean.
+**Phase F (SDKs) is COMPLETE.** Three language SDKs built from scratch, 301 tests total.
 
-**Next up:** Phase F: SDKs (Python, TypeScript, Go client SDKs).
-
-**Alternatively:** Remaining RustyClawRouter phases (8, 9, 12, 13, 14).
+**Next up:** Remaining RustyClawRouter phases: 8 (Escrow), 9 (Service Marketplace), 12 (Monitoring), 13 (Docs/Examples), 14 (Production Hardening).
 
 ---
 
@@ -166,7 +164,7 @@ tests/
 | C: Proxy Sidecar | localhost OpenAI-compat proxy | ✅ Complete (58 tests) |
 | D: CLI (`rcc`) | wallet, chat, models, doctor commands | ✅ Complete (74 tests) |
 | E: Smart Features | Sessions, cache, degraded detection, free fallback | ✅ Complete (121 tests) |
-| F: SDKs | Python, TS, Go client SDKs | Not started |
+| F: SDKs | Python, TS, Go client SDKs | ✅ Complete (301 tests across 3 repos) |
 | G: Gateway Changes | Debug headers, session ID, stats endpoint | G.3 (heartbeat) ✅, rest not started |
 
 **Remaining RustyClawRouter phases:** 8, 9, 12, 13, 14 (see ecosystem plan)
@@ -239,6 +237,39 @@ abbbd2c feat: implement catch-all proxy handler with 402 interception
 692517c feat: add sign_payment_for_402() and Wallet::from_keypair_bytes()
 ```
 
+**Phase F delivered (3 separate repos, fresh implementations from Rust client reference):**
+- **`rustyclaw-python`** (`~/projects/rustyclaw-python/`) — 114 tests, Python 3.10+, httpx + solders
+- **`rustyclaw-ts`** (`~/projects/rustyclaw-ts/`) — 100 tests, Node 18+, @solana/web3.js + native fetch
+- **`rustyclaw-go`** (`~/projects/rustyclaw-go/`) — 87 tests, Go 1.21+, stdlib net/http + ed25519
+
+Each SDK implements:
+- Wire-format types (matching `rustyclaw-protocol` exactly, snake_case JSON)
+- Wallet with keypair management + BIP39 mnemonics + secret redaction
+- Pluggable `Signer` interface with `KeypairSigner` (USDC-SPL transfers)
+- LRU response cache with TTL and dedup window
+- Session store with three-strike escalation
+- Quality check (4 degradation heuristics: empty, error phrases, repetitive loops, truncated)
+- HTTP transport with SSE streaming
+- Balance monitor with transition-debounced low-balance callback
+- 7-step smart chat flow (balance guard → session → cache → send → quality → cache store → session update)
+- OpenAI-compatible wrapper (Python/TS only — Go skips, no dominant Go OpenAI SDK)
+- Live contract tests (skipped by default)
+- CI with multi-version matrix (Python 3.10-3.12, Node 18/20/22, Go 1.21-1.23)
+
+### Phase F Design Decisions (from brainstorming)
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 57 | Separate repos per language | Industry standard, independent release cycles |
+| 58 | Fresh start from Rust reference | Clean slate avoids inheriting quirks from old sdks/ code |
+| 59 | Full on-chain signing, pluggable signer | Industry standard for crypto SDKs, proxy overkill for micropayments |
+| 60 | Minimal dependencies (HTTP + crypto) | Fewer conflicts for consumers |
+| 61 | Unit + integration + live contract tests | Maximum confidence, live tests catch real protocol issues |
+| 62 | Layered client architecture (1:1 Rust mapping) | Each module testable in isolation, easy cross-referencing |
+| 63 | OpenAI compat via wrapper classes (not subclass) | Zero dep on openai package |
+| 64 | Cache key after model finalization | Same fix as Rust client, prevents cross-model pollution |
+| 65 | Go skips OpenAI compat | No dominant Go OpenAI SDK pattern to mimic |
+
 ## What Didn't Work (Cumulative)
 
 - **Concurrent agents modifying same files** — never dispatch parallel agents that touch same files.
@@ -262,6 +293,11 @@ cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings
 cd ~/projects/RustyClawClient
 OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl cargo test  # 121 tests (93 unit + 9 client integration + 5 cli + 6 cli-args + 7 proxy integration + 1 doc-test)
 OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl cargo clippy --all-targets --all-features -- -D warnings
+
+# SDK Tests (~/projects/rustyclaw-{python,ts,go}/)
+cd ~/projects/rustyclaw-python && source .venv/bin/activate && pytest tests/ --ignore=tests/live -q  # 114 tests
+cd ~/projects/rustyclaw-ts && npx vitest run  # 100 tests
+cd ~/projects/rustyclaw-go && go test ./... -v  # 87 tests
 ```
 
 ## User Preferences
