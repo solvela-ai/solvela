@@ -33,6 +33,7 @@ use x402::facilitator::Facilitator;
 use crate::middleware::rate_limit::RateLimiter;
 use crate::middleware::request_id::RequestIdLayer;
 use crate::providers::ProviderRegistry;
+use crate::routes::escrow::SlotCache;
 
 /// Shared application state passed to all route handlers.
 pub struct AppState {
@@ -56,6 +57,11 @@ pub struct AppState {
     /// In-memory replay protection fallback used when Redis (`cache`) is absent.
     /// LRU-bounded to 10,000 entries so the oldest signatures are evicted first.
     pub replay_set: Mutex<LruCache<String, ()>>,
+    /// Cached Solana slot for the `/v1/escrow/config` endpoint (5s TTL).
+    pub slot_cache: SlotCache,
+    /// In-memory escrow claim metrics (submitted, succeeded, failed, retried).
+    /// `None` when escrow or claim processor is not configured.
+    pub escrow_metrics: Option<Arc<x402::escrow::EscrowMetrics>>,
 }
 
 impl AppState {
@@ -90,6 +96,8 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             "/v1/wallet/{address}/stats",
             get(routes::stats::wallet_stats),
         )
+        .route("/v1/escrow/config", get(routes::escrow::escrow_config))
+        .route("/v1/escrow/health", get(routes::escrow::escrow_health))
         .route("/pricing", get(routes::pricing::pricing))
         .route("/health", get(routes::health::health))
         .layer(axum::middleware::from_fn(

@@ -225,6 +225,24 @@ impl FeePayerPool {
         }
     }
 
+    /// Mark a wallet as healthy (clears cooldown).
+    ///
+    /// If `index` is out of bounds, this is a no-op.
+    pub fn mark_healthy(&self, index: usize) {
+        if let Some(wallet) = self.wallets.get(index) {
+            let mut guard = wallet
+                .failed_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = None;
+        }
+    }
+
+    /// Returns the pubkey strings for all wallets in the pool.
+    pub fn pubkeys(&self) -> Vec<String> {
+        self.wallets.iter().map(|w| w.pubkey_b58.clone()).collect()
+    }
+
     /// Number of wallets in the pool.
     pub fn len(&self) -> usize {
         self.wallets.len()
@@ -478,6 +496,117 @@ mod tests {
         assert!(
             !pool_debug.contains("keypair"),
             "pool debug must not contain raw keypair data"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. mark_healthy clears cooldown immediately
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mark_healthy_clears_cooldown() {
+        let keys = test_keypairs(1);
+        let pool = FeePayerPool::from_keys(&keys).expect("should load 1 key");
+
+        let w0 = pool.next().expect("wallet 0");
+        pool.mark_failed(w0.index);
+
+        // Wallet is now in cooldown
+        let result = pool.next();
+        assert!(result.is_err(), "wallet should be in cooldown");
+
+        // Explicitly mark healthy
+        pool.mark_healthy(w0.index);
+
+        // Wallet should be immediately available
+        let recovered = pool
+            .next()
+            .expect("wallet should be available after mark_healthy");
+        assert_eq!(recovered.pubkey_b58, w0.pubkey_b58);
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. mark_healthy out of bounds is a no-op
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mark_healthy_out_of_bounds_noop() {
+        let keys = test_keypairs(1);
+        let pool = FeePayerPool::from_keys(&keys).expect("should load 1 key");
+        // Should not panic
+        pool.mark_healthy(999);
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. pubkeys returns all wallet pubkeys
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pubkeys_returns_all() {
+        let keys = test_keypairs(3);
+        let pool = FeePayerPool::from_keys(&keys).expect("should load 3 keys");
+        let pubkeys = pool.pubkeys();
+        assert_eq!(pubkeys.len(), 3);
+        // Each pubkey should be distinct
+        let unique: std::collections::HashSet<_> = pubkeys.iter().collect();
+        assert_eq!(unique.len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // 13. Fee payer rotation on claim failure: failed wallet is skipped
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fee_payer_rotation_on_failure_skips_to_next() {
+        let keys = test_keypairs(3);
+        let pool = FeePayerPool::from_keys(&keys).expect("should load 3 keys");
+
+        // Get wallet 0
+        let w0 = pool.next().expect("wallet 0");
+
+        // Simulate claim failure by marking wallet 0 as failed
+        pool.mark_failed(w0.index);
+
+        // Next two calls should return wallets 1 and 2
+        let w1 = pool.next().expect("should get wallet 1");
+        let w2 = pool.next().expect("should get wallet 2");
+        assert_ne!(w1.pubkey_b58, w0.pubkey_b58, "wallet 0 should be skipped");
+        assert_ne!(
+            w2.pubkey_b58, w0.pubkey_b58,
+            "wallet 0 should still be skipped"
+        );
+        assert_ne!(
+            w1.pubkey_b58, w2.pubkey_b58,
+            "wallets 1 and 2 should differ"
+        );
+
+        // Wrap around still skips wallet 0
+        let w3 = pool.next().expect("should wrap to wallet 1 again");
+        assert_eq!(
+            w3.pubkey_b58, w1.pubkey_b58,
+            "should wrap to first available wallet"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 14. All payers unhealthy returns AllFailed error
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_all_payers_unhealthy_returns_all_failed() {
+        let keys = test_keypairs(3);
+        let pool = FeePayerPool::from_keys(&keys).expect("should load 3 keys");
+
+        // Mark all as failed
+        pool.mark_failed(0);
+        pool.mark_failed(1);
+        pool.mark_failed(2);
+
+        let result = pool.next();
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), FeePayerError::AllFailed),
+            "should return AllFailed when all payers are unhealthy"
         );
     }
 }

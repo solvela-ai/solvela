@@ -14,5 +14,7 @@ mod claimer;
 mod pda;
 mod verifier;
 
+#[cfg(feature = "postgres")]
+pub use claim_processor::{EscrowMetrics, EscrowMetricsSnapshot};
 pub use claimer::{do_claim_with_params, EscrowClaimer};
 pub use verifier::EscrowVerifier;

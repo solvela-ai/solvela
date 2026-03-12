@@ -69,11 +69,69 @@ async fn main() -> anyhow::Result<()> {
     let mut verifiers: Vec<Arc<dyn x402::traits::PaymentVerifier>> =
         vec![Arc::new(solana_verifier)];
 
-    // Conditionally build EscrowVerifier + EscrowClaimer if configured
-    let escrow_claimer = if let (Some(prog_id), Some(fee_payer_key)) = (
-        &app_config.solana.escrow_program_id,
-        &app_config.solana.fee_payer_key,
-    ) {
+    // ── Fee payer pool (hot wallet rotation) ──────────────────────────────────
+    //
+    // Build a FeePayerPool from all configured fee payer keys.
+    // Falls back to env-var scanning (RCR_SOLANA__FEE_PAYER_KEY[_N]) when the
+    // merged config list is empty.
+    // Constructed before EscrowClaimer because the claimer now uses the pool.
+    let fee_payer_pool = {
+        let merged_keys = app_config.solana.all_fee_payer_keys();
+        if merged_keys.is_empty() {
+            // Try loading directly from env vars as a fallback
+            match x402::fee_payer::FeePayerPool::from_env() {
+                Ok(pool) => {
+                    info!(
+                        wallets = pool.len(),
+                        "fee payer pool initialized from env vars"
+                    );
+                    Some(Arc::new(pool))
+                }
+                Err(_) => {
+                    info!("no fee payer keys configured — fee payer pool disabled");
+                    None
+                }
+            }
+        } else {
+            match x402::fee_payer::FeePayerPool::from_keys(&merged_keys) {
+                Ok(pool) => {
+                    info!(
+                        wallets = pool.len(),
+                        "fee payer pool initialized from config"
+                    );
+                    Some(Arc::new(pool))
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to init FeePayerPool — pool disabled");
+                    None
+                }
+            }
+        }
+    };
+
+    // ── Durable nonce pool ────────────────────────────────────────────────────
+    //
+    // Build a NoncePool from environment variables. Returns an empty pool
+    // (not an error) if no nonce accounts are configured — clients fall back
+    // to using a recent blockhash in that case.
+    // Constructed before EscrowClaimer because the claimer now uses the pool.
+    let nonce_pool = {
+        let pool = x402::nonce_pool::NoncePool::from_env();
+        if pool.is_empty() {
+            info!("nonce pool empty — clients will use recent blockhash (set RCR_SOLANA__NONCE_ACCOUNT to enable)");
+            None
+        } else {
+            info!(accounts = pool.len(), "durable nonce pool initialized");
+            Some(Arc::new(pool))
+        }
+    };
+
+    // Conditionally build EscrowVerifier + EscrowClaimer if configured.
+    // The claimer now uses FeePayerPool for rotation and optionally NoncePool
+    // for durable nonces.
+    let escrow_claimer = if let (Some(prog_id), Some(ref pool)) =
+        (&app_config.solana.escrow_program_id, &fee_payer_pool)
+    {
         let escrow_verifier = x402::escrow::EscrowVerifier {
             rpc_url: app_config.solana.rpc_url.clone(),
             recipient_wallet: app_config.solana.recipient_wallet.clone(),
@@ -85,13 +143,14 @@ async fn main() -> anyhow::Result<()> {
 
         match x402::escrow::EscrowClaimer::new(
             app_config.solana.rpc_url.clone(),
-            fee_payer_key,
+            Arc::clone(pool),
             prog_id,
             &app_config.solana.recipient_wallet,
             &app_config.solana.usdc_mint,
+            nonce_pool.clone(),
         ) {
             Ok(claimer) => {
-                info!("escrow payment mode enabled");
+                info!("escrow payment mode enabled (fee payer pool rotation + optional durable nonces)");
                 Some(Arc::new(claimer))
             }
             Err(e) => {
@@ -100,7 +159,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     } else {
-        info!("escrow payment mode disabled (set RCR_SOLANA_ESCROW_PROGRAM_ID + RCR_SOLANA_FEE_PAYER_KEY to enable)");
+        if app_config.solana.escrow_program_id.is_some() && fee_payer_pool.is_none() {
+            warn!("escrow program ID configured but no fee payer pool — escrow disabled");
+        } else {
+            info!("escrow payment mode disabled (set RCR_SOLANA_ESCROW_PROGRAM_ID + RCR_SOLANA_FEE_PAYER_KEY to enable)");
+        }
         None
     };
 
@@ -188,60 +251,16 @@ async fn main() -> anyhow::Result<()> {
         gateway::providers::health::CircuitBreakerConfig::default(),
     );
 
-    // ── Fee payer pool (hot wallet rotation) ──────────────────────────────────
+    // ── Escrow metrics (in-memory atomic counters) ─────────────────────────
     //
-    // Build a FeePayerPool from all configured fee payer keys.
-    // Falls back to env-var scanning (RCR_SOLANA__FEE_PAYER_KEY[_N]) when the
-    // merged config list is empty.
-    let fee_payer_pool = {
-        let merged_keys = app_config.solana.all_fee_payer_keys();
-        if merged_keys.is_empty() {
-            // Try loading directly from env vars as a fallback
-            match x402::fee_payer::FeePayerPool::from_env() {
-                Ok(pool) => {
-                    info!(
-                        wallets = pool.len(),
-                        "fee payer pool initialized from env vars"
-                    );
-                    Some(Arc::new(pool))
-                }
-                Err(_) => {
-                    info!("no fee payer keys configured — fee payer pool disabled");
-                    None
-                }
-            }
+    // Created here so both the claim processor and the AppState can share
+    // the same Arc.  `None` when escrow is not configured or no DB.
+    let escrow_metrics: Option<Arc<x402::escrow::EscrowMetrics>> =
+        if escrow_claimer.is_some() && db_pool.is_some() {
+            Some(Arc::new(x402::escrow::EscrowMetrics::new()))
         } else {
-            match x402::fee_payer::FeePayerPool::from_keys(&merged_keys) {
-                Ok(pool) => {
-                    info!(
-                        wallets = pool.len(),
-                        "fee payer pool initialized from config"
-                    );
-                    Some(Arc::new(pool))
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to init FeePayerPool — pool disabled");
-                    None
-                }
-            }
-        }
-    };
-
-    // ── Durable nonce pool ────────────────────────────────────────────────────
-    //
-    // Build a NoncePool from environment variables. Returns an empty pool
-    // (not an error) if no nonce accounts are configured — clients fall back
-    // to using a recent blockhash in that case.
-    let nonce_pool = {
-        let pool = x402::nonce_pool::NoncePool::from_env();
-        if pool.is_empty() {
-            info!("nonce pool empty — clients will use recent blockhash (set RCR_SOLANA__NONCE_ACCOUNT to enable)");
             None
-        } else {
-            info!(accounts = pool.len(), "durable nonce pool initialized");
-            Some(Arc::new(pool))
-        }
-    };
+        };
 
     // Build shared state
     let state = Arc::new(AppState {
@@ -257,6 +276,7 @@ async fn main() -> anyhow::Result<()> {
         fee_payer_pool,
         nonce_pool,
         db_pool,
+        escrow_metrics: escrow_metrics.clone(),
         session_secret: {
             let secret = match std::env::var("RCR_SESSION_SECRET") {
                 Ok(b64) => {
@@ -284,6 +304,7 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
     });
 
     // ── Claim processor (durable escrow claim background task) ──────────────
@@ -295,8 +316,11 @@ async fn main() -> anyhow::Result<()> {
             pool.clone(),
             Arc::clone(claimer),
             std::time::Duration::from_secs(10),
+            escrow_metrics.clone(),
         );
-        info!("background escrow claim processor started (10s poll interval)");
+        info!("escrow claim processor started");
+    } else if state.escrow_claimer.is_some() && state.db_pool.is_none() {
+        warn!("escrow configured but no database — claim processor disabled");
     }
 
     // ── Balance monitor (fire-and-forget background task) ─────────────────────
@@ -310,6 +334,16 @@ async fn main() -> anyhow::Result<()> {
         // Monitor the recipient wallet (always configured)
         if !app_config.solana.recipient_wallet.is_empty() {
             wallet_pubkeys.push(app_config.solana.recipient_wallet.clone());
+        }
+
+        // Add fee payer pool wallets to the monitor
+        if let Some(ref pool) = state.fee_payer_pool {
+            for pubkey in pool.pubkeys() {
+                // Avoid duplicates (fee payer may equal recipient wallet)
+                if !wallet_pubkeys.contains(&pubkey) {
+                    wallet_pubkeys.push(pubkey);
+                }
+            }
         }
 
         if wallet_pubkeys.is_empty() {
