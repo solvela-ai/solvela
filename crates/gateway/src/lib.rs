@@ -18,15 +18,20 @@ pub mod usage;
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::http::{HeaderName, HeaderValue, Method};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use lru::LruCache;
 use tokio::sync::RwLock;
+use tower::limit::ConcurrencyLimitLayer;
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::services::ServiceRegistry;
@@ -86,12 +91,40 @@ impl AppState {
     }
 }
 
+/// Custom panic handler that returns a JSON 500 response instead of dropping
+/// the TCP connection. Used by [`CatchPanicLayer`] as the outermost middleware.
+pub fn handle_panic(_err: Box<dyn std::any::Any + Send + 'static>) -> axum::response::Response {
+    let body = serde_json::json!({
+        "error": {
+            "type": "internal_error",
+            "message": "Internal server error"
+        }
+    });
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(body),
+    )
+        .into_response()
+}
+
 /// Build the Axum router with all routes and middleware.
 ///
 /// This is used by both `main.rs` and integration tests.
 /// The `rate_limiter` is passed in so callers can retain a clone for background
 /// cleanup tasks (see `main.rs`).
 pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
+    // Configurable request timeout (default 120s)
+    let timeout_secs: u64 = std::env::var("RCR_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120);
+
+    // Configurable max concurrent in-flight requests (default 256)
+    let max_concurrent: usize = std::env::var("RCR_MAX_CONCURRENT_REQUESTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(256);
+
     Router::new()
         .route("/v1/chat/completions", post(routes::chat::chat_completions))
         .route(
@@ -146,8 +179,17 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             HeaderName::from_static("referrer-policy"),
             HeaderValue::from_static("no-referrer"),
         ))
-        // Request ID — outermost layer, always attaches X-RCR-Request-Id
+        // Request ID
         .layer(RequestIdLayer)
+        // Concurrency limit — rejects excess requests with 503
+        .layer(ConcurrencyLimitLayer::new(max_concurrent))
+        // Global request timeout — returns 408 on expiry
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(timeout_secs),
+        ))
+        // Catch panics — outermost layer, returns JSON 500 instead of dropping connection
+        .layer(CatchPanicLayer::custom(handle_panic))
         .with_state(state)
 }
 

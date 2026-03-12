@@ -21,11 +21,8 @@ pub struct GoogleProvider {
 }
 
 impl GoogleProvider {
-    pub fn new(api_key: String) -> Self {
-        Self {
-            api_key,
-            client: reqwest::Client::new(),
-        }
+    pub fn new(client: reqwest::Client, api_key: String) -> Self {
+        Self { api_key, client }
     }
 }
 
@@ -227,14 +224,17 @@ impl LLMProvider for GoogleProvider {
 
         let gemini_req = to_gemini_request(&req);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("x-goog-api-key", &self.api_key)
-            .json(&gemini_req)
-            .send()
-            .await?;
+        let req_body = serde_json::to_value(&gemini_req)?;
+        let response = super::retry_with_backoff(2, || {
+            self.client
+                .post(&url)
+                .timeout(std::time::Duration::from_secs(90))
+                .header("content-type", "application/json")
+                .header("x-goog-api-key", &self.api_key)
+                .json(&req_body)
+                .send()
+        })
+        .await?;
 
         let gemini_resp = response
             .error_for_status()?

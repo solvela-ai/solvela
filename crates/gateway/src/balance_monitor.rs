@@ -198,9 +198,13 @@ impl BalanceMonitor {
     /// Spawn a background task that periodically checks balances and emits alerts.
     ///
     /// Runs an immediate check on startup, then loops at `check_interval_secs`.
+    /// Shuts down gracefully when the `shutdown_rx` watch channel fires.
     /// The returned `JoinHandle` is fire-and-forget — callers should not `.await` it
     /// on the hot path.
-    pub fn spawn(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+    pub fn spawn(
+        self: Arc<Self>,
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> tokio::task::JoinHandle<()> {
         let interval = Duration::from_secs(self.config.check_interval_secs);
 
         tokio::spawn(async move {
@@ -213,9 +217,16 @@ impl BalanceMonitor {
             ticker.tick().await;
 
             loop {
-                ticker.tick().await;
-                let results = self.check_balances().await;
-                self.emit_alerts(&results);
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        let results = self.check_balances().await;
+                        self.emit_alerts(&results);
+                    }
+                    _ = shutdown_rx.changed() => {
+                        info!("balance monitor shutting down gracefully");
+                        break;
+                    }
+                }
             }
         })
     }
