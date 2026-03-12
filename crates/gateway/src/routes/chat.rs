@@ -8,6 +8,7 @@ use axum::response::{sse, IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
 use futures::StreamExt;
+use metrics::{counter, histogram};
 use tracing::{info, warn};
 
 use router::profiles::{self, Profile};
@@ -137,6 +138,7 @@ pub async fn chat_completions(
 
     if payment_header.is_none() {
         // Return 402 with pricing info
+        counter!("rcr_payments_total", "status" => "none").increment(1);
         info!(model = %req.model, "no payment signature, returning 402");
 
         let cost = state
@@ -356,6 +358,8 @@ pub async fn chat_completions(
             };
 
             if replay_detected {
+                counter!("rcr_replay_rejections_total").increment(1);
+                counter!("rcr_payments_total", "status" => "failed").increment(1);
                 warn!(tx = %tx_raw, "replay attack detected — transaction already used");
                 return Err(GatewayError::InvalidPayment(
                     "transaction has already been used; each payment signature may only be submitted once".to_string()
@@ -367,6 +371,9 @@ pub async fn chat_completions(
                 Ok(settlement) => {
                     // Capture verified deposit amount for escrow claim capping
                     escrow_deposited_amount = settlement.verified_amount;
+                    counter!("rcr_payments_total", "status" => "verified").increment(1);
+                    histogram!("rcr_payment_amount_usdc")
+                        .record(client_amount as f64 / 1_000_000.0);
                     info!(
                         tx_signature = ?settlement.tx_signature,
                         network = %settlement.network,
@@ -376,6 +383,7 @@ pub async fn chat_completions(
                 }
                 Err(e) => {
                     // Payment verification failed — reject the request
+                    counter!("rcr_payments_total", "status" => "failed").increment(1);
                     warn!(error = %e, "payment verification failed");
                     return Err(GatewayError::InvalidPayment(format!(
                         "payment verification failed: {e}"
@@ -386,6 +394,7 @@ pub async fn chat_completions(
         None => {
             // Header present but could not be decoded — reject with a clear error.
             // A malformed header is not a valid payment; never serve for free.
+            counter!("rcr_payments_total", "status" => "failed").increment(1);
             return Err(GatewayError::InvalidPayment(
                 "PAYMENT-SIGNATURE header is present but could not be decoded. \
                  Encode a valid PaymentPayload as standard base64 JSON."
@@ -424,6 +433,7 @@ pub async fn chat_completions(
 
     // Track cache status for debug headers
     let mut cache_status = if req.stream {
+        counter!("rcr_cache_total", "result" => "skip").increment(1);
         CacheStatus::Skip
     } else {
         CacheStatus::Miss
@@ -433,6 +443,7 @@ pub async fn chat_completions(
     if !req.stream {
         if let Some(cache) = &state.cache {
             if let Some(cached) = cache.get(&req).await {
+                counter!("rcr_cache_total", "result" => "hit").increment(1);
                 info!(model = %req.model, "serving from cache");
                 cache_status = CacheStatus::Hit;
                 let mut resp = Json(
@@ -462,7 +473,11 @@ pub async fn chat_completions(
                 }
 
                 return Ok(resp);
+            } else {
+                counter!("rcr_cache_total", "result" => "miss").increment(1);
             }
+        } else {
+            counter!("rcr_cache_total", "result" => "miss").increment(1);
         }
     }
 
@@ -474,6 +489,7 @@ pub async fn chat_completions(
     if req.stream {
         info!(provider = provider_name, model = %req.model, "streaming to provider (with model fallback)");
 
+        let provider_start = std::time::Instant::now();
         let result = if let Some(pref) = fallback_pref {
             let mut chain: Vec<(String, String)> =
                 vec![(provider_name.to_string(), req.model.clone())];
@@ -501,6 +517,10 @@ pub async fn chat_completions(
             )
             .await
         };
+
+        let provider_duration = provider_start.elapsed();
+        histogram!("rcr_provider_request_duration_seconds", "provider" => provider_name.to_string())
+            .record(provider_duration.as_secs_f64());
 
         match result {
             Ok(result) => {
@@ -565,11 +585,13 @@ pub async fn chat_completions(
             }
             Err(_) => {
                 // All models failed — fall through to stub
+                counter!("rcr_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => "all_failed").increment(1);
             }
         }
     } else {
         info!(provider = provider_name, model = %req.model, "proxying to provider (with model fallback)");
 
+        let provider_start = std::time::Instant::now();
         let result = if let Some(pref) = fallback_pref {
             let mut chain: Vec<(String, String)> =
                 vec![(provider_name.to_string(), req.model.clone())];
@@ -597,6 +619,10 @@ pub async fn chat_completions(
             )
             .await
         };
+
+        let provider_duration = provider_start.elapsed();
+        histogram!("rcr_provider_request_duration_seconds", "provider" => provider_name.to_string())
+            .record(provider_duration.as_secs_f64());
 
         match result {
             Ok(result) => {
@@ -700,6 +726,7 @@ pub async fn chat_completions(
             }
             Err(_) => {
                 // All models failed — fall through to stub
+                counter!("rcr_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => "all_failed").increment(1);
             }
         }
     }

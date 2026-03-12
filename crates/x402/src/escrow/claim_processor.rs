@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use metrics::{counter, gauge};
 use tracing::{error, info, warn};
 
 use super::claim_queue::{self, MAX_CLAIM_ATTEMPTS};
@@ -268,6 +269,8 @@ async fn process_pending_claims(
         .await
         .map_err(|e| format!("failed to fetch pending claims: {e}"))?;
 
+    gauge!("rcr_escrow_queue_depth").set(pending.len() as f64);
+
     if pending.is_empty() {
         return Ok(());
     }
@@ -292,6 +295,7 @@ async fn process_pending_claims(
             let _ =
                 claim_queue::mark_attempt_failed(pool, &entry.id, &error_msg, entry.attempts).await;
             circuit_breaker.record_failure();
+            counter!("rcr_escrow_claims_total", "result" => "failure").increment(1);
             if let Some(m) = metrics {
                 m.claims_failed.fetch_add(1, Ordering::Relaxed);
             }
@@ -322,6 +326,7 @@ async fn process_pending_claims(
                 )
                 .await;
                 circuit_breaker.record_failure();
+                counter!("rcr_escrow_claims_total", "result" => "failure").increment(1);
                 if let Some(m) = metrics {
                     m.claims_failed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -347,6 +352,7 @@ async fn process_pending_claims(
                     );
                 }
                 circuit_breaker.record_success();
+                counter!("rcr_escrow_claims_total", "result" => "success").increment(1);
                 if let Some(m) = metrics {
                     m.claims_succeeded.fetch_add(1, Ordering::Relaxed);
                 }
@@ -375,6 +381,7 @@ async fn process_pending_claims(
                     );
                 }
                 circuit_breaker.record_failure();
+                counter!("rcr_escrow_claims_total", "result" => "failure").increment(1);
                 if let Some(m) = metrics {
                     // If this claim has exceeded max attempts, count as permanently failed.
                     // Otherwise, it's a retry.

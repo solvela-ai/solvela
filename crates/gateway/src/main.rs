@@ -263,6 +263,14 @@ async fn main() -> anyhow::Result<()> {
             None
         };
 
+    // ── Prometheus metrics recorder ─────────────────────────────────────────
+    //
+    // Install the global Prometheus recorder. The PrometheusHandle is stored
+    // in AppState so the /metrics endpoint can call `handle.render()`.
+    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .expect("failed to install Prometheus metrics recorder");
+
     // Build shared state
     let state = Arc::new(AppState {
         config: app_config.clone(),
@@ -310,6 +318,7 @@ async fn main() -> anyhow::Result<()> {
             .expect("failed to build HTTP client"),
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
+        prometheus_handle,
     });
 
     // ── Shutdown signal for background tasks ────────────────────────────────

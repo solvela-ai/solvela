@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use metrics::gauge;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -81,6 +82,12 @@ async fn check_all_services(state: &AppState) {
                 "service health check failed — marking unhealthy"
             );
         }
+
+        gauge!("rcr_service_health", "service_id" => service_id.to_string()).set(if healthy {
+            1.0
+        } else {
+            0.0
+        });
 
         // Acquire write lock briefly to update health status.
         let mut registry = state.service_registry.write().await;
