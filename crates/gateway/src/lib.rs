@@ -10,6 +10,7 @@ pub mod error;
 pub mod middleware;
 pub mod providers;
 pub mod routes;
+pub mod security;
 pub mod service_health;
 pub mod services;
 pub mod session;

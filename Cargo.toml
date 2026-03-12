@@ -65,6 +65,9 @@ anyhow = "1"
 zeroize = { version = "1", features = ["derive"] }
 lru = "0.12"
 
+# URL parsing
+url = "2"
+
 # Workspace crates
 x402 = { path = "crates/x402" }
 router = { path = "crates/router" }

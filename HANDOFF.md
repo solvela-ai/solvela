@@ -20,9 +20,9 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ## IMMEDIATE NEXT STEP: Remaining RustyClawRouter Phases
 
-**Phase 8 (Escrow Hardening) is COMPLETE.** All sub-tasks (8.1-8.7) implemented and merged to main. 384 tests passing.
+**Phase 9 (Service Marketplace) is COMPLETE.** All features implemented and merged to main. 308 gateway tests passing (220 unit + 88 integration).
 
-**Remaining RustyClawRouter phases:** 9 (Service Marketplace), 12 (Monitoring), 13 (Docs/Examples), 14 (Production Hardening). See ecosystem plan for details.
+**Remaining RustyClawRouter phases:** 12 (Monitoring), 13 (Docs/Examples), 14 (Production Hardening). See ecosystem plan for details.
 
 ---
 
@@ -30,7 +30,17 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ### What's Complete in RustyClawRouter
 
-**Phases 1-8, 10-11, Phase A, Phase G** — all complete (384 tests).
+**Phases 1-9, 10-11, Phase A, Phase G** — all complete (308 gateway tests).
+
+**Phase 9 (Service Marketplace) delivered:**
+- Service proxy endpoint (`POST /v1/services/{service_id}/proxy`) — accepts arbitrary JSON, verifies x402 payments with 5% platform fee, forwards to external services with 60s timeout
+- Service registration (`POST /v1/services/register`) — admin-auth (`RCR_ADMIN_TOKEN`), validates ID format/HTTPS/uniqueness, returns 201
+- Health monitoring — background checker runs every 60s (configurable via `RCR_SERVICE_HEALTH_INTERVAL_SECS`), concurrent HEAD probes, graceful shutdown via watch channel
+- Service discovery — `GET /v1/services` now includes health status and supports filtering
+- Security hardening — SSRF prevention (private network filtering at registration and proxy time), constant-time admin token comparison, integer USDC arithmetic, proper payer wallet extraction
+- `ServiceRegistry` refactored with `RwLock` for async access, new fields: `source`, `healthy`, `price_per_request_usdc`
+- New files: `routes/proxy.rs`, `service_health.rs`, `security.rs`, `docs/plans/phase-9-service-marketplace.md`
+- 12 new integration tests covering proxy, registration, health, and security
 
 **Phase G delivered:**
 - G.2: Debug response headers — RequestId middleware (always-on `X-RCR-Request-Id`), 11 debug headers opt-in via `X-RCR-Debug: true`
@@ -186,8 +196,9 @@ tests/
 | F: SDKs | Python, TS, Go client SDKs | ✅ Complete (301 tests across 3 repos) |
 | G: Gateway Changes | Debug headers, session ID, stats endpoint | ✅ Complete (G.1-G.5 all done, 342 tests) |
 | 8: Escrow Hardening | Claim recovery, fee payer rotation, monitoring | ✅ Complete (384 tests) |
+| 9: Service Marketplace | Proxy, registration, health, SSRF prevention | ✅ Complete (308 gateway tests) |
 
-**Remaining RustyClawRouter phases:** 9, 12, 13, 14 (see ecosystem plan)
+**Remaining RustyClawRouter phases:** 12, 13, 14 (see ecosystem plan)
 
 ---
 
@@ -323,6 +334,18 @@ Each SDK implements:
 | 87 | Recover stale in_progress claims after 5min | Prevents permanent stuck claims |
 | 88 | Single Mutex for circuit breaker state | Eliminates ABBA deadlock risk |
 
+### Phase 9 Design Decisions
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 89 | SSRF prevention with DNS resolution validation at registration and proxy time | Defense-in-depth; prevents private network access at both layers |
+| 90 | Constant-time admin token comparison | Prevents timing attacks on admin authentication |
+| 91 | Integer USDC arithmetic via `compute_service_cost_atomic()` | Prevents floating-point divergence in financial calculations |
+| 92 | Concurrent health probes with batch lock update | Avoids O(N*timeout) contention; single write lock per cycle |
+| 93 | Payer wallet extraction from transaction signer (direct) or `agent_pubkey` (escrow) | Correct attribution for both payment schemes |
+| 94 | Service registration validates ID format, HTTPS requirement, uniqueness | Security baseline: no HTTP endpoints, no duplicates, safe IDs |
+| 95 | Health probe accepts 2xx, 402, 405 as "healthy" | Services behind x402 return 402 for unauthenticated HEAD; 405 means server is up |
+
 ## What Didn't Work (Cumulative)
 
 - **Concurrent agents modifying same files** — never dispatch parallel agents that touch same files.
@@ -341,7 +364,7 @@ Each SDK implements:
 
 ```bash
 # RustyClawRouter (~/projects/RustyClawRouter/)
-cargo test                            # 384 tests
+cargo test                            # 308 gateway tests (220 unit + 88 integration)
 cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings
 
 # RustyClawClient (~/projects/RustyClawClient/)

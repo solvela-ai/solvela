@@ -11,9 +11,11 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use base64::Engine;
 use serde_json::json;
 use tracing::{info, warn};
 
+use x402::solana_types::VersionedTransaction;
 use x402::types::{
     CostBreakdown, PaymentAccept, PaymentRequired, Resource, PLATFORM_FEE_PERCENT, SOLANA_NETWORK,
     USDC_MINT, X402_VERSION,
@@ -21,14 +23,51 @@ use x402::types::{
 
 use crate::error::GatewayError;
 use crate::middleware::x402::decode_payment_header;
+use crate::security;
 use crate::usage::SpendLogEntry;
 use crate::AppState;
 
 /// Upstream request timeout for external service proxying.
 const PROXY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Platform fee multiplier (5% on top of service cost).
-const PLATFORM_FEE_MULTIPLIER: f64 = 1.05;
+/// Compute the total cost in atomic USDC units for a service request.
+///
+/// Uses integer arithmetic to avoid floating-point precision loss on financial
+/// amounts. The price is converted to atomic units (6 decimals) first, then
+/// the 5% platform fee is applied using integer math.
+fn compute_service_cost_atomic(price_usdc: f64) -> u64 {
+    // Convert to atomic units first (the only f64->int conversion)
+    let provider_atomic = (price_usdc * 1_000_000.0).round() as u64;
+    // 5% platform fee: total = provider * 105 / 100
+    provider_atomic * 105 / 100
+}
+
+/// Extract the payer wallet address from a payment payload.
+///
+/// For escrow payments, uses the `agent_pubkey` field (the depositor).
+/// For direct payments, decodes the base64 transaction and extracts the
+/// first account key (the fee payer / signer in Solana transactions).
+/// Returns "unknown" if extraction fails.
+fn extract_payer_wallet(payload: &x402::types::PaymentPayload) -> String {
+    match &payload.payload {
+        x402::types::PayloadData::Escrow(p) => p.agent_pubkey.clone(),
+        x402::types::PayloadData::Direct(p) => {
+            // Decode base64 transaction and extract first signer (fee payer)
+            extract_signer_from_base64_tx(&p.transaction).unwrap_or_else(|| "unknown".to_string())
+        }
+    }
+}
+
+/// Attempt to extract the first signer (fee payer) public key from a
+/// base64-encoded Solana versioned transaction.
+fn extract_signer_from_base64_tx(b64_tx: &str) -> Option<String> {
+    let tx_bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64_tx)
+        .ok()?;
+    let tx = VersionedTransaction::from_bytes(&tx_bytes).ok()?;
+    let msg = tx.parse_message().ok()?;
+    msg.account_keys.first().map(|pk| pk.to_string())
+}
 
 /// POST /v1/services/{service_id}/proxy — proxy a paid request to an external service.
 ///
@@ -87,17 +126,33 @@ pub async fn proxy_service(
         ))
     })?;
 
-    // Step 3: Check for payment
-    let payment_header = headers
-        .get("payment-signature")
-        .and_then(|v| v.to_str().ok());
+    // Compute cost once using integer arithmetic — used for both 402 response
+    // and payment validation to guarantee identical results.
+    let expected_atomic = compute_service_cost_atomic(price_usdc);
+    let provider_atomic = (price_usdc * 1_000_000.0).round() as u64;
+    let fee_atomic = expected_atomic - provider_atomic;
+
+    // Step 3: Check for payment header.
+    // Non-ASCII bytes in header value must produce 400, not a silent 402.
+    let payment_header = match headers.get("payment-signature") {
+        Some(val) => match val.to_str() {
+            Ok(s) => Some(s),
+            Err(_) => {
+                return Err(GatewayError::BadRequest(
+                    "Invalid PAYMENT-SIGNATURE header encoding".to_string(),
+                ));
+            }
+        },
+        None => None,
+    };
 
     if payment_header.is_none() {
         info!(service_id = %service_id, "no payment signature, returning 402");
 
-        let platform_fee = price_usdc * (PLATFORM_FEE_PERCENT as f64 / 100.0);
-        let total = price_usdc + platform_fee;
-        let atomic_amount = (total * 1_000_000.0) as u64;
+        // Format cost breakdown from integer-derived values for display
+        let provider_usdc = provider_atomic as f64 / 1_000_000.0;
+        let fee_usdc = fee_atomic as f64 / 1_000_000.0;
+        let total_usdc = expected_atomic as f64 / 1_000_000.0;
 
         let payment_required = PaymentRequired {
             x402_version: X402_VERSION,
@@ -108,16 +163,16 @@ pub async fn proxy_service(
             accepts: vec![PaymentAccept {
                 scheme: "exact".to_string(),
                 network: SOLANA_NETWORK.to_string(),
-                amount: atomic_amount.to_string(),
+                amount: expected_atomic.to_string(),
                 asset: USDC_MINT.to_string(),
                 pay_to: state.config.solana.recipient_wallet.clone(),
                 max_timeout_seconds: x402::types::MAX_TIMEOUT_SECONDS,
                 escrow_program_id: None,
             }],
             cost_breakdown: CostBreakdown {
-                provider_cost: format!("{price_usdc:.6}"),
-                platform_fee: format!("{platform_fee:.6}"),
-                total: format!("{total:.6}"),
+                provider_cost: format!("{provider_usdc:.6}"),
+                platform_fee: format!("{fee_usdc:.6}"),
+                total: format!("{total_usdc:.6}"),
                 currency: "USDC".to_string(),
                 fee_percent: PLATFORM_FEE_PERCENT,
             },
@@ -183,10 +238,13 @@ pub async fn proxy_service(
         )));
     }
 
-    // Validate payment amount covers the service cost + platform fee
-    let total_cost = price_usdc * PLATFORM_FEE_MULTIPLIER;
-    let expected_atomic = (total_cost * 1_000_000.0) as u64;
-    let client_amount: u64 = payload.accepted.amount.parse().unwrap_or(0);
+    // Validate payment amount covers the service cost + platform fee.
+    // Invalid amount format must produce 400, not silently become zero.
+    let client_amount: u64 = payload
+        .accepted
+        .amount
+        .parse()
+        .map_err(|_| GatewayError::BadRequest("Invalid payment amount format".to_string()))?;
     if client_amount < expected_atomic {
         return Err(GatewayError::BadRequest(format!(
             "payment amount insufficient: paid {client_amount} but cost is {expected_atomic} atomic USDC"
@@ -256,8 +314,8 @@ pub async fn proxy_service(
         }
     }
 
-    // Extract wallet address for spend logging
-    let wallet_address = payload.accepted.pay_to.clone();
+    // Extract the actual PAYER wallet (not the recipient pay_to address)
+    let wallet_address = extract_payer_wallet(&payload);
     let tx_signature = match &payload.payload {
         x402::types::PayloadData::Direct(p) => Some(p.transaction.clone()),
         x402::types::PayloadData::Escrow(p) => Some(p.deposit_tx.clone()),
@@ -269,7 +327,34 @@ pub async fn proxy_service(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
-    // Step 5: Forward request to upstream service
+    // Step 5: SSRF check — re-validate the endpoint at proxy time (defense in depth
+    // against DNS rebinding between registration and request).
+    match security::is_private_endpoint(&service.endpoint).await {
+        Ok(true) => {
+            warn!(
+                service_id = %service_id,
+                endpoint = %service.endpoint,
+                "SSRF blocked: service endpoint resolves to a private address"
+            );
+            return Err(GatewayError::BadRequest(
+                "service endpoint resolves to a private or internal network address".to_string(),
+            ));
+        }
+        Err(e) => {
+            warn!(
+                service_id = %service_id,
+                endpoint = %service.endpoint,
+                error = %e,
+                "SSRF check failed: could not validate service endpoint"
+            );
+            return Err(GatewayError::Internal(format!(
+                "failed to validate service endpoint: {e}"
+            )));
+        }
+        Ok(false) => { /* public address — proceed */ }
+    }
+
+    // Step 6: Forward request to upstream service
     info!(
         service_id = %service_id,
         endpoint = %service.endpoint,
@@ -343,13 +428,14 @@ pub async fn proxy_service(
     let upstream_status = upstream_response.status();
 
     // Step 7: Fire-and-forget spend log (log_spend internally uses tokio::spawn)
+    let total_cost_usdc = expected_atomic as f64 / 1_000_000.0;
     state.usage.log_spend(SpendLogEntry {
         wallet_address,
         model: service_id.clone(),
         provider: "external-service".to_string(),
         input_tokens: 0,
         output_tokens: 0,
-        cost_usdc: total_cost,
+        cost_usdc: total_cost_usdc,
         tx_signature,
         request_id: request_id.clone(),
         session_id: None,
@@ -388,4 +474,107 @@ pub async fn proxy_service(
     builder
         .body(Body::from(response_bytes))
         .map_err(|e| GatewayError::Internal(format!("failed to build response: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_service_cost_atomic_basic() {
+        // 0.01 USDC = 10_000 atomic; with 5% fee = 10_500
+        assert_eq!(compute_service_cost_atomic(0.01), 10_500);
+    }
+
+    #[test]
+    fn test_compute_service_cost_atomic_small() {
+        // 0.001 USDC = 1_000 atomic; with 5% fee = 1_050
+        assert_eq!(compute_service_cost_atomic(0.001), 1_050);
+    }
+
+    #[test]
+    fn test_compute_service_cost_atomic_zero() {
+        assert_eq!(compute_service_cost_atomic(0.0), 0);
+    }
+
+    #[test]
+    fn test_compute_service_cost_atomic_large() {
+        // 1.0 USDC = 1_000_000 atomic; with 5% fee = 1_050_000
+        assert_eq!(compute_service_cost_atomic(1.0), 1_050_000);
+    }
+
+    #[test]
+    fn test_compute_service_cost_atomic_consistency() {
+        let price = 0.002625;
+        let result1 = compute_service_cost_atomic(price);
+        let result2 = compute_service_cost_atomic(price);
+        assert_eq!(result1, result2);
+    }
+
+    #[test]
+    fn test_compute_service_cost_uses_round_not_truncate() {
+        // 0.0000015 USDC = 1.5 atomic -> rounds to 2 -> 2 * 105/100 = 2
+        let cost = compute_service_cost_atomic(0.0000015);
+        assert_eq!(cost, 2);
+    }
+
+    #[test]
+    fn test_extract_payer_wallet_escrow() {
+        let payload = x402::types::PaymentPayload {
+            x402_version: 1,
+            resource: x402::types::Resource {
+                url: "/test".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: x402::types::PaymentAccept {
+                scheme: "escrow".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "1000".to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: "RecipientWallet".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: x402::types::PayloadData::Escrow(x402::types::EscrowPayload {
+                deposit_tx: "dGVzdA==".to_string(),
+                service_id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                agent_pubkey: "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz".to_string(),
+            }),
+        };
+        assert_eq!(
+            extract_payer_wallet(&payload),
+            "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz"
+        );
+    }
+
+    #[test]
+    fn test_extract_payer_wallet_direct_invalid_tx() {
+        let payload = x402::types::PaymentPayload {
+            x402_version: 1,
+            resource: x402::types::Resource {
+                url: "/test".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: x402::types::PaymentAccept {
+                scheme: "exact".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "1000".to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: "RecipientWallet".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: x402::types::PayloadData::Direct(x402::types::SolanaPayload {
+                transaction: "not-valid-base64!!!".to_string(),
+            }),
+        };
+        assert_eq!(extract_payer_wallet(&payload), "unknown");
+    }
+
+    #[test]
+    fn test_extract_signer_from_base64_tx_invalid() {
+        assert_eq!(extract_signer_from_base64_tx("not-base64!!!"), None);
+        assert_eq!(extract_signer_from_base64_tx(""), None);
+        assert_eq!(extract_signer_from_base64_tx("AAAA"), None);
+    }
 }
