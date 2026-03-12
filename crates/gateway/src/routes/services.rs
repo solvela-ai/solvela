@@ -7,6 +7,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::security;
 use crate::services::{RegistrationError, ServiceEntry};
 use crate::AppState;
 
@@ -122,7 +123,7 @@ pub async fn register_service(
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|token| token == admin_token);
+        .is_some_and(|token| security::constant_time_eq(token.as_bytes(), admin_token.as_bytes()));
 
     if !authorized {
         return (
@@ -130,6 +131,25 @@ pub async fn register_service(
             Json(json!({ "error": "unauthorized" })),
         )
             .into_response();
+    }
+
+    // Validate endpoint is not a private/internal network address (SSRF prevention)
+    match security::is_private_endpoint(&body.endpoint).await {
+        Ok(true) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "service endpoint must not resolve to a private or internal network address" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("service endpoint validation failed: {e}") })),
+            )
+                .into_response();
+        }
+        Ok(false) => { /* public address — proceed */ }
     }
 
     // Build the ServiceEntry

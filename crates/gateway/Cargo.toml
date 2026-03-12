@@ -49,6 +49,9 @@ bs58 = { workspace = true }
 futures = { workspace = true }
 pin-project-lite = "0.2"
 
+# URL parsing / validation
+url = { workspace = true }
+
 # Config parsing
 toml = { workspace = true }
 

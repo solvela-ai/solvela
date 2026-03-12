@@ -6,12 +6,14 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::{sse, IntoResponse, Response};
 use axum::Json;
+use base64::Engine;
 use futures::StreamExt;
 use tracing::{info, warn};
 
 use router::profiles::{self, Profile};
 use router::scorer;
 use rustyclaw_protocol::ChatRequest;
+use x402::solana_types::VersionedTransaction;
 
 use crate::error::GatewayError;
 use crate::middleware::prompt_guard::{self, GuardResult, PromptGuardConfig};
@@ -770,13 +772,14 @@ fn decode_payment_from_header(header: &str) -> Option<x402::types::PaymentPayloa
 
 /// Extract wallet address and transaction signature from the payment header.
 ///
-/// If the header is a valid PaymentPayload, extracts the `pay_to` address and
-/// uses the transaction signature. Otherwise returns "unknown" / None.
-// TODO: wallet_address should be the actual payer (tx signer), not pay_to (gateway recipient). See security audit H3/M3.
+/// If the header is a valid PaymentPayload, extracts the actual payer wallet
+/// and transaction signature. For escrow payments, uses `agent_pubkey`. For
+/// direct payments, decodes the Solana transaction to get the first signer
+/// (fee payer). Falls back to "unknown" if extraction fails.
 fn extract_payment_info(header: &str) -> (String, Option<String>) {
     match decode_payment_from_header(header) {
         Some(payload) => {
-            let wallet = payload.accepted.pay_to.clone();
+            let wallet = extract_payer_wallet_from_payload(&payload);
             let tx_sig = match &payload.payload {
                 x402::types::PayloadData::Direct(p) => Some(p.transaction.clone()),
                 x402::types::PayloadData::Escrow(p) => Some(p.deposit_tx.clone()),
@@ -785,6 +788,32 @@ fn extract_payment_info(header: &str) -> (String, Option<String>) {
         }
         None => ("unknown".to_string(), None),
     }
+}
+
+/// Extract the payer wallet address from a payment payload.
+///
+/// For escrow payments, uses the `agent_pubkey` field (the depositor).
+/// For direct payments, decodes the base64 transaction and extracts the
+/// first account key (the fee payer / signer in Solana transactions).
+/// Returns "unknown" if extraction fails.
+fn extract_payer_wallet_from_payload(payload: &x402::types::PaymentPayload) -> String {
+    match &payload.payload {
+        x402::types::PayloadData::Escrow(p) => p.agent_pubkey.clone(),
+        x402::types::PayloadData::Direct(p) => {
+            extract_signer_from_base64_tx(&p.transaction).unwrap_or_else(|| "unknown".to_string())
+        }
+    }
+}
+
+/// Attempt to extract the first signer (fee payer) public key from a
+/// base64-encoded Solana versioned transaction.
+fn extract_signer_from_base64_tx(b64_tx: &str) -> Option<String> {
+    let tx_bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64_tx)
+        .ok()?;
+    let tx = VersionedTransaction::from_bytes(&tx_bytes).ok()?;
+    let msg = tx.parse_message().ok()?;
+    msg.account_keys.first().map(|pk| pk.to_string())
 }
 
 /// Resolve model ID from aliases, smart routing profiles, or direct model IDs.
@@ -1430,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_payment_info_valid_header() {
+    fn test_extract_payment_info_valid_header_direct_undecodable_tx() {
         use base64::Engine;
         let payload = x402::types::PaymentPayload {
             x402_version: 2,
@@ -1448,6 +1477,8 @@ mod tests {
                 escrow_program_id: None,
             },
             payload: x402::types::PayloadData::Direct(x402::types::SolanaPayload {
+                // "dGVzdHR4" decodes to "testtx" -- not a valid Solana tx,
+                // so payer extraction falls back to "unknown".
                 transaction: "dGVzdHR4".to_string(),
             }),
         };
@@ -1455,8 +1486,41 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&json);
 
         let (wallet, tx_sig) = extract_payment_info(&encoded);
-        assert_eq!(wallet, "MyWallet123");
+        assert_eq!(wallet, "unknown");
         assert_eq!(tx_sig, Some("dGVzdHR4".to_string()));
+    }
+
+    #[test]
+    fn test_extract_payment_info_escrow_uses_agent_pubkey() {
+        use base64::Engine;
+        let payload = x402::types::PaymentPayload {
+            x402_version: 2,
+            resource: x402::types::Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: x402::types::PaymentAccept {
+                scheme: "escrow".to_string(),
+                network: x402::types::SOLANA_NETWORK.to_string(),
+                amount: "2625".to_string(),
+                asset: x402::types::USDC_MINT.to_string(),
+                pay_to: "RecipientWallet".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: x402::types::PayloadData::Escrow(x402::types::EscrowPayload {
+                deposit_tx: "dGVzdA==".to_string(),
+                service_id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                agent_pubkey: "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz".to_string(),
+            }),
+        };
+        let json = serde_json::to_vec(&payload).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&json);
+
+        let (wallet, tx_sig) = extract_payment_info(&encoded);
+        // Escrow: wallet comes from agent_pubkey, NOT from pay_to
+        assert_eq!(wallet, "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz");
+        assert_eq!(tx_sig, Some("dGVzdA==".to_string()));
     }
 
     // =========================================================================
