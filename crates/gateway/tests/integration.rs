@@ -34,6 +34,9 @@ const TEST_RECIPIENT_WALLET: &str = "GatewayRecipientWallet111111111111111111111
 /// Large payment amount (in atomic USDC) that exceeds any test model cost estimate.
 const TEST_PAYMENT_AMOUNT: &str = "1000000";
 
+/// Admin token for escrow health endpoint tests.
+const TEST_ADMIN_TOKEN: &str = "test-admin-token-for-integration-tests";
+
 // ---------------------------------------------------------------------------
 // Mock payment verifier for integration tests
 // ---------------------------------------------------------------------------
@@ -206,6 +209,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         nonce_pool: None,
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
@@ -267,10 +271,11 @@ fn test_app_with_escrow() -> axum::Router {
         cache: None,
         provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
         escrow_claimer: Some(Arc::new(escrow_claimer)),
-        fee_payer_pool: None,
+        fee_payer_pool: Some(test_fee_payer_pool),
         nonce_pool: None,
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
@@ -1488,6 +1493,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         nonce_pool: Some(Arc::new(pool)),
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
@@ -2580,15 +2586,64 @@ async fn test_escrow_config_returns_200_when_configured() {
 // Phase 8.6: Escrow health endpoint tests
 // =========================================================================
 
-/// Test 13: escrow health returns 404 when escrow is not configured.
+/// Test 13a: escrow health returns 401 when no Authorization header is sent.
+#[tokio::test]
+async fn test_escrow_health_returns_401_without_auth_header() {
+    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
+    let app = test_app_with_escrow();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/escrow/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "unauthorized");
+}
+
+/// Test 13b: escrow health returns 401 when bearer token is wrong.
+#[tokio::test]
+async fn test_escrow_health_returns_401_with_wrong_token() {
+    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
+    let app = test_app_with_escrow();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/escrow/health")
+                .header("authorization", "Bearer wrong-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "unauthorized");
+}
+
+/// Test 13c: escrow health returns 404 when escrow is not configured (with valid auth).
 #[tokio::test]
 async fn test_escrow_health_returns_404_when_not_configured() {
+    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     let app = test_app(); // default config has escrow_program_id: None
 
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/v1/escrow/health")
+                .header("authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2605,12 +2660,14 @@ async fn test_escrow_health_returns_404_when_not_configured() {
 /// Test 14: escrow health returns 200 with correct shape when escrow is configured.
 #[tokio::test]
 async fn test_escrow_health_returns_200_when_configured() {
+    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     let app = test_app_with_escrow();
 
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/v1/escrow/health")
+                .header("authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2710,6 +2767,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         nonce_pool: None,
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: Some(metrics),
@@ -2720,12 +2778,14 @@ fn test_app_with_escrow_metrics() -> axum::Router {
 /// Test 15: escrow health returns populated metrics when metrics are configured.
 #[tokio::test]
 async fn test_escrow_health_returns_metrics() {
+    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     let app = test_app_with_escrow_metrics();
 
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/v1/escrow/health")
+                .header("authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2863,6 +2923,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         nonce_pool: None,
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: Some(Arc::clone(&metrics)),
@@ -2874,6 +2935,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
     metrics.claims_failed.fetch_add(1, Ordering::Relaxed);
     metrics.claims_retried.fetch_add(1, Ordering::Relaxed);
 
+    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     let app = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
@@ -2883,6 +2945,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         .oneshot(
             Request::builder()
                 .uri("/v1/escrow/health")
+                .header("authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3086,16 +3149,19 @@ async fn test_escrow_health_status_down_without_claimer() {
         nonce_pool: None,
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
     });
+    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
 
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/v1/escrow/health")
+                .header("authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3119,6 +3185,7 @@ async fn test_escrow_health_status_down_without_claimer() {
 /// no DB pool is available (claim processor cannot run).
 #[tokio::test]
 async fn test_escrow_health_status_degraded_without_db() {
+    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     // test_app_with_escrow has escrow_claimer but no db_pool
     let app = test_app_with_escrow();
 
@@ -3126,6 +3193,7 @@ async fn test_escrow_health_status_degraded_without_db() {
         .oneshot(
             Request::builder()
                 .uri("/v1/escrow/health")
+                .header("authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3139,11 +3207,10 @@ async fn test_escrow_health_status_degraded_without_db() {
 
     // Escrow is enabled but claim processor can't run without DB
     assert_eq!(json["escrow_enabled"], true);
-    // Status depends on whether fee_payer_pool is set in test_app_with_escrow
-    // test_app_with_escrow sets fee_payer_pool to None, so no wallets
-    let status = json["status"].as_str().unwrap();
-    assert!(
-        status == "degraded" || status == "down",
-        "status should be 'degraded' or 'down' without DB, got: {status}"
+    // test_app_with_escrow now sets fee_payer_pool, so wallets > 0,
+    // but no db_pool => claim_processor_running is false => "degraded"
+    assert_eq!(
+        json["status"], "degraded",
+        "status should be 'degraded' without DB but with fee payer pool"
     );
 }

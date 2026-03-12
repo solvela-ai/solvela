@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Serialize;
@@ -74,27 +74,38 @@ pub async fn escrow_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
 ///
 /// On RPC failure, logs a warning and returns `None` — the endpoint still
 /// returns the rest of the config without the slot.
+///
+/// Uses a check-then-act pattern so the `Mutex` is never held across the
+/// async RPC call. Two concurrent callers may both fetch on a cache miss —
+/// this is benign for a cache.
 async fn fetch_cached_slot(state: &AppState) -> Option<u64> {
     let cache = &state.slot_cache;
-    let mut guard = cache.lock().await;
 
-    // Return cached value if within TTL
-    if let Some((slot, fetched_at)) = *guard {
+    // 1. Acquire lock, read cached value, release immediately
+    let cached = {
+        let guard = cache.lock().await;
+        *guard
+    };
+
+    // 2. Return cached value if within TTL
+    if let Some((slot, fetched_at)) = cached {
         if fetched_at.elapsed() < SLOT_CACHE_TTL {
             return Some(slot);
         }
     }
 
-    // Fetch fresh slot from RPC
-    match fetch_slot_from_rpc(&state.config.solana.rpc_url).await {
+    // 3. Fetch fresh slot WITHOUT holding the lock
+    match fetch_slot_from_rpc(&state.http_client, &state.config.solana.rpc_url).await {
         Ok(slot) => {
+            // 4. Acquire lock again to write new value
+            let mut guard = cache.lock().await;
             *guard = Some((slot, Instant::now()));
             Some(slot)
         }
         Err(e) => {
             tracing::warn!(error = %e, "failed to fetch Solana slot for escrow config");
             // Return stale value if available, otherwise None
-            guard.map(|(slot, _)| slot)
+            cached.map(|(slot, _)| slot)
         }
     }
 }
@@ -126,13 +137,40 @@ pub struct EscrowClaimStats {
 /// GET /v1/escrow/health
 ///
 /// Returns:
-/// - 200 with escrow health when escrow is configured
-/// - 404 when escrow is not configured
+/// - 200 with escrow health when escrow is configured and caller is authorized
+/// - 401 when the `Authorization: Bearer <token>` header is missing or invalid
+/// - 404 when escrow is not configured **or** no `RCR_ADMIN_TOKEN` is set
 ///
 /// Status is "ok" when everything is healthy, "degraded" when the claim
 /// processor is not running or fee payer pool is missing, and "down" when
 /// escrow is not operational.
-pub async fn escrow_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn escrow_health(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Gate behind RCR_ADMIN_TOKEN — if not configured, hide the endpoint entirely
+    let admin_token = match std::env::var("RCR_ADMIN_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response();
+        }
+    };
+
+    // Validate Bearer token
+    let authorized = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|token| token == admin_token);
+
+    if !authorized {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+
     // Return 404 when escrow is not configured at all
     let _escrow_program_id = match &state.config.solana.escrow_program_id {
         Some(id) if !id.is_empty() => id,
@@ -209,12 +247,7 @@ pub async fn escrow_health(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 /// Make a `getSlot` JSON-RPC call to the Solana cluster.
-async fn fetch_slot_from_rpc(rpc_url: &str) -> Result<u64, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
+async fn fetch_slot_from_rpc(client: &reqwest::Client, rpc_url: &str) -> Result<u64, String> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,

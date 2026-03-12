@@ -169,7 +169,7 @@ impl NoncePool {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .unwrap_or_default();
+            .map_err(|e| NoncePoolError::RpcError(format!("failed to build HTTP client: {e}")))?;
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",

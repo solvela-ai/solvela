@@ -57,6 +57,8 @@ pub struct AppState {
     /// In-memory replay protection fallback used when Redis (`cache`) is absent.
     /// LRU-bounded to 10,000 entries so the oldest signatures are evicted first.
     pub replay_set: Mutex<LruCache<String, ()>>,
+    /// Shared HTTP client for outbound requests (e.g., Solana RPC slot fetch).
+    pub http_client: reqwest::Client,
     /// Cached Solana slot for the `/v1/escrow/config` endpoint (5s TTL).
     pub slot_cache: SlotCache,
     /// In-memory escrow claim metrics (submitted, succeeded, failed, retried).

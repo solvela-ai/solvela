@@ -31,13 +31,14 @@ pub struct FeePayerWallet {
 impl FeePayerWallet {
     /// Sign `message` with this wallet's ed25519 secret key.
     ///
-    /// Returns 64 raw signature bytes.
-    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+    /// Returns 64 raw signature bytes, or a [`FeePayerError`] if the keypair
+    /// bytes are invalid.
+    pub fn sign(&self, message: &[u8]) -> Result<[u8; 64], FeePayerError> {
         use ed25519_dalek::{Signer, SigningKey};
         // from_keypair_bytes expects [secret || public] which is exactly our layout.
         let signing_key = SigningKey::from_keypair_bytes(&self.keypair)
-            .expect("keypair bytes are validated on construction");
-        signing_key.sign(message).to_bytes()
+            .map_err(|e| FeePayerError::SigningFailed(e.to_string()))?;
+        Ok(signing_key.sign(message).to_bytes())
     }
 
     /// Return a reference to the raw 64-byte keypair.
@@ -82,6 +83,8 @@ pub enum FeePayerError {
     InvalidKey(String),
     #[error("all fee payer wallets are in cooldown")]
     AllFailed,
+    #[error("signing failed: {0}")]
+    SigningFailed(String),
 }
 
 impl FeePayerPool {

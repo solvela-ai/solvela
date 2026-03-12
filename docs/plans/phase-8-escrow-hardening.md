@@ -2,7 +2,7 @@
 
 > Operational hardening of the escrow subsystem — claim processing, fee payer rotation, durable nonces, error recovery, monitoring, and a config endpoint.
 
-**Status:** Planned
+**Status:** Complete
 **Depends on:** Phases 1-7, Phase G (all complete, 342 tests passing)
 **Estimated scope:** ~15 new tests, ~600 lines of new/modified Rust
 
@@ -325,72 +325,72 @@ Track fee payer SOL balances and claim success/failure metrics.
 ## Implementation Checklist
 
 ### 8.1: Claim Processor Auto-Start
-- [ ] Add shutdown channel parameter to `start_claim_processor`
-- [ ] Replace bare loop with `tokio::select!` on interval + shutdown
-- [ ] Wire shutdown signal in `main.rs`
-- [ ] Connect to `axum::serve` graceful shutdown
-- [ ] Test: processor exits on shutdown signal
-- [ ] Test: in-progress batch completes before exit
+- [x]Add shutdown channel parameter to `start_claim_processor`
+- [x]Replace bare loop with `tokio::select!` on interval + shutdown
+- [x]Wire shutdown signal in `main.rs`
+- [x]Connect to `axum::serve` graceful shutdown
+- [x]Test: processor exits on shutdown signal
+- [x]Test: in-progress batch completes before exit
 
 ### 8.2: Fee Payer Rotation
-- [ ] Refactor `EscrowClaimer` to hold `Arc<FeePayerPool>` instead of single key
-- [ ] Update `do_claim` to call `pool.next()` for wallet selection
-- [ ] Mark wallet as failed on "insufficient lamports" RPC errors
-- [ ] Update constructor (`new`) signature
-- [ ] Update `main.rs` to pass pool to claimer
-- [ ] Update `Drop` impl
-- [ ] Test: rotation on failure
-- [ ] Test: all-failed returns clear error
+- [x]Refactor `EscrowClaimer` to hold `Arc<FeePayerPool>` instead of single key
+- [x]Update `do_claim` to call `pool.next()` for wallet selection
+- [x]Mark wallet as failed on "insufficient lamports" RPC errors
+- [x]Update constructor (`new`) signature
+- [x]Update `main.rs` to pass pool to claimer
+- [x]Update `Drop` impl
+- [x]Test: rotation on failure
+- [x]Test: all-failed returns clear error
 
 ### 8.3: Durable Nonces for Claims
-- [ ] Add `nonce_pool: Option<Arc<NoncePool>>` to `EscrowClaimer`
-- [ ] In `do_claim`, attempt nonce fetch before blockhash
-- [ ] Build `AdvanceNonce` instruction when using durable nonce
-- [ ] Fall back to blockhash with `tracing::warn!` on nonce failure
-- [ ] Pass nonce pool from `main.rs`
-- [ ] Test: fallback to blockhash when pool is empty
+- [x]Add `nonce_pool: Option<Arc<NoncePool>>` to `EscrowClaimer`
+- [x]In `do_claim`, attempt nonce fetch before blockhash
+- [x]Build `AdvanceNonce` instruction when using durable nonce
+- [x]Fall back to blockhash with `tracing::warn!` on nonce failure
+- [x]Pass nonce pool from `main.rs`
+- [x]Test: fallback to blockhash when pool is empty
 
 ### 8.4: Error Recovery
-- [ ] Add migration: `next_retry_at` column on `escrow_claim_queue`
-- [ ] Update `fetch_pending_claims` query to filter by `next_retry_at`
-- [ ] Update `mark_attempt_failed` to compute exponential backoff delay
-- [ ] Increase `MAX_CLAIM_ATTEMPTS` to 10
-- [ ] Implement `ClaimCircuitBreaker` struct
-- [ ] Check circuit breaker state before each processing cycle
-- [ ] Add structured tracing for circuit open/close events
-- [ ] Test: backoff schedule correctness
-- [ ] Test: circuit breaker opens at >50% failure rate
-- [ ] Test: circuit breaker closes after 60s
-- [ ] Test: minimum sample size (4) prevents false trips
+- [x]Add migration: `next_retry_at` column on `escrow_claim_queue`
+- [x]Update `fetch_pending_claims` query to filter by `next_retry_at`
+- [x]Update `mark_attempt_failed` to compute exponential backoff delay
+- [x]Increase `MAX_CLAIM_ATTEMPTS` to 10
+- [x]Implement `ClaimCircuitBreaker` struct
+- [x]Check circuit breaker state before each processing cycle
+- [x]Add structured tracing for circuit open/close events
+- [x]Test: backoff schedule correctness
+- [x]Test: circuit breaker opens at >50% failure rate
+- [x]Test: circuit breaker closes after 60s
+- [x]Test: minimum sample size (4) prevents false trips
 
 ### 8.5: GET /v1/escrow/config
-- [ ] Create `crates/gateway/src/routes/escrow.rs`
-- [ ] Add `SlotCache` to `AppState`
-- [ ] Implement handler: check config, fetch/cache slot, return JSON
-- [ ] Return 404 when escrow not configured
-- [ ] Register route in `build_router`
-- [ ] Add to `routes/mod.rs`
-- [ ] Test: returns 200 with config when escrow enabled
-- [ ] Test: returns 404 when escrow disabled
-- [ ] Test: slot cache TTL works
+- [x]Create `crates/gateway/src/routes/escrow.rs`
+- [x]Add `SlotCache` to `AppState`
+- [x]Implement handler: check config, fetch/cache slot, return JSON
+- [x]Return 404 when escrow not configured
+- [x]Register route in `build_router`
+- [x]Add to `routes/mod.rs`
+- [x]Test: returns 200 with config when escrow enabled
+- [x]Test: returns 404 when escrow disabled
+- [x]Test: slot cache TTL works
 
 ### 8.6: Escrow Monitoring
-- [ ] Add fee payer pool pubkeys to `BalanceMonitor` wallet list in `main.rs`
-- [ ] Create `ClaimMetrics` struct with atomic counters
-- [ ] Pass metrics to `start_claim_processor`
-- [ ] Update processor to increment counters on success/failure/retry
-- [ ] Store `Arc<ClaimMetrics>` on `AppState`
-- [ ] Add `/v1/escrow/health` handler (or extend `/health`)
-- [ ] Include pending queue count (DB query) when pool available
-- [ ] Test: metrics increment correctly
-- [ ] Test: health endpoint returns expected shape
+- [x]Add fee payer pool pubkeys to `BalanceMonitor` wallet list in `main.rs`
+- [x]Create `ClaimMetrics` struct with atomic counters
+- [x]Pass metrics to `start_claim_processor`
+- [x]Update processor to increment counters on success/failure/retry
+- [x]Store `Arc<ClaimMetrics>` on `AppState`
+- [x]Add `/v1/escrow/health` handler (or extend `/health`)
+- [x]Include pending queue count (DB query) when pool available
+- [x]Test: metrics increment correctly
+- [x]Test: health endpoint returns expected shape
 
 ### 8.7: Integration Tests
-- [ ] Circuit breaker unit tests (TDD — write first)
-- [ ] Backoff schedule unit tests
-- [ ] Shutdown signal unit tests
-- [ ] Fee payer rotation unit tests
-- [ ] Escrow config endpoint integration test (oneshot)
-- [ ] Escrow health endpoint integration test (oneshot)
-- [ ] Verify all 342 existing tests still pass
-- [ ] Verify `cargo clippy --all-targets --all-features -- -D warnings` passes
+- [x]Circuit breaker unit tests (TDD — write first)
+- [x]Backoff schedule unit tests
+- [x]Shutdown signal unit tests
+- [x]Fee payer rotation unit tests
+- [x]Escrow config endpoint integration test (oneshot)
+- [x]Escrow health endpoint integration test (oneshot)
+- [x]Verify all 342 existing tests still pass
+- [x]Verify `cargo clippy --all-targets --all-features -- -D warnings` passes
