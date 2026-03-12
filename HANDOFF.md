@@ -18,11 +18,9 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ---
 
-## IMMEDIATE NEXT STEP: Remaining RustyClawRouter Phases
+## Status: ALL PHASES COMPLETE
 
-**Phase 13 (Documentation) is COMPLETE.** Full README overhaul + mdBook documentation site + SDK READMEs.
-
-**Remaining RustyClawRouter phase:** 14 (Production Hardening). See ecosystem plan for details.
+**RustyClawRouter is production-ready.** All 14 phases are complete. No remaining phases.
 
 ---
 
@@ -30,7 +28,20 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ### What's Complete in RustyClawRouter
 
-**Phases 1-9, 10-13, Phase A, Phase G** — all complete (316 gateway tests, 79 x402 tests).
+**Phases 1-14, Phase A, Phase G** — all complete (337 gateway tests, 79 x402 tests, 416+ total).
+
+**Phase 14 (Production Hardening) delivered:**
+- Safety layers — CatchPanicLayer (returns 500 JSON on panic), TimeoutLayer (120s configurable), ConcurrencyLimitLayer (256 configurable)
+- Graceful shutdown — Balance monitor and rate limiter cleanup now respond to shutdown signal via watch channel. All 4 background tasks shut down cleanly.
+- Readiness health check — `/health` now returns dependency status (DB, Redis, providers, Solana RPC) with ok/degraded/error status logic
+- JSON structured logging — `RCR_LOG_FORMAT=json` env var for production log aggregation
+- PostgreSQL pool — Configurable max_connections (default 20) via `RCR_DB_MAX_CONNECTIONS`, 5s acquire timeout
+- Shared HTTP client — All 5 provider adapters share a single reqwest::Client from AppState, 90s per-request timeout for LLM calls
+- Max message validation — 256 message limit per chat request
+- Provider retry — Exponential backoff (2 retries, 1s/2s) for transient failures (timeouts, 5xx). Never retries 4xx. Streaming paths not retried.
+- New files: `docs/plans/phase-14-production-hardening.md`
+- Modified: 15 files (lib.rs, main.rs, balance_monitor.rs, cache.rs, health.rs, chat.rs, all 5 providers, providers/mod.rs, integration.rs, Cargo.toml/lock)
+- 337 gateway tests (235 unit + 102 integration) + 79 x402 tests = 416+ total
 
 **Phase 13 (Documentation) delivered:**
 - README.md overhaul — branded shields.io badges (#F97316 orange), Mermaid architecture diagram (dark theme), x402 payment flow sequence diagram, complete 27-model pricing table, 12 API endpoints, SDK examples, CLI overview, project structure
@@ -208,7 +219,7 @@ tests/
 
 ---
 
-### What's NOT Done Yet
+### Ecosystem Phase Summary
 
 **RustyClawClient ecosystem** (master plan: `.claude/plan/rustyclaw-ecosystem.md`):
 | Phase | Description | Status |
@@ -224,8 +235,9 @@ tests/
 | 9: Service Marketplace | Proxy, registration, health, SSRF prevention | ✅ Complete (308 gateway tests) |
 | 12: Monitoring | Prometheus metrics, request/payment/provider/cache/escrow instrumentation | ✅ Complete (316 gateway + 79 x402 tests) |
 | 13: Documentation | README overhaul, mdBook site (22 chapters), SDK READMEs, brand alignment | ✅ Complete |
+| 14: Production Hardening | Safety layers, graceful shutdown, readiness health, JSON logging, shared HTTP client, provider retry | ✅ Complete (337 gateway + 79 x402 = 416+ tests) |
 
-**Remaining RustyClawRouter phase:** 14 (Production Hardening)
+**All RustyClawRouter phases complete. Production-ready.**
 
 ---
 
@@ -394,6 +406,22 @@ Each SDK implements:
 | 105 | Phosphor Icons (monochrome) as icon system | No colored icons; consistent with brand aesthetic |
 | 106 | Shields.io flat badges with brand orange for README header | Visual consistency, professional appearance |
 
+### Phase 14 Design Decisions
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 107 | CatchPanicLayer as outermost middleware | Catches panics before any other layer; returns 500 JSON instead of connection drop |
+| 108 | 120s global request timeout (configurable) | Generous for LLM streaming; prevents unbounded hangs |
+| 109 | 256 concurrent request limit (configurable) | Prevents resource exhaustion; configurable for scaling |
+| 110 | Watch channel shutdown for all background tasks | All 4 background tasks shut down cleanly on SIGTERM |
+| 111 | Readiness health check with dependency status | `/health` returns ok/degraded/error based on DB, Redis, providers, Solana RPC |
+| 112 | JSON logging via RCR_LOG_FORMAT env var | Production log aggregation without changing code |
+| 113 | PgPool max_connections=20 (configurable) | Reasonable default; tunable via `RCR_DB_MAX_CONNECTIONS` |
+| 114 | Shared reqwest::Client for all providers | Connection pooling; eliminates 5 separate clients |
+| 115 | 90s per-request timeout for LLM calls | Long enough for streaming responses; prevents unbounded waits |
+| 116 | Max 256 messages per chat request | Prevents abuse; generous for real conversations |
+| 117 | 2 retries with exponential backoff for transient provider failures | 1s/2s delays; never retries 4xx; streaming paths not retried |
+
 ## What Didn't Work (Cumulative)
 
 - **Concurrent agents modifying same files** — never dispatch parallel agents that touch same files.
@@ -412,7 +440,7 @@ Each SDK implements:
 
 ```bash
 # RustyClawRouter (~/projects/RustyClawRouter/)
-cargo test                            # 316 gateway tests (221 unit + 95 integration), 79 x402 tests
+cargo test                            # 337 gateway tests (235 unit + 102 integration), 79 x402 tests (416+ total)
 cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings
 
 # RustyClawClient (~/projects/RustyClawClient/)
