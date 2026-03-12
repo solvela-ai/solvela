@@ -1961,6 +1961,111 @@ mod tests {
         );
     }
 
+    // =========================================================================
+    // validate_session_id
+    // =========================================================================
+
+    #[test]
+    fn test_validate_session_id_valid_alphanumeric() {
+        assert_eq!(
+            validate_session_id("abc123"),
+            Some("abc123".to_string()),
+            "alphanumeric session ID should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_session_id_valid_with_dashes_and_underscores() {
+        assert_eq!(
+            validate_session_id("my-session_id-123"),
+            Some("my-session_id-123".to_string()),
+            "dashes and underscores should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_session_id_empty_rejected() {
+        assert_eq!(
+            validate_session_id(""),
+            None,
+            "empty session ID should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_session_id_oversized_rejected() {
+        let long_id = "a".repeat(129);
+        assert_eq!(
+            validate_session_id(&long_id),
+            None,
+            "session ID > 128 chars should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_session_id_exactly_128_chars_accepted() {
+        let id = "a".repeat(128);
+        assert_eq!(
+            validate_session_id(&id),
+            Some(id),
+            "session ID of exactly 128 chars should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_session_id_invalid_chars_rejected() {
+        assert_eq!(
+            validate_session_id("has spaces"),
+            None,
+            "spaces should be rejected"
+        );
+        assert_eq!(
+            validate_session_id("has!special@chars"),
+            None,
+            "special characters should be rejected"
+        );
+        assert_eq!(
+            validate_session_id("path/traversal"),
+            None,
+            "slashes should be rejected"
+        );
+    }
+
+    // =========================================================================
+    // attach_session_id
+    // =========================================================================
+
+    #[test]
+    fn test_attach_session_id_present() {
+        let mut resp = axum::http::Response::builder()
+            .status(200)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let session_id = Some("test-session".to_string());
+        attach_session_id(&mut resp, &session_id);
+        assert_eq!(
+            resp.headers()
+                .get("x-session-id")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "test-session"
+        );
+    }
+
+    #[test]
+    fn test_attach_session_id_absent() {
+        let mut resp = axum::http::Response::builder()
+            .status(200)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        attach_session_id(&mut resp, &None);
+        assert!(
+            resp.headers().get("x-session-id").is_none(),
+            "x-session-id should not be set when session_id is None"
+        );
+    }
+
     /// Helper to build a minimal legacy message for nonce detection tests.
     fn build_legacy_message_for_nonce_test(
         account_keys: &[x402::solana_types::Pubkey],
