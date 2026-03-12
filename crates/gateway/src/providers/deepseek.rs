@@ -14,11 +14,8 @@ pub struct DeepSeekProvider {
 }
 
 impl DeepSeekProvider {
-    pub fn new(api_key: String) -> Self {
-        Self {
-            api_key,
-            client: reqwest::Client::new(),
-        }
+    pub fn new(client: reqwest::Client, api_key: String) -> Self {
+        Self { api_key, client }
     }
 }
 
@@ -36,13 +33,16 @@ impl LLMProvider for DeepSeekProvider {
         &self,
         req: ChatRequest,
     ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let response = self
-            .client
-            .post("https://api.deepseek.com/chat/completions")
-            .bearer_auth(&self.api_key)
-            .json(&req)
-            .send()
-            .await?;
+        let req_body = serde_json::to_value(&req)?;
+        let response = super::retry_with_backoff(2, || {
+            self.client
+                .post("https://api.deepseek.com/chat/completions")
+                .timeout(std::time::Duration::from_secs(90))
+                .bearer_auth(&self.api_key)
+                .json(&req_body)
+                .send()
+        })
+        .await?;
 
         let body = response.error_for_status()?.json::<ChatResponse>().await?;
         Ok(body)
@@ -55,6 +55,7 @@ impl LLMProvider for DeepSeekProvider {
         let response = self
             .client
             .post("https://api.deepseek.com/chat/completions")
+            .timeout(std::time::Duration::from_secs(90))
             .bearer_auth(&self.api_key)
             .json(&body)
             .send()

@@ -77,6 +77,20 @@ impl ResponseCache {
         })
     }
 
+    /// Ping Redis to check connectivity.
+    ///
+    /// Returns `true` if Redis responds to PING, `false` on any error.
+    pub async fn ping(&self) -> bool {
+        let conn = self.client.get_multiplexed_async_connection().await;
+        match conn {
+            Ok(mut c) => redis::cmd("PING")
+                .query_async::<String>(&mut c)
+                .await
+                .is_ok(),
+            Err(_) => false,
+        }
+    }
+
     /// Generate a cache key from a request.
     /// Key = SHA256(model + sorted_messages_json + temperature)
     pub fn cache_key(req: &ChatRequest) -> String {

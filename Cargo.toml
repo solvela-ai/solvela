@@ -21,8 +21,8 @@ async-trait = "0.1"
 
 # Web framework
 axum = "0.8"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "limit", "set-header"] }
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "limit", "set-header", "catch-panic"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

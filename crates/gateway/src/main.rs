@@ -14,13 +14,21 @@ use router::models::ModelRegistry;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "gateway=info,tower_http=info".into()),
-        )
-        .init();
+    // Initialize tracing — text by default, JSON when RCR_LOG_FORMAT=json
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "gateway=info,tower_http=info".into());
+
+    match std::env::var("RCR_LOG_FORMAT").as_deref() {
+        Ok("json") => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .json()
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+    };
 
     // Load configuration
     let app_config = config::AppConfig::default();
@@ -45,8 +53,19 @@ async fn main() -> anyhow::Result<()> {
     );
     let service_registry = tokio::sync::RwLock::new(service_registry_inner);
 
+    // ── Shared HTTP client ─────────────────────────────────────────────────
+    //
+    // A single reqwest::Client is shared across all provider adapters and
+    // general-purpose outbound calls (Solana RPC, health checks). The 10s
+    // client-level timeout applies to non-LLM calls; each provider adapter
+    // overrides it with a 90s per-request timeout for LLM API calls.
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("failed to build HTTP client");
+
     // Initialize provider registry from environment API keys
-    let providers = ProviderRegistry::from_env();
+    let providers = ProviderRegistry::from_env(http_client.clone());
     let configured = providers.configured_providers();
     info!(providers = ?configured, "initialized provider registry");
 
@@ -174,8 +193,18 @@ async fn main() -> anyhow::Result<()> {
     //
     // Set DATABASE_URL to enable persistent spend logging and wallet budgets.
     // Without it, requests still work but spend data is only logged to stdout.
+    let max_connections: u32 = std::env::var("RCR_DB_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+
     let db_pool = match std::env::var("DATABASE_URL") {
-        Ok(url) => match sqlx::PgPool::connect(&url).await {
+        Ok(url) => match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(max_connections)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .connect(&url)
+            .await
+        {
             Ok(pool) => {
                 info!("PostgreSQL connected — spend logging enabled");
                 // Run migrations on startup so the schema is always up to date.
@@ -324,10 +353,7 @@ async fn main() -> anyhow::Result<()> {
                 secret
             }
         },
-        http_client: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .expect("failed to build HTTP client"),
+        http_client,
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         prometheus_handle,
@@ -365,12 +391,13 @@ async fn main() -> anyhow::Result<()> {
     // If both PostgreSQL and an EscrowClaimer are available, start the
     // background claim processor that polls the escrow_claim_queue table.
     if let (Some(ref pool), Some(ref claimer)) = (&state.db_pool, &state.escrow_claimer) {
+        let claim_shutdown_rx = shutdown_rx.clone();
         let _handle = x402::escrow::claim_processor::start_claim_processor(
             pool.clone(),
             Arc::clone(claimer),
             std::time::Duration::from_secs(10),
             escrow_metrics.clone(),
-            shutdown_rx,
+            claim_shutdown_rx,
         );
         info!("escrow claim processor started");
     } else if state.escrow_claimer.is_some() && state.db_pool.is_none() {
@@ -422,7 +449,9 @@ async fn main() -> anyhow::Result<()> {
             );
             // Fire-and-forget — we intentionally drop the handle so the background
             // task runs independently for the lifetime of the process.
-            drop(BalanceMonitor::spawn(monitor));
+            // Shutdown signal ensures clean exit on SIGTERM/Ctrl+C.
+            let monitor_shutdown_rx = shutdown_rx.clone();
+            drop(BalanceMonitor::spawn(monitor, monitor_shutdown_rx));
         }
     }
 
@@ -431,12 +460,21 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn periodic cleanup task — removes expired entries every 60 seconds
     // to prevent the in-memory HashMap from growing without bound.
+    // Shuts down gracefully when the shutdown signal fires.
+    let mut rl_shutdown_rx = shutdown_rx.clone();
     let rl_clone = rate_limiter.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
-            interval.tick().await;
-            rl_clone.cleanup().await;
+            tokio::select! {
+                _ = interval.tick() => {
+                    rl_clone.cleanup().await;
+                }
+                _ = rl_shutdown_rx.changed() => {
+                    info!("rate limiter cleanup shutting down gracefully");
+                    break;
+                }
+            }
         }
     });
 

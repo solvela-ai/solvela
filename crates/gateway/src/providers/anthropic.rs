@@ -22,11 +22,8 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    pub fn new(api_key: String) -> Self {
-        Self {
-            api_key,
-            client: reqwest::Client::new(),
-        }
+    pub fn new(client: reqwest::Client, api_key: String) -> Self {
+        Self { api_key, client }
     }
 }
 
@@ -365,15 +362,18 @@ impl LLMProvider for AnthropicProvider {
         let original_model = req.model.clone();
         let anthropic_req = to_anthropic_request(&req);
 
-        let response = self
-            .client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&anthropic_req)
-            .send()
-            .await?;
+        let req_body = serde_json::to_value(&anthropic_req)?;
+        let response = super::retry_with_backoff(2, || {
+            self.client
+                .post("https://api.anthropic.com/v1/messages")
+                .timeout(std::time::Duration::from_secs(90))
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&req_body)
+                .send()
+        })
+        .await?;
 
         let anthropic_resp = response
             .error_for_status()?
@@ -391,6 +391,7 @@ impl LLMProvider for AnthropicProvider {
         let response = self
             .client
             .post("https://api.anthropic.com/v1/messages")
+            .timeout(std::time::Duration::from_secs(90))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")

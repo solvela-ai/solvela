@@ -30,6 +30,10 @@ use crate::AppState;
 /// Maximum length for a client-provided session ID.
 const MAX_SESSION_ID_LEN: usize = 128;
 
+/// Maximum number of messages allowed in a single chat request.
+/// Prevents excessive memory usage and cost from very long conversations.
+const MAX_MESSAGES: usize = 256;
+
 /// Classify a provider error into a bounded set of label values for metrics.
 ///
 /// Returns one of: `"timeout"`, `"auth"`, `"rate_limit"`, `"server_error"`, `"unknown"`.
@@ -86,6 +90,15 @@ pub async fn chat_completions(
 ) -> Result<Response, GatewayError> {
     let request_start = Instant::now();
     let debug_enabled = is_debug_enabled(&headers);
+
+    // Validate message count before any processing
+    if req.messages.len() > MAX_MESSAGES {
+        return Err(GatewayError::BadRequest(format!(
+            "too many messages: {} exceeds maximum of {}",
+            req.messages.len(),
+            MAX_MESSAGES
+        )));
+    }
 
     // Extract request ID from the incoming header (if valid, it will be echoed
     // by the RequestIdLayer middleware; if invalid, the middleware generates a UUID,
@@ -1614,6 +1627,15 @@ mod tests {
     // =========================================================================
     // heartbeat integration
     // =========================================================================
+
+    // =========================================================================
+    // MAX_MESSAGES validation
+    // =========================================================================
+
+    #[test]
+    fn test_max_messages_constant() {
+        assert_eq!(MAX_MESSAGES, 256);
+    }
 
     #[test]
     fn test_heartbeat_sentinel_is_defined() {
