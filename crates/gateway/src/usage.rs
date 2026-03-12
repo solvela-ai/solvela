@@ -291,9 +291,9 @@ CREATE TABLE IF NOT EXISTS spend_logs (
     wallet_address TEXT NOT NULL,
     model TEXT NOT NULL,
     provider TEXT NOT NULL,
-    input_tokens INTEGER NOT NULL,
-    output_tokens INTEGER NOT NULL,
-    cost_usdc DECIMAL(18, 6) NOT NULL,
+    input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+    output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+    cost_usdc DECIMAL(18, 6) NOT NULL CHECK (cost_usdc >= 0),
     tx_signature TEXT,
     request_id TEXT,
     session_id TEXT,
@@ -304,7 +304,7 @@ CREATE TABLE IF NOT EXISTS wallet_budgets (
     wallet_address TEXT PRIMARY KEY,
     daily_limit_usdc DECIMAL(18, 6),
     monthly_limit_usdc DECIMAL(18, 6),
-    total_spent_usdc DECIMAL(18, 6) DEFAULT 0,
+    total_spent_usdc DECIMAL(18, 6) DEFAULT 0 CHECK (total_spent_usdc >= 0),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -394,6 +394,11 @@ mod tests {
         assert!(MIGRATION_SQL.contains("request_id TEXT"));
         assert!(MIGRATION_SQL.contains("session_id TEXT"));
         assert!(MIGRATION_SQL.contains("idx_spend_session"));
+        // CHECK constraints (must match 001_initial_schema.sql)
+        assert!(MIGRATION_SQL.contains("CHECK (input_tokens >= 0)"));
+        assert!(MIGRATION_SQL.contains("CHECK (output_tokens >= 0)"));
+        assert!(MIGRATION_SQL.contains("CHECK (cost_usdc >= 0)"));
+        assert!(MIGRATION_SQL.contains("CHECK (total_spent_usdc >= 0)"));
     }
 
     #[test]

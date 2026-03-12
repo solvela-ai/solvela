@@ -18,29 +18,11 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ---
 
-## IMMEDIATE NEXT STEP: Phase G Gateway Changes
+## IMMEDIATE NEXT STEP: Remaining RustyClawRouter Phases
 
-**Phase G plan is COMPLETE and written.** See `docs/plans/phase-g-gateway-changes.md` for the full design, 14 decisions (#66-79), implementation checklist, and test plan.
+**Phase G is COMPLETE.** All sub-tasks (G.1-G.5) implemented and merged to main. 342 tests passing.
 
-**Phase G has a worktree with partial G.2 implementation (uncommitted).** Branch `feature/phase-g-gateway-changes` at `.worktrees/phase-g/`. G.2 is committed (b619b93) but not merged to main — review before merging or discard and start fresh from the plan.
-
-**Build order:** G.2 (Debug Headers) → G.5 (Stats Endpoint) → G.1 (Session ID)
-
-**What's in the worktree (uncommitted, may need review/redo):**
-- `crates/gateway/src/middleware/request_id.rs` — RequestId middleware (always-on `X-RCR-Request-Id`)
-- `crates/gateway/src/routes/debug_headers.rs` — DebugInfo struct, attach_debug_headers(), CacheStatus/PaymentStatus enums
-- `crates/gateway/src/routes/chat.rs` — modified to track timing, routing data, cache/payment status; debug headers on all return paths
-- `crates/gateway/src/lib.rs` — RequestIdLayer added outermost, CORS headers for x-request-id/x-rcr-debug/x-session-id
-- `crates/gateway/tests/integration.rs` — 10 new integration tests for debug headers
-- Tests were passing (218 total: 170 unit + 48 integration, up from 199: 161 unit + 38 integration) at time of interruption
-
-**What's NOT done yet (use the plan doc):**
-- G.5: Stats endpoint (`GET /v1/wallet/{address}/stats`) — rename dashboard.rs, auth via session token, 3 DB queries
-- G.1: Session ID echo + logging — extract X-Session-Id in chat handler, echo, pass to usage.rs
-- Migration `003_phase_g_request_session_ids.sql` — add request_id and session_id columns to spend_logs
-- Tests for G.5 (10 tests) and G.1 (6 tests)
-
-**After Phase G:** Remaining RustyClawRouter phases: 8 (Escrow), 9 (Service Marketplace), 12 (Monitoring), 13 (Docs/Examples), 14 (Production Hardening).
+**Remaining RustyClawRouter phases:** 8 (Escrow), 9 (Service Marketplace), 12 (Monitoring), 13 (Docs/Examples), 14 (Production Hardening). See ecosystem plan for details.
 
 ---
 
@@ -48,13 +30,21 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ### What's Complete in RustyClawRouter
 
-**Phases 1-7, 10-11, Phase A** — all complete (304+ tests).
+**Phases 1-7, 10-11, Phase A, Phase G** — all complete (342 tests).
 
-**Security audit completed this session** — 6 critical/high findings fixed:
-- LRU cache replaces HashSet for replay protection (no full-clear gap)
-- 50KB size limit on PAYMENT-SIGNATURE header
-- Rate limit cleanup 60-second cooldown
-- Session secret length validation (>= 32 bytes)
+**Phase G delivered:**
+- G.2: Debug response headers — RequestId middleware (always-on `X-RCR-Request-Id`), 11 debug headers opt-in via `X-RCR-Debug: true`
+- G.5: Stats endpoint — `GET /v1/wallet/{address}/stats` with session auth (`x-rcr-session` HMAC), 3 DB queries (summary, by_model, by_day)
+- G.1: Session ID echo + `SpendLogEntry` refactor + migration `003_phase_g_request_session_ids.sql` (request_id + session_id columns)
+- G.3: SSE heartbeat (completed earlier)
+- G.4: Nonce endpoint (completed earlier)
+
+**Security audit completed** — comprehensive review with fixes:
+- 2 CRITICAL fixed: amount bypass vulnerability, mandatory replay protection
+- 4 HIGH fixed: ConnectInfo extraction, field validation, optimistic settlement guard, max_tokens cap
+- Multiple MEDIUM fixed: CORS tightening, error message leakage, USDC mint enforcement, Docker port exposure, and others
+- Remaining TODO: M3 payer wallet extraction from transaction
+- Earlier audit (Phase B): LRU cache replaces HashSet for replay protection, 50KB PAYMENT-SIGNATURE limit, rate limit cleanup cooldown, session secret length validation
 
 ### What's Complete in RustyClawClient
 
@@ -183,7 +173,7 @@ tests/
 | D: CLI (`rcc`) | wallet, chat, models, doctor commands | ✅ Complete (74 tests) |
 | E: Smart Features | Sessions, cache, degraded detection, free fallback | ✅ Complete (121 tests) |
 | F: SDKs | Python, TS, Go client SDKs | ✅ Complete (301 tests across 3 repos) |
-| G: Gateway Changes | Debug headers, session ID, stats endpoint | G.3 ✅, G.4 ✅, G.2 complete (in worktree, not merged), G.5 + G.1 planned |
+| G: Gateway Changes | Debug headers, session ID, stats endpoint | ✅ Complete (G.1-G.5 all done, 342 tests) |
 
 **Remaining RustyClawRouter phases:** 8, 9, 12, 13, 14 (see ecosystem plan)
 
@@ -324,7 +314,7 @@ Each SDK implements:
 
 ```bash
 # RustyClawRouter (~/projects/RustyClawRouter/)
-cargo test                            # 304+ tests
+cargo test                            # 342 tests
 cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings
 
 # RustyClawClient (~/projects/RustyClawClient/)

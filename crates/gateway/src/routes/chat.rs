@@ -27,6 +27,9 @@ use crate::AppState;
 /// Maximum length for a client-provided session ID.
 const MAX_SESSION_ID_LEN: usize = 128;
 
+/// Platform-wide upper bound for `max_tokens` to prevent unbounded cost exposure.
+const MAX_TOKENS_LIMIT: u32 = 128_000;
+
 /// Validate a session ID: max 128 chars, `[a-zA-Z0-9\-_]` only.
 fn validate_session_id(value: &str) -> Option<String> {
     if value.is_empty() || value.len() > MAX_SESSION_ID_LEN {
@@ -91,9 +94,9 @@ pub async fn chat_completions(
     match prompt_guard::check(&req.messages, &guard_config) {
         GuardResult::Blocked { reason } => {
             warn!(reason = %reason, "request blocked by prompt guard");
-            return Err(GatewayError::BadRequest(format!(
-                "request blocked: {reason}"
-            )));
+            return Err(GatewayError::BadRequest(
+                "Request blocked by content policy".to_string(),
+            ));
         }
         GuardResult::PiiDetected { fields } => {
             // Log only (pii_block=false by default); do not reject
@@ -110,6 +113,20 @@ pub async fn chat_completions(
         .model_registry
         .get(&req.model)
         .ok_or_else(|| GatewayError::ModelNotFound(req.model.clone()))?;
+
+    // Step 2b: Clamp max_tokens to model/platform limit to prevent unbounded cost
+    if let Some(requested_max) = req.max_tokens {
+        let model_limit = model_info.max_output_tokens.unwrap_or(MAX_TOKENS_LIMIT);
+        let effective_limit = model_limit.min(MAX_TOKENS_LIMIT);
+        if requested_max > effective_limit {
+            warn!(
+                original = requested_max,
+                clamped = effective_limit,
+                "max_tokens clamped to model/platform limit"
+            );
+            req.max_tokens = Some(effective_limit);
+        }
+    }
 
     // Step 3: Check for payment
     let payment_header = headers
@@ -274,6 +291,22 @@ pub async fn chat_completions(
                 )));
             }
 
+            // --- M6: Validate scheme matches PayloadData variant ---
+            // Untagged serde deserialization cannot enforce this; check explicitly.
+            match (payload.accepted.scheme.as_str(), &payload.payload) {
+                ("exact", x402::types::PayloadData::Escrow(_)) => {
+                    return Err(GatewayError::BadRequest(
+                        "scheme is 'exact' but payload contains escrow data".to_string(),
+                    ));
+                }
+                ("escrow", x402::types::PayloadData::Direct(_)) => {
+                    return Err(GatewayError::BadRequest(
+                        "scheme is 'escrow' but payload contains direct transfer data".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+
             // Track scheme and escrow info
             payment_scheme = payload.accepted.scheme.clone();
             if let x402::types::PayloadData::Escrow(ref ep) = payload.payload {
@@ -285,6 +318,15 @@ pub async fn chat_completions(
             // Atomically record this transaction signature before verifying.
             // If it was already seen, reject immediately — same signed tx
             // cannot be replayed.
+            //
+            // H1 TOCTOU mitigation: Replay check must happen before
+            // verify_and_settle to prevent TOCTOU double-spend. The tx
+            // signature is recorded atomically here, so concurrent requests
+            // with the same tx will be rejected before verification begins.
+            // Without this ordering, two concurrent requests could both pass
+            // verification but only one settlement would succeed on-chain,
+            // leaving the other request having consumed LLM resources for free.
+            //
             // NOTE: The 120s TTL (in Redis / LRU eviction in-memory) is
             // insufficient for durable nonce transactions, which have no
             // blockhash expiry. A future PR should extend replay persistence
@@ -730,6 +772,7 @@ fn decode_payment_from_header(header: &str) -> Option<x402::types::PaymentPayloa
 ///
 /// If the header is a valid PaymentPayload, extracts the `pay_to` address and
 /// uses the transaction signature. Otherwise returns "unknown" / None.
+// TODO: wallet_address should be the actual payer (tx signer), not pay_to (gateway recipient). See security audit H3/M3.
 fn extract_payment_info(header: &str) -> (String, Option<String>) {
     match decode_payment_from_header(header) {
         Some(payload) => {
@@ -923,16 +966,29 @@ fn estimate_input_tokens(req: &ChatRequest) -> u32 {
 }
 
 /// Compute the actual cost in atomic USDC units from token usage.
+///
+/// Uses integer arithmetic to avoid f64 precision loss on financial amounts.
+/// Cost per million tokens is converted to micro-USDC (atomic units) early,
+/// then all math stays in u128 to prevent overflow on large token counts.
 fn compute_actual_atomic_cost(
     prompt_tokens: u32,
     completion_tokens: u32,
     model_info: &rustyclaw_protocol::ModelInfo,
 ) -> u64 {
-    let input_cost = (prompt_tokens as f64 / 1_000_000.0) * model_info.input_cost_per_million;
-    let output_cost = (completion_tokens as f64 / 1_000_000.0) * model_info.output_cost_per_million;
-    let provider_cost = input_cost + output_cost;
-    let total = provider_cost * 1.05; // 5% platform fee
-    (total * 1_000_000.0) as u64 // Convert to atomic USDC units
+    // Convert cost-per-million-tokens from USDC (f64) to atomic micro-USDC (u64)
+    // by multiplying by 1_000_000. This is the only f64→int conversion.
+    let input_cost_atomic_per_million = (model_info.input_cost_per_million * 1_000_000.0) as u128;
+    let output_cost_atomic_per_million = (model_info.output_cost_per_million * 1_000_000.0) as u128;
+
+    // tokens * atomic_cost_per_million / 1_000_000 = atomic cost
+    let input_atomic = (prompt_tokens as u128) * input_cost_atomic_per_million / 1_000_000;
+    let output_atomic = (completion_tokens as u128) * output_cost_atomic_per_million / 1_000_000;
+    let provider_atomic = input_atomic + output_atomic;
+
+    // 5% platform fee: total = provider * 105 / 100
+    let total_atomic = provider_atomic * 105 / 100;
+
+    total_atomic as u64
 }
 
 /// Decode a base64-encoded service_id into a 32-byte array.
