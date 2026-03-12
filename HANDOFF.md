@@ -28,7 +28,7 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ### What's Complete in RustyClawRouter
 
-**Phases 1-14, Phase A, Phase G** — all complete (337 gateway tests, 79 x402 tests, 416+ total).
+**Phases 1-14, Phase A, Phase G** — all complete (373 gateway tests (264 unit + 109 integration), 503 total workspace).
 
 **Phase 14 (Production Hardening) delivered:**
 - Safety layers — CatchPanicLayer (returns 500 JSON on panic), TimeoutLayer (120s configurable), ConcurrencyLimitLayer (256 configurable)
@@ -78,18 +78,20 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 - New files: `routes/proxy.rs`, `service_health.rs`, `security.rs`, `docs/plans/phase-9-service-marketplace.md`
 - 12 new integration tests covering proxy, registration, health, and security
 
-**Phase G delivered:**
-- G.2: Debug response headers — RequestId middleware (always-on `X-RCR-Request-Id`), 11 debug headers opt-in via `X-RCR-Debug: true`
-- G.5: Stats endpoint — `GET /v1/wallet/{address}/stats` with session auth (`x-rcr-session` HMAC), 3 DB queries (summary, by_model, by_day)
-- G.1: Session ID echo + `SpendLogEntry` refactor + migration `003_phase_g_request_session_ids.sql` (request_id + session_id columns)
+**Phase G delivered (final pass):**
+- G.2: Debug response headers — RequestId middleware (always-on `X-RCR-Request-Id`), 11 debug headers opt-in via `X-RCR-Debug: true`. CORS `expose_headers` added for browser clients. 6 new integration tests for CORS header exposure.
+- G.5: Stats endpoint — `GET /v1/wallet/{address}/stats` with session auth (`x-rcr-session` HMAC), 3 DB queries (summary, by_model, by_day). Query functions moved to `usage.rs` (`get_wallet_stats`, `get_stats_by_model`, `get_stats_by_day`). Wallet mismatch enforcement (token wallet != path wallet -> 403). Response shape tests added.
+- G.1: Session ID echo + `SpendLogEntry` refactor + migration `003_phase_g_request_session_ids.sql` (request_id + session_id columns). 8 unit tests for validation and attachment. 2 migration validation tests.
 - G.3: SSE heartbeat (completed earlier)
 - G.4: Nonce endpoint (completed earlier)
+- Most functionality was already implemented in prior phases; Phase G final pass filled gaps (CORS headers, tests, query refactoring)
+- 373 gateway tests (264 unit + 109 integration), 503 total workspace
 
-**Security audit completed** — comprehensive review with fixes:
-- 2 CRITICAL fixed: amount bypass vulnerability, mandatory replay protection
-- 4 HIGH fixed: ConnectInfo extraction, field validation, optimistic settlement guard, max_tokens cap
+**Security audit completed (pre-Phase G final pass):**
+- 7 CRITICAL fixed: payment amount parsing, budget defaults, devnet fallback, stub-to-paid rejection, stats wallet matching, amount bypass vulnerability, mandatory replay protection
+- 7 HIGH fixed: Redis logging, durable nonce TTL, Anthropic streaming, f64 epsilon, CI action pinning, quinn-proto update, ConnectInfo extraction
+- 4 HIGH fixed (earlier): field validation, optimistic settlement guard, max_tokens cap
 - Multiple MEDIUM fixed: CORS tightening, error message leakage, USDC mint enforcement, Docker port exposure, and others
-- Remaining TODO: M3 payer wallet extraction from transaction
 - Earlier audit (Phase B): LRU cache replaces HashSet for replay protection, 50KB PAYMENT-SIGNATURE limit, rate limit cleanup cooldown, session secret length validation
 
 **Phase 8 (Escrow Hardening) delivered:**
@@ -230,7 +232,7 @@ tests/
 | D: CLI (`rcc`) | wallet, chat, models, doctor commands | ✅ Complete (74 tests) |
 | E: Smart Features | Sessions, cache, degraded detection, free fallback | ✅ Complete (121 tests) |
 | F: SDKs | Python, TS, Go client SDKs | ✅ Complete (301 tests across 3 repos) |
-| G: Gateway Changes | Debug headers, session ID, stats endpoint | ✅ Complete (G.1-G.5 all done, 342 tests) |
+| G: Gateway Changes | Debug headers, session ID, stats endpoint | ✅ Complete (G.1-G.5 all done, 373 gateway / 503 workspace tests) |
 | 8: Escrow Hardening | Claim recovery, fee payer rotation, monitoring | ✅ Complete (384 tests) |
 | 9: Service Marketplace | Proxy, registration, health, SSRF prevention | ✅ Complete (308 gateway tests) |
 | 12: Monitoring | Prometheus metrics, request/payment/provider/cache/escrow instrumentation | ✅ Complete (316 gateway + 79 x402 tests) |
@@ -422,6 +424,13 @@ Each SDK implements:
 | 116 | Max 256 messages per chat request | Prevents abuse; generous for real conversations |
 | 117 | 2 retries with exponential backoff for transient provider failures | 1s/2s delays; never retries 4xx; streaming paths not retried |
 
+### Phase G Final Pass Design Decisions
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 118 | CORS `expose_headers` for all `X-RCR-*` and `X-Session-Id` headers | Browser clients cannot read custom response headers without explicit CORS exposure; required for SDK/dashboard consumers |
+| 119 | Stats query functions (`get_wallet_stats`, `get_stats_by_model`, `get_stats_by_day`) in `usage.rs`, not separate `stats.rs` | Collocates all DB query logic in one module; follows existing pattern where `usage.rs` owns all spend_logs queries |
+
 ## What Didn't Work (Cumulative)
 
 - **Concurrent agents modifying same files** — never dispatch parallel agents that touch same files.
@@ -440,7 +449,7 @@ Each SDK implements:
 
 ```bash
 # RustyClawRouter (~/projects/RustyClawRouter/)
-cargo test                            # 337 gateway tests (235 unit + 102 integration), 79 x402 tests (416+ total)
+cargo test                            # 373 gateway tests (264 unit + 109 integration), 503 total workspace
 cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings
 
 # RustyClawClient (~/projects/RustyClawClient/)
