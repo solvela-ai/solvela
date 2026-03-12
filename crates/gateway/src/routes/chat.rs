@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
@@ -17,6 +18,9 @@ use crate::middleware::prompt_guard::{self, GuardResult, PromptGuardConfig};
 use crate::middleware::x402::decode_payment_header;
 use crate::providers::fallback;
 use crate::providers::heartbeat::{HeartbeatConfig, HeartbeatItem, HeartbeatStream};
+use crate::routes::debug_headers::{
+    attach_debug_headers, is_debug_enabled, CacheStatus, DebugInfo, PaymentStatus,
+};
 use crate::AppState;
 
 /// POST /v1/chat/completions — OpenAI-compatible chat endpoint.
@@ -32,9 +36,14 @@ pub async fn chat_completions(
     headers: HeaderMap,
     Json(mut req): Json<ChatRequest>,
 ) -> Result<Response, GatewayError> {
+    let request_start = Instant::now();
+    let debug_enabled = is_debug_enabled(&headers);
+
     // Step 1: Resolve model — handle aliases and smart routing profiles
     let original_model = req.model.clone();
-    req.model = resolve_model_id(&req, &state)?;
+    let (resolved_model, routing_profile, routing_tier, routing_score) =
+        resolve_model_with_debug(&req, &state)?;
+    req.model = resolved_model;
 
     info!(
         original_model,
@@ -336,16 +345,44 @@ pub async fn chat_completions(
     // Step 5: Proxy to provider (with cache and fallback)
     let provider_name = &model_info.provider;
 
+    // Track cache status for debug headers
+    let mut cache_status = if req.stream {
+        CacheStatus::Skip
+    } else {
+        CacheStatus::Miss
+    };
+
     // Check cache first (only for non-streaming requests)
     if !req.stream {
         if let Some(cache) = &state.cache {
             if let Some(cached) = cache.get(&req).await {
                 info!(model = %req.model, "serving from cache");
-                return Ok(Json(
+                cache_status = CacheStatus::Hit;
+                let mut resp = Json(
                     serde_json::to_value(&cached)
                         .map_err(|e| GatewayError::Internal(e.to_string()))?,
                 )
-                .into_response());
+                .into_response();
+
+                if debug_enabled {
+                    attach_debug_headers(
+                        &mut resp,
+                        &build_debug_info(
+                            &req.model,
+                            &routing_tier,
+                            routing_score,
+                            &routing_profile,
+                            provider_name,
+                            cache_status,
+                            request_start.elapsed().as_millis() as u64,
+                            PaymentStatus::Verified,
+                            estimate_input_tokens(&req),
+                            req.max_tokens.unwrap_or(1000),
+                        ),
+                    );
+                }
+
+                return Ok(resp);
             }
         }
     }
@@ -423,6 +460,24 @@ pub async fn chat_completions(
                         resp.headers_mut()
                             .insert(HeaderName::from_static("x-rcr-fallback"), hv);
                     }
+                }
+
+                if debug_enabled {
+                    attach_debug_headers(
+                        &mut resp,
+                        &build_debug_info(
+                            &req.model,
+                            &routing_tier,
+                            routing_score,
+                            &routing_profile,
+                            provider_name,
+                            cache_status,
+                            request_start.elapsed().as_millis() as u64,
+                            PaymentStatus::Verified,
+                            estimate_input_tokens(&req),
+                            req.max_tokens.unwrap_or(1000),
+                        ),
+                    );
                 }
 
                 return Ok(resp);
@@ -525,6 +580,37 @@ pub async fn chat_completions(
                             .insert(HeaderName::from_static("x-rcr-session"), hv);
                     }
                 }
+
+                if debug_enabled {
+                    let actual_tokens_out = result
+                        .data
+                        .usage
+                        .as_ref()
+                        .map(|u| u.completion_tokens)
+                        .unwrap_or(req.max_tokens.unwrap_or(1000));
+                    let actual_tokens_in = result
+                        .data
+                        .usage
+                        .as_ref()
+                        .map(|u| u.prompt_tokens)
+                        .unwrap_or(estimate_input_tokens(&req));
+                    attach_debug_headers(
+                        &mut resp,
+                        &build_debug_info(
+                            &req.model,
+                            &routing_tier,
+                            routing_score,
+                            &routing_profile,
+                            provider_name,
+                            cache_status,
+                            request_start.elapsed().as_millis() as u64,
+                            PaymentStatus::Verified,
+                            actual_tokens_in,
+                            actual_tokens_out,
+                        ),
+                    );
+                }
+
                 return Ok(resp);
             }
             Err(_) => {
@@ -564,7 +650,27 @@ pub async fn chat_completions(
         },
     });
 
-    Ok(Json(response).into_response())
+    let mut resp = Json(response).into_response();
+
+    if debug_enabled {
+        attach_debug_headers(
+            &mut resp,
+            &build_debug_info(
+                &req.model,
+                &routing_tier,
+                routing_score,
+                &routing_profile,
+                provider_name,
+                cache_status,
+                request_start.elapsed().as_millis() as u64,
+                PaymentStatus::Verified,
+                estimate_input_tokens(&req),
+                req.max_tokens.unwrap_or(1000),
+            ),
+        );
+    }
+
+    Ok(resp)
 }
 
 /// Try to decode a PaymentPayload from the PAYMENT-SIGNATURE header.
@@ -596,25 +702,72 @@ fn extract_payment_info(header: &str) -> (String, Option<String>) {
 }
 
 /// Resolve model ID from aliases, smart routing profiles, or direct model IDs.
-fn resolve_model_id(req: &ChatRequest, state: &AppState) -> Result<String, GatewayError> {
+///
+/// Returns (resolved_model, profile_name, tier_name, score) for debug headers.
+fn resolve_model_with_debug(
+    req: &ChatRequest,
+    state: &AppState,
+) -> Result<(String, String, String, f64), GatewayError> {
     // Check for profile-based routing (e.g., "auto", "eco", "premium")
     if let Some(profile) = Profile::from_alias(&req.model) {
         let result = scorer::classify(&req.messages, false);
         let model_id = profiles::resolve_model(profile, result.tier);
-        return Ok(model_id.to_string());
+        return Ok((
+            model_id.to_string(),
+            req.model.clone(), // profile name (e.g., "auto")
+            format!("{:?}", result.tier),
+            result.score,
+        ));
     }
 
     // Check for model aliases (e.g., "gpt5", "sonnet")
     if let Some(canonical) = profiles::resolve_alias(&req.model) {
-        return Ok(canonical.to_string());
+        return Ok((
+            canonical.to_string(),
+            "direct".to_string(),
+            "N/A".to_string(),
+            0.0,
+        ));
     }
 
     // Check if it's a direct model ID
     if state.model_registry.get(&req.model).is_some() {
-        return Ok(req.model.clone());
+        return Ok((
+            req.model.clone(),
+            "direct".to_string(),
+            "N/A".to_string(),
+            0.0,
+        ));
     }
 
     Err(GatewayError::ModelNotFound(req.model.clone()))
+}
+
+/// Build a [`DebugInfo`] from the routing data collected during request processing.
+fn build_debug_info(
+    model: &str,
+    tier: &str,
+    score: f64,
+    profile: &str,
+    provider: &str,
+    cache_status: CacheStatus,
+    latency_ms: u64,
+    payment_status: PaymentStatus,
+    token_estimate_in: u32,
+    token_estimate_out: u32,
+) -> DebugInfo {
+    DebugInfo {
+        model: model.to_string(),
+        tier: tier.to_string(),
+        score,
+        profile: profile.to_string(),
+        provider: provider.to_string(),
+        cache_status,
+        latency_ms,
+        payment_status,
+        token_estimate_in,
+        token_estimate_out,
+    }
 }
 
 /// Estimate cost in atomic USDC units using the model registry's cost breakdown.
