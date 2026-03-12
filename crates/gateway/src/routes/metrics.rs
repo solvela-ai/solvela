@@ -1,8 +1,9 @@
 //! GET /metrics — Prometheus metrics endpoint.
 //!
-//! Returns Prometheus text exposition format. Gated behind `RCR_ADMIN_TOKEN`
-//! via `Authorization: Bearer <token>` header. Returns 404 when the admin
-//! token is not configured (hides the endpoint entirely).
+//! Returns Prometheus text exposition format. Gated behind the admin token
+//! stored in `AppState.admin_token` (read from `RCR_ADMIN_TOKEN` at startup).
+//! Returns 404 when the admin token is not configured (hides the endpoint
+//! entirely). Returns 503 when the Prometheus recorder failed to install.
 
 use std::sync::Arc;
 
@@ -21,15 +22,16 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8"
 /// Returns:
 /// - 200 with Prometheus text format body when authorized
 /// - 401 when the Authorization header is missing or invalid
-/// - 404 when `RCR_ADMIN_TOKEN` is not set (endpoint hidden)
+/// - 404 when the admin token is not configured (endpoint hidden)
+/// - 503 when the Prometheus recorder is unavailable
 pub async fn get_metrics(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     // If no admin token is configured, hide the endpoint entirely
-    let admin_token = match std::env::var("RCR_ADMIN_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => {
+    let admin_token = match &state.admin_token {
+        Some(t) => t,
+        None => {
             return (StatusCode::NOT_FOUND, "not found").into_response();
         }
     };
@@ -45,7 +47,14 @@ pub async fn get_metrics(
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
 
-    let body = state.prometheus_handle.render();
+    let handle = match &state.prometheus_handle {
+        Some(h) => h,
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "metrics unavailable").into_response();
+        }
+    };
+
+    let body = handle.render();
     (
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],

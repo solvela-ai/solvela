@@ -267,9 +267,20 @@ async fn main() -> anyhow::Result<()> {
     //
     // Install the global Prometheus recorder. The PrometheusHandle is stored
     // in AppState so the /metrics endpoint can call `handle.render()`.
-    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+    let prometheus_handle = match metrics_exporter_prometheus::PrometheusBuilder::new()
         .install_recorder()
-        .expect("failed to install Prometheus metrics recorder");
+    {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to install Prometheus recorder — metrics will be unavailable");
+            None
+        }
+    };
+
+    // Read admin token once at startup
+    let admin_token = std::env::var("RCR_ADMIN_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
 
     // Build shared state
     let state = Arc::new(AppState {
@@ -286,6 +297,7 @@ async fn main() -> anyhow::Result<()> {
         nonce_pool,
         db_pool,
         escrow_metrics: escrow_metrics.clone(),
+        admin_token,
         session_secret: {
             let secret = match std::env::var("RCR_SESSION_SECRET") {
                 Ok(b64) => {

@@ -241,7 +241,8 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
-        prometheus_handle: test_prometheus_handle(),
+        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        prometheus_handle: Some(test_prometheus_handle()),
     });
     let router = build_router(
         Arc::clone(&state),
@@ -308,7 +309,8 @@ fn test_app_with_escrow() -> axum::Router {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
-        prometheus_handle: test_prometheus_handle(),
+        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        prometheus_handle: Some(test_prometheus_handle()),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -1528,7 +1530,8 @@ fn test_app_with_nonce_pool() -> axum::Router {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
-        prometheus_handle: test_prometheus_handle(),
+        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        prometheus_handle: Some(test_prometheus_handle()),
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -2621,7 +2624,6 @@ async fn test_escrow_config_returns_200_when_configured() {
 /// Test 13a: escrow health returns 401 when no Authorization header is sent.
 #[tokio::test]
 async fn test_escrow_health_returns_401_without_auth_header() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     let app = test_app_with_escrow();
 
     let response = app
@@ -2644,7 +2646,6 @@ async fn test_escrow_health_returns_401_without_auth_header() {
 /// Test 13b: escrow health returns 401 when bearer token is wrong.
 #[tokio::test]
 async fn test_escrow_health_returns_401_with_wrong_token() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     let app = test_app_with_escrow();
 
     let response = app
@@ -2668,7 +2669,6 @@ async fn test_escrow_health_returns_401_with_wrong_token() {
 /// Test 13c: escrow health returns 404 when escrow is not configured (with valid auth).
 #[tokio::test]
 async fn test_escrow_health_returns_404_when_not_configured() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     let app = test_app(); // default config has escrow_program_id: None
 
     let response = app
@@ -2692,7 +2692,6 @@ async fn test_escrow_health_returns_404_when_not_configured() {
 /// Test 14: escrow health returns 200 with correct shape when escrow is configured.
 #[tokio::test]
 async fn test_escrow_health_returns_200_when_configured() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     let app = test_app_with_escrow();
 
     let response = app
@@ -2803,7 +2802,8 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: Some(metrics),
-        prometheus_handle: test_prometheus_handle(),
+        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        prometheus_handle: Some(test_prometheus_handle()),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -2811,7 +2811,6 @@ fn test_app_with_escrow_metrics() -> axum::Router {
 /// Test 15: escrow health returns populated metrics when metrics are configured.
 #[tokio::test]
 async fn test_escrow_health_returns_metrics() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     let app = test_app_with_escrow_metrics();
 
     let response = app
@@ -2960,7 +2959,8 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: Some(Arc::clone(&metrics)),
-        prometheus_handle: test_prometheus_handle(),
+        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        prometheus_handle: Some(test_prometheus_handle()),
     });
 
     // Simulate claim processing by incrementing metrics atomically
@@ -2969,7 +2969,6 @@ async fn test_escrow_health_reflects_incremented_metrics() {
     metrics.claims_failed.fetch_add(1, Ordering::Relaxed);
     metrics.claims_retried.fetch_add(1, Ordering::Relaxed);
 
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     let app = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
@@ -3187,9 +3186,10 @@ async fn test_escrow_health_status_down_without_claimer() {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
-        prometheus_handle: test_prometheus_handle(),
+        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        prometheus_handle: Some(test_prometheus_handle()),
     });
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
+
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
 
     let response = app
@@ -3220,7 +3220,6 @@ async fn test_escrow_health_status_down_without_claimer() {
 /// no DB pool is available (claim processor cannot run).
 #[tokio::test]
 async fn test_escrow_health_status_degraded_without_db() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     // test_app_with_escrow has escrow_claimer but no db_pool
     let app = test_app_with_escrow();
 
@@ -3432,7 +3431,6 @@ async fn test_proxy_returns_503_for_unhealthy_service() {
 #[tokio::test]
 async fn test_register_service_requires_auth() {
     // Set the admin token env var so the endpoint is exposed
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
 
     let app = test_app();
 
@@ -3462,14 +3460,10 @@ async fn test_register_service_requires_auth() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "unauthorized");
-
-    std::env::remove_var("RCR_ADMIN_TOKEN");
 }
 
 #[tokio::test]
 async fn test_register_service_creates_entry() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
-
     let (app, state) = test_app_with_state();
 
     let body = serde_json::json!({
@@ -3509,14 +3503,10 @@ async fn test_register_service_creates_entry() {
     let entry = registry.get("my-new-api");
     assert!(entry.is_some());
     assert_eq!(entry.unwrap().name, "My New API");
-
-    std::env::remove_var("RCR_ADMIN_TOKEN");
 }
 
 #[tokio::test]
 async fn test_register_service_rejects_duplicate_id() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
-
     let app = test_app();
 
     let body = serde_json::json!({
@@ -3545,14 +3535,10 @@ async fn test_register_service_rejects_duplicate_id() {
     let resp_body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
     assert!(json["error"].as_str().unwrap().contains("already exists"));
-
-    std::env::remove_var("RCR_ADMIN_TOKEN");
 }
 
 #[tokio::test]
 async fn test_register_service_validates_https() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
-
     let app = test_app();
 
     let body = serde_json::json!({
@@ -3581,14 +3567,10 @@ async fn test_register_service_validates_https() {
     let resp_body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
     assert!(json["error"].as_str().unwrap().contains("https"));
-
-    std::env::remove_var("RCR_ADMIN_TOKEN");
 }
 
 #[tokio::test]
 async fn test_register_service_validates_required_fields() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
-
     let app = test_app();
 
     // Empty id should fail validation
@@ -3614,8 +3596,6 @@ async fn test_register_service_validates_required_fields() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-    std::env::remove_var("RCR_ADMIN_TOKEN");
 }
 
 // ---------------------------------------------------------------------------
@@ -3659,8 +3639,6 @@ async fn test_services_list_includes_health_status() {
 
 #[tokio::test]
 async fn test_services_list_includes_registered_services() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
-
     let (router, state) = test_app_with_state();
 
     // Register a new service directly via the registry
@@ -3708,8 +3686,6 @@ async fn test_services_list_includes_registered_services() {
     assert_eq!(runtime_svc["name"], "Runtime Service");
     assert_eq!(runtime_svc["source"], "api");
     assert_eq!(runtime_svc["category"], "compute");
-
-    std::env::remove_var("RCR_ADMIN_TOKEN");
 }
 
 // ---------------------------------------------------------------------------
@@ -3718,8 +3694,6 @@ async fn test_services_list_includes_registered_services() {
 
 #[tokio::test]
 async fn test_metrics_without_auth_returns_401() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
-
     let app = test_app();
     let response = app
         .oneshot(
@@ -3731,19 +3705,16 @@ async fn test_metrics_without_auth_returns_401() {
         .await
         .unwrap();
 
-    // 401 when token is configured (expected), 404 if another parallel test
-    // removed RCR_ADMIN_TOKEN between our set_var and the handler read.
-    let status = response.status();
-    assert!(
-        status == StatusCode::UNAUTHORIZED || status == StatusCode::NOT_FOUND,
-        "expected 401 (or 404 from env var race), got {status}"
+    // Admin token is in AppState — no env var race possible.
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "expected 401 when no Bearer token is provided"
     );
 }
 
 #[tokio::test]
 async fn test_metrics_with_valid_token_returns_200() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
-
     let app = test_app();
     let response = app
         .oneshot(
@@ -3756,12 +3727,7 @@ async fn test_metrics_with_valid_token_returns_200() {
         .await
         .unwrap();
 
-    // 200 when token matches (expected), 404 if another parallel test
-    // removed RCR_ADMIN_TOKEN between our set_var and the handler read.
-    if response.status() == StatusCode::NOT_FOUND {
-        return; // env var race — skip content-type assertion
-    }
-
+    // Admin token is in AppState — no env var race possible.
     assert_eq!(response.status(), StatusCode::OK);
 
     // Verify content type is Prometheus text format
@@ -3779,8 +3745,6 @@ async fn test_metrics_with_valid_token_returns_200() {
 
 #[tokio::test]
 async fn test_metrics_with_invalid_token_returns_401() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
-
     let app = test_app();
     let response = app
         .oneshot(
@@ -3793,21 +3757,18 @@ async fn test_metrics_with_invalid_token_returns_401() {
         .await
         .unwrap();
 
-    // 401 when token is configured (expected), 404 if another parallel test
-    // removed RCR_ADMIN_TOKEN between our set_var and the handler read.
-    let status = response.status();
-    assert!(
-        status == StatusCode::UNAUTHORIZED || status == StatusCode::NOT_FOUND,
-        "expected 401 (or 404 from env var race), got {status}"
+    // Admin token is in AppState — no env var race possible.
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "expected 401 when no Bearer token is provided"
     );
 }
 
 #[tokio::test]
 async fn test_metrics_without_admin_token_not_accessible() {
-    // This test verifies that the /metrics endpoint is not accessible when
-    // RCR_ADMIN_TOKEN is unset. However, since env vars are process-global
-    // and tests run in parallel, we can't reliably unset RCR_ADMIN_TOKEN.
-    // Instead, we verify that an unauthenticated request never returns 200.
+    // Admin token is in AppState so there are no env var races.
+    // test_app() sets admin_token: Some(...), so unauthenticated = 401.
     let app = test_app();
     let response = app
         .oneshot(
@@ -3819,18 +3780,15 @@ async fn test_metrics_without_admin_token_not_accessible() {
         .await
         .unwrap();
 
-    let status = response.status();
-    assert_ne!(
-        status,
-        StatusCode::OK,
-        "unauthenticated /metrics request should never return 200"
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated /metrics request should return 401"
     );
 }
 
 #[tokio::test]
 async fn test_metrics_contains_request_total_after_request() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
-
     let (app, state) = test_app_with_state();
 
     // First, make a request to /health to generate metrics
@@ -3871,7 +3829,7 @@ async fn test_metrics_contains_request_total_after_request() {
     // The global recorder is shared across all tests so we may see metrics
     // from other tests too, but rcr_requests_total should be present.
     // Also verify via the handle directly.
-    let rendered = state.prometheus_handle.render();
+    let rendered = state.prometheus_handle.as_ref().unwrap().render();
     assert!(
         rendered.contains("rcr_requests_total"),
         "metrics output should contain rcr_requests_total, got:\n{rendered}"
@@ -3882,14 +3840,10 @@ async fn test_metrics_contains_request_total_after_request() {
         body_str.contains("rcr_requests_total"),
         "metrics body should contain rcr_requests_total"
     );
-
-    std::env::remove_var("RCR_ADMIN_TOKEN");
 }
 
 #[tokio::test]
 async fn test_metrics_contains_request_duration() {
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
-
     let (app, state) = test_app_with_state();
 
     // Make a request to generate duration metrics
@@ -3905,13 +3859,11 @@ async fn test_metrics_contains_request_duration() {
         .unwrap();
 
     // Check that the histogram metric exists
-    let rendered = state.prometheus_handle.render();
+    let rendered = state.prometheus_handle.as_ref().unwrap().render();
     assert!(
         rendered.contains("rcr_request_duration_seconds"),
         "metrics should contain rcr_request_duration_seconds histogram, got:\n{rendered}"
     );
-
-    std::env::remove_var("RCR_ADMIN_TOKEN");
 }
 
 #[tokio::test]
@@ -3920,7 +3872,7 @@ async fn test_metrics_not_counted_in_own_requests() {
 
     // Set token immediately before each request to minimize env var race
     // with other parallel tests.
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
+
     let resp1 = app
         .clone()
         .oneshot(
@@ -3933,12 +3885,9 @@ async fn test_metrics_not_counted_in_own_requests() {
         .await
         .unwrap();
 
-    // If env var was removed by another test, we may get 404; retry with set_var
-    if resp1.status() == StatusCode::NOT_FOUND {
-        std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
-    }
+    // Admin token is in AppState — no env var race.
+    assert_eq!(resp1.status(), StatusCode::OK);
 
-    std::env::set_var("RCR_ADMIN_TOKEN", TEST_ADMIN_TOKEN);
     let _resp2 = app
         .oneshot(
             Request::builder()
@@ -3951,9 +3900,7 @@ async fn test_metrics_not_counted_in_own_requests() {
         .unwrap();
 
     // Primary assertion: the /metrics path must not appear in rcr_requests_total.
-    // Even if the first request got 404 due to env var race, the middleware
-    // still correctly skipped recording for /metrics path.
-    let rendered = state.prometheus_handle.render();
+    let rendered = state.prometheus_handle.as_ref().unwrap().render();
     let has_metrics_path = rendered
         .lines()
         .any(|line| line.contains("rcr_requests_total") && line.contains("path=\"/metrics\""));
@@ -3961,6 +3908,4 @@ async fn test_metrics_not_counted_in_own_requests() {
         !has_metrics_path,
         "/metrics path should not be counted in rcr_requests_total"
     );
-
-    std::env::remove_var("RCR_ADMIN_TOKEN");
 }

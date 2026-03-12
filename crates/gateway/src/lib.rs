@@ -67,8 +67,11 @@ pub struct AppState {
     /// In-memory escrow claim metrics (submitted, succeeded, failed, retried).
     /// `None` when escrow or claim processor is not configured.
     pub escrow_metrics: Option<Arc<x402::escrow::EscrowMetrics>>,
+    /// Admin token for protected endpoints. `None` when not configured.
+    pub admin_token: Option<String>,
     /// Prometheus metrics handle for rendering the `/metrics` endpoint.
-    pub prometheus_handle: metrics_exporter_prometheus::PrometheusHandle,
+    /// `None` when the recorder failed to install (metrics unavailable).
+    pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
 }
 
 impl AppState {

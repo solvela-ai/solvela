@@ -21,7 +21,7 @@ Add a Prometheus `/metrics` endpoint to the gateway using `metrics` + `metrics-e
 | `rcr_payment_amount_usdc` | histogram | — | chat.rs, proxy.rs |
 | `rcr_replay_rejections_total` | counter | — | chat.rs, proxy.rs |
 | `rcr_provider_request_duration_seconds` | histogram | provider | chat.rs |
-| `rcr_provider_errors_total` | counter | provider, error_type | chat.rs |
+| `rcr_provider_errors_total` | counter | provider, error_type (timeout/auth/rate_limit/server_error/unknown) | chat.rs |
 | `rcr_cache_total` | counter | result (hit/miss/skip) | chat.rs |
 | `rcr_escrow_claims_total` | counter | result (success/failure) | claim_processor.rs |
 | `rcr_escrow_queue_depth` | gauge | — | claim_processor.rs |
@@ -97,7 +97,7 @@ At each payment outcome:
 
 Wrap provider call with timing:
 - `histogram!("rcr_provider_request_duration_seconds", "provider" => provider_name).record(duration_secs)`
-- On provider error: `counter!("rcr_provider_errors_total", "provider" => name, "error_type" => type).increment(1)`
+- On provider error: `counter!("rcr_provider_errors_total", "provider" => name, "error_type" => type).increment(1)` — `error_type` labels are: `timeout`, `auth`, `rate_limit`, `server_error`, `unknown` (bounded cardinality via `classify_provider_error()`)
 
 ### Cache Metrics (chat.rs)
 

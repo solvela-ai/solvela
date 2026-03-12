@@ -30,6 +30,29 @@ use crate::AppState;
 /// Maximum length for a client-provided session ID.
 const MAX_SESSION_ID_LEN: usize = 128;
 
+/// Classify a provider error into a bounded set of label values for metrics.
+///
+/// Returns one of: `"timeout"`, `"auth"`, `"rate_limit"`, `"server_error"`, `"unknown"`.
+/// Cardinality is fixed — never use the raw error message as a label.
+fn classify_provider_error(err: &impl std::fmt::Display) -> &'static str {
+    let msg = err.to_string().to_lowercase();
+    if msg.contains("timeout") || msg.contains("timed out") {
+        "timeout"
+    } else if msg.contains("401") || msg.contains("unauthorized") || msg.contains("auth") {
+        "auth"
+    } else if msg.contains("429") || msg.contains("rate") || msg.contains("too many") {
+        "rate_limit"
+    } else if msg.contains("500")
+        || msg.contains("502")
+        || msg.contains("503")
+        || msg.contains("504")
+    {
+        "server_error"
+    } else {
+        "unknown"
+    }
+}
+
 /// Platform-wide upper bound for `max_tokens` to prevent unbounded cost exposure.
 const MAX_TOKENS_LIMIT: u32 = 128_000;
 
@@ -444,6 +467,7 @@ pub async fn chat_completions(
         if let Some(cache) = &state.cache {
             if let Some(cached) = cache.get(&req).await {
                 counter!("rcr_cache_total", "result" => "hit").increment(1);
+                counter!("rcr_payments_total", "status" => "cached").increment(1);
                 info!(model = %req.model, "serving from cache");
                 cache_status = CacheStatus::Hit;
                 let mut resp = Json(
@@ -583,9 +607,10 @@ pub async fn chat_completions(
 
                 return Ok(resp);
             }
-            Err(_) => {
+            Err(e) => {
                 // All models failed — fall through to stub
-                counter!("rcr_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => "all_failed").increment(1);
+                let error_type = classify_provider_error(&e);
+                counter!("rcr_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => error_type).increment(1);
             }
         }
     } else {
@@ -724,9 +749,10 @@ pub async fn chat_completions(
 
                 return Ok(resp);
             }
-            Err(_) => {
+            Err(e) => {
                 // All models failed — fall through to stub
-                counter!("rcr_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => "all_failed").increment(1);
+                let error_type = classify_provider_error(&e);
+                counter!("rcr_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => error_type).increment(1);
             }
         }
     }
@@ -1633,5 +1659,64 @@ mod tests {
         let prefs = parse_fallback_preference(" openai/gpt-4.1 , anthropic/claude-sonnet-4.6 ");
         assert_eq!(prefs.len(), 2);
         assert_eq!(prefs[0], ("openai", "gpt-4.1"));
+    }
+
+    // -------------------------------------------------------------------------
+    // classify_provider_error
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_classify_provider_error_timeout() {
+        assert_eq!(classify_provider_error(&"connection timeout"), "timeout");
+        assert_eq!(classify_provider_error(&"request timed out"), "timeout");
+    }
+
+    #[test]
+    fn test_classify_provider_error_auth() {
+        assert_eq!(classify_provider_error(&"HTTP 401 Unauthorized"), "auth");
+        assert_eq!(
+            classify_provider_error(&"unauthorized: invalid API key"),
+            "auth"
+        );
+        assert_eq!(classify_provider_error(&"auth error"), "auth");
+    }
+
+    #[test]
+    fn test_classify_provider_error_rate_limit() {
+        assert_eq!(
+            classify_provider_error(&"HTTP 429 Too Many Requests"),
+            "rate_limit"
+        );
+        assert_eq!(
+            classify_provider_error(&"rate limit exceeded"),
+            "rate_limit"
+        );
+        assert_eq!(classify_provider_error(&"too many requests"), "rate_limit");
+    }
+
+    #[test]
+    fn test_classify_provider_error_server_error() {
+        assert_eq!(
+            classify_provider_error(&"HTTP 500 Internal Server Error"),
+            "server_error"
+        );
+        assert_eq!(classify_provider_error(&"502 Bad Gateway"), "server_error");
+        assert_eq!(
+            classify_provider_error(&"503 Service Unavailable"),
+            "server_error"
+        );
+        assert_eq!(
+            classify_provider_error(&"504 Gateway Error"),
+            "server_error"
+        );
+        // "504 Gateway Timeout" matches "timeout" first — intentional;
+        // the timeout bucket is more operationally specific.
+        assert_eq!(classify_provider_error(&"504 Gateway Timeout"), "timeout");
+    }
+
+    #[test]
+    fn test_classify_provider_error_unknown() {
+        assert_eq!(classify_provider_error(&"something went wrong"), "unknown");
+        assert_eq!(classify_provider_error(&"connection refused"), "unknown");
     }
 }

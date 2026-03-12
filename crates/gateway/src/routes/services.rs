@@ -110,10 +110,10 @@ pub async fn register_service(
     headers: HeaderMap,
     Json(body): Json<RegisterServiceRequest>,
 ) -> impl IntoResponse {
-    // Gate behind RCR_ADMIN_TOKEN — if not configured, hide the endpoint entirely
-    let admin_token = match std::env::var("RCR_ADMIN_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => {
+    // Gate behind admin token — if not configured, hide the endpoint entirely
+    let admin_token = match &state.admin_token {
+        Some(t) => t,
+        None => {
             return (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response();
         }
     };
