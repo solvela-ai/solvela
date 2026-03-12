@@ -217,29 +217,56 @@ impl ResponseCache {
         match self.client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
                 // SET key 1 NX EX <ttl> — atomic: only sets if key does NOT exist
-                let result: Option<String> = redis::cmd("SET")
+                let result: Result<Option<String>, redis::RedisError> = redis::cmd("SET")
                     .arg(&key)
                     .arg("1")
                     .arg("NX")
                     .arg("EX")
                     .arg(ttl_secs)
                     .query_async(&mut conn)
-                    .await
-                    .unwrap_or(None);
+                    .await;
 
-                if result.is_some() {
-                    if uses_durable_nonce {
-                        info!(
-                            tx = %tx_signature,
-                            ttl_secs = ttl_secs,
-                            "recorded durable nonce transaction with extended replay TTL"
-                        );
+                match result {
+                    Ok(Some(_)) => {
+                        // Key was newly set — first time seeing this tx
+                        if uses_durable_nonce {
+                            info!(
+                                tx = %tx_signature,
+                                ttl_secs = ttl_secs,
+                                "recorded durable nonce transaction with extended replay TTL"
+                            );
+                        }
+                        Ok(())
                     }
-                    // Key was newly set — first time seeing this tx
-                    Ok(())
-                } else {
-                    // Key already existed — replay detected
-                    Err(CacheError::Replay)
+                    Ok(None) => {
+                        // Key already existed — replay detected
+                        Err(CacheError::Replay)
+                    }
+                    Err(e) => {
+                        // Redis command error (timeout, OOM, etc.) — do NOT treat as replay.
+                        // Fall through to in-memory LRU fallback below.
+                        warn!(
+                            error = %e,
+                            tx = %tx_signature,
+                            "Redis SET NX failed — falling back to in-memory replay check"
+                        );
+
+                        let mut cache = self
+                            .fallback_replay_set
+                            .lock()
+                            .expect("fallback replay set mutex poisoned");
+
+                        if cache.get(tx_signature).is_some() {
+                            Err(CacheError::Replay)
+                        } else {
+                            cache.put(tx_signature.to_string(), ());
+                            warn!(
+                                tx = %tx_signature,
+                                "payment accepted under degraded in-memory replay protection (Redis SET NX error)"
+                            );
+                            Ok(())
+                        }
+                    }
                 }
             }
             Err(e) => {

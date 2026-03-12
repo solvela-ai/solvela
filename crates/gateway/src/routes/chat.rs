@@ -186,10 +186,17 @@ pub async fn chat_completions(
             )
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
 
+        let atomic_amount = usdc_atomic_amount_checked(&cost.total).map_err(|e| {
+            GatewayError::Internal(format!(
+                "failed to compute USDC atomic amount for model '{}': {}",
+                req.model, e
+            ))
+        })?;
+
         let mut accepts = vec![x402::types::PaymentAccept {
             scheme: "exact".to_string(),
             network: x402::types::SOLANA_NETWORK.to_string(),
-            amount: usdc_atomic_amount(&cost.total),
+            amount: atomic_amount.clone(),
             asset: x402::types::USDC_MINT.to_string(),
             pay_to: state.config.solana.recipient_wallet.clone(),
             max_timeout_seconds: x402::types::MAX_TIMEOUT_SECONDS,
@@ -201,7 +208,7 @@ pub async fn chat_completions(
             accepts.push(x402::types::PaymentAccept {
                 scheme: "escrow".to_string(),
                 network: x402::types::SOLANA_NETWORK.to_string(),
-                amount: usdc_atomic_amount(&cost.total),
+                amount: atomic_amount,
                 asset: x402::types::USDC_MINT.to_string(),
                 pay_to: state.config.solana.recipient_wallet.clone(),
                 max_timeout_seconds: x402::types::MAX_TIMEOUT_SECONDS,
@@ -689,7 +696,7 @@ pub async fn chat_completions(
                 }
 
                 if let Some(usage) = &result.data.usage {
-                    let cost = match state
+                    match state
                         .model_registry
                         .estimate_cost(&req.model, usage.prompt_tokens, usage.completion_tokens)
                         .and_then(|c| {
@@ -697,24 +704,28 @@ pub async fn chat_completions(
                                 router::models::ModelRegistryError::ParseError(e.to_string())
                             })
                         }) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            warn!(error = %e, model = %req.model, "failed to compute actual cost for spend log, skipping");
-                            0.0
+                        Ok(cost) => {
+                            state.usage.log_spend(SpendLogEntry {
+                                wallet_address: wallet_address.clone(),
+                                model: req.model.clone(),
+                                provider: result.actual_provider.clone(),
+                                input_tokens: usage.prompt_tokens,
+                                output_tokens: usage.completion_tokens,
+                                cost_usdc: cost,
+                                tx_signature: tx_signature.clone(),
+                                request_id: request_id.clone(),
+                                session_id: session_id.clone(),
+                            });
                         }
-                    };
-
-                    state.usage.log_spend(SpendLogEntry {
-                        wallet_address: wallet_address.clone(),
-                        model: req.model.clone(),
-                        provider: result.actual_provider.clone(),
-                        input_tokens: usage.prompt_tokens,
-                        output_tokens: usage.completion_tokens,
-                        cost_usdc: cost,
-                        tx_signature: tx_signature.clone(),
-                        request_id: request_id.clone(),
-                        session_id: session_id.clone(),
-                    });
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                model = %req.model,
+                                wallet = %wallet_address,
+                                "failed to compute actual cost — skipping spend log to avoid $0 entry"
+                            );
+                        }
+                    }
                 }
 
                 let claim_atomic = if let Some(usage) = &result.data.usage {
@@ -1195,6 +1206,8 @@ fn parse_fallback_preference(header: &str) -> Vec<(&str, &str)> {
 ///
 /// Returns an error if the input is empty or contains non-numeric characters,
 /// preventing silent fallback to 0 on malformed financial amounts.
+/// Unchecked convenience wrapper — used only in tests to verify round-trip behavior.
+#[cfg(test)]
 fn usdc_atomic_amount(decimal_str: &str) -> String {
     usdc_atomic_amount_checked(decimal_str).unwrap_or_else(|_| "0".to_string())
 }

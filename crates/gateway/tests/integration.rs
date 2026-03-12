@@ -3,11 +3,15 @@
 //! These tests spin up the Axum app in-process using `tower::ServiceExt`
 //! and exercise the HTTP endpoints without needing a running server.
 
+use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine;
+use futures::stream;
 use http_body_util::BodyExt;
 use tokio::sync::RwLock;
 use tower::ServiceExt;
@@ -15,10 +19,14 @@ use tower::ServiceExt;
 use gateway::config::AppConfig;
 use gateway::middleware::rate_limit::{RateLimitConfig, RateLimiter};
 use gateway::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
-use gateway::providers::ProviderRegistry;
+use gateway::providers::{ChatStream, LLMProvider, ProviderRegistry};
 use gateway::services::ServiceRegistry;
 use gateway::{build_router, AppState};
 use router::models::ModelRegistry;
+use rustyclaw_protocol::{
+    ChatChoice, ChatChunk, ChatChunkChoice, ChatDelta, ChatMessage, ChatResponse, ModelInfo, Role,
+    Usage,
+};
 use x402::traits::{Error as X402Error, PaymentVerifier};
 use x402::types::{
     EscrowPayload, PayloadData, PaymentAccept, PaymentPayload, Resource, SettlementResult,
@@ -251,6 +259,211 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
     (router, state)
 }
 
+// ---------------------------------------------------------------------------
+// Mock LLM provider for integration tests
+// ---------------------------------------------------------------------------
+
+/// A mock LLM provider that returns canned responses for any model.
+/// Supports both streaming and non-streaming requests.
+struct MockProvider {
+    provider_name: String,
+}
+
+impl MockProvider {
+    fn new(name: &str) -> Self {
+        Self {
+            provider_name: name.to_string(),
+        }
+    }
+
+    fn mock_response(model: &str) -> ChatResponse {
+        ChatResponse {
+            id: "mock-chatcmpl-001".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1_700_000_000,
+            model: model.to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage {
+                    role: Role::Assistant,
+                    content: "[mock response]".to_string(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: Some(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for MockProvider {
+    fn name(&self) -> &str {
+        &self.provider_name
+    }
+
+    fn supported_models(&self) -> Vec<ModelInfo> {
+        vec![]
+    }
+
+    async fn chat_completion(
+        &self,
+        req: rustyclaw_protocol::ChatRequest,
+    ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self::mock_response(&req.model))
+    }
+
+    async fn chat_completion_stream(
+        &self,
+        req: rustyclaw_protocol::ChatRequest,
+    ) -> Result<ChatStream, Box<dyn std::error::Error + Send + Sync>> {
+        let chunk = ChatChunk {
+            id: "mock-chatcmpl-001".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 1_700_000_000,
+            model: req.model.clone(),
+            choices: vec![ChatChunkChoice {
+                index: 0,
+                delta: ChatDelta {
+                    role: Some(Role::Assistant),
+                    content: Some("[mock stream response]".to_string()),
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+        };
+        let s = stream::iter(vec![Ok(chunk)]);
+        Ok(Pin::from(
+            Box::new(s) as Box<dyn futures::Stream<Item = _> + Send>
+        ))
+    }
+}
+
+/// Build a mock `ProviderRegistry` that has providers for all models in TEST_MODELS_TOML.
+fn mock_provider_registry() -> ProviderRegistry {
+    let mut providers: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+    providers.insert("openai".to_string(), Arc::new(MockProvider::new("openai")));
+    providers.insert(
+        "anthropic".to_string(),
+        Arc::new(MockProvider::new("anthropic")),
+    );
+    providers.insert(
+        "deepseek".to_string(),
+        Arc::new(MockProvider::new("deepseek")),
+    );
+    ProviderRegistry::from_providers(providers)
+}
+
+/// Build a test app with mock providers so paid requests succeed.
+fn test_app_with_mock_provider() -> axum::Router {
+    let (router, _state) = test_app_with_mock_provider_and_state();
+    router
+}
+
+/// Build a test app with mock providers and return both the router and state.
+fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator = x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        prometheus_handle: Some(test_prometheus_handle()),
+    });
+    let router = build_router(
+        Arc::clone(&state),
+        RateLimiter::new(RateLimitConfig::default()),
+    );
+    (router, state)
+}
+
+/// Build a test app with mock providers and escrow support enabled.
+fn test_app_with_mock_provider_and_escrow() -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+
+    let facilitator = x402::facilitator::Facilitator::new(vec![
+        Arc::new(AlwaysPassVerifier),
+        Arc::new(AlwaysPassEscrowVerifier),
+    ]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    config.solana.escrow_program_id =
+        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+
+    let test_keypair = {
+        use ed25519_dalek::SigningKey;
+        let sk = SigningKey::from_bytes(&[1u8; 32]);
+        let mut kp = [0u8; 64];
+        kp[..32].copy_from_slice(&[1u8; 32]);
+        kp[32..].copy_from_slice(sk.verifying_key().as_bytes());
+        bs58::encode(&kp).into_string()
+    };
+    let test_fee_payer_pool = Arc::new(
+        x402::fee_payer::FeePayerPool::from_keys(&[test_keypair]).expect("test pool must load"),
+    );
+
+    let escrow_claimer = x402::escrow::EscrowClaimer::new(
+        "https://api.devnet.solana.com".to_string(),
+        test_fee_payer_pool.clone(),
+        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "11111111111111111111111111111111",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        None,
+    )
+    .expect("test claimer must be valid");
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: Some(Arc::new(escrow_claimer)),
+        fee_payer_pool: Some(test_fee_payer_pool),
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        prometheus_handle: Some(test_prometheus_handle()),
+    });
+    build_router(state, RateLimiter::new(RateLimitConfig::default()))
+}
+
 /// Build a test app with escrow support enabled.
 fn test_app_with_escrow() -> axum::Router {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
@@ -471,7 +684,42 @@ async fn test_chat_returns_402_without_payment() {
 }
 
 #[tokio::test]
-async fn test_chat_with_payment_returns_stub() {
+async fn test_chat_with_payment_returns_mock_response() {
+    let app = test_app_with_mock_provider();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["object"], "chat.completion");
+    assert_eq!(json["choices"][0]["message"]["content"], "[mock response]");
+    assert!(json["usage"]["total_tokens"].is_number());
+}
+
+/// Paid requests with NO provider configured should return 500 (stub rejection).
+#[tokio::test]
+async fn test_chat_paid_no_provider_returns_500() {
     let app = test_app();
 
     let body = serde_json::json!({
@@ -495,8 +743,6 @@ async fn test_chat_with_payment_returns_stub() {
         .await
         .unwrap();
 
-    // With no real provider configured, paid requests now return 500
-    // (security fix: never serve stub responses to paying users)
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -544,7 +790,7 @@ async fn test_malformed_payment_header_returns_402() {
 
 #[tokio::test]
 async fn test_chat_model_alias_resolution() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "sonnet",
@@ -567,10 +813,16 @@ async fn test_chat_model_alias_resolution() {
         .await
         .unwrap();
 
-    // With no real provider configured, paid requests now return 500
-    // (security fix: never serve stub responses to paying users).
-    // Model alias resolution is verified by the error message containing the resolved model.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // "sonnet" alias resolves to the anthropic claude model
+    let model = json["model"].as_str().unwrap();
+    assert!(
+        model.contains("claude"),
+        "alias 'sonnet' should resolve to a claude model, got: {model}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -607,7 +859,7 @@ async fn test_chat_unknown_model_returns_404() {
 
 #[tokio::test]
 async fn test_chat_smart_routing_eco_profile() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "eco",
@@ -620,6 +872,7 @@ async fn test_chat_smart_routing_eco_profile() {
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
+                .header("x-rcr-debug", "true")
                 .header(
                     "payment-signature",
                     valid_payment_header("/v1/chat/completions"),
@@ -630,10 +883,18 @@ async fn test_chat_smart_routing_eco_profile() {
         .await
         .unwrap();
 
-    // With no real provider configured, paid requests now return 500
-    // (security fix: never serve stub responses to paying users).
-    // Smart routing resolution is verified separately in router crate tests.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Debug headers reveal routing info
+    let profile = response
+        .headers()
+        .get("x-rcr-profile")
+        .expect("should have x-rcr-profile debug header");
+    assert_eq!(profile.to_str().unwrap(), "eco", "profile should be 'eco'");
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["object"], "chat.completion");
 }
 
 // ---------------------------------------------------------------------------
@@ -737,7 +998,7 @@ async fn test_402_response_contains_x402_fields() {
 
 #[tokio::test]
 async fn test_chat_stream_request_returns_ok() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -761,9 +1022,27 @@ async fn test_chat_stream_request_returns_ok() {
         .await
         .unwrap();
 
-    // With no real provider configured, paid requests now return 500
-    // (security fix: never serve stub responses to paying users)
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Verify it's an SSE response
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .expect("streaming response should have content-type")
+        .to_str()
+        .unwrap();
+    assert!(
+        content_type.contains("text/event-stream"),
+        "streaming response should be SSE, got: {content_type}"
+    );
+
+    // Read the body and verify it contains SSE data events
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        body_str.contains("data:"),
+        "SSE stream should contain data events, got: {body_str}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -772,7 +1051,7 @@ async fn test_chat_stream_request_returns_ok() {
 
 #[tokio::test]
 async fn test_response_has_rate_limit_headers() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -795,10 +1074,7 @@ async fn test_response_has_rate_limit_headers() {
         .await
         .unwrap();
 
-    // With no real provider configured, paid requests now return 500
-    // (security fix: never serve stub responses to paying users).
-    // Rate limit headers are added by middleware regardless of response status.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
 
     // The rate limiter is configured with default 60 req/min.
     // After one request, x-ratelimit-remaining should be present.
@@ -819,7 +1095,7 @@ async fn test_response_has_rate_limit_headers() {
 
 #[tokio::test]
 async fn test_chat_with_base64_payment_header() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     // Build a valid PaymentPayload and base64-encode it
     let payment_payload = PaymentPayload {
@@ -863,13 +1139,13 @@ async fn test_chat_with_base64_payment_header() {
         .await
         .unwrap();
 
-    // The AlwaysPassVerifier accepts the payment, but no real provider is configured.
-    // Security fix: paid requests now return 500 instead of stub responses.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // Base64-encoded payment should be successfully decoded and verified
+    assert_eq!(response.status(), StatusCode::OK);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["type"], "internal_error");
+    assert_eq!(json["object"], "chat.completion");
+    assert_eq!(json["choices"][0]["message"]["content"], "[mock response]");
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,7 +1465,7 @@ async fn test_402_no_escrow_when_not_configured() {
 
 #[tokio::test]
 async fn test_escrow_payment_header_accepted() {
-    let app = test_app_with_escrow();
+    let app = test_app_with_mock_provider_and_escrow();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -1212,13 +1488,13 @@ async fn test_escrow_payment_header_accepted() {
         .await
         .unwrap();
 
-    // Escrow verifier passes, but no real provider is configured.
-    // Security fix: paid requests now return 500 instead of stub responses.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // Escrow verifier passes, mock provider returns a response
+    assert_eq!(response.status(), StatusCode::OK);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["type"], "internal_error");
+    assert_eq!(json["object"], "chat.completion");
+    assert_eq!(json["choices"][0]["message"]["content"], "[mock response]");
 }
 
 #[tokio::test]
@@ -1453,7 +1729,7 @@ async fn test_chat_empty_body_returns_error() {
 
 #[tokio::test]
 async fn test_chat_pii_detected_but_allowed() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -1477,10 +1753,13 @@ async fn test_chat_pii_detected_but_allowed() {
         .unwrap();
 
     // PII is detected but pii_block=false by default, so request is allowed through.
-    // With no real provider configured, paid requests return 500
-    // (security fix: never serve stub responses to paying users).
-    // The key assertion is that we did NOT get 400 (blocked by PII guard).
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // The key assertion is that we did NOT get 400 (blocked by PII guard)
+    // and the request succeeded with a mock response.
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["object"], "chat.completion");
 }
 
 // ---------------------------------------------------------------------------
@@ -1923,7 +2202,7 @@ async fn test_stats_wallet_mismatch_returns_403() {
 
 #[tokio::test]
 async fn test_session_id_echoed_in_response() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -1947,15 +2226,22 @@ async fn test_session_id_echoed_in_response() {
         .await
         .unwrap();
 
-    // With no real provider configured, paid requests now return 500.
-    // Session ID echo is only attached on successful responses, so we
-    // verify the request was processed (not rejected for other reasons).
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let session_id = response
+        .headers()
+        .get("x-session-id")
+        .expect("x-session-id should be echoed on successful responses");
+    assert_eq!(
+        session_id.to_str().unwrap(),
+        "my-session-abc123",
+        "session ID should match the one sent"
+    );
 }
 
 #[tokio::test]
 async fn test_no_session_id_means_no_header() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -1978,9 +2264,7 @@ async fn test_no_session_id_means_no_header() {
         .await
         .unwrap();
 
-    // With no real provider, paid requests return 500.
-    // Session ID header is only attached on success, so it's absent here too.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
     assert!(
         response.headers().get("x-session-id").is_none(),
         "x-session-id should not be present when not sent"
@@ -1989,7 +2273,7 @@ async fn test_no_session_id_means_no_header() {
 
 #[tokio::test]
 async fn test_oversized_session_id_ignored() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let long_session_id = "a".repeat(200); // > 128 chars
 
@@ -2015,8 +2299,7 @@ async fn test_oversized_session_id_ignored() {
         .await
         .unwrap();
 
-    // With no real provider, paid requests return 500.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
     assert!(
         response.headers().get("x-session-id").is_none(),
         "oversized session ID should be ignored, not echoed"
@@ -2025,7 +2308,7 @@ async fn test_oversized_session_id_ignored() {
 
 #[tokio::test]
 async fn test_invalid_session_id_chars_ignored() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -2049,8 +2332,7 @@ async fn test_invalid_session_id_chars_ignored() {
         .await
         .unwrap();
 
-    // With no real provider, paid requests return 500.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
     assert!(
         response.headers().get("x-session-id").is_none(),
         "session ID with invalid chars should be ignored"
@@ -2059,7 +2341,7 @@ async fn test_invalid_session_id_chars_ignored() {
 
 #[tokio::test]
 async fn test_session_id_with_dashes_and_underscores_echoed() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -2083,9 +2365,16 @@ async fn test_session_id_with_dashes_and_underscores_echoed() {
         .await
         .unwrap();
 
-    // With no real provider, paid requests return 500.
-    // Session ID echo is only attached on successful responses.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let session_id = response
+        .headers()
+        .get("x-session-id")
+        .expect("x-session-id with dashes/underscores should be echoed");
+    assert_eq!(
+        session_id.to_str().unwrap(),
+        "session-id_with-mixed_chars-123"
+    );
 }
 
 #[tokio::test]
@@ -2351,7 +2640,7 @@ async fn test_oversized_request_id_replaced_with_uuid() {
 
 #[tokio::test]
 async fn test_no_debug_headers_without_flag() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -2374,6 +2663,7 @@ async fn test_no_debug_headers_without_flag() {
         .await
         .unwrap();
 
+    assert_eq!(response.status(), StatusCode::OK);
     // Request ID should always be present
     assert!(response.headers().get("x-rcr-request-id").is_some());
     // Debug headers should NOT be present
@@ -2391,7 +2681,7 @@ async fn test_no_debug_headers_without_flag() {
 
 #[tokio::test]
 async fn test_debug_headers_present_with_flag() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -2415,15 +2705,43 @@ async fn test_debug_headers_present_with_flag() {
         .await
         .unwrap();
 
-    // With no real provider, paid requests return 500.
-    // Debug headers are only attached on successful responses in the handler,
-    // so they are not present on error responses.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // All debug headers should be present on successful responses
+    assert!(
+        response.headers().get("x-rcr-model").is_some(),
+        "x-rcr-model must be present with debug flag"
+    );
+    assert!(
+        response.headers().get("x-rcr-provider").is_some(),
+        "x-rcr-provider must be present with debug flag"
+    );
+    assert!(
+        response.headers().get("x-rcr-cache").is_some(),
+        "x-rcr-cache must be present with debug flag"
+    );
+    assert!(
+        response.headers().get("x-rcr-latency-ms").is_some(),
+        "x-rcr-latency-ms must be present with debug flag"
+    );
+    assert!(
+        response.headers().get("x-rcr-payment-status").is_some(),
+        "x-rcr-payment-status must be present with debug flag"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-rcr-payment-status")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "verified"
+    );
 }
 
 #[tokio::test]
 async fn test_debug_flag_false_no_debug_headers() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -2447,6 +2765,7 @@ async fn test_debug_flag_false_no_debug_headers() {
         .await
         .unwrap();
 
+    assert_eq!(response.status(), StatusCode::OK);
     // Debug headers should NOT be present when flag is "false"
     assert!(response.headers().get("x-rcr-model").is_none());
     assert!(response.headers().get("x-rcr-tier").is_none());
@@ -2454,7 +2773,7 @@ async fn test_debug_flag_false_no_debug_headers() {
 
 #[tokio::test]
 async fn test_debug_headers_on_smart_routed_request() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     // Use "eco" profile — Simple tier maps to deepseek-chat which is in test registry
     let body = serde_json::json!({
@@ -2479,9 +2798,25 @@ async fn test_debug_headers_on_smart_routed_request() {
         .await
         .unwrap();
 
-    // With no real provider, paid requests return 500.
-    // Debug headers are only attached on successful responses in the handler.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Smart-routed request should have routing debug headers
+    assert!(
+        response.headers().get("x-rcr-model").is_some(),
+        "x-rcr-model must be present on smart-routed debug request"
+    );
+    assert!(
+        response.headers().get("x-rcr-profile").is_some(),
+        "x-rcr-profile must be present on smart-routed request"
+    );
+    assert!(
+        response.headers().get("x-rcr-tier").is_some(),
+        "x-rcr-tier must be present on smart-routed request"
+    );
+    assert!(
+        response.headers().get("x-rcr-score").is_some(),
+        "x-rcr-score must be present on smart-routed request"
+    );
 }
 
 #[tokio::test]
@@ -2598,12 +2933,10 @@ async fn test_request_id_present_on_streaming_request() {
 /// G.2 Test 10: Debug headers on streaming responses when flag set.
 ///
 /// When `X-RCR-Debug: true` is set on a streaming request, debug headers
-/// should be attached if the provider returns successfully. Without a
-/// real provider this returns 500, but we verify the flag is propagated
-/// by checking no debug headers leak on error responses.
+/// should be attached on successful responses.
 #[tokio::test]
 async fn test_debug_headers_on_streaming_with_flag() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -2628,23 +2961,26 @@ async fn test_debug_headers_on_streaming_with_flag() {
         .await
         .unwrap();
 
-    // Without a real provider, paid streaming requests return 500.
-    // Debug headers are only attached on successful responses.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    // Request ID should still be present via middleware.
+    assert_eq!(response.status(), StatusCode::OK);
     assert!(response.headers().get("x-rcr-request-id").is_some());
+    // Debug headers should be present on successful streaming responses
+    assert!(
+        response.headers().get("x-rcr-model").is_some(),
+        "x-rcr-model must be present on streaming debug response"
+    );
+    assert!(
+        response.headers().get("x-rcr-provider").is_some(),
+        "x-rcr-provider must be present on streaming debug response"
+    );
 }
 
-/// G.2 Test 11: Cache hit reflected in X-RCR-Cache header.
+/// G.2 Test 11: Cache miss reflected in X-RCR-Cache header.
 ///
 /// Since integration tests don't have Redis configured (`cache: None`),
-/// all non-streaming requests show cache_status = Miss. We verify the
-/// unit-level `CacheStatus::Hit.as_str()` returns "hit" (in debug_headers
-/// unit tests) and that the cache status field is correctly wired when
-/// cache is absent.
+/// all non-streaming requests show cache_status = Miss.
 #[tokio::test]
 async fn test_cache_miss_on_non_streaming_without_redis() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -2668,23 +3004,27 @@ async fn test_cache_miss_on_non_streaming_without_redis() {
         .await
         .unwrap();
 
-    // Without a real provider, 500 is returned and debug headers are not
-    // attached (they are only added on success). This test confirms the
-    // cache tracking code path doesn't panic when cache is absent.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
     assert!(response.headers().get("x-rcr-request-id").is_some());
+    // Cache header should show "miss" when no Redis is configured
+    let cache_header = response
+        .headers()
+        .get("x-rcr-cache")
+        .expect("x-rcr-cache must be present with debug flag");
+    assert_eq!(
+        cache_header.to_str().unwrap(),
+        "miss",
+        "cache status should be 'miss' without Redis"
+    );
 }
 
 /// G.2 Test 12: Payment verified status on paid requests.
 ///
-/// A properly-paid request passes the AlwaysPassVerifier and enters the
-/// provider call path. Since no real provider is configured, it fails
-/// with 500. The payment verification itself succeeded (PaymentStatus::Verified
-/// would be set in the debug info). We verify the payment verification
-/// path is reached by confirming no InvalidPayment error (which would be 402).
+/// A properly-paid request passes the AlwaysPassVerifier and the provider
+/// responds successfully. Debug headers should show PaymentStatus::Verified.
 #[tokio::test]
 async fn test_payment_verified_reaches_provider_path() {
-    let app = test_app();
+    let app = test_app_with_mock_provider();
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -2708,10 +3048,17 @@ async fn test_payment_verified_reaches_provider_path() {
         .await
         .unwrap();
 
-    // 500 (not 402) means payment verification succeeded but provider failed.
-    // This confirms PaymentStatus::Verified would be set in DebugInfo.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
     assert!(response.headers().get("x-rcr-request-id").is_some());
+    assert_eq!(
+        response
+            .headers()
+            .get("x-rcr-payment-status")
+            .expect("payment status debug header must be present")
+            .to_str()
+            .unwrap(),
+        "verified"
+    );
 }
 
 /// G.2 Test 15: Debug headers not leaked when flag is absent (security).

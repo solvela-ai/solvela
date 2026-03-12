@@ -6,6 +6,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 /// Tolerance for f64 USDC comparisons.
 ///
@@ -14,7 +15,6 @@ use tracing::{info, warn};
 /// affecting budget comparisons while still being strict enough
 /// for financial correctness.
 const USDC_EPSILON: f64 = 0.000_000_5;
-use uuid::Uuid;
 
 /// A single spend log entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,11 +275,22 @@ impl UsageTracker {
                 Ok(mut conn) => {
                     let day_key =
                         format!("spend:{}:{}", wallet_address, Utc::now().format("%Y-%m-%d"));
-                    let daily_spend: f64 = redis::cmd("GET")
+                    let daily_spend: f64 = match redis::cmd("GET")
                         .arg(&day_key)
-                        .query_async(&mut conn)
+                        .query_async::<Option<f64>>(&mut conn)
                         .await
-                        .unwrap_or(0.0);
+                    {
+                        Ok(Some(val)) => val,
+                        Ok(None) => 0.0, // Key doesn't exist yet — no spend today
+                        Err(e) => {
+                            warn!(
+                                key = %day_key,
+                                error = %e,
+                                "Redis GET failed for daily spend — assuming 0.0 (fail-open)"
+                            );
+                            0.0
+                        }
+                    };
 
                     // Default daily limit: $100 USDC.
                     // Use epsilon-aware comparison to avoid f64 rounding errors.
