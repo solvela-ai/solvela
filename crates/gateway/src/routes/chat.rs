@@ -21,7 +21,26 @@ use crate::providers::heartbeat::{HeartbeatConfig, HeartbeatItem, HeartbeatStrea
 use crate::routes::debug_headers::{
     attach_debug_headers, is_debug_enabled, CacheStatus, DebugInfo, PaymentStatus,
 };
+use crate::usage::SpendLogEntry;
 use crate::AppState;
+
+/// Maximum length for a client-provided session ID.
+const MAX_SESSION_ID_LEN: usize = 128;
+
+/// Validate a session ID: max 128 chars, `[a-zA-Z0-9\-_]` only.
+fn validate_session_id(value: &str) -> Option<String> {
+    if value.is_empty() || value.len() > MAX_SESSION_ID_LEN {
+        return None;
+    }
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        Some(value.to_string())
+    } else {
+        None
+    }
+}
 
 /// POST /v1/chat/completions — OpenAI-compatible chat endpoint.
 ///
@@ -38,6 +57,20 @@ pub async fn chat_completions(
 ) -> Result<Response, GatewayError> {
     let request_start = Instant::now();
     let debug_enabled = is_debug_enabled(&headers);
+
+    // Extract request ID from the incoming header (if valid, it will be echoed
+    // by the RequestIdLayer middleware; if invalid, the middleware generates a UUID,
+    // but we can only capture the client-provided one here).
+    let request_id: Option<String> = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    // Extract and validate X-Session-Id header
+    let session_id: Option<String> = headers
+        .get("x-session-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(validate_session_id);
 
     // Step 1: Resolve model — handle aliases and smart routing profiles
     let original_model = req.model.clone();
@@ -364,6 +397,8 @@ pub async fn chat_completions(
                 )
                 .into_response();
 
+                attach_session_id(&mut resp, &session_id);
+
                 if debug_enabled {
                     attach_debug_headers(
                         &mut resp,
@@ -462,6 +497,8 @@ pub async fn chat_completions(
                     }
                 }
 
+                attach_session_id(&mut resp, &session_id);
+
                 if debug_enabled {
                     attach_debug_headers(
                         &mut resp,
@@ -530,15 +567,17 @@ pub async fn chat_completions(
                         .map(|c| c.total.parse::<f64>().unwrap_or(0.0))
                         .unwrap_or(0.0);
 
-                    state.usage.log_spend(
-                        wallet_address.clone(),
-                        req.model.clone(),
-                        result.actual_provider.clone(),
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                        cost,
-                        tx_signature.clone(),
-                    );
+                    state.usage.log_spend(SpendLogEntry {
+                        wallet_address: wallet_address.clone(),
+                        model: req.model.clone(),
+                        provider: result.actual_provider.clone(),
+                        input_tokens: usage.prompt_tokens,
+                        output_tokens: usage.completion_tokens,
+                        cost_usdc: cost,
+                        tx_signature: tx_signature.clone(),
+                        request_id: request_id.clone(),
+                        session_id: session_id.clone(),
+                    });
                 }
 
                 let claim_atomic = if let Some(usage) = &result.data.usage {
@@ -580,6 +619,8 @@ pub async fn chat_completions(
                             .insert(HeaderName::from_static("x-rcr-session"), hv);
                     }
                 }
+
+                attach_session_id(&mut resp, &session_id);
 
                 if debug_enabled {
                     let actual_tokens_out = result
@@ -651,6 +692,8 @@ pub async fn chat_completions(
     });
 
     let mut resp = Json(response).into_response();
+
+    attach_session_id(&mut resp, &session_id);
 
     if debug_enabled {
         attach_debug_headers(
@@ -744,6 +787,7 @@ fn resolve_model_with_debug(
 }
 
 /// Build a [`DebugInfo`] from the routing data collected during request processing.
+#[allow(clippy::too_many_arguments)]
 fn build_debug_info(
     model: &str,
     tier: &str,
@@ -860,6 +904,16 @@ fn build_session_token(wallet: &str, secret: &[u8]) -> Option<String> {
     };
 
     crate::session::create_session_token(&claims, secret).ok()
+}
+
+/// Attach the `X-Session-Id` response header if a valid session ID was provided.
+fn attach_session_id(resp: &mut Response, session_id: &Option<String>) {
+    if let Some(sid) = session_id {
+        if let Ok(hv) = HeaderValue::from_str(sid) {
+            resp.headers_mut()
+                .insert(HeaderName::from_static("x-session-id"), hv);
+        }
+    }
 }
 
 /// Rough token estimate: ~4 chars per token.

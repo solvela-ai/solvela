@@ -135,16 +135,28 @@ mod tests {
         let mut resp = Response::new(());
         attach_debug_headers(&mut resp, &sample_debug_info());
 
-        assert_eq!(resp.headers().get("x-rcr-model").unwrap(), "anthropic/claude-sonnet-4.6");
+        assert_eq!(
+            resp.headers().get("x-rcr-model").unwrap(),
+            "anthropic/claude-sonnet-4.6"
+        );
         assert_eq!(resp.headers().get("x-rcr-tier").unwrap(), "Complex");
         assert_eq!(resp.headers().get("x-rcr-score").unwrap(), "0.4237");
         assert_eq!(resp.headers().get("x-rcr-profile").unwrap(), "auto");
         assert_eq!(resp.headers().get("x-rcr-provider").unwrap(), "anthropic");
         assert_eq!(resp.headers().get("x-rcr-cache").unwrap(), "miss");
         assert_eq!(resp.headers().get("x-rcr-latency-ms").unwrap(), "1847");
-        assert_eq!(resp.headers().get("x-rcr-payment-status").unwrap(), "verified");
-        assert_eq!(resp.headers().get("x-rcr-token-estimate-in").unwrap(), "1200");
-        assert_eq!(resp.headers().get("x-rcr-token-estimate-out").unwrap(), "500");
+        assert_eq!(
+            resp.headers().get("x-rcr-payment-status").unwrap(),
+            "verified"
+        );
+        assert_eq!(
+            resp.headers().get("x-rcr-token-estimate-in").unwrap(),
+            "1200"
+        );
+        assert_eq!(
+            resp.headers().get("x-rcr-token-estimate-out").unwrap(),
+            "500"
+        );
     }
 
     #[test]

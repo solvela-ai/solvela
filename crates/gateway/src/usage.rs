@@ -44,6 +44,22 @@ pub struct SpendSummary {
     pub monthly_cost_usdc: f64,
 }
 
+/// Input struct for `log_spend()` — groups all spend log fields.
+///
+/// Replaces positional arguments to keep the API clean as fields grow.
+#[derive(Debug, Clone)]
+pub struct SpendLogEntry {
+    pub wallet_address: String,
+    pub model: String,
+    pub provider: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cost_usdc: f64,
+    pub tx_signature: Option<String>,
+    pub request_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
 /// Error types for usage tracking.
 #[derive(Debug, thiserror::Error)]
 pub enum UsageError {
@@ -101,51 +117,42 @@ impl UsageTracker {
     ///
     /// This should be called after every successful LLM request.
     /// The write is spawned onto a background task.
-    #[allow(clippy::too_many_arguments)]
-    pub fn log_spend(
-        &self,
-        wallet_address: String,
-        model: String,
-        provider: String,
-        input_tokens: u32,
-        output_tokens: u32,
-        cost_usdc: f64,
-        tx_signature: Option<String>,
-    ) {
+    pub fn log_spend(&self, entry: SpendLogEntry) {
         let id = Uuid::new_v4();
         let created_at = Utc::now();
 
         info!(
-            wallet = %wallet_address,
-            model = %model,
-            provider = %provider,
-            input_tokens,
-            output_tokens,
-            cost_usdc,
-            tx_signature = tx_signature.as_deref().unwrap_or("none"),
+            wallet = %entry.wallet_address,
+            model = %entry.model,
+            provider = %entry.provider,
+            input_tokens = entry.input_tokens,
+            output_tokens = entry.output_tokens,
+            cost_usdc = entry.cost_usdc,
+            tx_signature = entry.tx_signature.as_deref().unwrap_or("none"),
+            request_id = entry.request_id.as_deref().unwrap_or("none"),
+            session_id = entry.session_id.as_deref().unwrap_or("none"),
             "spend logged"
         );
 
         // Write to PostgreSQL asynchronously
         if let Some(pool) = &self.db_pool {
             let pool = pool.clone();
-            let db_wallet = wallet_address.clone();
-            let db_model = model.clone();
-            let db_provider = provider.clone();
-            let db_tx_sig = tx_signature.clone();
+            let db_entry = entry.clone();
             tokio::spawn(async move {
                 let result = sqlx::query(
-                    r#"INSERT INTO spend_logs (id, wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, created_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
+                    r#"INSERT INTO spend_logs (id, wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, request_id, session_id, created_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
                 )
                 .bind(id)
-                .bind(&db_wallet)
-                .bind(&db_model)
-                .bind(&db_provider)
-                .bind(input_tokens as i32)
-                .bind(output_tokens as i32)
-                .bind(cost_usdc)
-                .bind(&db_tx_sig)
+                .bind(&db_entry.wallet_address)
+                .bind(&db_entry.model)
+                .bind(&db_entry.provider)
+                .bind(db_entry.input_tokens as i32)
+                .bind(db_entry.output_tokens as i32)
+                .bind(db_entry.cost_usdc)
+                .bind(&db_entry.tx_signature)
+                .bind(&db_entry.request_id)
+                .bind(&db_entry.session_id)
                 .bind(created_at)
                 .execute(&pool)
                 .await;
@@ -159,8 +166,8 @@ impl UsageTracker {
         // Update Redis hot-path counters
         if let Some(client) = &self.redis_client {
             let client = client.clone();
-            let wallet = wallet_address;
-            let cost = cost_usdc;
+            let wallet = entry.wallet_address;
+            let cost = entry.cost_usdc;
             tokio::spawn(async move {
                 if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
                     // Daily spend counter
@@ -288,6 +295,8 @@ CREATE TABLE IF NOT EXISTS spend_logs (
     output_tokens INTEGER NOT NULL,
     cost_usdc DECIMAL(18, 6) NOT NULL,
     tx_signature TEXT,
+    request_id TEXT,
+    session_id TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -301,6 +310,7 @@ CREATE TABLE IF NOT EXISTS wallet_budgets (
 
 CREATE INDEX IF NOT EXISTS idx_spend_wallet ON spend_logs(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_spend_created ON spend_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_spend_session ON spend_logs(session_id) WHERE session_id IS NOT NULL;
 "#;
 
 #[cfg(test)]
@@ -358,15 +368,17 @@ mod tests {
         let tracker = UsageTracker::noop();
 
         // Should not panic — just logs and returns
-        tracker.log_spend(
-            "wallet123".to_string(),
-            "openai/gpt-4o".to_string(),
-            "openai".to_string(),
-            100,
-            200,
-            0.003,
-            None,
-        );
+        tracker.log_spend(SpendLogEntry {
+            wallet_address: "wallet123".to_string(),
+            model: "openai/gpt-4o".to_string(),
+            provider: "openai".to_string(),
+            input_tokens: 100,
+            output_tokens: 200,
+            cost_usdc: 0.003,
+            tx_signature: None,
+            request_id: None,
+            session_id: None,
+        });
     }
 
     #[test]
@@ -378,6 +390,10 @@ mod tests {
         assert!(MIGRATION_SQL.contains("idx_spend_created"));
         assert!(MIGRATION_SQL.contains("CREATE TABLE IF NOT EXISTS"));
         assert!(MIGRATION_SQL.contains("CREATE INDEX IF NOT EXISTS"));
+        // Phase G: request_id and session_id columns
+        assert!(MIGRATION_SQL.contains("request_id TEXT"));
+        assert!(MIGRATION_SQL.contains("session_id TEXT"));
+        assert!(MIGRATION_SQL.contains("idx_spend_session"));
     }
 
     #[test]

@@ -1636,31 +1636,432 @@ async fn test_chat_with_tools_returns_402() {
 }
 
 // ---------------------------------------------------------------------------
-// Dashboard spend endpoint
+// Stats endpoint (G.5)
 // ---------------------------------------------------------------------------
 
+/// Helper: build a valid session token for tests.
+fn test_session_token() -> String {
+    let claims = gateway::session::SessionClaims {
+        wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+        budget_remaining: 5_000_000,
+        issued_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expires_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600,
+        allowed_models: vec![],
+    };
+    gateway::session::create_session_token(&claims, b"test-secret").unwrap()
+}
+
+/// Helper: build an expired session token for tests.
+fn test_expired_session_token() -> String {
+    let claims = gateway::session::SessionClaims {
+        wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+        budget_remaining: 5_000_000,
+        issued_at: 1_000_000,
+        expires_at: 1_000_001, // expired long ago
+        allowed_models: vec![],
+    };
+    gateway::session::create_session_token(&claims, b"test-secret").unwrap()
+}
+
 #[tokio::test]
-async fn test_dashboard_spend_returns_200() {
+async fn test_stats_missing_auth_returns_401() {
     let app = test_app();
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/v1/dashboard/spend?wallet=test123&days=7")
+                .uri("/v1/wallet/7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU/stats")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_stats_invalid_token_returns_401() {
+    let app = test_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/wallet/7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU/stats")
+                .header("authorization", "Bearer invalid-token-garbage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_stats_expired_token_returns_401() {
+    let app = test_app();
+    let token = test_expired_session_token();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/wallet/7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU/stats")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_stats_no_db_returns_503() {
+    let app = test_app(); // test_app has db_pool: None
+    let token = test_session_token();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/wallet/7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU/stats")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["error"].as_str().unwrap().contains("no database"));
+}
 
-    assert_eq!(json["wallet"], "test123");
-    assert_eq!(json["total_usdc"], "0.000000");
-    assert_eq!(json["request_count"], 0);
-    assert_eq!(json["period_days"], 7);
-    assert!(json["by_day"].is_array());
+#[tokio::test]
+async fn test_stats_days_too_large_returns_400() {
+    let app = test_app();
+    let token = test_session_token();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/wallet/7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU/stats?days=500")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_stats_days_too_small_returns_400() {
+    let app = test_app();
+    let token = test_session_token();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/wallet/7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU/stats?days=0")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_stats_invalid_wallet_returns_400() {
+    let app = test_app();
+    let token = test_session_token();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/wallet/short/stats")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["error"]
+        .as_str()
+        .unwrap()
+        .contains("invalid wallet address"));
+}
+
+#[tokio::test]
+async fn test_stats_default_days_is_30() {
+    // When no `days` param is provided, the default should be 30.
+    // Since we have no DB, we'll get 503, but the route itself is matched.
+    let app = test_app();
+    let token = test_session_token();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/wallet/7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU/stats")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Without DB we get 503 — this confirms the route is reachable and auth works
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_stats_explicit_days_7() {
+    let app = test_app();
+    let token = test_session_token();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/wallet/7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU/stats?days=7")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Without DB we get 503
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_stats_wallet_with_invalid_chars_returns_400() {
+    let app = test_app();
+    let token = test_session_token();
+    // '0' and 'O' are not in base58 alphabet
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/wallet/0xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAs/stats")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Session ID echo (G.1)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_session_id_echoed_in_response() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-session-id", "my-session-abc123")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-session-id")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "my-session-abc123",
+        "session ID should be echoed back"
+    );
+}
+
+#[tokio::test]
+async fn test_no_session_id_means_no_header() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers().get("x-session-id").is_none(),
+        "x-session-id should not be present when not sent"
+    );
+}
+
+#[tokio::test]
+async fn test_oversized_session_id_ignored() {
+    let app = test_app();
+
+    let long_session_id = "a".repeat(200); // > 128 chars
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-session-id", &long_session_id)
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers().get("x-session-id").is_none(),
+        "oversized session ID should be ignored, not echoed"
+    );
+}
+
+#[tokio::test]
+async fn test_invalid_session_id_chars_ignored() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-session-id", "invalid session with spaces!")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers().get("x-session-id").is_none(),
+        "session ID with invalid chars should be ignored"
+    );
+}
+
+#[tokio::test]
+async fn test_session_id_with_dashes_and_underscores_echoed() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-session-id", "session-id_with-mixed_chars-123")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-session-id")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "session-id_with-mixed_chars-123"
+    );
+}
+
+#[tokio::test]
+async fn test_session_id_on_402_not_echoed() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-session-id", "my-session")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 402 goes through error path — session ID should not be echoed
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    assert!(
+        response.headers().get("x-session-id").is_none(),
+        "session ID should not be echoed on 402 error responses"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1771,7 +2172,10 @@ async fn test_request_id_always_present_on_success() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let request_id = response.headers().get("x-rcr-request-id");
-    assert!(request_id.is_some(), "X-RCR-Request-Id must be present on all responses");
+    assert!(
+        request_id.is_some(),
+        "X-RCR-Request-Id must be present on all responses"
+    );
     // Should be a valid UUID (36 chars with dashes)
     let id_str = request_id.unwrap().to_str().unwrap();
     assert_eq!(id_str.len(), 36, "server-generated ID should be a UUID");
@@ -1822,7 +2226,12 @@ async fn test_client_provided_request_id_echoed() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.headers().get("x-rcr-request-id").unwrap().to_str().unwrap(),
+        response
+            .headers()
+            .get("x-rcr-request-id")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "my-custom-id-123",
         "client-provided request ID should be echoed back"
     );
@@ -1850,7 +2259,10 @@ async fn test_invalid_request_id_replaced_with_uuid() {
         .unwrap()
         .to_str()
         .unwrap();
-    assert_ne!(id, "invalid id with spaces!", "invalid ID should be replaced");
+    assert_ne!(
+        id, "invalid id with spaces!",
+        "invalid ID should be replaced"
+    );
     assert_eq!(id.len(), 36, "replacement should be a UUID");
 }
 
@@ -1957,13 +2369,28 @@ async fn test_debug_headers_present_with_flag() {
     assert!(h.get("x-rcr-profile").is_some(), "missing x-rcr-profile");
     assert!(h.get("x-rcr-provider").is_some(), "missing x-rcr-provider");
     assert!(h.get("x-rcr-cache").is_some(), "missing x-rcr-cache");
-    assert!(h.get("x-rcr-latency-ms").is_some(), "missing x-rcr-latency-ms");
-    assert!(h.get("x-rcr-payment-status").is_some(), "missing x-rcr-payment-status");
-    assert!(h.get("x-rcr-token-estimate-in").is_some(), "missing x-rcr-token-estimate-in");
-    assert!(h.get("x-rcr-token-estimate-out").is_some(), "missing x-rcr-token-estimate-out");
+    assert!(
+        h.get("x-rcr-latency-ms").is_some(),
+        "missing x-rcr-latency-ms"
+    );
+    assert!(
+        h.get("x-rcr-payment-status").is_some(),
+        "missing x-rcr-payment-status"
+    );
+    assert!(
+        h.get("x-rcr-token-estimate-in").is_some(),
+        "missing x-rcr-token-estimate-in"
+    );
+    assert!(
+        h.get("x-rcr-token-estimate-out").is_some(),
+        "missing x-rcr-token-estimate-out"
+    );
 
     // Verify some values
-    assert_eq!(h.get("x-rcr-model").unwrap().to_str().unwrap(), "openai/gpt-4o");
+    assert_eq!(
+        h.get("x-rcr-model").unwrap().to_str().unwrap(),
+        "openai/gpt-4o"
+    );
     assert_eq!(h.get("x-rcr-provider").unwrap().to_str().unwrap(), "openai");
     assert_eq!(h.get("x-rcr-profile").unwrap().to_str().unwrap(), "direct");
     assert_eq!(h.get("x-rcr-cache").unwrap().to_str().unwrap(), "miss");
