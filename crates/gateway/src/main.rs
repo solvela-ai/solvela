@@ -69,21 +69,56 @@ async fn main() -> anyhow::Result<()> {
     let configured = providers.configured_providers();
     info!(providers = ?configured, "initialized provider registry");
 
-    // Initialize Solana payment verifier
-    let solana_verifier = x402::solana::SolanaVerifier::new(
+    // Initialize Solana payment verifier.
+    //
+    // SECURITY: In production mode (RCR_ENV=production), a valid Solana config
+    // is required. Falling back to devnet in production would accept devnet
+    // transactions as valid payments or cause all real payments to fail.
+    let is_production = matches!(
+        std::env::var("RCR_ENV").as_deref(),
+        Ok("production") | Ok("prod")
+    );
+
+    let solana_verifier = match x402::solana::SolanaVerifier::new(
         &app_config.solana.rpc_url,
         &app_config.solana.recipient_wallet,
         &app_config.solana.usdc_mint,
-    )
-    .unwrap_or_else(|e| {
-        warn!(error = %e, "failed to initialize Solana verifier, using devnet defaults");
-        x402::solana::SolanaVerifier::new(
-            "https://api.devnet.solana.com",
-            "11111111111111111111111111111111",
-            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-        )
-        .expect("default verifier config must be valid")
-    });
+    ) {
+        Ok(v) => {
+            if app_config.solana.rpc_url.contains("devnet") {
+                if is_production {
+                    panic!(
+                        "FATAL: Solana RPC URL points to devnet in production mode. \
+                         Set RCR_SOLANA_RPC_URL to a mainnet-beta endpoint."
+                    );
+                }
+                warn!(
+                    "⚠ Solana RPC URL points to devnet — payments will use devnet. \
+                     Set RCR_SOLANA_RPC_URL for mainnet-beta in production."
+                );
+            }
+            v
+        }
+        Err(e) => {
+            if is_production {
+                panic!(
+                    "FATAL: Failed to initialize Solana verifier in production: {e}. \
+                     Set RCR_SOLANA_RPC_URL and RCR_SOLANA_RECIPIENT_WALLET."
+                );
+            }
+            warn!(
+                error = %e,
+                "failed to initialize Solana verifier, using devnet defaults. \
+                 THIS IS UNSAFE FOR PRODUCTION — set RCR_ENV=production to enforce."
+            );
+            x402::solana::SolanaVerifier::new(
+                "https://api.devnet.solana.com",
+                "11111111111111111111111111111111",
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            )
+            .expect("default verifier config must be valid")
+        }
+    };
 
     // Build verifiers list — always include the direct SolanaVerifier
     let mut verifiers: Vec<Arc<dyn x402::traits::PaymentVerifier>> =

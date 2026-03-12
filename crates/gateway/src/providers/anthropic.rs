@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use rustyclaw_protocol::{
     ChatChoice, ChatChunk, ChatChunkChoice, ChatDelta, ChatMessage, ChatRequest, ChatResponse,
@@ -248,81 +249,130 @@ fn spawn_anthropic_sse_parser(response: reqwest::Response, model: String) -> Cha
 
                         match event_type.as_str() {
                             "message_start" => {
-                                if let Ok(msg) =
-                                    serde_json::from_str::<AnthropicMessageStart>(&data)
-                                {
-                                    message_id = msg.message.id.clone();
-                                    let chunk = ChatChunk {
-                                        id: msg.message.id,
-                                        object: "chat.completion.chunk".to_string(),
-                                        created,
-                                        model: msg.message.model,
-                                        choices: vec![ChatChunkChoice {
-                                            index: 0,
-                                            delta: ChatDelta {
-                                                role: Some(Role::Assistant),
-                                                content: None,
-                                                tool_calls: None,
-                                            },
-                                            finish_reason: None,
-                                        }],
-                                    };
-                                    if tx.send(Ok(chunk)).await.is_err() {
-                                        return;
+                                match serde_json::from_str::<AnthropicMessageStart>(&data) {
+                                    Ok(msg) => {
+                                        message_id = msg.message.id.clone();
+                                        let chunk = ChatChunk {
+                                            id: msg.message.id,
+                                            object: "chat.completion.chunk".to_string(),
+                                            created,
+                                            model: msg.message.model,
+                                            choices: vec![ChatChunkChoice {
+                                                index: 0,
+                                                delta: ChatDelta {
+                                                    role: Some(Role::Assistant),
+                                                    content: None,
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason: None,
+                                            }],
+                                        };
+                                        if tx.send(Ok(chunk)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let truncated: String = data.chars().take(200).collect();
+                                        warn!(
+                                            error = %e,
+                                            raw_data = %truncated,
+                                            "anthropic_stream_parse_error: failed to parse message_start event"
+                                        );
                                     }
                                 }
                             }
                             "content_block_delta" => {
-                                if let Ok(cbd) =
-                                    serde_json::from_str::<AnthropicContentBlockDelta>(&data)
-                                {
-                                    let chunk = ChatChunk {
-                                        id: message_id.clone(),
-                                        object: "chat.completion.chunk".to_string(),
-                                        created,
-                                        model: model.clone(),
-                                        choices: vec![ChatChunkChoice {
-                                            index: 0,
-                                            delta: ChatDelta {
-                                                role: None,
-                                                content: cbd.delta.text,
-                                                tool_calls: None,
-                                            },
-                                            finish_reason: None,
-                                        }],
-                                    };
-                                    if tx.send(Ok(chunk)).await.is_err() {
-                                        return;
+                                match serde_json::from_str::<AnthropicContentBlockDelta>(&data) {
+                                    Ok(cbd) => {
+                                        let chunk = ChatChunk {
+                                            id: message_id.clone(),
+                                            object: "chat.completion.chunk".to_string(),
+                                            created,
+                                            model: model.clone(),
+                                            choices: vec![ChatChunkChoice {
+                                                index: 0,
+                                                delta: ChatDelta {
+                                                    role: None,
+                                                    content: cbd.delta.text,
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason: None,
+                                            }],
+                                        };
+                                        if tx.send(Ok(chunk)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Content delta parse failure — forward a best-effort
+                                        // chunk with the raw data so the client receives
+                                        // something rather than a silent gap in the stream.
+                                        let truncated: String = data.chars().take(200).collect();
+                                        warn!(
+                                            error = %e,
+                                            raw_data = %truncated,
+                                            "anthropic_stream_parse_error: failed to parse content_block_delta, forwarding raw text"
+                                        );
+                                        let chunk = ChatChunk {
+                                            id: message_id.clone(),
+                                            object: "chat.completion.chunk".to_string(),
+                                            created,
+                                            model: model.clone(),
+                                            choices: vec![ChatChunkChoice {
+                                                index: 0,
+                                                delta: ChatDelta {
+                                                    role: None,
+                                                    content: Some(
+                                                        "[parse error: content may be incomplete]"
+                                                            .to_string(),
+                                                    ),
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason: None,
+                                            }],
+                                        };
+                                        if tx.send(Ok(chunk)).await.is_err() {
+                                            return;
+                                        }
                                     }
                                 }
                             }
                             "message_delta" => {
-                                if let Ok(md) = serde_json::from_str::<AnthropicMessageDelta>(&data)
-                                {
-                                    let finish_reason =
-                                        md.delta.stop_reason.map(|r| match r.as_str() {
-                                            "end_turn" => "stop".to_string(),
-                                            "max_tokens" => "length".to_string(),
-                                            "stop_sequence" => "stop".to_string(),
-                                            other => other.to_string(),
-                                        });
-                                    let chunk = ChatChunk {
-                                        id: message_id.clone(),
-                                        object: "chat.completion.chunk".to_string(),
-                                        created,
-                                        model: model.clone(),
-                                        choices: vec![ChatChunkChoice {
-                                            index: 0,
-                                            delta: ChatDelta {
-                                                role: None,
-                                                content: None,
-                                                tool_calls: None,
-                                            },
-                                            finish_reason,
-                                        }],
-                                    };
-                                    if tx.send(Ok(chunk)).await.is_err() {
-                                        return;
+                                match serde_json::from_str::<AnthropicMessageDelta>(&data) {
+                                    Ok(md) => {
+                                        let finish_reason =
+                                            md.delta.stop_reason.map(|r| match r.as_str() {
+                                                "end_turn" => "stop".to_string(),
+                                                "max_tokens" => "length".to_string(),
+                                                "stop_sequence" => "stop".to_string(),
+                                                other => other.to_string(),
+                                            });
+                                        let chunk = ChatChunk {
+                                            id: message_id.clone(),
+                                            object: "chat.completion.chunk".to_string(),
+                                            created,
+                                            model: model.clone(),
+                                            choices: vec![ChatChunkChoice {
+                                                index: 0,
+                                                delta: ChatDelta {
+                                                    role: None,
+                                                    content: None,
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason,
+                                            }],
+                                        };
+                                        if tx.send(Ok(chunk)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let truncated: String = data.chars().take(200).collect();
+                                        warn!(
+                                            error = %e,
+                                            raw_data = %truncated,
+                                            "anthropic_stream_parse_error: failed to parse message_delta event"
+                                        );
                                     }
                                 }
                             }
@@ -492,6 +542,40 @@ mod tests {
         assert_eq!(anthropic_req.messages.len(), 1);
         assert_eq!(anthropic_req.messages[0].role, "user");
         assert_eq!(anthropic_req.messages[0].content, "Hello!");
+    }
+
+    #[test]
+    fn test_content_block_delta_parse_failure_is_detected() {
+        // Verify that malformed JSON for content_block_delta actually fails to parse,
+        // which is the condition that triggers our warn! + best-effort forwarding.
+        let malformed = r#"{"delta": {"not_text": "hello"}}"#;
+        let result = serde_json::from_str::<AnthropicContentBlockDelta>(malformed);
+        // This should parse OK because `text` is Option with #[serde(default)],
+        // but verify the text field is None (which would result in an empty delta).
+        assert!(result.is_ok());
+        assert!(result.unwrap().delta.text.is_none());
+
+        // Truly malformed JSON should fail to parse
+        let truly_malformed = r#"{"delta": not valid json"#;
+        let result = serde_json::from_str::<AnthropicContentBlockDelta>(truly_malformed);
+        assert!(result.is_err(), "truly malformed JSON must fail to parse");
+    }
+
+    #[test]
+    fn test_message_start_parse_failure_is_detected() {
+        let malformed = r#"{"not_message": {}}"#;
+        let result = serde_json::from_str::<AnthropicMessageStart>(malformed);
+        assert!(
+            result.is_err(),
+            "missing 'message' field must fail to parse"
+        );
+    }
+
+    #[test]
+    fn test_message_delta_parse_failure_is_detected() {
+        let malformed = r#"not json at all"#;
+        let result = serde_json::from_str::<AnthropicMessageDelta>(malformed);
+        assert!(result.is_err(), "invalid JSON must fail to parse");
     }
 
     #[test]

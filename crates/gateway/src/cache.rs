@@ -179,34 +179,62 @@ impl ResponseCache {
 
     /// Atomically check-and-record a transaction signature to prevent replay attacks.
     ///
-    /// Uses Redis SET NX (set-if-not-exists) with a TTL longer than the Solana
-    /// blockhash expiry window (~90 seconds). If the signature has been seen before,
-    /// returns `Err(CacheError::Replay)`. On first sight, records it and returns `Ok(())`.
+    /// Uses Redis SET NX (set-if-not-exists) with a TTL. If the signature has been
+    /// seen before, returns `Err(CacheError::Replay)`. On first sight, records it
+    /// and returns `Ok(())`.
     ///
-    /// TTL is set to 120 seconds — enough to cover the blockhash expiry window
-    /// plus settlement latency, without persisting stale entries indefinitely.
+    /// ## TTL strategy
+    ///
+    /// - **Standard transactions** (recent blockhash): 120 seconds — covers the
+    ///   blockhash expiry window (~90s) plus settlement latency.
+    /// - **Durable nonce transactions**: 86,400 seconds (24 hours) — durable nonce
+    ///   transactions never expire on-chain, so a short TTL would allow replay
+    ///   after the entry expires. 24 hours provides strong protection for the
+    ///   realistic threat window while still allowing Redis key cleanup.
+    ///
+    /// Set `uses_durable_nonce` to `true` when the transaction contains an
+    /// `AdvanceNonceAccount` instruction (detectable from the tx structure).
     ///
     /// **Degraded mode**: if Redis is unavailable, the method falls back to an
     /// in-memory LRU cache (bounded to 10,000 entries).  A warning is emitted
     /// so operators know protection is degraded.  The LRU cache automatically
     /// evicts the oldest entries when full, so there is no clear-on-overflow gap.
-    pub async fn check_and_record_tx(&self, tx_signature: &str) -> Result<(), CacheError> {
+    pub async fn check_and_record_tx(
+        &self,
+        tx_signature: &str,
+        uses_durable_nonce: bool,
+    ) -> Result<(), CacheError> {
+        // Standard blockhash txs expire on-chain in ~90s; 120s TTL is sufficient.
+        // Durable nonce txs never expire on-chain; use 24h to prevent replay.
+        let ttl_secs: u64 = if uses_durable_nonce {
+            86_400 // 24 hours
+        } else {
+            120
+        };
+
         let key = format!("rcr:txn:{}", tx_signature);
 
         match self.client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
-                // SET key 1 NX EX 120 — atomic: only sets if key does NOT exist
+                // SET key 1 NX EX <ttl> — atomic: only sets if key does NOT exist
                 let result: Option<String> = redis::cmd("SET")
                     .arg(&key)
                     .arg("1")
                     .arg("NX")
                     .arg("EX")
-                    .arg(120_u64)
+                    .arg(ttl_secs)
                     .query_async(&mut conn)
                     .await
                     .unwrap_or(None);
 
                 if result.is_some() {
+                    if uses_durable_nonce {
+                        info!(
+                            tx = %tx_signature,
+                            ttl_secs = ttl_secs,
+                            "recorded durable nonce transaction with extended replay TTL"
+                        );
+                    }
                     // Key was newly set — first time seeing this tx
                     Ok(())
                 } else {

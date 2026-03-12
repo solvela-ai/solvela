@@ -314,10 +314,24 @@ pub async fn chat_completions(
                     req.max_tokens.unwrap_or(1000),
                 )
                 .map_err(|e| GatewayError::Internal(e.to_string()))?;
-            let expected_amount: u64 = usdc_atomic_amount(&expected_cost.total)
+            let expected_amount: u64 = usdc_atomic_amount_checked(&expected_cost.total)
+                .map_err(|e| {
+                    GatewayError::Internal(format!(
+                        "failed to compute expected payment amount: {e}"
+                    ))
+                })?
                 .parse()
-                .unwrap_or(0);
-            let client_amount: u64 = payload.accepted.amount.parse().unwrap_or(0);
+                .map_err(|_| {
+                    GatewayError::Internal(
+                        "failed to parse expected payment amount as u64".to_string(),
+                    )
+                })?;
+            let client_amount: u64 = payload.accepted.amount.parse().map_err(|_| {
+                GatewayError::BadRequest(format!(
+                    "invalid payment amount '{}': must be a valid integer",
+                    payload.accepted.amount
+                ))
+            })?;
 
             if client_amount < expected_amount {
                 warn!(
@@ -366,18 +380,21 @@ pub async fn chat_completions(
             // Without this ordering, two concurrent requests could both pass
             // verification but only one settlement would succeed on-chain,
             // leaving the other request having consumed LLM resources for free.
-            //
-            // NOTE: The 120s TTL (in Redis / LRU eviction in-memory) is
-            // insufficient for durable nonce transactions, which have no
-            // blockhash expiry. A future PR should extend replay persistence
-            // for durable nonce payloads (e.g., database-backed dedup).
             let tx_raw = match &payload.payload {
                 x402::types::PayloadData::Direct(p) => &p.transaction,
                 x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
             };
 
+            // Detect durable nonce to set appropriate replay TTL.
+            // Durable nonce txs never expire on-chain, so they need
+            // a much longer replay protection window (24h vs 120s).
+            let is_durable_nonce = uses_durable_nonce(tx_raw);
+
             let replay_detected = if let Some(cache) = &state.cache {
-                cache.check_and_record_tx(tx_raw).await.is_err()
+                cache
+                    .check_and_record_tx(tx_raw, is_durable_nonce)
+                    .await
+                    .is_err()
             } else {
                 // No Redis — fall back to in-memory LRU replay set
                 let mut replay_set = state.replay_set.lock().expect("replay_set mutex poisoned");
@@ -445,7 +462,8 @@ pub async fn chat_completions(
     // which is not decoded here — we use the tx signature as a unique identifier.
     let (wallet_address, tx_signature) = extract_payment_info(payment_header.unwrap());
 
-    // Check budget before proxying to provider
+    // Check budget before proxying to provider.
+    // If cost cannot be determined, reject — never proceed with cost=0.
     let estimated_cost = state
         .model_registry
         .estimate_cost(
@@ -453,8 +471,10 @@ pub async fn chat_completions(
             estimate_input_tokens(&req),
             req.max_tokens.unwrap_or(1000),
         )
-        .map(|c| c.total.parse::<f64>().unwrap_or(0.0))
-        .unwrap_or(0.0);
+        .map_err(|e| GatewayError::Internal(format!("failed to estimate cost: {e}")))?
+        .total
+        .parse::<f64>()
+        .map_err(|_| GatewayError::Internal("failed to parse estimated cost as f64".to_string()))?;
 
     if let Err(e) = state
         .usage
@@ -669,11 +689,20 @@ pub async fn chat_completions(
                 }
 
                 if let Some(usage) = &result.data.usage {
-                    let cost = state
+                    let cost = match state
                         .model_registry
                         .estimate_cost(&req.model, usage.prompt_tokens, usage.completion_tokens)
-                        .map(|c| c.total.parse::<f64>().unwrap_or(0.0))
-                        .unwrap_or(0.0);
+                        .and_then(|c| {
+                            c.total.parse::<f64>().map_err(|e| {
+                                router::models::ModelRegistryError::ParseError(e.to_string())
+                            })
+                        }) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(error = %e, model = %req.model, "failed to compute actual cost for spend log, skipping");
+                            0.0
+                        }
+                    };
 
                     state.usage.log_spend(SpendLogEntry {
                         wallet_address: wallet_address.clone(),
@@ -770,60 +799,25 @@ pub async fn chat_completions(
         }
     }
 
-    // Fallback: stub response when no provider succeeded
-    info!(
+    // SECURITY: A paid request reached the stub path — all providers failed.
+    // Never serve a stub response to a paying user. They paid real money and
+    // deserve either a real response or a clear error so they can retry.
+    warn!(
         provider = provider_name,
         model = %req.model,
-        "no provider available, returning stub response"
+        wallet = %wallet_address,
+        "paid request failed: no provider available — returning error instead of stub"
     );
+    counter!("rcr_paid_stub_rejections_total").increment(1);
 
-    let response = serde_json::json!({
-        "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
-        "object": "chat.completion",
-        "created": chrono::Utc::now().timestamp(),
-        "model": model_info.id,
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": format!(
-                    "[STUB] {} provider not configured. Set {}_API_KEY env var to enable.",
-                    model_info.display_name,
-                    provider_name.to_uppercase()
-                ),
-            },
-            "finish_reason": "stop",
-        }],
-        "usage": {
-            "prompt_tokens": estimate_input_tokens(&req),
-            "completion_tokens": 20,
-            "total_tokens": estimate_input_tokens(&req) + 20,
-        },
-    });
-
-    let mut resp = Json(response).into_response();
-
-    attach_session_id(&mut resp, &session_id);
-
-    if debug_enabled {
-        attach_debug_headers(
-            &mut resp,
-            &build_debug_info(
-                &req.model,
-                &routing_tier,
-                routing_score,
-                &routing_profile,
-                provider_name,
-                cache_status,
-                request_start.elapsed().as_millis() as u64,
-                PaymentStatus::Verified,
-                estimate_input_tokens(&req),
-                req.max_tokens.unwrap_or(1000),
-            ),
-        );
-    }
-
-    Ok(resp)
+    Err(GatewayError::Internal(format!(
+        "all providers failed for model '{}'. Your payment was submitted but no response \
+         could be generated. Contact the gateway operator or retry. \
+         Provider: {}, tx: {}",
+        req.model,
+        provider_name,
+        tx_signature.as_deref().unwrap_or("unknown")
+    )))
 }
 
 /// Try to decode a PaymentPayload from the PAYMENT-SIGNATURE header.
@@ -880,6 +874,45 @@ fn extract_signer_from_base64_tx(b64_tx: &str) -> Option<String> {
     let tx = VersionedTransaction::from_bytes(&tx_bytes).ok()?;
     let msg = tx.parse_message().ok()?;
     msg.account_keys.first().map(|pk| pk.to_string())
+}
+
+/// Detect whether a base64-encoded Solana transaction uses a durable nonce.
+///
+/// Durable nonce transactions have an `AdvanceNonceAccount` instruction as
+/// the FIRST instruction. The System Program's `AdvanceNonceAccount` has
+/// instruction discriminator `4` (little-endian u32 = `[4, 0, 0, 0]`).
+///
+/// Returns `false` if the transaction cannot be decoded (fail-safe: treat as
+/// standard blockhash transaction with shorter replay TTL).
+pub(crate) fn uses_durable_nonce(b64_tx: &str) -> bool {
+    let tx_bytes = match base64::engine::general_purpose::STANDARD.decode(b64_tx) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let tx = match VersionedTransaction::from_bytes(&tx_bytes) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let msg = match tx.parse_message() {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    // AdvanceNonceAccount must be the first instruction
+    let first_ix = match msg.instructions.first() {
+        Some(ix) => ix,
+        None => return false,
+    };
+
+    // Check that the program invoked is the System Program (all zeros)
+    let program_key = msg.account_keys.get(first_ix.program_id_index as usize);
+    let is_system_program =
+        matches!(program_key, Some(pk) if *pk == x402::solana_types::Pubkey::SYSTEM_PROGRAM);
+
+    // AdvanceNonceAccount discriminator: 4 as little-endian u32
+    let is_advance_nonce = first_ix.data.len() >= 4 && first_ix.data[..4] == [4, 0, 0, 0];
+
+    is_system_program && is_advance_nonce
 }
 
 /// Resolve model ID from aliases, smart routing profiles, or direct model IDs.
@@ -955,21 +988,29 @@ fn build_debug_info(
 /// Estimate cost in atomic USDC units using the model registry's cost breakdown.
 ///
 /// Used as a fallback when actual token usage is unavailable (e.g., streaming).
+/// Returns 0 only when the cost genuinely is zero; logs a warning on parse failures.
 fn estimated_atomic_cost(
     registry: &router::models::ModelRegistry,
     model: &str,
     req: &ChatRequest,
 ) -> u64 {
-    registry
+    match registry
         .estimate_cost(
             model,
             estimate_input_tokens(req),
             req.max_tokens.unwrap_or(1000),
         )
-        .ok()
-        .and_then(|c| c.total.parse::<f64>().ok())
-        .map(|f| (f * 1_000_000.0) as u64)
-        .unwrap_or(0)
+        .and_then(|c| {
+            c.total
+                .parse::<f64>()
+                .map_err(|e| router::models::ModelRegistryError::ParseError(e.to_string()))
+        }) {
+        Ok(f) => (f * 1_000_000.0) as u64,
+        Err(e) => {
+            warn!(error = %e, model, "failed to estimate atomic cost for escrow claim");
+            0
+        }
+    }
 }
 
 /// Fire an escrow claim transaction if the payment scheme is escrow.
@@ -994,6 +1035,16 @@ fn fire_escrow_claim(
             Some(deposited) => claim_atomic.min(deposited),
             None => claim_atomic,
         };
+
+        // Never claim 0 — if cost computation failed, skip the claim entirely
+        if claim_amount == 0 {
+            warn!(
+                service_id = %sid_b64,
+                agent = %agent_b58,
+                "skipping escrow claim: computed claim amount is 0"
+            );
+            return;
+        }
 
         if let Ok(sid) = decode_service_id(sid_b64) {
             // Prefer durable queue if DB is available
@@ -1141,23 +1192,39 @@ fn parse_fallback_preference(header: &str) -> Vec<(&str, &str)> {
 ///
 /// Uses integer arithmetic to avoid f64 precision loss on financial amounts.
 /// Splits on the decimal point and pads/truncates the fractional part to 6 digits.
+///
+/// Returns an error if the input is empty or contains non-numeric characters,
+/// preventing silent fallback to 0 on malformed financial amounts.
 fn usdc_atomic_amount(decimal_str: &str) -> String {
-    // Parse as integer arithmetic to avoid f64 rounding errors
+    usdc_atomic_amount_checked(decimal_str).unwrap_or_else(|_| "0".to_string())
+}
+
+/// Checked version of USDC atomic amount conversion. Returns `Err` on malformed input.
+fn usdc_atomic_amount_checked(decimal_str: &str) -> Result<String, String> {
     let s = decimal_str.trim();
+    if s.is_empty() {
+        return Err("empty USDC amount string".to_string());
+    }
+
     let (integer_part, fractional_part) = if let Some(dot) = s.find('.') {
         (&s[..dot], &s[dot + 1..])
     } else {
         (s, "")
     };
 
-    let integer: u64 = integer_part.parse().unwrap_or(0);
+    let integer: u64 = integer_part
+        .parse()
+        .map_err(|e| format!("invalid USDC integer part '{}': {}", integer_part, e))?;
+
     // Pad or truncate fractional part to exactly 6 digits
     let frac_padded = format!("{:0<6}", fractional_part);
     let frac_6 = &frac_padded[..6.min(frac_padded.len())];
-    let fractional: u64 = frac_6.parse().unwrap_or(0);
+    let fractional: u64 = frac_6
+        .parse()
+        .map_err(|e| format!("invalid USDC fractional part '{}': {}", frac_6, e))?;
 
     let atomic = integer * 1_000_000 + fractional;
-    atomic.to_string()
+    Ok(atomic.to_string())
 }
 
 #[cfg(test)]
@@ -1740,5 +1807,183 @@ mod tests {
     fn test_classify_provider_error_unknown() {
         assert_eq!(classify_provider_error(&"something went wrong"), "unknown");
         assert_eq!(classify_provider_error(&"connection refused"), "unknown");
+    }
+
+    // =========================================================================
+    // Security: usdc_atomic_amount_checked rejects malformed input
+    // =========================================================================
+
+    #[test]
+    fn test_usdc_atomic_checked_valid_amounts() {
+        assert_eq!(usdc_atomic_amount_checked("1.50").unwrap(), "1500000");
+        assert_eq!(usdc_atomic_amount_checked("0.002625").unwrap(), "2625");
+        assert_eq!(usdc_atomic_amount_checked("5").unwrap(), "5000000");
+        assert_eq!(usdc_atomic_amount_checked("0").unwrap(), "0");
+    }
+
+    #[test]
+    fn test_usdc_atomic_checked_rejects_empty() {
+        assert!(
+            usdc_atomic_amount_checked("").is_err(),
+            "empty string must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_usdc_atomic_checked_rejects_non_numeric() {
+        assert!(
+            usdc_atomic_amount_checked("abc").is_err(),
+            "non-numeric string must be rejected"
+        );
+        assert!(
+            usdc_atomic_amount_checked("1.2.3").is_err(),
+            "double-dot string must be rejected"
+        );
+        assert!(
+            usdc_atomic_amount_checked("-1.50").is_err(),
+            "negative amounts must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_usdc_atomic_checked_rejects_negative() {
+        // Negative amounts should never be accepted for payments
+        assert!(usdc_atomic_amount_checked("-5").is_err());
+    }
+
+    #[test]
+    fn test_usdc_atomic_unchecked_defaults_to_zero_on_malformed() {
+        // The unchecked version defaults to "0" for backwards compatibility
+        // in non-critical paths (e.g., 402 response generation).
+        assert_eq!(usdc_atomic_amount(""), "0");
+        assert_eq!(usdc_atomic_amount("not-a-number"), "0");
+    }
+
+    // =========================================================================
+    // uses_durable_nonce
+    // =========================================================================
+
+    #[test]
+    fn test_uses_durable_nonce_returns_false_for_invalid_base64() {
+        assert!(!uses_durable_nonce("not-valid-base64!!!"));
+    }
+
+    #[test]
+    fn test_uses_durable_nonce_returns_false_for_empty() {
+        assert!(!uses_durable_nonce(""));
+    }
+
+    #[test]
+    fn test_uses_durable_nonce_returns_false_for_standard_tx() {
+        use x402::solana_types::Pubkey;
+
+        // Build a standard transaction (SPL transfer, no nonce instruction).
+        // First instruction is a token transfer (program = TOKEN_PROGRAM_ID).
+        let keys = vec![Pubkey::SYSTEM_PROGRAM, Pubkey::TOKEN_PROGRAM_ID];
+        let msg_bytes = build_legacy_message_for_nonce_test(
+            &keys,
+            &[(1, &[0], &[3, 0x0C, 0x01])], // token program instruction
+        );
+
+        let mut tx_data = Vec::new();
+        tx_data.push(0x01); // compact-u16: 1 signature
+        tx_data.extend_from_slice(&[0xAA; 64]); // signature
+        tx_data.extend_from_slice(&msg_bytes);
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&tx_data);
+        assert!(
+            !uses_durable_nonce(&b64),
+            "standard transfer should not be detected as durable nonce"
+        );
+    }
+
+    #[test]
+    fn test_uses_durable_nonce_returns_true_for_nonce_tx() {
+        use x402::solana_types::Pubkey;
+
+        // Build a durable nonce transaction:
+        // First instruction = AdvanceNonceAccount (System Program, data = [4,0,0,0])
+        let nonce_account = Pubkey([1u8; 32]); // fake nonce account
+        let keys = vec![
+            Pubkey::SYSTEM_PROGRAM, // account 0: fee payer
+            nonce_account,          // account 1: nonce account
+            Pubkey::SYSTEM_PROGRAM, // account 2: system program
+        ];
+        // AdvanceNonceAccount: program_id_index=2 (system program),
+        // accounts=[1, 0] (nonce account, authority), data=[4,0,0,0]
+        let msg_bytes = build_legacy_message_for_nonce_test(
+            &keys,
+            &[(2, &[1, 0], &[4, 0, 0, 0])], // AdvanceNonceAccount instruction
+        );
+
+        let mut tx_data = Vec::new();
+        tx_data.push(0x01); // compact-u16: 1 signature
+        tx_data.extend_from_slice(&[0xAA; 64]); // signature
+        tx_data.extend_from_slice(&msg_bytes);
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&tx_data);
+        assert!(
+            uses_durable_nonce(&b64),
+            "transaction with AdvanceNonceAccount as first instruction should be detected"
+        );
+    }
+
+    #[test]
+    fn test_uses_durable_nonce_returns_false_when_nonce_not_first() {
+        use x402::solana_types::Pubkey;
+
+        // Build a tx where AdvanceNonceAccount is the SECOND instruction (not first).
+        // This should NOT be detected because durable nonce must be first instruction.
+        let nonce_account = Pubkey([1u8; 32]);
+        let keys = vec![
+            Pubkey::SYSTEM_PROGRAM,   // account 0
+            nonce_account,            // account 1
+            Pubkey::TOKEN_PROGRAM_ID, // account 2
+            Pubkey::SYSTEM_PROGRAM,   // account 3 (system program for nonce)
+        ];
+        let msg_bytes = build_legacy_message_for_nonce_test(
+            &keys,
+            &[
+                (2, &[0, 1], &[3, 0x0C]),    // token instruction first
+                (3, &[1, 0], &[4, 0, 0, 0]), // AdvanceNonceAccount second
+            ],
+        );
+
+        let mut tx_data = Vec::new();
+        tx_data.push(0x01);
+        tx_data.extend_from_slice(&[0xAA; 64]);
+        tx_data.extend_from_slice(&msg_bytes);
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&tx_data);
+        assert!(
+            !uses_durable_nonce(&b64),
+            "nonce instruction not in first position should not be detected"
+        );
+    }
+
+    /// Helper to build a minimal legacy message for nonce detection tests.
+    fn build_legacy_message_for_nonce_test(
+        account_keys: &[x402::solana_types::Pubkey],
+        instructions: &[(u8, &[u8], &[u8])],
+    ) -> Vec<u8> {
+        let mut msg = vec![
+            1,                        // num_required_signatures
+            0,                        // num_readonly_signed
+            1,                        // num_readonly_unsigned
+            account_keys.len() as u8, // compact-u16 for small values
+        ];
+        for key in account_keys {
+            msg.extend_from_slice(&key.0);
+        }
+        msg.extend_from_slice(&[0u8; 32]); // recent blockhash
+        msg.push(instructions.len() as u8);
+        for (pid_index, accounts, data) in instructions {
+            msg.push(*pid_index);
+            msg.push(accounts.len() as u8);
+            msg.extend_from_slice(accounts);
+            msg.push(data.len() as u8);
+            msg.extend_from_slice(data);
+        }
+        msg
     }
 }
