@@ -174,6 +174,13 @@ impl ProviderRegistry {
         Self { providers }
     }
 
+    /// Create a provider registry from pre-built provider instances.
+    ///
+    /// Used in tests to inject mock providers without requiring real API keys.
+    pub fn from_providers(providers: HashMap<String, Arc<dyn LLMProvider>>) -> Self {
+        Self { providers }
+    }
+
     /// Look up a provider by name.
     pub fn get(&self, provider_name: &str) -> Option<&Arc<dyn LLMProvider>> {
         self.providers.get(provider_name)
