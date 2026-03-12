@@ -46,6 +46,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uu
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }

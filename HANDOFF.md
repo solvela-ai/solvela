@@ -20,9 +20,9 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ## IMMEDIATE NEXT STEP: Remaining RustyClawRouter Phases
 
-**Phase 9 (Service Marketplace) is COMPLETE.** All features implemented and merged to main. 308 gateway tests passing (220 unit + 88 integration).
+**Phase 12 (Prometheus Monitoring) is COMPLETE.** All features implemented and merged to main. 316 gateway tests passing (221 unit + 95 integration), 79 x402 tests.
 
-**Remaining RustyClawRouter phases:** 12 (Monitoring), 13 (Docs/Examples), 14 (Production Hardening). See ecosystem plan for details.
+**Remaining RustyClawRouter phases:** 13 (Docs/Examples), 14 (Production Hardening). See ecosystem plan for details.
 
 ---
 
@@ -30,7 +30,19 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ### What's Complete in RustyClawRouter
 
-**Phases 1-9, 10-11, Phase A, Phase G** — all complete (308 gateway tests).
+**Phases 1-9, 10-12, Phase A, Phase G** — all complete (316 gateway tests, 79 x402 tests).
+
+**Phase 12 (Prometheus Monitoring) delivered:**
+- Prometheus `/metrics` endpoint — admin-gated via `RCR_ADMIN_TOKEN`, renders Prometheus text exposition format
+- Request metrics middleware — Tower layer recording `rcr_requests_total` (counter), `rcr_request_duration_seconds` (histogram), `rcr_active_requests` (gauge) with method/path/status labels. Skips `/metrics` to avoid feedback loops. Uses `MatchedPath` for route normalization.
+- Payment metrics — `rcr_payments_total` (counter, status: verified/cached/free/none/failed), `rcr_payment_amount_usdc` (histogram), `rcr_replay_rejections_total` (counter) in chat.rs and proxy.rs
+- Provider metrics — `rcr_provider_request_duration_seconds` (histogram, provider label), `rcr_provider_errors_total` (counter, provider+error_type labels)
+- Cache metrics — `rcr_cache_total` (counter, result: hit/miss/skip)
+- Escrow metrics — `rcr_escrow_claims_total` (counter, result: success/failure), `rcr_escrow_queue_depth` (gauge)
+- Infrastructure gauges — `rcr_fee_payer_balance_sol` (gauge, pubkey label), `rcr_service_health` (gauge, service_id label)
+- New files: `crates/gateway/src/middleware/metrics.rs`, `crates/gateway/src/routes/metrics.rs`, `docs/plans/phase-12-monitoring.md`
+- Modified: workspace + gateway + x402 Cargo.toml, `lib.rs` (PrometheusHandle in AppState, /metrics route, metrics middleware), `main.rs` (recorder init), `chat.rs`/`proxy.rs` (payment/provider/cache metrics), `claim_processor.rs` (escrow metrics), `balance_monitor.rs` (fee payer gauge), `service_health.rs` (health gauge)
+- 7 new integration tests for metrics endpoint and instrumentation
 
 **Phase 9 (Service Marketplace) delivered:**
 - Service proxy endpoint (`POST /v1/services/{service_id}/proxy`) — accepts arbitrary JSON, verifies x402 payments with 5% platform fee, forwards to external services with 60s timeout
@@ -197,8 +209,9 @@ tests/
 | G: Gateway Changes | Debug headers, session ID, stats endpoint | ✅ Complete (G.1-G.5 all done, 342 tests) |
 | 8: Escrow Hardening | Claim recovery, fee payer rotation, monitoring | ✅ Complete (384 tests) |
 | 9: Service Marketplace | Proxy, registration, health, SSRF prevention | ✅ Complete (308 gateway tests) |
+| 12: Monitoring | Prometheus metrics, request/payment/provider/cache/escrow instrumentation | ✅ Complete (316 gateway + 79 x402 tests) |
 
-**Remaining RustyClawRouter phases:** 12, 13, 14 (see ecosystem plan)
+**Remaining RustyClawRouter phases:** 13 (Docs/Examples), 14 (Production Hardening)
 
 ---
 
@@ -346,6 +359,17 @@ Each SDK implements:
 | 94 | Service registration validates ID format, HTTPS requirement, uniqueness | Security baseline: no HTTP endpoints, no duplicates, safe IDs |
 | 95 | Health probe accepts 2xx, 402, 405 as "healthy" | Services behind x402 return 402 for unauthenticated HEAD; 405 means server is up |
 
+### Phase 12 Design Decisions
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 96 | `metrics` + `metrics-exporter-prometheus` over `prometheus` crate | Idiomatic Rust, macro API, better ergonomics |
+| 97 | Hybrid middleware + inline instrumentation | Request metrics cross-cutting (middleware), domain metrics inline (chat/proxy/escrow) |
+| 98 | Admin-gated `/metrics` endpoint | Consistent with escrow health pattern; prevents metric data leakage |
+| 99 | `rcr_` prefix on all metric names | Matches `RCR_` env var convention; avoids collisions |
+| 100 | Global recorder initialized in main.rs, PrometheusHandle in AppState | Single init point; handle passed via Axum state for rendering |
+| 101 | Exclude `/metrics` from its own request counter | Avoids Prometheus scraping feedback loop inflating request counts |
+
 ## What Didn't Work (Cumulative)
 
 - **Concurrent agents modifying same files** — never dispatch parallel agents that touch same files.
@@ -364,7 +388,7 @@ Each SDK implements:
 
 ```bash
 # RustyClawRouter (~/projects/RustyClawRouter/)
-cargo test                            # 308 gateway tests (220 unit + 88 integration)
+cargo test                            # 316 gateway tests (221 unit + 95 integration), 79 x402 tests
 cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings
 
 # RustyClawClient (~/projects/RustyClawClient/)

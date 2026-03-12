@@ -67,6 +67,8 @@ pub struct AppState {
     /// In-memory escrow claim metrics (submitted, succeeded, failed, retried).
     /// `None` when escrow or claim processor is not configured.
     pub escrow_metrics: Option<Arc<x402::escrow::EscrowMetrics>>,
+    /// Prometheus metrics handle for rendering the `/metrics` endpoint.
+    pub prometheus_handle: metrics_exporter_prometheus::PrometheusHandle,
 }
 
 impl AppState {
@@ -113,6 +115,7 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .route("/v1/escrow/health", get(routes::escrow::escrow_health))
         .route("/pricing", get(routes::pricing::pricing))
         .route("/health", get(routes::health::health))
+        .route("/metrics", get(routes::metrics::get_metrics))
         .layer(axum::middleware::from_fn(
             middleware::rate_limit::rate_limit,
         ))
@@ -123,6 +126,9 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         ))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10 MB
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(
+            middleware::metrics::record_metrics,
+        ))
         .layer(build_cors())
         // Security headers — applied to every response
         .layer(SetResponseHeaderLayer::if_not_present(
