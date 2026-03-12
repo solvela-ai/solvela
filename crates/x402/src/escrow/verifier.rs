@@ -284,31 +284,54 @@ impl PaymentVerifier for EscrowVerifier {
                     if let Some(confirmation) =
                         status.get("confirmationStatus").and_then(|s| s.as_str())
                     {
-                        if confirmation == "confirmed" || confirmation == "finalized" {
-                            info!(
-                                signature = %sig_b58,
-                                status = confirmation,
-                                "escrow deposit confirmed"
-                            );
-                            return Ok(SettlementResult {
-                                success: true,
-                                tx_signature: Some(sig_b58),
-                                network: SOLANA_NETWORK.to_string(),
-                                error: None,
-                                verified_amount,
-                            });
+                        match confirmation {
+                            "confirmed" | "finalized" => {
+                                info!(
+                                    signature = %sig_b58,
+                                    status = confirmation,
+                                    "escrow deposit confirmed"
+                                );
+                                return Ok(SettlementResult {
+                                    success: true,
+                                    tx_signature: Some(sig_b58),
+                                    network: SOLANA_NETWORK.to_string(),
+                                    error: None,
+                                    verified_amount,
+                                });
+                            }
+                            "processed" => {
+                                info!(
+                                    signature = %sig_b58,
+                                    status = confirmation,
+                                    "escrow deposit processed (optimistic settle)"
+                                );
+                                return Ok(SettlementResult {
+                                    success: true,
+                                    tx_signature: Some(sig_b58),
+                                    network: SOLANA_NETWORK.to_string(),
+                                    error: None,
+                                    verified_amount,
+                                });
+                            }
+                            _ => {
+                                // Unknown confirmation status — reject
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Not yet confirmed — return with a note
+        // Not yet confirmed — reject to prevent servicing unconfirmed deposits
         Ok(SettlementResult {
-            success: true,
+            success: false,
             tx_signature: Some(sig_b58),
             network: SOLANA_NETWORK.to_string(),
-            error: Some("deposit not yet confirmed — will proceed optimistically".to_string()),
+            error: Some(
+                "escrow deposit not yet confirmed on-chain; \
+                 transaction must reach at least \"processed\" status"
+                    .to_string(),
+            ),
             verified_amount,
         })
     }
