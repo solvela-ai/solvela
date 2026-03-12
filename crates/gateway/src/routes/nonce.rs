@@ -11,6 +11,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::json;
+use tracing;
 
 use crate::AppState;
 
@@ -60,13 +61,16 @@ pub async fn get_nonce(State(state): State<Arc<AppState>>) -> impl IntoResponse 
             })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "error": format!("failed to fetch nonce value: {e}")
-            })),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "nonce fetch failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "Failed to fetch nonce value"
+                })),
+            )
+                .into_response()
+        }
     }
 }
 

@@ -14,11 +14,13 @@ pub mod services;
 pub mod session;
 pub mod usage;
 
-use std::sync::Arc;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
 
 use axum::http::{HeaderName, HeaderValue, Method};
 use axum::routing::{get, post};
 use axum::Router;
+use lru::LruCache;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -50,6 +52,21 @@ pub struct AppState {
     pub db_pool: Option<sqlx::PgPool>,
     /// HMAC secret for signing/verifying session tokens.
     pub session_secret: Vec<u8>,
+    /// In-memory replay protection fallback used when Redis (`cache`) is absent.
+    /// LRU-bounded to 10,000 entries so the oldest signatures are evicted first.
+    pub replay_set: Mutex<LruCache<String, ()>>,
+}
+
+impl AppState {
+    /// Default capacity for the in-memory replay protection LRU cache.
+    const REPLAY_SET_CAPACITY: usize = 10_000;
+
+    /// Create a new in-memory replay LRU cache with the default capacity.
+    pub fn new_replay_set() -> Mutex<LruCache<String, ()>> {
+        Mutex::new(LruCache::new(
+            NonZeroUsize::new(Self::REPLAY_SET_CAPACITY).expect("nonzero"),
+        ))
+    }
 }
 
 /// Build the Axum router with all routes and middleware.
@@ -106,17 +123,21 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
 /// if no origins are configured — SDK/agent clients are unaffected since they
 /// don't use CORS.
 fn build_cors() -> CorsLayer {
-    // Collect allowed origins: env var overrides + always-allowed dev origins
+    // Collect allowed origins: env var overrides + dev-only localhost origins
     let mut origins: Vec<HeaderValue> = Vec::new();
 
-    // Always allow localhost for development
-    for dev_origin in &[
-        "http://localhost:3000",
-        "http://localhost:8080",
-        "http://127.0.0.1:3000",
-    ] {
-        if let Ok(v) = dev_origin.parse() {
-            origins.push(v);
+    // Only allow localhost origins in non-production environments
+    let is_dev =
+        std::env::var("RCR_ENV").unwrap_or_else(|_| "development".to_string()) != "production";
+    if is_dev {
+        for dev_origin in &[
+            "http://localhost:3000",
+            "http://localhost:8080",
+            "http://127.0.0.1:3000",
+        ] {
+            if let Ok(v) = dev_origin.parse() {
+                origins.push(v);
+            }
         }
     }
 

@@ -62,11 +62,14 @@ impl IntoResponse for GatewayError {
                 "rate_limited",
                 "Too many requests".to_string(),
             ),
-            GatewayError::Internal(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                msg.clone(),
-            ),
+            GatewayError::Internal(msg) => {
+                tracing::error!(error = %msg, "internal server error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Internal server error".to_string(),
+                )
+            }
         };
 
         let body = json!({
@@ -169,6 +172,8 @@ mod tests {
             error_response(GatewayError::Internal("panic recovered".to_string())).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(json["error"]["type"], "internal_error");
+        // Must NOT leak raw error details to clients
+        assert_eq!(json["error"]["message"], "Internal server error");
     }
 
     // -------------------------------------------------------------------------

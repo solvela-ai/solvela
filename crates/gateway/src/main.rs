@@ -283,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
                 secret
             }
         },
+        replay_set: AppState::new_replay_set(),
     });
 
     // ── Claim processor (durable escrow claim background task) ──────────────
@@ -363,7 +364,11 @@ async fn main() -> anyhow::Result<()> {
         "RustyClawRouter gateway started"
     );
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
