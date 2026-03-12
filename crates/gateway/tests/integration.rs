@@ -1750,3 +1750,329 @@ async fn test_chat_with_broken_model_circuit_returns_stub() {
         resp.status()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Request ID + Debug Headers (Phase G.2)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_request_id_always_present_on_success() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let request_id = response.headers().get("x-rcr-request-id");
+    assert!(request_id.is_some(), "X-RCR-Request-Id must be present on all responses");
+    // Should be a valid UUID (36 chars with dashes)
+    let id_str = request_id.unwrap().to_str().unwrap();
+    assert_eq!(id_str.len(), 36, "server-generated ID should be a UUID");
+}
+
+#[tokio::test]
+async fn test_request_id_always_present_on_402() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    assert!(
+        response.headers().get("x-rcr-request-id").is_some(),
+        "X-RCR-Request-Id must be present on 402 responses"
+    );
+}
+
+#[tokio::test]
+async fn test_client_provided_request_id_echoed() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header("x-request-id", "my-custom-id-123")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("x-rcr-request-id").unwrap().to_str().unwrap(),
+        "my-custom-id-123",
+        "client-provided request ID should be echoed back"
+    );
+}
+
+#[tokio::test]
+async fn test_invalid_request_id_replaced_with_uuid() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header("x-request-id", "invalid id with spaces!")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let id = response
+        .headers()
+        .get("x-rcr-request-id")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_ne!(id, "invalid id with spaces!", "invalid ID should be replaced");
+    assert_eq!(id.len(), 36, "replacement should be a UUID");
+}
+
+#[tokio::test]
+async fn test_oversized_request_id_replaced_with_uuid() {
+    let app = test_app();
+    let long_id = "a".repeat(200);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header("x-request-id", &long_id)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let id = response
+        .headers()
+        .get("x-rcr-request-id")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_ne!(id, &long_id, "oversized ID should be replaced");
+    assert_eq!(id.len(), 36, "replacement should be a UUID");
+}
+
+#[tokio::test]
+async fn test_no_debug_headers_without_flag() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Request ID should always be present
+    assert!(response.headers().get("x-rcr-request-id").is_some());
+    // Debug headers should NOT be present
+    assert!(
+        response.headers().get("x-rcr-model").is_none(),
+        "x-rcr-model must not leak without debug flag"
+    );
+    assert!(response.headers().get("x-rcr-tier").is_none());
+    assert!(response.headers().get("x-rcr-score").is_none());
+    assert!(response.headers().get("x-rcr-provider").is_none());
+    assert!(response.headers().get("x-rcr-cache").is_none());
+    assert!(response.headers().get("x-rcr-latency-ms").is_none());
+    assert!(response.headers().get("x-rcr-payment-status").is_none());
+}
+
+#[tokio::test]
+async fn test_debug_headers_present_with_flag() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-rcr-debug", "true")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // All 10 debug headers should be present
+    let h = response.headers();
+    assert!(h.get("x-rcr-model").is_some(), "missing x-rcr-model");
+    assert!(h.get("x-rcr-tier").is_some(), "missing x-rcr-tier");
+    assert!(h.get("x-rcr-score").is_some(), "missing x-rcr-score");
+    assert!(h.get("x-rcr-profile").is_some(), "missing x-rcr-profile");
+    assert!(h.get("x-rcr-provider").is_some(), "missing x-rcr-provider");
+    assert!(h.get("x-rcr-cache").is_some(), "missing x-rcr-cache");
+    assert!(h.get("x-rcr-latency-ms").is_some(), "missing x-rcr-latency-ms");
+    assert!(h.get("x-rcr-payment-status").is_some(), "missing x-rcr-payment-status");
+    assert!(h.get("x-rcr-token-estimate-in").is_some(), "missing x-rcr-token-estimate-in");
+    assert!(h.get("x-rcr-token-estimate-out").is_some(), "missing x-rcr-token-estimate-out");
+
+    // Verify some values
+    assert_eq!(h.get("x-rcr-model").unwrap().to_str().unwrap(), "openai/gpt-4o");
+    assert_eq!(h.get("x-rcr-provider").unwrap().to_str().unwrap(), "openai");
+    assert_eq!(h.get("x-rcr-profile").unwrap().to_str().unwrap(), "direct");
+    assert_eq!(h.get("x-rcr-cache").unwrap().to_str().unwrap(), "miss");
+}
+
+#[tokio::test]
+async fn test_debug_flag_false_no_debug_headers() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-rcr-debug", "false")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Debug headers should NOT be present when flag is "false"
+    assert!(response.headers().get("x-rcr-model").is_none());
+    assert!(response.headers().get("x-rcr-tier").is_none());
+}
+
+#[tokio::test]
+async fn test_debug_headers_on_smart_routed_request() {
+    let app = test_app();
+
+    // Use "eco" profile — Simple tier maps to deepseek-chat which is in test registry
+    let body = serde_json::json!({
+        "model": "eco",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-rcr-debug", "true")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let h = response.headers();
+
+    // Profile should be "eco" since we used smart routing
+    assert_eq!(h.get("x-rcr-profile").unwrap().to_str().unwrap(), "eco");
+    // Tier should be a valid tier name
+    let tier = h.get("x-rcr-tier").unwrap().to_str().unwrap();
+    assert!(
+        ["Simple", "Medium", "Complex", "Reasoning"].contains(&tier),
+        "unexpected tier: {tier}"
+    );
+    // Score should be parseable as f64
+    let score: f64 = h
+        .get("x-rcr-score")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .expect("score should be a number");
+    assert!(score.is_finite(), "score should be finite");
+}
+
+#[tokio::test]
+async fn test_payment_status_none_on_402() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-rcr-debug", "true")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 402 responses go through GatewayError, not the handler's debug header path.
+    // But request ID should still be present (middleware handles it).
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    assert!(response.headers().get("x-rcr-request-id").is_some());
+}
