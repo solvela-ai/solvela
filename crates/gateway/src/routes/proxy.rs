@@ -274,8 +274,13 @@ pub async fn proxy_service(
         x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
     };
 
+    let is_durable_nonce = crate::routes::chat::uses_durable_nonce(tx_raw);
+
     let replay_detected = if let Some(cache) = &state.cache {
-        cache.check_and_record_tx(tx_raw).await.is_err()
+        cache
+            .check_and_record_tx(tx_raw, is_durable_nonce)
+            .await
+            .is_err()
     } else {
         let mut replay_set = state.replay_set.lock().expect("replay_set mutex poisoned");
         if replay_set.get(tx_raw).is_some() {

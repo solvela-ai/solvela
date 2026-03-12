@@ -120,18 +120,18 @@ pub async fn wallet_stats(
     };
 
     match verify_session_token(token, &state.session_secret) {
-        Ok(_claims) => {
-            // TODO: Wallet matching is disabled because build_session_token() currently
-            // populates the wallet field from payload.accepted.pay_to (the gateway's
-            // recipient wallet), not the payer's wallet. Once extract_payment_info()
-            // returns the actual payer wallet address, re-enable this check:
-            //
-            // if claims.wallet != address {
-            //     return Err((
-            //         StatusCode::FORBIDDEN,
-            //         Json(serde_json::json!({ "error": "token wallet does not match path" })),
-            //     ).into_response());
-            // }
+        Ok(claims) => {
+            // Verify that the session token's wallet matches the requested path.
+            // build_session_token() in chat.rs populates the wallet field from
+            // extract_payer_wallet_from_payload(), which returns the actual payer
+            // (tx fee payer for direct, agent_pubkey for escrow).
+            if claims.wallet != address {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "error": "token wallet does not match requested address" })),
+                )
+                    .into_response());
+            }
         }
         Err(_) => {
             return Err((
@@ -338,5 +338,72 @@ mod tests {
         let json = serde_json::to_string(&resp).expect("should serialize");
         assert!(json.contains("test_wallet"));
         assert!(json.contains("period_days"));
+    }
+
+    /// Verify that a valid session token for a different wallet is correctly
+    /// detected as a mismatch. This tests the core logic that was previously
+    /// commented out (the CRITICAL security finding).
+    #[test]
+    fn test_wallet_mismatch_detected() {
+        use crate::session::{create_session_token, verify_session_token, SessionClaims};
+
+        let secret = b"test-secret-key-for-wallet-match";
+        let wallet_a = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+        let wallet_b = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = SessionClaims {
+            wallet: wallet_a.to_string(),
+            budget_remaining: 0,
+            issued_at: now,
+            expires_at: now + 3600,
+            allowed_models: vec![],
+        };
+        let token = create_session_token(&claims, secret).expect("should create token");
+        let verified = verify_session_token(&token, secret).expect("token should verify");
+
+        // The verified claims wallet should NOT match wallet_b
+        assert_ne!(
+            verified.wallet, wallet_b,
+            "token for wallet A must not match wallet B"
+        );
+
+        // But SHOULD match wallet_a
+        assert_eq!(
+            verified.wallet, wallet_a,
+            "token for wallet A must match wallet A"
+        );
+    }
+
+    /// Verify that the session token correctly round-trips the wallet address,
+    /// so the stats handler comparison (claims.wallet != address) works.
+    #[test]
+    fn test_session_token_preserves_wallet() {
+        use crate::session::{create_session_token, verify_session_token, SessionClaims};
+
+        let secret = b"test-secret-key-for-wallet-match";
+        let wallet = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = SessionClaims {
+            wallet: wallet.to_string(),
+            budget_remaining: 5_000_000,
+            issued_at: now,
+            expires_at: now + 3600,
+            allowed_models: vec![],
+        };
+        let token = create_session_token(&claims, secret).expect("should create token");
+        let verified = verify_session_token(&token, secret).expect("token should verify");
+
+        assert_eq!(
+            verified.wallet, wallet,
+            "session token must preserve the exact wallet address"
+        );
     }
 }

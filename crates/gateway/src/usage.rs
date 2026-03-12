@@ -6,6 +6,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+
+/// Tolerance for f64 USDC comparisons.
+///
+/// USDC has 6 decimal places, so 1 atomic unit = 0.000001 USDC.
+/// We use half an atomic unit as epsilon to avoid rounding errors
+/// affecting budget comparisons while still being strict enough
+/// for financial correctness.
+const USDC_EPSILON: f64 = 0.000_000_5;
 use uuid::Uuid;
 
 /// A single spend log entry.
@@ -169,32 +177,59 @@ impl UsageTracker {
             let wallet = entry.wallet_address;
             let cost = entry.cost_usdc;
             tokio::spawn(async move {
-                if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
-                    // Daily spend counter
-                    let day_key = format!("spend:{}:{}", wallet, Utc::now().format("%Y-%m-%d"));
-                    let _: Result<(), _> = redis::cmd("INCRBYFLOAT")
-                        .arg(&day_key)
-                        .arg(cost)
-                        .query_async(&mut conn)
-                        .await;
-                    let _: Result<(), _> = redis::cmd("EXPIRE")
-                        .arg(&day_key)
-                        .arg(86400_u64)
-                        .query_async(&mut conn)
-                        .await;
+                let mut conn = match client.get_multiplexed_async_connection().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        // SECURITY: Redis spend tracking is unavailable. Budget enforcement
+                        // is degraded — requests proceed without accumulation tracking.
+                        // This is fail-open by design (availability over strict enforcement),
+                        // but operators MUST investigate promptly.
+                        warn!(
+                            error = %e,
+                            wallet = %wallet,
+                            cost_usdc = cost,
+                            "Redis unavailable for spend tracking — budget enforcement degraded"
+                        );
+                        return;
+                    }
+                };
 
-                    // Monthly spend counter
-                    let month_key = format!("spend:{}:{}", wallet, Utc::now().format("%Y-%m"));
-                    let _: Result<(), _> = redis::cmd("INCRBYFLOAT")
-                        .arg(&month_key)
-                        .arg(cost)
-                        .query_async(&mut conn)
-                        .await;
-                    let _: Result<(), _> = redis::cmd("EXPIRE")
-                        .arg(&month_key)
-                        .arg(86400_u64 * 31)
-                        .query_async(&mut conn)
-                        .await;
+                // Daily spend counter
+                let day_key = format!("spend:{}:{}", wallet, Utc::now().format("%Y-%m-%d"));
+                if let Err(e) = redis::cmd("INCRBYFLOAT")
+                    .arg(&day_key)
+                    .arg(cost)
+                    .query_async::<()>(&mut conn)
+                    .await
+                {
+                    warn!(error = %e, key = %day_key, "failed to increment daily spend counter in Redis");
+                }
+                if let Err(e) = redis::cmd("EXPIRE")
+                    .arg(&day_key)
+                    .arg(86400_u64)
+                    .query_async::<()>(&mut conn)
+                    .await
+                {
+                    warn!(error = %e, key = %day_key, "failed to set TTL on daily spend counter");
+                }
+
+                // Monthly spend counter
+                let month_key = format!("spend:{}:{}", wallet, Utc::now().format("%Y-%m"));
+                if let Err(e) = redis::cmd("INCRBYFLOAT")
+                    .arg(&month_key)
+                    .arg(cost)
+                    .query_async::<()>(&mut conn)
+                    .await
+                {
+                    warn!(error = %e, key = %month_key, "failed to increment monthly spend counter in Redis");
+                }
+                if let Err(e) = redis::cmd("EXPIRE")
+                    .arg(&month_key)
+                    .arg(86400_u64 * 31)
+                    .query_async::<()>(&mut conn)
+                    .await
+                {
+                    warn!(error = %e, key = %month_key, "failed to set TTL on monthly spend counter");
                 }
             });
         }
@@ -208,6 +243,14 @@ impl UsageTracker {
     /// a conservative per-request cap of $1.00 USDC is applied to prevent runaway
     /// spend on high-cost models.  Requests with an estimated cost at or below $1.00
     /// are allowed through; above that they are rejected.
+    ///
+    /// **Fail-open design decision**: When a Redis client IS configured but the
+    /// connection fails at request time (e.g., Redis is temporarily down), the
+    /// budget check is skipped and the request is allowed through. This is an
+    /// intentional fail-open design: we prefer serving requests over blocking
+    /// paying users due to an infrastructure issue. Operators should monitor the
+    /// `budget_check_skipped` warning logs and set up alerts for sustained Redis
+    /// outages that could allow budget overruns.
     pub async fn check_budget(
         &self,
         wallet_address: &str,
@@ -228,22 +271,38 @@ impl UsageTracker {
 
         // Try Redis hot-path budget check.
         if let Some(client) = &self.redis_client {
-            if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
-                let day_key = format!("spend:{}:{}", wallet_address, Utc::now().format("%Y-%m-%d"));
-                let daily_spend: f64 = redis::cmd("GET")
-                    .arg(&day_key)
-                    .query_async(&mut conn)
-                    .await
-                    .unwrap_or(0.0);
+            match client.get_multiplexed_async_connection().await {
+                Ok(mut conn) => {
+                    let day_key =
+                        format!("spend:{}:{}", wallet_address, Utc::now().format("%Y-%m-%d"));
+                    let daily_spend: f64 = redis::cmd("GET")
+                        .arg(&day_key)
+                        .query_async(&mut conn)
+                        .await
+                        .unwrap_or(0.0);
 
-                // Default daily limit: $100 USDC
-                const DAILY_LIMIT_USDC: f64 = 100.0;
-                if daily_spend + estimated_cost_usdc > DAILY_LIMIT_USDC {
-                    return Err(UsageError::BudgetExceeded {
-                        wallet: wallet_address.to_string(),
-                        limit: DAILY_LIMIT_USDC,
-                        spent: daily_spend + estimated_cost_usdc,
-                    });
+                    // Default daily limit: $100 USDC.
+                    // Use epsilon-aware comparison to avoid f64 rounding errors.
+                    // For example, $99.999999 + $0.000002 should not falsely exceed $100.00.
+                    const DAILY_LIMIT_USDC: f64 = 100.0;
+                    if daily_spend + estimated_cost_usdc > DAILY_LIMIT_USDC + USDC_EPSILON {
+                        return Err(UsageError::BudgetExceeded {
+                            wallet: wallet_address.to_string(),
+                            limit: DAILY_LIMIT_USDC,
+                            spent: daily_spend + estimated_cost_usdc,
+                        });
+                    }
+                }
+                Err(e) => {
+                    // Fail-open: allow the request but log a warning so operators
+                    // can monitor for sustained Redis outages. See doc comment above
+                    // for the design rationale.
+                    warn!(
+                        wallet = %wallet_address,
+                        estimated_cost_usdc = estimated_cost_usdc,
+                        error = %e,
+                        "budget_check_skipped: Redis connection failed, allowing request through (fail-open)"
+                    );
                 }
             }
         }
@@ -462,6 +521,41 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, UsageError::NotConfigured));
         assert_eq!(err.to_string(), "not configured");
+    }
+
+    #[test]
+    fn test_usdc_epsilon_prevents_false_budget_exceed() {
+        // USDC_EPSILON must be sub-atomic-unit (< 0.000001) and positive.
+        const _: () = {
+            assert!(USDC_EPSILON < 0.000_001);
+            assert!(USDC_EPSILON > 0.0);
+        };
+
+        // Simulate a budget check where f64 rounding causes a tiny overshoot.
+        // Without epsilon, this would falsely exceed the $100 limit.
+        let daily_limit: f64 = 100.0;
+        let daily_spend: f64 = 99.999_999_999_999;
+        let estimated_cost: f64 = 0.000_000_000_002;
+        let total = daily_spend + estimated_cost;
+
+        // total might be 100.000000000001 due to f64, but should NOT exceed
+        // the limit when epsilon is applied.
+        assert!(
+            total <= daily_limit + USDC_EPSILON,
+            "epsilon-aware comparison should not trigger false budget exceeded"
+        );
+    }
+
+    #[test]
+    fn test_usdc_epsilon_still_catches_real_overages() {
+        // A genuine overage of $0.01 must still be caught.
+        let daily_limit: f64 = 100.0;
+        let total: f64 = 100.01;
+
+        assert!(
+            total > daily_limit + USDC_EPSILON,
+            "real overages must still be caught"
+        );
     }
 
     #[test]
