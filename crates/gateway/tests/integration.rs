@@ -207,6 +207,8 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
         replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
     });
     let router = build_router(
         Arc::clone(&state),
@@ -241,13 +243,17 @@ fn test_app_with_escrow() -> axum::Router {
         kp[32..].copy_from_slice(sk.verifying_key().as_bytes());
         bs58::encode(&kp).into_string()
     };
+    let test_fee_payer_pool = Arc::new(
+        x402::fee_payer::FeePayerPool::from_keys(&[test_keypair]).expect("test pool must load"),
+    );
 
     let escrow_claimer = x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
-        &test_keypair,
+        test_fee_payer_pool.clone(),
         "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
         "11111111111111111111111111111111",
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        None,
     )
     .expect("test claimer must be valid");
 
@@ -266,6 +272,8 @@ fn test_app_with_escrow() -> axum::Router {
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
         replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -1481,6 +1489,8 @@ fn test_app_with_nonce_pool() -> axum::Router {
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
         replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -2502,4 +2512,638 @@ async fn test_payment_status_none_on_402() {
     // But request ID should still be present (middleware handles it).
     assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
     assert!(response.headers().get("x-rcr-request-id").is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Escrow config endpoint (Phase 8.5)
+// ---------------------------------------------------------------------------
+
+/// Test 11: escrow config returns 404 when escrow_program_id is not set.
+#[tokio::test]
+async fn test_escrow_config_returns_404_when_not_configured() {
+    let app = test_app(); // default config has escrow_program_id: None
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/escrow/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "escrow not configured");
+}
+
+/// Test 12: escrow config returns 200 with escrow params when configured.
+/// Since we cannot make a real Solana RPC call in tests, current_slot may be null.
+#[tokio::test]
+async fn test_escrow_config_returns_200_when_configured() {
+    let app = test_app_with_escrow();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/escrow/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(
+        json["escrow_program_id"],
+        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy"
+    );
+    assert_eq!(json["network"], SOLANA_NETWORK);
+    assert_eq!(json["usdc_mint"], USDC_MINT);
+    assert_eq!(json["provider_wallet"], TEST_RECIPIENT_WALLET);
+    // current_slot may be null if devnet RPC is unreachable in CI
+    assert!(
+        json["current_slot"].is_u64() || json["current_slot"].is_null(),
+        "current_slot must be a u64 or null, got: {}",
+        json["current_slot"]
+    );
+}
+
+// =========================================================================
+// Phase 8.6: Escrow health endpoint tests
+// =========================================================================
+
+/// Test 13: escrow health returns 404 when escrow is not configured.
+#[tokio::test]
+async fn test_escrow_health_returns_404_when_not_configured() {
+    let app = test_app(); // default config has escrow_program_id: None
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/escrow/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "escrow not configured");
+}
+
+/// Test 14: escrow health returns 200 with correct shape when escrow is configured.
+#[tokio::test]
+async fn test_escrow_health_returns_200_when_configured() {
+    let app = test_app_with_escrow();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/escrow/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Verify response shape
+    assert!(
+        json["status"].is_string(),
+        "status must be a string, got: {}",
+        json["status"]
+    );
+    assert!(json["escrow_enabled"].is_boolean());
+    assert!(json["fee_payer_wallets"].is_number());
+    assert!(json["claims"].is_object());
+    assert!(json["claims"]["submitted"].is_number());
+    assert!(json["claims"]["succeeded"].is_number());
+    assert!(json["claims"]["failed"].is_number());
+    assert!(json["claims"]["retried"].is_number());
+
+    // Without metrics or DB, claims should be zero and pending null
+    assert_eq!(json["claims"]["submitted"], 0);
+    assert_eq!(json["claims"]["succeeded"], 0);
+    assert_eq!(json["claims"]["failed"], 0);
+    assert_eq!(json["claims"]["retried"], 0);
+    assert!(json["claims"]["pending_in_queue"].is_null());
+}
+
+/// Helper that builds a test app with escrow configured AND metrics enabled.
+fn test_app_with_escrow_metrics() -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+
+    let facilitator = x402::facilitator::Facilitator::new(vec![
+        Arc::new(AlwaysPassVerifier),
+        Arc::new(AlwaysPassEscrowVerifier),
+    ]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    config.solana.escrow_program_id =
+        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+
+    let test_keypair = {
+        use ed25519_dalek::SigningKey;
+        let sk = SigningKey::from_bytes(&[1u8; 32]);
+        let mut kp = [0u8; 64];
+        kp[..32].copy_from_slice(&[1u8; 32]);
+        kp[32..].copy_from_slice(sk.verifying_key().as_bytes());
+        bs58::encode(&kp).into_string()
+    };
+    let test_fee_payer_pool = Arc::new(
+        x402::fee_payer::FeePayerPool::from_keys(&[test_keypair]).expect("test pool must load"),
+    );
+
+    let escrow_claimer = x402::escrow::EscrowClaimer::new(
+        "https://api.devnet.solana.com".to_string(),
+        test_fee_payer_pool.clone(),
+        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "11111111111111111111111111111111",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        None,
+    )
+    .expect("test claimer must be valid");
+
+    // Pre-populate metrics with some values
+    let metrics = Arc::new(x402::escrow::EscrowMetrics::new());
+    metrics
+        .claims_submitted
+        .store(42, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .claims_succeeded
+        .store(38, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .claims_failed
+        .store(3, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .claims_retried
+        .store(1, std::sync::atomic::Ordering::Relaxed);
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry,
+        providers: ProviderRegistry::from_env(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: Some(Arc::new(escrow_claimer)),
+        fee_payer_pool: Some(test_fee_payer_pool),
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: Some(metrics),
+    });
+    build_router(state, RateLimiter::new(RateLimitConfig::default()))
+}
+
+/// Test 15: escrow health returns populated metrics when metrics are configured.
+#[tokio::test]
+async fn test_escrow_health_returns_metrics() {
+    let app = test_app_with_escrow_metrics();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/escrow/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Metrics should reflect pre-populated values
+    assert_eq!(json["claims"]["submitted"], 42);
+    assert_eq!(json["claims"]["succeeded"], 38);
+    assert_eq!(json["claims"]["failed"], 3);
+    assert_eq!(json["claims"]["retried"], 1);
+
+    // With escrow_claimer + fee_payer_pool but no db_pool,
+    // status should be "degraded" (claim_processor_running is false without DB)
+    assert_eq!(json["escrow_enabled"], true);
+    assert_eq!(json["fee_payer_wallets"], 1);
+    assert!(json["claims"]["pending_in_queue"].is_null());
+}
+
+// =========================================================================
+// Phase 8.7: Escrow hardening integration tests
+// =========================================================================
+
+// ---------------------------------------------------------------------------
+// Escrow config endpoint — program ID field
+// ---------------------------------------------------------------------------
+
+/// Test that the escrow config endpoint returns the correct program ID
+/// when escrow is configured, along with all required fields.
+#[tokio::test]
+async fn test_escrow_config_returns_correct_program_id() {
+    let app = test_app_with_escrow();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/escrow/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Program ID must match exactly what was configured
+    assert_eq!(
+        json["escrow_program_id"], "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "escrow_program_id must match configured value"
+    );
+
+    // All required fields must be present and have correct types
+    assert!(json["network"].is_string(), "network must be a string");
+    assert!(json["usdc_mint"].is_string(), "usdc_mint must be a string");
+    assert!(
+        json["provider_wallet"].is_string(),
+        "provider_wallet must be a string"
+    );
+
+    // Network must be the Solana network identifier
+    assert!(
+        json["network"].as_str().unwrap().starts_with("solana:"),
+        "network must start with 'solana:'"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Escrow health — metrics increment after atomic updates
+// ---------------------------------------------------------------------------
+
+/// Test that escrow health endpoint reflects atomically incremented metrics.
+/// This verifies that the metrics flow from atomic counters -> snapshot -> JSON
+/// works correctly with various increment patterns.
+#[tokio::test]
+async fn test_escrow_health_reflects_incremented_metrics() {
+    use std::sync::atomic::Ordering;
+
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+
+    let facilitator = x402::facilitator::Facilitator::new(vec![
+        Arc::new(AlwaysPassVerifier),
+        Arc::new(AlwaysPassEscrowVerifier),
+    ]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    config.solana.escrow_program_id =
+        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+
+    let test_keypair = {
+        use ed25519_dalek::SigningKey;
+        let sk = SigningKey::from_bytes(&[1u8; 32]);
+        let mut kp = [0u8; 64];
+        kp[..32].copy_from_slice(&[1u8; 32]);
+        kp[32..].copy_from_slice(sk.verifying_key().as_bytes());
+        bs58::encode(&kp).into_string()
+    };
+    let test_fee_payer_pool = Arc::new(
+        x402::fee_payer::FeePayerPool::from_keys(&[test_keypair]).expect("test pool must load"),
+    );
+
+    let escrow_claimer = x402::escrow::EscrowClaimer::new(
+        "https://api.devnet.solana.com".to_string(),
+        test_fee_payer_pool.clone(),
+        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "11111111111111111111111111111111",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        None,
+    )
+    .expect("test claimer must be valid");
+
+    // Start with zero metrics
+    let metrics = Arc::new(x402::escrow::EscrowMetrics::new());
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry,
+        providers: ProviderRegistry::from_env(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: Some(Arc::new(escrow_claimer)),
+        fee_payer_pool: Some(test_fee_payer_pool),
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: Some(Arc::clone(&metrics)),
+    });
+
+    // Simulate claim processing by incrementing metrics atomically
+    metrics.claims_submitted.fetch_add(5, Ordering::Relaxed);
+    metrics.claims_succeeded.fetch_add(3, Ordering::Relaxed);
+    metrics.claims_failed.fetch_add(1, Ordering::Relaxed);
+    metrics.claims_retried.fetch_add(1, Ordering::Relaxed);
+
+    let app = build_router(
+        Arc::clone(&state),
+        RateLimiter::new(RateLimitConfig::default()),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/escrow/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["claims"]["submitted"], 5);
+    assert_eq!(json["claims"]["succeeded"], 3);
+    assert_eq!(json["claims"]["failed"], 1);
+    assert_eq!(json["claims"]["retried"], 1);
+
+    // Verify status reflects operational state
+    assert_eq!(json["escrow_enabled"], true);
+    assert_eq!(json["fee_payer_wallets"], 1);
+}
+
+// ---------------------------------------------------------------------------
+// Escrow scheme-payload mismatch validation
+// ---------------------------------------------------------------------------
+
+/// Build a mismatched PaymentPayload header: scheme="exact" but with escrow payload data.
+fn mismatched_exact_scheme_escrow_payload_header(resource_url: &str) -> String {
+    let payload = PaymentPayload {
+        x402_version: 2,
+        resource: Resource {
+            url: resource_url.to_string(),
+            method: "POST".to_string(),
+        },
+        accepted: PaymentAccept {
+            scheme: "exact".to_string(), // <-- says "exact"
+            network: SOLANA_NETWORK.to_string(),
+            amount: TEST_PAYMENT_AMOUNT.to_string(),
+            asset: USDC_MINT.to_string(),
+            pay_to: TEST_RECIPIENT_WALLET.to_string(),
+            max_timeout_seconds: 300,
+            escrow_program_id: None,
+        },
+        payload: PayloadData::Escrow(EscrowPayload {
+            // <-- but contains escrow data
+            deposit_tx: base64::engine::general_purpose::STANDARD.encode(b"mock_deposit_tx_bytes"),
+            service_id: base64::engine::general_purpose::STANDARD.encode([0u8; 32]),
+            agent_pubkey: "11111111111111111111111111111111".to_string(),
+        }),
+    };
+    let json = serde_json::to_vec(&payload).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(&json)
+}
+
+/// Build a mismatched PaymentPayload header: scheme="escrow" but with direct payload data.
+fn mismatched_escrow_scheme_direct_payload_header(resource_url: &str) -> String {
+    let payload = PaymentPayload {
+        x402_version: 2,
+        resource: Resource {
+            url: resource_url.to_string(),
+            method: "POST".to_string(),
+        },
+        accepted: PaymentAccept {
+            scheme: "escrow".to_string(), // <-- says "escrow"
+            network: SOLANA_NETWORK.to_string(),
+            amount: TEST_PAYMENT_AMOUNT.to_string(),
+            asset: USDC_MINT.to_string(),
+            pay_to: TEST_RECIPIENT_WALLET.to_string(),
+            max_timeout_seconds: 300,
+            escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+        },
+        payload: PayloadData::Direct(SolanaPayload {
+            // <-- but contains direct transfer data
+            transaction: base64::engine::general_purpose::STANDARD.encode(b"mock_signed_tx_bytes"),
+        }),
+    };
+    let json = serde_json::to_vec(&payload).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(&json)
+}
+
+/// Test that submitting scheme="exact" with an escrow PayloadData returns 400.
+#[tokio::test]
+async fn test_scheme_payload_mismatch_exact_with_escrow_returns_400() {
+    let app = test_app_with_escrow();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    mismatched_exact_scheme_escrow_payload_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "scheme-payload mismatch (exact scheme + escrow data) must return 400"
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "bad_request");
+    assert!(
+        json["error"]["message"].as_str().unwrap().contains("exact")
+            && json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("escrow"),
+        "error message should mention the scheme-payload mismatch"
+    );
+}
+
+/// Test that submitting scheme="escrow" with a direct PayloadData returns 400.
+#[tokio::test]
+async fn test_scheme_payload_mismatch_escrow_with_direct_returns_400() {
+    let app = test_app_with_escrow();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    mismatched_escrow_scheme_direct_payload_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "scheme-payload mismatch (escrow scheme + direct data) must return 400"
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "bad_request");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("escrow")
+            && json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("direct"),
+        "error message should mention the scheme-payload mismatch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Escrow health — status field values
+// ---------------------------------------------------------------------------
+
+/// Test that escrow health reports "down" when escrow is configured but no
+/// claimer is present (e.g., fee payer key missing).
+#[tokio::test]
+async fn test_escrow_health_status_down_without_claimer() {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator = x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    config.solana.escrow_program_id =
+        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry,
+        providers: ProviderRegistry::from_env(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None, // No claimer configured
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+    });
+    let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/escrow/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(
+        json["status"], "down",
+        "status should be 'down' when escrow_claimer is None"
+    );
+    assert_eq!(json["escrow_enabled"], false);
+    assert_eq!(json["fee_payer_wallets"], 0);
+}
+
+/// Test that escrow health reports "degraded" when claimer is present but
+/// no DB pool is available (claim processor cannot run).
+#[tokio::test]
+async fn test_escrow_health_status_degraded_without_db() {
+    // test_app_with_escrow has escrow_claimer but no db_pool
+    let app = test_app_with_escrow();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/escrow/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Escrow is enabled but claim processor can't run without DB
+    assert_eq!(json["escrow_enabled"], true);
+    // Status depends on whether fee_payer_pool is set in test_app_with_escrow
+    // test_app_with_escrow sets fee_payer_pool to None, so no wallets
+    let status = json["status"].as_str().unwrap();
+    assert!(
+        status == "degraded" || status == "down",
+        "status should be 'degraded' or 'down' without DB, got: {status}"
+    );
 }

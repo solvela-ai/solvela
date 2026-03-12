@@ -50,7 +50,21 @@ pub struct ClaimEntry {
 
 /// Maximum number of submission attempts before a claim is marked as permanently
 /// [`ClaimStatus::Failed`].
-pub const MAX_CLAIM_ATTEMPTS: i32 = 5;
+pub const MAX_CLAIM_ATTEMPTS: i32 = 10;
+
+/// Maximum backoff duration (5 minutes) in seconds.
+const MAX_BACKOFF_SECS: u64 = 300;
+
+/// Compute exponential backoff duration for the given attempt number.
+///
+/// Schedule: 1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s, 300s (capped).
+pub fn backoff_duration(attempt: i32) -> std::time::Duration {
+    let secs = 1u64
+        .checked_shl(attempt.max(0) as u32)
+        .unwrap_or(MAX_BACKOFF_SECS)
+        .min(MAX_BACKOFF_SECS);
+    std::time::Duration::from_secs(secs)
+}
 
 // ---------------------------------------------------------------------------
 // Queue operations
@@ -112,12 +126,17 @@ pub async fn mark_completed(
 }
 
 /// Record a failed attempt. If attempts >= [`MAX_CLAIM_ATTEMPTS`] the claim is
-/// marked as permanently `failed`; otherwise it returns to `pending` for retry.
+/// marked as permanently `failed`; otherwise it returns to `pending` for retry
+/// with an exponential backoff delay stored in `next_retry_at`.
 pub async fn mark_attempt_failed(
     pool: &sqlx::PgPool,
     id: &str,
     error: &str,
+    current_attempts: i32,
 ) -> Result<(), sqlx::Error> {
+    let backoff = backoff_duration(current_attempts);
+    let backoff_secs = backoff.as_secs() as i32;
+
     sqlx::query(
         "UPDATE escrow_claim_queue
          SET status = CASE
@@ -125,12 +144,17 @@ pub async fn mark_attempt_failed(
              ELSE 'pending'
          END,
          error_message = $2,
-         last_attempt_at = NOW()
+         last_attempt_at = NOW(),
+         next_retry_at = CASE
+             WHEN attempts >= $1 THEN next_retry_at
+             ELSE NOW() + ($4 || ' seconds')::interval
+         END
          WHERE id = $3::uuid",
     )
     .bind(MAX_CLAIM_ATTEMPTS)
     .bind(error)
     .bind(id)
+    .bind(backoff_secs.to_string())
     .execute(pool)
     .await?;
     Ok(())
@@ -159,6 +183,7 @@ pub async fn fetch_pending_claims(
                 status, attempts, tx_signature, error_message
          FROM escrow_claim_queue
          WHERE status = 'pending'
+           AND (next_retry_at IS NULL OR next_retry_at <= NOW())
          ORDER BY created_at ASC
          LIMIT $1",
     )
@@ -234,7 +259,35 @@ mod tests {
 
     #[test]
     fn test_max_attempts_constant() {
-        assert_eq!(MAX_CLAIM_ATTEMPTS, 5);
+        assert_eq!(MAX_CLAIM_ATTEMPTS, 10);
+    }
+
+    #[test]
+    fn test_backoff_schedule() {
+        // 1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s, 300s (capped)
+        let expected_secs = [1, 2, 4, 8, 16, 32, 64, 128, 256, 300];
+        for (attempt, &expected) in expected_secs.iter().enumerate() {
+            let duration = backoff_duration(attempt as i32);
+            assert_eq!(
+                duration.as_secs(),
+                expected,
+                "attempt {attempt}: expected {expected}s, got {}s",
+                duration.as_secs()
+            );
+        }
+    }
+
+    #[test]
+    fn test_backoff_capped_at_five_minutes() {
+        // Even very high attempt numbers should cap at 300s
+        assert_eq!(backoff_duration(20).as_secs(), 300);
+        assert_eq!(backoff_duration(100).as_secs(), 300);
+    }
+
+    #[test]
+    fn test_backoff_negative_attempt_treated_as_zero() {
+        // Negative attempts should be treated as attempt 0 (1 second)
+        assert_eq!(backoff_duration(-1).as_secs(), 1);
     }
 
     #[test]
