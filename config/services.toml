@@ -30,6 +30,7 @@ x402_enabled = true
 internal = false
 description = "Real-time web search with structured results"
 pricing_label = "$0.005/query"
+price_per_request_usdc = 0.005
 
 [services.weather-api]
 name = "Weather Data"
@@ -39,3 +40,4 @@ x402_enabled = true
 internal = false
 description = "Current conditions and 7-day forecast for any location"
 pricing_label = "$0.001/request"
+price_per_request_usdc = 0.001

@@ -6,6 +6,7 @@ pub mod images;
 pub mod models;
 pub mod nonce;
 pub mod pricing;
+pub mod proxy;
 pub mod services;
 pub mod stats;
 pub mod supported;

@@ -35,14 +35,15 @@ async fn main() -> anyhow::Result<()> {
     // Load service registry from config file
     let services_toml = std::fs::read_to_string("config/services.toml")
         .unwrap_or_else(|_| include_str!("../../../config/services.toml").to_string());
-    let service_registry = ServiceRegistry::from_toml(&services_toml).unwrap_or_else(|e| {
+    let service_registry_inner = ServiceRegistry::from_toml(&services_toml).unwrap_or_else(|e| {
         warn!(error = %e, "failed to parse services.toml, using empty registry");
         ServiceRegistry::empty()
     });
     info!(
-        services = service_registry.all().len(),
+        services = service_registry_inner.all().len(),
         "loaded service registry"
     );
+    let service_registry = tokio::sync::RwLock::new(service_registry_inner);
 
     // Initialize provider registry from environment API keys
     let providers = ProviderRegistry::from_env();
@@ -316,6 +317,27 @@ async fn main() -> anyhow::Result<()> {
     // A watch channel that signals background tasks (like the claim processor)
     // to shut down gracefully. The sender fires when SIGTERM / Ctrl+C arrives.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // ── Service health checker (background task) ────────────────────────────
+    //
+    // Periodically probes external x402 services and updates their health
+    // status in the registry. Only starts if there are external services.
+    {
+        let has_external = {
+            let registry = state.service_registry.read().await;
+            !registry.external().is_empty()
+        };
+        if has_external {
+            let health_shutdown_rx = shutdown_rx.clone();
+            let _handle = gateway::service_health::start_service_health_checker(
+                Arc::clone(&state),
+                health_shutdown_rx,
+            );
+            info!("service health checker started");
+        } else {
+            info!("service health checker disabled — no external services");
+        }
+    }
 
     // ── Claim processor (durable escrow claim background task) ──────────────
     //

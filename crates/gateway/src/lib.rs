@@ -10,6 +10,7 @@ pub mod error;
 pub mod middleware;
 pub mod providers;
 pub mod routes;
+pub mod service_health;
 pub mod services;
 pub mod session;
 pub mod usage;
@@ -21,6 +22,7 @@ use axum::http::{HeaderName, HeaderValue, Method};
 use axum::routing::{get, post};
 use axum::Router;
 use lru::LruCache;
+use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -39,7 +41,7 @@ use crate::routes::escrow::SlotCache;
 pub struct AppState {
     pub config: config::AppConfig,
     pub model_registry: ModelRegistry,
-    pub service_registry: ServiceRegistry,
+    pub service_registry: RwLock<ServiceRegistry>,
     pub providers: ProviderRegistry,
     pub facilitator: Facilitator,
     pub usage: usage::UsageTracker,
@@ -92,6 +94,14 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         )
         .route("/v1/models", get(routes::models::list_models))
         .route("/v1/services", get(routes::services::list_services))
+        .route(
+            "/v1/services/register",
+            post(routes::services::register_service),
+        )
+        .route(
+            "/v1/services/{service_id}/proxy",
+            post(routes::proxy::proxy_service),
+        )
         .route("/v1/supported", get(routes::supported::supported))
         .route("/v1/nonce", get(routes::nonce::get_nonce))
         .route(
