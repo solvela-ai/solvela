@@ -20,9 +20,9 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ## IMMEDIATE NEXT STEP: Remaining RustyClawRouter Phases
 
-**Phase G is COMPLETE.** All sub-tasks (G.1-G.5) implemented and merged to main. 342 tests passing.
+**Phase 8 (Escrow Hardening) is COMPLETE.** All sub-tasks (8.1-8.7) implemented and merged to main. 384 tests passing.
 
-**Remaining RustyClawRouter phases:** 8 (Escrow), 9 (Service Marketplace), 12 (Monitoring), 13 (Docs/Examples), 14 (Production Hardening). See ecosystem plan for details.
+**Remaining RustyClawRouter phases:** 9 (Service Marketplace), 12 (Monitoring), 13 (Docs/Examples), 14 (Production Hardening). See ecosystem plan for details.
 
 ---
 
@@ -30,7 +30,7 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ### What's Complete in RustyClawRouter
 
-**Phases 1-7, 10-11, Phase A, Phase G** — all complete (342 tests).
+**Phases 1-8, 10-11, Phase A, Phase G** — all complete (384 tests).
 
 **Phase G delivered:**
 - G.2: Debug response headers — RequestId middleware (always-on `X-RCR-Request-Id`), 11 debug headers opt-in via `X-RCR-Debug: true`
@@ -45,6 +45,17 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 - Multiple MEDIUM fixed: CORS tightening, error message leakage, USDC mint enforcement, Docker port exposure, and others
 - Remaining TODO: M3 payer wallet extraction from transaction
 - Earlier audit (Phase B): LRU cache replaces HashSet for replay protection, 50KB PAYMENT-SIGNATURE limit, rate limit cleanup cooldown, session secret length validation
+
+**Phase 8 (Escrow Hardening) delivered:**
+- 8.1: Claim processor auto-start on gateway boot (gated on escrow + DB)
+- 8.2: Fee payer rotation with health tracking and 60s cooldown
+- 8.3: Durable nonces for claim transactions (blockhash fallback)
+- 8.4: Exponential backoff (1s-5min), max 10 retries, circuit breaker
+- 8.5: GET /v1/escrow/config endpoint (program ID, current slot, USDC mint)
+- 8.6: GET /v1/escrow/health endpoint (admin-auth gated, claim metrics)
+- 8.7: Integration tests for escrow endpoints and scheme validation
+- Graceful shutdown via watch channel, stale claim recovery after 5min
+- Code review fixes: deadlock fix, keypair zeroing, shared HTTP client
 
 ### What's Complete in RustyClawClient
 
@@ -174,8 +185,9 @@ tests/
 | E: Smart Features | Sessions, cache, degraded detection, free fallback | ✅ Complete (121 tests) |
 | F: SDKs | Python, TS, Go client SDKs | ✅ Complete (301 tests across 3 repos) |
 | G: Gateway Changes | Debug headers, session ID, stats endpoint | ✅ Complete (G.1-G.5 all done, 342 tests) |
+| 8: Escrow Hardening | Claim recovery, fee payer rotation, monitoring | ✅ Complete (384 tests) |
 
-**Remaining RustyClawRouter phases:** 8, 9, 12, 13, 14 (see ecosystem plan)
+**Remaining RustyClawRouter phases:** 9, 12, 13, 14 (see ecosystem plan)
 
 ---
 
@@ -297,6 +309,20 @@ Each SDK implements:
 | 78 | Partial index on session_id (WHERE NOT NULL) | Most rows null initially; partial index avoids bloat |
 | 79 | Build order: G.2 → G.5 → G.1 | Debug headers are foundation; stats is more complex; session ID is simplest |
 
+### Phase 8 Design Decisions
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 80 | Keep single-signer constraint (fee_payer == provider) | Avoid Anchor program changes during hardening phase |
+| 81 | Exponential backoff 1s-5min, max 10 retries | Industry standard; prevents thundering herd |
+| 82 | Circuit breaker: 50% failure in 5min window, 1min pause | Protects RPC from retry storms |
+| 83 | Durable nonces for claims with blockhash fallback | Prevents claim expiry on slow networks |
+| 84 | GET /v1/escrow/config public, /health admin-gated | Config is discovery; health is operational |
+| 85 | In-memory claim metrics (AtomicU64) | No external metrics crate needed |
+| 86 | watch channel for graceful shutdown | Clean claim processor exit on SIGTERM |
+| 87 | Recover stale in_progress claims after 5min | Prevents permanent stuck claims |
+| 88 | Single Mutex for circuit breaker state | Eliminates ABBA deadlock risk |
+
 ## What Didn't Work (Cumulative)
 
 - **Concurrent agents modifying same files** — never dispatch parallel agents that touch same files.
@@ -307,6 +333,7 @@ Each SDK implements:
 - **`expect()` in library code** — violated project conventions; return `Result` instead.
 - **RustyClawClient HTTPS remote** — auth failed; switched to SSH.
 - **Main agent implementing code directly instead of delegating to subagents** — Kenneth prefers subagent-driven execution. Main agent should brainstorm/plan, then dispatch subagents for implementation. Do NOT implement code in the main conversation.
+- **Nested Mutex acquisition in circuit breaker** — caused ABBA deadlock risk; consolidated into single Mutex.
 
 ---
 
@@ -314,7 +341,7 @@ Each SDK implements:
 
 ```bash
 # RustyClawRouter (~/projects/RustyClawRouter/)
-cargo test                            # 342 tests
+cargo test                            # 384 tests
 cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings
 
 # RustyClawClient (~/projects/RustyClawClient/)
