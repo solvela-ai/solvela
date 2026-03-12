@@ -18,11 +18,29 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ---
 
-## IMMEDIATE NEXT STEP: Remaining RustyClawRouter Phases (8, 9, 12, 13, 14)
+## IMMEDIATE NEXT STEP: Phase G Gateway Changes
 
-**Phase F (SDKs) is COMPLETE.** Three language SDKs built from scratch, 301 tests total.
+**Phase G plan is COMPLETE and written.** See `docs/plans/phase-g-gateway-changes.md` for the full design, 14 decisions (#66-79), implementation checklist, and test plan.
 
-**Next up:** Remaining RustyClawRouter phases: 8 (Escrow), 9 (Service Marketplace), 12 (Monitoring), 13 (Docs/Examples), 14 (Production Hardening).
+**Phase G has a worktree with partial G.2 implementation (uncommitted).** Branch `feature/phase-g-gateway-changes` at `.worktrees/phase-g/`. G.2 is committed (b619b93) but not merged to main — review before merging or discard and start fresh from the plan.
+
+**Build order:** G.2 (Debug Headers) → G.5 (Stats Endpoint) → G.1 (Session ID)
+
+**What's in the worktree (uncommitted, may need review/redo):**
+- `crates/gateway/src/middleware/request_id.rs` — RequestId middleware (always-on `X-RCR-Request-Id`)
+- `crates/gateway/src/routes/debug_headers.rs` — DebugInfo struct, attach_debug_headers(), CacheStatus/PaymentStatus enums
+- `crates/gateway/src/routes/chat.rs` — modified to track timing, routing data, cache/payment status; debug headers on all return paths
+- `crates/gateway/src/lib.rs` — RequestIdLayer added outermost, CORS headers for x-request-id/x-rcr-debug/x-session-id
+- `crates/gateway/tests/integration.rs` — 10 new integration tests for debug headers
+- Tests were passing (218 total: 170 unit + 48 integration, up from 199: 161 unit + 38 integration) at time of interruption
+
+**What's NOT done yet (use the plan doc):**
+- G.5: Stats endpoint (`GET /v1/wallet/{address}/stats`) — rename dashboard.rs, auth via session token, 3 DB queries
+- G.1: Session ID echo + logging — extract X-Session-Id in chat handler, echo, pass to usage.rs
+- Migration `003_phase_g_request_session_ids.sql` — add request_id and session_id columns to spend_logs
+- Tests for G.5 (10 tests) and G.1 (6 tests)
+
+**After Phase G:** Remaining RustyClawRouter phases: 8 (Escrow), 9 (Service Marketplace), 12 (Monitoring), 13 (Docs/Examples), 14 (Production Hardening).
 
 ---
 
@@ -165,7 +183,7 @@ tests/
 | D: CLI (`rcc`) | wallet, chat, models, doctor commands | ✅ Complete (74 tests) |
 | E: Smart Features | Sessions, cache, degraded detection, free fallback | ✅ Complete (121 tests) |
 | F: SDKs | Python, TS, Go client SDKs | ✅ Complete (301 tests across 3 repos) |
-| G: Gateway Changes | Debug headers, session ID, stats endpoint | G.3 (heartbeat) ✅, rest not started |
+| G: Gateway Changes | Debug headers, session ID, stats endpoint | G.3 ✅, G.4 ✅, G.2 complete (in worktree, not merged), G.5 + G.1 planned |
 
 **Remaining RustyClawRouter phases:** 8, 9, 12, 13, 14 (see ecosystem plan)
 
@@ -270,6 +288,25 @@ Each SDK implements:
 | 64 | Cache key after model finalization | Same fix as Rust client, prevents cross-model pollution |
 | 65 | Go skips OpenAI compat | No dominant Go OpenAI SDK pattern to mimic |
 
+### Phase G Design Decisions (from brainstorming)
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 66 | Debug headers opt-in via `X-RCR-Debug: true` | No info leakage by default; matches Cloudflare `cf-debug` pattern |
+| 67 | 11 debug headers (7 original + request ID + payment status + token estimates) | All data already computed; headers are negligible overhead |
+| 68 | Request ID: client-provided with server fallback | Industry standard for distributed tracing; enables end-to-end correlation |
+| 69 | Request ID always returned (not gated by debug flag) | Zero security risk (random UUID); massive operational value; matches Stripe/AWS/GitHub |
+| 70 | Hybrid: Request ID in middleware, debug headers in handler | Request ID needs early availability; debug data is local to handler |
+| 71 | Stats path: `GET /v1/wallet/{address}/stats` | RESTful resource-oriented; self-documenting |
+| 72 | Stats time range: `?days=N` (default 30, max 365) | YAGNI; covers 90% of cases |
+| 73 | Stats shape: summary + by_model + by_day | Covers CLI, SDK, and dashboard needs |
+| 74 | Stats auth: reuse `x-rcr-session` HMAC token | Zero new infrastructure; token already issued and verified |
+| 75 | Session ID: echo + log, no server-side sticking | Client handles sticking; server adds cost tracking without duplicating logic |
+| 76 | No server-generated session IDs | Sessions are a client concept; Request ID covers per-request tracking |
+| 77 | Single migration for request_id + session_id | Both are simple ALTER TABLE; one migration is cleaner |
+| 78 | Partial index on session_id (WHERE NOT NULL) | Most rows null initially; partial index avoids bloat |
+| 79 | Build order: G.2 → G.5 → G.1 | Debug headers are foundation; stats is more complex; session ID is simplest |
+
 ## What Didn't Work (Cumulative)
 
 - **Concurrent agents modifying same files** — never dispatch parallel agents that touch same files.
@@ -279,6 +316,7 @@ Each SDK implements:
 - **`zeroize` derive feature** — conflicts with `curve25519-dalek v3`.
 - **`expect()` in library code** — violated project conventions; return `Result` instead.
 - **RustyClawClient HTTPS remote** — auth failed; switched to SSH.
+- **Main agent implementing code directly instead of delegating to subagents** — Kenneth prefers subagent-driven execution. Main agent should brainstorm/plan, then dispatch subagents for implementation. Do NOT implement code in the main conversation.
 
 ---
 
