@@ -139,11 +139,96 @@ pub async fn chat_completions(
 
     match payment_payload {
         Some(payload) => {
-            // Verify the resource field matches this endpoint
+            // --- H2: Validate all `accepted` fields ---
+
+            // Verify the resource URL matches this endpoint
             if payload.resource.url != "/v1/chat/completions" {
                 return Err(GatewayError::InvalidPayment(format!(
                     "payment resource '{}' does not match this endpoint",
                     payload.resource.url
+                )));
+            }
+
+            // Verify the resource method is POST
+            if !payload.resource.method.eq_ignore_ascii_case("POST") {
+                warn!(
+                    method = %payload.resource.method,
+                    "payment resource method mismatch"
+                );
+                return Err(GatewayError::BadRequest(format!(
+                    "payment resource method must be POST, got '{}'",
+                    payload.resource.method
+                )));
+            }
+
+            // Verify network is Solana
+            if !payload
+                .accepted
+                .network
+                .eq_ignore_ascii_case(x402::types::SOLANA_NETWORK)
+            {
+                warn!(
+                    network = %payload.accepted.network,
+                    expected = %x402::types::SOLANA_NETWORK,
+                    "payment network mismatch"
+                );
+                return Err(GatewayError::BadRequest(format!(
+                    "payment network must be '{}', got '{}'",
+                    x402::types::SOLANA_NETWORK,
+                    payload.accepted.network
+                )));
+            }
+
+            // Verify asset is USDC-SPL mint
+            if payload.accepted.asset != x402::types::USDC_MINT {
+                warn!(
+                    asset = %payload.accepted.asset,
+                    expected = %x402::types::USDC_MINT,
+                    "payment asset mismatch"
+                );
+                return Err(GatewayError::BadRequest(format!(
+                    "payment asset must be USDC mint '{}', got '{}'",
+                    x402::types::USDC_MINT,
+                    payload.accepted.asset
+                )));
+            }
+
+            // Verify pay_to matches the gateway's recipient wallet
+            if payload.accepted.pay_to != state.config.solana.recipient_wallet {
+                warn!(
+                    pay_to = %payload.accepted.pay_to,
+                    expected = %state.config.solana.recipient_wallet,
+                    "payment pay_to mismatch"
+                );
+                return Err(GatewayError::BadRequest(format!(
+                    "payment pay_to must be '{}', got '{}'",
+                    state.config.solana.recipient_wallet, payload.accepted.pay_to
+                )));
+            }
+
+            // --- C1: Recompute expected cost and validate client amount ---
+            let expected_cost = state
+                .model_registry
+                .estimate_cost(
+                    &req.model,
+                    estimate_input_tokens(&req),
+                    req.max_tokens.unwrap_or(1000),
+                )
+                .map_err(|e| GatewayError::Internal(e.to_string()))?;
+            let expected_amount: u64 = usdc_atomic_amount(&expected_cost.total)
+                .parse()
+                .unwrap_or(0);
+            let client_amount: u64 = payload.accepted.amount.parse().unwrap_or(0);
+
+            if client_amount < expected_amount {
+                warn!(
+                    client_amount,
+                    expected_amount,
+                    model = %req.model,
+                    "payment amount insufficient"
+                );
+                return Err(GatewayError::BadRequest(format!(
+                    "payment amount insufficient: paid {client_amount} but cost is {expected_amount} atomic USDC"
                 )));
             }
 
@@ -154,20 +239,41 @@ pub async fn chat_completions(
                 escrow_agent_pubkey = Some(ep.agent_pubkey.clone());
             }
 
-            // Replay attack prevention: atomically record this transaction
-            // signature in Redis before verifying. If it was already seen,
-            // reject immediately — same signed tx cannot be replayed.
-            if let Some(cache) = &state.cache {
-                let tx_raw = match &payload.payload {
-                    x402::types::PayloadData::Direct(p) => &p.transaction,
-                    x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
-                };
-                if cache.check_and_record_tx(tx_raw).await.is_err() {
-                    warn!(tx = %tx_raw, "replay attack detected — transaction already used");
-                    return Err(GatewayError::InvalidPayment(
-                        "transaction has already been used; each payment signature may only be submitted once".to_string()
-                    ));
+            // --- C2: Mandatory replay attack prevention ---
+            // Atomically record this transaction signature before verifying.
+            // If it was already seen, reject immediately — same signed tx
+            // cannot be replayed.
+            // NOTE: The 120s TTL (in Redis / LRU eviction in-memory) is
+            // insufficient for durable nonce transactions, which have no
+            // blockhash expiry. A future PR should extend replay persistence
+            // for durable nonce payloads (e.g., database-backed dedup).
+            let tx_raw = match &payload.payload {
+                x402::types::PayloadData::Direct(p) => &p.transaction,
+                x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
+            };
+
+            let replay_detected = if let Some(cache) = &state.cache {
+                cache.check_and_record_tx(tx_raw).await.is_err()
+            } else {
+                // No Redis — fall back to in-memory LRU replay set
+                let mut replay_set = state.replay_set.lock().expect("replay_set mutex poisoned");
+                if replay_set.get(tx_raw).is_some() {
+                    true
+                } else {
+                    replay_set.put(tx_raw.to_string(), ());
+                    warn!(
+                        tx = %tx_raw,
+                        "payment accepted under degraded in-memory replay protection (no Redis)"
+                    );
+                    false
                 }
+            };
+
+            if replay_detected {
+                warn!(tx = %tx_raw, "replay attack detected — transaction already used");
+                return Err(GatewayError::InvalidPayment(
+                    "transaction has already been used; each payment signature may only be submitted once".to_string()
+                ));
             }
 
             // Verify and settle via Facilitator — hard enforcement

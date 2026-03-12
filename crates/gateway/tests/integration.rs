@@ -25,6 +25,16 @@ use x402::types::{
 };
 
 // ---------------------------------------------------------------------------
+// Test constants
+// ---------------------------------------------------------------------------
+
+/// Recipient wallet used across all integration test AppState and payment headers.
+const TEST_RECIPIENT_WALLET: &str = "GatewayRecipientWallet111111111111111111111111";
+
+/// Large payment amount (in atomic USDC) that exceeds any test model cost estimate.
+const TEST_PAYMENT_AMOUNT: &str = "1000000";
+
+// ---------------------------------------------------------------------------
 // Mock payment verifier for integration tests
 // ---------------------------------------------------------------------------
 
@@ -179,20 +189,24 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
     // Use the always-pass mock verifier so tests exercise the full request path
     let facilitator = x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
 
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
     let state = Arc::new(AppState {
-        config: AppConfig::default(),
+        config,
         model_registry,
         service_registry,
         providers: ProviderRegistry::from_env(), // No keys set in test env
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
-        cache: None, // No Redis in tests (replay check is skipped when cache=None)
+        cache: None, // No Redis in tests — replay check uses in-memory LRU fallback
         provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
         escrow_claimer: None,
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
+        replay_set: AppState::new_replay_set(),
     });
     let router = build_router(
         Arc::clone(&state),
@@ -213,6 +227,7 @@ fn test_app_with_escrow() -> axum::Router {
     ]);
 
     let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
     config.solana.escrow_program_id =
         Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
 
@@ -250,6 +265,7 @@ fn test_app_with_escrow() -> axum::Router {
         nonce_pool: None,
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
+        replay_set: AppState::new_replay_set(),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -265,9 +281,9 @@ fn valid_payment_header(resource_url: &str) -> String {
         accepted: PaymentAccept {
             scheme: "exact".to_string(),
             network: SOLANA_NETWORK.to_string(),
-            amount: "2625".to_string(),
+            amount: TEST_PAYMENT_AMOUNT.to_string(),
             asset: USDC_MINT.to_string(),
-            pay_to: "GatewayRecipientWallet111111111111111111111111".to_string(),
+            pay_to: TEST_RECIPIENT_WALLET.to_string(),
             max_timeout_seconds: 300,
             escrow_program_id: None,
         },
@@ -290,9 +306,9 @@ fn valid_escrow_payment_header(resource_url: &str) -> String {
         accepted: PaymentAccept {
             scheme: "escrow".to_string(),
             network: SOLANA_NETWORK.to_string(),
-            amount: "2625".to_string(),
+            amount: TEST_PAYMENT_AMOUNT.to_string(),
             asset: USDC_MINT.to_string(),
-            pay_to: "GatewayRecipientWallet111111111111111111111111".to_string(),
+            pay_to: TEST_RECIPIENT_WALLET.to_string(),
             max_timeout_seconds: 300,
             escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
         },
@@ -776,10 +792,10 @@ async fn test_chat_with_base64_payment_header() {
         },
         accepted: PaymentAccept {
             scheme: "exact".to_string(),
-            network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp".to_string(),
-            amount: "2625".to_string(),
-            asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
-            pay_to: "TestRecipientWallet".to_string(),
+            network: SOLANA_NETWORK.to_string(),
+            amount: TEST_PAYMENT_AMOUNT.to_string(),
+            asset: USDC_MINT.to_string(),
+            pay_to: TEST_RECIPIENT_WALLET.to_string(),
             max_timeout_seconds: 300,
             escrow_program_id: None,
         },
@@ -1464,6 +1480,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         nonce_pool: Some(Arc::new(pool)),
         db_pool: None,
         session_secret: b"test-secret".to_vec(),
+        replay_set: AppState::new_replay_set(),
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }

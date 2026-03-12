@@ -4,6 +4,7 @@ use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 use crate::errors::EscrowError;
 use crate::state::Escrow;
+use crate::USDC_MINT;
 
 /// Deposit USDC into the PDA vault, locking funds for a specific service request.
 ///
@@ -61,7 +62,8 @@ pub struct Deposit<'info> {
     /// constraint needed here.
     pub provider: UncheckedAccount<'info>,
 
-    /// USDC mint (or any SPL token mint the gateway accepts).
+    /// USDC mint — only the mainnet USDC mint is accepted.
+    #[account(address = USDC_MINT)]
     pub mint: Account<'info, Mint>,
 
     /// Escrow PDA — stores deposit metadata.
