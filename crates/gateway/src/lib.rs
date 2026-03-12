@@ -86,7 +86,10 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .route("/v1/services", get(routes::services::list_services))
         .route("/v1/supported", get(routes::supported::supported))
         .route("/v1/nonce", get(routes::nonce::get_nonce))
-        .route("/v1/dashboard/spend", get(routes::dashboard::spend_summary))
+        .route(
+            "/v1/wallet/{address}/stats",
+            get(routes::stats::wallet_stats),
+        )
         .route("/pricing", get(routes::pricing::pricing))
         .route("/health", get(routes::health::health))
         .layer(axum::middleware::from_fn(
