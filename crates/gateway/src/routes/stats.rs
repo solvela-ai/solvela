@@ -12,6 +12,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::session::verify_session_token;
+use crate::usage::{get_stats_by_day, get_stats_by_model, get_wallet_stats};
 use crate::AppState;
 
 /// Base58 character set for wallet address validation.
@@ -156,12 +157,12 @@ pub async fn wallet_stats(
 
     // Run the three queries concurrently
     let (summary_result, by_model_result, by_day_result) = tokio::join!(
-        query_summary(pool, &address, params.days),
-        query_by_model(pool, &address, params.days),
-        query_by_day(pool, &address, params.days),
+        get_wallet_stats(pool, &address, params.days),
+        get_stats_by_model(pool, &address, params.days),
+        get_stats_by_day(pool, &address, params.days),
     );
 
-    let summary = summary_result.map_err(|e| {
+    let summary_row = summary_result.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("database error: {e}") })),
@@ -169,7 +170,7 @@ pub async fn wallet_stats(
             .into_response()
     })?;
 
-    let by_model = by_model_result.map_err(|e| {
+    let model_rows = by_model_result.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("database error: {e}") })),
@@ -177,13 +178,40 @@ pub async fn wallet_stats(
             .into_response()
     })?;
 
-    let by_day = by_day_result.map_err(|e| {
+    let day_rows = by_day_result.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("database error: {e}") })),
         )
             .into_response()
     })?;
+
+    let summary = StatsSummary {
+        total_requests: summary_row.total_requests,
+        total_cost_usdc: format!("{:.6}", summary_row.total_cost),
+        total_input_tokens: summary_row.total_input,
+        total_output_tokens: summary_row.total_output,
+    };
+
+    let by_model = model_rows
+        .into_iter()
+        .map(|r| ModelStats {
+            model: r.model,
+            requests: r.requests,
+            cost_usdc: format!("{:.6}", r.cost),
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+        })
+        .collect();
+
+    let by_day = day_rows
+        .into_iter()
+        .map(|r| DayStats {
+            date: r.date.to_string(),
+            requests: r.requests,
+            cost_usdc: format!("{:.6}", r.cost),
+        })
+        .collect();
 
     Ok(Json(StatsResponse {
         wallet: address,
@@ -193,99 +221,6 @@ pub async fn wallet_stats(
         by_day,
     })
     .into_response())
-}
-
-/// Query aggregate summary for a wallet over a time period.
-async fn query_summary(
-    pool: &sqlx::PgPool,
-    wallet: &str,
-    days: i32,
-) -> Result<StatsSummary, sqlx::Error> {
-    let row: (i64, f64, i64, i64) = sqlx::query_as(
-        r#"SELECT COUNT(*) as total_requests,
-                  COALESCE(SUM(cost_usdc), 0) as total_cost,
-                  COALESCE(SUM(input_tokens), 0) as total_input,
-                  COALESCE(SUM(output_tokens), 0) as total_output
-           FROM spend_logs
-           WHERE wallet_address = $1
-             AND created_at >= NOW() - make_interval(days => $2)"#,
-    )
-    .bind(wallet)
-    .bind(days)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(StatsSummary {
-        total_requests: row.0,
-        total_cost_usdc: format!("{:.6}", row.1),
-        total_input_tokens: row.2,
-        total_output_tokens: row.3,
-    })
-}
-
-/// Query per-model breakdown for a wallet over a time period.
-async fn query_by_model(
-    pool: &sqlx::PgPool,
-    wallet: &str,
-    days: i32,
-) -> Result<Vec<ModelStats>, sqlx::Error> {
-    let rows: Vec<(String, i64, f64, i64, i64)> = sqlx::query_as(
-        r#"SELECT model, COUNT(*) as requests,
-                  COALESCE(SUM(cost_usdc), 0) as cost,
-                  COALESCE(SUM(input_tokens), 0) as input_tokens,
-                  COALESCE(SUM(output_tokens), 0) as output_tokens
-           FROM spend_logs
-           WHERE wallet_address = $1
-             AND created_at >= NOW() - make_interval(days => $2)
-           GROUP BY model ORDER BY cost DESC"#,
-    )
-    .bind(wallet)
-    .bind(days)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(
-            |(model, requests, cost, input_tokens, output_tokens)| ModelStats {
-                model,
-                requests,
-                cost_usdc: format!("{cost:.6}"),
-                input_tokens,
-                output_tokens,
-            },
-        )
-        .collect())
-}
-
-/// Query per-day breakdown for a wallet over a time period.
-async fn query_by_day(
-    pool: &sqlx::PgPool,
-    wallet: &str,
-    days: i32,
-) -> Result<Vec<DayStats>, sqlx::Error> {
-    let rows: Vec<(chrono::NaiveDate, i64, f64)> = sqlx::query_as(
-        r#"SELECT DATE(created_at) as date,
-                  COUNT(*) as requests,
-                  COALESCE(SUM(cost_usdc), 0) as cost
-           FROM spend_logs
-           WHERE wallet_address = $1
-             AND created_at >= NOW() - make_interval(days => $2)
-           GROUP BY DATE(created_at) ORDER BY date"#,
-    )
-    .bind(wallet)
-    .bind(days)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|(date, requests, cost)| DayStats {
-            date: date.to_string(),
-            requests,
-            cost_usdc: format!("{cost:.6}"),
-        })
-        .collect())
 }
 
 #[cfg(test)]
@@ -405,5 +340,91 @@ mod tests {
             verified.wallet, wallet,
             "session token must preserve the exact wallet address"
         );
+    }
+
+    /// Verify the full JSON response shape matches the G.5 spec when populated
+    /// with real data (plan test #1).
+    #[test]
+    fn test_stats_response_full_shape() {
+        let resp = StatsResponse {
+            wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+            period_days: 30,
+            summary: StatsSummary {
+                total_requests: 1247,
+                total_cost_usdc: "3.847291".to_string(),
+                total_input_tokens: 892_400,
+                total_output_tokens: 341_200,
+            },
+            by_model: vec![ModelStats {
+                model: "anthropic/claude-sonnet-4.6".to_string(),
+                requests: 412,
+                cost_usdc: "1.923000".to_string(),
+                input_tokens: 310_000,
+                output_tokens: 142_000,
+            }],
+            by_day: vec![DayStats {
+                date: "2026-03-11".to_string(),
+                requests: 47,
+                cost_usdc: "0.142300".to_string(),
+            }],
+        };
+
+        let json: serde_json::Value =
+            serde_json::to_value(&resp).expect("should serialize to JSON value");
+
+        // Top-level fields
+        assert_eq!(
+            json["wallet"],
+            "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+        );
+        assert_eq!(json["period_days"], 30);
+
+        // Summary
+        assert_eq!(json["summary"]["total_requests"], 1247);
+        assert_eq!(json["summary"]["total_cost_usdc"], "3.847291");
+        assert_eq!(json["summary"]["total_input_tokens"], 892_400);
+        assert_eq!(json["summary"]["total_output_tokens"], 341_200);
+
+        // by_model array
+        assert_eq!(json["by_model"].as_array().unwrap().len(), 1);
+        assert_eq!(json["by_model"][0]["model"], "anthropic/claude-sonnet-4.6");
+        assert_eq!(json["by_model"][0]["requests"], 412);
+        assert_eq!(json["by_model"][0]["cost_usdc"], "1.923000");
+        assert_eq!(json["by_model"][0]["input_tokens"], 310_000);
+        assert_eq!(json["by_model"][0]["output_tokens"], 142_000);
+
+        // by_day array
+        assert_eq!(json["by_day"].as_array().unwrap().len(), 1);
+        assert_eq!(json["by_day"][0]["date"], "2026-03-11");
+        assert_eq!(json["by_day"][0]["requests"], 47);
+        assert_eq!(json["by_day"][0]["cost_usdc"], "0.142300");
+    }
+
+    /// Verify that empty results produce 200 with zeros and empty arrays
+    /// (plan test #9).
+    #[test]
+    fn test_stats_response_empty_results_shape() {
+        let resp = StatsResponse {
+            wallet: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+            period_days: 30,
+            summary: StatsSummary {
+                total_requests: 0,
+                total_cost_usdc: "0.000000".to_string(),
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+            },
+            by_model: vec![],
+            by_day: vec![],
+        };
+
+        let json: serde_json::Value =
+            serde_json::to_value(&resp).expect("should serialize to JSON value");
+
+        assert_eq!(json["summary"]["total_requests"], 0);
+        assert_eq!(json["summary"]["total_cost_usdc"], "0.000000");
+        assert_eq!(json["summary"]["total_input_tokens"], 0);
+        assert_eq!(json["summary"]["total_output_tokens"], 0);
+        assert!(json["by_model"].as_array().unwrap().is_empty());
+        assert!(json["by_day"].as_array().unwrap().is_empty());
     }
 }

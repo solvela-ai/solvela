@@ -252,4 +252,42 @@ fn build_cors() -> CorsLayer {
                 .parse()
                 .expect("'x-session-id' is a valid header name"),
         ])
+        .expose_headers([
+            "x-rcr-request-id"
+                .parse()
+                .expect("'x-rcr-request-id' is a valid header name"),
+            "x-rcr-model"
+                .parse()
+                .expect("'x-rcr-model' is a valid header name"),
+            "x-rcr-tier"
+                .parse()
+                .expect("'x-rcr-tier' is a valid header name"),
+            "x-rcr-score"
+                .parse()
+                .expect("'x-rcr-score' is a valid header name"),
+            "x-rcr-profile"
+                .parse()
+                .expect("'x-rcr-profile' is a valid header name"),
+            "x-rcr-provider"
+                .parse()
+                .expect("'x-rcr-provider' is a valid header name"),
+            "x-rcr-cache"
+                .parse()
+                .expect("'x-rcr-cache' is a valid header name"),
+            "x-rcr-latency-ms"
+                .parse()
+                .expect("'x-rcr-latency-ms' is a valid header name"),
+            "x-rcr-payment-status"
+                .parse()
+                .expect("'x-rcr-payment-status' is a valid header name"),
+            "x-rcr-token-estimate-in"
+                .parse()
+                .expect("'x-rcr-token-estimate-in' is a valid header name"),
+            "x-rcr-token-estimate-out"
+                .parse()
+                .expect("'x-rcr-token-estimate-out' is a valid header name"),
+            "x-session-id"
+                .parse()
+                .expect("'x-session-id' is a valid header name"),
+        ])
 }

@@ -342,6 +342,130 @@ impl UsageTracker {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stats query functions (used by routes/stats.rs)
+// ---------------------------------------------------------------------------
+
+/// Summary row returned by [`get_wallet_stats`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletStatsSummary {
+    pub total_requests: i64,
+    pub total_cost: f64,
+    pub total_input: i64,
+    pub total_output: i64,
+}
+
+/// Per-model row returned by [`get_stats_by_model`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsModelRow {
+    pub model: String,
+    pub requests: i64,
+    pub cost: f64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+/// Per-day row returned by [`get_stats_by_day`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsDayRow {
+    pub date: chrono::NaiveDate,
+    pub requests: i64,
+    pub cost: f64,
+}
+
+/// Fetch aggregate spend summary for a wallet over the given number of days.
+pub async fn get_wallet_stats(
+    pool: &sqlx::PgPool,
+    wallet: &str,
+    days: i32,
+) -> Result<WalletStatsSummary, sqlx::Error> {
+    let row: (i64, f64, i64, i64) = sqlx::query_as(
+        r#"SELECT COUNT(*) as total_requests,
+                  COALESCE(SUM(cost_usdc), 0) as total_cost,
+                  COALESCE(SUM(input_tokens), 0) as total_input,
+                  COALESCE(SUM(output_tokens), 0) as total_output
+           FROM spend_logs
+           WHERE wallet_address = $1
+             AND created_at >= NOW() - make_interval(days => $2)"#,
+    )
+    .bind(wallet)
+    .bind(days)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(WalletStatsSummary {
+        total_requests: row.0,
+        total_cost: row.1,
+        total_input: row.2,
+        total_output: row.3,
+    })
+}
+
+/// Fetch per-model spend breakdown for a wallet over the given number of days.
+pub async fn get_stats_by_model(
+    pool: &sqlx::PgPool,
+    wallet: &str,
+    days: i32,
+) -> Result<Vec<StatsModelRow>, sqlx::Error> {
+    let rows: Vec<(String, i64, f64, i64, i64)> = sqlx::query_as(
+        r#"SELECT model, COUNT(*) as requests,
+                  COALESCE(SUM(cost_usdc), 0) as cost,
+                  COALESCE(SUM(input_tokens), 0) as input_tokens,
+                  COALESCE(SUM(output_tokens), 0) as output_tokens
+           FROM spend_logs
+           WHERE wallet_address = $1
+             AND created_at >= NOW() - make_interval(days => $2)
+           GROUP BY model ORDER BY cost DESC"#,
+    )
+    .bind(wallet)
+    .bind(days)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(model, requests, cost, input_tokens, output_tokens)| StatsModelRow {
+                model,
+                requests,
+                cost,
+                input_tokens,
+                output_tokens,
+            },
+        )
+        .collect())
+}
+
+/// Fetch per-day spend breakdown for a wallet over the given number of days.
+pub async fn get_stats_by_day(
+    pool: &sqlx::PgPool,
+    wallet: &str,
+    days: i32,
+) -> Result<Vec<StatsDayRow>, sqlx::Error> {
+    let rows: Vec<(chrono::NaiveDate, i64, f64)> = sqlx::query_as(
+        r#"SELECT DATE(created_at) as date,
+                  COUNT(*) as requests,
+                  COALESCE(SUM(cost_usdc), 0) as cost
+           FROM spend_logs
+           WHERE wallet_address = $1
+             AND created_at >= NOW() - make_interval(days => $2)
+           GROUP BY DATE(created_at) ORDER BY date"#,
+    )
+    .bind(wallet)
+    .bind(days)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(date, requests, cost)| StatsDayRow {
+            date,
+            requests,
+            cost,
+        })
+        .collect())
+}
+
 /// SQL migration for usage tracking tables.
 /// Run this against PostgreSQL to create the required tables.
 pub const MIGRATION_SQL: &str = r#"
@@ -555,6 +679,56 @@ mod tests {
         assert!(
             total > daily_limit + USDC_EPSILON,
             "real overages must still be caught"
+        );
+    }
+
+    /// Phase G migration SQL (loaded from migrations/003_phase_g_request_session_ids.sql).
+    const PHASE_G_MIGRATION: &str =
+        include_str!("../../../migrations/003_phase_g_request_session_ids.sql");
+
+    #[test]
+    fn test_phase_g_migration_adds_request_id_and_session_id_columns() {
+        // Verify the migration adds both new columns to spend_logs
+        assert!(
+            PHASE_G_MIGRATION.contains("ADD COLUMN IF NOT EXISTS request_id TEXT"),
+            "migration must add request_id column"
+        );
+        assert!(
+            PHASE_G_MIGRATION.contains("ADD COLUMN IF NOT EXISTS session_id TEXT"),
+            "migration must add session_id column"
+        );
+        // Both columns should default to NULL (nullable, no NOT NULL constraint)
+        assert!(
+            PHASE_G_MIGRATION.contains("request_id TEXT DEFAULT NULL"),
+            "request_id must default to NULL"
+        );
+        assert!(
+            PHASE_G_MIGRATION.contains("session_id TEXT DEFAULT NULL"),
+            "session_id must default to NULL"
+        );
+        // All statements must be idempotent (IF NOT EXISTS / IF EXISTS)
+        for line in PHASE_G_MIGRATION.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("--") {
+                continue;
+            }
+            assert!(
+                trimmed.contains("IF NOT EXISTS") || trimmed.contains("IF EXISTS"),
+                "non-comment SQL statement must be idempotent: {trimmed}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_phase_g_migration_creates_partial_index_on_session_id() {
+        // Verify the partial index is created on session_id (WHERE NOT NULL)
+        assert!(
+            PHASE_G_MIGRATION.contains("CREATE INDEX IF NOT EXISTS idx_spend_session"),
+            "migration must create idx_spend_session index"
+        );
+        assert!(
+            PHASE_G_MIGRATION.contains("WHERE session_id IS NOT NULL"),
+            "session_id index must be partial (WHERE NOT NULL) to avoid bloat on null rows"
         );
     }
 
