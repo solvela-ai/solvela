@@ -75,6 +75,12 @@ pub struct EscrowMetricsSnapshot {
 // Circuit Breaker
 // ---------------------------------------------------------------------------
 
+/// Mutable state protected by a single lock to avoid ABBA deadlocks.
+struct CircuitBreakerState {
+    last_reset: Instant,
+    tripped_until: Option<Instant>,
+}
+
 /// Rolling-window circuit breaker for claim processing.
 ///
 /// Tracks success/failure counts in a 5-minute window. If the failure rate
@@ -83,8 +89,7 @@ pub struct EscrowMetricsSnapshot {
 pub struct ClaimCircuitBreaker {
     success_count: AtomicU64,
     failure_count: AtomicU64,
-    last_reset: Mutex<Instant>,
-    tripped_until: Mutex<Option<Instant>>,
+    state: Mutex<CircuitBreakerState>,
     /// Duration of the rolling window (default 5 minutes).
     window: Duration,
     /// How long to pause when tripped (default 60 seconds).
@@ -99,8 +104,10 @@ impl ClaimCircuitBreaker {
         Self {
             success_count: AtomicU64::new(0),
             failure_count: AtomicU64::new(0),
-            last_reset: Mutex::new(Instant::now()),
-            tripped_until: Mutex::new(None),
+            state: Mutex::new(CircuitBreakerState {
+                last_reset: Instant::now(),
+                tripped_until: None,
+            }),
             window: Duration::from_secs(300),
             pause_duration: Duration::from_secs(60),
             min_sample_size: 4,
@@ -113,8 +120,10 @@ impl ClaimCircuitBreaker {
         Self {
             success_count: AtomicU64::new(0),
             failure_count: AtomicU64::new(0),
-            last_reset: Mutex::new(Instant::now()),
-            tripped_until: Mutex::new(None),
+            state: Mutex::new(CircuitBreakerState {
+                last_reset: Instant::now(),
+                tripped_until: None,
+            }),
             window,
             pause_duration,
             min_sample_size,
@@ -122,56 +131,55 @@ impl ClaimCircuitBreaker {
     }
 
     /// Reset counters if the rolling window has expired.
-    fn maybe_reset_window(&self) {
-        let mut last_reset = self.last_reset.lock().unwrap_or_else(|e| e.into_inner());
-        if last_reset.elapsed() >= self.window {
+    ///
+    /// Caller must hold the `state` lock and pass the guard.
+    fn maybe_reset_window(&self, state: &mut CircuitBreakerState) {
+        if state.last_reset.elapsed() >= self.window {
             self.success_count.store(0, Ordering::Relaxed);
             self.failure_count.store(0, Ordering::Relaxed);
-            *last_reset = Instant::now();
+            state.last_reset = Instant::now();
         }
     }
 
     /// Record a successful claim.
     pub fn record_success(&self) {
-        self.maybe_reset_window();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.maybe_reset_window(&mut state);
         self.success_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record a failed claim. May trip the circuit breaker.
     pub fn record_failure(&self) {
-        self.maybe_reset_window();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.maybe_reset_window(&mut state);
         let failures = self.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
         let successes = self.success_count.load(Ordering::Relaxed);
         let total = successes + failures;
 
-        if total >= self.min_sample_size && failures * 2 > total {
-            let mut tripped = self.tripped_until.lock().unwrap_or_else(|e| e.into_inner());
-            if tripped.is_none() {
-                let until = Instant::now() + self.pause_duration;
-                *tripped = Some(until);
-                error!(
-                    failures = failures,
-                    successes = successes,
-                    total = total,
-                    pause_secs = self.pause_duration.as_secs(),
-                    "claim circuit breaker OPENED — pausing claim processing"
-                );
-            }
+        if total >= self.min_sample_size && failures * 2 > total && state.tripped_until.is_none() {
+            let until = Instant::now() + self.pause_duration;
+            state.tripped_until = Some(until);
+            error!(
+                failures = failures,
+                successes = successes,
+                total = total,
+                pause_secs = self.pause_duration.as_secs(),
+                "claim circuit breaker OPENED — pausing claim processing"
+            );
         }
     }
 
     /// Check if the circuit breaker is open (processing should be paused).
     pub fn is_open(&self) -> bool {
-        let mut tripped = self.tripped_until.lock().unwrap_or_else(|e| e.into_inner());
-        match *tripped {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.tripped_until {
             Some(until) => {
                 if Instant::now() >= until {
                     // Circuit breaker closes — reset counters
-                    *tripped = None;
+                    state.tripped_until = None;
+                    state.last_reset = Instant::now();
                     self.success_count.store(0, Ordering::Relaxed);
                     self.failure_count.store(0, Ordering::Relaxed);
-                    let mut last_reset = self.last_reset.lock().unwrap_or_else(|e| e.into_inner());
-                    *last_reset = Instant::now();
                     info!("claim circuit breaker CLOSED — resuming claim processing");
                     false
                 } else {
@@ -199,13 +207,17 @@ impl Default for ClaimCircuitBreaker {
 /// `claims_submitted`, `claims_succeeded`, `claims_failed`, and `claims_retried`.
 /// Pass `None` to disable metrics tracking.
 ///
-/// Returns the [`tokio::task::JoinHandle`] so the caller can optionally
-/// await shutdown. In practice the handle is dropped (fire-and-forget).
+/// The `shutdown_rx` watch channel enables graceful shutdown. When the sender
+/// sends `true`, the processor finishes its current cycle and exits.
+///
+/// Returns the [`tokio::task::JoinHandle`] so the caller can await clean
+/// shutdown.
 pub fn start_claim_processor(
     pool: sqlx::PgPool,
     claimer: Arc<EscrowClaimer>,
     poll_interval: Duration,
     metrics: Option<Arc<EscrowMetrics>>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     let circuit_breaker = Arc::new(ClaimCircuitBreaker::new());
 
@@ -216,11 +228,18 @@ pub fn start_claim_processor(
             "claim processor started"
         );
         loop {
-            interval.tick().await;
-            if let Err(e) =
-                process_pending_claims(&pool, &claimer, &circuit_breaker, metrics.as_deref()).await
-            {
-                warn!(error = %e, "claim processor cycle failed");
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(e) =
+                        process_pending_claims(&pool, &claimer, &circuit_breaker, metrics.as_deref()).await
+                    {
+                        warn!(error = %e, "claim processor cycle failed");
+                    }
+                }
+                _ = shutdown_rx.changed() => {
+                    info!("claim processor shutting down gracefully");
+                    break;
+                }
             }
         }
     })
@@ -391,6 +410,7 @@ mod tests {
             Arc<EscrowClaimer>,
             Duration,
             Option<Arc<EscrowMetrics>>,
+            tokio::sync::watch::Receiver<bool>,
         ) -> tokio::task::JoinHandle<()> = start_claim_processor;
     }
 

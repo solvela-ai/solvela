@@ -161,6 +161,9 @@ pub async fn mark_attempt_failed(
 }
 
 /// Fetch pending claims ordered by creation time (oldest first).
+///
+/// Also recovers stale `in_progress` claims that have been stuck for more
+/// than 5 minutes (likely abandoned due to a crash or SIGTERM).
 pub async fn fetch_pending_claims(
     pool: &sqlx::PgPool,
     limit: i64,
@@ -182,8 +185,8 @@ pub async fn fetch_pending_claims(
         "SELECT id::text, service_id, agent_pubkey, claim_amount, deposited_amount,
                 status, attempts, tx_signature, error_message
          FROM escrow_claim_queue
-         WHERE status = 'pending'
-           AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+         WHERE (status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= NOW()))
+            OR (status = 'in_progress' AND updated_at < NOW() - INTERVAL '5 minutes')
          ORDER BY created_at ASC
          LIMIT $1",
     )

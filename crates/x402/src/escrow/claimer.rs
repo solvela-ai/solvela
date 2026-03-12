@@ -99,7 +99,7 @@ impl EscrowClaimer {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .unwrap_or_default(),
+                .map_err(|e| format!("failed to build HTTP client: {e}"))?,
         })
     }
 
@@ -188,6 +188,12 @@ pub(crate) struct ClaimParams {
     nonce_pool: Option<Arc<NoncePool>>,
     /// RPC URL for nonce value fetching (same as main RPC).
     nonce_rpc_url: String,
+}
+
+impl Drop for ClaimParams {
+    fn drop(&mut self) {
+        self.fee_payer_keypair.iter_mut().for_each(|b| *b = 0);
+    }
 }
 
 /// Check if an error indicates the fee payer has insufficient SOL.

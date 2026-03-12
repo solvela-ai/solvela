@@ -303,9 +303,19 @@ async fn main() -> anyhow::Result<()> {
                 secret
             }
         },
+        http_client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to build HTTP client"),
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
     });
+
+    // ── Shutdown signal for background tasks ────────────────────────────────
+    //
+    // A watch channel that signals background tasks (like the claim processor)
+    // to shut down gracefully. The sender fires when SIGTERM / Ctrl+C arrives.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // ── Claim processor (durable escrow claim background task) ──────────────
     //
@@ -317,6 +327,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(claimer),
             std::time::Duration::from_secs(10),
             escrow_metrics.clone(),
+            shutdown_rx,
         );
         info!("escrow claim processor started");
     } else if state.escrow_claimer.is_some() && state.db_pool.is_none() {
@@ -402,6 +413,33 @@ async fn main() -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to install SIGTERM handler");
+            tokio::select! {
+                _ = ctrl_c => {
+                    info!("received Ctrl+C, shutting down");
+                }
+                _ = sigterm.recv() => {
+                    info!("received SIGTERM, shutting down");
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.expect("failed to listen for Ctrl+C");
+            info!("received Ctrl+C, shutting down");
+        }
+
+        // Signal the claim processor (and any other background tasks) to stop
+        let _ = shutdown_tx.send(true);
+    })
     .await?;
 
     Ok(())
