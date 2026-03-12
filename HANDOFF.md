@@ -20,9 +20,9 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ## IMMEDIATE NEXT STEP: Remaining RustyClawRouter Phases
 
-**Phase 12 (Prometheus Monitoring) is COMPLETE.** All features implemented and merged to main. 316 gateway tests passing (221 unit + 95 integration), 79 x402 tests.
+**Phase 13 (Documentation) is COMPLETE.** Full README overhaul + mdBook documentation site + SDK READMEs.
 
-**Remaining RustyClawRouter phases:** 13 (Docs/Examples), 14 (Production Hardening). See ecosystem plan for details.
+**Remaining RustyClawRouter phase:** 14 (Production Hardening). See ecosystem plan for details.
 
 ---
 
@@ -30,7 +30,20 @@ Kenneth is building this for his **trading platform** and **AI assistant platfor
 
 ### What's Complete in RustyClawRouter
 
-**Phases 1-9, 10-12, Phase A, Phase G** — all complete (316 gateway tests, 79 x402 tests).
+**Phases 1-9, 10-13, Phase A, Phase G** — all complete (316 gateway tests, 79 x402 tests).
+
+**Phase 13 (Documentation) delivered:**
+- README.md overhaul — branded shields.io badges (#F97316 orange), Mermaid architecture diagram (dark theme), x402 payment flow sequence diagram, complete 27-model pricing table, 12 API endpoints, SDK examples, CLI overview, project structure
+- mdBook documentation site (`docs/book/`) — 22 chapters, 3,102 lines across 4 sections:
+  - Getting Started: installation, quickstart (full 402 walkthrough), configuration (complete env var + model pricing tables)
+  - Core Concepts: how-it-works (request flow diagram), x402 protocol (deep dive), smart routing (15 dimensions), escrow (deposit/claim/refund flow)
+  - API Reference: chat completions, models, services, wallet stats, health/metrics — all with request/response JSON shapes
+  - SDK Guides: Python, TypeScript, Go, MCP — complete usage examples
+  - Operations: deployment (Docker/Fly.io), monitoring (all 15 Prometheus metrics), security model, troubleshooting (17 common issues)
+- SDK READMEs — TypeScript (LLMClient API, OpenAI compat), Go (functional options, typed errors), MCP (Claude Code/Desktop setup, 5 tools)
+- Brand-aligned — dark theme Mermaid diagrams with #F97316 orange accent, zero emoji, Telsi.ai aesthetic, Phosphor-compatible monochrome
+- New files: 22 mdBook chapters + book.toml, 3 SDK READMEs
+- Modified: README.md
 
 **Phase 12 (Prometheus Monitoring) delivered:**
 - Prometheus `/metrics` endpoint — admin-gated via `RCR_ADMIN_TOKEN`, renders Prometheus text exposition format
@@ -210,8 +223,9 @@ tests/
 | 8: Escrow Hardening | Claim recovery, fee payer rotation, monitoring | ✅ Complete (384 tests) |
 | 9: Service Marketplace | Proxy, registration, health, SSRF prevention | ✅ Complete (308 gateway tests) |
 | 12: Monitoring | Prometheus metrics, request/payment/provider/cache/escrow instrumentation | ✅ Complete (316 gateway + 79 x402 tests) |
+| 13: Documentation | README overhaul, mdBook site (22 chapters), SDK READMEs, brand alignment | ✅ Complete |
 
-**Remaining RustyClawRouter phases:** 13 (Docs/Examples), 14 (Production Hardening)
+**Remaining RustyClawRouter phase:** 14 (Production Hardening)
 
 ---
 
@@ -369,6 +383,16 @@ Each SDK implements:
 | 99 | `rcr_` prefix on all metric names | Matches `RCR_` env var convention; avoids collisions |
 | 100 | Global recorder initialized in main.rs, PrometheusHandle in AppState | Single init point; handle passed via Axum state for rendering |
 | 101 | Exclude `/metrics` from its own request counter | Avoids Prometheus scraping feedback loop inflating request counts |
+
+### Phase 13 Design Decisions
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 102 | mdBook over Starlight/Docusaurus | Rust-native, single binary, Playground integration, no Node.js toolchain |
+| 103 | Mermaid over D2/Excalidraw for inline diagrams | Universal GitHub + mdBook support, zero build step |
+| 104 | Dark theme with #F97316 accent | Matching Telsi.ai brand identity |
+| 105 | Phosphor Icons (monochrome) as icon system | No colored icons; consistent with brand aesthetic |
+| 106 | Shields.io flat badges with brand orange for README header | Visual consistency, professional appearance |
 
 ## What Didn't Work (Cumulative)
 
