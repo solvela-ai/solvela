@@ -153,7 +153,10 @@ mod tests {
     #[test]
     fn test_resolve_alias() {
         assert_eq!(resolve_alias("gpt5"), Some("openai/gpt-5.2"));
-        assert_eq!(resolve_alias("sonnet"), Some("anthropic/claude-sonnet-4-20250514"));
+        assert_eq!(
+            resolve_alias("sonnet"),
+            Some("anthropic/claude-sonnet-4-20250514")
+        );
         assert_eq!(resolve_alias("nonexistent"), None);
     }
 }

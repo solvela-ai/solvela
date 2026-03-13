@@ -594,7 +594,8 @@ mod tests {
             },
         };
 
-        let chat_resp = from_anthropic_response(anthropic_resp, "anthropic/claude-sonnet-4-20250514");
+        let chat_resp =
+            from_anthropic_response(anthropic_resp, "anthropic/claude-sonnet-4-20250514");
         assert_eq!(chat_resp.object, "chat.completion");
         assert_eq!(chat_resp.choices.len(), 1);
         assert_eq!(

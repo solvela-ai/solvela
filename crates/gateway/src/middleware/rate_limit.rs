@@ -124,11 +124,24 @@ impl RateLimiter {
     }
 }
 
+/// Paths that are exempt from rate limiting.
+///
+/// These are operational/monitoring endpoints that must remain accessible even
+/// when a client has exceeded its rate limit — otherwise health checks fail and
+/// load balancers mistakenly mark the service as down.
+const RATE_LIMIT_SKIP_PATHS: &[&str] = &["/health", "/v1/models", "/metrics"];
+
 /// Rate limiting middleware.
 ///
 /// Identifies clients by wallet address (from PAYMENT-SIGNATURE header)
 /// or by IP address as fallback.
 pub async fn rate_limit(request: Request, next: Next) -> Response {
+    // Skip rate limiting for operational/monitoring endpoints (checked early,
+    // before any Redis/memory lookup).
+    if RATE_LIMIT_SKIP_PATHS.contains(&request.uri().path()) {
+        return next.run(request).await;
+    }
+
     // Extract client identifier: wallet from payment header, or IP fallback
     let client_id = extract_client_id(&request);
 
@@ -311,6 +324,22 @@ mod tests {
         assert!(limiter.check("wallet-b").await.is_ok());
         assert!(limiter.check("wallet-b").await.is_ok());
         assert!(limiter.check("wallet-b").await.is_err());
+    }
+
+    #[test]
+    fn test_skip_paths_contains_operational_endpoints() {
+        assert!(
+            RATE_LIMIT_SKIP_PATHS.contains(&"/health"),
+            "health endpoint must be exempt from rate limiting"
+        );
+        assert!(
+            RATE_LIMIT_SKIP_PATHS.contains(&"/v1/models"),
+            "models endpoint must be exempt from rate limiting"
+        );
+        assert!(
+            RATE_LIMIT_SKIP_PATHS.contains(&"/metrics"),
+            "metrics endpoint must be exempt from rate limiting"
+        );
     }
 
     #[tokio::test]

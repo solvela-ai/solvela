@@ -2048,13 +2048,15 @@ mod tests {
 
     #[test]
     fn test_parse_fallback_preference_invalid_entries_skipped() {
-        let prefs = parse_fallback_preference("openai/gpt-4.1,invalid,anthropic/claude-sonnet-4-20250514");
+        let prefs =
+            parse_fallback_preference("openai/gpt-4.1,invalid,anthropic/claude-sonnet-4-20250514");
         assert_eq!(prefs.len(), 2);
     }
 
     #[test]
     fn test_parse_fallback_preference_whitespace_trimmed() {
-        let prefs = parse_fallback_preference(" openai/gpt-4.1 , anthropic/claude-sonnet-4-20250514 ");
+        let prefs =
+            parse_fallback_preference(" openai/gpt-4.1 , anthropic/claude-sonnet-4-20250514 ");
         assert_eq!(prefs.len(), 2);
         assert_eq!(prefs[0], ("openai", "gpt-4.1"));
     }
