@@ -70,6 +70,9 @@ lru = "0.12"
 # URL parsing
 url = "2"
 
+# Environment
+dotenvy = "0.15"
+
 # Workspace crates
 x402 = { path = "crates/x402" }
 router = { path = "crates/router" }

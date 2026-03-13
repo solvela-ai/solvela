@@ -765,6 +765,7 @@ dependencies = [
  "base64",
  "bs58",
  "chrono",
+ "dotenvy",
  "ed25519-dalek",
  "futures",
  "hmac",

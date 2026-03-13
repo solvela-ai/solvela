@@ -64,6 +64,8 @@ pub enum PaymentStatus {
     Free,
     /// No payment header — 402 will be returned.
     None,
+    /// Dev-mode bypass — payment skipped for development/testing.
+    DevBypass,
 }
 
 impl PaymentStatus {
@@ -72,6 +74,7 @@ impl PaymentStatus {
             Self::Verified => "verified",
             Self::Free => "free",
             Self::None => "none",
+            Self::DevBypass => "dev_bypass",
         }
     }
 }
@@ -117,7 +120,7 @@ mod tests {
 
     fn sample_debug_info() -> DebugInfo {
         DebugInfo {
-            model: "anthropic/claude-sonnet-4.6".to_string(),
+            model: "anthropic/claude-sonnet-4-20250514".to_string(),
             tier: "Complex".to_string(),
             score: 0.4237,
             profile: "auto".to_string(),
@@ -137,7 +140,7 @@ mod tests {
 
         assert_eq!(
             resp.headers().get("x-rcr-model").unwrap(),
-            "anthropic/claude-sonnet-4.6"
+            "anthropic/claude-sonnet-4-20250514"
         );
         assert_eq!(resp.headers().get("x-rcr-tier").unwrap(), "Complex");
         assert_eq!(resp.headers().get("x-rcr-score").unwrap(), "0.4237");

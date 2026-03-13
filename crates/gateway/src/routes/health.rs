@@ -163,6 +163,7 @@ supports_vision = false
             escrow_metrics: None,
             admin_token: None,
             prometheus_handle: None,
+            dev_bypass_payment: false,
         })
     }
 
@@ -233,6 +234,7 @@ supports_vision = false
             escrow_metrics: None,
             admin_token: Some("test-admin-token".to_string()),
             prometheus_handle: None,
+            dev_bypass_payment: false,
         })
     }
 

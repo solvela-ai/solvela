@@ -59,7 +59,7 @@ supports_streaming = true
 
 [models.anthropic-claude-opus-4-6]
 provider = "anthropic"
-model_id = "claude-opus-4.6"
+model_id = "claude-opus-4-20250514"
 display_name = "Claude Opus 4.6"
 input_cost_per_million = 5.00
 output_cost_per_million = 25.00
@@ -71,7 +71,7 @@ reasoning = true
 
 [models.anthropic-claude-sonnet-4-6]
 provider = "anthropic"
-model_id = "claude-sonnet-4.6"
+model_id = "claude-sonnet-4-20250514"
 display_name = "Claude Sonnet 4.6"
 input_cost_per_million = 3.00
 output_cost_per_million = 15.00
@@ -82,7 +82,7 @@ reasoning = true
 
 [models.anthropic-claude-haiku-4-5]
 provider = "anthropic"
-model_id = "claude-haiku-4.5"
+model_id = "claude-3-5-haiku-20241022"
 display_name = "Claude Haiku 4.5"
 input_cost_per_million = 1.00
 output_cost_per_million = 5.00
@@ -232,7 +232,7 @@ max_output_tokens = 32768
 
 [models.anthropic-claude-sonnet-4-5]
 provider = "anthropic"
-model_id = "claude-sonnet-4.5"
+model_id = "claude-sonnet-4-20250514"
 display_name = "Claude Sonnet 4.5"
 input_cost_per_million = 3.00
 output_cost_per_million = 15.00

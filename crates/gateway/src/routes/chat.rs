@@ -172,6 +172,31 @@ pub async fn chat_completions(
         .get("payment-signature")
         .and_then(|v| v.to_str().ok());
 
+    if payment_header.is_none() && state.dev_bypass_payment {
+        // Dev-mode payment bypass — skip payment verification entirely
+        warn!(
+            model = %req.model,
+            "DEV MODE: payment bypassed for request to {}",
+            req.model
+        );
+        counter!("rcr_payments_total", "status" => "dev_bypass").increment(1);
+
+        // Jump straight to provider call — no payment verification, no escrow, no budget check
+        return handle_provider_call(
+            &state,
+            &req,
+            model_info,
+            &headers,
+            debug_enabled,
+            request_start,
+            &routing_tier,
+            routing_score,
+            &routing_profile,
+            &session_id,
+        )
+        .await;
+    }
+
     if payment_header.is_none() {
         // Return 402 with pricing info
         counter!("rcr_payments_total", "status" => "none").increment(1);
@@ -845,6 +870,253 @@ pub async fn chat_completions(
         provider_name,
         tx_signature.as_deref().unwrap_or("unknown")
     )))
+}
+
+/// Handle the provider call for dev-mode payment bypass.
+///
+/// This is a stripped-down version of the main provider call path that skips
+/// all payment-related operations (escrow claims, spend logging, budget checks).
+/// Only called when `dev_bypass_payment` is enabled in non-production environments.
+#[allow(clippy::too_many_arguments)]
+async fn handle_provider_call(
+    state: &Arc<AppState>,
+    req: &ChatRequest,
+    model_info: &rustyclaw_protocol::ModelInfo,
+    headers: &HeaderMap,
+    debug_enabled: bool,
+    request_start: Instant,
+    routing_tier: &str,
+    routing_score: f64,
+    routing_profile: &str,
+    session_id: &Option<String>,
+) -> Result<Response, GatewayError> {
+    let provider_name = &model_info.provider;
+
+    let mut cache_status = if req.stream {
+        counter!("rcr_cache_total", "result" => "skip").increment(1);
+        CacheStatus::Skip
+    } else {
+        CacheStatus::Miss
+    };
+
+    // Check cache first (only for non-streaming requests)
+    if !req.stream {
+        if let Some(cache) = &state.cache {
+            if let Some(cached) = cache.get(req).await {
+                counter!("rcr_cache_total", "result" => "hit").increment(1);
+                info!(model = %req.model, "serving from cache (dev bypass)");
+                cache_status = CacheStatus::Hit;
+                let mut resp = Json(
+                    serde_json::to_value(&cached)
+                        .map_err(|e| GatewayError::Internal(e.to_string()))?,
+                )
+                .into_response();
+                attach_session_id(&mut resp, session_id);
+                if debug_enabled {
+                    attach_debug_headers(
+                        &mut resp,
+                        &build_debug_info(
+                            &req.model,
+                            routing_tier,
+                            routing_score,
+                            routing_profile,
+                            provider_name,
+                            cache_status,
+                            request_start.elapsed().as_millis() as u64,
+                            PaymentStatus::DevBypass,
+                            estimate_input_tokens(req),
+                            req.max_tokens.unwrap_or(1000),
+                        ),
+                    );
+                }
+                return Ok(resp);
+            }
+            counter!("rcr_cache_total", "result" => "miss").increment(1);
+        } else {
+            counter!("rcr_cache_total", "result" => "miss").increment(1);
+        }
+    }
+
+    let fallback_pref = headers
+        .get("x-rcr-fallback-preference")
+        .and_then(|v| v.to_str().ok());
+
+    if req.stream {
+        info!(provider = provider_name, model = %req.model, "streaming to provider (dev bypass)");
+
+        let result = if let Some(pref) = fallback_pref {
+            let mut chain: Vec<(String, String)> =
+                vec![(provider_name.to_string(), req.model.clone())];
+            for (p, m) in parse_fallback_preference(pref) {
+                let entry = (p.to_string(), m.to_string());
+                if !chain.contains(&entry) {
+                    chain.push(entry);
+                }
+            }
+            fallback::stream_with_chain(
+                &state.providers,
+                &state.provider_health,
+                &chain,
+                &req.model,
+                req.clone(),
+            )
+            .await
+        } else {
+            fallback::stream_with_model_fallback(
+                &state.providers,
+                &state.provider_health,
+                provider_name,
+                &req.model,
+                req.clone(),
+            )
+            .await
+        };
+
+        match result {
+            Ok(result) => {
+                let heartbeat_stream =
+                    HeartbeatStream::new(result.data, HeartbeatConfig::default());
+                let sse_stream = heartbeat_stream.map(|item| match item {
+                    HeartbeatItem::Chunk(Ok(chunk)) => {
+                        let json = serde_json::to_string(&chunk).unwrap_or_default();
+                        Ok::<_, Infallible>(sse::Event::default().data(json))
+                    }
+                    HeartbeatItem::Chunk(Err(e)) => {
+                        warn!(error = %e, "stream chunk error");
+                        Ok(sse::Event::default().data(format!("{{\"error\": \"{e}\"}}")))
+                    }
+                    HeartbeatItem::KeepAlive => Ok(sse::Event::default().comment("keep-alive")),
+                });
+                let mut resp = sse::Sse::new(sse_stream).into_response();
+                if result.was_fallback {
+                    let fallback_value =
+                        format!("{} -> {}", result.original_model, result.actual_model);
+                    if let Ok(hv) = HeaderValue::from_str(&fallback_value) {
+                        resp.headers_mut()
+                            .insert(HeaderName::from_static("x-rcr-fallback"), hv);
+                    }
+                }
+                attach_session_id(&mut resp, session_id);
+                if debug_enabled {
+                    attach_debug_headers(
+                        &mut resp,
+                        &build_debug_info(
+                            &req.model,
+                            routing_tier,
+                            routing_score,
+                            routing_profile,
+                            provider_name,
+                            cache_status,
+                            request_start.elapsed().as_millis() as u64,
+                            PaymentStatus::DevBypass,
+                            estimate_input_tokens(req),
+                            req.max_tokens.unwrap_or(1000),
+                        ),
+                    );
+                }
+                Ok(resp)
+            }
+            Err(e) => {
+                let error_type = classify_provider_error(&e);
+                counter!("rcr_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => error_type).increment(1);
+                Err(GatewayError::Internal(format!(
+                    "all providers failed for model '{}' (dev bypass): {}",
+                    req.model, e
+                )))
+            }
+        }
+    } else {
+        info!(provider = provider_name, model = %req.model, "proxying to provider (dev bypass)");
+
+        let result = if let Some(pref) = fallback_pref {
+            let mut chain: Vec<(String, String)> =
+                vec![(provider_name.to_string(), req.model.clone())];
+            for (p, m) in parse_fallback_preference(pref) {
+                let entry = (p.to_string(), m.to_string());
+                if !chain.contains(&entry) {
+                    chain.push(entry);
+                }
+            }
+            fallback::chat_with_chain(
+                &state.providers,
+                &state.provider_health,
+                &chain,
+                &req.model,
+                req.clone(),
+            )
+            .await
+        } else {
+            fallback::chat_with_model_fallback(
+                &state.providers,
+                &state.provider_health,
+                provider_name,
+                &req.model,
+                req.clone(),
+            )
+            .await
+        };
+
+        match result {
+            Ok(result) => {
+                // Cache the response for future requests
+                if let Some(cache) = &state.cache {
+                    cache.set(req, &result.data).await;
+                }
+
+                let response_json = serde_json::to_value(&result.data)
+                    .map_err(|e| GatewayError::Internal(e.to_string()))?;
+                let mut resp = Json(response_json).into_response();
+
+                if result.was_fallback {
+                    let fallback_value =
+                        format!("{} -> {}", result.original_model, result.actual_model);
+                    if let Ok(hv) = HeaderValue::from_str(&fallback_value) {
+                        resp.headers_mut()
+                            .insert(HeaderName::from_static("x-rcr-fallback"), hv);
+                    }
+                }
+                attach_session_id(&mut resp, session_id);
+                if debug_enabled {
+                    let actual_tokens_out = result
+                        .data
+                        .usage
+                        .as_ref()
+                        .map(|u| u.completion_tokens)
+                        .unwrap_or(req.max_tokens.unwrap_or(1000));
+                    let actual_tokens_in = result
+                        .data
+                        .usage
+                        .as_ref()
+                        .map(|u| u.prompt_tokens)
+                        .unwrap_or(estimate_input_tokens(req));
+                    attach_debug_headers(
+                        &mut resp,
+                        &build_debug_info(
+                            &req.model,
+                            routing_tier,
+                            routing_score,
+                            routing_profile,
+                            provider_name,
+                            cache_status,
+                            request_start.elapsed().as_millis() as u64,
+                            PaymentStatus::DevBypass,
+                            actual_tokens_in,
+                            actual_tokens_out,
+                        ),
+                    );
+                }
+                Ok(resp)
+            }
+            Err(e) => {
+                let error_type = classify_provider_error(&e);
+                counter!("rcr_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => error_type).increment(1);
+                Err(GatewayError::Internal(format!(
+                    "all providers failed for model '{}' (dev bypass): {}",
+                    req.model, e
+                )))
+            }
+        }
+    }
 }
 
 /// Try to decode a PaymentPayload from the PAYMENT-SIGNATURE header.
@@ -1762,10 +2034,10 @@ mod tests {
 
     #[test]
     fn test_parse_fallback_preference_valid() {
-        let prefs = parse_fallback_preference("openai/gpt-4.1,anthropic/claude-sonnet-4.6");
+        let prefs = parse_fallback_preference("openai/gpt-4.1,anthropic/claude-sonnet-4-20250514");
         assert_eq!(prefs.len(), 2);
         assert_eq!(prefs[0], ("openai", "gpt-4.1"));
-        assert_eq!(prefs[1], ("anthropic", "claude-sonnet-4.6"));
+        assert_eq!(prefs[1], ("anthropic", "claude-sonnet-4-20250514"));
     }
 
     #[test]
@@ -1776,13 +2048,13 @@ mod tests {
 
     #[test]
     fn test_parse_fallback_preference_invalid_entries_skipped() {
-        let prefs = parse_fallback_preference("openai/gpt-4.1,invalid,anthropic/claude-sonnet-4.6");
+        let prefs = parse_fallback_preference("openai/gpt-4.1,invalid,anthropic/claude-sonnet-4-20250514");
         assert_eq!(prefs.len(), 2);
     }
 
     #[test]
     fn test_parse_fallback_preference_whitespace_trimmed() {
-        let prefs = parse_fallback_preference(" openai/gpt-4.1 , anthropic/claude-sonnet-4.6 ");
+        let prefs = parse_fallback_preference(" openai/gpt-4.1 , anthropic/claude-sonnet-4-20250514 ");
         assert_eq!(prefs.len(), 2);
         assert_eq!(prefs[0], ("openai", "gpt-4.1"));
     }

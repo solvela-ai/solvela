@@ -197,8 +197,8 @@ supports_streaming = true
 
 [models.anthropic-claude-sonnet]
 provider = "anthropic"
-model_id = "claude-sonnet-4.6"
-display_name = "Claude Sonnet 4.6"
+model_id = "claude-sonnet-4-20250514"
+display_name = "Claude Sonnet 4"
 input_cost_per_million = 3.00
 output_cost_per_million = 15.00
 context_window = 200000
@@ -251,6 +251,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         escrow_metrics: None,
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
     });
     let router = build_router(
         Arc::clone(&state),
@@ -395,6 +396,7 @@ fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
         escrow_metrics: None,
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
     });
     let router = build_router(
         Arc::clone(&state),
@@ -460,6 +462,7 @@ fn test_app_with_mock_provider_and_escrow() -> axum::Router {
         escrow_metrics: None,
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -524,6 +527,7 @@ fn test_app_with_escrow() -> axum::Router {
         escrow_metrics: None,
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -1809,6 +1813,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         escrow_metrics: None,
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -3371,6 +3376,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         escrow_metrics: Some(metrics),
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -3528,6 +3534,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         escrow_metrics: Some(Arc::clone(&metrics)),
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
     });
 
     // Simulate claim processing by incrementing metrics atomically
@@ -3755,6 +3762,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         escrow_metrics: None,
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
     });
 
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
