@@ -1,10 +1,24 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::Json;
 use serde_json::{json, Value};
 
+use crate::security;
 use crate::AppState;
+
+/// Check whether the request carries a valid admin bearer token.
+fn is_admin_authenticated(headers: &HeaderMap, admin_token: Option<&str>) -> bool {
+    let Some(expected) = admin_token else {
+        return false;
+    };
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|token| security::constant_time_eq(token.as_bytes(), expected.as_bytes()))
+}
 
 /// GET /health — gateway readiness check with dependency status.
 ///
@@ -13,7 +27,11 @@ use crate::AppState;
 /// - `"ok"` — at least one provider configured, all configured deps healthy
 /// - `"degraded"` — at least one provider, but a configured dep is unavailable
 /// - `"error"` — zero providers configured
-pub async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
+///
+/// Detailed `checks` (database, redis, providers, solana_rpc) are only included
+/// when the request carries a valid `Authorization: Bearer <admin_token>` header.
+/// Unauthenticated callers receive only `{"status":"..."}`.
+pub async fn health(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Json<Value> {
     // ── Database check ──────────────────────────────────────────────────────
     let database_status = match &state.db_pool {
         Some(pool) => {
@@ -65,16 +83,24 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
         }
     };
 
-    Json(json!({
-        "status": status,
-        "version": env!("CARGO_PKG_VERSION"),
-        "checks": {
-            "database": database_status,
-            "redis": redis_status,
-            "providers": providers,
-            "solana_rpc": solana_rpc_status,
-        }
-    }))
+    let authenticated = is_admin_authenticated(&headers, state.admin_token.as_deref());
+
+    if authenticated {
+        Json(json!({
+            "status": status,
+            "version": env!("CARGO_PKG_VERSION"),
+            "checks": {
+                "database": database_status,
+                "redis": redis_status,
+                "providers": providers,
+                "solana_rpc": solana_rpc_status,
+            }
+        }))
+    } else {
+        Json(json!({
+            "status": status,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -147,7 +173,7 @@ supports_vision = false
     }
 
     #[tokio::test]
-    async fn test_health_returns_checks_structure() {
+    async fn test_health_unauthenticated_returns_only_status() {
         let state = test_state();
         let app = test_router(state);
 
@@ -166,7 +192,72 @@ supports_vision = false
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        // Always has status, version, checks
+        // Unauthenticated: only status, no version or checks
+        assert!(json["status"].is_string());
+        assert!(json.get("checks").is_none() || json["checks"].is_null());
+        assert!(json.get("version").is_none() || json["version"].is_null());
+    }
+
+    fn test_state_with_admin_token() -> Arc<AppState> {
+        Arc::new(AppState {
+            config: AppConfig::default(),
+            model_registry: ModelRegistry::from_toml(
+                r#"
+[models.test-model]
+provider = "test"
+model_id = "test-model"
+display_name = "Test"
+input_cost_per_million = 1.0
+output_cost_per_million = 2.0
+context_window = 4096
+supports_streaming = false
+supports_tools = false
+supports_vision = false
+                "#,
+            )
+            .unwrap(),
+            service_registry: RwLock::new(ServiceRegistry::empty()),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator: Facilitator::new(vec![]),
+            usage: UsageTracker::noop(),
+            cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: Mutex::new(LruCache::new(NonZeroUsize::new(100).expect("nonzero"))),
+            slot_cache: new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: Some("test-admin-token".to_string()),
+            prometheus_handle: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_health_authenticated_returns_checks_structure() {
+        let state = test_state_with_admin_token();
+        let app = test_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header("Authorization", "Bearer test-admin-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Authenticated: has status, version, checks
         assert!(json["status"].is_string());
         assert!(json["version"].is_string());
         assert!(json["checks"].is_object());
@@ -178,13 +269,14 @@ supports_vision = false
 
     #[tokio::test]
     async fn test_health_no_db_no_redis_reports_not_configured() {
-        let state = test_state();
+        let state = test_state_with_admin_token();
         let app = test_router(state);
 
         let response = app
             .oneshot(
                 Request::builder()
                     .uri("/health")
+                    .header("Authorization", "Bearer test-admin-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -222,7 +314,5 @@ supports_vision = false
 
         // No providers configured in test env → "error"
         assert_eq!(json["status"], "error");
-        let providers = json["checks"]["providers"].as_array().unwrap();
-        assert!(providers.is_empty());
     }
 }

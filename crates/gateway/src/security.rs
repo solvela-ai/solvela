@@ -8,17 +8,19 @@ use std::net::IpAddr;
 /// Constant-time byte comparison to prevent timing attacks on secret tokens.
 ///
 /// Returns `true` only when both slices have the same length and identical
-/// contents. The comparison always examines every byte regardless of where
-/// the first difference is, so an attacker cannot infer partial matches from
-/// response timing.
+/// contents. The comparison always iterates over `max(a.len(), b.len())` bytes
+/// regardless of where the first difference is or whether lengths differ, so
+/// an attacker cannot infer partial matches or correct length from response
+/// timing.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
+    let len = a.len().max(b.len());
+    let mut result: u8 = (a.len() != b.len()) as u8;
+    for i in 0..len {
+        let x = if i < a.len() { a[i] } else { 0 };
+        let y = if i < b.len() { b[i] } else { 0 };
+        result |= x ^ y;
     }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    result == 0
 }
 
 /// Check whether a URL points to a private/internal network endpoint.

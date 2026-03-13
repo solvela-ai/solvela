@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use rustyclaw_protocol::{
     ChatChoice, ChatMessage, ChatRequest, ChatResponse, ModelInfo, Role, Usage,
@@ -148,11 +149,8 @@ fn to_gemini_request(req: &ChatRequest) -> GeminiRequest {
 }
 
 fn from_gemini_response(resp: GeminiResponse, original_model: &str) -> ChatResponse {
-    let (content, finish_reason) = resp
-        .candidates
-        .as_ref()
-        .and_then(|c| c.first())
-        .map(|c| {
+    let (content, finish_reason) = match resp.candidates.as_ref().and_then(|c| c.first()) {
+        Some(c) => {
             let text: String = c
                 .content
                 .parts
@@ -167,14 +165,44 @@ fn from_gemini_response(resp: GeminiResponse, original_model: &str) -> ChatRespo
                 other => other.to_lowercase(),
             });
             (text, reason)
-        })
-        .unwrap_or_default();
+        }
+        None => {
+            warn!(
+                model = %original_model,
+                "Gemini response contained no candidates; likely content filter"
+            );
+            (String::new(), Some("content_filter".to_string()))
+        }
+    };
 
-    let usage = resp.usage_metadata.map(|u| Usage {
-        prompt_tokens: u.prompt_token_count.unwrap_or(0),
-        completion_tokens: u.candidates_token_count.unwrap_or(0),
-        total_tokens: u.total_token_count.unwrap_or(0),
-    });
+    let usage = match resp.usage_metadata {
+        Some(u) => {
+            if u.prompt_token_count.is_none()
+                || u.candidates_token_count.is_none()
+                || u.total_token_count.is_none()
+            {
+                warn!(
+                    model = %original_model,
+                    prompt_tokens = ?u.prompt_token_count,
+                    completion_tokens = ?u.candidates_token_count,
+                    total_tokens = ?u.total_token_count,
+                    "Gemini usage_metadata has missing token count fields; defaulting to 0"
+                );
+            }
+            Some(Usage {
+                prompt_tokens: u.prompt_token_count.unwrap_or(0),
+                completion_tokens: u.candidates_token_count.unwrap_or(0),
+                total_tokens: u.total_token_count.unwrap_or(0),
+            })
+        }
+        None => {
+            warn!(
+                model = %original_model,
+                "Gemini response missing usage_metadata; token counts will be 0"
+            );
+            None
+        }
+    };
 
     ChatResponse {
         id: format!("gemini-{}", uuid::Uuid::new_v4()),

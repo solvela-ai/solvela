@@ -1,5 +1,7 @@
 # Stage 1: chef — prepare the recipe for dependency caching
-FROM rust:bookworm AS chef
+# Pin base images to SHA digests to prevent supply-chain attacks via tag mutation.
+# To update: docker pull rust:bookworm && docker inspect --format='{{index .RepoDigests 0}}' rust:bookworm
+FROM rust:bookworm@sha256:6a544e5d08298a8cddfe9e7d3b4796e746601d933f3b40b3cccc7acdfcd66e0d AS chef
 RUN cargo install cargo-chef
 WORKDIR /app
 
@@ -7,7 +9,7 @@ COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 2: builder — cook deps then build the release binary
-FROM rust:bookworm AS builder
+FROM rust:bookworm@sha256:6a544e5d08298a8cddfe9e7d3b4796e746601d933f3b40b3cccc7acdfcd66e0d AS builder
 RUN cargo install cargo-chef
 WORKDIR /app
 
@@ -18,7 +20,8 @@ COPY . .
 RUN cargo build --release -p gateway
 
 # Stage 3: runtime — minimal image with only what's needed to run
-FROM debian:bookworm-slim AS runtime
+# To update: docker pull debian:bookworm-slim && docker inspect --format='{{index .RepoDigests 0}}' debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:74d56e3931e0d5a1dd51f8c8a2466d21de84a271cd3b5a733b803aa91abf4421 AS runtime
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
