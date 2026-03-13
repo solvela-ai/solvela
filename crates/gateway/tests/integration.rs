@@ -605,7 +605,15 @@ async fn test_health_endpoint() {
     // Test app has no provider API keys → "error" status (zero providers configured).
     // HTTP status is always 200 (Fly.io health checks need 2xx).
     assert_eq!(json["status"], "error");
-    assert!(json["version"].is_string());
+    // Unauthenticated requests do not include version or checks (security hardening)
+    assert!(
+        json.get("version").is_none() || json["version"].is_null(),
+        "unauthenticated health must not include version"
+    );
+    assert!(
+        json.get("checks").is_none() || json["checks"].is_null(),
+        "unauthenticated health must not include checks"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -4571,7 +4579,7 @@ async fn test_concurrent_request_limit() {
 // Phase 14: Production Hardening — Health Endpoint
 // ---------------------------------------------------------------------------
 
-/// 14.3: GET /health returns a `version` field.
+/// 14.3: GET /health returns a `version` field when authenticated with admin token.
 #[tokio::test]
 async fn test_health_returns_version() {
     let app = test_app();
@@ -4580,6 +4588,7 @@ async fn test_health_returns_version() {
         .oneshot(
             Request::builder()
                 .uri("/health")
+                .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4602,6 +4611,7 @@ async fn test_health_returns_version() {
 /// registry is empty. The health endpoint status logic returns `"error"`
 /// when zero providers are configured (regardless of DB/Redis state).
 /// HTTP status is always 200 (Fly.io health checks need 2xx).
+/// Authenticated with admin token to verify detailed checks.
 #[tokio::test]
 async fn test_health_returns_error_without_providers() {
     let app = test_app();
@@ -4610,6 +4620,7 @@ async fn test_health_returns_error_without_providers() {
         .oneshot(
             Request::builder()
                 .uri("/health")
+                .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4630,7 +4641,8 @@ async fn test_health_returns_error_without_providers() {
     assert_eq!(json["checks"]["redis"], "not_configured");
 }
 
-/// 14.3: GET /health response contains a `checks` object with `providers` array.
+/// 14.3: GET /health response contains a `checks` object with `providers` array
+/// when authenticated with admin token.
 ///
 /// Verifies the expanded health response shape: `checks` object with
 /// `database`, `redis`, `providers`, and `solana_rpc` fields.
@@ -4642,6 +4654,7 @@ async fn test_health_returns_checks_with_providers() {
         .oneshot(
             Request::builder()
                 .uri("/health")
+                .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
         )

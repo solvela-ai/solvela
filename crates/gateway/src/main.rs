@@ -234,29 +234,39 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(20);
 
     let db_pool = match std::env::var("DATABASE_URL") {
-        Ok(url) => match sqlx::postgres::PgPoolOptions::new()
-            .max_connections(max_connections)
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .connect(&url)
-            .await
-        {
-            Ok(pool) => {
-                info!("PostgreSQL connected — spend logging enabled");
-                // Run migrations on startup so the schema is always up to date.
-                if let Err(e) = run_migrations(&pool).await {
-                    warn!(error = %e, "migration failed — spend logging may not work correctly");
-                }
-                Some(pool)
-            }
-            Err(e) => {
+        Ok(url) => {
+            // Warn if production mode but DATABASE_URL lacks sslmode
+            if is_production && !url.contains("sslmode=") {
                 warn!(
-                    error = %e,
-                    url = %redact_connection_url(&url),
-                    "PostgreSQL connection failed — spend logging disabled"
+                    "DATABASE_URL does not contain sslmode= parameter — \
+                     database connections may be unencrypted. \
+                     Add ?sslmode=require (or &sslmode=require) for production."
                 );
-                None
             }
-        },
+            match sqlx::postgres::PgPoolOptions::new()
+                .max_connections(max_connections)
+                .acquire_timeout(std::time::Duration::from_secs(5))
+                .connect(&url)
+                .await
+            {
+                Ok(pool) => {
+                    info!("PostgreSQL connected — spend logging enabled");
+                    // Run migrations on startup so the schema is always up to date.
+                    if let Err(e) = run_migrations(&pool).await {
+                        warn!(error = %e, "migration failed — spend logging may not work correctly");
+                    }
+                    Some(pool)
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        url = %redact_connection_url(&url),
+                        "PostgreSQL connection failed — spend logging disabled"
+                    );
+                    None
+                }
+            }
+        }
         Err(_) => {
             warn!("DATABASE_URL not set — spend logging disabled (set in .env to enable)");
             None

@@ -588,14 +588,23 @@ pub async fn chat_completions(
 
         match result {
             Ok(result) => {
-                fire_escrow_claim(
-                    &state,
-                    &payment_scheme,
-                    &escrow_service_id,
-                    &escrow_agent_pubkey,
-                    escrow_deposited_amount,
-                    estimated_atomic_cost(&state.model_registry, &req.model, &req),
-                );
+                if let Some(claim_atomic) =
+                    estimated_atomic_cost(&state.model_registry, &req.model, &req)
+                {
+                    fire_escrow_claim(
+                        &state,
+                        &payment_scheme,
+                        &escrow_service_id,
+                        &escrow_agent_pubkey,
+                        escrow_deposited_amount,
+                        claim_atomic,
+                    );
+                } else {
+                    warn!(
+                        model = %req.model,
+                        "skipping escrow claim — cost estimation failed for streaming request"
+                    );
+                }
 
                 // Wrap with adaptive heartbeat
                 let heartbeat_stream =
@@ -729,22 +738,29 @@ pub async fn chat_completions(
                 }
 
                 let claim_atomic = if let Some(usage) = &result.data.usage {
-                    compute_actual_atomic_cost(
+                    Some(compute_actual_atomic_cost(
                         usage.prompt_tokens,
                         usage.completion_tokens,
                         model_info,
-                    )
+                    ))
                 } else {
                     estimated_atomic_cost(&state.model_registry, &req.model, &req)
                 };
-                fire_escrow_claim(
-                    &state,
-                    &payment_scheme,
-                    &escrow_service_id,
-                    &escrow_agent_pubkey,
-                    escrow_deposited_amount,
-                    claim_atomic,
-                );
+                if let Some(amount) = claim_atomic {
+                    fire_escrow_claim(
+                        &state,
+                        &payment_scheme,
+                        &escrow_service_id,
+                        &escrow_agent_pubkey,
+                        escrow_deposited_amount,
+                        amount,
+                    );
+                } else {
+                    warn!(
+                        model = %req.model,
+                        "skipping escrow claim — cost estimation failed for non-streaming request"
+                    );
+                }
 
                 let response_json = serde_json::to_value(&result.data)
                     .map_err(|e| GatewayError::Internal(e.to_string()))?;
@@ -881,9 +897,15 @@ fn extract_payer_wallet_from_payload(payload: &x402::types::PaymentPayload) -> S
 fn extract_signer_from_base64_tx(b64_tx: &str) -> Option<String> {
     let tx_bytes = base64::engine::general_purpose::STANDARD
         .decode(b64_tx)
+        .map_err(|e| warn!(error = %e, "failed to base64-decode transaction"))
         .ok()?;
-    let tx = VersionedTransaction::from_bytes(&tx_bytes).ok()?;
-    let msg = tx.parse_message().ok()?;
+    let tx = VersionedTransaction::from_bytes(&tx_bytes)
+        .map_err(|e| warn!(error = %e, "failed to deserialize VersionedTransaction"))
+        .ok()?;
+    let msg = tx
+        .parse_message()
+        .map_err(|e| warn!(error = %e, "failed to parse transaction message"))
+        .ok()?;
     msg.account_keys.first().map(|pk| pk.to_string())
 }
 
@@ -999,12 +1021,14 @@ fn build_debug_info(
 /// Estimate cost in atomic USDC units using the model registry's cost breakdown.
 ///
 /// Used as a fallback when actual token usage is unavailable (e.g., streaming).
-/// Returns 0 only when the cost genuinely is zero; logs a warning on parse failures.
+/// Returns `None` when the estimate cannot be computed (model not found, parse
+/// failure, etc.) so callers can distinguish "failed to compute" from "genuinely
+/// zero cost".
 fn estimated_atomic_cost(
     registry: &router::models::ModelRegistry,
     model: &str,
     req: &ChatRequest,
-) -> u64 {
+) -> Option<u64> {
     match registry
         .estimate_cost(
             model,
@@ -1016,10 +1040,10 @@ fn estimated_atomic_cost(
                 .parse::<f64>()
                 .map_err(|e| router::models::ModelRegistryError::ParseError(e.to_string()))
         }) {
-        Ok(f) => (f * 1_000_000.0) as u64,
+        Ok(f) => Some((f * 1_000_000.0) as u64),
         Err(e) => {
             warn!(error = %e, model, "failed to estimate atomic cost for escrow claim");
-            0
+            None
         }
     }
 }

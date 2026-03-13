@@ -18,6 +18,10 @@ pub struct RateLimitConfig {
     pub max_requests: u32,
     /// Window duration.
     pub window: Duration,
+    /// Maximum requests per window for unidentified clients that fall through
+    /// to the shared "unknown" bucket. Should be much lower than `max_requests`
+    /// to limit abuse surface when ConnectInfo is not configured.
+    pub unknown_max_requests: u32,
 }
 
 impl Default for RateLimitConfig {
@@ -25,6 +29,7 @@ impl Default for RateLimitConfig {
         Self {
             max_requests: 60,
             window: Duration::from_secs(60),
+            unknown_max_requests: 10,
         }
     }
 }
@@ -58,6 +63,9 @@ impl RateLimiter {
 
     /// Check if a request from the given client should be allowed.
     /// Returns `Ok(remaining)` or `Err(())` if rate limited.
+    ///
+    /// When `client_id` is `"unknown"`, applies the stricter
+    /// `unknown_max_requests` limit instead of the normal `max_requests`.
     pub async fn check(&self, client_id: &str) -> Result<u32, ()> {
         // Emergency cleanup: if the map has grown too large, evict expired
         // entries — but only if at least 60 seconds have passed since the last
@@ -95,10 +103,16 @@ impl RateLimiter {
 
         entry.count += 1;
 
-        if entry.count > self.config.max_requests {
+        let effective_limit = if client_id == "unknown" {
+            self.config.unknown_max_requests
+        } else {
+            self.config.max_requests
+        };
+
+        if entry.count > effective_limit {
             Err(())
         } else {
-            Ok(self.config.max_requests - entry.count)
+            Ok(effective_limit - entry.count)
         }
     }
 
@@ -197,7 +211,14 @@ fn extract_client_id(request: &Request) -> String {
         return addr.0.ip().to_string();
     }
 
-    // 3. Unknown — rate limit slot shared by all unknown clients (conservative)
+    // 3. Unknown — rate limit slot shared by all unknown clients (conservative).
+    //    This fallback is hit when ConnectInfo is not configured. When deployed
+    //    behind a reverse proxy, configure `into_make_service_with_connect_info::<SocketAddr>()`
+    //    on the Axum server so that each TCP peer gets its own rate-limit bucket.
+    warn!(
+        "rate limiter falling back to shared 'unknown' bucket — ConnectInfo not configured; \
+           all unidentified clients share a single stricter rate limit"
+    );
     "unknown".to_string()
 }
 
@@ -209,6 +230,7 @@ mod tests {
         RateLimitConfig {
             max_requests,
             window: Duration::from_millis(window_ms),
+            unknown_max_requests: 10,
         }
     }
 
@@ -289,5 +311,30 @@ mod tests {
         assert!(limiter.check("wallet-b").await.is_ok());
         assert!(limiter.check("wallet-b").await.is_ok());
         assert!(limiter.check("wallet-b").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_unknown_bucket_uses_stricter_limit() {
+        let config = RateLimitConfig {
+            max_requests: 60,
+            window: Duration::from_secs(60),
+            unknown_max_requests: 3,
+        };
+        let limiter = RateLimiter::new(config);
+
+        // "unknown" should only get 3 requests, not 60
+        assert!(limiter.check("unknown").await.is_ok());
+        assert!(limiter.check("unknown").await.is_ok());
+        assert!(limiter.check("unknown").await.is_ok());
+        assert!(
+            limiter.check("unknown").await.is_err(),
+            "unknown bucket should be limited to unknown_max_requests"
+        );
+
+        // Named clients should still get the full 60
+        for _ in 0..60 {
+            assert!(limiter.check("wallet-x").await.is_ok());
+        }
+        assert!(limiter.check("wallet-x").await.is_err());
     }
 }

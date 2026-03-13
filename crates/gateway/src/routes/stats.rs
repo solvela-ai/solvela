@@ -163,25 +163,28 @@ pub async fn wallet_stats(
     );
 
     let summary_row = summary_result.map_err(|e| {
+        tracing::error!(error = %e, wallet = %address, "failed to retrieve wallet stats summary");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("database error: {e}") })),
+            Json(serde_json::json!({ "error": "failed to retrieve stats" })),
         )
             .into_response()
     })?;
 
     let model_rows = by_model_result.map_err(|e| {
+        tracing::error!(error = %e, wallet = %address, "failed to retrieve stats by model");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("database error: {e}") })),
+            Json(serde_json::json!({ "error": "failed to retrieve stats" })),
         )
             .into_response()
     })?;
 
     let day_rows = by_day_result.map_err(|e| {
+        tracing::error!(error = %e, wallet = %address, "failed to retrieve stats by day");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("database error: {e}") })),
+            Json(serde_json::json!({ "error": "failed to retrieve stats" })),
         )
             .into_response()
     })?;

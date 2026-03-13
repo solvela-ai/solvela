@@ -292,8 +292,16 @@ async fn process_pending_claims(
                 attempts = entry.attempts,
                 "marking claim as permanently failed — max retries exceeded"
             );
-            let _ =
-                claim_queue::mark_attempt_failed(pool, &entry.id, &error_msg, entry.attempts).await;
+            if let Err(db_err) =
+                claim_queue::mark_attempt_failed(pool, &entry.id, &error_msg, entry.attempts).await
+            {
+                warn!(
+                    claim_id = %entry.id,
+                    error = %db_err,
+                    "failed to mark max-retry claim as permanently failed — \
+                     claim may be retried indefinitely"
+                );
+            }
             circuit_breaker.record_failure();
             counter!("rcr_escrow_claims_total", "result" => "failure").increment(1);
             if let Some(m) = metrics {

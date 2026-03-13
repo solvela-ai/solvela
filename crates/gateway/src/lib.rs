@@ -179,6 +179,27 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             HeaderName::from_static("referrer-policy"),
             HeaderValue::from_static("no-referrer"),
         ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static("default-src 'none'"),
+        ))
+        .layer({
+            // Only add HSTS in production to avoid issues with local dev (HTTP)
+            let is_prod = matches!(
+                std::env::var("RCR_ENV").as_deref(),
+                Ok("production") | Ok("prod")
+            );
+            SetResponseHeaderLayer::if_not_present(
+                HeaderName::from_static("strict-transport-security"),
+                if is_prod {
+                    HeaderValue::from_static("max-age=31536000; includeSubDomains")
+                } else {
+                    // Empty value — Tower's if_not_present still sets the header,
+                    // so we skip via a no-op value that browsers ignore.
+                    HeaderValue::from_static("")
+                },
+            )
+        })
         // Request ID
         .layer(RequestIdLayer)
         // Concurrency limit — rejects excess requests with 503

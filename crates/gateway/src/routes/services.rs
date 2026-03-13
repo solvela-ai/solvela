@@ -133,6 +133,45 @@ pub async fn register_service(
             .into_response();
     }
 
+    // Validate field lengths to prevent abuse
+    if body.id.len() > 64 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "id must be at most 64 characters" })),
+        )
+            .into_response();
+    }
+    if body.name.len() > 256 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "name must be at most 256 characters" })),
+        )
+            .into_response();
+    }
+    if body.endpoint.len() > 2048 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "endpoint must be at most 2048 characters" })),
+        )
+            .into_response();
+    }
+    if body.category.len() > 64 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "category must be at most 64 characters" })),
+        )
+            .into_response();
+    }
+    if let Some(ref desc) = body.description {
+        if desc.len() > 4096 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "description must be at most 4096 characters" })),
+            )
+                .into_response();
+        }
+    }
+
     // Validate endpoint is not a private/internal network address (SSRF prevention)
     match security::is_private_endpoint(&body.endpoint).await {
         Ok(true) => {

@@ -64,9 +64,15 @@ fn extract_payer_wallet(payload: &x402::types::PaymentPayload) -> String {
 fn extract_signer_from_base64_tx(b64_tx: &str) -> Option<String> {
     let tx_bytes = base64::engine::general_purpose::STANDARD
         .decode(b64_tx)
+        .map_err(|e| warn!(error = %e, "failed to base64-decode transaction"))
         .ok()?;
-    let tx = VersionedTransaction::from_bytes(&tx_bytes).ok()?;
-    let msg = tx.parse_message().ok()?;
+    let tx = VersionedTransaction::from_bytes(&tx_bytes)
+        .map_err(|e| warn!(error = %e, "failed to deserialize VersionedTransaction"))
+        .ok()?;
+    let msg = tx
+        .parse_message()
+        .map_err(|e| warn!(error = %e, "failed to parse transaction message"))
+        .ok()?;
     msg.account_keys.first().map(|pk| pk.to_string())
 }
 
@@ -341,6 +347,16 @@ pub async fn proxy_service(
 
     // Step 5: SSRF check — re-validate the endpoint at proxy time (defense in depth
     // against DNS rebinding between registration and request).
+    //
+    // SECURITY NOTE (TOCTOU / DNS rebinding): There is a time-of-check to
+    // time-of-use gap between this DNS resolution and the subsequent HTTP
+    // request via reqwest, which resolves DNS independently. A sophisticated
+    // attacker controlling DNS could return a public IP here and a private IP
+    // for the actual connection. Fully closing this gap requires resolving
+    // DNS once, checking the IP, then connecting to that IP directly (e.g.,
+    // via reqwest's `resolve()` builder on a per-request client). The current
+    // dual-check (registration-time + request-time) mitigates most practical
+    // attacks but does not eliminate the theoretical TOCTOU window.
     match security::is_private_endpoint(&service.endpoint).await {
         Ok(true) => {
             warn!(
