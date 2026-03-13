@@ -113,7 +113,7 @@ fn to_anthropic_request(req: &ChatRequest) -> AnthropicRequest {
         })
         .collect();
 
-    // Extract model_id part (e.g., "anthropic/claude-sonnet-4.6" → "claude-sonnet-4.6")
+    // Extract model_id part (e.g., "anthropic/claude-sonnet-4-20250514" → "claude-sonnet-4-20250514")
     let model = req
         .model
         .strip_prefix("anthropic/")
@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn test_system_message_extraction() {
         let req = ChatRequest {
-            model: "anthropic/claude-sonnet-4.6".to_string(),
+            model: "anthropic/claude-sonnet-4-20250514".to_string(),
             messages: vec![
                 ChatMessage {
                     role: Role::System,
@@ -493,13 +493,13 @@ mod tests {
         );
         assert_eq!(anthropic_req.messages.len(), 1);
         assert_eq!(anthropic_req.messages[0].role, "user");
-        assert_eq!(anthropic_req.model, "claude-sonnet-4.6");
+        assert_eq!(anthropic_req.model, "claude-sonnet-4-20250514");
     }
 
     #[test]
     fn test_developer_role_extracted_as_system() {
         let req = ChatRequest {
-            model: "anthropic/claude-sonnet-4.6".to_string(),
+            model: "anthropic/claude-sonnet-4-20250514".to_string(),
             messages: vec![
                 ChatMessage {
                     role: Role::System,
@@ -582,7 +582,7 @@ mod tests {
     fn test_response_translation() {
         let anthropic_resp = AnthropicResponse {
             id: "msg_123".to_string(),
-            model: "claude-sonnet-4.6".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
             content: vec![AnthropicContentBlock {
                 content_type: "text".to_string(),
                 text: Some("Hello! How can I help you?".to_string()),
@@ -594,7 +594,7 @@ mod tests {
             },
         };
 
-        let chat_resp = from_anthropic_response(anthropic_resp, "anthropic/claude-sonnet-4.6");
+        let chat_resp = from_anthropic_response(anthropic_resp, "anthropic/claude-sonnet-4-20250514");
         assert_eq!(chat_resp.object, "chat.completion");
         assert_eq!(chat_resp.choices.len(), 1);
         assert_eq!(

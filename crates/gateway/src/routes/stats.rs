@@ -359,7 +359,7 @@ mod tests {
                 total_output_tokens: 341_200,
             },
             by_model: vec![ModelStats {
-                model: "anthropic/claude-sonnet-4.6".to_string(),
+                model: "anthropic/claude-sonnet-4-20250514".to_string(),
                 requests: 412,
                 cost_usdc: "1.923000".to_string(),
                 input_tokens: 310_000,
@@ -390,7 +390,7 @@ mod tests {
 
         // by_model array
         assert_eq!(json["by_model"].as_array().unwrap().len(), 1);
-        assert_eq!(json["by_model"][0]["model"], "anthropic/claude-sonnet-4.6");
+        assert_eq!(json["by_model"][0]["model"], "anthropic/claude-sonnet-4-20250514");
         assert_eq!(json["by_model"][0]["requests"], 412);
         assert_eq!(json["by_model"][0]["cost_usdc"], "1.923000");
         assert_eq!(json["by_model"][0]["input_tokens"], 310_000);

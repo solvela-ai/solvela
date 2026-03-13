@@ -14,6 +14,10 @@ use router::models::ModelRegistry;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env file if present (before any env var reads).
+    // Existing env vars take precedence — .env values are not overwritten.
+    dotenvy::dotenv().ok();
+
     // Initialize tracing — text by default, JSON when RCR_LOG_FORMAT=json
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "gateway=info,tower_http=info".into());
@@ -356,6 +360,20 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .filter(|t| !t.is_empty());
 
+    // Dev-mode payment bypass — only when RCR_DEV_BYPASS_PAYMENT=true AND not production
+    let dev_bypass_payment = if is_production {
+        if std::env::var("RCR_DEV_BYPASS_PAYMENT").as_deref() == Ok("true") {
+            warn!("RCR_DEV_BYPASS_PAYMENT is set but ignored — payment bypass is NEVER allowed in production");
+        }
+        false
+    } else {
+        let enabled = std::env::var("RCR_DEV_BYPASS_PAYMENT").as_deref() == Ok("true");
+        if enabled {
+            warn!("DEV MODE: payment bypass ENABLED — all chat requests will skip payment verification. DO NOT use in production!");
+        }
+        enabled
+    };
+
     // Build shared state
     let state = Arc::new(AppState {
         config: app_config.clone(),
@@ -402,6 +420,7 @@ async fn main() -> anyhow::Result<()> {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         prometheus_handle,
+        dev_bypass_payment,
     });
 
     // ── Shutdown signal for background tasks ────────────────────────────────

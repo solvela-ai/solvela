@@ -431,62 +431,57 @@ pub fn fallback_chain(primary: &str) -> Vec<String> {
 pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a str, &'a str)> {
     let chain: Vec<(&str, &str)> = match (provider, model) {
         // --- Premium tier (reasoning, high capability) ---
-        ("anthropic", "claude-opus-4.6") => vec![
-            ("anthropic", "claude-opus-4.6"),
+        ("anthropic", "claude-opus-4-20250514") => vec![
+            ("anthropic", "claude-opus-4-20250514"),
             ("openai", "gpt-5.2"),
             ("google", "gemini-3.1-pro"),
             ("openai", "o3"),
         ],
         ("openai", "gpt-5.2") => vec![
             ("openai", "gpt-5.2"),
-            ("anthropic", "claude-opus-4.6"),
+            ("anthropic", "claude-opus-4-20250514"),
             ("google", "gemini-3.1-pro"),
         ],
         ("google", "gemini-3.1-pro") => vec![
             ("google", "gemini-3.1-pro"),
-            ("anthropic", "claude-opus-4.6"),
+            ("anthropic", "claude-opus-4-20250514"),
             ("openai", "gpt-5.2"),
         ],
 
         // --- Mid tier (strong general purpose) ---
-        ("anthropic", "claude-sonnet-4.6") => vec![
-            ("anthropic", "claude-sonnet-4.6"),
+        ("anthropic", "claude-sonnet-4-20250514") => vec![
+            ("anthropic", "claude-sonnet-4-20250514"),
             ("openai", "gpt-4.1"),
             ("google", "gemini-3.1-pro"),
             ("xai", "grok-3"),
         ],
-        ("anthropic", "claude-sonnet-4.5") => vec![
-            ("anthropic", "claude-sonnet-4.5"),
-            ("openai", "gpt-4.1"),
-            ("xai", "grok-3"),
-        ],
         ("openai", "gpt-4o") => vec![
             ("openai", "gpt-4o"),
-            ("anthropic", "claude-sonnet-4.6"),
+            ("anthropic", "claude-sonnet-4-20250514"),
             ("google", "gemini-3.1-pro"),
             ("xai", "grok-3"),
         ],
         ("openai", "gpt-4.1") => vec![
             ("openai", "gpt-4.1"),
-            ("anthropic", "claude-sonnet-4.6"),
+            ("anthropic", "claude-sonnet-4-20250514"),
             ("google", "gemini-3.1-pro"),
         ],
         ("xai", "grok-3") => vec![
             ("xai", "grok-3"),
-            ("anthropic", "claude-sonnet-4.6"),
+            ("anthropic", "claude-sonnet-4-20250514"),
             ("openai", "gpt-4o"),
         ],
 
         // --- Budget tier (fast, cheap) ---
         ("openai", "gpt-4o-mini") => vec![
             ("openai", "gpt-4o-mini"),
-            ("anthropic", "claude-haiku-4.5"),
+            ("anthropic", "claude-3-5-haiku-20241022"),
             ("google", "gemini-2.5-flash"),
             ("deepseek", "deepseek-chat"),
         ],
         ("openai", "gpt-4.1-mini") => vec![
             ("openai", "gpt-4.1-mini"),
-            ("anthropic", "claude-haiku-4.5"),
+            ("anthropic", "claude-3-5-haiku-20241022"),
             ("google", "gemini-2.5-flash"),
         ],
         ("openai", "gpt-4.1-nano") => vec![
@@ -494,8 +489,8 @@ pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a s
             ("google", "gemini-2.5-flash-lite"),
             ("google", "gemini-2.0-flash-lite"),
         ],
-        ("anthropic", "claude-haiku-4.5") => vec![
-            ("anthropic", "claude-haiku-4.5"),
+        ("anthropic", "claude-3-5-haiku-20241022") => vec![
+            ("anthropic", "claude-3-5-haiku-20241022"),
             ("openai", "gpt-4o-mini"),
             ("google", "gemini-2.5-flash"),
             ("deepseek", "deepseek-chat"),
@@ -503,7 +498,7 @@ pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a s
         ("google", "gemini-2.5-flash") => vec![
             ("google", "gemini-2.5-flash"),
             ("openai", "gpt-4o-mini"),
-            ("anthropic", "claude-haiku-4.5"),
+            ("anthropic", "claude-3-5-haiku-20241022"),
             ("deepseek", "deepseek-chat"),
         ],
         ("deepseek", "deepseek-chat") => vec![
@@ -515,7 +510,7 @@ pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a s
         // --- Reasoning tier ---
         ("openai", "o3") => vec![
             ("openai", "o3"),
-            ("anthropic", "claude-opus-4.6"),
+            ("anthropic", "claude-opus-4-20250514"),
             ("deepseek", "deepseek-reasoner"),
         ],
         ("openai", "o3-mini") | ("openai", "o4-mini") => vec![
@@ -585,8 +580,8 @@ mod tests {
 
     #[test]
     fn test_model_fallback_chain_opus() {
-        let chain = model_fallback_chain("anthropic", "claude-opus-4.6");
-        assert_eq!(chain[0], ("anthropic", "claude-opus-4.6"));
+        let chain = model_fallback_chain("anthropic", "claude-opus-4-20250514");
+        assert_eq!(chain[0], ("anthropic", "claude-opus-4-20250514"));
         assert!(chain.len() > 1);
         // Must have cross-provider fallbacks
         assert!(chain.iter().any(|(p, _)| *p != "anthropic"));
@@ -623,7 +618,7 @@ mod tests {
     fn test_fallback_result_indicates_fallback() {
         let result: FallbackResult<String> = FallbackResult {
             data: "test".to_string(),
-            original_model: "claude-opus-4.6".to_string(),
+            original_model: "claude-opus-4-20250514".to_string(),
             actual_model: "gpt-5.2".to_string(),
             actual_provider: "openai".to_string(),
             was_fallback: true,
@@ -635,18 +630,17 @@ mod tests {
     #[test]
     fn test_model_fallback_chain_no_self_duplicates() {
         let known_models: Vec<(&str, &str)> = vec![
-            ("anthropic", "claude-opus-4.6"),
+            ("anthropic", "claude-opus-4-20250514"),
             ("openai", "gpt-5.2"),
             ("google", "gemini-3.1-pro"),
-            ("anthropic", "claude-sonnet-4.6"),
-            ("anthropic", "claude-sonnet-4.5"),
+            ("anthropic", "claude-sonnet-4-20250514"),
             ("openai", "gpt-4o"),
             ("openai", "gpt-4.1"),
             ("xai", "grok-3"),
             ("openai", "gpt-4o-mini"),
             ("openai", "gpt-4.1-mini"),
             ("openai", "gpt-4.1-nano"),
-            ("anthropic", "claude-haiku-4.5"),
+            ("anthropic", "claude-3-5-haiku-20241022"),
             ("google", "gemini-2.5-flash"),
             ("deepseek", "deepseek-chat"),
             ("openai", "o3"),

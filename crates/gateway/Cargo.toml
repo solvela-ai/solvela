@@ -57,6 +57,9 @@ url = { workspace = true }
 # Config parsing
 toml = { workspace = true }
 
+# Environment
+dotenvy = { workspace = true }
+
 # Error handling
 thiserror = { workspace = true }
 anyhow = { workspace = true }

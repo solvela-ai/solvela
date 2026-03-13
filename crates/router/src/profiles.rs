@@ -72,8 +72,8 @@ pub fn resolve_model(profile: Profile, tier: Tier) -> &'static str {
 
         // PREMIUM: best quality regardless of cost
         (Profile::Premium, Tier::Simple) => "openai/gpt-4o",
-        (Profile::Premium, Tier::Medium) => "anthropic/claude-sonnet-4.6",
-        (Profile::Premium, Tier::Complex) => "anthropic/claude-opus-4.6",
+        (Profile::Premium, Tier::Medium) => "anthropic/claude-sonnet-4-20250514",
+        (Profile::Premium, Tier::Complex) => "anthropic/claude-opus-4-20250514",
         (Profile::Premium, Tier::Reasoning) => "openai/o3",
 
         // FREE: only free-tier models
@@ -88,9 +88,9 @@ pub fn resolve_model(profile: Profile, tier: Tier) -> &'static str {
 pub fn resolve_alias(alias: &str) -> Option<&'static str> {
     match alias.to_lowercase().as_str() {
         "gpt5" | "gpt-5" => Some("openai/gpt-5.2"),
-        "sonnet" | "claude-sonnet" => Some("anthropic/claude-sonnet-4.6"),
-        "opus" | "claude-opus" => Some("anthropic/claude-opus-4.6"),
-        "haiku" | "claude-haiku" => Some("anthropic/claude-haiku-4.5"),
+        "sonnet" | "claude-sonnet" => Some("anthropic/claude-sonnet-4-20250514"),
+        "opus" | "claude-opus" => Some("anthropic/claude-opus-4-20250514"),
+        "haiku" | "claude-haiku" => Some("anthropic/claude-3-5-haiku-20241022"),
         "gemini" | "gemini-pro" => Some("google/gemini-3.1-pro"),
         "flash" | "gemini-flash" => Some("google/gemini-2.5-flash"),
         "grok" | "grok-fast" => Some("xai/grok-4-fast-reasoning"),
@@ -102,7 +102,7 @@ pub fn resolve_alias(alias: &str) -> Option<&'static str> {
         "gpt4.1" | "gpt-4.1" | "gpt41" => Some("openai/gpt-4.1"),
         "gpt4.1-mini" | "gpt-4.1-mini" => Some("openai/gpt-4.1-mini"),
         "gpt4.1-nano" | "gpt-4.1-nano" => Some("openai/gpt-4.1-nano"),
-        "sonnet4.5" | "sonnet-4.5" => Some("anthropic/claude-sonnet-4.5"),
+        "sonnet4.5" | "sonnet-4.5" => Some("anthropic/claude-sonnet-4-20250514"),
         "grok3" | "grok-3" => Some("xai/grok-3"),
         "grok3-mini" | "grok-3-mini" => Some("xai/grok-3-mini"),
         _ => None,
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn test_resolve_alias() {
         assert_eq!(resolve_alias("gpt5"), Some("openai/gpt-5.2"));
-        assert_eq!(resolve_alias("sonnet"), Some("anthropic/claude-sonnet-4.6"));
+        assert_eq!(resolve_alias("sonnet"), Some("anthropic/claude-sonnet-4-20250514"));
         assert_eq!(resolve_alias("nonexistent"), None);
     }
 }
