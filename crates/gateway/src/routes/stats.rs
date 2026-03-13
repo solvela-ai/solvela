@@ -390,7 +390,10 @@ mod tests {
 
         // by_model array
         assert_eq!(json["by_model"].as_array().unwrap().len(), 1);
-        assert_eq!(json["by_model"][0]["model"], "anthropic/claude-sonnet-4-20250514");
+        assert_eq!(
+            json["by_model"][0]["model"],
+            "anthropic/claude-sonnet-4-20250514"
+        );
         assert_eq!(json["by_model"][0]["requests"], 412);
         assert_eq!(json["by_model"][0]["cost_usdc"], "1.923000");
         assert_eq!(json["by_model"][0]["input_tokens"], 310_000);

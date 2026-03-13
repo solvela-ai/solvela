@@ -72,6 +72,166 @@ jobs:
       - name: Run cargo audit
         run: cargo audit
 
+  smoke-test:
+    name: Smoke test (boot gateway + curl endpoints)
+    runs-on: ubuntu-latest
+    needs: rust
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rcr
+          POSTGRES_PASSWORD: rcr
+          POSTGRES_DB: rcr_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rcr"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c676846f29d98ff6b0106d3608c7ffd4048af17b  # v2
+
+      - name: Build gateway (release)
+        run: cargo build --release -p gateway
+
+      - name: Start gateway
+        run: |
+          DATABASE_URL="postgres://rcr:rcr@localhost:5432/rcr_test" \
+          REDIS_URL="redis://localhost:6379" \
+          RCR_DEV_BYPASS_PAYMENT=true \
+          RCR_ADMIN_TOKEN=ci-test-token \
+          RUST_LOG=gateway=info \
+          ./target/release/rustyclawrouter &
+          echo "GATEWAY_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for gateway to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8402/health > /dev/null 2>&1; then
+              echo "Gateway healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Gateway failed to start within 30s"
+          exit 1
+
+      - name: Run smoke tests
+        run: |
+          set -euo pipefail
+          BASE="http://localhost:8402"
+          PASS=0
+          FAIL=0
+
+          check() {
+            local name="$1"
+            shift
+            if "$@"; then
+              echo "PASS: $name"
+              PASS=$((PASS + 1))
+            else
+              echo "FAIL: $name"
+              FAIL=$((FAIL + 1))
+            fi
+          }
+
+          # 1. GET /health → 200
+          check "GET /health returns 200" \
+            curl -sf "$BASE/health" -o /dev/null -w '' --fail
+
+          # 2. GET /v1/models → 200, body contains "data"
+          check "GET /v1/models returns 200 with data" \
+            bash -c 'curl -sf "$0/v1/models" | grep -q "\"data\""' "$BASE"
+
+          # 3. POST /v1/chat/completions → 402 or 500 (no payment header, bypass
+          #    enabled but no provider API keys means FallbackProvider responds)
+          check "POST /v1/chat/completions returns expected status" \
+            bash -c '
+              status=$(curl -s -o /dev/null -w "%{http_code}" \
+                -X POST "$0/v1/chat/completions" \
+                -H "Content-Type: application/json" \
+                -d "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
+              echo "  status=$status"
+              [ "$status" = "402" ] || [ "$status" = "500" ] || [ "$status" = "200" ]
+            ' "$BASE"
+
+          # 4. GET /metrics with admin token → 200, body contains "rcr_requests_total"
+          check "GET /metrics with admin token returns metrics" \
+            bash -c '
+              body=$(curl -sf "$0/metrics" -H "Authorization: Bearer ci-test-token")
+              echo "$body" | grep -q "rcr_requests_total"
+            ' "$BASE"
+
+          # 5. POST /v1/chat/completions with X-RCR-Debug: true → x-rcr-request-id header present
+          check "X-RCR-Debug returns x-rcr-request-id header" \
+            bash -c '
+              headers=$(curl -sD - -o /dev/null \
+                -X POST "$0/v1/chat/completions" \
+                -H "Content-Type: application/json" \
+                -H "X-RCR-Debug: true" \
+                -d "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+              echo "$headers" | grep -qi "x-rcr-request-id"
+            ' "$BASE"
+
+          # 6. POST with X-Request-Id → echoed back
+          check "X-Request-Id is echoed back" \
+            bash -c '
+              headers=$(curl -sD - -o /dev/null \
+                -X POST "$0/v1/chat/completions" \
+                -H "Content-Type: application/json" \
+                -H "X-Request-Id: ci-test-123" \
+                -d "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+              echo "$headers" | grep -q "ci-test-123"
+            ' "$BASE"
+
+          # 7. Send 5 rapid requests → rate limit headers present
+          check "Rate limit headers present after rapid requests" \
+            bash -c '
+              for i in 1 2 3 4 5; do
+                curl -s -o /dev/null \
+                  -X POST "$0/v1/chat/completions" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"test $i\"}]}"
+              done
+              headers=$(curl -sD - -o /dev/null \
+                -X POST "$0/v1/chat/completions" \
+                -H "Content-Type: application/json" \
+                -d "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"test 6\"}]}")
+              echo "$headers" | grep -qi "x-ratelimit-limit"
+            ' "$BASE"
+
+          echo ""
+          echo "Results: $PASS passed, $FAIL failed"
+          [ "$FAIL" -eq 0 ]
+
+      - name: Stop gateway
+        if: always()
+        run: |
+          if [ -n "${GATEWAY_PID:-}" ]; then
+            kill "$GATEWAY_PID" 2>/dev/null || true
+            wait "$GATEWAY_PID" 2>/dev/null || true
+          fi
+
   docker-build:
     name: Docker build
     runs-on: ubuntu-latest
