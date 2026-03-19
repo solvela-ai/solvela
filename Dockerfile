@@ -1,37 +1,49 @@
-# Stage 1: chef — prepare the recipe for dependency caching
-# Pin base images to SHA digests to prevent supply-chain attacks via tag mutation.
-# To update: docker pull rust:bookworm && docker inspect --format='{{index .RepoDigests 0}}' rust:bookworm
-FROM rust:bookworm@sha256:6a544e5d08298a8cddfe9e7d3b4796e746601d933f3b40b3cccc7acdfcd66e0d AS chef
-RUN cargo install cargo-chef
+# Stage 1: Build
+FROM rust:1.88-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
+# Copy workspace manifests first for dependency caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/common/Cargo.toml crates/common/Cargo.toml
+COPY crates/x402/Cargo.toml crates/x402/Cargo.toml
+COPY crates/router/Cargo.toml crates/router/Cargo.toml
+COPY crates/gateway/Cargo.toml crates/gateway/Cargo.toml
+COPY crates/cli/Cargo.toml crates/cli/Cargo.toml
 
-# Stage 2: builder — cook deps then build the release binary
-FROM rust:bookworm@sha256:6a544e5d08298a8cddfe9e7d3b4796e746601d933f3b40b3cccc7acdfcd66e0d AS builder
-RUN cargo install cargo-chef
+# Create dummy source files to cache dependency compilation
+RUN mkdir -p crates/common/src crates/x402/src crates/router/src crates/gateway/src crates/cli/src && \
+    echo "pub fn _dummy() {}" > crates/common/src/lib.rs && \
+    echo "pub fn _dummy() {}" > crates/x402/src/lib.rs && \
+    echo "pub fn _dummy() {}" > crates/router/src/lib.rs && \
+    echo "pub fn _dummy() {}" > crates/gateway/src/lib.rs && \
+    echo "fn main() {}" > crates/gateway/src/main.rs && \
+    echo "pub fn _dummy() {}" > crates/cli/src/lib.rs && \
+    echo "fn main() {}" > crates/cli/src/main.rs
+
+RUN cargo build --release --bin rustyclawrouter 2>/dev/null || true
+
+# Copy actual source code
+COPY crates/ crates/
+COPY config/ config/
+
+# Touch source files to invalidate the cache for actual compilation
+RUN touch crates/common/src/lib.rs crates/x402/src/lib.rs crates/router/src/lib.rs crates/gateway/src/lib.rs crates/gateway/src/main.rs
+
+RUN cargo build --release --bin rustyclawrouter
+
+# Stage 2: Runtime
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-COPY --from=chef /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
-
-COPY . .
-RUN cargo build --release -p gateway
-
-# Stage 3: runtime — minimal image with only what's needed to run
-# To update: docker pull debian:bookworm-slim && docker inspect --format='{{index .RepoDigests 0}}' debian:bookworm-slim
-FROM debian:bookworm-slim@sha256:74d56e3931e0d5a1dd51f8c8a2466d21de84a271cd3b5a733b803aa91abf4421 AS runtime
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    libssl3 \
-    libpq5 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN useradd --uid 1001 --no-create-home --shell /bin/false rcr
-
-COPY --from=builder /app/target/release/rustyclawrouter /usr/local/bin/rustyclawrouter
+COPY --from=builder /app/target/release/rustyclawrouter .
+COPY --from=builder /app/config/ config/
 
 EXPOSE 8402
-USER rcr
-CMD ["/usr/local/bin/rustyclawrouter"]
+
+CMD ["./rustyclawrouter"]

@@ -1,43 +1,39 @@
 # x402 Service Marketplace Registry
 # Phase 6: Registered x402-compatible services available through the gateway.
 #
-# internal = true  → service is hosted by the gateway (no external proxy needed)
-# internal = false → gateway proxies requests to external x402 endpoints (+5% fee)
-
-[services.llm-gateway]
-name = "LLM Intelligence"
-endpoint = "/v1/chat/completions"
-category = "intelligence"
-x402_enabled = true
-internal = true
-description = "OpenAI-compatible LLM inference with 15-dimension smart routing across 5+ providers"
-pricing_label = "per-token (see /pricing)"
-
-[services.image-gen]
-name = "Image Generation"
-endpoint = "/v1/images/generations"
-category = "media"
-x402_enabled = true
-internal = true
-description = "AI image generation via DALL-E 3 and compatible providers"
-pricing_label = "per-image"
-
-[services.web-search]
-name = "Web Search"
-endpoint = "https://search.example.com/v1/query"
-category = "search"
-x402_enabled = true
-internal = false
-description = "Real-time web search with structured results"
-pricing_label = "$0.005/query"
-price_per_request_usdc = 0.005
-
-[services.weather-api]
-name = "Weather Data"
-endpoint = "https://weather.example.com/v1/forecast"
-category = "data"
-x402_enabled = true
-internal = false
-description = "Current conditions and 7-day forecast for any location"
-pricing_label = "$0.001/request"
-price_per_request_usdc = 0.001
+# Phase 6 is NOT YET IMPLEMENTED. All entries below are commented out to
+# prevent health-check warnings on the deployed gateway. Uncomment and
+# update endpoints when the service marketplace code is wired in.
+#
+# ── Internal services (served by this gateway) ──────────────────────
+#
+# [services.llm-gateway]
+# name = "LLM Intelligence"
+# endpoint = "/v1/chat/completions"
+# category = "intelligence"
+# x402_enabled = true
+# internal = true
+#
+# [services.image-gen]
+# name = "Image Generation"
+# endpoint = "/v1/images/generations"
+# category = "media"
+# x402_enabled = true
+# internal = true
+#
+# ── External services (examples — replace with real endpoints) ──────
+#
+# [services.weather-api]
+# name = "Weather Data"
+# endpoint = "https://weather.example.com/v1/forecast"   # PLACEHOLDER — do not enable
+# category = "data"
+# x402_enabled = true
+# internal = false
+# provider_fee_percent = 0
+#
+# [services.web-search]
+# name = "Web Search"
+# endpoint = "https://search.example.com/v1/query"       # PLACEHOLDER — do not enable
+# category = "search"
+# x402_enabled = true
+# internal = false

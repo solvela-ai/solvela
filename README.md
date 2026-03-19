@@ -374,6 +374,30 @@ migrations/         PostgreSQL migrations (idempotent, auto-applied on startup)
 
 ---
 
+## Deployment
+
+RCR is deployed on Fly.io:
+
+| Resource | URL / Name |
+|----------|------------|
+| Gateway | `rustyclawrouter-gateway.fly.dev` |
+| PostgreSQL | `rustyclawrouter-db` (Fly Postgres 17.2) |
+| Redis | `rustyclawrouter-cache` (Upstash, ord + iad) |
+
+```bash
+# Deploy
+cd crates/gateway && fly deploy -a rustyclawrouter-gateway
+
+# Set provider keys
+fly secrets set -a rustyclawrouter-gateway OPENAI_API_KEY=... ANTHROPIC_API_KEY=...
+
+# Check status
+fly status -a rustyclawrouter-gateway
+curl https://rustyclawrouter-gateway.fly.dev/health
+```
+
+See `HANDOFF.md` for full deployment status and blockers.
+
 ## License
 
 MIT
