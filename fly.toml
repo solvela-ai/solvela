@@ -16,13 +16,13 @@ primary_region = "ord"
   min_machines_running = 1
 
   [[http_service.checks]]
-    grace_period = "10s"
     interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
     method = "GET"
     path = "/health"
     protocol = "http"
-    timeout = "5s"
 
-[vm]
+[[vm]]
   size = "shared-cpu-1x"
   memory = "512mb"
