@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 RustyClawRouter is a Solana-native AI agent payment gateway built in Rust (Axum). AI agents pay for LLM API calls with USDC-SPL on Solana via the x402 protocol. No API keys, no accounts, just wallets.
 
-Read `.claude/plan/rustyclawrouter.md` for the full implementation plan before making architectural decisions. Phases 1-6 are complete.
+Read `.claude/plan/rustyclawrouter.md` for the full implementation plan before making architectural decisions. Phases 1-3 are complete; Phases 4-6 are not started.
 
 ## Build & Test Commands
 
@@ -17,12 +17,13 @@ cargo check                       # faster — prefer for iteration
 cargo check -p gateway            # single crate
 cargo build --release             # release build
 
-# Test (304 tests total)
+# Test (507 tests total)
 cargo test                        # all workspace tests
-cargo test -p gateway             # 199 tests (161 unit + 38 integration)
-cargo test -p x402                # 74 tests
+cargo test -p gateway             # 267 tests (unit + integration)
+cargo test -p x402                # 110 tests
 cargo test -p router              # 13 tests
 cargo test -p rustyclaw-protocol  # 18 tests
+cargo test -p rcr-cli             # 99 tests
 
 # Single test
 cargo test -p gateway test_health_endpoint -- --exact
@@ -74,7 +75,7 @@ Trustless USDC-SPL escrow with deposit/claim/refund instructions. **NOT a worksp
 
 ### Configuration (`config/`)
 
-- `models.toml` — Model registry with per-token pricing (5 providers, 16 models)
+- `models.toml` — Model registry with per-token pricing (5 providers, 26 models)
 - `default.toml` — Server host/port, Solana RPC URL, monitor thresholds
 - `services.toml` — x402 service marketplace registry
 
@@ -118,7 +119,7 @@ Provider API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI
 
 ### Rust Conventions
 
-- **Edition**: Rust 2021 (`resolver = "2"` workspace)
+- **Edition**: Rust 2021 (`resolver = "2"` workspace) — migration to 2024 planned
 - **Async runtime**: Tokio — use `#[tokio::main]` and `#[tokio::test]`
 - **Web framework**: Axum 0.8 with Tower middleware layers
 - **Error handling**:

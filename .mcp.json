@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "stripe": {
+      "type": "http",
+      "url": "https://mcp.stripe.com/"
+    },
+    "solana-mcp-server": {
+      "type": "http",
+      "url": "https://mcp.solana.com/mcp"
+    },
+    "helius": {
+      "command": "npx",
+      "args": ["helius-mcp@latest"],
+      "env": {
+        "HELIUS_API_KEY": "${HELIUS_API_KEY}"
+      }
+    }
+  }
+}
