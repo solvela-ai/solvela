@@ -53,3 +53,10 @@ sdks/go/vendor/
 dashboard/node_modules/
 dashboard/.next/
 dashboard/out/
+
+# Claude Code symlinked skills (from skills-pool)
+.claude/skills/memory-safety-patterns
+.claude/skills/rust-async-patterns
+.claude/skills/rust-pro
+.claude/skills/rust-router
+.claude/skills/systems-programming-rust-project

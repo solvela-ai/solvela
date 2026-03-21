@@ -16,7 +16,7 @@ RCR is one of three products under **rustyclaw.ai**:
 | **RustyClawRouter** | LLM payment gateway (this repo) | 5% fee per LLM call | Deployed on Fly.io |
 | **Telsi.ai** | Multi-tenant AI assistant SaaS | $59-229/mo (Stripe) | Live on BlockRun, planned RCR migration |
 
-**Ecosystem strategy:** See `/home/kdsky/projects/rustyclaw/docs/superpowers/specs/2026-03-17-rustyclaw-ecosystem-design.md` for full context on build-vs-adopt, GitHub strategy, Telsi migration path, and competitive landscape.
+**Ecosystem strategy:** See `/home/kennethdixon/projects/rustyclaw/docs/superpowers/specs/2026-03-17-rustyclaw-ecosystem-design.md` for full context on build-vs-adopt, GitHub strategy, Telsi migration path, and competitive landscape.
 
 ---
 
@@ -26,11 +26,11 @@ RCR is one of three products under **rustyclaw.ai**:
 
 | Phase | Description | Tests |
 |-------|-------------|-------|
-| 1 | **Core Gateway + x402 Payments** — Axum HTTP server, x402 middleware, Solana payment verification, 5 provider adapters (OpenAI, Anthropic, Google, xAI, DeepSeek), rate limiting, usage tracking | 51 gateway + 39 x402 |
-| 2 | **Smart Router + Caching** — 15-dimension scorer, 4 profiles (ECO/AUTO/PREMIUM/FREE), 10 aliases, Redis response cache, provider fallback + circuit breaker | 13 router |
-| 3 | **SDKs + CLI** — Python (63 tests), TypeScript (19 tests), Go (12 tests), Rust CLI (wallet, models, chat, health, stats, doctor) | 94 SDK tests |
+| 1 | **Core Gateway + x402 Payments** — Axum HTTP server, x402 middleware, Solana payment verification, 5 provider adapters (OpenAI, Anthropic, Google, xAI, DeepSeek), rate limiting, usage tracking | 267 gateway + 110 x402 |
+| 2 | **Smart Router + Caching** — 15-dimension scorer, 4 profiles (ECO/AUTO/PREMIUM/FREE), 10 aliases, Redis response cache, provider fallback + circuit breaker | 13 router + 18 protocol |
+| 3 | **SDKs + CLI** — Python (63 tests), TypeScript (19 tests), Go (12 tests), Rust CLI (wallet, models, chat, health, stats, doctor) | 99 cli + 94 SDK tests |
 
-**Total: 105 Rust tests + 94 SDK tests, all passing.**
+**Total: 507 Rust tests + 94 SDK tests, all passing.**
 
 ### Deployment Status (as of 2026-03-18)
 
@@ -94,14 +94,14 @@ DEEPSEEK_API_KEY              ✗ NOT SET
 
 ## Coordination with Other Projects
 
-### RustyClaw Terminal (`/home/kdsky/projects/rustyclaw`)
+### RustyClaw Terminal (`/home/kennethdixon/projects/rustyclaw`)
 - Terminal's AI agent routes through RCR via `RcrProvider` in `rclawterm-agent`
 - **Terminal backend deployed** (2026-03-18): `rclawterm-gateway.fly.dev`, 2 machines (ord), health OK
 - Terminal uses the same Upstash Redis instance (`rustyclawrouter-cache`)
 - Exchange execution disabled until Next.js app is on Vercel (`INTERNAL_API_URL` + `INTERNAL_API_KEY` not set)
 - **Next:** Deploy Next.js frontend to Vercel, set `NEXT_PUBLIC_GATEWAY_WS_URL=wss://rclawterm-gateway.fly.dev`
 
-### Telsi.ai (`/home/kdsky/projects/clawstack`)
+### Telsi.ai (`/home/kennethdixon/projects/clawstack`)
 - Currently routes through BlockRun (x402 USDC on Base chain)
 - Planned migration to RCR: Shadow → Canary → Flip → Clean
 - **Prerequisites before migration:**
@@ -129,7 +129,7 @@ crates/
   gateway/         Axum HTTP server — routes, middleware, provider adapters, cache, usage tracking
   x402/            x402 protocol — Solana payment verification, facilitator, escrow types
   router/          Smart routing — 15-dimension scorer, profiles, model registry
-  common/          Shared types — ChatRequest, ChatResponse, CostBreakdown
+  protocol/        Shared types — ChatRequest, ChatResponse, CostBreakdown (rustyclaw-protocol on crates.io)
   cli/             CLI tool (rcr) — wallet, models, chat, health, stats, doctor
 programs/
   escrow/          Anchor escrow program (Phase 4 — not started)
@@ -138,7 +138,7 @@ sdks/
   typescript/      npm install @rustyclawrouter/sdk (19 tests)
   go/              go get github.com/rustyclawrouter/sdk-go (12 tests)
 config/
-  models.toml      Model registry + pricing (15 models, 5 providers, 5% platform fee)
+  models.toml      Model registry + pricing (26 models, 5 providers, 5% platform fee)
   default.toml     Gateway configuration
   services.toml    x402 service marketplace registry (Phase 6)
 ```
@@ -202,11 +202,13 @@ fly redis list
 ## Test Commands
 
 ```bash
-# Rust (105 tests across 5 crates)
+# Rust (507 tests across 5 crates)
 cargo test                    # All crates
-cargo test -p gateway         # Gateway (39 unit + 12 integration)
-cargo test -p x402            # x402 protocol (39 tests)
+cargo test -p gateway         # Gateway (267 tests)
+cargo test -p x402            # x402 protocol (110 tests)
 cargo test -p router          # Smart router (13 tests)
+cargo test -p rcr-cli         # CLI (99 tests)
+cargo test -p rustyclaw-protocol  # Protocol (18 tests)
 
 # Lint
 cargo fmt --all -- --check
