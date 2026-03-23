@@ -107,15 +107,11 @@ pub async fn health(State(state): State<Arc<AppState>>, headers: HeaderMap) -> J
 mod tests {
     use super::*;
 
-    use std::num::NonZeroUsize;
-    use std::sync::Mutex;
-
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
     use axum::Router;
     use http_body_util::BodyExt;
-    use lru::LruCache;
     use tokio::sync::RwLock;
     use tower::ServiceExt;
 
@@ -158,7 +154,7 @@ supports_vision = false
             db_pool: None,
             session_secret: b"test-secret".to_vec(),
             http_client: reqwest::Client::new(),
-            replay_set: Mutex::new(LruCache::new(NonZeroUsize::new(100).expect("nonzero"))),
+            replay_set: AppState::new_replay_set(),
             slot_cache: new_slot_cache(),
             escrow_metrics: None,
             admin_token: None,
@@ -229,7 +225,7 @@ supports_vision = false
             db_pool: None,
             session_secret: b"test-secret".to_vec(),
             http_client: reqwest::Client::new(),
-            replay_set: Mutex::new(LruCache::new(NonZeroUsize::new(100).expect("nonzero"))),
+            replay_set: AppState::new_replay_set(),
             slot_cache: new_slot_cache(),
             escrow_metrics: None,
             admin_token: Some("test-admin-token".to_string()),

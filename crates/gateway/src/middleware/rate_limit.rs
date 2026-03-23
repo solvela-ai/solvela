@@ -67,25 +67,24 @@ impl RateLimiter {
     /// When `client_id` is `"unknown"`, applies the stricter
     /// `unknown_max_requests` limit instead of the normal `max_requests`.
     pub async fn check(&self, client_id: &str) -> Result<u32, ()> {
+        let mut entries = self.entries.lock().await;
+
         // Emergency cleanup: if the map has grown too large, evict expired
         // entries — but only if at least 60 seconds have passed since the last
         // emergency cleanup to prevent cleanup storms under sustained load.
-        {
-            let entries = self.entries.lock().await;
-            let too_large = entries.len() > 100_000;
-            drop(entries);
-            if too_large {
-                let mut last = self.last_emergency_cleanup.lock().await;
-                let should_cleanup = last.is_none_or(|t| t.elapsed() >= Duration::from_secs(60));
-                if should_cleanup {
-                    *last = Some(Instant::now());
-                    drop(last);
-                    self.cleanup().await;
-                }
+        if entries.len() > 100_000 {
+            let mut last = self.last_emergency_cleanup.lock().await;
+            let should_cleanup = last.is_none_or(|t| t.elapsed() >= Duration::from_secs(60));
+            if should_cleanup {
+                *last = Some(Instant::now());
+                drop(last);
+                let now = Instant::now();
+                entries.retain(|_, entry| {
+                    now.duration_since(entry.window_start) < self.config.window * 2
+                });
             }
         }
 
-        let mut entries = self.entries.lock().await;
         let now = Instant::now();
 
         let entry = entries

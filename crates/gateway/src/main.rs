@@ -87,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
         &app_config.solana.rpc_url,
         &app_config.solana.recipient_wallet,
         &app_config.solana.usdc_mint,
+        http_client.clone(),
     ) {
         Ok(v) => {
             if app_config.solana.rpc_url.contains("devnet") {
@@ -119,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
                 "https://api.devnet.solana.com",
                 "11111111111111111111111111111111",
                 "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                http_client.clone(),
             )
             .expect("default verifier config must be valid")
         }
@@ -196,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
             recipient_wallet: app_config.solana.recipient_wallet.clone(),
             usdc_mint: app_config.solana.usdc_mint.clone(),
             escrow_program_id: prog_id.clone(),
-            http_client: reqwest::Client::new(),
+            http_client: http_client.clone(),
         };
         verifiers.push(Arc::new(escrow_verifier));
 

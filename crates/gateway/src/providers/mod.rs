@@ -72,7 +72,7 @@ pub fn spawn_openai_sse_parser(response: reqwest::Response) -> ChatStream {
 
                     while let Some(pos) = buffer.find("\n\n") {
                         let event = buffer[..pos].to_string();
-                        buffer = buffer[pos + 2..].to_string();
+                        buffer.drain(..pos + 2);
 
                         for line in event.lines() {
                             if let Some(data) = line.strip_prefix("data: ") {
@@ -200,33 +200,39 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T, reqwest::Error>>,
 {
-    let mut last_err = None;
-    for attempt in 0..=max_retries {
+    // Run the first attempt outside the retry loop so we always have a concrete
+    // error value to return, avoiding `Option::unwrap()` on `last_err`.
+    let mut last_err = match f().await {
+        Ok(val) => return Ok(val),
+        Err(e) => e,
+    };
+
+    for attempt in 1..=max_retries {
+        let is_transient = last_err.is_timeout()
+            || last_err.is_connect()
+            || last_err.status().is_some_and(|s| s.is_server_error());
+
+        if !is_transient {
+            return Err(last_err);
+        }
+
+        let delay = Duration::from_secs(1 << (attempt - 1)); // 1s, 2s, …
+        tracing::warn!(
+            attempt = attempt,
+            max_retries = max_retries,
+            error = %last_err,
+            "provider request failed, retrying after {}s",
+            delay.as_secs()
+        );
+        tokio::time::sleep(delay).await;
+
         match f().await {
             Ok(val) => return Ok(val),
-            Err(e) => {
-                let is_transient = e.is_timeout()
-                    || e.is_connect()
-                    || e.status().is_some_and(|s| s.is_server_error());
-
-                if attempt < max_retries && is_transient {
-                    let delay = Duration::from_secs(1 << attempt); // 1s, 2s
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        max_retries = max_retries,
-                        error = %e,
-                        "provider request failed, retrying after {}s",
-                        delay.as_secs()
-                    );
-                    tokio::time::sleep(delay).await;
-                    last_err = Some(e);
-                } else {
-                    return Err(e);
-                }
-            }
+            Err(e) => last_err = e,
         }
     }
-    Err(last_err.unwrap())
+
+    Err(last_err)
 }
 
 #[cfg(test)]

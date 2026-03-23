@@ -41,7 +41,13 @@ impl SolanaVerifier {
     /// * `rpc_url` - Solana RPC endpoint URL
     /// * `recipient` - The gateway's USDC recipient wallet address
     /// * `usdc_mint` - The USDC-SPL mint address
-    pub fn new(rpc_url: &str, recipient: &str, usdc_mint: &str) -> Result<Self, Error> {
+    /// * `http_client` - Shared HTTP client for JSON-RPC calls (reuse across subsystems)
+    pub fn new(
+        rpc_url: &str,
+        recipient: &str,
+        usdc_mint: &str,
+        http_client: reqwest::Client,
+    ) -> Result<Self, Error> {
         let recipient =
             Pubkey::from_str(recipient).map_err(|e| Error::InvalidTransaction(e.to_string()))?;
 
@@ -50,7 +56,7 @@ impl SolanaVerifier {
 
         Ok(Self {
             rpc_url: rpc_url.to_string(),
-            http_client: reqwest::Client::new(),
+            http_client,
             recipient,
             usdc_mint,
             nonce_pool: None,
@@ -216,11 +222,15 @@ impl SolanaVerifier {
             })
     }
 
-    /// Poll for transaction confirmation with a timeout.
+    /// Poll for transaction confirmation with a timeout and exponential backoff.
+    ///
+    /// Starts polling at 500ms intervals, doubling up to a 4s cap. The overall
+    /// timeout (default 30s) is unchanged — only the inter-poll interval grows.
     async fn confirm_transaction(&self, signature: &str, timeout_secs: u64) -> Result<(), Error> {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(timeout_secs);
-        let poll_interval = std::time::Duration::from_millis(500);
+        let mut interval = std::time::Duration::from_millis(500);
+        let max_interval = std::time::Duration::from_secs(4);
 
         loop {
             if start.elapsed() > timeout {
@@ -256,7 +266,8 @@ impl SolanaVerifier {
                 }
             }
 
-            tokio::time::sleep(poll_interval).await;
+            tokio::time::sleep(interval).await;
+            interval = (interval * 2).min(max_interval);
         }
     }
 
@@ -521,6 +532,7 @@ mod tests {
             "https://api.devnet.solana.com",
             TEST_RECIPIENT,
             TEST_USDC_MINT,
+            reqwest::Client::new(),
         )
         .expect("failed to create test verifier")
     }
@@ -654,6 +666,7 @@ mod tests {
             "https://api.devnet.solana.com",
             "not-a-valid-pubkey",
             TEST_USDC_MINT,
+            reqwest::Client::new(),
         );
         assert!(result.is_err());
     }
