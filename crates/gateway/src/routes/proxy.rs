@@ -11,12 +11,10 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use base64::Engine;
 use metrics::{counter, histogram};
 use serde_json::json;
 use tracing::{info, warn};
 
-use x402::solana_types::VersionedTransaction;
 use x402::types::{
     CostBreakdown, PaymentAccept, PaymentRequired, Resource, PLATFORM_FEE_PERCENT, SOLANA_NETWORK,
     USDC_MINT, X402_VERSION,
@@ -24,6 +22,7 @@ use x402::types::{
 
 use crate::error::GatewayError;
 use crate::middleware::x402::decode_payment_header;
+use crate::payment_util::extract_payer_wallet;
 use crate::security;
 use crate::usage::SpendLogEntry;
 use crate::AppState;
@@ -41,39 +40,6 @@ fn compute_service_cost_atomic(price_usdc: f64) -> u64 {
     let provider_atomic = (price_usdc * 1_000_000.0).round() as u64;
     // 5% platform fee: total = provider * 105 / 100
     provider_atomic * 105 / 100
-}
-
-/// Extract the payer wallet address from a payment payload.
-///
-/// For escrow payments, uses the `agent_pubkey` field (the depositor).
-/// For direct payments, decodes the base64 transaction and extracts the
-/// first account key (the fee payer / signer in Solana transactions).
-/// Returns "unknown" if extraction fails.
-fn extract_payer_wallet(payload: &x402::types::PaymentPayload) -> String {
-    match &payload.payload {
-        x402::types::PayloadData::Escrow(p) => p.agent_pubkey.clone(),
-        x402::types::PayloadData::Direct(p) => {
-            // Decode base64 transaction and extract first signer (fee payer)
-            extract_signer_from_base64_tx(&p.transaction).unwrap_or_else(|| "unknown".to_string())
-        }
-    }
-}
-
-/// Attempt to extract the first signer (fee payer) public key from a
-/// base64-encoded Solana versioned transaction.
-fn extract_signer_from_base64_tx(b64_tx: &str) -> Option<String> {
-    let tx_bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64_tx)
-        .map_err(|e| warn!(error = %e, "failed to base64-decode transaction"))
-        .ok()?;
-    let tx = VersionedTransaction::from_bytes(&tx_bytes)
-        .map_err(|e| warn!(error = %e, "failed to deserialize VersionedTransaction"))
-        .ok()?;
-    let msg = tx
-        .parse_message()
-        .map_err(|e| warn!(error = %e, "failed to parse transaction message"))
-        .ok()?;
-    msg.account_keys.first().map(|pk| pk.to_string())
 }
 
 /// POST /v1/services/{service_id}/proxy — proxy a paid request to an external service.
@@ -292,7 +258,7 @@ pub async fn proxy_service(
         if replay_set.get(tx_raw).is_some() {
             true
         } else {
-            replay_set.put(tx_raw.to_string(), ());
+            replay_set.put(tx_raw.to_string(), std::time::Instant::now());
             warn!(
                 tx = %tx_raw,
                 "payment accepted under degraded in-memory replay protection (no Redis)"
@@ -345,58 +311,48 @@ pub async fn proxy_service(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
-    // Step 5: SSRF check — re-validate the endpoint at proxy time (defense in depth
-    // against DNS rebinding between registration and request).
-    //
-    // SECURITY NOTE (TOCTOU / DNS rebinding): There is a time-of-check to
-    // time-of-use gap between this DNS resolution and the subsequent HTTP
-    // request via reqwest, which resolves DNS independently. A sophisticated
-    // attacker controlling DNS could return a public IP here and a private IP
-    // for the actual connection. Fully closing this gap requires resolving
-    // DNS once, checking the IP, then connecting to that IP directly (e.g.,
-    // via reqwest's `resolve()` builder on a per-request client). The current
-    // dual-check (registration-time + request-time) mitigates most practical
-    // attacks but does not eliminate the theoretical TOCTOU window.
-    match security::is_private_endpoint(&service.endpoint).await {
-        Ok(true) => {
-            warn!(
-                service_id = %service_id,
-                endpoint = %service.endpoint,
-                "SSRF blocked: service endpoint resolves to a private address"
-            );
-            return Err(GatewayError::BadRequest(
-                "service endpoint resolves to a private or internal network address".to_string(),
-            ));
-        }
-        Err(e) => {
-            warn!(
-                service_id = %service_id,
-                endpoint = %service.endpoint,
-                error = %e,
-                "SSRF check failed: could not validate service endpoint"
-            );
-            return Err(GatewayError::Internal(format!(
-                "failed to validate service endpoint: {e}"
-            )));
-        }
-        Ok(false) => { /* public address — proceed */ }
-    }
+    // Step 5: SSRF check — resolve DNS once, validate all addresses are public,
+    // then pin the validated IP into a per-request reqwest client. This eliminates
+    // the TOCTOU / DNS rebinding window where an attacker controlling DNS could
+    // return a public IP for the check and a private IP for the actual connection.
+    let (validated_host, validated_addr) =
+        match security::resolve_and_validate_endpoint(&service.endpoint).await {
+            Ok(result) => result,
+            Err(e) => {
+                warn!(
+                    service_id = %service_id,
+                    endpoint = %service.endpoint,
+                    error = %e,
+                    "SSRF blocked: service endpoint failed validation"
+                );
+                return Err(GatewayError::BadRequest(format!(
+                    "service endpoint resolves to a private or internal network address: {e}"
+                )));
+            }
+        };
 
     // Step 6: Forward request to upstream service
     info!(
         service_id = %service_id,
         endpoint = %service.endpoint,
-        "forwarding request to external service"
+        resolved_ip = %validated_addr,
+        "forwarding request to external service (DNS pinned)"
     );
+
+    // Build a per-request client that pins the validated DNS resolution,
+    // preventing DNS rebinding between the SSRF check and the connection.
+    let pinned_client = reqwest::Client::builder()
+        .resolve(&validated_host, validated_addr)
+        .build()
+        .map_err(|e| GatewayError::Internal(format!("HTTP client error: {e}")))?;
 
     // Collect the body bytes to forward
     let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024)
         .await
         .map_err(|e| GatewayError::BadRequest(format!("failed to read request body: {e}")))?;
 
-    // Build upstream request
-    let mut upstream_req = state
-        .http_client
+    // Build upstream request using the DNS-pinned client
+    let mut upstream_req = pinned_client
         .post(&service.endpoint)
         .timeout(PROXY_TIMEOUT)
         .body(body_bytes.clone());
@@ -507,6 +463,7 @@ pub async fn proxy_service(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::payment_util::extract_signer_from_base64_tx;
 
     #[test]
     fn test_compute_service_cost_atomic_basic() {

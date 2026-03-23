@@ -1,0 +1,40 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { Sidebar } from "./sidebar";
+import { Menu } from "lucide-react";
+
+export function Shell({ children }: { children: React.ReactNode }) {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSidebarOpen(false);
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [sidebarOpen]);
+
+  return (
+    <div className="flex h-screen overflow-hidden">
+      <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Mobile-only hamburger bar */}
+        <div className="flex items-center gap-3 border-b border-gray-200 bg-white px-4 py-3 md:hidden">
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="rounded-lg p-1.5 text-gray-600 hover:bg-gray-50"
+            aria-label="Open menu"
+          >
+            <Menu size={20} />
+          </button>
+          <span className="text-sm font-semibold text-gray-900">RustyClawRouter</span>
+        </div>
+
+        <main className="flex-1 overflow-y-auto">{children}</main>
+      </div>
+    </div>
+  );
+}

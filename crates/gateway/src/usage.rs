@@ -325,12 +325,12 @@ impl UsageTracker {
     pub async fn get_summary(&self, wallet_address: &str) -> Result<SpendSummary, UsageError> {
         if let Some(pool) = &self.db_pool {
             let row: (i64, i64, i64, f64) = sqlx::query_as(
-                r#"SELECT 
+                r#"SELECT
                     COUNT(*) as total_requests,
                     COALESCE(SUM(input_tokens), 0) as total_input,
                     COALESCE(SUM(output_tokens), 0) as total_output,
                     COALESCE(SUM(cost_usdc), 0.0) as total_cost
-                FROM spend_logs 
+                FROM spend_logs
                 WHERE wallet_address = $1"#,
             )
             .bind(wallet_address)
@@ -344,8 +344,10 @@ impl UsageTracker {
                 total_input_tokens: row.1 as u64,
                 total_output_tokens: row.2 as u64,
                 total_cost_usdc: row.3,
-                daily_cost_usdc: 0.0,   // Would query Redis
-                monthly_cost_usdc: 0.0, // Would query Redis
+                // TODO: Query Redis daily/monthly spend counters to populate these fields.
+                // Currently returns 0.0 — see backend audit Q5.
+                daily_cost_usdc: 0.0,
+                monthly_cost_usdc: 0.0,
             });
         }
 
@@ -494,6 +496,9 @@ CREATE TABLE IF NOT EXISTS spend_logs (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Reserved for future per-wallet budget customization (see backend audit Q4).
+-- Currently created but not queried; budget enforcement uses a hardcoded
+-- $100/day limit checked against Redis spend counters in check_budget().
 CREATE TABLE IF NOT EXISTS wallet_budgets (
     wallet_address TEXT PRIMARY KEY,
     daily_limit_usdc DECIMAL(18, 6),

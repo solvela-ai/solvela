@@ -3,7 +3,7 @@
 //! Provides constant-time token comparison and SSRF prevention via private
 //! network detection.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 /// Constant-time byte comparison to prevent timing attacks on secret tokens.
 ///
@@ -75,6 +75,64 @@ pub async fn is_private_endpoint(url: &str) -> Result<bool, String> {
     }
 
     Ok(false)
+}
+
+/// Resolve a URL's hostname and validate that all resolved addresses are public.
+///
+/// Returns the hostname and the first validated public `SocketAddr`. This
+/// allows callers to pin DNS resolution into the HTTP client via
+/// `reqwest::ClientBuilder::resolve()`, eliminating the TOCTOU / DNS rebinding
+/// window between the SSRF check and the actual connection.
+///
+/// # Errors
+///
+/// Returns `Err` if the URL is malformed, has no host, resolves to a private
+/// address, or DNS resolution fails entirely.
+pub async fn resolve_and_validate_endpoint(url: &str) -> Result<(String, SocketAddr), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?;
+
+    // Reject localhost hostname before DNS resolution
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err("endpoint resolves to a private address (localhost)".to_string());
+    }
+
+    let port = parsed.port_or_known_default().unwrap_or(443);
+
+    // If the host is already an IP address, check it directly without DNS
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_ip(ip) {
+            return Err(format!("endpoint resolves to a private address ({ip})"));
+        }
+        return Ok((host.to_string(), SocketAddr::new(ip, port)));
+    }
+
+    let lookup_addr = format!("{host}:{port}");
+
+    let addrs: Vec<SocketAddr> = match tokio::net::lookup_host(&lookup_addr).await {
+        Ok(addrs) => addrs.collect(),
+        Err(e) => return Err(format!("DNS resolution failed for {host}: {e}")),
+    };
+
+    if addrs.is_empty() {
+        return Err(format!("DNS resolution returned no addresses for {host}"));
+    }
+
+    // Reject if ANY resolved address is private (defense in depth)
+    for addr in &addrs {
+        if is_private_ip(addr.ip()) {
+            return Err(format!(
+                "endpoint resolves to a private address ({})",
+                addr.ip()
+            ));
+        }
+    }
+
+    // Return the first validated public address for DNS pinning
+    Ok((host.to_string(), addrs[0]))
 }
 
 /// Returns `true` if the IP address is in a private, loopback, link-local,
@@ -256,5 +314,54 @@ mod tests {
     #[tokio::test]
     async fn test_no_host_returns_error() {
         assert!(is_private_endpoint("file:///etc/passwd").await.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_and_validate_endpoint
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_resolve_localhost_rejected() {
+        assert!(resolve_and_validate_endpoint("https://localhost:8080/api")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_loopback_ip_rejected() {
+        assert!(resolve_and_validate_endpoint("https://127.0.0.1:8080/api")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_private_ip_rejected() {
+        assert!(resolve_and_validate_endpoint("https://10.0.0.1/internal")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_metadata_rejected() {
+        assert!(
+            resolve_and_validate_endpoint("http://169.254.169.254/latest/meta-data")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_invalid_url_rejected() {
+        assert!(resolve_and_validate_endpoint("not-a-url").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_public_ip_returns_socket_addr() {
+        let result = resolve_and_validate_endpoint("https://8.8.8.8:443/test").await;
+        assert!(result.is_ok());
+        let (host, addr) = result.unwrap();
+        assert_eq!(host, "8.8.8.8");
+        assert_eq!(addr.ip().to_string(), "8.8.8.8");
+        assert_eq!(addr.port(), 443);
     }
 }

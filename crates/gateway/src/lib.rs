@@ -8,6 +8,7 @@ pub mod cache;
 pub mod config;
 pub mod error;
 pub mod middleware;
+pub mod payment_util;
 pub mod providers;
 pub mod routes;
 pub mod security;
@@ -63,8 +64,9 @@ pub struct AppState {
     /// HMAC secret for signing/verifying session tokens.
     pub session_secret: Vec<u8>,
     /// In-memory replay protection fallback used when Redis (`cache`) is absent.
-    /// LRU-bounded to 10,000 entries so the oldest signatures are evicted first.
-    pub replay_set: Mutex<LruCache<String, ()>>,
+    /// LRU-bounded to 10,000 entries with 120-second TTL so stale signatures
+    /// are treated as expired and the oldest entries are evicted first.
+    pub replay_set: Mutex<LruCache<String, std::time::Instant>>,
     /// Shared HTTP client for outbound requests (e.g., Solana RPC slot fetch).
     pub http_client: reqwest::Client,
     /// Cached Solana slot for the `/v1/escrow/config` endpoint (5s TTL).
@@ -86,8 +88,11 @@ impl AppState {
     /// Default capacity for the in-memory replay protection LRU cache.
     const REPLAY_SET_CAPACITY: usize = 10_000;
 
+    /// TTL for in-memory replay entries (120 seconds matches Solana blockhash lifetime).
+    pub const REPLAY_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
     /// Create a new in-memory replay LRU cache with the default capacity.
-    pub fn new_replay_set() -> Mutex<LruCache<String, ()>> {
+    pub fn new_replay_set() -> Mutex<LruCache<String, std::time::Instant>> {
         Mutex::new(LruCache::new(
             NonZeroUsize::new(Self::REPLAY_SET_CAPACITY).expect("nonzero"),
         ))

@@ -230,7 +230,7 @@ fn spawn_anthropic_sse_parser(response: reqwest::Response, model: String) -> Cha
 
                     while let Some(pos) = buffer.find("\n\n") {
                         let event_block = buffer[..pos].to_string();
-                        buffer = buffer[pos + 2..].to_string();
+                        buffer.drain(..pos + 2);
 
                         let mut event_type = None;
                         let mut data_str = None;
