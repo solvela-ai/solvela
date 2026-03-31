@@ -329,7 +329,7 @@ impl UsageTracker {
                     COUNT(*) as total_requests,
                     COALESCE(SUM(input_tokens), 0) as total_input,
                     COALESCE(SUM(output_tokens), 0) as total_output,
-                    COALESCE(SUM(cost_usdc), 0.0) as total_cost
+                    COALESCE(SUM(cost_usdc), 0.0)::DOUBLE PRECISION as total_cost
                 FROM spend_logs
                 WHERE wallet_address = $1"#,
             )
@@ -394,7 +394,7 @@ pub async fn get_wallet_stats(
 ) -> Result<WalletStatsSummary, sqlx::Error> {
     let row: (i64, f64, i64, i64) = sqlx::query_as(
         r#"SELECT COUNT(*) as total_requests,
-                  COALESCE(SUM(cost_usdc), 0) as total_cost,
+                  COALESCE(SUM(cost_usdc), 0)::DOUBLE PRECISION as total_cost,
                   COALESCE(SUM(input_tokens), 0) as total_input,
                   COALESCE(SUM(output_tokens), 0) as total_output
            FROM spend_logs
@@ -422,7 +422,7 @@ pub async fn get_stats_by_model(
 ) -> Result<Vec<StatsModelRow>, sqlx::Error> {
     let rows: Vec<(String, i64, f64, i64, i64)> = sqlx::query_as(
         r#"SELECT model, COUNT(*) as requests,
-                  COALESCE(SUM(cost_usdc), 0) as cost,
+                  COALESCE(SUM(cost_usdc), 0)::DOUBLE PRECISION as cost,
                   COALESCE(SUM(input_tokens), 0) as input_tokens,
                   COALESCE(SUM(output_tokens), 0) as output_tokens
            FROM spend_logs
@@ -458,7 +458,7 @@ pub async fn get_stats_by_day(
     let rows: Vec<(chrono::NaiveDate, i64, f64)> = sqlx::query_as(
         r#"SELECT DATE(created_at) as date,
                   COUNT(*) as requests,
-                  COALESCE(SUM(cost_usdc), 0) as cost
+                  COALESCE(SUM(cost_usdc), 0)::DOUBLE PRECISION as cost
            FROM spend_logs
            WHERE wallet_address = $1
              AND created_at >= NOW() - make_interval(days => $2)
