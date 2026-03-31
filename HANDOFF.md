@@ -112,16 +112,17 @@ RCR_SOLANA__FEE_PAYER_KEY     ✅
 OPENAI_API_KEY                ✅ (set 2026-03-18)
 GOOGLE_API_KEY                ✅ (set 2026-03-18)
 RCR_INTERNAL_SERVICE_KEY      ✅ (shared with rclawterm-gateway)
-ANTHROPIC_API_KEY             ✗ NOT SET
-XAI_API_KEY                   ✗ NOT SET
-DEEPSEEK_API_KEY              ✗ NOT SET
+RCR_ADMIN_TOKEN               ✅ (rotated 2026-03-31)
+ANTHROPIC_API_KEY             ✅ (set 2026-03-31)
+XAI_API_KEY                   ✅ (set 2026-03-31)
+DEEPSEEK_API_KEY              ✅ (set 2026-03-31)
 ```
 
 ### Deployment Blockers
 
 | # | Blocker | Severity | Status |
 |---|---------|----------|--------|
-| 1 | Fee-payer wallet has 0 SOL | LOW | Soft enforcement — requests proceed. Fund ~0.1 SOL when ready for real settlement |
+| 1 | ~~Fee-payer wallet has 0 SOL~~ | LOW | RESOLVED — Fee-payer wallet funded with 0.09 SOL (2026-03-31) |
 
 ---
 
@@ -131,6 +132,7 @@ DEEPSEEK_API_KEY              ✗ NOT SET
 - Terminal's AI agent routes through RCR via `RcrProvider` in `rclawterm-agent`
 - **Terminal backend deployed** (2026-03-18): `rclawterm-gateway.fly.dev`, 2 machines (ord), health OK
 - Terminal uses the same Upstash Redis instance (`rustyclawrouter-cache`)
+- **Terminal wired to RCR** (2026-03-31): Removed direct ANTHROPIC_API_KEY from rclawterm-gateway. All Terminal LLM traffic now routes through RCR.
 - **Next:** Deploy Next.js frontend to Vercel
 
 ### Telsi.ai (`/home/kennethdixon/projects/clawstack`)
@@ -275,15 +277,15 @@ cd sdks/go && go test ./...              # 12 tests
 1. ~~Dashboard → real API integration~~ **DONE 2026-03-29**
 2. ~~Redeploy gateway with Dockerfile fix~~ **DONE 2026-03-31**
 3. Deploy dashboard to Vercel (set `NEXT_PUBLIC_GATEWAY_URL` + `GATEWAY_ADMIN_KEY`)
-4. Set missing provider API keys on Fly.io: `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`
-5. Enterprise features (team billing, SSO, audit logs)
+4. ~~Set missing provider API keys~~ **DONE 2026-03-31** (Anthropic, xAI, DeepSeek)
+5. ~~Fund fee-payer wallet~~ **DONE 2026-03-31** (0.09 SOL)
+6. ~~Wire Terminal → RCR~~ **DONE 2026-03-31** (removed direct Anthropic key from rclawterm-gateway)
+7. Enterprise features (team billing, SSO, audit logs)
 
 **Infrastructure:**
-6. Fund fee-payer wallet (~0.1 SOL for real settlement)
-7. Load testing
-8. LiteSVM integration tests for escrow program
+8. Load testing
+9. LiteSVM integration tests for escrow program
 
 **Strategic:**
-9. Wire Terminal → RCR for real traffic
 10. Consider AP2 compatibility and x402 V2 migration
 11. Multi-chain support (Base/EVM) — trait ready, implementation deferred
