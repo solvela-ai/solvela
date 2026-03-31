@@ -38,3 +38,5 @@ anchor-lang = { version = "0.31.1" }
 # Requires anchor build to produce a .so first; tests skip gracefully without it
 litesvm = "0.6.1"
 solana-sdk = "2.2"
+spl-token = "7"
+spl-associated-token-account = "6"
