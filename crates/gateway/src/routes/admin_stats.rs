@@ -271,7 +271,7 @@ struct AdminWalletRow {
 async fn get_admin_summary(pool: &sqlx::PgPool, days: i32) -> Result<AdminSummaryRow, sqlx::Error> {
     let row: (i64, f64, i64, i64, i64) = sqlx::query_as(
         r#"SELECT COUNT(*) as total_requests,
-                  COALESCE(SUM(cost_usdc), 0) as total_cost,
+                  COALESCE(SUM(cost_usdc), 0)::DOUBLE PRECISION as total_cost,
                   COALESCE(SUM(input_tokens), 0) as total_input,
                   COALESCE(SUM(output_tokens), 0) as total_output,
                   COUNT(DISTINCT wallet_address) as unique_wallets
@@ -298,7 +298,7 @@ async fn get_admin_stats_by_model(
 ) -> Result<Vec<AdminModelRow>, sqlx::Error> {
     let rows: Vec<(String, String, i64, f64, i64, i64)> = sqlx::query_as(
         r#"SELECT model, provider, COUNT(*) as requests,
-                  COALESCE(SUM(cost_usdc), 0) as cost,
+                  COALESCE(SUM(cost_usdc), 0)::DOUBLE PRECISION as cost,
                   COALESCE(SUM(input_tokens), 0) as input_tokens,
                   COALESCE(SUM(output_tokens), 0) as output_tokens
            FROM spend_logs
@@ -333,7 +333,7 @@ async fn get_admin_stats_by_day(
     let rows: Vec<(chrono::NaiveDate, i64, f64)> = sqlx::query_as(
         r#"SELECT DATE(created_at) as date,
                   COUNT(*) as requests,
-                  COALESCE(SUM(cost_usdc), 0) as cost
+                  COALESCE(SUM(cost_usdc), 0)::DOUBLE PRECISION as cost
            FROM spend_logs
            WHERE created_at >= NOW() - make_interval(days => $1)
            GROUP BY DATE(created_at)
@@ -360,7 +360,7 @@ async fn get_admin_top_wallets(
 ) -> Result<Vec<AdminWalletRow>, sqlx::Error> {
     let rows: Vec<(String, i64, f64)> = sqlx::query_as(
         r#"SELECT wallet_address, COUNT(*) as requests,
-                  COALESCE(SUM(cost_usdc), 0) as cost
+                  COALESCE(SUM(cost_usdc), 0)::DOUBLE PRECISION as cost
            FROM spend_logs
            WHERE created_at >= NOW() - make_interval(days => $1)
            GROUP BY wallet_address
