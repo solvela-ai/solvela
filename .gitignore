@@ -60,3 +60,5 @@ dashboard/out/
 .claude/skills/rust-pro
 .claude/skills/rust-router
 .claude/skills/systems-programming-rust-project
+.vercel
+.env*.local

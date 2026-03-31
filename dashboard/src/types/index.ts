@@ -81,3 +81,78 @@ export interface DashboardStats {
   activeModels: number;
   walletBalance: number;
 }
+
+// ─── Admin Stats API types ──────────────────────────────────────────────────
+
+export interface AdminStatsSummary {
+  total_requests: number;
+  total_cost_usdc: string;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  unique_wallets: number;
+  cache_hit_rate: number | null;
+}
+
+export interface AdminModelStats {
+  model: string;
+  provider: string;
+  requests: number;
+  cost_usdc: string;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+export interface AdminDayStats {
+  date: string;
+  requests: number;
+  cost_usdc: string;
+  spend: number;
+}
+
+export interface AdminWalletStats {
+  wallet: string;
+  requests: number;
+  cost_usdc: string;
+}
+
+export interface AdminStatsResponse {
+  period_days: number;
+  summary: AdminStatsSummary;
+  by_model: AdminModelStats[];
+  by_day: AdminDayStats[];
+  top_wallets: AdminWalletStats[];
+}
+
+// ─── Services API types ─────────────────────────────────────────────────────
+
+export interface ServiceEntry {
+  id: string;
+  name: string;
+  description: string;
+  endpoint: string;
+  [key: string]: unknown;
+}
+
+export interface ServicesResponse {
+  object: "list";
+  data: ServiceEntry[];
+  total: number;
+}
+
+// ─── Escrow API types ───────────────────────────────────────────────────────
+
+export interface EscrowConfig {
+  escrow_program_id: string;
+  current_slot: number;
+  network: string;
+  usdc_mint: string;
+  provider_wallet: string;
+}
+
+export interface EscrowHealth {
+  status: string;
+  escrow_enabled: boolean;
+  claim_processor_running: boolean;
+  fee_payer_wallets: unknown;
+  claims: unknown;
+}

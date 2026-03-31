@@ -5,15 +5,26 @@ import { Copy, Check, ExternalLink, ArrowUpRight } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { StatusDot } from "@/components/ui/status-dot";
 import { WALLET_TXS, DASHBOARD_STATS } from "@/lib/mock-data";
-import { formatUSDC } from "@/lib/utils";
+import { formatUSDC, formatNumber } from "@/lib/utils";
+import type { EscrowConfig } from "@/types";
+
+interface WalletPageClientProps {
+  recipientWallet: string;
+  totalSpend?: number;
+  topWallets?: Array<{ wallet: string; requests: number; cost: number }>;
+  escrowConfig?: EscrowConfig | null;
+  usingMockData?: boolean;
+}
 
 export function WalletPageClient({
   recipientWallet,
-}: {
-  recipientWallet: string;
-}) {
+  totalSpend,
+  topWallets,
+  escrowConfig,
+  usingMockData = false,
+}: WalletPageClientProps) {
   const [copied, setCopied] = useState(false);
-  const balance = DASHBOARD_STATS.walletBalance;
+  const balance = totalSpend ?? DASHBOARD_STATS.walletBalance;
   const addr = recipientWallet;
   const isConfigured = addr.length > 20 && !addr.startsWith("Configure");
   const short = isConfigured
@@ -30,12 +41,14 @@ export function WalletPageClient({
           <div className="flex items-start justify-between">
             <div>
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
-                USDC Balance
+                {topWallets ? "Total Platform Spend" : "USDC Balance"}
               </p>
               <p className="mt-1 text-4xl font-bold text-gray-900 tabular-nums">
                 {formatUSDC(balance, 2)}
               </p>
-              <p className="mt-0.5 text-sm text-gray-500">≈ {balance.toFixed(2)} USDC on Solana mainnet</p>
+              <p className="mt-0.5 text-sm text-gray-500">
+                {topWallets ? "USDC on Solana mainnet (last 30 days)" : `≈ ${balance.toFixed(2)} USDC on Solana mainnet`}
+              </p>
             </div>
             <StatusDot status="ok" label="Connected" />
           </div>
@@ -51,7 +64,7 @@ export function WalletPageClient({
                 if (isConfigured) {
                   navigator.clipboard.writeText(addr).then(
                     () => { setCopied(true); setTimeout(() => setCopied(false), 1500); },
-                    () => { /* clipboard failed, silently ignore */ }
+                    (err) => { console.warn("[WalletPage] Clipboard write failed:", err); }
                   );
                 }
               }}
@@ -69,6 +82,125 @@ export function WalletPageClient({
             </a>
           </div>
         </div>
+
+        {/* Escrow config (if available) */}
+        {escrowConfig && (
+          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+            <h2 className="text-sm font-semibold text-gray-900 mb-3">
+              Escrow Configuration
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div>
+                <p className="text-xs text-gray-500">Network</p>
+                <p className="font-medium text-gray-900">{escrowConfig.network}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Current Slot</p>
+                <p className="font-medium text-gray-900 tabular-nums">{formatNumber(escrowConfig.current_slot)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">USDC Mint</p>
+                <code className="text-xs font-mono text-gray-700">{escrowConfig.usdc_mint}</code>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Program ID</p>
+                <code className="text-xs font-mono text-gray-700">{escrowConfig.escrow_program_id}</code>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Top wallets table (from API) or recent transactions (mock fallback) */}
+        {topWallets ? (
+          <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+            <div className="px-5 py-4 border-b border-gray-100">
+              <h2 className="text-sm font-semibold text-gray-900">
+                Top Wallets
+              </h2>
+            </div>
+            <div className="divide-y divide-gray-100">
+              {topWallets.map((w) => (
+                <div
+                  key={w.wallet}
+                  className="flex items-center gap-4 px-5 py-3 hover:bg-gray-50 transition-colors"
+                >
+                  <code className="text-xs font-mono text-gray-600 min-w-0 truncate">
+                    {w.wallet}
+                  </code>
+                  <div className="ml-auto flex items-center gap-6">
+                    <span className="text-sm font-medium text-gray-900 tabular-nums">
+                      {formatUSDC(w.cost, 4)}
+                    </span>
+                    <span className="text-xs text-gray-400 tabular-nums">
+                      {formatNumber(w.requests)} req
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          /* Fallback: mock transaction history */
+          <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+            <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-900">
+                Recent Transactions
+              </h2>
+              <a
+                href={`https://solscan.io/account/${addr}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-xs text-blue-600 hover:underline"
+              >
+                View all <ExternalLink size={10} />
+              </a>
+            </div>
+            <div className="divide-y divide-gray-100">
+              {WALLET_TXS.map((tx) => (
+                <div
+                  key={tx.signature}
+                  className="flex items-center gap-4 px-5 py-3 hover:bg-gray-50 transition-colors"
+                >
+                  <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-orange-50 text-orange-600">
+                    <ArrowUpRight size={14} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">
+                      {tx.model}
+                    </p>
+                    <p className="text-xs text-gray-400">
+                      {tx.timestamp} ·{" "}
+                      <a
+                        href={`https://solscan.io/tx/${tx.signature}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="hover:underline text-blue-500"
+                      >
+                        {tx.signature}
+                      </a>
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm font-medium text-gray-900 tabular-nums">
+                      −${tx.amount}
+                    </p>
+                    <p className="text-xs text-gray-400">USDC</p>
+                  </div>
+                  <StatusDot
+                    status={
+                      tx.status === "confirmed"
+                        ? "ok"
+                        : tx.status === "pending"
+                        ? "degraded"
+                        : "down"
+                    }
+                    label={tx.status}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Funding instructions */}
         <div className="rounded-xl border border-blue-100 bg-blue-50 p-5">
@@ -93,67 +225,6 @@ export function WalletPageClient({
               Payments are deducted automatically per API call via x402 protocol
             </li>
           </ol>
-        </div>
-
-        {/* Transaction history */}
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-          <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-900">
-              Recent Transactions
-            </h2>
-            <a
-              href={`https://solscan.io/account/${addr}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 text-xs text-blue-600 hover:underline"
-            >
-              View all <ExternalLink size={10} />
-            </a>
-          </div>
-          <div className="divide-y divide-gray-100">
-            {WALLET_TXS.map((tx) => (
-              <div
-                key={tx.signature}
-                className="flex items-center gap-4 px-5 py-3 hover:bg-gray-50 transition-colors"
-              >
-                <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-orange-50 text-orange-600">
-                  <ArrowUpRight size={14} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900 truncate">
-                    {tx.model}
-                  </p>
-                  <p className="text-xs text-gray-400">
-                    {tx.timestamp} ·{" "}
-                    <a
-                      href={`https://solscan.io/tx/${tx.signature}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="hover:underline text-blue-500"
-                    >
-                      {tx.signature}
-                    </a>
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className="text-sm font-medium text-gray-900 tabular-nums">
-                    −${tx.amount}
-                  </p>
-                  <p className="text-xs text-gray-400">USDC</p>
-                </div>
-                <StatusDot
-                  status={
-                    tx.status === "confirmed"
-                      ? "ok"
-                      : tx.status === "pending"
-                      ? "degraded"
-                      : "down"
-                  }
-                  label={tx.status}
-                />
-              </div>
-            ))}
-          </div>
         </div>
       </div>
     </div>

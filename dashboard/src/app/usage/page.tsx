@@ -1,16 +1,71 @@
+import { AlertTriangle } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { ModelPie } from "@/components/charts/model-pie";
 import { SpendChart } from "@/components/charts/spend-chart";
 import { Badge } from "@/components/ui/badge";
 import { MODEL_USAGE, SPEND_HISTORY } from "@/lib/mock-data";
+import { fetchAdminStats } from "@/lib/api";
 import {
   formatUSDC,
   formatNumber,
   providerBadgeClass,
 } from "@/lib/utils";
+import type { SpendDataPoint, ModelUsage } from "@/types";
 
-export default function UsagePage() {
-  const history = SPEND_HISTORY;
+export default async function UsagePage() {
+  const statsResponse = await fetchAdminStats(30);
+
+  const usingMockData = !statsResponse;
+
+  // Map by_model to ModelUsage[], falling back to mock data
+  const modelUsage: ModelUsage[] = statsResponse
+    ? (() => {
+        const totalRequests = statsResponse.by_model.reduce(
+          (sum, m) => sum + m.requests,
+          0,
+        );
+        return statsResponse.by_model.map((m) => ({
+          model: m.model,
+          provider: m.provider,
+          requests: m.requests,
+          spend: parseFloat(m.cost_usdc),
+          pct:
+            totalRequests > 0
+              ? Math.round((m.requests / totalRequests) * 100)
+              : 0,
+        }));
+      })()
+    : MODEL_USAGE;
+
+  // Map by_day to SpendDataPoint[], falling back to mock data
+  const history: SpendDataPoint[] = statsResponse
+    ? statsResponse.by_day.map((day) => ({
+        date: new Date(day.date).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+        }),
+        spend: day.spend,
+        requests: day.requests,
+      }))
+    : SPEND_HISTORY;
+
+  // Top wallets from API or hardcoded fallback
+  const topWallets = statsResponse
+    ? statsResponse.top_wallets.map((w) => {
+        const totalCost = parseFloat(statsResponse.summary.total_cost_usdc);
+        const walletCost = parseFloat(w.cost_usdc);
+        return {
+          wallet: w.wallet,
+          spend: walletCost,
+          requests: w.requests,
+          pct: totalCost > 0 ? Math.round((walletCost / totalCost) * 100) : 0,
+        };
+      })
+    : [
+        { wallet: "7xKpF...mR9t", spend: 0.62, requests: 412, pct: 55 },
+        { wallet: "3yLqZ...nS2v", spend: 0.31, requests: 278, pct: 27 },
+        { wallet: "9bNwA...8kJx", spend: 0.20, requests: 237, pct: 18 },
+      ];
 
   return (
     <div className="flex flex-col h-full">
@@ -20,13 +75,23 @@ export default function UsagePage() {
       />
 
       <div className="flex-1 p-6 space-y-6">
+        {/* Mock data warning banner */}
+        {usingMockData && (
+          <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
+            <AlertTriangle size={14} className="flex-shrink-0" />
+            <span>
+              Unable to reach gateway API. Showing sample data.
+            </span>
+          </div>
+        )}
+
         {/* Top row: pie + spend line */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
             <h2 className="text-sm font-semibold text-gray-900 mb-4">
               Requests by Model
             </h2>
-            <ModelPie data={MODEL_USAGE} />
+            <ModelPie data={modelUsage} />
           </div>
 
           <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
@@ -57,7 +122,7 @@ export default function UsagePage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {MODEL_USAGE.map((row) => (
+                {modelUsage.map((row) => (
                   <tr key={row.model} className="hover:bg-gray-50 transition-colors">
                     <td className="px-5 py-3 font-medium text-gray-900">
                       {row.model}
@@ -97,11 +162,7 @@ export default function UsagePage() {
             Top Wallets by Spend
           </h2>
           <div className="space-y-3">
-            {[
-              { wallet: "7xKpF...mR9t", spend: 0.62, requests: 412, pct: 55 },
-              { wallet: "3yLqZ...nS2v", spend: 0.31, requests: 278, pct: 27 },
-              { wallet: "9bNwA...8kJx", spend: 0.20, requests: 237, pct: 18 },
-            ].map((w) => (
+            {topWallets.map((w) => (
               <div key={w.wallet} className="flex items-center gap-4">
                 <code className="w-28 text-xs text-gray-500 font-mono">
                   {w.wallet}

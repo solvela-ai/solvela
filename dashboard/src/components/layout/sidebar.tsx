@@ -20,11 +20,31 @@ const NAV = [
   { href: "/settings",  label: "Settings",  icon: Settings },
 ];
 
-export function Sidebar() {
+interface SidebarProps {
+  open?: boolean;
+  onClose?: () => void;
+}
+
+export function Sidebar({ open, onClose }: SidebarProps) {
   const pathname = usePathname();
 
   return (
-    <aside className="flex h-screen w-56 flex-col border-r border-gray-200 bg-white">
+    <>
+      {/* Mobile overlay */}
+      {open && (
+        <div
+          className="fixed inset-0 z-30 bg-black/30 md:hidden"
+          onClick={onClose}
+          aria-hidden
+        />
+      )}
+      <aside
+        className={cn(
+          "flex h-screen w-56 flex-col border-r border-gray-200 bg-white",
+          "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:transition-transform max-md:duration-200",
+          open ? "max-md:translate-x-0" : "max-md:-translate-x-full"
+        )}
+      >
       {/* Logo */}
       <div className="flex items-center gap-2 px-5 py-5 border-b border-gray-100">
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-500 text-white">
@@ -60,5 +80,6 @@ export function Sidebar() {
         <p className="text-xs text-gray-400">Solana · USDC-SPL · x402 v2</p>
       </div>
     </aside>
+    </>
   );
 }
