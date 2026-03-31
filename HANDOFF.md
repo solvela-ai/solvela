@@ -1,7 +1,7 @@
 # HANDOFF.md — RustyClawRouter Continuation Guide
 
 > **Start here.** This document captures full context so a fresh agent can continue without ramp-up time.
-> **Last updated:** 2026-03-29
+> **Last updated:** 2026-03-31
 
 ---
 
@@ -39,6 +39,7 @@ RCR is one of three products under **rustyclaw.ai**:
 | — | **Chat Route Refactor** | Monolithic `chat.rs` (2405 lines) → `chat/` module directory (mod.rs, cost.rs, payment.rs, provider.rs, response.rs) |
 | — | **Audit Bug Fixes** | E1 retry unwrap, S1 DNS rebinding TOCTOU, S2 replay TTL, SSE buffer optimization, shared HTTP clients |
 | 5a | **Dashboard API Integration** | Admin aggregate stats endpoint (`GET /v1/admin/stats`), all dashboard pages connected to real API, graceful mock-data fallback, mobile sidebar fix |
+| — | **Dockerfile Fix** | Fixed `crates/common/` → `crates/protocol/` reference in Dockerfile. Previous deploys were using stale cached images. |
 
 **Total: 528 Rust tests + 82 dashboard tests + 94 SDK tests, all passing. Lint clean (fmt + clippy).**
 
@@ -90,11 +91,11 @@ dashboard:  82 tests (32 utils + 19 mock-data + 31 API)
 
 ---
 
-## Deployment Status (as of 2026-03-18)
+## Deployment Status (as of 2026-03-31)
 
 | Resource | Status | Details |
 |----------|--------|---------|
-| **RCR Gateway** | Running | `rustyclawrouter-gateway.fly.dev`, 1 machine (ord), health returns 200 |
+| **RCR Gateway** | Running | `rustyclawrouter-gateway.fly.dev`, v20 deployed 2026-03-31, 2 machines (ord), health passing. Endpoints verified: `/health`, `/pricing` (25 models), `/v1/models` |
 | **PostgreSQL** | Running | `rustyclawrouter-db` on Fly.io, Postgres 17.2, 3/3 health checks passing |
 | **Upstash Redis** | Running | `rustyclawrouter-cache`, pay-as-you-go, ord + iad regions |
 
@@ -270,7 +271,19 @@ cd sdks/go && go test ./...              # 12 tests
 
 **Strategic priority:** Ship fast, differentiate on escrow ("only gateway where agents don't overpay"), target Solana-native agent builders.
 
-1. ~~Dashboard → real API integration (replace mock data)~~ **DONE 2026-03-29**
-2. Deploy dashboard to Vercel (set `NEXT_PUBLIC_GATEWAY_URL` + `GATEWAY_ADMIN_KEY`)
-3. Wire Terminal → RCR for real traffic
-4. Consider AP2 compatibility and x402 V2 migration
+**Immediate (Phase 5 remaining):**
+1. ~~Dashboard → real API integration~~ **DONE 2026-03-29**
+2. ~~Redeploy gateway with Dockerfile fix~~ **DONE 2026-03-31**
+3. Deploy dashboard to Vercel (set `NEXT_PUBLIC_GATEWAY_URL` + `GATEWAY_ADMIN_KEY`)
+4. Set missing provider API keys on Fly.io: `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`
+5. Enterprise features (team billing, SSO, audit logs)
+
+**Infrastructure:**
+6. Fund fee-payer wallet (~0.1 SOL for real settlement)
+7. Load testing
+8. LiteSVM integration tests for escrow program
+
+**Strategic:**
+9. Wire Terminal → RCR for real traffic
+10. Consider AP2 compatibility and x402 V2 migration
+11. Multi-chain support (Base/EVM) — trait ready, implementation deferred

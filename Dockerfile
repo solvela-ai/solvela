@@ -7,15 +7,15 @@ WORKDIR /app
 
 # Copy workspace manifests first for dependency caching
 COPY Cargo.toml Cargo.lock ./
-COPY crates/common/Cargo.toml crates/common/Cargo.toml
+COPY crates/protocol/Cargo.toml crates/protocol/Cargo.toml
 COPY crates/x402/Cargo.toml crates/x402/Cargo.toml
 COPY crates/router/Cargo.toml crates/router/Cargo.toml
 COPY crates/gateway/Cargo.toml crates/gateway/Cargo.toml
 COPY crates/cli/Cargo.toml crates/cli/Cargo.toml
 
 # Create dummy source files to cache dependency compilation
-RUN mkdir -p crates/common/src crates/x402/src crates/router/src crates/gateway/src crates/cli/src && \
-    echo "pub fn _dummy() {}" > crates/common/src/lib.rs && \
+RUN mkdir -p crates/protocol/src crates/x402/src crates/router/src crates/gateway/src crates/cli/src && \
+    echo "pub fn _dummy() {}" > crates/protocol/src/lib.rs && \
     echo "pub fn _dummy() {}" > crates/x402/src/lib.rs && \
     echo "pub fn _dummy() {}" > crates/router/src/lib.rs && \
     echo "pub fn _dummy() {}" > crates/gateway/src/lib.rs && \
@@ -30,7 +30,7 @@ COPY crates/ crates/
 COPY config/ config/
 
 # Touch source files to invalidate the cache for actual compilation
-RUN touch crates/common/src/lib.rs crates/x402/src/lib.rs crates/router/src/lib.rs crates/gateway/src/lib.rs crates/gateway/src/main.rs
+RUN touch crates/protocol/src/lib.rs crates/x402/src/lib.rs crates/router/src/lib.rs crates/gateway/src/lib.rs crates/gateway/src/main.rs
 
 RUN cargo build --release --bin rustyclawrouter
 
