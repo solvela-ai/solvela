@@ -1,0 +1,18 @@
+{
+  "name": "@rustyclaw/clawrouter",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin for RustyClawRouter — Solana-native LLM routing with x402 payments",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --external @solana/web3.js --external @solana/spl-token --external bs58",
+    "test": "node --import tsx --test tests/plugin.test.ts"
+  },
+  "devDependencies": {
+    "@solana/web3.js": "^1.87.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0"
+  }
+}
