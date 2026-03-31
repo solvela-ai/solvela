@@ -4790,3 +4790,169 @@ async fn test_chat_accepts_max_messages() {
     // Expect 402 since no payment header is provided
     assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 }
+
+// ---------------------------------------------------------------------------
+// Admin stats endpoint tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_admin_stats_returns_503_without_db() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/admin/stats")
+                .header("Authorization", format!("Bearer {}", TEST_ADMIN_TOKEN))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // No db_pool configured in test_app → 503
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "database not configured");
+}
+
+#[tokio::test]
+async fn test_admin_stats_returns_401_with_wrong_token() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/admin/stats")
+                .header("Authorization", "Bearer wrong-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "unauthorized");
+}
+
+#[tokio::test]
+async fn test_admin_stats_returns_401_without_auth_header() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/admin/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
+    // Build a custom app with admin_token = None
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator = x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: None, // <-- no admin token configured
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+    });
+    let app = build_router(
+        Arc::clone(&state),
+        RateLimiter::new(RateLimitConfig::default()),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/admin/stats")
+                .header("Authorization", "Bearer some-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Endpoint is hidden when admin_token is not configured
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_admin_stats_returns_400_for_days_zero() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/admin/stats?days=0")
+                .header("Authorization", format!("Bearer {}", TEST_ADMIN_TOKEN))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(error.contains("days must be between 1 and 365"));
+    assert!(error.contains("0"));
+}
+
+#[tokio::test]
+async fn test_admin_stats_returns_400_for_days_over_365() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/admin/stats?days=999")
+                .header("Authorization", format!("Bearer {}", TEST_ADMIN_TOKEN))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(error.contains("days must be between 1 and 365"));
+    assert!(error.contains("999"));
+}

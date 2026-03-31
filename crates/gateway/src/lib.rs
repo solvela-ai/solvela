@@ -159,6 +159,7 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .route("/v1/escrow/health", get(routes::escrow::escrow_health))
         .route("/pricing", get(routes::pricing::pricing))
         .route("/health", get(routes::health::health))
+        .route("/v1/admin/stats", get(routes::admin_stats::admin_stats))
         .route("/metrics", get(routes::metrics::get_metrics))
         .layer(axum::middleware::from_fn(
             middleware::rate_limit::rate_limit,

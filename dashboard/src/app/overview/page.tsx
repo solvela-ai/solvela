@@ -5,6 +5,7 @@ import {
   Zap,
   Cpu,
   Wallet,
+  AlertTriangle,
 } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { StatCard } from "@/components/ui/stat-card";
@@ -12,11 +13,58 @@ import { SpendChart } from "@/components/charts/spend-chart";
 import { RequestsBar } from "@/components/charts/requests-bar";
 import { StatusDot } from "@/components/ui/status-dot";
 import { DASHBOARD_STATS, SPEND_HISTORY } from "@/lib/mock-data";
+import { fetchAdminStats, fetchHealth } from "@/lib/api";
 import { formatUSDC, formatNumber } from "@/lib/utils";
+import type { SpendDataPoint } from "@/types";
 
-export default function OverviewPage() {
-  const history = SPEND_HISTORY;
-  const s = DASHBOARD_STATS;
+export default async function OverviewPage() {
+  const [statsResponse, healthResponse] = await Promise.all([
+    fetchAdminStats(30),
+    fetchHealth().catch((error) => {
+      console.error("[OverviewPage] Health check failed:", error);
+      return null;
+    }),
+  ]);
+
+  const usingMockData = !statsResponse;
+
+  // Map API data to display values, falling back to mock data
+  const s = statsResponse
+    ? {
+        totalSpend: parseFloat(statsResponse.summary.total_cost_usdc),
+        totalRequests: statsResponse.summary.total_requests,
+        avgCostPerRequest:
+          statsResponse.summary.total_requests > 0
+            ? parseFloat(statsResponse.summary.total_cost_usdc) /
+              statsResponse.summary.total_requests
+            : 0,
+        uniqueWallets: statsResponse.summary.unique_wallets,
+        activeModels: statsResponse.by_model.length,
+        cacheHitRate: statsResponse.summary.cache_hit_rate ?? 0,
+      }
+    : {
+        totalSpend: DASHBOARD_STATS.totalSpend,
+        totalRequests: DASHBOARD_STATS.totalRequests,
+        avgCostPerRequest: DASHBOARD_STATS.avgCostPerRequest,
+        uniqueWallets: 0,
+        activeModels: DASHBOARD_STATS.activeModels,
+        cacheHitRate: 0,
+      };
+
+  // Map by_day to SpendDataPoint[], falling back to mock data
+  const history: SpendDataPoint[] = statsResponse
+    ? statsResponse.by_day.map((day) => ({
+        date: new Date(day.date).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+        }),
+        spend: day.spend,
+        requests: day.requests,
+      }))
+    : SPEND_HISTORY;
+
+  const gatewayStatus = healthResponse?.status ?? "down";
+  const gatewayVersion = healthResponse?.version ?? "unknown";
 
   return (
     <div className="flex flex-col h-full">
@@ -26,6 +74,16 @@ export default function OverviewPage() {
       />
 
       <div className="flex-1 p-6 space-y-6">
+        {/* Mock data warning banner */}
+        {usingMockData && (
+          <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
+            <AlertTriangle size={14} className="flex-shrink-0" />
+            <span>
+              Unable to reach gateway API. Showing sample data.
+            </span>
+          </div>
+        )}
+
         {/* Stats row */}
         <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
           <StatCard
@@ -49,9 +107,9 @@ export default function OverviewPage() {
             icon={TrendingDown}
           />
           <StatCard
-            title="Savings vs API"
-            value={`${s.savingsVsOpenAI}%`}
-            subtitle="vs direct OpenAI"
+            title="Cache Hit Rate"
+            value={`${Math.round(s.cacheHitRate * 100)}%`}
+            subtitle="response cache"
             icon={Zap}
             iconColor="text-green-600"
           />
@@ -62,9 +120,9 @@ export default function OverviewPage() {
             icon={Cpu}
           />
           <StatCard
-            title="Wallet Balance"
-            value={formatUSDC(s.walletBalance, 2)}
-            subtitle="USDC available"
+            title="Unique Wallets"
+            value={String(s.uniqueWallets)}
+            subtitle="this period"
             icon={Wallet}
             iconColor="text-blue-600"
           />
@@ -100,25 +158,22 @@ export default function OverviewPage() {
           </h2>
           <div className="flex flex-wrap gap-6 text-sm">
             <div className="flex items-center gap-2">
-              <StatusDot status="ok" label="Gateway" />
+              <StatusDot status={gatewayStatus === "ok" ? "ok" : gatewayStatus === "degraded" ? "degraded" : "down"} label="Gateway" />
             </div>
             <div className="flex items-center gap-2">
-              <StatusDot status="ok" label="Solana RPC" />
+              <StatusDot status={gatewayStatus === "ok" ? "ok" : "degraded"} label="Solana RPC" />
             </div>
             <div className="flex items-center gap-2">
-              <StatusDot status="ok" label="OpenAI" />
+              <StatusDot status={gatewayStatus === "ok" ? "ok" : "degraded"} label="OpenAI" />
             </div>
             <div className="flex items-center gap-2">
-              <StatusDot status="ok" label="Anthropic" />
+              <StatusDot status={gatewayStatus === "ok" ? "ok" : "degraded"} label="Anthropic" />
             </div>
             <div className="flex items-center gap-2">
-              <StatusDot status="ok" label="Google" />
-            </div>
-            <div className="flex items-center gap-2">
-              <StatusDot status="degraded" label="xAI" />
+              <StatusDot status={gatewayStatus === "ok" ? "ok" : "degraded"} label="Google" />
             </div>
             <div className="ml-auto text-xs text-gray-400">
-              v0.1.0 · x402 v2 · Solana mainnet
+              v{gatewayVersion} · x402 v2 · Solana mainnet
             </div>
           </div>
         </div>

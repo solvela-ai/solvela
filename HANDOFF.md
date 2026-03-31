@@ -1,7 +1,7 @@
 # HANDOFF.md — RustyClawRouter Continuation Guide
 
 > **Start here.** This document captures full context so a fresh agent can continue without ramp-up time.
-> **Last updated:** 2026-03-24
+> **Last updated:** 2026-03-29
 
 ---
 
@@ -38,28 +38,32 @@ RCR is one of three products under **rustyclaw.ai**:
 | — | **Security Audits** | Multiple rounds: 7 CRITICAL, 7 HIGH, 4 HIGH, 12 MEDIUM — all resolved |
 | — | **Chat Route Refactor** | Monolithic `chat.rs` (2405 lines) → `chat/` module directory (mod.rs, cost.rs, payment.rs, provider.rs, response.rs) |
 | — | **Audit Bug Fixes** | E1 retry unwrap, S1 DNS rebinding TOCTOU, S2 replay TTL, SSE buffer optimization, shared HTTP clients |
+| 5a | **Dashboard API Integration** | Admin aggregate stats endpoint (`GET /v1/admin/stats`), all dashboard pages connected to real API, graceful mock-data fallback, mobile sidebar fix |
 
-**Total: 516 Rust tests + 94 SDK tests, all passing. Lint clean (fmt + clippy).**
+**Total: 528 Rust tests + 82 dashboard tests + 94 SDK tests, all passing. Lint clean (fmt + clippy).**
 
 ### Test Breakdown
 
 ```
-gateway:   276 tests (unit + integration)
+gateway:   288 tests (282 unit + 116 integration, +6 admin_stats integration)
 x402:      110 tests
 cli:        99 tests
 protocol:   18 tests
 router:     13 tests
 ─────────────────
-Total:     516 Rust tests
+Total:     528 Rust tests
+
+dashboard:  82 tests (32 utils + 19 mock-data + 31 API)
 ```
 
 ### What's NOT Done Yet
 
 #### Phase 5: Dashboard + Enterprise — IN PROGRESS
-- Next.js dashboard scaffolded with pages: Overview, Usage, Models, Wallet, Settings
+- Next.js 16 dashboard with pages: Overview, Usage, Models, Wallet, Settings
 - Charts: spend-chart, requests-bar, model-pie
-- Components: shell layout, topbar, sidebar, stat-card, status-dot, badge
-- **Still needed:** Connect to real gateway API (currently mock data), enterprise features (team billing, SSO, audit logs)
+- Components: shell layout (with mobile sidebar), topbar, sidebar, stat-card, status-dot, badge
+- **Dashboard API integration COMPLETE (2026-03-29):** All pages fetch real data from gateway via `GET /v1/admin/stats`, `GET /health`, `GET /pricing`, `GET /v1/escrow/config`. Falls back to mock data with warning banner when API unavailable. Admin auth via `GATEWAY_ADMIN_KEY` env var (server-side only).
+- **Still needed:** Deploy dashboard to Vercel, enterprise features (team billing, SSO, audit logs)
 - **Market research completed:** `docs/research/2026-03-23-ai-agent-payment-infrastructure.md`
 
 #### Other Deferred Items
@@ -158,7 +162,7 @@ crates/
   cli/             CLI tool (rcr) — wallet, models, chat, health, stats, doctor
 programs/
   escrow/          Anchor escrow program — deposit, claim, refund instructions, PDA vault
-dashboard/         Next.js 15 + Tailwind + shadcn/ui — Overview, Usage, Models, Wallet, Settings
+dashboard/         Next.js 16 + Tailwind + Recharts — Overview, Usage, Models, Wallet, Settings (real API)
 sdks/
   python/          pip install rustyclawrouter (63 tests)
   typescript/      npm install @rustyclawrouter/sdk (19 tests)
@@ -220,9 +224,9 @@ curl https://rustyclawrouter-gateway.fly.dev/health
 ## Test Commands
 
 ```bash
-# Rust (516 tests across 5 crates)
+# Rust (528 tests across 5 crates)
 cargo test                        # All crates
-cargo test -p gateway             # Gateway (276 tests)
+cargo test -p gateway             # Gateway (288 tests)
 cargo test -p x402                # x402 protocol (110 tests)
 cargo test -p rustyclawrouter-cli # CLI (99 tests)
 cargo test -p rustyclaw-protocol  # Protocol (18 tests)
@@ -262,11 +266,11 @@ cd sdks/go && go test ./...              # 12 tests
 
 ## What's Next
 
-**Phase 5: Dashboard + Enterprise** — Connect dashboard to real API, polish UI, add enterprise features.
+**Phase 5: Dashboard + Enterprise** — Deploy dashboard, add enterprise features.
 
 **Strategic priority:** Ship fast, differentiate on escrow ("only gateway where agents don't overpay"), target Solana-native agent builders.
 
-1. Dashboard → real API integration (replace mock data)
-2. Deploy dashboard (Vercel)
+1. ~~Dashboard → real API integration (replace mock data)~~ **DONE 2026-03-29**
+2. Deploy dashboard to Vercel (set `NEXT_PUBLIC_GATEWAY_URL` + `GATEWAY_ADMIN_KEY`)
 3. Wire Terminal → RCR for real traffic
 4. Consider AP2 compatibility and x402 V2 migration

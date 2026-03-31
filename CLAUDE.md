@@ -17,9 +17,9 @@ cargo check                       # faster — prefer for iteration
 cargo check -p gateway            # single crate
 cargo build --release             # release build
 
-# Test (507 tests total)
+# Test (528 tests total)
 cargo test                        # all workspace tests
-cargo test -p gateway             # 267 tests (unit + integration)
+cargo test -p gateway             # 288 tests (unit + integration)
 cargo test -p x402                # 110 tests
 cargo test -p router              # 13 tests
 cargo test -p rustyclaw-protocol  # 18 tests
@@ -199,7 +199,7 @@ These skills contain patterns, checklists, and constraints specific to this proj
 | `domain-web` | Axum routes, middleware, Tower layers, SSE streaming, CORS, request/response handling | `routes/`, `middleware/`, `providers/`, `lib.rs` (`build_router`) |
 | `m07-concurrency` | Async patterns, tokio::spawn, fire-and-forget, background tasks, Arc sharing | `usage.rs`, `cache.rs`, `balance_monitor.rs`, `escrow/claimer.rs`, `main.rs` |
 | `api-design` | Adding/changing HTTP endpoints, 402 response shape, OpenAI compatibility, query params | `routes/chat.rs`, `routes/services.rs`, `routes/models.rs`, x402 types |
-| `tdd-workflow` | Any new feature or bugfix — write tests first | All crates (304 existing tests, integration tests in `gateway/tests/`) |
+| `tdd-workflow` | Any new feature or bugfix — write tests first | All crates (528 existing tests, integration tests in `gateway/tests/`) |
 | `docker-patterns` | Container config, compose services, multi-stage builds | `Dockerfile`, `docker-compose.yml` |
 | `deployment-patterns` | Deploy config, CI/CD, infrastructure | `Dockerfile`, `fly.toml` |
 
