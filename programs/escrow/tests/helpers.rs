@@ -250,7 +250,9 @@ pub fn read_token_balance(svm: &LiteSVM, ata: &Pubkey) -> Option<u64> {
 }
 
 pub fn account_exists(svm: &LiteSVM, pubkey: &Pubkey) -> bool {
-    svm.get_account(pubkey).is_some()
+    svm.get_account(pubkey)
+        .map(|a| a.lamports > 0)
+        .unwrap_or(false)
 }
 
 #[derive(Debug)]
