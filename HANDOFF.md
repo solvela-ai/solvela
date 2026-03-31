@@ -40,8 +40,9 @@ RCR is one of three products under **rustyclaw.ai**:
 | — | **Audit Bug Fixes** | E1 retry unwrap, S1 DNS rebinding TOCTOU, S2 replay TTL, SSE buffer optimization, shared HTTP clients |
 | 5a | **Dashboard API Integration** | Admin aggregate stats endpoint (`GET /v1/admin/stats`), all dashboard pages connected to real API, graceful mock-data fallback, mobile sidebar fix |
 | — | **Dockerfile Fix** | Fixed `crates/common/` → `crates/protocol/` reference in Dockerfile. Previous deploys were using stale cached images. |
+| — | **LiteSVM Integration Tests** | 14 LiteSVM integration tests for escrow program (5 happy path + 9 error cases). Installed Anchor CLI 0.31.1 + Solana toolchain 3.1.12. All 20 escrow tests pass in 2.5s. |
 
-**Total: 528 Rust tests + 82 dashboard tests + 94 SDK tests, all passing. Lint clean (fmt + clippy).**
+**Total: 528 Rust tests + 20 escrow tests + 82 dashboard tests + 94 SDK tests, all passing. Lint clean (fmt + clippy).**
 
 ### Test Breakdown
 
@@ -51,8 +52,9 @@ x402:      110 tests
 cli:        99 tests
 protocol:   18 tests
 router:     13 tests
+escrow:     20 tests (6 unit + 14 LiteSVM integration)
 ─────────────────
-Total:     528 Rust tests
+Total:     548 Rust tests (528 workspace + 20 escrow)
 
 dashboard:  82 tests (32 utils + 19 mock-data + 31 API)
 ```
@@ -72,7 +74,6 @@ dashboard:  82 tests (32 utils + 19 mock-data + 31 API)
 - **Multi-chain support** — Base/EVM deferred. `PaymentVerifier` trait is chain-agnostic by design.
 - **AP2 compatibility** — Google's Agent Payments Protocol has 60+ partners. Consider for Phase 7.
 - Load testing, per-user fairness queuing, secret rotation plan
-- LiteSVM integration tests for escrow program
 - Complete API reference documentation
 
 ---
@@ -123,6 +124,14 @@ DEEPSEEK_API_KEY              ✅ (set 2026-03-31)
 | # | Blocker | Severity | Status |
 |---|---------|----------|--------|
 | 1 | ~~Fee-payer wallet has 0 SOL~~ | LOW | RESOLVED — Fee-payer wallet funded with 0.09 SOL (2026-03-31) |
+
+### Development Toolchain (as of 2026-03-31)
+
+| Tool | Version | Status |
+|------|---------|--------|
+| Anchor CLI | 0.31.1 | Installed |
+| Solana CLI | 3.1.12 (Agave) | Installed |
+| Solana keypair | `~/.config/solana/id.json` | Generated (dev only, not funded) |
 
 ---
 
@@ -280,7 +289,8 @@ cd sdks/go && go test ./...              # 12 tests
 4. ~~Set missing provider API keys~~ **DONE 2026-03-31** (Anthropic, xAI, DeepSeek)
 5. ~~Fund fee-payer wallet~~ **DONE 2026-03-31** (0.09 SOL)
 6. ~~Wire Terminal → RCR~~ **DONE 2026-03-31** (removed direct Anthropic key from rclawterm-gateway)
-7. Enterprise features (team billing, SSO, audit logs)
+7. ~~LiteSVM integration tests for escrow~~ **DONE 2026-03-31** (14 tests, 2.5s)
+8. Enterprise features (team billing, SSO, audit logs)
 
 **Infrastructure:**
 8. Load testing
