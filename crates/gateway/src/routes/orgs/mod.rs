@@ -673,4 +673,111 @@ mod tests {
         let other_org_id = uuid::Uuid::new_v4();
         assert!(require_org_admin_access(&auth, other_org_id).is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // Input validation: validate_slug
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_slug_empty_returns_err() {
+        use super::validate_slug;
+        assert!(validate_slug("").is_err());
+    }
+
+    #[test]
+    fn validate_slug_too_long_returns_err() {
+        use super::validate_slug;
+        let slug = "a".repeat(65);
+        assert!(validate_slug(&slug).is_err());
+    }
+
+    #[test]
+    fn validate_slug_uppercase_returns_err() {
+        use super::validate_slug;
+        assert!(validate_slug("MyOrg").is_err());
+    }
+
+    #[test]
+    fn validate_slug_special_chars_returns_err() {
+        use super::validate_slug;
+        assert!(validate_slug("my_org").is_err());
+        assert!(validate_slug("my org").is_err());
+        assert!(validate_slug("my@org").is_err());
+    }
+
+    #[test]
+    fn validate_slug_leading_hyphen_returns_err() {
+        use super::validate_slug;
+        assert!(validate_slug("-myorg").is_err());
+    }
+
+    #[test]
+    fn validate_slug_trailing_hyphen_returns_err() {
+        use super::validate_slug;
+        assert!(validate_slug("myorg-").is_err());
+    }
+
+    #[test]
+    fn validate_slug_valid() {
+        use super::validate_slug;
+        assert!(validate_slug("my-org").is_ok());
+        assert!(validate_slug("acme").is_ok());
+        assert!(validate_slug("org123").is_ok());
+        assert!(validate_slug("my-org-2").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Input validation: validate_name
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_name_empty_returns_err() {
+        use super::validate_name;
+        assert!(validate_name("", "name").is_err());
+    }
+
+    #[test]
+    fn validate_name_whitespace_only_returns_err() {
+        use super::validate_name;
+        assert!(validate_name("   ", "name").is_err());
+    }
+
+    #[test]
+    fn validate_name_too_long_returns_err() {
+        use super::validate_name;
+        let name = "a".repeat(257);
+        assert!(validate_name(&name, "name").is_err());
+    }
+
+    #[test]
+    fn validate_name_valid() {
+        use super::validate_name;
+        assert!(validate_name("Acme Corp", "name").is_ok());
+        assert!(validate_name("a", "name").is_ok());
+        assert!(validate_name(&"a".repeat(256), "name").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Input validation: validate_wallet_address
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_wallet_address_empty_returns_err() {
+        use super::validate_wallet_address;
+        assert!(validate_wallet_address("").is_err());
+    }
+
+    #[test]
+    fn validate_wallet_address_too_long_returns_err() {
+        use super::validate_wallet_address;
+        let addr = "a".repeat(65);
+        assert!(validate_wallet_address(&addr).is_err());
+    }
+
+    #[test]
+    fn validate_wallet_address_valid() {
+        use super::validate_wallet_address;
+        assert!(validate_wallet_address("So11111111111111111111111111111111111111112").is_ok());
+        assert!(validate_wallet_address(&"a".repeat(64)).is_ok());
+    }
 }

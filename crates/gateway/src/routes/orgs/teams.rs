@@ -25,6 +25,11 @@ pub async fn create_team(
 
     let pool = require_db!(state);
 
+    let actor_api_key = match &auth {
+        AuthContext::OrgKey(ctx) => Some(ctx.api_key_id),
+        AuthContext::Admin => None,
+    };
+
     match queries::create_team(pool, org_id, body).await {
         Ok(team) => {
             log_audit(
@@ -32,7 +37,7 @@ pub async fn create_team(
                 AuditEntry {
                     org_id: Some(org_id),
                     actor_wallet: None,
-                    actor_api_key: None,
+                    actor_api_key,
                     action: "team.created".to_string(),
                     resource_type: "team".to_string(),
                     resource_id: Some(team.id.to_string()),
@@ -123,6 +128,11 @@ pub async fn add_member(
 
     let pool = require_db!(state);
 
+    let actor_api_key = match &auth {
+        AuthContext::OrgKey(ctx) => Some(ctx.api_key_id),
+        AuthContext::Admin => None,
+    };
+
     match queries::add_member(pool, org_id, body).await {
         Ok(member) => {
             log_audit(
@@ -130,7 +140,7 @@ pub async fn add_member(
                 AuditEntry {
                     org_id: Some(org_id),
                     actor_wallet: None,
-                    actor_api_key: None,
+                    actor_api_key,
                     action: "member.added".to_string(),
                     resource_type: "org_member".to_string(),
                     resource_id: Some(member.id.to_string()),
@@ -234,6 +244,11 @@ pub async fn assign_wallet(
             .into_response();
     }
 
+    let actor_api_key = match &auth {
+        AuthContext::OrgKey(ctx) => Some(ctx.api_key_id),
+        AuthContext::Admin => None,
+    };
+
     match queries::assign_wallet(pool, team_id, &body).await {
         Ok(wallet) => {
             log_audit(
@@ -241,7 +256,7 @@ pub async fn assign_wallet(
                 AuditEntry {
                     org_id: Some(org_id),
                     actor_wallet: None,
-                    actor_api_key: None,
+                    actor_api_key,
                     action: "wallet.assigned".to_string(),
                     resource_type: "team_wallet".to_string(),
                     resource_id: Some(wallet.id.to_string()),

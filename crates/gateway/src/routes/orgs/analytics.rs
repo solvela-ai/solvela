@@ -63,7 +63,7 @@ pub struct TeamBreakdown {
 /// `GET /v1/orgs/:id/teams/:tid/stats?days=7`
 ///
 /// Returns team-scoped spend analytics for the given period.
-/// Protected by admin token (Bearer auth).
+/// Protected by admin token or org-scoped API key.
 pub async fn get_team_stats(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -213,7 +213,7 @@ pub async fn get_team_stats(
 /// `GET /v1/orgs/:id/stats?days=7`
 ///
 /// Returns org-level aggregate spend analytics for the given period.
-/// Protected by admin token (Bearer auth).
+/// Protected by admin token or org-scoped API key.
 pub async fn get_org_stats(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
