@@ -9,6 +9,20 @@ use crate::orgs::models::{
     CreateOrgRequest, CreateTeamRequest, OrgMember, Organization, Team, TeamWallet,
 };
 
+/// Length of the stored key prefix: "rcr_k_" (6) + 4 entropy hex chars = 10.
+const KEY_PREFIX_LEN: usize = 10;
+
+/// Valid role values for org members.
+const VALID_ROLES: &[&str] = &["owner", "admin", "member"];
+
+fn validate_role(role: &str) -> Result<(), sqlx::Error> {
+    if VALID_ROLES.contains(&role) {
+        Ok(())
+    } else {
+        Err(sqlx::Error::Protocol(format!("invalid role: {role}")))
+    }
+}
+
 /// Generate a new API key: "rcr_k_" + 32 random hex chars.
 pub fn generate_api_key() -> String {
     let mut rng = rand::rng();
@@ -24,6 +38,8 @@ pub fn hash_api_key(key: &str) -> String {
 }
 
 /// Create a new organization and auto-enroll the owner as a member with role "owner".
+///
+/// Both INSERTs run inside a single transaction — either both succeed or neither does.
 pub async fn create_org(
     pool: &PgPool,
     req: CreateOrgRequest,
@@ -31,6 +47,8 @@ pub async fn create_org(
 ) -> Result<Organization, sqlx::Error> {
     let id = Uuid::new_v4();
     let now = Utc::now();
+
+    let mut tx = pool.begin().await?;
 
     let org = sqlx::query_as::<_, Organization>(
         r#"
@@ -45,7 +63,7 @@ pub async fn create_org(
     .bind(&owner_wallet)
     .bind(now)
     .bind(now)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
     let member_id = Uuid::new_v4();
@@ -61,17 +79,16 @@ pub async fn create_org(
     .bind("owner")
     .bind(now)
     .bind(now)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(org)
 }
 
 /// Fetch a single organization by ID.
-pub async fn get_org(
-    pool: &PgPool,
-    org_id: Uuid,
-) -> Result<Option<Organization>, sqlx::Error> {
+pub async fn get_org(pool: &PgPool, org_id: Uuid) -> Result<Option<Organization>, sqlx::Error> {
     sqlx::query_as::<_, Organization>(
         r#"
         SELECT id, name, slug, owner_wallet, created_at, updated_at
@@ -152,6 +169,7 @@ pub async fn add_member(
     let id = Uuid::new_v4();
     let now = Utc::now();
     let role = req.role.unwrap_or_else(|| "member".to_string());
+    validate_role(&role)?;
 
     sqlx::query_as::<_, OrgMember>(
         r#"
@@ -238,15 +256,17 @@ pub async fn create_api_key(
 ) -> Result<ApiKeyCreated, sqlx::Error> {
     let id = Uuid::new_v4();
     let now = Utc::now();
-    let role = req.role.unwrap_or_else(|| "read".to_string());
+    let role = req.role.unwrap_or_else(|| "member".to_string());
+    validate_role(&role)?;
 
     let key = generate_api_key();
     let key_hash = hash_api_key(&key);
-    let key_prefix = key[..10].to_string();
+    debug_assert!(key.is_ascii());
+    let key_prefix = key[..KEY_PREFIX_LEN].to_string();
 
-    let expires_at = req.expires_in_days.map(|days| {
-        now + chrono::Duration::days(i64::from(days))
-    });
+    let expires_at = req
+        .expires_in_days
+        .map(|days| now + chrono::Duration::days(i64::from(days)));
 
     sqlx::query(
         r#"
@@ -307,13 +327,11 @@ pub async fn verify_api_key(
         // Fire-and-forget last_used_at update — never block the caller.
         let pool_clone = pool.clone();
         tokio::spawn(async move {
-            let result = sqlx::query(
-                r#"UPDATE api_keys SET last_used_at = $1 WHERE id = $2"#,
-            )
-            .bind(Utc::now())
-            .bind(key_id)
-            .execute(&pool_clone)
-            .await;
+            let result = sqlx::query(r#"UPDATE api_keys SET last_used_at = $1 WHERE id = $2"#)
+                .bind(Utc::now())
+                .bind(key_id)
+                .execute(&pool_clone)
+                .await;
 
             if let Err(e) = result {
                 tracing::warn!(key_id = %key_id, error = %e, "failed to update api key last_used_at");
