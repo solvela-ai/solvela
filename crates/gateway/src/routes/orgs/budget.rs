@@ -43,10 +43,15 @@ pub struct BudgetResponse {
 pub async fn set_team_budget(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    org_ctx: Option<Extension<OrgContext>>,
     Path((org_id, team_id)): Path<(Uuid, Uuid)>,
     Json(body): Json<SetBudgetRequest>,
 ) -> Response {
-    if let Err(resp) = require_admin(&state, &headers) {
+    let auth = match require_auth(&state, &headers, org_ctx.as_ref().map(|e| &e.0)) {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = require_org_admin_access(&auth, org_id) {
         return resp;
     }
 
@@ -163,9 +168,14 @@ pub async fn set_team_budget(
 pub async fn get_team_budget(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    org_ctx: Option<Extension<OrgContext>>,
     Path((org_id, team_id)): Path<(Uuid, Uuid)>,
 ) -> Response {
-    if let Err(resp) = require_admin(&state, &headers) {
+    let auth = match require_auth(&state, &headers, org_ctx.as_ref().map(|e| &e.0)) {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = require_org_access(&auth, org_id) {
         return resp;
     }
     let pool = require_db!(state);

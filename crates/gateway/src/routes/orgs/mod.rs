@@ -1,6 +1,7 @@
 //! Organization and team management REST API.
 //!
-//! All endpoints require admin token authentication via `Authorization: Bearer <token>`.
+//! Endpoints accept **either** a global admin token (`Authorization: Bearer <admin_token>`)
+//! or an org-scoped API key (`Authorization: Bearer rcr_k_...`).
 //! Database (`db_pool`) must be configured — returns 503 otherwise.
 
 mod analytics;
@@ -19,7 +20,7 @@ pub use teams::*;
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -30,6 +31,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::audit::{log_audit, AuditEntry};
+use crate::middleware::api_key::OrgContext;
 use crate::orgs::models::{
     AddMemberRequest, AssignWalletRequest, CreateApiKeyRequest, CreateOrgRequest, CreateTeamRequest,
 };
@@ -107,6 +109,85 @@ fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Response> 
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dual auth: admin token OR org-scoped API key
+// ---------------------------------------------------------------------------
+
+/// Authentication context: either a global admin or an org-scoped API key.
+pub(crate) enum AuthContext {
+    /// Global admin — unrestricted access to all orgs.
+    Admin,
+    /// Org-scoped API key — can only access the associated org.
+    OrgKey(OrgContext),
+}
+
+/// Authenticate the request: accept either admin token or org API key.
+/// Returns `Err(Response)` with 401 if neither is present.
+#[allow(clippy::result_large_err)]
+pub(crate) fn require_auth(
+    state: &AppState,
+    headers: &HeaderMap,
+    org_ctx: Option<&OrgContext>,
+) -> Result<AuthContext, Response> {
+    // Try admin token first
+    if let Some(admin_token) = &state.admin_token {
+        let is_admin = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .is_some_and(|token| {
+                security::constant_time_eq(token.as_bytes(), admin_token.as_bytes())
+            });
+        if is_admin {
+            return Ok(AuthContext::Admin);
+        }
+    }
+    // Try org API key
+    if let Some(ctx) = org_ctx {
+        return Ok(AuthContext::OrgKey(ctx.clone()));
+    }
+    Err((
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": { "type": "unauthorized", "message": "Valid admin token or API key required" } })),
+    )
+        .into_response())
+}
+
+/// Verify the auth context has access to the given org_id.
+/// Admin has access to everything. OrgKey must match the org_id.
+#[allow(clippy::result_large_err)]
+pub(crate) fn require_org_access(auth: &AuthContext, org_id: Uuid) -> Result<(), Response> {
+    match auth {
+        AuthContext::Admin => Ok(()),
+        AuthContext::OrgKey(ctx) if ctx.org_id == org_id => Ok(()),
+        AuthContext::OrgKey(_) => Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": { "type": "forbidden", "message": "API key not scoped to this organization" } })),
+        )
+            .into_response()),
+    }
+}
+
+/// Verify the auth context has admin/owner access for the given org.
+/// Global admin always passes. OrgKey must match org AND have admin/owner role.
+#[allow(clippy::result_large_err)]
+pub(crate) fn require_org_admin_access(auth: &AuthContext, org_id: Uuid) -> Result<(), Response> {
+    match auth {
+        AuthContext::Admin => Ok(()),
+        AuthContext::OrgKey(ctx) if ctx.org_id == org_id && ctx.role.is_admin_or_owner() => Ok(()),
+        AuthContext::OrgKey(ctx) if ctx.org_id != org_id => Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": { "type": "forbidden", "message": "API key not scoped to this organization" } })),
+        )
+            .into_response()),
+        AuthContext::OrgKey(_) => Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": { "type": "forbidden", "message": "Admin or owner role required" } })),
+        )
+            .into_response()),
+    }
 }
 
 /// Retrieve the database pool or return 503.
@@ -325,7 +406,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_orgs_no_admin_token_configured_returns_503() {
+    async fn list_orgs_no_admin_token_configured_returns_401() {
         let app = test_router(None);
 
         let resp = app
@@ -339,7 +420,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // No admin token configured AND no API key -> 401
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -360,5 +442,235 @@ mod tests {
 
         // db_pool is None -> 503
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // -----------------------------------------------------------------------
+    // Dual auth (require_auth / require_org_access / require_org_admin_access)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn require_auth_admin_token_succeeds() {
+        use super::*;
+        use crate::config::AppConfig;
+
+        let state = AppState {
+            config: AppConfig::default(),
+            model_registry: router::models::ModelRegistry::from_toml(
+                super::test_helpers::TEST_MODELS_TOML,
+            )
+            .unwrap(),
+            service_registry: tokio::sync::RwLock::new(crate::services::ServiceRegistry::empty()),
+            providers: crate::providers::ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator: x402::facilitator::Facilitator::new(vec![]),
+            usage: crate::usage::UsageTracker::noop(),
+            cache: None,
+            provider_health: crate::providers::health::ProviderHealthTracker::new(
+                crate::providers::health::CircuitBreakerConfig::default(),
+            ),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            session_secret: vec![0u8; 32],
+            replay_set: AppState::new_replay_set(),
+            http_client: reqwest::Client::new(),
+            slot_cache: crate::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: Some("admin-secret".to_string()),
+            prometheus_handle: None,
+            dev_bypass_payment: false,
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer admin-secret".parse().unwrap());
+
+        let result = require_auth(&state, &headers, None);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), AuthContext::Admin));
+    }
+
+    #[test]
+    fn require_auth_api_key_succeeds() {
+        use super::*;
+        use crate::config::AppConfig;
+        use crate::middleware::api_key::OrgContext;
+        use crate::orgs::models::OrgRole;
+
+        let state = AppState {
+            config: AppConfig::default(),
+            model_registry: router::models::ModelRegistry::from_toml(
+                super::test_helpers::TEST_MODELS_TOML,
+            )
+            .unwrap(),
+            service_registry: tokio::sync::RwLock::new(crate::services::ServiceRegistry::empty()),
+            providers: crate::providers::ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator: x402::facilitator::Facilitator::new(vec![]),
+            usage: crate::usage::UsageTracker::noop(),
+            cache: None,
+            provider_health: crate::providers::health::ProviderHealthTracker::new(
+                crate::providers::health::CircuitBreakerConfig::default(),
+            ),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            session_secret: vec![0u8; 32],
+            replay_set: AppState::new_replay_set(),
+            http_client: reqwest::Client::new(),
+            slot_cache: crate::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: Some("admin-secret".to_string()),
+            prometheus_handle: None,
+            dev_bypass_payment: false,
+        };
+
+        let org_id = uuid::Uuid::new_v4();
+        let ctx = OrgContext {
+            org_id,
+            api_key_id: uuid::Uuid::new_v4(),
+            role: OrgRole::Member,
+        };
+        let headers = HeaderMap::new(); // no admin token header
+
+        let result = require_auth(&state, &headers, Some(&ctx));
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), AuthContext::OrgKey(_)));
+    }
+
+    #[test]
+    fn require_auth_neither_returns_401() {
+        use super::*;
+        use crate::config::AppConfig;
+
+        let state = AppState {
+            config: AppConfig::default(),
+            model_registry: router::models::ModelRegistry::from_toml(
+                super::test_helpers::TEST_MODELS_TOML,
+            )
+            .unwrap(),
+            service_registry: tokio::sync::RwLock::new(crate::services::ServiceRegistry::empty()),
+            providers: crate::providers::ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator: x402::facilitator::Facilitator::new(vec![]),
+            usage: crate::usage::UsageTracker::noop(),
+            cache: None,
+            provider_health: crate::providers::health::ProviderHealthTracker::new(
+                crate::providers::health::CircuitBreakerConfig::default(),
+            ),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            session_secret: vec![0u8; 32],
+            replay_set: AppState::new_replay_set(),
+            http_client: reqwest::Client::new(),
+            slot_cache: crate::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: Some("admin-secret".to_string()),
+            prometheus_handle: None,
+            dev_bypass_payment: false,
+        };
+
+        let headers = HeaderMap::new();
+        let result = require_auth(&state, &headers, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn require_org_access_admin_always_passes() {
+        use super::*;
+
+        let org_id = uuid::Uuid::new_v4();
+        let auth = AuthContext::Admin;
+        assert!(require_org_access(&auth, org_id).is_ok());
+    }
+
+    #[test]
+    fn require_org_access_matching_org_passes() {
+        use super::*;
+        use crate::middleware::api_key::OrgContext;
+        use crate::orgs::models::OrgRole;
+
+        let org_id = uuid::Uuid::new_v4();
+        let auth = AuthContext::OrgKey(OrgContext {
+            org_id,
+            api_key_id: uuid::Uuid::new_v4(),
+            role: OrgRole::Member,
+        });
+        assert!(require_org_access(&auth, org_id).is_ok());
+    }
+
+    #[test]
+    fn require_org_access_wrong_org_returns_403() {
+        use super::*;
+        use crate::middleware::api_key::OrgContext;
+        use crate::orgs::models::OrgRole;
+
+        let auth = AuthContext::OrgKey(OrgContext {
+            org_id: uuid::Uuid::new_v4(),
+            api_key_id: uuid::Uuid::new_v4(),
+            role: OrgRole::Member,
+        });
+        let other_org_id = uuid::Uuid::new_v4();
+        assert!(require_org_access(&auth, other_org_id).is_err());
+    }
+
+    #[test]
+    fn require_org_admin_access_member_role_returns_403() {
+        use super::*;
+        use crate::middleware::api_key::OrgContext;
+        use crate::orgs::models::OrgRole;
+
+        let org_id = uuid::Uuid::new_v4();
+        let auth = AuthContext::OrgKey(OrgContext {
+            org_id,
+            api_key_id: uuid::Uuid::new_v4(),
+            role: OrgRole::Member,
+        });
+        assert!(require_org_admin_access(&auth, org_id).is_err());
+    }
+
+    #[test]
+    fn require_org_admin_access_admin_role_passes() {
+        use super::*;
+        use crate::middleware::api_key::OrgContext;
+        use crate::orgs::models::OrgRole;
+
+        let org_id = uuid::Uuid::new_v4();
+        let auth = AuthContext::OrgKey(OrgContext {
+            org_id,
+            api_key_id: uuid::Uuid::new_v4(),
+            role: OrgRole::Admin,
+        });
+        assert!(require_org_admin_access(&auth, org_id).is_ok());
+    }
+
+    #[test]
+    fn require_org_admin_access_owner_role_passes() {
+        use super::*;
+        use crate::middleware::api_key::OrgContext;
+        use crate::orgs::models::OrgRole;
+
+        let org_id = uuid::Uuid::new_v4();
+        let auth = AuthContext::OrgKey(OrgContext {
+            org_id,
+            api_key_id: uuid::Uuid::new_v4(),
+            role: OrgRole::Owner,
+        });
+        assert!(require_org_admin_access(&auth, org_id).is_ok());
+    }
+
+    #[test]
+    fn require_org_admin_access_wrong_org_returns_403() {
+        use super::*;
+        use crate::middleware::api_key::OrgContext;
+        use crate::orgs::models::OrgRole;
+
+        let auth = AuthContext::OrgKey(OrgContext {
+            org_id: uuid::Uuid::new_v4(),
+            api_key_id: uuid::Uuid::new_v4(),
+            role: OrgRole::Owner,
+        });
+        let other_org_id = uuid::Uuid::new_v4();
+        assert!(require_org_admin_access(&auth, other_org_id).is_err());
     }
 }
