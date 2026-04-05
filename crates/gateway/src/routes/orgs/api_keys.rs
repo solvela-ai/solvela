@@ -40,6 +40,11 @@ pub async fn create_api_key(
 
     let pool = require_db!(state);
 
+    let actor_api_key = match &auth {
+        AuthContext::OrgKey(ctx) => Some(ctx.api_key_id),
+        AuthContext::Admin => None,
+    };
+
     match queries::create_api_key(pool, org_id, body).await {
         Ok(created) => {
             log_audit(
@@ -47,7 +52,7 @@ pub async fn create_api_key(
                 AuditEntry {
                     org_id: Some(org_id),
                     actor_wallet: None,
-                    actor_api_key: None,
+                    actor_api_key,
                     action: "api_key.created".to_string(),
                     resource_type: "api_key".to_string(),
                     resource_id: Some(created.id.to_string()),
@@ -113,6 +118,11 @@ pub async fn revoke_api_key(
     }
     let pool = require_db!(state);
 
+    let actor_api_key = match &auth {
+        AuthContext::OrgKey(ctx) => Some(ctx.api_key_id),
+        AuthContext::Admin => None,
+    };
+
     match queries::revoke_api_key(pool, key_id, org_id).await {
         Ok(true) => {
             log_audit(
@@ -120,7 +130,7 @@ pub async fn revoke_api_key(
                 AuditEntry {
                     org_id: Some(org_id),
                     actor_wallet: None,
-                    actor_api_key: None,
+                    actor_api_key,
                     action: "api_key.revoked".to_string(),
                     resource_type: "api_key".to_string(),
                     resource_id: Some(key_id.to_string()),

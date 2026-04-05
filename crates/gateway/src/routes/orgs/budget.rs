@@ -137,12 +137,17 @@ pub async fn set_team_budget(
                 }
             }
 
+            let actor_api_key = match &auth {
+                AuthContext::OrgKey(ctx) => Some(ctx.api_key_id),
+                AuthContext::Admin => None,
+            };
+
             log_audit(
                 pool,
                 AuditEntry {
                     org_id: Some(org_id),
                     actor_wallet: None,
-                    actor_api_key: None,
+                    actor_api_key,
                     action: "budget.team_updated".to_string(),
                     resource_type: "team_budget".to_string(),
                     resource_id: Some(team_id.to_string()),
@@ -270,6 +275,10 @@ pub async fn get_team_budget(
 }
 
 /// `PUT /v1/wallets/:wallet/budget` — Set wallet budget limits.
+///
+/// Note: wallet budget endpoints use admin-only auth because the URL path
+/// (`/v1/wallets/{wallet}/budget`) is not org-scoped. Org-scoped API keys
+/// cannot be verified against a specific org without an org_id in the path.
 pub async fn set_wallet_budget(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -360,6 +369,10 @@ pub async fn set_wallet_budget(
 }
 
 /// `GET /v1/wallets/:wallet/budget` — Get wallet budget + current spend.
+///
+/// Note: wallet budget endpoints use admin-only auth because the URL path
+/// (`/v1/wallets/{wallet}/budget`) is not org-scoped. Org-scoped API keys
+/// cannot be verified against a specific org without an org_id in the path.
 pub async fn get_wallet_budget(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -438,6 +451,42 @@ mod tests {
     use uuid::Uuid;
 
     use super::super::test_helpers::test_router;
+    use super::validate_budget_value;
+
+    // -----------------------------------------------------------------------
+    // validate_budget_value unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_budget_value_none_passes() {
+        assert!(validate_budget_value(None, "hourly").is_ok());
+    }
+
+    #[test]
+    fn validate_budget_value_zero_passes() {
+        assert!(validate_budget_value(Some(0.0), "hourly").is_ok());
+    }
+
+    #[test]
+    fn validate_budget_value_positive_passes() {
+        assert!(validate_budget_value(Some(50.0), "daily").is_ok());
+    }
+
+    #[test]
+    fn validate_budget_value_negative_returns_err() {
+        assert!(validate_budget_value(Some(-1.0), "hourly").is_err());
+    }
+
+    #[test]
+    fn validate_budget_value_nan_returns_err() {
+        assert!(validate_budget_value(Some(f64::NAN), "daily").is_err());
+    }
+
+    #[test]
+    fn validate_budget_value_infinity_returns_err() {
+        assert!(validate_budget_value(Some(f64::INFINITY), "monthly").is_err());
+        assert!(validate_budget_value(Some(f64::NEG_INFINITY), "monthly").is_err());
+    }
 
     #[tokio::test]
     async fn set_team_budget_requires_auth() {
