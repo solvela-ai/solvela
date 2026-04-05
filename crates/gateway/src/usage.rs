@@ -285,13 +285,14 @@ impl UsageTracker {
     /// spend on high-cost models.  Requests with an estimated cost at or below $1.00
     /// are allowed through; above that they are rejected.
     ///
-    /// **Fail-open design decision**: When a Redis client IS configured but the
-    /// connection fails at request time (e.g., Redis is temporarily down), the
-    /// budget check is skipped and the request is allowed through. This is an
-    /// intentional fail-open design: we prefer serving requests over blocking
-    /// paying users due to an infrastructure issue. Operators should monitor the
-    /// `budget_check_skipped` warning logs and set up alerts for sustained Redis
-    /// outages that could allow budget overruns.
+    /// **Fail-closed on Redis errors**: When a Redis client IS configured but a
+    /// GET command fails at request time (e.g., Redis is temporarily down or
+    /// returns an unexpected error), the budget check returns
+    /// `Err(UsageError::Redis(...))` and the request is **denied**. We cannot
+    /// verify that the wallet has budget headroom, so we must not allow the
+    /// request through — an unverifiable spend limit is treated as exceeded.
+    /// The connection-level failure path (unable to acquire a connection at all)
+    /// is still logged as a warning and fails closed via `Err(UsageError::Redis)`.
     pub async fn check_budget(
         &self,
         wallet_address: &str,
@@ -325,7 +326,9 @@ impl UsageTracker {
                     if let Some(hourly_limit) = config.hourly {
                         let hour_key =
                             format!("spend:{}:{}", wallet_address, now.format("%Y-%m-%dT%H"));
-                        let hourly_spend = redis_get_f64(&mut conn, &hour_key).await;
+                        let hourly_spend = redis_get_f64(&mut conn, &hour_key)
+                            .await
+                            .map_err(UsageError::Redis)?;
                         if hourly_spend + estimated_cost_usdc > hourly_limit + USDC_EPSILON {
                             return Err(UsageError::BudgetExceeded {
                                 wallet: wallet_address.to_string(),
@@ -339,7 +342,9 @@ impl UsageTracker {
                     if let Some(daily_limit) = config.daily {
                         let day_key =
                             format!("spend:{}:{}", wallet_address, now.format("%Y-%m-%d"));
-                        let daily_spend = redis_get_f64(&mut conn, &day_key).await;
+                        let daily_spend = redis_get_f64(&mut conn, &day_key)
+                            .await
+                            .map_err(UsageError::Redis)?;
                         if daily_spend + estimated_cost_usdc > daily_limit + USDC_EPSILON {
                             return Err(UsageError::BudgetExceeded {
                                 wallet: wallet_address.to_string(),
@@ -352,7 +357,9 @@ impl UsageTracker {
                     // --- Monthly limit ---
                     if let Some(monthly_limit) = config.monthly {
                         let month_key = format!("spend:{}:{}", wallet_address, now.format("%Y-%m"));
-                        let monthly_spend = redis_get_f64(&mut conn, &month_key).await;
+                        let monthly_spend = redis_get_f64(&mut conn, &month_key)
+                            .await
+                            .map_err(UsageError::Redis)?;
                         if monthly_spend + estimated_cost_usdc > monthly_limit + USDC_EPSILON {
                             return Err(UsageError::BudgetExceeded {
                                 wallet: wallet_address.to_string(),
@@ -376,7 +383,9 @@ impl UsageTracker {
                             if let Some(hourly_limit) = team_cfg.hourly {
                                 let key =
                                     format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%dT%H"));
-                                let spend = redis_get_f64(&mut conn, &key).await;
+                                let spend = redis_get_f64(&mut conn, &key)
+                                    .await
+                                    .map_err(UsageError::Redis)?;
                                 if spend + estimated_cost_usdc > hourly_limit + USDC_EPSILON {
                                     return Err(UsageError::BudgetExceeded {
                                         wallet: wallet_address.to_string(),
@@ -389,7 +398,9 @@ impl UsageTracker {
                             if let Some(daily_limit) = team_cfg.daily {
                                 let key =
                                     format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%d"));
-                                let spend = redis_get_f64(&mut conn, &key).await;
+                                let spend = redis_get_f64(&mut conn, &key)
+                                    .await
+                                    .map_err(UsageError::Redis)?;
                                 if spend + estimated_cost_usdc > daily_limit + USDC_EPSILON {
                                     return Err(UsageError::BudgetExceeded {
                                         wallet: wallet_address.to_string(),
@@ -401,7 +412,9 @@ impl UsageTracker {
 
                             if let Some(monthly_limit) = team_cfg.monthly {
                                 let key = format!("team_spend:{}:{}", tid_str, now.format("%Y-%m"));
-                                let spend = redis_get_f64(&mut conn, &key).await;
+                                let spend = redis_get_f64(&mut conn, &key)
+                                    .await
+                                    .map_err(UsageError::Redis)?;
                                 if spend + estimated_cost_usdc > monthly_limit + USDC_EPSILON {
                                     return Err(UsageError::BudgetExceeded {
                                         wallet: wallet_address.to_string(),
@@ -414,15 +427,16 @@ impl UsageTracker {
                     }
                 }
                 Err(e) => {
-                    // Fail-open: allow the request but log a warning so operators
-                    // can monitor for sustained Redis outages. See doc comment above
-                    // for the design rationale.
+                    // Fail-closed: deny the request when we cannot reach Redis.
+                    // Without a connection we cannot verify spend, so we must not
+                    // allow the request through. See doc comment on check_budget.
                     warn!(
                         wallet = %wallet_address,
                         estimated_cost_usdc = estimated_cost_usdc,
                         error = %e,
-                        "budget_check_skipped: Redis connection failed, allowing request through (fail-open)"
+                        "budget_check_denied: Redis connection failed, denying request (fail-closed)"
                     );
+                    return Err(UsageError::Redis(e.to_string()));
                 }
             }
         }
@@ -494,18 +508,29 @@ async fn incr_and_expire(
     }
 }
 
-/// Read an f64 value from Redis, returning 0.0 on miss or error (fail-open).
-async fn redis_get_f64(conn: &mut redis::aio::MultiplexedConnection, key: &str) -> f64 {
+/// Read an f64 value from Redis for budget enforcement (fail-closed).
+///
+/// Returns `Ok(val)` on a cache hit, `Ok(0.0)` on a cache miss (key not set
+/// yet means no spend has been recorded), and `Err(String)` on a Redis error.
+///
+/// Callers on the **enforcement path** (`check_budget`) must propagate the
+/// error and deny the request — if we cannot verify spend we must not allow
+/// the request through.  Display-only callers (budget GET endpoints) use
+/// `get_redis_spend` which applies `.unwrap_or(0.0)` itself.
+async fn redis_get_f64(
+    conn: &mut redis::aio::MultiplexedConnection,
+    key: &str,
+) -> Result<f64, String> {
     match redis::cmd("GET")
         .arg(key)
         .query_async::<Option<f64>>(conn)
         .await
     {
-        Ok(Some(val)) => val,
-        Ok(None) => 0.0,
+        Ok(Some(val)) => Ok(val),
+        Ok(None) => Ok(0.0), // key absent = no spend recorded yet
         Err(e) => {
-            warn!(key = %key, error = %e, "Redis GET failed — assuming 0.0 (fail-open)");
-            0.0
+            warn!(key = %key, error = %e, "Redis GET failed — denying request (fail-closed)");
+            Err(e.to_string())
         }
     }
 }
@@ -718,7 +743,9 @@ pub async fn get_redis_spend(client: &redis::Client, key: &str) -> Result<f64, U
         .get_multiplexed_async_connection()
         .await
         .map_err(|e| UsageError::Redis(e.to_string()))?;
-    Ok(redis_get_f64(&mut conn, key).await)
+    redis_get_f64(&mut conn, key)
+        .await
+        .map_err(UsageError::Redis)
 }
 
 // ---------------------------------------------------------------------------

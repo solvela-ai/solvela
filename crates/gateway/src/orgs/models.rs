@@ -112,7 +112,7 @@ pub struct CreateApiKeyRequest {
     pub expires_in_days: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ApiKeyCreated {
     pub id: Uuid,
     pub key: String,
@@ -120,4 +120,44 @@ pub struct ApiKeyCreated {
     pub name: String,
     pub role: OrgRole,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for ApiKeyCreated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeyCreated")
+            .field("id", &self.id)
+            .field("key", &"[REDACTED]")
+            .field("key_prefix", &self.key_prefix)
+            .field("name", &self.name)
+            .field("role", &self.role)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_key_created_debug_redacts_key() {
+        let key_created = ApiKeyCreated {
+            id: Uuid::new_v4(),
+            key: "rcr_k_supersecretkey".to_string(),
+            key_prefix: "rcr_k_sup".to_string(),
+            name: "Test Key".to_string(),
+            role: OrgRole::Admin,
+            expires_at: None,
+        };
+
+        let debug_output = format!("{key_created:?}");
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "debug output should contain [REDACTED]"
+        );
+        assert!(
+            !debug_output.contains("supersecretkey"),
+            "debug output must not contain the plaintext key value"
+        );
+    }
 }

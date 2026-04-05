@@ -1,6 +1,7 @@
 //! Team, member, and team-wallet handlers.
 
 use super::*;
+use crate::orgs::models::OrgRole;
 
 /// `POST /v1/orgs/:id/teams` — Create a new team within an organization.
 pub async fn create_team(
@@ -99,6 +100,21 @@ pub async fn add_member(
     };
     if let Err(resp) = require_org_admin_access(&auth, org_id) {
         return resp;
+    }
+
+    // Prevent role escalation: callers cannot assign a role higher than their own
+    if let AuthContext::OrgKey(ref ctx) = auth {
+        if let Some(ref requested_role) = body.role {
+            if *requested_role == OrgRole::Owner && ctx.role != OrgRole::Owner {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "error": "only owners can assign the owner role"
+                    })),
+                )
+                    .into_response();
+            }
+        }
     }
 
     if let Err((status, err)) = validate_wallet_address(&body.wallet_address) {
@@ -352,5 +368,84 @@ mod tests {
 
         // db_pool is None -> 503
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn add_member_admin_key_cannot_assign_owner_role() {
+        use axum::routing::post;
+        use axum::Router;
+        use std::sync::Arc;
+
+        use crate::middleware::api_key::OrgContext;
+        use crate::orgs::models::OrgRole;
+        use crate::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
+        use crate::services::ServiceRegistry;
+        use router::models::ModelRegistry;
+        use tokio::sync::RwLock;
+
+        let org_id = Uuid::new_v4();
+
+        let model_registry = ModelRegistry::from_toml(super::test_helpers::TEST_MODELS_TOML)
+            .expect("test models toml must be valid");
+        let service_registry = ServiceRegistry::empty();
+        let facilitator = x402::facilitator::Facilitator::new(vec![]);
+
+        let state = Arc::new(crate::AppState {
+            config: crate::config::AppConfig::default(),
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: crate::providers::ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator,
+            usage: crate::usage::UsageTracker::noop(),
+            cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            session_secret: vec![0u8; 32],
+            replay_set: crate::AppState::new_replay_set(),
+            http_client: reqwest::Client::new(),
+            slot_cache: crate::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None, // no admin token — forces API key auth path
+            prometheus_handle: None,
+            dev_bypass_payment: false,
+        });
+
+        let ctx = OrgContext {
+            org_id,
+            api_key_id: Uuid::new_v4(),
+            role: OrgRole::Admin, // Admin, not Owner
+        };
+
+        let app = Router::new()
+            .route("/v1/orgs/{id}/members", post(super::super::add_member))
+            .layer(axum::middleware::from_fn(
+                move |mut req: axum::extract::Request, next: axum::middleware::Next| {
+                    let ctx = ctx.clone();
+                    async move {
+                        req.extensions_mut().insert(ctx);
+                        next.run(req).await
+                    }
+                },
+            ))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/orgs/{org_id}/members"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"wallet_address":"SomeWallet123","role":"owner"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
