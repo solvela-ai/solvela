@@ -161,6 +161,31 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .route("/pricing", get(routes::pricing::pricing))
         .route("/health", get(routes::health::health))
         .route("/v1/admin/stats", get(routes::admin_stats::admin_stats))
+        .route(
+            "/v1/orgs",
+            post(routes::orgs::create_org).get(routes::orgs::list_orgs),
+        )
+        .route("/v1/orgs/{id}", get(routes::orgs::get_org))
+        .route(
+            "/v1/orgs/{id}/teams",
+            post(routes::orgs::create_team).get(routes::orgs::list_teams),
+        )
+        .route(
+            "/v1/orgs/{id}/members",
+            post(routes::orgs::add_member).get(routes::orgs::list_members),
+        )
+        .route(
+            "/v1/orgs/{id}/teams/{tid}/wallets",
+            post(routes::orgs::assign_wallet).get(routes::orgs::list_team_wallets),
+        )
+        .route(
+            "/v1/orgs/{id}/api-keys",
+            post(routes::orgs::create_api_key).get(routes::orgs::list_api_keys),
+        )
+        .route(
+            "/v1/orgs/{id}/api-keys/{kid}",
+            axum::routing::delete(routes::orgs::revoke_api_key),
+        )
         .route("/metrics", get(routes::metrics::get_metrics))
         .layer(axum::middleware::from_fn(
             middleware::rate_limit::rate_limit,
