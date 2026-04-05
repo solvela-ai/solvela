@@ -226,232 +226,154 @@ export async function fetchEscrowHealth(): Promise<EscrowHealth | null> {
   }
 }
 
+// ─── Structured error result types ───────────────────────────────────────────
+
+export interface ApiError {
+  status: number;
+  type: string;
+  message: string;
+}
+
+export type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
+
+export async function fetchApi<T>(url: string, init?: RequestInit): Promise<ApiResult<T>> {
+  try {
+    const res = await fetch(url, init);
+    if (!res.ok) {
+      let type = 'unknown';
+      let message = `HTTP ${res.status}`;
+      try {
+        const body = await res.json() as { error?: { type?: string; message?: string } | string };
+        if (body?.error && typeof body.error === 'object' && body.error.type) {
+          type = body.error.type;
+          message = body.error.message ?? message;
+        } else if (typeof body?.error === 'string') {
+          message = body.error;
+        }
+      } catch {
+        // Response body wasn't JSON — use status text
+      }
+      return { ok: false, error: { status: res.status, type, message } };
+    }
+    return { ok: true, data: await res.json() as T };
+  } catch (err) {
+    return {
+      ok: false,
+      error: {
+        status: 0,
+        type: 'network_error',
+        message: err instanceof Error ? err.message : 'Network error',
+      },
+    };
+  }
+}
+
 // ─── Org / team / audit API functions ────────────────────────────────────────
 
-export async function fetchOrgs(): Promise<OrgEntry[] | null> {
-  try {
-    const res = await fetch(`${GATEWAY_URL}/v1/orgs`, {
-      headers: getAuthHeaders(),
-      cache: "no-store",
-    });
-    if (!res.ok) {
-      console.warn(`[fetchOrgs] HTTP ${res.status}`);
-      return null;
-    }
-    return res.json();
-  } catch (error) {
-    console.warn("[fetchOrgs] Failed to reach gateway:", error);
-    return null;
-  }
+export async function fetchOrgs(): Promise<ApiResult<OrgEntry[]>> {
+  return fetchApi<OrgEntry[]>(`${GATEWAY_URL}/v1/orgs`, {
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
 }
 
-export async function fetchTeams(orgId: string): Promise<TeamEntry[] | null> {
-  try {
-    const res = await fetch(`${GATEWAY_URL}/v1/orgs/${orgId}/teams`, {
-      headers: getAuthHeaders(),
-      cache: "no-store",
-    });
-    if (!res.ok) {
-      console.warn(`[fetchTeams] HTTP ${res.status}`);
-      return null;
-    }
-    return res.json();
-  } catch (error) {
-    console.warn("[fetchTeams] Failed to reach gateway:", error);
-    return null;
-  }
+export async function fetchTeams(orgId: string): Promise<ApiResult<TeamEntry[]>> {
+  return fetchApi<TeamEntry[]>(`${GATEWAY_URL}/v1/orgs/${orgId}/teams`, {
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
 }
 
-export async function fetchMembers(orgId: string): Promise<MemberEntry[] | null> {
-  try {
-    const res = await fetch(`${GATEWAY_URL}/v1/orgs/${orgId}/members`, {
-      headers: getAuthHeaders(),
-      cache: "no-store",
-    });
-    if (!res.ok) {
-      console.warn(`[fetchMembers] HTTP ${res.status}`);
-      return null;
-    }
-    return res.json();
-  } catch (error) {
-    console.warn("[fetchMembers] Failed to reach gateway:", error);
-    return null;
-  }
+export async function fetchMembers(orgId: string): Promise<ApiResult<MemberEntry[]>> {
+  return fetchApi<MemberEntry[]>(`${GATEWAY_URL}/v1/orgs/${orgId}/members`, {
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
 }
 
-export async function fetchApiKeys(orgId: string): Promise<ApiKeyEntry[] | null> {
-  try {
-    const res = await fetch(`${GATEWAY_URL}/v1/orgs/${orgId}/api-keys`, {
-      headers: getAuthHeaders(),
-      cache: "no-store",
-    });
-    if (!res.ok) {
-      console.warn(`[fetchApiKeys] HTTP ${res.status}`);
-      return null;
-    }
-    return res.json();
-  } catch (error) {
-    console.warn("[fetchApiKeys] Failed to reach gateway:", error);
-    return null;
-  }
+export async function fetchApiKeys(orgId: string): Promise<ApiResult<ApiKeyEntry[]>> {
+  return fetchApi<ApiKeyEntry[]>(`${GATEWAY_URL}/v1/orgs/${orgId}/api-keys`, {
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
 }
 
 export async function createApiKey(
   orgId: string,
   name: string,
   role?: string,
-): Promise<CreateApiKeyResponse | null> {
-  try {
-    const res = await fetch(`${GATEWAY_URL}/v1/orgs/${orgId}/api-keys`, {
-      method: "POST",
-      headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ name, role: role ?? "member" }),
-    });
-    if (!res.ok) {
-      console.warn(`[createApiKey] HTTP ${res.status}`);
-      return null;
-    }
-    return res.json();
-  } catch (error) {
-    console.warn("[createApiKey] Failed to reach gateway:", error);
-    return null;
-  }
+): Promise<ApiResult<CreateApiKeyResponse>> {
+  return fetchApi<CreateApiKeyResponse>(`${GATEWAY_URL}/v1/orgs/${orgId}/api-keys`, {
+    method: 'POST',
+    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, role: role ?? 'member' }),
+  });
 }
 
 export async function revokeApiKey(
   orgId: string,
   keyId: string,
-): Promise<boolean> {
-  try {
-    const res = await fetch(
-      `${GATEWAY_URL}/v1/orgs/${orgId}/api-keys/${keyId}`,
-      {
-        method: "DELETE",
-        headers: getAuthHeaders(),
-      },
-    );
-    if (!res.ok) {
-      console.warn(`[revokeApiKey] HTTP ${res.status}`);
-      return false;
-    }
-    return true;
-  } catch (error) {
-    console.warn("[revokeApiKey] Failed to reach gateway:", error);
-    return false;
-  }
+): Promise<ApiResult<boolean>> {
+  const result = await fetchApi<unknown>(
+    `${GATEWAY_URL}/v1/orgs/${orgId}/api-keys/${keyId}`,
+    { method: 'DELETE', headers: getAuthHeaders() },
+  );
+  if (result.ok) return { ok: true, data: true };
+  return result;
 }
 
 export async function fetchAuditLogs(
   orgId: string,
   params?: { limit?: number },
-): Promise<AuditLogEntry[] | null> {
-  try {
-    const query = new URLSearchParams();
-    if (params?.limit !== undefined) query.set("limit", String(params.limit));
-    const qs = query.toString() ? `?${query.toString()}` : "";
-    const res = await fetch(`${GATEWAY_URL}/v1/orgs/${orgId}/audit-logs${qs}`, {
-      headers: getAuthHeaders(),
-      cache: "no-store",
-    });
-    if (!res.ok) {
-      console.warn(`[fetchAuditLogs] HTTP ${res.status}`);
-      return null;
-    }
-    return res.json();
-  } catch (error) {
-    console.warn("[fetchAuditLogs] Failed to reach gateway:", error);
-    return null;
-  }
+): Promise<ApiResult<AuditLogEntry[]>> {
+  const query = new URLSearchParams();
+  if (params?.limit !== undefined) query.set('limit', String(params.limit));
+  const qs = query.toString() ? `?${query.toString()}` : '';
+  return fetchApi<AuditLogEntry[]>(`${GATEWAY_URL}/v1/orgs/${orgId}/audit-logs${qs}`, {
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
 }
 
 export async function fetchOrgStats(
   orgId: string,
   days: number = 30,
-): Promise<OrgStats | null> {
-  try {
-    const res = await fetch(
-      `${GATEWAY_URL}/v1/orgs/${orgId}/stats?days=${days}`,
-      {
-        headers: getAuthHeaders(),
-        cache: "no-store",
-      },
-    );
-    if (!res.ok) {
-      console.warn(`[fetchOrgStats] HTTP ${res.status}`);
-      return null;
-    }
-    return res.json();
-  } catch (error) {
-    console.warn("[fetchOrgStats] Failed to reach gateway:", error);
-    return null;
-  }
+): Promise<ApiResult<OrgStats>> {
+  return fetchApi<OrgStats>(`${GATEWAY_URL}/v1/orgs/${orgId}/stats?days=${days}`, {
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
 }
 
 export async function createTeam(
   orgId: string,
   name: string,
-): Promise<TeamEntry | null> {
-  try {
-    const res = await fetch(`${GATEWAY_URL}/v1/orgs/${orgId}/teams`, {
-      method: "POST",
-      headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    if (!res.ok) {
-      console.warn(`[createTeam] HTTP ${res.status}`);
-      return null;
-    }
-    return res.json();
-  } catch (error) {
-    console.warn("[createTeam] Failed to reach gateway:", error);
-    return null;
-  }
+): Promise<ApiResult<TeamEntry>> {
+  return fetchApi<TeamEntry>(`${GATEWAY_URL}/v1/orgs/${orgId}/teams`, {
+    method: 'POST',
+    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
 }
 
 export async function setTeamBudget(
   orgId: string,
   teamId: string,
   budget: { hourly?: number; daily?: number; monthly?: number },
-): Promise<TeamBudget | null> {
-  try {
-    const res = await fetch(
-      `${GATEWAY_URL}/v1/orgs/${orgId}/teams/${teamId}/budget`,
-      {
-        method: "PUT",
-        headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
-        body: JSON.stringify(budget),
-      },
-    );
-    if (!res.ok) {
-      console.warn(`[setTeamBudget] HTTP ${res.status}`);
-      return null;
-    }
-    return res.json();
-  } catch (error) {
-    console.warn("[setTeamBudget] Failed to reach gateway:", error);
-    return null;
-  }
+): Promise<ApiResult<TeamBudget>> {
+  return fetchApi<TeamBudget>(`${GATEWAY_URL}/v1/orgs/${orgId}/teams/${teamId}/budget`, {
+    method: 'PUT',
+    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(budget),
+  });
 }
 
 export async function fetchTeamBudget(
   orgId: string,
   teamId: string,
-): Promise<TeamBudget | null> {
-  try {
-    const res = await fetch(
-      `${GATEWAY_URL}/v1/orgs/${orgId}/teams/${teamId}/budget`,
-      {
-        headers: getAuthHeaders(),
-        cache: "no-store",
-      },
-    );
-    if (!res.ok) {
-      console.warn(`[fetchTeamBudget] HTTP ${res.status}`);
-      return null;
-    }
-    return res.json();
-  } catch (error) {
-    console.warn("[fetchTeamBudget] Failed to reach gateway:", error);
-    return null;
-  }
+): Promise<ApiResult<TeamBudget>> {
+  return fetchApi<TeamBudget>(`${GATEWAY_URL}/v1/orgs/${orgId}/teams/${teamId}/budget`, {
+    headers: getAuthHeaders(),
+    cache: 'no-store',
+  });
 }
