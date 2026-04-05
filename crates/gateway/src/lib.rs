@@ -8,6 +8,7 @@ pub mod cache;
 pub mod config;
 pub mod error;
 pub mod middleware;
+pub mod orgs;
 pub mod payment_util;
 pub mod providers;
 pub mod routes;
