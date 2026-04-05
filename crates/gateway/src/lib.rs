@@ -207,6 +207,7 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         )
         .route("/v1/orgs/{id}/stats", get(routes::orgs::get_org_stats))
         .route("/.well-known/agent.json", get(a2a::agent_card::agent_card))
+        .route("/a2a", post(a2a::jsonrpc::a2a_endpoint))
         .route("/metrics", get(routes::metrics::get_metrics))
         .layer(axum::middleware::from_fn(
             middleware::rate_limit::rate_limit,
