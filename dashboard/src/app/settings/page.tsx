@@ -138,21 +138,21 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!currentApiKey) return;
-    fetchOrgs().then((data) => {
-      if (data && data.length > 0) {
-        setOrgs(data);
-        setSelectedOrgId(data[0].id);
+    fetchOrgs().then((result) => {
+      if (result.ok && result.data.length > 0) {
+        setOrgs(result.data);
+        setSelectedOrgId(result.data[0].id);
       }
     });
   }, [currentApiKey]);
 
   useEffect(() => {
     if (!selectedOrgId) return;
-    fetchTeams(selectedOrgId).then((data) => {
-      if (data) setTeams(data);
+    fetchTeams(selectedOrgId).then((result) => {
+      if (result.ok) setTeams(result.data);
     });
-    fetchAuditLogs(selectedOrgId, { limit: 20 }).then((data) => {
-      if (data) setAuditLogs(data);
+    fetchAuditLogs(selectedOrgId, { limit: 20 }).then((result) => {
+      if (result.ok) setAuditLogs(result.data);
     });
   }, [selectedOrgId]);
 
@@ -177,9 +177,9 @@ export default function SettingsPage() {
   async function handleCreateTeam() {
     if (!selectedOrgId || !newTeamName.trim()) return;
     setCreatingTeam(true);
-    const team = await createTeam(selectedOrgId, newTeamName.trim());
-    if (team) {
-      setTeams((prev) => [...prev, team]);
+    const result = await createTeam(selectedOrgId, newTeamName.trim());
+    if (result.ok) {
+      setTeams((prev) => [...prev, result.data]);
       setNewTeamName("");
     }
     setCreatingTeam(false);
