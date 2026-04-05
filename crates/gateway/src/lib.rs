@@ -3,6 +3,7 @@
 //! This module exposes the gateway internals for integration testing.
 //! The binary entry point is in `main.rs`.
 
+pub mod audit;
 pub mod balance_monitor;
 pub mod cache;
 pub mod config;
@@ -185,6 +186,10 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .route(
             "/v1/orgs/{id}/api-keys/{kid}",
             axum::routing::delete(routes::orgs::revoke_api_key),
+        )
+        .route(
+            "/v1/orgs/{id}/audit-logs",
+            get(routes::orgs::list_audit_logs),
         )
         .route("/metrics", get(routes::metrics::get_metrics))
         .layer(axum::middleware::from_fn(

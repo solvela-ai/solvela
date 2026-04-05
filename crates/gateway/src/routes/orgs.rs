@@ -5,21 +5,49 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::audit::{log_audit, AuditEntry};
 use crate::orgs::models::{
-    AddMemberRequest, AssignWalletRequest, CreateApiKeyRequest, CreateOrgRequest,
-    CreateTeamRequest,
+    AddMemberRequest, AssignWalletRequest, CreateApiKeyRequest, CreateOrgRequest, CreateTeamRequest,
 };
 use crate::orgs::queries;
 use crate::security;
 use crate::AppState;
+
+/// Query parameters for the audit log endpoint.
+#[derive(Debug, Deserialize)]
+pub struct AuditLogQuery {
+    /// Filter by action string (exact match).
+    pub action: Option<String>,
+    /// Return only events after this ISO 8601 timestamp.
+    pub since: Option<DateTime<Utc>>,
+    /// Maximum number of results (default 100, max 1000).
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// A single audit log entry returned from the database.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct AuditLogEntry {
+    pub id: Uuid,
+    pub org_id: Option<Uuid>,
+    pub actor_wallet: Option<String>,
+    pub actor_api_key: Option<Uuid>,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub details: Option<serde_json::Value>,
+    pub ip_address: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
 
 /// Full request body for creating an organization (includes `owner_wallet`).
 #[derive(Debug, Deserialize)]
@@ -102,7 +130,22 @@ pub async fn create_org(
     };
 
     match queries::create_org(pool, req, body.owner_wallet).await {
-        Ok(org) => (StatusCode::CREATED, Json(org)).into_response(),
+        Ok(org) => {
+            log_audit(
+                pool,
+                AuditEntry {
+                    org_id: Some(org.id),
+                    actor_wallet: None,
+                    actor_api_key: None,
+                    action: "org.created".to_string(),
+                    resource_type: "organization".to_string(),
+                    resource_id: Some(org.id.to_string()),
+                    details: None,
+                    ip_address: None,
+                },
+            );
+            (StatusCode::CREATED, Json(org)).into_response()
+        }
         Err(e) => {
             tracing::warn!(error = %e, "failed to create org");
             (
@@ -115,10 +158,7 @@ pub async fn create_org(
 }
 
 /// `GET /v1/orgs` — List all organizations (admin view, first 100).
-pub async fn list_orgs(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn list_orgs(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Err(resp) = require_admin(&state, &headers) {
         return resp;
     }
@@ -193,7 +233,22 @@ pub async fn create_team(
     let pool = require_db!(state);
 
     match queries::create_team(pool, org_id, body).await {
-        Ok(team) => (StatusCode::CREATED, Json(team)).into_response(),
+        Ok(team) => {
+            log_audit(
+                pool,
+                AuditEntry {
+                    org_id: Some(org_id),
+                    actor_wallet: None,
+                    actor_api_key: None,
+                    action: "team.created".to_string(),
+                    resource_type: "team".to_string(),
+                    resource_id: Some(team.id.to_string()),
+                    details: None,
+                    ip_address: None,
+                },
+            );
+            (StatusCode::CREATED, Json(team)).into_response()
+        }
         Err(e) => {
             tracing::warn!(org_id = %org_id, error = %e, "failed to create team");
             (
@@ -246,7 +301,22 @@ pub async fn add_member(
     let pool = require_db!(state);
 
     match queries::add_member(pool, org_id, body).await {
-        Ok(member) => (StatusCode::CREATED, Json(member)).into_response(),
+        Ok(member) => {
+            log_audit(
+                pool,
+                AuditEntry {
+                    org_id: Some(org_id),
+                    actor_wallet: None,
+                    actor_api_key: None,
+                    action: "member.added".to_string(),
+                    resource_type: "org_member".to_string(),
+                    resource_id: Some(member.id.to_string()),
+                    details: None,
+                    ip_address: None,
+                },
+            );
+            (StatusCode::CREATED, Json(member)).into_response()
+        }
         Err(e) => {
             tracing::warn!(org_id = %org_id, error = %e, "failed to add member");
             (
@@ -299,7 +369,22 @@ pub async fn assign_wallet(
     let pool = require_db!(state);
 
     match queries::assign_wallet(pool, team_id, &body).await {
-        Ok(wallet) => (StatusCode::CREATED, Json(wallet)).into_response(),
+        Ok(wallet) => {
+            log_audit(
+                pool,
+                AuditEntry {
+                    org_id: None,
+                    actor_wallet: None,
+                    actor_api_key: None,
+                    action: "wallet.assigned".to_string(),
+                    resource_type: "team_wallet".to_string(),
+                    resource_id: Some(wallet.id.to_string()),
+                    details: None,
+                    ip_address: None,
+                },
+            );
+            (StatusCode::CREATED, Json(wallet)).into_response()
+        }
         Err(e) => {
             tracing::warn!(team_id = %team_id, error = %e, "failed to assign wallet");
             (
@@ -352,7 +437,22 @@ pub async fn create_api_key(
     let pool = require_db!(state);
 
     match queries::create_api_key(pool, org_id, body).await {
-        Ok(created) => (StatusCode::CREATED, Json(created)).into_response(),
+        Ok(created) => {
+            log_audit(
+                pool,
+                AuditEntry {
+                    org_id: Some(org_id),
+                    actor_wallet: None,
+                    actor_api_key: None,
+                    action: "api_key.created".to_string(),
+                    resource_type: "api_key".to_string(),
+                    resource_id: Some(created.id.to_string()),
+                    details: None,
+                    ip_address: None,
+                },
+            );
+            (StatusCode::CREATED, Json(created)).into_response()
+        }
         Err(e) => {
             tracing::warn!(org_id = %org_id, error = %e, "failed to create api key");
             (
@@ -400,7 +500,22 @@ pub async fn revoke_api_key(
     let pool = require_db!(state);
 
     match queries::revoke_api_key(pool, key_id, org_id).await {
-        Ok(true) => (StatusCode::OK, Json(json!({ "revoked": true }))).into_response(),
+        Ok(true) => {
+            log_audit(
+                pool,
+                AuditEntry {
+                    org_id: Some(org_id),
+                    actor_wallet: None,
+                    actor_api_key: None,
+                    action: "api_key.revoked".to_string(),
+                    resource_type: "api_key".to_string(),
+                    resource_id: Some(key_id.to_string()),
+                    details: None,
+                    ip_address: None,
+                },
+            );
+            (StatusCode::OK, Json(json!({ "revoked": true }))).into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "API key not found or already revoked" })),
@@ -411,6 +526,61 @@ pub async fn revoke_api_key(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "failed to revoke API key" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audit log endpoint
+// ---------------------------------------------------------------------------
+
+/// `GET /v1/orgs/:id/audit-logs` — List audit log entries for an organization.
+///
+/// Query parameters:
+/// - `action`  — filter by action string (exact match)
+/// - `since`   — ISO 8601 timestamp; return only events after this time
+/// - `limit`   — max results (default 100, capped at 1000)
+pub async fn list_audit_logs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(org_id): Path<Uuid>,
+    Query(params): Query<AuditLogQuery>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let pool = require_db!(state);
+
+    let limit = params.limit.unwrap_or(100).min(1000).max(1);
+
+    // Build query dynamically based on optional filters.
+    // Using a fixed-shape query avoids sqlx macro limitations with optional clauses.
+    let entries = sqlx::query_as::<_, AuditLogEntry>(
+        r#"SELECT id, org_id, actor_wallet, actor_api_key, action, resource_type,
+                  resource_id, details, ip_address, created_at
+           FROM audit_logs
+           WHERE org_id = $1
+             AND ($2::TEXT IS NULL OR action = $2)
+             AND ($3::TIMESTAMPTZ IS NULL OR created_at > $3)
+           ORDER BY created_at DESC
+           LIMIT $4"#,
+    )
+    .bind(org_id)
+    .bind(&params.action)
+    .bind(params.since)
+    .bind(limit)
+    .fetch_all(pool)
+    .await;
+
+    match entries {
+        Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
+        Err(e) => {
+            tracing::warn!(org_id = %org_id, error = %e, "failed to list audit logs");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to list audit logs" })),
             )
                 .into_response()
         }
@@ -452,8 +622,8 @@ supports_vision = true
         use router::models::ModelRegistry;
         use tokio::sync::RwLock;
 
-        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML)
-            .expect("test models toml must be valid");
+        let model_registry =
+            ModelRegistry::from_toml(TEST_MODELS_TOML).expect("test models toml must be valid");
         let service_registry = ServiceRegistry::empty();
         let facilitator = x402::facilitator::Facilitator::new(vec![]);
 
@@ -483,14 +653,8 @@ supports_vision = true
         Router::new()
             .route("/v1/orgs", post(create_org).get(list_orgs))
             .route("/v1/orgs/{id}", get(get_org))
-            .route(
-                "/v1/orgs/{id}/teams",
-                post(create_team).get(list_teams),
-            )
-            .route(
-                "/v1/orgs/{id}/members",
-                post(add_member).get(list_members),
-            )
+            .route("/v1/orgs/{id}/teams", post(create_team).get(list_teams))
+            .route("/v1/orgs/{id}/members", post(add_member).get(list_members))
             .route(
                 "/v1/orgs/{id}/teams/{tid}/wallets",
                 post(assign_wallet).get(list_team_wallets),
@@ -499,10 +663,8 @@ supports_vision = true
                 "/v1/orgs/{id}/api-keys",
                 post(create_api_key).get(list_api_keys),
             )
-            .route(
-                "/v1/orgs/{id}/api-keys/{kid}",
-                delete(revoke_api_key),
-            )
+            .route("/v1/orgs/{id}/api-keys/{kid}", delete(revoke_api_key))
+            .route("/v1/orgs/{id}/audit-logs", get(list_audit_logs))
             .with_state(state)
     }
 
@@ -666,6 +828,46 @@ supports_vision = true
                     .header("content-type", "application/json")
                     .header("authorization", "Bearer mytoken")
                     .body(Body::from(r#"{"name":"My Key","scopes":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // db_pool is None → 503
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn audit_logs_missing_token_returns_401() {
+        let app = test_router(Some("secret-token"));
+        let org_id = Uuid::new_v4();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/orgs/{org_id}/audit-logs"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn audit_logs_valid_token_no_db_returns_503() {
+        let app = test_router(Some("mytoken"));
+        let org_id = Uuid::new_v4();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/orgs/{org_id}/audit-logs"))
+                    .header("authorization", "Bearer mytoken")
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
