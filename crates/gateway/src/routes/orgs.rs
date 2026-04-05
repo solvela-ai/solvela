@@ -10,6 +10,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
+use redis;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
@@ -593,11 +594,29 @@ pub async fn list_audit_logs(
 // ---------------------------------------------------------------------------
 
 /// Request body for setting budget limits.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SetBudgetRequest {
     pub hourly: Option<f64>,
     pub daily: Option<f64>,
     pub monthly: Option<f64>,
+}
+
+/// Validate a single budget field value — must be non-negative and finite.
+fn validate_budget_value(
+    val: Option<f64>,
+    field_name: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if let Some(v) = val {
+        if v.is_nan() || v.is_infinite() || v < 0.0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("{} must be a non-negative finite number", field_name)
+                })),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Response body for budget endpoints (limits + current spend).
@@ -615,12 +634,24 @@ pub struct BudgetResponse {
 pub async fn set_team_budget(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((_org_id, team_id)): Path<(Uuid, Uuid)>,
+    Path((org_id, team_id)): Path<(Uuid, Uuid)>,
     Json(body): Json<SetBudgetRequest>,
 ) -> Response {
     if let Err(resp) = require_admin(&state, &headers) {
         return resp;
     }
+
+    // Validate all budget fields before touching the DB.
+    if let Err((status, body_err)) = validate_budget_value(body.hourly, "hourly") {
+        return (status, body_err).into_response();
+    }
+    if let Err((status, body_err)) = validate_budget_value(body.daily, "daily") {
+        return (status, body_err).into_response();
+    }
+    if let Err((status, body_err)) = validate_budget_value(body.monthly, "monthly") {
+        return (status, body_err).into_response();
+    }
+
     let pool = require_db!(state);
 
     let now = chrono::Utc::now();
@@ -643,7 +674,35 @@ pub async fn set_team_budget(
     .await;
 
     match result {
-        Ok(_) => (StatusCode::OK, Json(json!({ "updated": true }))).into_response(),
+        Ok(_) => {
+            // Invalidate the cached team budget config so the next read reflects
+            // the new limits immediately.
+            if let Some(redis_client) = state.usage.redis_client() {
+                if let Ok(mut conn) = redis_client.get_multiplexed_async_connection().await {
+                    let cache_key = format!("team_budget:{}", team_id);
+                    let _ = redis::cmd("DEL")
+                        .arg(&cache_key)
+                        .query_async::<()>(&mut conn)
+                        .await;
+                }
+            }
+
+            log_audit(
+                pool,
+                AuditEntry {
+                    org_id: Some(org_id),
+                    actor_wallet: None,
+                    actor_api_key: None,
+                    action: "budget.team_updated".to_string(),
+                    resource_type: "team_budget".to_string(),
+                    resource_id: Some(team_id.to_string()),
+                    details: Some(serde_json::to_value(&body).unwrap_or_default()),
+                    ip_address: None,
+                },
+            );
+
+            (StatusCode::OK, Json(json!({ "updated": true }))).into_response()
+        }
         Err(e) => {
             tracing::warn!(team_id = %team_id, error = %e, "failed to set team budget");
             (
@@ -737,6 +796,18 @@ pub async fn set_wallet_budget(
     if let Err(resp) = require_admin(&state, &headers) {
         return resp;
     }
+
+    // Validate all budget fields before touching the DB.
+    if let Err((status, body_err)) = validate_budget_value(body.hourly, "hourly") {
+        return (status, body_err).into_response();
+    }
+    if let Err((status, body_err)) = validate_budget_value(body.daily, "daily") {
+        return (status, body_err).into_response();
+    }
+    if let Err((status, body_err)) = validate_budget_value(body.monthly, "monthly") {
+        return (status, body_err).into_response();
+    }
+
     let pool = require_db!(state);
 
     let now = chrono::Utc::now();
@@ -757,7 +828,35 @@ pub async fn set_wallet_budget(
     .await;
 
     match result {
-        Ok(_) => (StatusCode::OK, Json(json!({ "updated": true }))).into_response(),
+        Ok(_) => {
+            // Invalidate the cached wallet budget config so the next read reflects
+            // the new limits immediately.
+            if let Some(redis_client) = state.usage.redis_client() {
+                if let Ok(mut conn) = redis_client.get_multiplexed_async_connection().await {
+                    let cache_key = format!("budget_config:{}", wallet);
+                    let _ = redis::cmd("DEL")
+                        .arg(&cache_key)
+                        .query_async::<()>(&mut conn)
+                        .await;
+                }
+            }
+
+            log_audit(
+                pool,
+                AuditEntry {
+                    org_id: None,
+                    actor_wallet: None,
+                    actor_api_key: None,
+                    action: "budget.wallet_updated".to_string(),
+                    resource_type: "wallet_budget".to_string(),
+                    resource_id: Some(wallet.clone()),
+                    details: Some(serde_json::to_value(&body).unwrap_or_default()),
+                    ip_address: None,
+                },
+            );
+
+            (StatusCode::OK, Json(json!({ "updated": true }))).into_response()
+        }
         Err(e) => {
             tracing::warn!(wallet = %wallet, error = %e, "failed to set wallet budget");
             (
