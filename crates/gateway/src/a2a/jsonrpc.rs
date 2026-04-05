@@ -5,17 +5,15 @@
 
 use std::sync::Arc;
 
+use crate::a2a::types::{
+    JsonRpcError, JsonRpcErrorData, JsonRpcRequest, JsonRpcResponse, A2A_EXTENSIONS_HEADER,
+    X402_EXTENSION_URI,
+};
+use crate::AppState;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::Value;
-
-use crate::a2a::types::{
-    JsonRpcError, JsonRpcErrorData, JsonRpcRequest, JsonRpcResponse, MessageSendParams,
-    A2A_EXTENSIONS_HEADER, X402_EXTENSION_URI,
-};
-use crate::AppState;
 
 /// JSON-RPC 2.0 standard error codes.
 const PARSE_ERROR: i32 = -32700;
@@ -43,7 +41,7 @@ pub async fn a2a_endpoint(
 
     // Route by method
     let result = match request.method.as_str() {
-        "message/send" => handle_message_send(state, &headers, &request).await,
+        "message/send" => crate::a2a::handler::handle_message_send(state, &headers, &request).await,
         _ => Err(JsonRpcErrorData {
             code: METHOD_NOT_FOUND,
             message: format!("Method not found: {}", request.method),
@@ -75,31 +73,6 @@ pub async fn a2a_endpoint(
     }
 
     response
-}
-
-/// Stub handler for message/send — replaced by real handler in Task 5.
-async fn handle_message_send(
-    _state: Arc<AppState>,
-    _headers: &HeaderMap,
-    request: &JsonRpcRequest,
-) -> Result<Value, JsonRpcErrorData> {
-    let _params: MessageSendParams =
-        serde_json::from_value(request.params.clone()).map_err(|e| JsonRpcErrorData {
-            code: -32602,
-            message: format!("Invalid params: {e}"),
-            data: None,
-        })?;
-
-    Ok(serde_json::json!({
-        "id": "stub_task",
-        "status": {
-            "state": "input-required",
-            "message": {
-                "role": "agent",
-                "parts": [{"kind": "text", "text": "Payment required (stub)"}]
-            }
-        }
-    }))
 }
 
 #[cfg(test)]
@@ -245,7 +218,8 @@ supports_vision = false
                             "params": {
                                 "message": {
                                     "role": "user",
-                                    "parts": [{"kind": "text", "text": "Hello"}]
+                                    "parts": [{"kind": "text", "text": "Hello"}],
+                                    "metadata": {"model": "test-model"}
                                 }
                             }
                         })
