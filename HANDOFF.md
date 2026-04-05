@@ -40,21 +40,22 @@ RCR is one of three products under **rustyclaw.ai**:
 | — | **Audit Bug Fixes** | E1 retry unwrap, S1 DNS rebinding TOCTOU, S2 replay TTL, SSE buffer optimization, shared HTTP clients |
 | 5a | **Dashboard API Integration** | Admin aggregate stats endpoint (`GET /v1/admin/stats`), all dashboard pages connected to real API, graceful mock-data fallback, mobile sidebar fix |
 | 5b | **Enterprise Features** | Org/team hierarchy, API key auth, audit logs, hourly+team spend limits, budget API, team analytics, dashboard auth |
+| — | **A2A Protocol Adapter** | `GET /.well-known/agent.json` (AgentCard), `POST /a2a` (JSON-RPC 2.0), message/send handler with x402 payment flow, Redis task state |
 | — | **Dockerfile Fix** | Fixed `crates/common/` → `crates/protocol/` reference in Dockerfile. Previous deploys were using stale cached images. |
 | — | **LiteSVM Integration Tests** | 14 LiteSVM integration tests for escrow program (5 happy path + 9 error cases). Installed Anchor CLI 0.31.1 + Solana toolchain 3.1.12. All 20 escrow tests pass in 2.5s. |
 
-**Total: 571 Rust workspace tests + 21 escrow tests + 82 dashboard tests + 94 SDK tests, all passing. Lint clean (fmt + clippy).**
+**Total: 614 Rust workspace tests + 21 escrow tests + 82 dashboard tests + 94 SDK tests, all passing. Lint clean (fmt + clippy).**
 
 ### Test Breakdown
 
 ```
-gateway:   441 tests (325 unit + 116 integration)
+gateway:   484 tests (368 unit + 116 integration)
 x402:       99 tests
 protocol:   18 tests
 router:     13 tests
 escrow:     21 tests (standalone, not in workspace)
 ─────────────────
-Total:     592 Rust tests (571 workspace + 21 escrow)
+Total:     635 Rust tests (614 workspace + 21 escrow)
 
 dashboard:  82 tests (32 utils + 19 mock-data + 31 API)
 ```
@@ -73,7 +74,7 @@ dashboard:  82 tests (32 utils + 19 mock-data + 31 API)
 #### Other Deferred Items
 - **x402 V2 Migration** — V2 launched Dec 2025 (sessions, multi-chain, service discovery). We're on V1.
 - **Multi-chain support** — Base/EVM deferred. `PaymentVerifier` trait is chain-agnostic by design.
-- **AP2 compatibility** — Google's Agent Payments Protocol has 60+ partners. Consider for Phase 7.
+- ~~**AP2 compatibility**~~ — **DONE 2026-04-05**: A2A protocol adapter (`GET /.well-known/agent.json`, `POST /a2a` JSON-RPC 2.0) with x402 payment flow and Redis task state.
 - Load testing, per-user fairness queuing, secret rotation plan
 - Complete API reference documentation
 
@@ -241,9 +242,9 @@ curl https://rustyclawrouter-gateway.fly.dev/health
 ## Test Commands
 
 ```bash
-# Rust (571 workspace tests)
+# Rust (614 workspace tests)
 cargo test                        # All crates
-cargo test -p gateway             # Gateway (441 tests)
+cargo test -p gateway             # Gateway (484 tests)
 cargo test -p x402                # x402 protocol (99 tests)
 cargo test -p rustyclaw-protocol  # Protocol (18 tests)
 cargo test -p router              # Smart router (13 tests)
