@@ -188,7 +188,7 @@ async fn handle_new_request(
         status: TaskStatus {
             state: TaskState::InputRequired,
             message: Some(Message {
-                role: "agent".to_string(),
+                role: MessageRole::Agent,
                 parts: vec![Part::Text {
                     text: "Payment required to process this request.".to_string(),
                 }],
@@ -226,6 +226,11 @@ async fn handle_payment_submitted(
     // Load task record
     let record = task_store::load_task(state, task_id)
         .await
+        .map_err(|e| JsonRpcErrorData {
+            code: ERR_INTERNAL,
+            message: format!("Task store error: {e}"),
+            data: None,
+        })?
         .ok_or_else(|| JsonRpcErrorData {
             code: ERR_TASK_NOT_FOUND,
             message: format!("Task not found or expired: {task_id}"),
@@ -421,7 +426,7 @@ async fn handle_payment_submitted(
         status: TaskStatus {
             state: TaskState::Completed,
             message: Some(Message {
-                role: "agent".to_string(),
+                role: MessageRole::Agent,
                 parts: vec![Part::Text {
                     text: response_text.clone(),
                 }],
@@ -615,7 +620,7 @@ supports_vision = false
         let state = test_state(); // test_state() has cache: None
         let params = MessageSendParams {
             message: Message {
-                role: "user".to_string(),
+                role: MessageRole::User,
                 parts: vec![Part::Text {
                     text: "What is Solana?".to_string(),
                 }],
@@ -645,7 +650,7 @@ supports_vision = false
         let state = test_state();
         let params = MessageSendParams {
             message: Message {
-                role: "user".to_string(),
+                role: MessageRole::User,
                 parts: vec![Part::Data {
                     content_type: "image/png".to_string(),
                     data: json!("base64"),
@@ -669,7 +674,7 @@ supports_vision = false
         let state = test_state();
         let params = MessageSendParams {
             message: Message {
-                role: "user".to_string(),
+                role: MessageRole::User,
                 parts: vec![Part::Text {
                     text: "Hello".to_string(),
                 }],
@@ -697,7 +702,7 @@ supports_vision = false
         let headers = HeaderMap::new();
         let params = MessageSendParams {
             message: Message {
-                role: "user".to_string(),
+                role: MessageRole::User,
                 parts: vec![Part::Text {
                     text: "pay".to_string(),
                 }],

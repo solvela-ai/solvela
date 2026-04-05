@@ -27,15 +27,14 @@ pub async fn a2a_endpoint(
 ) -> Response {
     // Validate JSON-RPC version
     if request.jsonrpc != "2.0" {
-        return Json(JsonRpcError {
-            jsonrpc: "2.0".to_string(),
-            id: request.id.clone(),
-            error: JsonRpcErrorData {
+        return Json(JsonRpcError::new(
+            request.id.clone(),
+            JsonRpcErrorData {
                 code: PARSE_ERROR,
                 message: "Invalid JSON-RPC version".to_string(),
                 data: None,
             },
-        })
+        ))
         .into_response();
     }
 
@@ -51,18 +50,8 @@ pub async fn a2a_endpoint(
 
     // Build response with extension echo header
     let mut response = match result {
-        Ok(value) => Json(JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            id: request.id,
-            result: value,
-        })
-        .into_response(),
-        Err(error) => Json(JsonRpcError {
-            jsonrpc: "2.0".to_string(),
-            id: request.id,
-            error,
-        })
-        .into_response(),
+        Ok(value) => Json(JsonRpcResponse::success(request.id, value)).into_response(),
+        Err(error) => Json(JsonRpcError::new(request.id, error)).into_response(),
     };
 
     // Echo X-A2A-Extensions header if client sent it
