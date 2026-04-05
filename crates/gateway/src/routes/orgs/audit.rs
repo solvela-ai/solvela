@@ -11,10 +11,15 @@ use super::*;
 pub async fn list_audit_logs(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    org_ctx: Option<Extension<OrgContext>>,
     Path(org_id): Path<Uuid>,
     Query(params): Query<AuditLogQuery>,
 ) -> Response {
-    if let Err(resp) = require_admin(&state, &headers) {
+    let auth = match require_auth(&state, &headers, org_ctx.as_ref().map(|e| &e.0)) {
+        Ok(a) => a,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = require_org_access(&auth, org_id) {
         return resp;
     }
     let pool = require_db!(state);
