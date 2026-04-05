@@ -302,11 +302,11 @@ export default function SettingsPage() {
                       </div>
                       {team.budget && (
                         <div className="text-xs text-gray-500 text-right">
-                          {team.budget.daily_usdc != null && (
-                            <p>Daily: {team.budget.daily_usdc} USDC</p>
+                          {team.budget.daily_limit != null && (
+                            <p>Daily: {team.budget.daily_limit} USDC</p>
                           )}
-                          {team.budget.monthly_usdc != null && (
-                            <p>Monthly: {team.budget.monthly_usdc} USDC</p>
+                          {team.budget.monthly_limit != null && (
+                            <p>Monthly: {team.budget.monthly_limit} USDC</p>
                           )}
                         </div>
                       )}

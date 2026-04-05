@@ -526,8 +526,15 @@ async fn get_wallet_budget_config(
         .query_async::<Option<String>>(conn)
         .await
     {
-        if let Ok(config) = serde_json::from_str::<BudgetConfig>(&json_str) {
-            return config;
+        match serde_json::from_str::<BudgetConfig>(&json_str) {
+            Ok(config) => return config,
+            Err(e) => {
+                tracing::warn!(cache_key = %cache_key, error = %e, "corrupted cache entry, falling through to DB");
+                let _ = redis::cmd("DEL")
+                    .arg(&cache_key)
+                    .query_async::<()>(conn)
+                    .await;
+            }
         }
     }
 
@@ -562,13 +569,16 @@ async fn get_wallet_budget_config(
 
     // Cache in Redis (best-effort)
     if let Ok(json_str) = serde_json::to_string(&config) {
-        let _: Result<(), _> = redis::cmd("SET")
+        if let Err(e) = redis::cmd("SET")
             .arg(&cache_key)
             .arg(&json_str)
             .arg("EX")
             .arg(BUDGET_CONFIG_CACHE_TTL)
-            .query_async(conn)
-            .await;
+            .query_async::<()>(conn)
+            .await
+        {
+            tracing::warn!(cache_key = %cache_key, error = %e, "failed to write to Redis cache");
+        }
     }
 
     config

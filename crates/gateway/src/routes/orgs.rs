@@ -112,6 +112,56 @@ macro_rules! require_db {
 }
 
 // ---------------------------------------------------------------------------
+// Input validation helpers
+// ---------------------------------------------------------------------------
+
+fn validate_slug(slug: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if slug.is_empty() || slug.len() > 64 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "slug must be 1-64 characters"})),
+        ));
+    }
+    if !slug
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "slug must contain only lowercase letters, digits, and hyphens"})),
+        ));
+    }
+    if slug.starts_with('-') || slug.ends_with('-') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "slug must not start or end with a hyphen"})),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_name(name: &str, field: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.len() > 256 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("{} must be 1-256 characters", field)})),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_wallet_address(addr: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if addr.is_empty() || addr.len() > 64 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "wallet address must be 1-64 characters"})),
+        ));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Organization endpoints
 // ---------------------------------------------------------------------------
 
@@ -124,6 +174,17 @@ pub async fn create_org(
     if let Err(resp) = require_admin(&state, &headers) {
         return resp;
     }
+
+    if let Err((status, err)) = validate_name(&body.name, "name") {
+        return (status, err).into_response();
+    }
+    if let Err((status, err)) = validate_slug(&body.slug) {
+        return (status, err).into_response();
+    }
+    if let Err((status, err)) = validate_wallet_address(&body.owner_wallet) {
+        return (status, err).into_response();
+    }
+
     let pool = require_db!(state);
 
     let req = CreateOrgRequest {
@@ -232,6 +293,11 @@ pub async fn create_team(
     if let Err(resp) = require_admin(&state, &headers) {
         return resp;
     }
+
+    if let Err((status, err)) = validate_name(&body.name, "name") {
+        return (status, err).into_response();
+    }
+
     let pool = require_db!(state);
 
     match queries::create_team(pool, org_id, body).await {
@@ -300,6 +366,11 @@ pub async fn add_member(
     if let Err(resp) = require_admin(&state, &headers) {
         return resp;
     }
+
+    if let Err((status, err)) = validate_wallet_address(&body.wallet_address) {
+        return (status, err).into_response();
+    }
+
     let pool = require_db!(state);
 
     match queries::add_member(pool, org_id, body).await {
@@ -362,20 +433,53 @@ pub async fn list_members(
 pub async fn assign_wallet(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((_org_id, team_id)): Path<(Uuid, Uuid)>,
+    Path((org_id, team_id)): Path<(Uuid, Uuid)>,
     Json(body): Json<AssignWalletRequest>,
 ) -> Response {
     if let Err(resp) = require_admin(&state, &headers) {
         return resp;
     }
+
+    if let Err((status, err)) = validate_wallet_address(&body.wallet_address) {
+        return (status, err).into_response();
+    }
+
     let pool = require_db!(state);
+
+    // Verify the team belongs to the org
+    let team_exists: bool = match sqlx::query_as::<_, (bool,)>(
+        "SELECT EXISTS(SELECT 1 FROM teams WHERE id = $1 AND org_id = $2)",
+    )
+    .bind(team_id)
+    .bind(org_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok((exists,)) => exists,
+        Err(e) => {
+            tracing::warn!(team_id = %team_id, error = %e, "failed to verify team");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to verify team" })),
+            )
+                .into_response();
+        }
+    };
+
+    if !team_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "team not found in this organization" })),
+        )
+            .into_response();
+    }
 
     match queries::assign_wallet(pool, team_id, &body).await {
         Ok(wallet) => {
             log_audit(
                 pool,
                 AuditEntry {
-                    org_id: None,
+                    org_id: Some(org_id),
                     actor_wallet: None,
                     actor_api_key: None,
                     action: "wallet.assigned".to_string(),
@@ -402,12 +506,40 @@ pub async fn assign_wallet(
 pub async fn list_team_wallets(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((_org_id, team_id)): Path<(Uuid, Uuid)>,
+    Path((org_id, team_id)): Path<(Uuid, Uuid)>,
 ) -> Response {
     if let Err(resp) = require_admin(&state, &headers) {
         return resp;
     }
     let pool = require_db!(state);
+
+    // Verify the team belongs to the org
+    let team_exists: bool = match sqlx::query_as::<_, (bool,)>(
+        "SELECT EXISTS(SELECT 1 FROM teams WHERE id = $1 AND org_id = $2)",
+    )
+    .bind(team_id)
+    .bind(org_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok((exists,)) => exists,
+        Err(e) => {
+            tracing::warn!(team_id = %team_id, error = %e, "failed to verify team");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to verify team" })),
+            )
+                .into_response();
+        }
+    };
+
+    if !team_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "team not found in this organization" })),
+        )
+            .into_response();
+    }
 
     match queries::list_team_wallets(pool, team_id).await {
         Ok(wallets) => (StatusCode::OK, Json(wallets)).into_response(),
@@ -654,6 +786,34 @@ pub async fn set_team_budget(
 
     let pool = require_db!(state);
 
+    // Verify the team belongs to the org
+    let team_exists: bool = match sqlx::query_as::<_, (bool,)>(
+        "SELECT EXISTS(SELECT 1 FROM teams WHERE id = $1 AND org_id = $2)",
+    )
+    .bind(team_id)
+    .bind(org_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok((exists,)) => exists,
+        Err(e) => {
+            tracing::warn!(team_id = %team_id, error = %e, "failed to verify team");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to verify team" })),
+            )
+                .into_response();
+        }
+    };
+
+    if !team_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "team not found in this organization" })),
+        )
+            .into_response();
+    }
+
     let now = chrono::Utc::now();
     let result = sqlx::query(
         r#"INSERT INTO team_budgets (team_id, hourly_limit_usdc, daily_limit_usdc, monthly_limit_usdc, created_at, updated_at)
@@ -678,12 +838,20 @@ pub async fn set_team_budget(
             // Invalidate the cached team budget config so the next read reflects
             // the new limits immediately.
             if let Some(redis_client) = state.usage.redis_client() {
-                if let Ok(mut conn) = redis_client.get_multiplexed_async_connection().await {
-                    let cache_key = format!("team_budget:{}", team_id);
-                    let _ = redis::cmd("DEL")
-                        .arg(&cache_key)
-                        .query_async::<()>(&mut conn)
-                        .await;
+                match redis_client.get_multiplexed_async_connection().await {
+                    Ok(mut conn) => {
+                        let cache_key = format!("team_budget:{}", team_id);
+                        if let Err(e) = redis::cmd("DEL")
+                            .arg(&cache_key)
+                            .query_async::<()>(&mut conn)
+                            .await
+                        {
+                            tracing::warn!(cache_key = %cache_key, error = %e, "failed to invalidate budget cache");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Redis unavailable for budget cache invalidation");
+                    }
                 }
             }
 
@@ -718,12 +886,40 @@ pub async fn set_team_budget(
 pub async fn get_team_budget(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path((_org_id, team_id)): Path<(Uuid, Uuid)>,
+    Path((org_id, team_id)): Path<(Uuid, Uuid)>,
 ) -> Response {
     if let Err(resp) = require_admin(&state, &headers) {
         return resp;
     }
     let pool = require_db!(state);
+
+    // Verify the team belongs to the org
+    let team_exists: bool = match sqlx::query_as::<_, (bool,)>(
+        "SELECT EXISTS(SELECT 1 FROM teams WHERE id = $1 AND org_id = $2)",
+    )
+    .bind(team_id)
+    .bind(org_id)
+    .fetch_one(pool)
+    .await
+    {
+        Ok((exists,)) => exists,
+        Err(e) => {
+            tracing::warn!(team_id = %team_id, error = %e, "failed to verify team");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to verify team" })),
+            )
+                .into_response();
+        }
+    };
+
+    if !team_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "team not found in this organization" })),
+        )
+            .into_response();
+    }
 
     let row = sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>)>(
         r#"SELECT
@@ -832,12 +1028,20 @@ pub async fn set_wallet_budget(
             // Invalidate the cached wallet budget config so the next read reflects
             // the new limits immediately.
             if let Some(redis_client) = state.usage.redis_client() {
-                if let Ok(mut conn) = redis_client.get_multiplexed_async_connection().await {
-                    let cache_key = format!("budget_config:{}", wallet);
-                    let _ = redis::cmd("DEL")
-                        .arg(&cache_key)
-                        .query_async::<()>(&mut conn)
-                        .await;
+                match redis_client.get_multiplexed_async_connection().await {
+                    Ok(mut conn) => {
+                        let cache_key = format!("budget_config:{}", wallet);
+                        if let Err(e) = redis::cmd("DEL")
+                            .arg(&cache_key)
+                            .query_async::<()>(&mut conn)
+                            .await
+                        {
+                            tracing::warn!(cache_key = %cache_key, error = %e, "failed to invalidate budget cache");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Redis unavailable for budget cache invalidation");
+                    }
                 }
             }
 
@@ -1354,10 +1558,7 @@ supports_vision = true
                 "/v1/wallets/{wallet}/budget",
                 put(set_wallet_budget).get(get_wallet_budget),
             )
-            .route(
-                "/v1/orgs/{id}/teams/{tid}/stats",
-                get(get_team_stats),
-            )
+            .route("/v1/orgs/{id}/teams/{tid}/stats", get(get_team_stats))
             .route("/v1/orgs/{id}/stats", get(get_org_stats))
             .with_state(state)
     }

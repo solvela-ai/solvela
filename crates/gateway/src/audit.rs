@@ -42,7 +42,7 @@ pub fn log_audit(pool: &PgPool, entry: AuditEntry) {
         .await;
 
         if let Err(e) = result {
-            tracing::warn!(error = %e, action = %entry.action, "failed to write audit log");
+            tracing::error!(error = %e, action = %entry.action, resource_type = %entry.resource_type, "failed to write audit log — compliance event lost");
         }
     });
 }

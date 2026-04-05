@@ -390,6 +390,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn validate_role_accepts_valid_roles() {
+        assert!(validate_role("owner").is_ok());
+        assert!(validate_role("admin").is_ok());
+        assert!(validate_role("member").is_ok());
+    }
+
+    #[test]
+    fn validate_role_rejects_invalid_roles() {
+        assert!(validate_role("superadmin").is_err());
+        assert!(validate_role("").is_err());
+        assert!(validate_role("Admin").is_err()); // case-sensitive
+        assert!(validate_role("OWNER").is_err());
+        assert!(validate_role("viewer").is_err());
+    }
+
+    #[test]
     fn generate_api_key_has_correct_prefix_and_length() {
         let key = generate_api_key();
         // Prefix: "rcr_k_" (6 chars) + 32 hex chars from 16 bytes = 38 total
