@@ -82,9 +82,13 @@ export interface AuditLogEntry {
 }
 
 export interface TeamBudget {
-  team_id: string;
-  daily_usdc?: number | null;
-  monthly_usdc?: number | null;
+  team_id?: string;
+  hourly_limit?: number | null;
+  daily_limit?: number | null;
+  monthly_limit?: number | null;
+  hourly_spend?: number;
+  daily_spend?: number;
+  monthly_spend?: number;
   [key: string]: unknown;
 }
 
@@ -339,12 +343,11 @@ export async function revokeApiKey(
 
 export async function fetchAuditLogs(
   orgId: string,
-  params?: { limit?: number; offset?: number },
+  params?: { limit?: number },
 ): Promise<AuditLogEntry[] | null> {
   try {
     const query = new URLSearchParams();
     if (params?.limit !== undefined) query.set("limit", String(params.limit));
-    if (params?.offset !== undefined) query.set("offset", String(params.offset));
     const qs = query.toString() ? `?${query.toString()}` : "";
     const res = await fetch(`${GATEWAY_URL}/v1/orgs/${orgId}/audit-logs${qs}`, {
       headers: getAuthHeaders(),
@@ -408,7 +411,7 @@ export async function createTeam(
 export async function setTeamBudget(
   orgId: string,
   teamId: string,
-  budget: { daily_usdc?: number; monthly_usdc?: number },
+  budget: { hourly?: number; daily?: number; monthly?: number },
 ): Promise<TeamBudget | null> {
   try {
     const res = await fetch(
