@@ -9,7 +9,6 @@ CREATE TABLE IF NOT EXISTS organizations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_org_owner ON organizations(owner_wallet);
-CREATE INDEX IF NOT EXISTS idx_org_slug ON organizations(slug);
 
 -- Teams within an organization
 CREATE TABLE IF NOT EXISTS teams (
@@ -30,11 +29,11 @@ CREATE TABLE IF NOT EXISTS org_members (
     wallet_address  TEXT        NOT NULL,
     role            TEXT        NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'admin', 'member')),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(org_id, wallet_address)
 );
 
 CREATE INDEX IF NOT EXISTS idx_org_member_wallet ON org_members(wallet_address);
-CREATE INDEX IF NOT EXISTS idx_org_member_org ON org_members(org_id);
 
 -- Team wallet assignments
 CREATE TABLE IF NOT EXISTS team_wallets (
@@ -63,7 +62,6 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_key_org ON api_keys(org_id);
-CREATE INDEX IF NOT EXISTS idx_api_key_hash ON api_keys(key_hash);
 
 -- Generic updated_at trigger function (replaces migration 001's version)
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -84,8 +82,15 @@ CREATE TRIGGER trg_teams_updated_at
     BEFORE UPDATE ON teams
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS trg_org_members_updated_at ON org_members;
+CREATE TRIGGER trg_org_members_updated_at
+    BEFORE UPDATE ON org_members
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
 -- Repoint wallet_budgets trigger to use the generic function
 DROP TRIGGER IF EXISTS trg_wallet_budgets_updated_at ON wallet_budgets;
 CREATE TRIGGER trg_wallet_budgets_updated_at
     BEFORE UPDATE ON wallet_budgets
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP FUNCTION IF EXISTS update_wallet_budgets_updated_at();
