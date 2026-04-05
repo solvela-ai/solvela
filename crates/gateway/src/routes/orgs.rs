@@ -64,6 +64,7 @@ pub struct CreateOrgFullRequest {
 /// Validate the `Authorization: Bearer <token>` header against the configured
 /// admin token. Returns `Err(Response)` with the appropriate status code when
 /// auth fails or the endpoint is not configured.
+#[allow(clippy::result_large_err)]
 fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
     let admin_token = match &state.admin_token {
         Some(t) => t,
@@ -553,7 +554,7 @@ pub async fn list_audit_logs(
     }
     let pool = require_db!(state);
 
-    let limit = params.limit.unwrap_or(100).min(1000).max(1);
+    let limit = params.limit.unwrap_or(100).clamp(1, 1000);
 
     // Build query dynamically based on optional filters.
     // Using a fixed-shape query avoids sqlx macro limitations with optional clauses.
@@ -588,6 +589,258 @@ pub async fn list_audit_logs(
 }
 
 // ---------------------------------------------------------------------------
+// Budget management endpoints
+// ---------------------------------------------------------------------------
+
+/// Request body for setting budget limits.
+#[derive(Debug, Deserialize)]
+pub struct SetBudgetRequest {
+    pub hourly: Option<f64>,
+    pub daily: Option<f64>,
+    pub monthly: Option<f64>,
+}
+
+/// Response body for budget endpoints (limits + current spend).
+#[derive(Debug, Serialize)]
+pub struct BudgetResponse {
+    pub hourly_limit: Option<f64>,
+    pub daily_limit: Option<f64>,
+    pub monthly_limit: Option<f64>,
+    pub hourly_spend: f64,
+    pub daily_spend: f64,
+    pub monthly_spend: f64,
+}
+
+/// `PUT /v1/orgs/:id/teams/:tid/budget` — Set team budget limits.
+pub async fn set_team_budget(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((_org_id, team_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<SetBudgetRequest>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let pool = require_db!(state);
+
+    let now = chrono::Utc::now();
+    let result = sqlx::query(
+        r#"INSERT INTO team_budgets (team_id, hourly_limit_usdc, daily_limit_usdc, monthly_limit_usdc, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (team_id) DO UPDATE SET
+               hourly_limit_usdc = EXCLUDED.hourly_limit_usdc,
+               daily_limit_usdc = EXCLUDED.daily_limit_usdc,
+               monthly_limit_usdc = EXCLUDED.monthly_limit_usdc,
+               updated_at = EXCLUDED.updated_at"#,
+    )
+    .bind(team_id)
+    .bind(body.hourly)
+    .bind(body.daily)
+    .bind(body.monthly)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await;
+
+    match result {
+        Ok(_) => (StatusCode::OK, Json(json!({ "updated": true }))).into_response(),
+        Err(e) => {
+            tracing::warn!(team_id = %team_id, error = %e, "failed to set team budget");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to set team budget" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `GET /v1/orgs/:id/teams/:tid/budget` — Get team budget + current spend.
+pub async fn get_team_budget(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((_org_id, team_id)): Path<(Uuid, Uuid)>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let pool = require_db!(state);
+
+    let row = sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>)>(
+        r#"SELECT
+            hourly_limit_usdc::DOUBLE PRECISION,
+            daily_limit_usdc::DOUBLE PRECISION,
+            monthly_limit_usdc::DOUBLE PRECISION
+        FROM team_budgets
+        WHERE team_id = $1"#,
+    )
+    .bind(team_id)
+    .fetch_optional(pool)
+    .await;
+
+    let (hourly_limit, daily_limit, monthly_limit) = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => (None, None, None),
+        Err(e) => {
+            tracing::warn!(team_id = %team_id, error = %e, "failed to query team budget");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to query team budget" })),
+            )
+                .into_response();
+        }
+    };
+
+    let now = chrono::Utc::now();
+    let tid_str = team_id.to_string();
+    let (hourly_spend, daily_spend, monthly_spend) =
+        if let Some(client) = &state.usage.redis_client() {
+            let hour_key = format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%dT%H"));
+            let day_key = format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%d"));
+            let month_key = format!("team_spend:{}:{}", tid_str, now.format("%Y-%m"));
+            (
+                crate::usage::get_redis_spend(client, &hour_key)
+                    .await
+                    .unwrap_or(0.0),
+                crate::usage::get_redis_spend(client, &day_key)
+                    .await
+                    .unwrap_or(0.0),
+                crate::usage::get_redis_spend(client, &month_key)
+                    .await
+                    .unwrap_or(0.0),
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+
+    (
+        StatusCode::OK,
+        Json(BudgetResponse {
+            hourly_limit,
+            daily_limit,
+            monthly_limit,
+            hourly_spend,
+            daily_spend,
+            monthly_spend,
+        }),
+    )
+        .into_response()
+}
+
+/// `PUT /v1/wallets/:wallet/budget` — Set wallet budget limits.
+pub async fn set_wallet_budget(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(wallet): Path<String>,
+    Json(body): Json<SetBudgetRequest>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let pool = require_db!(state);
+
+    let now = chrono::Utc::now();
+    let result = sqlx::query(
+        r#"INSERT INTO wallet_budgets (wallet_address, hourly_limit_usdc, daily_limit_usdc, monthly_limit_usdc, created_at)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (wallet_address) DO UPDATE SET
+               hourly_limit_usdc = EXCLUDED.hourly_limit_usdc,
+               daily_limit_usdc = EXCLUDED.daily_limit_usdc,
+               monthly_limit_usdc = EXCLUDED.monthly_limit_usdc"#,
+    )
+    .bind(&wallet)
+    .bind(body.hourly)
+    .bind(body.daily)
+    .bind(body.monthly)
+    .bind(now)
+    .execute(pool)
+    .await;
+
+    match result {
+        Ok(_) => (StatusCode::OK, Json(json!({ "updated": true }))).into_response(),
+        Err(e) => {
+            tracing::warn!(wallet = %wallet, error = %e, "failed to set wallet budget");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to set wallet budget" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `GET /v1/wallets/:wallet/budget` — Get wallet budget + current spend.
+pub async fn get_wallet_budget(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(wallet): Path<String>,
+) -> Response {
+    if let Err(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let pool = require_db!(state);
+
+    let row = sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>)>(
+        r#"SELECT
+            hourly_limit_usdc::DOUBLE PRECISION,
+            daily_limit_usdc::DOUBLE PRECISION,
+            monthly_limit_usdc::DOUBLE PRECISION
+        FROM wallet_budgets
+        WHERE wallet_address = $1"#,
+    )
+    .bind(&wallet)
+    .fetch_optional(pool)
+    .await;
+
+    let (hourly_limit, daily_limit, monthly_limit) = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => (None, Some(100.0), None), // Default $100/day
+        Err(e) => {
+            tracing::warn!(wallet = %wallet, error = %e, "failed to query wallet budget");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to query wallet budget" })),
+            )
+                .into_response();
+        }
+    };
+
+    let now = chrono::Utc::now();
+    let (hourly_spend, daily_spend, monthly_spend) =
+        if let Some(client) = &state.usage.redis_client() {
+            let hour_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H"));
+            let day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
+            let month_key = format!("spend:{}:{}", wallet, now.format("%Y-%m"));
+            (
+                crate::usage::get_redis_spend(client, &hour_key)
+                    .await
+                    .unwrap_or(0.0),
+                crate::usage::get_redis_spend(client, &day_key)
+                    .await
+                    .unwrap_or(0.0),
+                crate::usage::get_redis_spend(client, &month_key)
+                    .await
+                    .unwrap_or(0.0),
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+
+    (
+        StatusCode::OK,
+        Json(BudgetResponse {
+            hourly_limit,
+            daily_limit,
+            monthly_limit,
+            hourly_spend,
+            daily_spend,
+            monthly_spend,
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -595,7 +848,7 @@ pub async fn list_audit_logs(
 mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use axum::routing::{delete, get, post};
+    use axum::routing::{delete, get, post, put};
     use axum::Router;
     use tower::ServiceExt;
 
@@ -665,6 +918,14 @@ supports_vision = true
             )
             .route("/v1/orgs/{id}/api-keys/{kid}", delete(revoke_api_key))
             .route("/v1/orgs/{id}/audit-logs", get(list_audit_logs))
+            .route(
+                "/v1/orgs/{id}/teams/{tid}/budget",
+                put(set_team_budget).get(get_team_budget),
+            )
+            .route(
+                "/v1/wallets/{wallet}/budget",
+                put(set_wallet_budget).get(get_wallet_budget),
+            )
             .with_state(state)
     }
 
@@ -874,6 +1135,170 @@ supports_vision = true
             .unwrap();
 
         // db_pool is None → 503
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // -----------------------------------------------------------------------
+    // Budget endpoint tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn set_team_budget_requires_auth() {
+        let app = test_router(Some("tok"));
+        let org_id = Uuid::new_v4();
+        let team_id = Uuid::new_v4();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/v1/orgs/{org_id}/teams/{team_id}/budget"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"daily":200.0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_team_budget_requires_auth() {
+        let app = test_router(Some("tok"));
+        let org_id = Uuid::new_v4();
+        let team_id = Uuid::new_v4();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/orgs/{org_id}/teams/{team_id}/budget"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn set_team_budget_no_db_returns_503() {
+        let app = test_router(Some("mytoken"));
+        let org_id = Uuid::new_v4();
+        let team_id = Uuid::new_v4();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/v1/orgs/{org_id}/teams/{team_id}/budget"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer mytoken")
+                    .body(Body::from(r#"{"daily":200.0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn get_team_budget_no_db_returns_503() {
+        let app = test_router(Some("mytoken"));
+        let org_id = Uuid::new_v4();
+        let team_id = Uuid::new_v4();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/v1/orgs/{org_id}/teams/{team_id}/budget"))
+                    .header("authorization", "Bearer mytoken")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn set_wallet_budget_requires_auth() {
+        let app = test_router(Some("tok"));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/wallets/WalletABC/budget")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"daily":50.0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_wallet_budget_requires_auth() {
+        let app = test_router(Some("tok"));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/wallets/WalletABC/budget")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn set_wallet_budget_no_db_returns_503() {
+        let app = test_router(Some("mytoken"));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/wallets/WalletABC/budget")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer mytoken")
+                    .body(Body::from(r#"{"daily":50.0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn get_wallet_budget_no_db_returns_503() {
+        let app = test_router(Some("mytoken"));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/wallets/WalletABC/budget")
+                    .header("authorization", "Bearer mytoken")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
