@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 RustyClawRouter is a Solana-native AI agent payment gateway built in Rust (Axum). AI agents pay for LLM API calls with USDC-SPL on Solana via the x402 protocol. No API keys, no accounts, just wallets.
 
-Read `.claude/plan/rustyclawrouter.md` for the full implementation plan before making architectural decisions. Phases 1-3 are complete; Phases 4-6 are not started.
+Read `.claude/plan/rustyclawrouter.md` for the full implementation plan. See `HANDOFF.md` for current project status and what's been completed. See `CHANGELOG.md` for chronological history.
 
 ## Build & Test Commands
 
@@ -17,13 +17,13 @@ cargo check                       # faster — prefer for iteration
 cargo check -p gateway            # single crate
 cargo build --release             # release build
 
-# Test (528 tests total)
+# Test — run `cargo test` for current counts (don't trust hardcoded numbers)
 cargo test                        # all workspace tests
-cargo test -p gateway             # 288 tests (unit + integration)
-cargo test -p x402                # 110 tests
-cargo test -p router              # 13 tests
-cargo test -p rustyclaw-protocol  # 18 tests
-cargo test -p rcr-cli             # 99 tests
+cargo test -p gateway             # gateway (unit + integration)
+cargo test -p x402                # x402 protocol
+cargo test -p router              # smart router
+cargo test -p rustyclaw-protocol  # wire-format types
+cargo test -p rcr-cli             # CLI
 
 # Single test
 cargo test -p gateway test_health_endpoint -- --exact
@@ -63,25 +63,36 @@ Migrations in `migrations/` are applied automatically by `docker compose up` and
 
 ### Workspace Crates (`crates/`)
 
-- **gateway** — The only binary. Axum HTTP server with routes, middleware, provider proxies, usage tracking, caching, and `ServiceRegistry`. Binary name: `rustyclawrouter`.
-- **x402** — Pure protocol library (no Axum dependency). Solana verification, escrow integration, fee payer pool, nonce pool. Chain-agnostic `PaymentVerifier` trait for future EVM support. Payment wire-format types re-exported from `rustyclaw-protocol`.
-- **router** — 15-dimension rule-based request scorer (`scorer.rs`), routing profiles (`profiles.rs`: eco/auto/premium/free), and model registry (`models.rs` loads `config/models.toml`).
-- **protocol** (`rustyclaw-protocol`) — Shared wire-format types for the RustyClaw ecosystem. Payment protocol types (`PaymentRequired`, `PaymentPayload`, `CostBreakdown`), OpenAI-compatible chat types (`ChatRequest`, `ChatResponse`, streaming), model info, and constants. Published to crates.io. Zero workspace dependencies.
+- **gateway** — The only binary. Axum HTTP server with routes, middleware, provider proxies, usage tracking, caching, Prometheus metrics, service marketplace, and `ServiceRegistry`. Key modules:
+  - `routes/chat/` — Chat completions (mod.rs, cost.rs, payment.rs, provider.rs, response.rs)
+  - `a2a/` — A2A protocol adapter (types.rs, agent_card.rs, jsonrpc.rs, handler.rs, task_store.rs)
+  - `orgs/` — Enterprise org/team hierarchy (models.rs, queries.rs)
+  - `routes/orgs/` — Org API endpoints (crud.rs, teams.rs, api_keys.rs, audit.rs, budget.rs, analytics.rs)
+  - `audit.rs` — Fire-and-forget audit log writer
+  - `middleware/api_key.rs` — `OrgContext`, `RequireOrg`/`RequireOrgAdmin` extractors
+  - Binary name: `rustyclawrouter`
+- **x402** — Pure protocol library (no Axum dependency). Solana verification, escrow integration, fee payer pool, nonce pool. Chain-agnostic `PaymentVerifier` trait for future EVM support.
+- **router** — 15-dimension rule-based request scorer, routing profiles (eco/auto/premium/free), and model registry (loads `config/models.toml`).
+- **protocol** (`rustyclaw-protocol`) — Shared wire-format types. Payment protocol types, OpenAI-compatible chat types, model info, constants. Zero workspace dependencies.
 - **cli** (`rcr-cli`) — `rcr` CLI binary (clap derive): wallet, chat, models, health, stats, doctor commands.
 
 ### Standalone Anchor Program (`programs/escrow/`)
 
-Trustless USDC-SPL escrow with deposit/claim/refund instructions. **NOT a workspace member** to avoid `thiserror` v1/v2 and `base64` version conflicts. PDA seeds: `[b"escrow", agent.key().as_ref(), &service_id]`.
+Trustless USDC-SPL escrow with deposit/claim/refund instructions. **NOT a workspace member** to avoid dep version conflicts. PDA seeds: `[b"escrow", agent.key().as_ref(), &service_id]`.
 
 ### Configuration (`config/`)
 
-- `models.toml` — Model registry with per-token pricing (5 providers, 26 models)
+- `models.toml` — Model registry with per-token pricing (5 providers, 26+ models)
 - `default.toml` — Server host/port, Solana RPC URL, monitor thresholds
 - `services.toml` — x402 service marketplace registry
 
 ### SDKs (`sdks/`)
 
 Python, TypeScript, Go, and MCP server SDKs. Each has its own test suite.
+
+### Dashboard (`dashboard/`)
+
+Next.js 16 + Tailwind + Recharts. Pages: Overview, Usage, Models, Wallet, Settings.
 
 ## Key Architectural Rules
 
@@ -97,6 +108,8 @@ Python, TypeScript, Go, and MCP server SDKs. Each has its own test suite.
 10. **Integration tests need no live server** — use `tower::ServiceExt::oneshot` with `test_app()`
 11. **Escrow program is NOT a workspace member** — avoids dep version conflicts; build separately
 12. **Both PostgreSQL and Redis are optional** — gateway degrades gracefully when either is absent
+13. **API key auth uses extractor pattern** — `RequireOrg` and `RequireOrgAdmin` are Axum extractors that populate `OrgContext`; org-scoped routes extract `OrgContext` from request extensions, never from query params or body
+14. **A2A is a protocol adapter, not new payment logic** — translates A2A JSON-RPC to existing x402 + chat pipeline. No fiat, no AP2 mandates, no card processing.
 
 ## Request Flow (POST /v1/chat/completions)
 
@@ -106,6 +119,13 @@ Python, TypeScript, Go, and MCP server SDKs. Each has its own test suite.
 4. If header present -> decode (base64 or raw JSON) -> replay protection (Redis) -> verify via Facilitator -> proxy to LLM provider
 5. Cache response (Redis), log spend (PostgreSQL), fire escrow claim if applicable
 6. Return JSON or SSE stream; fall through to stub if no provider configured
+
+## A2A Request Flow (POST /a2a, method: message/send)
+
+1. Agent discovers RustyClawRouter via `GET /.well-known/agent.json` (AgentCard with AP2 + x402 extensions)
+2. Agent sends `message/send` JSON-RPC with text prompt → gateway computes cost → returns Task (`input-required`) with `x402.payment.required` metadata
+3. Agent signs Solana USDC-SPL transaction → sends `message/send` with `taskId` + `x402.payment.payload` metadata
+4. Gateway verifies payment (reuses facilitator), proxies to LLM provider → returns Task (`completed`) with artifacts + receipt
 
 ## Smart Router
 
@@ -187,19 +207,19 @@ use crate::config::AppConfig;               // 4. Crate-internal modules
 
 ## Skills — Invoke Before Making Changes
 
-These skills contain patterns, checklists, and constraints specific to this project's domains. Invoke them via the `Skill` tool BEFORE writing or modifying code in the matching areas. Keyword matching alone often misses these — e.g., "fix the claim logic" won't trigger `solana-dev`, and "add a spend field" won't trigger `database-migrations`.
+These skills contain patterns, checklists, and constraints specific to this project's domains. Invoke them via the `Skill` tool BEFORE writing or modifying code in the matching areas.
 
 | Skill | Invoke when touching | Key files |
 |---|---|---|
 | `solana-dev` | Solana, Anchor, SPL token, x402 protocol, escrow, fee payer, nonce, PDA, on-chain verification | `crates/x402/`, `programs/escrow/`, `solana.rs`, `fee_payer.rs`, `nonce_pool.rs`, `facilitator.rs` |
 | `security-review` | Payment verification, crypto, API key handling, CORS, rate limiting, header decoding, secret redaction | `middleware/x402.rs`, `middleware/rate_limit.rs`, `config.rs` (redaction), `solana.rs` |
-| `domain-fintech` | USDC calculations, atomic amounts, cost breakdowns, pricing, 5% fee logic, budget checks | `routes/chat.rs` (`usdc_atomic_amount`, `compute_actual_atomic_cost`), `models.rs` (pricing), `usage.rs` (budgets) |
+| `domain-fintech` | USDC calculations, atomic amounts, cost breakdowns, pricing, 5% fee logic, budget checks | `routes/chat/cost.rs`, `models.rs` (pricing), `usage.rs` (budgets) |
 | `database-migrations` | Schema changes, new columns, indexes, PostgreSQL queries | `migrations/`, `usage.rs`, `wallet_budgets` |
 | `postgres-patterns` | Query optimization, sqlx usage, connection pooling | `usage.rs`, `main.rs` (pool setup) |
 | `domain-web` | Axum routes, middleware, Tower layers, SSE streaming, CORS, request/response handling | `routes/`, `middleware/`, `providers/`, `lib.rs` (`build_router`) |
 | `m07-concurrency` | Async patterns, tokio::spawn, fire-and-forget, background tasks, Arc sharing | `usage.rs`, `cache.rs`, `balance_monitor.rs`, `escrow/claimer.rs`, `main.rs` |
 | `api-design` | Adding/changing HTTP endpoints, 402 response shape, OpenAI compatibility, query params | `routes/chat.rs`, `routes/services.rs`, `routes/models.rs`, x402 types |
-| `tdd-workflow` | Any new feature or bugfix — write tests first | All crates (528 existing tests, integration tests in `gateway/tests/`) |
+| `tdd-workflow` | Any new feature or bugfix — write tests first | All crates |
 | `docker-patterns` | Container config, compose services, multi-stage builds | `Dockerfile`, `docker-compose.yml` |
 | `deployment-patterns` | Deploy config, CI/CD, infrastructure | `Dockerfile`, `fly.toml` |
 
@@ -208,4 +228,5 @@ These skills contain patterns, checklists, and constraints specific to this proj
 - Dockerfile: 3-stage build with cargo-chef for dependency caching
 - Fly.io config in `fly.toml` (app: `rustyclawrouter-gateway`, port 8402, region ord)
 - Docker Compose for local dev: PostgreSQL 16 + Redis 7
+- Dashboard: Next.js on Vercel (`rusty-claw-router.vercel.app`)
 - Migrations in `migrations/` run automatically on startup (idempotent `CREATE IF NOT EXISTS`)

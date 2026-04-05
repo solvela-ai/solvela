@@ -3,11 +3,14 @@
 //! This module exposes the gateway internals for integration testing.
 //! The binary entry point is in `main.rs`.
 
+pub mod a2a;
+pub mod audit;
 pub mod balance_monitor;
 pub mod cache;
 pub mod config;
 pub mod error;
 pub mod middleware;
+pub mod orgs;
 pub mod payment_util;
 pub mod providers;
 pub mod routes;
@@ -160,11 +163,60 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .route("/pricing", get(routes::pricing::pricing))
         .route("/health", get(routes::health::health))
         .route("/v1/admin/stats", get(routes::admin_stats::admin_stats))
+        .route(
+            "/v1/orgs",
+            post(routes::orgs::create_org).get(routes::orgs::list_orgs),
+        )
+        .route("/v1/orgs/{id}", get(routes::orgs::get_org))
+        .route(
+            "/v1/orgs/{id}/teams",
+            post(routes::orgs::create_team).get(routes::orgs::list_teams),
+        )
+        .route(
+            "/v1/orgs/{id}/members",
+            post(routes::orgs::add_member).get(routes::orgs::list_members),
+        )
+        .route(
+            "/v1/orgs/{id}/teams/{tid}/wallets",
+            post(routes::orgs::assign_wallet).get(routes::orgs::list_team_wallets),
+        )
+        .route(
+            "/v1/orgs/{id}/api-keys",
+            post(routes::orgs::create_api_key).get(routes::orgs::list_api_keys),
+        )
+        .route(
+            "/v1/orgs/{id}/api-keys/{kid}",
+            axum::routing::delete(routes::orgs::revoke_api_key),
+        )
+        .route(
+            "/v1/orgs/{id}/audit-logs",
+            get(routes::orgs::list_audit_logs),
+        )
+        .route(
+            "/v1/orgs/{id}/teams/{tid}/budget",
+            axum::routing::put(routes::orgs::set_team_budget).get(routes::orgs::get_team_budget),
+        )
+        .route(
+            "/v1/wallets/{wallet}/budget",
+            axum::routing::put(routes::orgs::set_wallet_budget)
+                .get(routes::orgs::get_wallet_budget),
+        )
+        .route(
+            "/v1/orgs/{id}/teams/{tid}/stats",
+            get(routes::orgs::get_team_stats),
+        )
+        .route("/v1/orgs/{id}/stats", get(routes::orgs::get_org_stats))
+        .route("/.well-known/agent.json", get(a2a::agent_card::agent_card))
+        .route("/a2a", post(a2a::jsonrpc::a2a_endpoint))
         .route("/metrics", get(routes::metrics::get_metrics))
         .layer(axum::middleware::from_fn(
             middleware::rate_limit::rate_limit,
         ))
         .layer(axum::Extension(rate_limiter))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::api_key::extract_api_key,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::x402::extract_payment,
@@ -263,7 +315,14 @@ fn build_cors() -> CorsLayer {
 
     CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
