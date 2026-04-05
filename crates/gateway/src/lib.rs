@@ -200,6 +200,11 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             axum::routing::put(routes::orgs::set_wallet_budget)
                 .get(routes::orgs::get_wallet_budget),
         )
+        .route(
+            "/v1/orgs/{id}/teams/{tid}/stats",
+            get(routes::orgs::get_team_stats),
+        )
+        .route("/v1/orgs/{id}/stats", get(routes::orgs::get_org_stats))
         .route("/metrics", get(routes::metrics::get_metrics))
         .layer(axum::middleware::from_fn(
             middleware::rate_limit::rate_limit,
