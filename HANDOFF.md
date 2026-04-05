@@ -1,7 +1,7 @@
 # HANDOFF.md — RustyClawRouter Continuation Guide
 
 > **Start here.** This document captures full context so a fresh agent can continue without ramp-up time.
-> **Last updated:** 2026-03-31
+> **Last updated:** 2026-04-05
 
 ---
 
@@ -39,34 +39,35 @@ RCR is one of three products under **rustyclaw.ai**:
 | — | **Chat Route Refactor** | Monolithic `chat.rs` (2405 lines) → `chat/` module directory (mod.rs, cost.rs, payment.rs, provider.rs, response.rs) |
 | — | **Audit Bug Fixes** | E1 retry unwrap, S1 DNS rebinding TOCTOU, S2 replay TTL, SSE buffer optimization, shared HTTP clients |
 | 5a | **Dashboard API Integration** | Admin aggregate stats endpoint (`GET /v1/admin/stats`), all dashboard pages connected to real API, graceful mock-data fallback, mobile sidebar fix |
+| 5b | **Enterprise Features** | Org/team hierarchy, API key auth, audit logs, hourly+team spend limits, budget API, team analytics, dashboard auth |
 | — | **Dockerfile Fix** | Fixed `crates/common/` → `crates/protocol/` reference in Dockerfile. Previous deploys were using stale cached images. |
 | — | **LiteSVM Integration Tests** | 14 LiteSVM integration tests for escrow program (5 happy path + 9 error cases). Installed Anchor CLI 0.31.1 + Solana toolchain 3.1.12. All 20 escrow tests pass in 2.5s. |
 
-**Total: 528 Rust tests + 20 escrow tests + 82 dashboard tests + 94 SDK tests, all passing. Lint clean (fmt + clippy).**
+**Total: 571 Rust workspace tests + 21 escrow tests + 82 dashboard tests + 94 SDK tests, all passing. Lint clean (fmt + clippy).**
 
 ### Test Breakdown
 
 ```
-gateway:   288 tests (282 unit + 116 integration, +6 admin_stats integration)
-x402:      110 tests
-cli:        99 tests
+gateway:   441 tests (325 unit + 116 integration)
+x402:       99 tests
 protocol:   18 tests
 router:     13 tests
-escrow:     20 tests (6 unit + 14 LiteSVM integration)
+escrow:     21 tests (standalone, not in workspace)
 ─────────────────
-Total:     548 Rust tests (528 workspace + 20 escrow)
+Total:     592 Rust tests (571 workspace + 21 escrow)
 
 dashboard:  82 tests (32 utils + 19 mock-data + 31 API)
 ```
 
 ### What's NOT Done Yet
 
-#### Phase 5: Dashboard + Enterprise — IN PROGRESS
+#### Phase 5: Dashboard + Enterprise — COMPLETE
 - Next.js 16 dashboard with pages: Overview, Usage, Models, Wallet, Settings
 - Charts: spend-chart, requests-bar, model-pie
 - Components: shell layout (with mobile sidebar), topbar, sidebar, stat-card, status-dot, badge
 - **Dashboard API integration COMPLETE (2026-03-29):** All pages fetch real data from gateway via `GET /v1/admin/stats`, `GET /health`, `GET /pricing`, `GET /v1/escrow/config`. Falls back to mock data with warning banner when API unavailable. Admin auth via `GATEWAY_ADMIN_KEY` env var (server-side only).
-- **Still needed:** Deploy dashboard to Vercel, enterprise features (team billing, SSO, audit logs)
+- **Enterprise features COMPLETE (2026-04-05):** Org/team hierarchy, API key auth middleware (`OrgContext`, `RequireOrg`/`RequireOrgAdmin` extractors), audit logs (fire-and-forget writer), hourly+team spend limits, budget API with cache invalidation, team analytics endpoints, dashboard API key auth UI.
+- **Still needed:** Deploy dashboard to Vercel
 - **Market research completed:** `docs/research/2026-03-23-ai-agent-payment-infrastructure.md`
 
 #### Other Deferred Items
@@ -166,6 +167,10 @@ DEEPSEEK_API_KEY              ✅ (set 2026-03-31)
 crates/
   gateway/         Axum HTTP server — routes, middleware, providers, cache, usage, metrics, security
     routes/chat/   Refactored: mod.rs, cost.rs, payment.rs, provider.rs, response.rs
+    orgs/          Enterprise: models.rs, queries.rs (org/team/member/wallet/API key CRUD)
+    audit.rs       Fire-and-forget audit log writer
+    middleware/
+      api_key.rs   OrgContext, RequireOrg/RequireOrgAdmin extractors
     payment_util.rs  Shared payment extraction (extract_payer_wallet, extract_signer)
   x402/            x402 protocol — Solana verification, escrow (verifier, claimer, claim_queue,
                    claim_processor, PDA), fee payer pool, nonce pool, facilitator
@@ -236,11 +241,10 @@ curl https://rustyclawrouter-gateway.fly.dev/health
 ## Test Commands
 
 ```bash
-# Rust (528 tests across 5 crates)
+# Rust (571 workspace tests)
 cargo test                        # All crates
-cargo test -p gateway             # Gateway (288 tests)
-cargo test -p x402                # x402 protocol (110 tests)
-cargo test -p rustyclawrouter-cli # CLI (99 tests)
+cargo test -p gateway             # Gateway (441 tests)
+cargo test -p x402                # x402 protocol (99 tests)
 cargo test -p rustyclaw-protocol  # Protocol (18 tests)
 cargo test -p router              # Smart router (13 tests)
 
@@ -278,19 +282,21 @@ cd sdks/go && go test ./...              # 12 tests
 
 ## What's Next
 
-**Phase 5: Dashboard + Enterprise** — Deploy dashboard, add enterprise features.
+**Phase 5: Dashboard + Enterprise** — COMPLETE. Next: deploy dashboard, then Terminal launch.
 
 **Strategic priority:** Ship fast, differentiate on escrow ("only gateway where agents don't overpay"), target Solana-native agent builders.
 
-**Immediate (Phase 5 remaining):**
+**Phase 5 — all done:**
 1. ~~Dashboard → real API integration~~ **DONE 2026-03-29**
 2. ~~Redeploy gateway with Dockerfile fix~~ **DONE 2026-03-31**
-3. Deploy dashboard to Vercel (set `NEXT_PUBLIC_GATEWAY_URL` + `GATEWAY_ADMIN_KEY`)
-4. ~~Set missing provider API keys~~ **DONE 2026-03-31** (Anthropic, xAI, DeepSeek)
-5. ~~Fund fee-payer wallet~~ **DONE 2026-03-31** (0.09 SOL)
-6. ~~Wire Terminal → RCR~~ **DONE 2026-03-31** (removed direct Anthropic key from rclawterm-gateway)
-7. ~~LiteSVM integration tests for escrow~~ **DONE 2026-03-31** (14 tests, 2.5s)
-8. Enterprise features (team billing, SSO, audit logs)
+3. ~~Set missing provider API keys~~ **DONE 2026-03-31** (Anthropic, xAI, DeepSeek)
+4. ~~Fund fee-payer wallet~~ **DONE 2026-03-31** (0.09 SOL)
+5. ~~Wire Terminal → RCR~~ **DONE 2026-03-31** (removed direct Anthropic key from rclawterm-gateway)
+6. ~~LiteSVM integration tests for escrow~~ **DONE 2026-03-31** (14 tests, 2.5s)
+7. ~~Enterprise features (team billing, audit logs, hourly spend limits)~~ **DONE 2026-04-05**
+
+**Immediate next:**
+1. Deploy dashboard to Vercel (set `NEXT_PUBLIC_GATEWAY_URL` + `GATEWAY_ADMIN_KEY`)
 
 **Infrastructure:**
 8. Load testing
