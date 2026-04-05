@@ -5,8 +5,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::orgs::models::{
-    AddMemberRequest, ApiKey, ApiKeyCreated, CreateApiKeyRequest, CreateOrgRequest,
-    CreateTeamRequest, OrgMember, Organization, Team, TeamWallet,
+    AddMemberRequest, ApiKey, ApiKeyCreated, AssignWalletRequest, CreateApiKeyRequest,
+    CreateOrgRequest, CreateTeamRequest, OrgMember, Organization, Team, TeamWallet,
 };
 
 /// Generate a new API key: "rcr_k_" + 32 random hex chars.
@@ -189,7 +189,7 @@ pub async fn list_members(pool: &PgPool, org_id: Uuid) -> Result<Vec<OrgMember>,
 pub async fn assign_wallet(
     pool: &PgPool,
     team_id: Uuid,
-    wallet: &str,
+    req: &AssignWalletRequest,
 ) -> Result<TeamWallet, sqlx::Error> {
     let id = Uuid::new_v4();
     let now = Utc::now();
@@ -203,7 +203,7 @@ pub async fn assign_wallet(
     )
     .bind(id)
     .bind(team_id)
-    .bind(wallet)
+    .bind(&req.wallet_address)
     .bind(now)
     .fetch_one(pool)
     .await
@@ -333,6 +333,7 @@ pub async fn list_api_keys(pool: &PgPool, org_id: Uuid) -> Result<Vec<ApiKey>, s
         SELECT id, org_id, key_prefix, name, role, last_used_at, expires_at, revoked_at, created_at
         FROM api_keys
         WHERE org_id = $1
+          AND revoked_at IS NULL
         ORDER BY created_at ASC
         "#,
     )
