@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 RustyClawRouter is a Solana-native AI agent payment gateway built in Rust (Axum). AI agents pay for LLM API calls with USDC-SPL on Solana via the x402 protocol. No API keys, no accounts, just wallets.
 
-Read `.claude/plan/rustyclawrouter.md` for the full implementation plan before making architectural decisions. Phases 1-3 are complete; Phases 4-6 are not started.
+Read `.claude/plan/rustyclawrouter.md` for the full implementation plan before making architectural decisions. Phases 1-4, 5a, 5b, 8-9, 12-14 are complete. Dashboard deployed to Vercel (`rusty-claw-router.vercel.app`). x402 V2 migration complete (2026-04-04). Enterprise features complete (2026-04-05): org/team hierarchy, API key auth, audit logs, hourly+team spend limits, budget API, team analytics. Still needed: AP2 compatibility, multi-chain support, deploy updated dashboard.
 
 ## Build & Test Commands
 
@@ -17,9 +17,9 @@ cargo check                       # faster — prefer for iteration
 cargo check -p gateway            # single crate
 cargo build --release             # release build
 
-# Test (528 tests total)
+# Test (571 workspace tests total)
 cargo test                        # all workspace tests
-cargo test -p gateway             # 288 tests (unit + integration)
+cargo test -p gateway             # 441 tests (325 unit + 116 integration)
 cargo test -p x402                # 110 tests
 cargo test -p router              # 13 tests
 cargo test -p rustyclaw-protocol  # 18 tests
@@ -63,7 +63,7 @@ Migrations in `migrations/` are applied automatically by `docker compose up` and
 
 ### Workspace Crates (`crates/`)
 
-- **gateway** — The only binary. Axum HTTP server with routes, middleware, provider proxies, usage tracking, caching, and `ServiceRegistry`. Binary name: `rustyclawrouter`.
+- **gateway** — The only binary. Axum HTTP server with routes, middleware, provider proxies, usage tracking, caching, Prometheus metrics, service marketplace, and `ServiceRegistry`. Chat route refactored into `routes/chat/` module (mod.rs, cost.rs, payment.rs, provider.rs, response.rs). Enterprise modules: `orgs/` (models.rs, queries.rs — org/team/member/wallet/API key CRUD), `audit.rs` (fire-and-forget audit log writer), `middleware/api_key.rs` (`OrgContext`, `RequireOrg`/`RequireOrgAdmin` extractors). Binary name: `rustyclawrouter`.
 - **x402** — Pure protocol library (no Axum dependency). Solana verification, escrow integration, fee payer pool, nonce pool. Chain-agnostic `PaymentVerifier` trait for future EVM support. Payment wire-format types re-exported from `rustyclaw-protocol`.
 - **router** — 15-dimension rule-based request scorer (`scorer.rs`), routing profiles (`profiles.rs`: eco/auto/premium/free), and model registry (`models.rs` loads `config/models.toml`).
 - **protocol** (`rustyclaw-protocol`) — Shared wire-format types for the RustyClaw ecosystem. Payment protocol types (`PaymentRequired`, `PaymentPayload`, `CostBreakdown`), OpenAI-compatible chat types (`ChatRequest`, `ChatResponse`, streaming), model info, and constants. Published to crates.io. Zero workspace dependencies.
@@ -97,6 +97,7 @@ Python, TypeScript, Go, and MCP server SDKs. Each has its own test suite.
 10. **Integration tests need no live server** — use `tower::ServiceExt::oneshot` with `test_app()`
 11. **Escrow program is NOT a workspace member** — avoids dep version conflicts; build separately
 12. **Both PostgreSQL and Redis are optional** — gateway degrades gracefully when either is absent
+13. **API key auth uses extractor pattern** — `RequireOrg` and `RequireOrgAdmin` are Axum extractors that populate `OrgContext`; org-scoped routes extract `OrgContext` from request extensions, never from query params or body
 
 ## Request Flow (POST /v1/chat/completions)
 
@@ -199,7 +200,7 @@ These skills contain patterns, checklists, and constraints specific to this proj
 | `domain-web` | Axum routes, middleware, Tower layers, SSE streaming, CORS, request/response handling | `routes/`, `middleware/`, `providers/`, `lib.rs` (`build_router`) |
 | `m07-concurrency` | Async patterns, tokio::spawn, fire-and-forget, background tasks, Arc sharing | `usage.rs`, `cache.rs`, `balance_monitor.rs`, `escrow/claimer.rs`, `main.rs` |
 | `api-design` | Adding/changing HTTP endpoints, 402 response shape, OpenAI compatibility, query params | `routes/chat.rs`, `routes/services.rs`, `routes/models.rs`, x402 types |
-| `tdd-workflow` | Any new feature or bugfix — write tests first | All crates (528 existing tests, integration tests in `gateway/tests/`) |
+| `tdd-workflow` | Any new feature or bugfix — write tests first | All crates (571 workspace tests, integration tests in `gateway/tests/`) |
 | `docker-patterns` | Container config, compose services, multi-stage builds | `Dockerfile`, `docker-compose.yml` |
 | `deployment-patterns` | Deploy config, CI/CD, infrastructure | `Dockerfile`, `fly.toml` |
 
