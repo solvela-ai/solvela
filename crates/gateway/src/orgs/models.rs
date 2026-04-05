@@ -140,6 +140,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn org_role_is_admin_or_owner() {
+        assert!(OrgRole::Owner.is_admin_or_owner());
+        assert!(OrgRole::Admin.is_admin_or_owner());
+        assert!(!OrgRole::Member.is_admin_or_owner());
+    }
+
+    #[test]
+    fn org_role_serde_lowercase() {
+        assert_eq!(serde_json::to_string(&OrgRole::Owner).unwrap(), "\"owner\""); // safe: infallible for enum
+        assert_eq!(serde_json::to_string(&OrgRole::Admin).unwrap(), "\"admin\""); // safe: infallible for enum
+        assert_eq!(
+            serde_json::to_string(&OrgRole::Member).unwrap(), // safe: infallible for enum
+            "\"member\""
+        );
+    }
+
+    #[test]
+    fn org_role_display() {
+        assert_eq!(OrgRole::Owner.to_string(), "owner");
+        assert_eq!(OrgRole::Admin.to_string(), "admin");
+        assert_eq!(OrgRole::Member.to_string(), "member");
+    }
+
+    #[test]
     fn api_key_created_debug_redacts_key() {
         let key_created = ApiKeyCreated {
             id: Uuid::new_v4(),

@@ -26,12 +26,32 @@ pub struct JsonRpcResponse {
     pub result: Value,
 }
 
+impl JsonRpcResponse {
+    pub fn success(id: Value, result: Value) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id,
+            result,
+        }
+    }
+}
+
 /// Outbound JSON-RPC 2.0 error response.
 #[derive(Debug, Clone, Serialize)]
 pub struct JsonRpcError {
     pub jsonrpc: String,
     pub id: Value,
     pub error: JsonRpcErrorData,
+}
+
+impl JsonRpcError {
+    pub fn new(id: Value, error: JsonRpcErrorData) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id,
+            error,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,6 +63,14 @@ pub struct JsonRpcErrorData {
 }
 
 // ── A2A message types ────────────────────────────────────────────────────
+
+/// Role of a message sender per the A2A spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageRole {
+    User,
+    Agent,
+}
 
 /// A message part — text or data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,7 +89,7 @@ pub enum Part {
 /// An A2A message (user or agent).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub role: String,
+    pub role: MessageRole,
     pub parts: Vec<Part>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Map<String, Value>>,
@@ -87,6 +115,20 @@ pub enum TaskState {
     Working,
     Completed,
     Failed,
+}
+
+impl TaskState {
+    /// Check if transitioning from `self` to `next` is valid.
+    pub fn can_transition_to(self, next: TaskState) -> bool {
+        matches!(
+            (self, next),
+            (TaskState::InputRequired, TaskState::Working)
+                | (TaskState::InputRequired, TaskState::Completed)
+                | (TaskState::InputRequired, TaskState::Failed)
+                | (TaskState::Working, TaskState::Completed)
+                | (TaskState::Working, TaskState::Failed)
+        )
+    }
 }
 
 /// A2A task status.
@@ -248,6 +290,52 @@ mod tests {
         }"#;
         let params: MessageSendParams = serde_json::from_str(json).unwrap(); // safe: known-good test data
         assert!(params.task_id.is_none());
+    }
+
+    #[test]
+    fn message_role_serde_lowercase() {
+        assert_eq!(
+            serde_json::to_value(MessageRole::User).unwrap(), // safe: infallible for enum
+            "user"
+        );
+        assert_eq!(
+            serde_json::to_value(MessageRole::Agent).unwrap(), // safe: infallible for enum
+            "agent"
+        );
+        let user: MessageRole = serde_json::from_str("\"user\"").unwrap(); // safe: known-good literal
+        assert_eq!(user, MessageRole::User);
+        let agent: MessageRole = serde_json::from_str("\"agent\"").unwrap(); // safe: known-good literal
+        assert_eq!(agent, MessageRole::Agent);
+    }
+
+    #[test]
+    fn message_role_invalid_string_fails() {
+        let result: Result<MessageRole, _> = serde_json::from_str("\"moderator\"");
+        assert!(
+            result.is_err(),
+            "unknown role string should fail to deserialize"
+        );
+    }
+
+    #[test]
+    fn task_state_can_transition_to_valid() {
+        assert!(TaskState::InputRequired.can_transition_to(TaskState::Working));
+        assert!(TaskState::InputRequired.can_transition_to(TaskState::Completed));
+        assert!(TaskState::InputRequired.can_transition_to(TaskState::Failed));
+        assert!(TaskState::Working.can_transition_to(TaskState::Completed));
+        assert!(TaskState::Working.can_transition_to(TaskState::Failed));
+    }
+
+    #[test]
+    fn task_state_can_transition_to_invalid() {
+        assert!(!TaskState::Completed.can_transition_to(TaskState::InputRequired));
+        assert!(!TaskState::Completed.can_transition_to(TaskState::Working));
+        assert!(!TaskState::Completed.can_transition_to(TaskState::Failed));
+        assert!(!TaskState::Failed.can_transition_to(TaskState::InputRequired));
+        assert!(!TaskState::Failed.can_transition_to(TaskState::Working));
+        assert!(!TaskState::Failed.can_transition_to(TaskState::Completed));
+        assert!(!TaskState::Working.can_transition_to(TaskState::InputRequired));
+        assert!(!TaskState::InputRequired.can_transition_to(TaskState::InputRequired));
     }
 
     #[test]

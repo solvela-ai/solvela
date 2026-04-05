@@ -1,7 +1,7 @@
 //! Redis-backed task state for A2A payment flows.
 //!
 //! Each A2A payment flow creates a task that tracks the lifecycle:
-//! input-required (payment needed) → working (verifying) → completed/failed.
+//! input-required → completed/failed (Working state reserved for future async processing).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,24 +49,31 @@ pub async fn save_task(state: &Arc<AppState>, record: &TaskRecord) -> Result<(),
         .map_err(|e| format!("Redis save failed: {e}"))
 }
 
-/// Load a task record from Redis. Returns `None` if not found or Redis absent.
-pub async fn load_task(state: &Arc<AppState>, task_id: &str) -> Option<TaskRecord> {
-    let cache = state.cache.as_ref()?;
+/// Load a task record from Redis.
+///
+/// Returns:
+/// - `Ok(Some(record))` — found
+/// - `Ok(None)` — not found (task expired or never existed)
+/// - `Err(msg)` — Redis error
+pub async fn load_task(state: &Arc<AppState>, task_id: &str) -> Result<Option<TaskRecord>, String> {
+    let Some(ref cache) = state.cache else {
+        return Ok(None);
+    };
     let key = format!("a2a_task:{task_id}");
 
     match cache.get_raw(&key).await {
         Ok(Some(json)) => match serde_json::from_str(&json) {
-            Ok(record) => Some(record),
+            Ok(record) => Ok(Some(record)),
             Err(e) => {
                 tracing::warn!(task_id, error = %e, "A2A task store: corrupt record, deleting");
                 let _ = cache.del_raw(&key).await;
-                None
+                Ok(None)
             }
         },
-        Ok(None) => None,
+        Ok(None) => Ok(None),
         Err(e) => {
             tracing::warn!(task_id, error = %e, "A2A task store: Redis read error");
-            None
+            Err(format!("Redis read error: {e}"))
         }
     }
 }
@@ -77,9 +84,17 @@ pub async fn update_task_state(
     task_id: &str,
     new_state: TaskState,
 ) -> Result<(), String> {
-    let Some(record) = load_task(state, task_id).await else {
-        return Err(format!("task not found: {task_id}"));
-    };
+    let record = load_task(state, task_id)
+        .await?
+        .ok_or_else(|| format!("task not found: {task_id}"))?;
+
+    if !record.state.can_transition_to(new_state) {
+        return Err(format!(
+            "invalid state transition: {:?} -> {:?}",
+            record.state, new_state
+        ));
+    }
+
     let updated = TaskRecord {
         state: new_state,
         ..record
@@ -90,6 +105,32 @@ pub async fn update_task_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::a2a::types::TaskState;
+
+    #[test]
+    fn task_state_valid_transitions() {
+        assert!(TaskState::InputRequired.can_transition_to(TaskState::Working));
+        assert!(TaskState::InputRequired.can_transition_to(TaskState::Completed));
+        assert!(TaskState::InputRequired.can_transition_to(TaskState::Failed));
+        assert!(TaskState::Working.can_transition_to(TaskState::Completed));
+        assert!(TaskState::Working.can_transition_to(TaskState::Failed));
+    }
+
+    #[test]
+    fn task_state_invalid_transitions() {
+        // Terminal states cannot transition to anything
+        assert!(!TaskState::Completed.can_transition_to(TaskState::InputRequired));
+        assert!(!TaskState::Completed.can_transition_to(TaskState::Working));
+        assert!(!TaskState::Completed.can_transition_to(TaskState::Failed));
+        assert!(!TaskState::Failed.can_transition_to(TaskState::InputRequired));
+        assert!(!TaskState::Failed.can_transition_to(TaskState::Working));
+        assert!(!TaskState::Failed.can_transition_to(TaskState::Completed));
+        // Cannot go backwards
+        assert!(!TaskState::Working.can_transition_to(TaskState::InputRequired));
+        // Self-transitions are invalid
+        assert!(!TaskState::InputRequired.can_transition_to(TaskState::InputRequired));
+        assert!(!TaskState::Completed.can_transition_to(TaskState::Completed));
+    }
 
     #[test]
     fn test_new_task_id_format() {

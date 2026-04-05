@@ -9,7 +9,7 @@ use crate::orgs::models::{
     CreateOrgRequest, CreateTeamRequest, OrgMember, OrgRole, Organization, Team, TeamWallet,
 };
 
-/// Length of the stored key prefix: "rcr_k_" (6) + 4 entropy hex chars = 10.
+/// Length of the stored key prefix: "rcr_k_" (6) + first 4 hex chars of the key = 10. Used for display only; uniqueness is ensured by the full key hash.
 const KEY_PREFIX_LEN: usize = 10;
 
 /// Generate a new API key: "rcr_k_" + 32 random hex chars.
