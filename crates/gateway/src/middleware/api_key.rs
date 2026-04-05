@@ -9,6 +9,7 @@ use axum::Json;
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::orgs::models::OrgRole;
 use crate::AppState;
 
 /// Resolved organization context from API key authentication.
@@ -17,7 +18,7 @@ use crate::AppState;
 pub struct OrgContext {
     pub org_id: Uuid,
     pub api_key_id: Uuid,
-    pub role: String,
+    pub role: OrgRole,
 }
 
 /// Middleware: extract API key from Authorization header, verify, inject `OrgContext`.
@@ -42,7 +43,7 @@ pub async fn extract_api_key(
                         request.extensions_mut().insert(OrgContext {
                             org_id,
                             api_key_id: api_key.id,
-                            role: api_key.role.clone(),
+                            role: api_key.role,
                         });
                     }
                     Ok(None) => {
@@ -118,7 +119,7 @@ where
                 )
             })?;
 
-        if ctx.role == "admin" || ctx.role == "owner" {
+        if ctx.role.is_admin_or_owner() {
             Ok(RequireOrgAdmin(ctx))
         } else {
             Err((
@@ -277,7 +278,7 @@ supports_vision = false
         parts.extensions.insert(OrgContext {
             org_id: Uuid::new_v4(),
             api_key_id: Uuid::new_v4(),
-            role: "member".to_string(),
+            role: OrgRole::Member,
         });
 
         let result = RequireOrgAdmin::from_request_parts(&mut parts, &()).await;
@@ -298,7 +299,7 @@ supports_vision = false
         parts.extensions.insert(OrgContext {
             org_id: Uuid::new_v4(),
             api_key_id: Uuid::new_v4(),
-            role: "owner".to_string(),
+            role: OrgRole::Owner,
         });
 
         let result = RequireOrgAdmin::from_request_parts(&mut parts, &()).await;
@@ -316,7 +317,7 @@ supports_vision = false
         parts.extensions.insert(OrgContext {
             org_id: Uuid::new_v4(),
             api_key_id: Uuid::new_v4(),
-            role: "admin".to_string(),
+            role: OrgRole::Admin,
         });
 
         let result = RequireOrgAdmin::from_request_parts(&mut parts, &()).await;
