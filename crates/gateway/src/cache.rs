@@ -297,6 +297,56 @@ impl ResponseCache {
             }
         }
     }
+
+    /// Get a raw string value by key.
+    pub async fn get_raw(&self, key: &str) -> Result<Option<String>, CacheError> {
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))?;
+        redis::cmd("GET")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))
+    }
+
+    /// Set a raw string value with TTL.
+    pub async fn set_raw(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: std::time::Duration,
+    ) -> Result<(), CacheError> {
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))?;
+        redis::cmd("SETEX")
+            .arg(key)
+            .arg(ttl.as_secs())
+            .arg(value)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))
+    }
+
+    /// Delete a key.
+    pub async fn del_raw(&self, key: &str) -> Result<(), CacheError> {
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))?;
+        redis::cmd("DEL")
+            .arg(key)
+            .query_async::<i64>(&mut conn)
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))?;
+        Ok(())
+    }
 }
 
 /// Cache error types.

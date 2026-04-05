@@ -6,7 +6,7 @@
 //! - [`provider`] — Shared provider call pipeline (cache, fallback, SSE)
 //! - [`response`] — Debug headers, session tokens, response construction
 
-mod cost;
+pub(crate) mod cost;
 mod payment;
 mod provider;
 mod response;

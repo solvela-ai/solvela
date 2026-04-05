@@ -5,8 +5,46 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
+
+/// Default daily limit when no per-wallet budget row exists.
+const DEFAULT_DAILY_LIMIT_USDC: f64 = 100.0;
+
+/// TTL for cached wallet budget config in Redis (seconds).
+const BUDGET_CONFIG_CACHE_TTL: u64 = 60;
+
+/// TTL for cached team membership lookups in Redis (seconds).
+const TEAM_MEMBER_CACHE_TTL: u64 = 60;
+
+/// TTL for cached team budget config in Redis (seconds).
+const TEAM_BUDGET_CACHE_TTL: u64 = 60;
+
+/// Cached budget configuration for a wallet, stored in Redis as JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetConfig {
+    pub hourly: Option<f64>,
+    pub daily: Option<f64>,
+    pub monthly: Option<f64>,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            hourly: None,
+            daily: Some(DEFAULT_DAILY_LIMIT_USDC),
+            monthly: None,
+        }
+    }
+}
+
+/// Cached team budget configuration, stored in Redis as JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamBudgetConfig {
+    pub hourly: Option<f64>,
+    pub daily: Option<f64>,
+    pub monthly: Option<f64>,
+}
 
 /// Tolerance for f64 USDC comparisons.
 ///
@@ -34,6 +72,7 @@ pub struct SpendLog {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletBudget {
     pub wallet_address: String,
+    pub hourly_limit_usdc: Option<f64>,
     pub daily_limit_usdc: Option<f64>,
     pub monthly_limit_usdc: Option<f64>,
     pub total_spent_usdc: f64,
@@ -113,6 +152,13 @@ impl UsageTracker {
         }
     }
 
+    /// Access the Redis client, if configured.
+    ///
+    /// Used by budget management endpoints to read current spend counters.
+    pub fn redis_client(&self) -> Option<&redis::Client> {
+        self.redis_client.as_ref()
+    }
+
     /// Create a tracker with no backends (for testing).
     pub fn noop() -> Self {
         Self {
@@ -174,6 +220,7 @@ impl UsageTracker {
         // Update Redis hot-path counters
         if let Some(client) = &self.redis_client {
             let client = client.clone();
+            let db_pool = self.db_pool.clone();
             let wallet = entry.wallet_address;
             let cost = entry.cost_usdc;
             tokio::spawn(async move {
@@ -194,42 +241,33 @@ impl UsageTracker {
                     }
                 };
 
+                let now = Utc::now();
+
+                // Hourly spend counter
+                let hour_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H"));
+                incr_and_expire(&mut conn, &hour_key, cost, 7200).await;
+
                 // Daily spend counter
-                let day_key = format!("spend:{}:{}", wallet, Utc::now().format("%Y-%m-%d"));
-                if let Err(e) = redis::cmd("INCRBYFLOAT")
-                    .arg(&day_key)
-                    .arg(cost)
-                    .query_async::<()>(&mut conn)
-                    .await
-                {
-                    warn!(error = %e, key = %day_key, "failed to increment daily spend counter in Redis");
-                }
-                if let Err(e) = redis::cmd("EXPIRE")
-                    .arg(&day_key)
-                    .arg(86400_u64)
-                    .query_async::<()>(&mut conn)
-                    .await
-                {
-                    warn!(error = %e, key = %day_key, "failed to set TTL on daily spend counter");
-                }
+                let day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
+                incr_and_expire(&mut conn, &day_key, cost, 86400).await;
 
                 // Monthly spend counter
-                let month_key = format!("spend:{}:{}", wallet, Utc::now().format("%Y-%m"));
-                if let Err(e) = redis::cmd("INCRBYFLOAT")
-                    .arg(&month_key)
-                    .arg(cost)
-                    .query_async::<()>(&mut conn)
-                    .await
-                {
-                    warn!(error = %e, key = %month_key, "failed to increment monthly spend counter in Redis");
-                }
-                if let Err(e) = redis::cmd("EXPIRE")
-                    .arg(&month_key)
-                    .arg(86400_u64 * 31)
-                    .query_async::<()>(&mut conn)
-                    .await
-                {
-                    warn!(error = %e, key = %month_key, "failed to set TTL on monthly spend counter");
+                let month_key = format!("spend:{}:{}", wallet, now.format("%Y-%m"));
+                incr_and_expire(&mut conn, &month_key, cost, 86400 * 31).await;
+
+                // Team-level counters: look up team membership
+                let team_id = get_team_for_wallet(&mut conn, db_pool.as_ref(), &wallet).await;
+                if let Some(tid) = team_id {
+                    let tid_str = tid.to_string();
+                    let team_hour_key =
+                        format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%dT%H"));
+                    incr_and_expire(&mut conn, &team_hour_key, cost, 7200).await;
+
+                    let team_day_key = format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%d"));
+                    incr_and_expire(&mut conn, &team_day_key, cost, 86400).await;
+
+                    let team_month_key = format!("team_spend:{}:{}", tid_str, now.format("%Y-%m"));
+                    incr_and_expire(&mut conn, &team_month_key, cost, 86400 * 31).await;
                 }
             });
         }
@@ -239,18 +277,22 @@ impl UsageTracker {
     ///
     /// Returns `Ok(())` if within budget, `Err(UsageError::BudgetExceeded)` if not.
     ///
+    /// Checks wallet-level hourly, daily, and monthly limits (read from DB with
+    /// Redis caching), then checks team-level limits if the wallet belongs to a team.
+    ///
     /// **No-Redis fallback**: when Redis is unavailable and no client is configured,
     /// a conservative per-request cap of $1.00 USDC is applied to prevent runaway
     /// spend on high-cost models.  Requests with an estimated cost at or below $1.00
     /// are allowed through; above that they are rejected.
     ///
-    /// **Fail-open design decision**: When a Redis client IS configured but the
-    /// connection fails at request time (e.g., Redis is temporarily down), the
-    /// budget check is skipped and the request is allowed through. This is an
-    /// intentional fail-open design: we prefer serving requests over blocking
-    /// paying users due to an infrastructure issue. Operators should monitor the
-    /// `budget_check_skipped` warning logs and set up alerts for sustained Redis
-    /// outages that could allow budget overruns.
+    /// **Fail-closed on Redis errors**: When a Redis client IS configured but a
+    /// GET command fails at request time (e.g., Redis is temporarily down or
+    /// returns an unexpected error), the budget check returns
+    /// `Err(UsageError::Redis(...))` and the request is **denied**. We cannot
+    /// verify that the wallet has budget headroom, so we must not allow the
+    /// request through — an unverifiable spend limit is treated as exceeded.
+    /// The connection-level failure path (unable to acquire a connection at all)
+    /// is still logged as a warning and fails closed via `Err(UsageError::Redis)`.
     pub async fn check_budget(
         &self,
         wallet_address: &str,
@@ -273,47 +315,128 @@ impl UsageTracker {
         if let Some(client) = &self.redis_client {
             match client.get_multiplexed_async_connection().await {
                 Ok(mut conn) => {
-                    let day_key =
-                        format!("spend:{}:{}", wallet_address, Utc::now().format("%Y-%m-%d"));
-                    let daily_spend: f64 = match redis::cmd("GET")
-                        .arg(&day_key)
-                        .query_async::<Option<f64>>(&mut conn)
-                        .await
-                    {
-                        Ok(Some(val)) => val,
-                        Ok(None) => 0.0, // Key doesn't exist yet — no spend today
-                        Err(e) => {
-                            warn!(
-                                key = %day_key,
-                                error = %e,
-                                "Redis GET failed for daily spend — assuming 0.0 (fail-open)"
-                            );
-                            0.0
-                        }
-                    };
+                    let now = Utc::now();
 
-                    // Default daily limit: $100 USDC.
-                    // Use epsilon-aware comparison to avoid f64 rounding errors.
-                    // For example, $99.999999 + $0.000002 should not falsely exceed $100.00.
-                    const DAILY_LIMIT_USDC: f64 = 100.0;
-                    if daily_spend + estimated_cost_usdc > DAILY_LIMIT_USDC + USDC_EPSILON {
-                        return Err(UsageError::BudgetExceeded {
-                            wallet: wallet_address.to_string(),
-                            limit: DAILY_LIMIT_USDC,
-                            spent: daily_spend + estimated_cost_usdc,
-                        });
+                    // Load per-wallet budget config (DB-backed, cached in Redis 60s)
+                    let config =
+                        get_wallet_budget_config(&mut conn, self.db_pool.as_ref(), wallet_address)
+                            .await;
+
+                    // --- Hourly limit ---
+                    if let Some(hourly_limit) = config.hourly {
+                        let hour_key =
+                            format!("spend:{}:{}", wallet_address, now.format("%Y-%m-%dT%H"));
+                        let hourly_spend = redis_get_f64(&mut conn, &hour_key)
+                            .await
+                            .map_err(UsageError::Redis)?;
+                        if hourly_spend + estimated_cost_usdc > hourly_limit + USDC_EPSILON {
+                            return Err(UsageError::BudgetExceeded {
+                                wallet: wallet_address.to_string(),
+                                limit: hourly_limit,
+                                spent: hourly_spend + estimated_cost_usdc,
+                            });
+                        }
+                    }
+
+                    // --- Daily limit ---
+                    if let Some(daily_limit) = config.daily {
+                        let day_key =
+                            format!("spend:{}:{}", wallet_address, now.format("%Y-%m-%d"));
+                        let daily_spend = redis_get_f64(&mut conn, &day_key)
+                            .await
+                            .map_err(UsageError::Redis)?;
+                        if daily_spend + estimated_cost_usdc > daily_limit + USDC_EPSILON {
+                            return Err(UsageError::BudgetExceeded {
+                                wallet: wallet_address.to_string(),
+                                limit: daily_limit,
+                                spent: daily_spend + estimated_cost_usdc,
+                            });
+                        }
+                    }
+
+                    // --- Monthly limit ---
+                    if let Some(monthly_limit) = config.monthly {
+                        let month_key = format!("spend:{}:{}", wallet_address, now.format("%Y-%m"));
+                        let monthly_spend = redis_get_f64(&mut conn, &month_key)
+                            .await
+                            .map_err(UsageError::Redis)?;
+                        if monthly_spend + estimated_cost_usdc > monthly_limit + USDC_EPSILON {
+                            return Err(UsageError::BudgetExceeded {
+                                wallet: wallet_address.to_string(),
+                                limit: monthly_limit,
+                                spent: monthly_spend + estimated_cost_usdc,
+                            });
+                        }
+                    }
+
+                    // --- Team-level budget enforcement ---
+                    let team_id =
+                        get_team_for_wallet(&mut conn, self.db_pool.as_ref(), wallet_address).await;
+
+                    if let Some(tid) = team_id {
+                        let team_config =
+                            get_team_budget_config(&mut conn, self.db_pool.as_ref(), tid).await;
+
+                        if let Some(team_cfg) = team_config {
+                            let tid_str = tid.to_string();
+
+                            if let Some(hourly_limit) = team_cfg.hourly {
+                                let key =
+                                    format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%dT%H"));
+                                let spend = redis_get_f64(&mut conn, &key)
+                                    .await
+                                    .map_err(UsageError::Redis)?;
+                                if spend + estimated_cost_usdc > hourly_limit + USDC_EPSILON {
+                                    return Err(UsageError::BudgetExceeded {
+                                        wallet: wallet_address.to_string(),
+                                        limit: hourly_limit,
+                                        spent: spend + estimated_cost_usdc,
+                                    });
+                                }
+                            }
+
+                            if let Some(daily_limit) = team_cfg.daily {
+                                let key =
+                                    format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%d"));
+                                let spend = redis_get_f64(&mut conn, &key)
+                                    .await
+                                    .map_err(UsageError::Redis)?;
+                                if spend + estimated_cost_usdc > daily_limit + USDC_EPSILON {
+                                    return Err(UsageError::BudgetExceeded {
+                                        wallet: wallet_address.to_string(),
+                                        limit: daily_limit,
+                                        spent: spend + estimated_cost_usdc,
+                                    });
+                                }
+                            }
+
+                            if let Some(monthly_limit) = team_cfg.monthly {
+                                let key = format!("team_spend:{}:{}", tid_str, now.format("%Y-%m"));
+                                let spend = redis_get_f64(&mut conn, &key)
+                                    .await
+                                    .map_err(UsageError::Redis)?;
+                                if spend + estimated_cost_usdc > monthly_limit + USDC_EPSILON {
+                                    return Err(UsageError::BudgetExceeded {
+                                        wallet: wallet_address.to_string(),
+                                        limit: monthly_limit,
+                                        spent: spend + estimated_cost_usdc,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 Err(e) => {
-                    // Fail-open: allow the request but log a warning so operators
-                    // can monitor for sustained Redis outages. See doc comment above
-                    // for the design rationale.
+                    // Fail-closed: deny the request when we cannot reach Redis.
+                    // Without a connection we cannot verify spend, so we must not
+                    // allow the request through. See doc comment on check_budget.
                     warn!(
                         wallet = %wallet_address,
                         estimated_cost_usdc = estimated_cost_usdc,
                         error = %e,
-                        "budget_check_skipped: Redis connection failed, allowing request through (fail-open)"
+                        "budget_check_denied: Redis connection failed, denying request (fail-closed)"
                     );
+                    return Err(UsageError::Redis(e.to_string()));
                 }
             }
         }
@@ -353,6 +476,288 @@ impl UsageTracker {
 
         Err(UsageError::NotConfigured)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Redis + DB helper functions for budget enforcement
+// ---------------------------------------------------------------------------
+
+/// Increment a Redis key by `amount` and set its TTL. Fire-and-forget style
+/// (logs warnings on failure, never panics).
+async fn incr_and_expire(
+    conn: &mut redis::aio::MultiplexedConnection,
+    key: &str,
+    amount: f64,
+    ttl_secs: u64,
+) {
+    if let Err(e) = redis::cmd("INCRBYFLOAT")
+        .arg(key)
+        .arg(amount)
+        .query_async::<()>(conn)
+        .await
+    {
+        warn!(error = %e, key = %key, "failed to INCRBYFLOAT in Redis");
+    }
+    if let Err(e) = redis::cmd("EXPIRE")
+        .arg(key)
+        .arg(ttl_secs)
+        .query_async::<()>(conn)
+        .await
+    {
+        warn!(error = %e, key = %key, "failed to set TTL in Redis");
+    }
+}
+
+/// Read an f64 value from Redis for budget enforcement (fail-closed).
+///
+/// Returns `Ok(val)` on a cache hit, `Ok(0.0)` on a cache miss (key not set
+/// yet means no spend has been recorded), and `Err(String)` on a Redis error.
+///
+/// Callers on the **enforcement path** (`check_budget`) must propagate the
+/// error and deny the request — if we cannot verify spend we must not allow
+/// the request through.  Display-only callers (budget GET endpoints) use
+/// `get_redis_spend` which applies `.unwrap_or(0.0)` itself.
+async fn redis_get_f64(
+    conn: &mut redis::aio::MultiplexedConnection,
+    key: &str,
+) -> Result<f64, String> {
+    match redis::cmd("GET")
+        .arg(key)
+        .query_async::<Option<f64>>(conn)
+        .await
+    {
+        Ok(Some(val)) => Ok(val),
+        Ok(None) => Ok(0.0), // key absent = no spend recorded yet
+        Err(e) => {
+            warn!(key = %key, error = %e, "Redis GET failed — denying request (fail-closed)");
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Restrictive budget config returned on DB errors to fail-closed.
+/// $1/day prevents silent over-spending during DB outages.
+fn restrictive_budget_fallback() -> BudgetConfig {
+    BudgetConfig {
+        hourly: Some(0.50),
+        daily: Some(1.0),
+        monthly: Some(10.0),
+    }
+}
+
+/// Load per-wallet budget config. Checks Redis cache first (`budget_config:{wallet}`),
+/// falls back to DB query, caches result in Redis with 60s TTL.
+/// Returns default config ($100/day) if no row exists; restrictive fallback on DB error.
+async fn get_wallet_budget_config(
+    conn: &mut redis::aio::MultiplexedConnection,
+    db_pool: Option<&sqlx::PgPool>,
+    wallet: &str,
+) -> BudgetConfig {
+    let cache_key = format!("budget_config:{wallet}");
+
+    // Try Redis cache first
+    if let Ok(Some(json_str)) = redis::cmd("GET")
+        .arg(&cache_key)
+        .query_async::<Option<String>>(conn)
+        .await
+    {
+        match serde_json::from_str::<BudgetConfig>(&json_str) {
+            Ok(config) => return config,
+            Err(e) => {
+                tracing::warn!(cache_key = %cache_key, error = %e, "corrupted cache entry, falling through to DB");
+                let _ = redis::cmd("DEL")
+                    .arg(&cache_key)
+                    .query_async::<()>(conn)
+                    .await;
+            }
+        }
+    }
+
+    // Cache miss — query DB
+    let config = if let Some(pool) = db_pool {
+        match sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>)>(
+            r#"SELECT
+                hourly_limit_usdc::DOUBLE PRECISION,
+                daily_limit_usdc::DOUBLE PRECISION,
+                monthly_limit_usdc::DOUBLE PRECISION
+            FROM wallet_budgets
+            WHERE wallet_address = $1"#,
+        )
+        .bind(wallet)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some((hourly, daily, monthly))) => BudgetConfig {
+                hourly,
+                daily: daily.or(Some(DEFAULT_DAILY_LIMIT_USDC)),
+                monthly,
+            },
+            Ok(None) => BudgetConfig::default(),
+            Err(e) => {
+                warn!(wallet = %wallet, error = %e, "failed to query wallet_budgets — using restrictive fallback");
+                restrictive_budget_fallback()
+            }
+        }
+    } else {
+        BudgetConfig::default()
+    };
+
+    // Cache in Redis (best-effort)
+    if let Ok(json_str) = serde_json::to_string(&config) {
+        if let Err(e) = redis::cmd("SET")
+            .arg(&cache_key)
+            .arg(&json_str)
+            .arg("EX")
+            .arg(BUDGET_CONFIG_CACHE_TTL)
+            .query_async::<()>(conn)
+            .await
+        {
+            tracing::warn!(cache_key = %cache_key, error = %e, "failed to write to Redis cache");
+        }
+    }
+
+    config
+}
+
+/// Look up the team_id for a wallet. Checks Redis cache (`team_member:{wallet}`),
+/// falls back to DB query on `team_wallets`. Returns `None` if not in any team.
+async fn get_team_for_wallet(
+    conn: &mut redis::aio::MultiplexedConnection,
+    db_pool: Option<&sqlx::PgPool>,
+    wallet: &str,
+) -> Option<Uuid> {
+    let cache_key = format!("team_member:{wallet}");
+
+    // Try Redis cache
+    if let Ok(Some(tid_str)) = redis::cmd("GET")
+        .arg(&cache_key)
+        .query_async::<Option<String>>(conn)
+        .await
+    {
+        // A cached "none" sentinel means the wallet has no team
+        if tid_str == "none" {
+            return None;
+        }
+        if let Ok(tid) = tid_str.parse::<Uuid>() {
+            return Some(tid);
+        }
+    }
+
+    // Cache miss — query DB
+    let team_id = if let Some(pool) = db_pool {
+        match sqlx::query_as::<_, (Uuid,)>(
+            "SELECT team_id FROM team_wallets WHERE wallet_address = $1 LIMIT 1",
+        )
+        .bind(wallet)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some((tid,))) => Some(tid),
+            Ok(None) => None,
+            Err(e) => {
+                // Error-level: team budget enforcement is skipped on DB failure (fail-open for team
+                // budgets). Wallet-level budget still applies as the primary guard.
+                error!(wallet = %wallet, error = %e, "failed to query team_wallets — team budget enforcement skipped");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Cache result (including "none" sentinel to avoid repeated DB misses)
+    let cache_val = team_id
+        .map(|tid| tid.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let _: Result<(), _> = redis::cmd("SET")
+        .arg(&cache_key)
+        .arg(&cache_val)
+        .arg("EX")
+        .arg(TEAM_MEMBER_CACHE_TTL)
+        .query_async(conn)
+        .await;
+
+    team_id
+}
+
+/// Load team budget config from `team_budgets` table. Cached in Redis with 60s TTL.
+/// Returns `None` if no budget row exists for the team.
+async fn get_team_budget_config(
+    conn: &mut redis::aio::MultiplexedConnection,
+    db_pool: Option<&sqlx::PgPool>,
+    team_id: Uuid,
+) -> Option<TeamBudgetConfig> {
+    let cache_key = format!("team_budget:{team_id}");
+
+    // Try Redis cache
+    if let Ok(Some(json_str)) = redis::cmd("GET")
+        .arg(&cache_key)
+        .query_async::<Option<String>>(conn)
+        .await
+    {
+        if json_str == "none" {
+            return None;
+        }
+        if let Ok(config) = serde_json::from_str::<TeamBudgetConfig>(&json_str) {
+            return Some(config);
+        }
+    }
+
+    // Cache miss — query DB
+    let config = if let Some(pool) = db_pool {
+        match sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>)>(
+            r#"SELECT
+                hourly_limit_usdc::DOUBLE PRECISION,
+                daily_limit_usdc::DOUBLE PRECISION,
+                monthly_limit_usdc::DOUBLE PRECISION
+            FROM team_budgets
+            WHERE team_id = $1"#,
+        )
+        .bind(team_id)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some((hourly, daily, monthly))) => Some(TeamBudgetConfig {
+                hourly,
+                daily,
+                monthly,
+            }),
+            Ok(None) => None,
+            Err(e) => {
+                warn!(team_id = %team_id, error = %e, "failed to query team_budgets");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Cache result
+    let cache_val = match &config {
+        Some(cfg) => serde_json::to_string(cfg).unwrap_or_else(|_| "none".to_string()),
+        None => "none".to_string(),
+    };
+    let _: Result<(), _> = redis::cmd("SET")
+        .arg(&cache_key)
+        .arg(&cache_val)
+        .arg("EX")
+        .arg(TEAM_BUDGET_CACHE_TTL)
+        .query_async(conn)
+        .await;
+
+    config
+}
+
+/// Read the current spend from Redis for a given key pattern.
+/// Public helper used by budget API endpoints to report current spend.
+pub async fn get_redis_spend(client: &redis::Client, key: &str) -> Result<f64, UsageError> {
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|e| UsageError::Redis(e.to_string()))?;
+    redis_get_f64(&mut conn, key)
+        .await
+        .map_err(UsageError::Redis)
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +952,7 @@ mod tests {
     fn test_wallet_budget_struct() {
         let budget = WalletBudget {
             wallet_address: "So11111111111111111111111111111111111111112".to_string(),
+            hourly_limit_usdc: Some(10.0),
             daily_limit_usdc: Some(50.0),
             monthly_limit_usdc: Some(500.0),
             total_spent_usdc: 12.50,
@@ -557,6 +963,7 @@ mod tests {
         let deserialized: WalletBudget = serde_json::from_str(&json).expect("should deserialize");
 
         assert_eq!(deserialized.wallet_address, budget.wallet_address);
+        assert_eq!(deserialized.hourly_limit_usdc, Some(10.0));
         assert_eq!(deserialized.daily_limit_usdc, Some(50.0));
         assert_eq!(deserialized.monthly_limit_usdc, Some(500.0));
         assert!((deserialized.total_spent_usdc - 12.50).abs() < f64::EPSILON);
@@ -766,5 +1173,158 @@ mod tests {
 
         let err = UsageError::NotConfigured;
         assert_eq!(err.to_string(), "not configured");
+    }
+
+    #[test]
+    fn test_budget_config_default_has_100_daily() {
+        let config = BudgetConfig::default();
+        assert_eq!(config.daily, Some(100.0));
+        assert!(config.hourly.is_none());
+        assert!(config.monthly.is_none());
+    }
+
+    #[test]
+    fn test_budget_config_serialization_roundtrip() {
+        let config = BudgetConfig {
+            hourly: Some(10.0),
+            daily: Some(100.0),
+            monthly: None,
+        };
+        let json = serde_json::to_string(&config).expect("should serialize");
+        let deserialized: BudgetConfig = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(deserialized.hourly, Some(10.0));
+        assert_eq!(deserialized.daily, Some(100.0));
+        assert!(deserialized.monthly.is_none());
+    }
+
+    #[test]
+    fn test_budget_config_cache_key_format() {
+        let wallet = "So11111111111111111111111111111111111111112";
+        let key = format!("budget_config:{wallet}");
+        assert_eq!(
+            key,
+            "budget_config:So11111111111111111111111111111111111111112"
+        );
+    }
+
+    #[test]
+    fn test_team_member_cache_key_format() {
+        let wallet = "WalletABC";
+        let key = format!("team_member:{wallet}");
+        assert_eq!(key, "team_member:WalletABC");
+    }
+
+    #[test]
+    fn test_team_budget_config_serialization_roundtrip() {
+        let config = TeamBudgetConfig {
+            hourly: Some(50.0),
+            daily: Some(500.0),
+            monthly: Some(5000.0),
+        };
+        let json = serde_json::to_string(&config).expect("should serialize");
+        let deserialized: TeamBudgetConfig =
+            serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(deserialized.hourly, Some(50.0));
+        assert_eq!(deserialized.daily, Some(500.0));
+        assert_eq!(deserialized.monthly, Some(5000.0));
+    }
+
+    #[test]
+    fn test_budget_exceeded_error_includes_fields() {
+        let err = UsageError::BudgetExceeded {
+            wallet: "wallet_xyz".to_string(),
+            limit: 50.0,
+            spent: 75.0,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wallet_xyz"),
+            "error should include wallet address"
+        );
+        assert!(msg.contains("50"), "error should include limit");
+        assert!(msg.contains("75"), "error should include spent amount");
+    }
+
+    #[test]
+    fn test_hourly_spend_key_format() {
+        // Verify the hourly key format used in log_spend and check_budget
+        let wallet = "WalletABC";
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 4, 5)
+            .expect("valid date")
+            .and_hms_opt(14, 30, 0)
+            .expect("valid time");
+        let key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H"));
+        assert_eq!(key, "spend:WalletABC:2026-04-05T14");
+    }
+
+    #[test]
+    fn test_team_spend_key_format() {
+        let team_id = "550e8400-e29b-41d4-a716-446655440000";
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 4, 5)
+            .expect("valid date")
+            .and_hms_opt(14, 30, 0)
+            .expect("valid time");
+        let hourly = format!("team_spend:{}:{}", team_id, now.format("%Y-%m-%dT%H"));
+        assert_eq!(
+            hourly,
+            "team_spend:550e8400-e29b-41d4-a716-446655440000:2026-04-05T14"
+        );
+        let daily = format!("team_spend:{}:{}", team_id, now.format("%Y-%m-%d"));
+        assert_eq!(
+            daily,
+            "team_spend:550e8400-e29b-41d4-a716-446655440000:2026-04-05"
+        );
+        let monthly = format!("team_spend:{}:{}", team_id, now.format("%Y-%m"));
+        assert_eq!(
+            monthly,
+            "team_spend:550e8400-e29b-41d4-a716-446655440000:2026-04"
+        );
+    }
+
+    /// Migration 007 SQL (loaded from file).
+    const MIGRATION_007: &str = include_str!("../../../migrations/007_hourly_spend_limits.sql");
+
+    #[test]
+    fn test_migration_007_adds_hourly_limit_column() {
+        assert!(
+            MIGRATION_007.contains("ADD COLUMN IF NOT EXISTS hourly_limit_usdc"),
+            "migration must add hourly_limit_usdc column to wallet_budgets"
+        );
+    }
+
+    #[test]
+    fn test_migration_007_creates_team_budgets_table() {
+        assert!(
+            MIGRATION_007.contains("CREATE TABLE IF NOT EXISTS team_budgets"),
+            "migration must create team_budgets table"
+        );
+        assert!(
+            MIGRATION_007.contains("REFERENCES teams(id) ON DELETE CASCADE"),
+            "team_budgets.team_id must reference teams with cascade delete"
+        );
+        assert!(
+            MIGRATION_007.contains("hourly_limit_usdc"),
+            "team_budgets must have hourly_limit_usdc"
+        );
+        assert!(
+            MIGRATION_007.contains("daily_limit_usdc"),
+            "team_budgets must have daily_limit_usdc"
+        );
+        assert!(
+            MIGRATION_007.contains("monthly_limit_usdc"),
+            "team_budgets must have monthly_limit_usdc"
+        );
+    }
+
+    #[test]
+    fn test_migration_007_creates_updated_at_trigger() {
+        assert!(
+            MIGRATION_007.contains("trg_team_budgets_updated_at"),
+            "migration must create updated_at trigger for team_budgets"
+        );
+        assert!(
+            MIGRATION_007.contains("update_updated_at_column()"),
+            "trigger must use the generic update_updated_at_column function"
+        );
     }
 }

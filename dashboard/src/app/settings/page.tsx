@@ -1,9 +1,17 @@
 "use client";
 
-import { useState } from "react";
-import { Save, CheckCircle, Terminal, Info } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Save, CheckCircle, Terminal, Info, Key, Trash2, Plus } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { StatusDot } from "@/components/ui/status-dot";
+import { setApiKey, clearApiKey, getApiKey } from "@/lib/auth";
+import {
+  fetchOrgs,
+  fetchTeams,
+  fetchAuditLogs,
+  createTeam,
+} from "@/lib/api";
+import type { OrgEntry, TeamEntry, AuditLogEntry } from "@/lib/api";
 
 function SettingRow({
   label,
@@ -109,6 +117,74 @@ export default function SettingsPage() {
   // For now, show the generated .env snippet the user should apply manually.
   const [showEnvSnippet, setShowEnvSnippet] = useState(false);
 
+  // API Key section
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [currentApiKey, setCurrentApiKey] = useState<string | null>(null);
+  const [apiKeySaved, setApiKeySaved] = useState(false);
+
+  // Team management
+  const [orgs, setOrgs] = useState<OrgEntry[]>([]);
+  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
+  const [teams, setTeams] = useState<TeamEntry[]>([]);
+  const [newTeamName, setNewTeamName] = useState("");
+  const [creatingTeam, setCreatingTeam] = useState(false);
+
+  // Audit log
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+
+  useEffect(() => {
+    setCurrentApiKey(getApiKey());
+  }, []);
+
+  useEffect(() => {
+    if (!currentApiKey) return;
+    fetchOrgs().then((result) => {
+      if (result.ok && result.data.length > 0) {
+        setOrgs(result.data);
+        setSelectedOrgId(result.data[0].id);
+      }
+    });
+  }, [currentApiKey]);
+
+  useEffect(() => {
+    if (!selectedOrgId) return;
+    fetchTeams(selectedOrgId).then((result) => {
+      if (result.ok) setTeams(result.data);
+    });
+    fetchAuditLogs(selectedOrgId, { limit: 20 }).then((result) => {
+      if (result.ok) setAuditLogs(result.data);
+    });
+  }, [selectedOrgId]);
+
+  function handleSaveApiKey() {
+    if (!apiKeyInput.trim()) return;
+    setApiKey(apiKeyInput.trim());
+    setCurrentApiKey(apiKeyInput.trim());
+    setApiKeyInput("");
+    setApiKeySaved(true);
+    setTimeout(() => setApiKeySaved(false), 2000);
+  }
+
+  function handleClearApiKey() {
+    clearApiKey();
+    setCurrentApiKey(null);
+    setOrgs([]);
+    setTeams([]);
+    setAuditLogs([]);
+    setSelectedOrgId(null);
+  }
+
+  async function handleCreateTeam() {
+    if (!selectedOrgId || !newTeamName.trim()) return;
+    setCreatingTeam(true);
+    const result = await createTeam(selectedOrgId, newTeamName.trim());
+    if (result.ok) {
+      setTeams((prev) => [...prev, result.data]);
+      setNewTeamName("");
+    }
+    setCreatingTeam(false);
+  }
+
   const envSnippet = [
     `NEXT_PUBLIC_GATEWAY_URL=${gatewayUrl}`,
     `RCR_CORS_ORIGINS=${corsOrigins}`,
@@ -123,6 +199,182 @@ export default function SettingsPage() {
       <Topbar title="Settings" subtitle="Gateway configuration and budget limits" />
 
       <div className="flex-1 p-6 space-y-6 max-w-3xl">
+        {/* API Key */}
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <div className="flex items-center gap-2 mb-1">
+            <Key size={14} className="text-gray-500" />
+            <h2 className="text-sm font-semibold text-gray-900">API Key</h2>
+          </div>
+          <p className="text-xs text-gray-500 mb-4">
+            Paste your <code className="font-mono">rcr_k_...</code> API key to
+            authenticate with org-scoped endpoints. Stored in localStorage only.
+          </p>
+
+          <div className="space-y-3">
+            {currentApiKey ? (
+              <div className="flex items-center justify-between rounded-lg border border-green-200 bg-green-50 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <CheckCircle size={13} className="text-green-600" />
+                  <code className="text-xs font-mono text-green-800">
+                    {currentApiKey.slice(0, 10)}...
+                  </code>
+                  <span className="text-xs text-green-700">configured</span>
+                </div>
+                <button
+                  onClick={handleClearApiKey}
+                  className="flex items-center gap-1 text-xs text-red-600 hover:text-red-700 transition-colors"
+                >
+                  <Trash2 size={12} />
+                  Clear
+                </button>
+              </div>
+            ) : (
+              <p className="text-xs text-gray-400 italic">No API key configured</p>
+            )}
+
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={apiKeyInput}
+                onChange={(e) => setApiKeyInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleSaveApiKey()}
+                placeholder="rcr_k_..."
+                className="flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-orange-400 focus:outline-none focus:ring-2 focus:ring-orange-100 transition-colors"
+              />
+              <button
+                onClick={handleSaveApiKey}
+                disabled={!apiKeyInput.trim()}
+                className="flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white bg-orange-500 hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                {apiKeySaved ? <CheckCircle size={13} /> : <Save size={13} />}
+                {apiKeySaved ? "Saved" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Team Management */}
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="text-sm font-semibold text-gray-900 mb-1">Team Management</h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Manage teams within your organization. Requires a valid API key above.
+          </p>
+
+          {!currentApiKey ? (
+            <p className="text-xs text-gray-400 italic">
+              Configure an API key to view team management.
+            </p>
+          ) : orgs.length === 0 ? (
+            <p className="text-xs text-gray-400 italic">No organizations found.</p>
+          ) : (
+            <div className="space-y-4">
+              {orgs.length > 1 && (
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-gray-600 font-medium">Org:</label>
+                  <select
+                    value={selectedOrgId ?? ""}
+                    onChange={(e) => setSelectedOrgId(e.target.value)}
+                    className="rounded border border-gray-200 px-2 py-1 text-xs text-gray-900 focus:outline-none focus:border-orange-400"
+                  >
+                    {orgs.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Teams list */}
+              <div className="divide-y divide-gray-100 rounded-lg border border-gray-200">
+                {teams.length === 0 ? (
+                  <p className="px-4 py-3 text-xs text-gray-400 italic">No teams yet.</p>
+                ) : (
+                  teams.map((team) => (
+                    <div key={team.id} className="flex items-center justify-between px-4 py-3">
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">{team.name}</p>
+                        {team.wallet_count !== undefined && (
+                          <p className="text-xs text-gray-500">
+                            {team.wallet_count} wallet{team.wallet_count !== 1 ? "s" : ""}
+                          </p>
+                        )}
+                      </div>
+                      {team.budget && (
+                        <div className="text-xs text-gray-500 text-right">
+                          {team.budget.daily_limit != null && (
+                            <p>Daily: {team.budget.daily_limit} USDC</p>
+                          )}
+                          {team.budget.monthly_limit != null && (
+                            <p>Monthly: {team.budget.monthly_limit} USDC</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* Create team */}
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newTeamName}
+                  onChange={(e) => setNewTeamName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleCreateTeam()}
+                  placeholder="New team name"
+                  className="flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-orange-400 focus:outline-none focus:ring-2 focus:ring-orange-100 transition-colors"
+                />
+                <button
+                  onClick={handleCreateTeam}
+                  disabled={!newTeamName.trim() || creatingTeam}
+                  className="flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white bg-orange-500 hover:bg-orange-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  <Plus size={13} />
+                  {creatingTeam ? "Creating..." : "Create Team"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Audit Log */}
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h2 className="text-sm font-semibold text-gray-900 mb-1">Audit Log</h2>
+          <p className="text-xs text-gray-500 mb-4">Recent organization activity (last 20 entries).</p>
+
+          {!currentApiKey ? (
+            <p className="text-xs text-gray-400 italic">
+              Configure an API key to view audit logs.
+            </p>
+          ) : auditLogs.length === 0 ? (
+            <p className="text-xs text-gray-400 italic">No audit log entries found.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-gray-100">
+                    <th className="pb-2 text-left font-medium text-gray-600">Action</th>
+                    <th className="pb-2 text-left font-medium text-gray-600">Resource</th>
+                    <th className="pb-2 text-left font-medium text-gray-600">Time</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {auditLogs.map((entry) => (
+                    <tr key={entry.id}>
+                      <td className="py-2 pr-4 font-mono text-gray-800">{entry.action}</td>
+                      <td className="py-2 pr-4 text-gray-600">{entry.resource_type}</td>
+                      <td className="py-2 text-gray-500">
+                        {new Date(entry.created_at).toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
         {/* Gateway */}
         <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
           <h2 className="text-sm font-semibold text-gray-900 mb-1">Gateway</h2>

@@ -42,6 +42,8 @@ redis = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 lru = { workspace = true }
+hex = "0.4"
+rand = "0.9"
 
 # Utilities
 uuid = { workspace = true }
