@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 /// Default daily limit when no per-wallet budget row exists.
@@ -535,9 +535,19 @@ async fn redis_get_f64(
     }
 }
 
+/// Restrictive budget config returned on DB errors to fail-closed.
+/// $1/day prevents silent over-spending during DB outages.
+fn restrictive_budget_fallback() -> BudgetConfig {
+    BudgetConfig {
+        hourly: Some(0.50),
+        daily: Some(1.0),
+        monthly: Some(10.0),
+    }
+}
+
 /// Load per-wallet budget config. Checks Redis cache first (`budget_config:{wallet}`),
 /// falls back to DB query, caches result in Redis with 60s TTL.
-/// Returns default config ($100/day) if no row exists or DB is unavailable.
+/// Returns default config ($100/day) if no row exists; restrictive fallback on DB error.
 async fn get_wallet_budget_config(
     conn: &mut redis::aio::MultiplexedConnection,
     db_pool: Option<&sqlx::PgPool>,
@@ -584,8 +594,8 @@ async fn get_wallet_budget_config(
             },
             Ok(None) => BudgetConfig::default(),
             Err(e) => {
-                warn!(wallet = %wallet, error = %e, "failed to query wallet_budgets — using defaults");
-                BudgetConfig::default()
+                warn!(wallet = %wallet, error = %e, "failed to query wallet_budgets — using restrictive fallback");
+                restrictive_budget_fallback()
             }
         }
     } else {
@@ -645,7 +655,9 @@ async fn get_team_for_wallet(
             Ok(Some((tid,))) => Some(tid),
             Ok(None) => None,
             Err(e) => {
-                warn!(wallet = %wallet, error = %e, "failed to query team_wallets");
+                // Error-level: team budget enforcement is skipped on DB failure (fail-open for team
+                // budgets). Wallet-level budget still applies as the primary guard.
+                error!(wallet = %wallet, error = %e, "failed to query team_wallets — team budget enforcement skipped");
                 None
             }
         }

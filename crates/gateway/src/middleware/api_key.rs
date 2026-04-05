@@ -4,7 +4,7 @@ use axum::extract::{FromRequestParts, Request, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use tracing::warn;
 use uuid::Uuid;
@@ -50,7 +50,17 @@ pub async fn extract_api_key(
                         warn!("invalid or expired API key");
                     }
                     Err(e) => {
-                        warn!(error = %e, "API key verification DB error");
+                        warn!(error = %e, "API key verification DB error — returning 503");
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(serde_json::json!({
+                                "error": {
+                                    "type": "service_unavailable",
+                                    "message": "Authentication service temporarily unavailable"
+                                }
+                            })),
+                        )
+                            .into_response();
                     }
                 }
             }
