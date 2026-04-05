@@ -102,7 +102,7 @@ pub async fn create_org(
     };
 
     match queries::create_org(pool, req, body.owner_wallet).await {
-        Ok(org) => (StatusCode::OK, Json(org)).into_response(),
+        Ok(org) => (StatusCode::CREATED, Json(org)).into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "failed to create org");
             (
@@ -193,7 +193,7 @@ pub async fn create_team(
     let pool = require_db!(state);
 
     match queries::create_team(pool, org_id, body).await {
-        Ok(team) => (StatusCode::OK, Json(team)).into_response(),
+        Ok(team) => (StatusCode::CREATED, Json(team)).into_response(),
         Err(e) => {
             tracing::warn!(org_id = %org_id, error = %e, "failed to create team");
             (
@@ -246,7 +246,7 @@ pub async fn add_member(
     let pool = require_db!(state);
 
     match queries::add_member(pool, org_id, body).await {
-        Ok(member) => (StatusCode::OK, Json(member)).into_response(),
+        Ok(member) => (StatusCode::CREATED, Json(member)).into_response(),
         Err(e) => {
             tracing::warn!(org_id = %org_id, error = %e, "failed to add member");
             (
@@ -299,7 +299,7 @@ pub async fn assign_wallet(
     let pool = require_db!(state);
 
     match queries::assign_wallet(pool, team_id, &body).await {
-        Ok(wallet) => (StatusCode::OK, Json(wallet)).into_response(),
+        Ok(wallet) => (StatusCode::CREATED, Json(wallet)).into_response(),
         Err(e) => {
             tracing::warn!(team_id = %team_id, error = %e, "failed to assign wallet");
             (
@@ -352,7 +352,7 @@ pub async fn create_api_key(
     let pool = require_db!(state);
 
     match queries::create_api_key(pool, org_id, body).await {
-        Ok(created) => (StatusCode::OK, Json(created)).into_response(),
+        Ok(created) => (StatusCode::CREATED, Json(created)).into_response(),
         Err(e) => {
             tracing::warn!(org_id = %org_id, error = %e, "failed to create api key");
             (
@@ -629,5 +629,49 @@ supports_vision = true
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn create_team_no_db_returns_503() {
+        let app = test_router(Some("mytoken"));
+        let org_id = Uuid::new_v4();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/orgs/{org_id}/teams"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer mytoken")
+                    .body(Body::from(r#"{"name":"Engineering"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // db_pool is None → 503
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn create_api_key_no_db_returns_503() {
+        let app = test_router(Some("mytoken"));
+        let org_id = Uuid::new_v4();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/orgs/{org_id}/api-keys"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer mytoken")
+                    .body(Body::from(r#"{"name":"My Key","scopes":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // db_pool is None → 503
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
