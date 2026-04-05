@@ -1,269 +1,132 @@
-# HANDOFF.md — RustyClawRouter Continuation Guide
+# HANDOFF.md — RustyClawRouter Current State
 
-> **Start here.** This document captures full context so a fresh agent can continue without ramp-up time.
-> **Last updated:** 2026-04-05
-
----
-
-## Goal
-
-RustyClawRouter (RCR) is a Solana-native LLM payment gateway. AI agents pay for LLM API calls with USDC-SPL on Solana via the x402 protocol. No API keys, no accounts, just wallets. Revenue: 5% fee on every proxied LLM call.
-
-RCR is one of three products under **rustyclaw.ai**:
-
-| Product | Purpose | Revenue | Status |
-|---------|---------|---------|--------|
-| **RustyClaw Terminal** | Crypto trading terminal + AI agent | $49-179/mo (Whop) | Built, not deployed |
-| **RustyClawRouter** | LLM payment gateway (this repo) | 5% fee per LLM call | Deployed on Fly.io |
-| **Telsi.ai** | Multi-tenant AI assistant SaaS | $59-229/mo (Stripe) | Live on BlockRun, planned RCR migration |
-
-**Ecosystem strategy:** See `/home/kennethdixon/projects/rustyclaw/docs/superpowers/specs/2026-03-17-rustyclaw-ecosystem-design.md` for full context.
+> **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
+> **Last verified:** 2026-04-05 (from actual repo inspection, not docs)
 
 ---
 
-## Current Progress
+## What Is This
 
-### What's Complete
+RustyClawRouter (RCR) is a Solana-native LLM payment gateway. AI agents pay for LLM API calls with USDC-SPL on Solana via x402. Revenue: 5% fee per call.
 
-| Phase | Description | Key Components |
-|-------|-------------|----------------|
-| 1-3 | **Core Gateway + x402 + Smart Router + SDKs** | Axum server, x402 middleware, 5 providers, 15-dim scorer, 4 routing profiles, Redis cache, circuit breaker, Python/TS/Go SDKs, CLI |
-| 4 | **Anchor Escrow Program** | Deposit/claim/refund instructions, PDA vault, timeout-based refunds, events. `programs/escrow/` |
-| 8 | **Escrow Hardening** | Claim queue (PostgreSQL), claim processor (background), fee payer pool rotation (8 wallets), durable nonces, circuit breaker, exponential backoff, escrow metrics |
-| 9 | **Service Marketplace** | External service proxy, admin registration API, background health checker |
-| 12 | **Prometheus Monitoring** | 15 metrics, `/metrics` endpoint, request/payment/provider/cache/escrow/infra instrumentation |
-| 13 | **Documentation** | Comprehensive docs overhaul |
-| 14 | **Production Hardening** | CatchPanicLayer, request timeout, connection limits, shared HTTP clients, graceful shutdown |
-| G | **Gateway Changes** | Debug headers (`X-RCR-*`), stats endpoint (`GET /v1/stats`), session ID tracking, SSE heartbeat, nonce endpoint |
-| — | **Security Audits** | Multiple rounds: 7 CRITICAL, 7 HIGH, 4 HIGH, 12 MEDIUM — all resolved |
-| — | **Chat Route Refactor** | Monolithic `chat.rs` (2405 lines) → `chat/` module directory (mod.rs, cost.rs, payment.rs, provider.rs, response.rs) |
-| — | **Audit Bug Fixes** | E1 retry unwrap, S1 DNS rebinding TOCTOU, S2 replay TTL, SSE buffer optimization, shared HTTP clients |
-| 5a | **Dashboard API Integration** | Admin aggregate stats endpoint (`GET /v1/admin/stats`), all dashboard pages connected to real API, graceful mock-data fallback, mobile sidebar fix |
-| 5b | **Enterprise Features** | Org/team hierarchy, API key auth, audit logs, hourly+team spend limits, budget API, team analytics, dashboard auth |
-| — | **A2A Protocol Adapter** | `GET /.well-known/agent.json` (AgentCard), `POST /a2a` (JSON-RPC 2.0), message/send handler with x402 payment flow, Redis task state |
-| — | **Dockerfile Fix** | Fixed `crates/common/` → `crates/protocol/` reference in Dockerfile. Previous deploys were using stale cached images. |
-| — | **LiteSVM Integration Tests** | 14 LiteSVM integration tests for escrow program (5 happy path + 9 error cases). Installed Anchor CLI 0.31.1 + Solana toolchain 3.1.12. All 20 escrow tests pass in 2.5s. |
+Part of the **rustyclaw.ai** ecosystem:
 
-**Total: 614 Rust workspace tests + 21 escrow tests + 82 dashboard tests + 94 SDK tests, all passing. Lint clean (fmt + clippy).**
+| Product | Purpose | Status |
+|---------|---------|--------|
+| **RustyClawRouter** | LLM payment gateway (this repo) | Deployed on Fly.io |
+| **RustyClaw Terminal** | Crypto trading terminal + AI agent | Backend deployed, frontend not yet |
+| **Telsi.ai** | Multi-tenant AI assistant SaaS | Live on BlockRun, planned RCR migration |
 
-### Test Breakdown
+---
+
+## What's Built (verified from codebase)
+
+### Gateway (23 HTTP routes)
+
+| Area | Routes | Status |
+|------|--------|--------|
+| **Chat completions** | `POST /v1/chat/completions` | Working, 5 providers |
+| **Image generation** | `POST /v1/images/generations` | Working |
+| **A2A protocol** | `GET /.well-known/agent.json`, `POST /a2a` | Working, x402 payment flow |
+| **Models/Services** | `GET /v1/models`, `GET /v1/services`, `POST /v1/services/register`, `POST /v1/services/{id}/proxy` | Working |
+| **Escrow** | `GET /v1/escrow/config`, `GET /v1/escrow/health` | Working |
+| **Enterprise (orgs)** | 12 endpoints under `/v1/orgs/...` | Working, API key auth |
+| **Wallet/Stats** | `GET /v1/wallet/{addr}/stats`, `GET /v1/admin/stats` | Working |
+| **Infrastructure** | `GET /health`, `GET /pricing`, `GET /metrics`, `GET /v1/nonce`, `GET /v1/supported` | Working |
+
+### Middleware Stack
+
+Rate limiting, API key extraction (org-scoped), x402 payment extraction, CORS, security headers (CSP, X-Frame-Options, HSTS), request ID tracking, concurrency limiting, global timeout, panic handler.
+
+### Database (7 migrations)
+
+Core tables (wallet_budgets, escrow, claims), escrow claim queue, session tracking, retry scheduling, organizations/teams/members/API keys, audit logs, hourly spend limits.
+
+### Escrow Program (Anchor, standalone)
+
+Trustless USDC-SPL escrow: deposit/claim/refund. PDA vault with timeout refunds. Not a workspace member (dep conflicts).
+
+### SDKs
+
+Python (`sdks/python/`), TypeScript (`sdks/typescript/`), Go (`sdks/go/`), MCP server (`sdks/mcp/`).
+
+### Dashboard
+
+Next.js 16 + Tailwind + Recharts. 5 pages: Overview, Usage, Models, Wallet, Settings. Deployed to Vercel (`rusty-claw-router.vercel.app`). Note: no `vercel.json` in repo — deployed via Vercel UI.
+
+---
+
+## Test Counts (run `cargo test` to verify — these go stale)
+
+Last verified 2026-04-05:
 
 ```
-gateway:   484 tests (368 unit + 116 integration)
-x402:       99 tests
-protocol:   18 tests
-router:     13 tests
-escrow:     21 tests (standalone, not in workspace)
-─────────────────
-Total:     635 Rust tests (614 workspace + 21 escrow)
+gateway unit:        368
+gateway integration: 122
+router:               13
+protocol:             18
+x402:                 99
+cli:                   0  (no tests written yet)
+───────────────────────
+workspace total:     620
 
-dashboard:  82 tests (32 utils + 19 mock-data + 31 API)
+escrow (standalone):  21
+dashboard (vitest):   82
 ```
-
-### What's NOT Done Yet
-
-#### Phase 5: Dashboard + Enterprise — COMPLETE
-- Next.js 16 dashboard with pages: Overview, Usage, Models, Wallet, Settings
-- Charts: spend-chart, requests-bar, model-pie
-- Components: shell layout (with mobile sidebar), topbar, sidebar, stat-card, status-dot, badge
-- **Dashboard API integration COMPLETE (2026-03-29):** All pages fetch real data from gateway via `GET /v1/admin/stats`, `GET /health`, `GET /pricing`, `GET /v1/escrow/config`. Falls back to mock data with warning banner when API unavailable. Admin auth via `GATEWAY_ADMIN_KEY` env var (server-side only).
-- **Enterprise features COMPLETE (2026-04-05):** Org/team hierarchy, API key auth middleware (`OrgContext`, `RequireOrg`/`RequireOrgAdmin` extractors), audit logs (fire-and-forget writer), hourly+team spend limits, budget API with cache invalidation, team analytics endpoints, dashboard API key auth UI.
-- **Still needed:** Deploy dashboard to Vercel
-- **Market research completed:** `docs/research/2026-03-23-ai-agent-payment-infrastructure.md`
-
-#### Other Deferred Items
-- **x402 V2 Migration** — V2 launched Dec 2025 (sessions, multi-chain, service discovery). We're on V1.
-- **Multi-chain support** — Base/EVM deferred. `PaymentVerifier` trait is chain-agnostic by design.
-- ~~**AP2 compatibility**~~ — **DONE 2026-04-05**: A2A protocol adapter (`GET /.well-known/agent.json`, `POST /a2a` JSON-RPC 2.0) with x402 payment flow and Redis task state.
-- Load testing, per-user fairness queuing, secret rotation plan
-- Complete API reference documentation
 
 ---
 
-## Competitive Landscape (as of 2026-03-23)
+## Deployment
 
-| Competitor | Chain | Escrow | Routing | Users | Funding |
-|-----------|-------|--------|---------|-------|---------|
-| **BlockRun** | Base only | No | No | Active | Unknown |
-| **OpenRouter** | Traditional payments | No | Yes (400+ models) | 5M+ | $40M (a16z, Sequoia) |
-| **Stripe** (Agentic Commerce) | Base | No | No | Massive | Public ($91.5B) |
-| **Google AP2** | Chain-agnostic | No | No | 60+ enterprise partners | Google |
-| **RustyClawRouter** | Solana | **Yes (Anchor)** | **Yes (15-dim)** | 0 | Bootstrapped |
+| Resource | Location | Status |
+|----------|----------|--------|
+| **Gateway** | `rustyclawrouter-gateway.fly.dev` | Running (ord region) |
+| **PostgreSQL** | `rustyclawrouter-db` on Fly.io | Running (Postgres 17.2) |
+| **Redis** | Upstash (`rustyclawrouter-cache`) | Running (ord + iad) |
+| **Dashboard** | `rusty-claw-router.vercel.app` | Deployed |
+| **Terminal backend** | `rclawterm-gateway.fly.dev` | Running (ord, 2 machines) |
 
-**Our edge:** Trustless Anchor escrow (agents don't overpay), Solana-native (50-70% of x402 volume), Rust performance. See full research in `docs/research/2026-03-23-ai-agent-payment-infrastructure.md`.
+### Secrets on Fly.io
 
----
-
-## Deployment Status (as of 2026-03-31)
-
-| Resource | Status | Details |
-|----------|--------|---------|
-| **RCR Gateway** | Running | `rustyclawrouter-gateway.fly.dev`, v20 deployed 2026-03-31, 2 machines (ord), health passing. Endpoints verified: `/health`, `/pricing` (25 models), `/v1/models` |
-| **PostgreSQL** | Running | `rustyclawrouter-db` on Fly.io, Postgres 17.2, 3/3 health checks passing |
-| **Upstash Redis** | Running | `rustyclawrouter-cache`, pay-as-you-go, ord + iad regions |
-
-### Secrets Currently Set on Fly.io
-
-```
-DATABASE_URL                  ✅
-REDIS_URL                     ✅
-RCR_SOLANA__RECIPIENT_WALLET  ✅
-RCR_SOLANA__RPC_URL           ✅ (mainnet via Helius)
-RCR_SOLANA__USDC_MINT         ✅
-RCR_SOLANA__ESCROW_PROGRAM_ID ✅
-RCR_SOLANA__FEE_PAYER_KEY     ✅
-OPENAI_API_KEY                ✅ (set 2026-03-18)
-GOOGLE_API_KEY                ✅ (set 2026-03-18)
-RCR_INTERNAL_SERVICE_KEY      ✅ (shared with rclawterm-gateway)
-RCR_ADMIN_TOKEN               ✅ (rotated 2026-03-31)
-ANTHROPIC_API_KEY             ✅ (set 2026-03-31)
-XAI_API_KEY                   ✅ (set 2026-03-31)
-DEEPSEEK_API_KEY              ✅ (set 2026-03-31)
-```
-
-### Deployment Blockers
-
-| # | Blocker | Severity | Status |
-|---|---------|----------|--------|
-| 1 | ~~Fee-payer wallet has 0 SOL~~ | LOW | RESOLVED — Fee-payer wallet funded with 0.09 SOL (2026-03-31) |
-
-### Development Toolchain (as of 2026-03-31)
-
-| Tool | Version | Status |
-|------|---------|--------|
-| Anchor CLI | 0.31.1 | Installed |
-| Solana CLI | 3.1.12 (Agave) | Installed |
-| Solana keypair | `~/.config/solana/id.json` | Generated (dev only, not funded) |
+All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana config set (RPC, recipient wallet, USDC mint, escrow program, fee payer key). Database + Redis URLs set. Admin token rotated 2026-03-31.
 
 ---
 
-## Coordination with Other Projects
+## What's NOT Done
 
-### RustyClaw Terminal (`/home/kennethdixon/projects/rustyclaw`)
-- Terminal's AI agent routes through RCR via `RcrProvider` in `rclawterm-agent`
-- **Terminal backend deployed** (2026-03-18): `rclawterm-gateway.fly.dev`, 2 machines (ord), health OK
-- Terminal uses the same Upstash Redis instance (`rustyclawrouter-cache`)
-- **Terminal wired to RCR** (2026-03-31): Removed direct ANTHROPIC_API_KEY from rclawterm-gateway. All Terminal LLM traffic now routes through RCR.
-- **Next:** Deploy Next.js frontend to Vercel
+### Immediate
 
-### Telsi.ai (`/home/kennethdixon/projects/clawstack`)
-- Currently routes through BlockRun (x402 USDC on Base chain)
-- Planned migration to RCR: Shadow → Canary → Flip → Clean
-- **Not started yet.** Terminal comes first.
+- **CLI tests**: `rcr-cli` crate has 0 tests. Commands exist (wallet, chat, models, health, stats, doctor) but no test coverage.
+- **Redeploy gateway**: The enterprise features + A2A adapter haven't been deployed to Fly.io yet. Current production is pre-enterprise.
 
-### Ecosystem Priority Order
+### Deferred
 
-1. Get Terminal live (deploy, first subscribers)
+- **Multi-chain support**: `PaymentVerifier` trait is chain-agnostic by design. Base/EVM implementation deferred.
+- **x402 V2 sessions**: V2 adds sessions and service discovery. Wire format migrated but session features not implemented.
+- **Load testing**: Not started.
+- **Per-user fairness queuing**: Not started.
+- **Secret rotation plan**: No automated rotation.
+- **API reference docs**: Incomplete.
+- **Rust 2021 → 2024 edition**: Planned but not blocking.
+- **SDK publishing**: SDKs exist but npm/PyPI/crates.io publishing status unclear.
+
+### Ecosystem (in priority order)
+
+1. Deploy Terminal frontend to Vercel
 2. Harden RCR under real Terminal load
 3. Build OpenClaw plugin (`@rustyclaw/clawrouter`)
-4. Migrate Telsi (Shadow → Canary → Flip → Clean)
-5. Build Sky64 network agent (third vertical)
-6. Go public (open-source `rcr-router`, `rcr-protocol`)
+4. Migrate Telsi from BlockRun to RCR
+5. Build Sky64 network agent
+6. Open-source (`rcr-router`, `rcr-protocol`)
 
 ---
 
-## Project Structure
+## Regulatory Notes
 
-```
-crates/
-  gateway/         Axum HTTP server — routes, middleware, providers, cache, usage, metrics, security
-    routes/chat/   Refactored: mod.rs, cost.rs, payment.rs, provider.rs, response.rs
-    orgs/          Enterprise: models.rs, queries.rs (org/team/member/wallet/API key CRUD)
-    audit.rs       Fire-and-forget audit log writer
-    middleware/
-      api_key.rs   OrgContext, RequireOrg/RequireOrgAdmin extractors
-    payment_util.rs  Shared payment extraction (extract_payer_wallet, extract_signer)
-  x402/            x402 protocol — Solana verification, escrow (verifier, claimer, claim_queue,
-                   claim_processor, PDA), fee payer pool, nonce pool, facilitator
-  router/          Smart routing — 15-dimension scorer, profiles, model registry
-  protocol/        Shared types — ChatRequest, ChatResponse, CostBreakdown (rustyclaw-protocol)
-  cli/             CLI tool (rcr) — wallet, models, chat, health, stats, doctor
-programs/
-  escrow/          Anchor escrow program — deposit, claim, refund instructions, PDA vault
-dashboard/         Next.js 16 + Tailwind + Recharts — Overview, Usage, Models, Wallet, Settings (real API)
-sdks/
-  python/          pip install rustyclawrouter (63 tests)
-  typescript/      npm install @rustyclawrouter/sdk (19 tests)
-  go/              go get github.com/rustyclawrouter/sdk-go (12 tests)
-config/
-  models.toml      Model registry + pricing (26 models, 5 providers, 5% platform fee)
-  default.toml     Gateway configuration
-  services.toml    x402 service marketplace registry
-docs/
-  plans/           Phase plans (8, 9, 12, 14, G, competitive analysis, SDKs)
-  research/        Market research (AI agent payment infrastructure)
-```
-
----
-
-## Design Decisions
-
-| # | Decision | Rationale |
-|---|----------|-----------|
-| D1 | Rust + Axum | Sub-microsecond routing. Memory safety. Solana ecosystem native. |
-| D2 | 15-dimension scorer | Token count, code detection, reasoning markers, etc. <1µs per request. |
-| D3 | x402 V1 direct settlement + escrow | Direct for simple payments, Anchor escrow for trustless settlement. |
-| D4 | 5% platform fee | Transparent, shown in all responses. Sustainable revenue. |
-| D5 | Chain-agnostic PaymentVerifier trait | Solana-first, but trait designed for future EVM support. |
-| D6 | Provider adapters (not passthrough) | Format translation per provider. OpenAI-compatible external API. |
-| D7 | Redis for cache + rate limiting | Hot-path data. Per-wallet + per-IP rate limits. |
-| D8 | PostgreSQL for usage + claim queue | Async writes only. Never on critical path. Durable escrow claims. |
-| D9 | Independent facilitator | Own payment verification. No BlockRun/CDP dependency. |
-| D10 | Fee payer pool (up to 8 wallets) | Round-robin rotation, auto-failover, 60s cooldown on failure. |
-| D11 | Durable nonces | Eliminates blockhash expiry (60s) for long-lived transactions. |
-| D12 | Circuit breaker on claims | 50% failure rate in 5-min window → 60s pause. Prevents cascading failures. |
-
----
-
-## Fly.io Infrastructure
-
-### Deploy Commands
-
-```bash
-# Deploy gateway (from repo root)
-cd crates/gateway && fly deploy -a rustyclawrouter-gateway
-
-# Set secrets
-fly secrets set -a rustyclawrouter-gateway KEY=value
-
-# Check status
-fly status -a rustyclawrouter-gateway
-fly logs -a rustyclawrouter-gateway --no-tail
-
-# Database
-fly postgres connect -a rustyclawrouter-db
-
-# Health check (live)
-curl https://rustyclawrouter-gateway.fly.dev/health
-```
-
----
-
-## Test Commands
-
-```bash
-# Rust (614 workspace tests)
-cargo test                        # All crates
-cargo test -p gateway             # Gateway (484 tests)
-cargo test -p x402                # x402 protocol (99 tests)
-cargo test -p rustyclaw-protocol  # Protocol (18 tests)
-cargo test -p router              # Smart router (13 tests)
-
-# Escrow (standalone — NOT in workspace)
-cargo test --manifest-path programs/escrow/Cargo.toml
-
-# Lint
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-
-# Dashboard
-npm --prefix dashboard test
-
-# SDKs
-cd sdks/python && python -m pytest       # 63 tests
-cd sdks/typescript && npm test           # 19 tests
-cd sdks/go && go test ./...              # 12 tests
-```
+- **Safe (no licensing)**: AP2 discovery endpoints, x402 crypto settlement (wallet-to-wallet), mandate verification as metadata
+- **DO NOT build (triggers MSB + 49 state licenses)**: Card payment processing, fiat ↔ crypto conversion, custodial fund holding
+- **Gray area**: Anchor escrow PDAs (trustless, PDA-controlled) — FinCEN guidance on custodial wallets is evolving. Attorney consultation scheduled 2026-04-06.
+- **Watch**: California DFAL takes effect July 2026.
 
 ---
 
@@ -271,38 +134,9 @@ cd sdks/go && go test ./...              # 12 tests
 
 | File | Purpose |
 |------|---------|
-| `.claude/plan/rustyclawrouter.md` | Master implementation plan (885 lines) |
-| `CLAUDE.md` | AI agent coding guidelines |
-| `HANDOFF.md` | This file — continuation guide |
-| `config/models.toml` | Model registry (pricing, capabilities, routing profiles) |
-| `config/services.toml` | x402 service marketplace config |
-| `docs/research/2026-03-23-ai-agent-payment-infrastructure.md` | Market research |
-| `docs/plans/` | Phase plans (8, 9, 12, 14, G, competitive analysis) |
-
----
-
-## What's Next
-
-**Phase 5: Dashboard + Enterprise** — COMPLETE. Next: deploy dashboard, then Terminal launch.
-
-**Strategic priority:** Ship fast, differentiate on escrow ("only gateway where agents don't overpay"), target Solana-native agent builders.
-
-**Phase 5 — all done:**
-1. ~~Dashboard → real API integration~~ **DONE 2026-03-29**
-2. ~~Redeploy gateway with Dockerfile fix~~ **DONE 2026-03-31**
-3. ~~Set missing provider API keys~~ **DONE 2026-03-31** (Anthropic, xAI, DeepSeek)
-4. ~~Fund fee-payer wallet~~ **DONE 2026-03-31** (0.09 SOL)
-5. ~~Wire Terminal → RCR~~ **DONE 2026-03-31** (removed direct Anthropic key from rclawterm-gateway)
-6. ~~LiteSVM integration tests for escrow~~ **DONE 2026-03-31** (14 tests, 2.5s)
-7. ~~Enterprise features (team billing, audit logs, hourly spend limits)~~ **DONE 2026-04-05**
-
-**Immediate next:**
-1. Deploy dashboard to Vercel (set `NEXT_PUBLIC_GATEWAY_URL` + `GATEWAY_ADMIN_KEY`)
-
-**Infrastructure:**
-8. Load testing
-9. LiteSVM integration tests for escrow program
-
-**Strategic:**
-10. Consider AP2 compatibility and x402 V2 migration
-11. Multi-chain support (Base/EVM) — trait ready, implementation deferred
+| `CLAUDE.md` | How to work in the repo (conventions, architecture, commands) |
+| `HANDOFF.md` | This file — current project state |
+| `CHANGELOG.md` | What changed and when |
+| `.claude/plan/rustyclawrouter.md` | Master implementation plan |
+| `config/models.toml` | Model registry + pricing |
+| `.env.example` | All env vars documented |
