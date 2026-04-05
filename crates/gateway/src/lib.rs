@@ -193,11 +193,11 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .layer(axum::Extension(rate_limiter))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            middleware::x402::extract_payment,
+            middleware::api_key::extract_api_key,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            middleware::api_key::extract_api_key,
+            middleware::x402::extract_payment,
         ))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10 MB
         .layer(TraceLayer::new_for_http())

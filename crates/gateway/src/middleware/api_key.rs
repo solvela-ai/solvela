@@ -304,4 +304,22 @@ supports_vision = false
         let result = RequireOrgAdmin::from_request_parts(&mut parts, &()).await;
         assert!(result.is_ok(), "owner role should be accepted");
     }
+
+    #[tokio::test]
+    async fn test_require_org_admin_admin_role() {
+        let (mut parts, _body) = http::Request::builder()
+            .uri("/test")
+            .body(())
+            .expect("valid request")
+            .into_parts();
+
+        parts.extensions.insert(OrgContext {
+            org_id: Uuid::new_v4(),
+            api_key_id: Uuid::new_v4(),
+            role: "admin".to_string(),
+        });
+
+        let result = RequireOrgAdmin::from_request_parts(&mut parts, &()).await;
+        assert!(result.is_ok(), "admin role should be accepted");
+    }
 }
