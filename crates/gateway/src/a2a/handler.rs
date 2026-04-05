@@ -24,6 +24,7 @@ use crate::AppState;
 
 /// A2A-specific JSON-RPC error codes.
 const ERR_INVALID_PARAMS: i32 = -32602;
+const ERR_INTERNAL: i32 = -32603;
 const ERR_TASK_NOT_FOUND: i32 = -32000;
 const ERR_PAYMENT_FAILED: i32 = -32001;
 const ERR_PROVIDER_ERROR: i32 = -32002;
@@ -170,9 +171,14 @@ async fn handle_new_request(
         created_at: chrono::Utc::now(),
     };
 
-    if let Err(e) = task_store::save_task(state, &record).await {
-        warn!(error = %e, task_id, "failed to persist task record (continuing anyway)");
-    }
+    task_store::save_task(state, &record).await.map_err(|e| {
+        tracing::error!(error = %e, "A2A task store unavailable — cannot issue payment task");
+        JsonRpcErrorData {
+            code: ERR_INTERNAL,
+            message: "Payment flow unavailable: task state store is not configured".to_string(),
+            data: None,
+        }
+    })?;
 
     info!(task_id, model = %resolved_model, "A2A new request → input-required");
 
@@ -387,7 +393,7 @@ async fn handle_payment_submitted(
 
     // Update task state
     if let Err(e) = task_store::update_task_state(state, task_id, TaskState::Completed).await {
-        warn!(error = %e, task_id, "failed to update task state (continuing anyway)");
+        tracing::error!(error = %e, task_id, "failed to update task state after payment settlement");
     }
 
     info!(
@@ -603,8 +609,10 @@ supports_vision = false
     }
 
     #[tokio::test]
-    async fn test_new_request_returns_payment_required() {
-        let state = test_state();
+    async fn test_new_request_fails_without_redis() {
+        // With cache: None, save_task now returns Err — task issuance must be blocked
+        // to prevent clients paying USDC against a task that can't be loaded later.
+        let state = test_state(); // test_state() has cache: None
         let params = MessageSendParams {
             message: Message {
                 role: "user".to_string(),
@@ -621,32 +629,14 @@ supports_vision = false
         };
 
         let result = handle_new_request(&state, &params).await;
-        let task_json = result.expect("should return task"); // safe: known-good test data
-
-        assert_eq!(
-            task_json["status"]["state"], "input-required",
-            "task state should be input-required"
-        );
-
-        // Verify payment metadata is present
-        let meta = &task_json["status"]["message"]["metadata"];
-        assert_eq!(
-            meta[x402_meta::STATUS_KEY],
-            x402_meta::PAYMENT_REQUIRED,
-            "payment status should be payment-required"
-        );
         assert!(
-            meta[x402_meta::REQUIRED_KEY].is_object(),
-            "payment required info should be present"
+            result.is_err(),
+            "should return error when Redis is unavailable"
         );
-
-        // Verify the payment required structure
-        let pr = &meta[x402_meta::REQUIRED_KEY];
-        assert_eq!(pr["x402_version"], 2);
-        assert!(pr["accepts"].is_array(), "accepts should be an array");
-        assert!(
-            pr["cost_breakdown"].is_object(),
-            "cost_breakdown should be present"
+        assert_eq!(
+            result.unwrap_err().code, // safe: just asserted is_err
+            ERR_INTERNAL,
+            "error code should be ERR_INTERNAL when task store is unavailable"
         );
     }
 
@@ -751,8 +741,14 @@ supports_vision = false
         };
 
         let result = handle_message_send(state, &headers, &request).await;
-        let task = result.expect("should return task"); // safe: known-good test data
-        assert_eq!(task["status"]["state"], "input-required");
+        // With cache: None, new requests are rejected — Redis is required to store
+        // the task so clients cannot pay against a task that cannot be loaded.
+        assert!(result.is_err(), "should error when Redis is unavailable");
+        assert_eq!(
+            result.unwrap_err().code, // safe: just asserted is_err
+            ERR_INTERNAL,
+            "should return ERR_INTERNAL when task store is unavailable"
+        );
     }
 
     #[tokio::test]
