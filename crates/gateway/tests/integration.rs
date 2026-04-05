@@ -5011,7 +5011,10 @@ async fn test_a2a_unknown_method_returns_method_not_found() {
 }
 
 #[tokio::test]
-async fn test_a2a_message_send_returns_payment_required() {
+async fn test_a2a_message_send_requires_redis() {
+    // test_app() has cache: None — new A2A requests must be rejected without Redis
+    // because clients cannot pay USDC against a task that cannot be persisted and
+    // loaded back. ERR_INTERNAL (-32603) is returned to signal the store is unavailable.
     let app = test_app();
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -5041,16 +5044,12 @@ async fn test_a2a_message_send_returns_payment_required() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    let task = &json["result"];
-    assert_eq!(task["status"]["state"], "input-required");
-
-    // Verify payment metadata is present
-    let metadata = &task["status"]["message"]["metadata"];
-    assert_eq!(metadata["x402.payment.status"], "payment-required");
-    assert!(
-        metadata["x402.payment.required"].is_object(),
-        "should contain PaymentRequired"
+    // ERR_INTERNAL = -32603: task store unavailable
+    assert_eq!(
+        json["error"]["code"], -32603_i32,
+        "should return ERR_INTERNAL when Redis is unavailable"
     );
+    assert!(json["result"].is_null(), "result should be null on error");
 }
 
 #[tokio::test]

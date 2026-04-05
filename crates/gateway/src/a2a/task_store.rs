@@ -34,11 +34,10 @@ pub fn new_task_id() -> String {
     format!("a2a_{}", Uuid::new_v4().simple())
 }
 
-/// Save a task record to Redis. Returns `Ok(())` on success or if Redis is absent.
+/// Save a task record to Redis. Returns `Err` if Redis is absent or the write fails.
 pub async fn save_task(state: &Arc<AppState>, record: &TaskRecord) -> Result<(), String> {
     let Some(ref cache) = state.cache else {
-        tracing::warn!("A2A task store: no Redis configured, task state will not persist");
-        return Ok(());
+        return Err("A2A task store requires Redis — no Redis configured".to_string());
     };
 
     let key = format!("a2a_task:{}", record.id);
@@ -78,11 +77,14 @@ pub async fn update_task_state(
     task_id: &str,
     new_state: TaskState,
 ) -> Result<(), String> {
-    let Some(mut record) = load_task(state, task_id).await else {
+    let Some(record) = load_task(state, task_id).await else {
         return Err(format!("task not found: {task_id}"));
     };
-    record.state = new_state;
-    save_task(state, &record).await
+    let updated = TaskRecord {
+        state: new_state,
+        ..record
+    };
+    save_task(state, &updated).await
 }
 
 #[cfg(test)]

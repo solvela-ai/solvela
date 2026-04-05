@@ -202,8 +202,11 @@ supports_vision = false
     }
 
     #[tokio::test]
-    async fn test_message_send_stub_returns_task() {
-        let app = test_app();
+    async fn test_message_send_without_redis_returns_error() {
+        // Redis (cache: None) is required to persist task state before issuing a
+        // task ID. Without it we must return an error — clients must not be able
+        // to pay USDC against a task that cannot be loaded later.
+        let app = test_app(); // test_app() has cache: None
         let resp = app
             .oneshot(
                 http::Request::builder()
@@ -235,7 +238,12 @@ supports_vision = false
             .await
             .expect("read body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
-        assert_eq!(json["result"]["status"]["state"], "input-required");
+        // ERR_INTERNAL = -32603: task store unavailable
+        assert_eq!(
+            json["error"]["code"], -32603_i32,
+            "should return ERR_INTERNAL"
+        );
+        assert!(json["result"].is_null(), "result should be null on error");
     }
 
     #[tokio::test]
