@@ -3,6 +3,7 @@
 //! This module exposes the gateway internals for integration testing.
 //! The binary entry point is in `main.rs`.
 
+pub mod a2a;
 pub mod audit;
 pub mod balance_monitor;
 pub mod cache;
