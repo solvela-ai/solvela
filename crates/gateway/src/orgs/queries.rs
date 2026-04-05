@@ -6,22 +6,11 @@ use uuid::Uuid;
 
 use crate::orgs::models::{
     AddMemberRequest, ApiKey, ApiKeyCreated, AssignWalletRequest, CreateApiKeyRequest,
-    CreateOrgRequest, CreateTeamRequest, OrgMember, Organization, Team, TeamWallet,
+    CreateOrgRequest, CreateTeamRequest, OrgMember, OrgRole, Organization, Team, TeamWallet,
 };
 
 /// Length of the stored key prefix: "rcr_k_" (6) + 4 entropy hex chars = 10.
 const KEY_PREFIX_LEN: usize = 10;
-
-/// Valid role values for org members.
-const VALID_ROLES: &[&str] = &["owner", "admin", "member"];
-
-fn validate_role(role: &str) -> Result<(), sqlx::Error> {
-    if VALID_ROLES.contains(&role) {
-        Ok(())
-    } else {
-        Err(sqlx::Error::Protocol(format!("invalid role: {role}")))
-    }
-}
 
 /// Generate a new API key: "rcr_k_" + 32 random hex chars.
 pub fn generate_api_key() -> String {
@@ -76,7 +65,7 @@ pub async fn create_org(
     .bind(member_id)
     .bind(org.id)
     .bind(&owner_wallet)
-    .bind("owner")
+    .bind(OrgRole::Owner)
     .bind(now)
     .bind(now)
     .execute(&mut *tx)
@@ -168,8 +157,7 @@ pub async fn add_member(
 ) -> Result<OrgMember, sqlx::Error> {
     let id = Uuid::new_v4();
     let now = Utc::now();
-    let role = req.role.unwrap_or_else(|| "member".to_string());
-    validate_role(&role)?;
+    let role = req.role.unwrap_or(OrgRole::Member);
 
     sqlx::query_as::<_, OrgMember>(
         r#"
@@ -181,7 +169,7 @@ pub async fn add_member(
     .bind(id)
     .bind(org_id)
     .bind(&req.wallet_address)
-    .bind(&role)
+    .bind(role)
     .bind(now)
     .bind(now)
     .fetch_one(pool)
@@ -256,8 +244,7 @@ pub async fn create_api_key(
 ) -> Result<ApiKeyCreated, sqlx::Error> {
     let id = Uuid::new_v4();
     let now = Utc::now();
-    let role = req.role.unwrap_or_else(|| "member".to_string());
-    validate_role(&role)?;
+    let role = req.role.unwrap_or(OrgRole::Member);
 
     let key = generate_api_key();
     let key_hash = hash_api_key(&key);
@@ -279,7 +266,7 @@ pub async fn create_api_key(
     .bind(&key_prefix)
     .bind(&key_hash)
     .bind(&req.name)
-    .bind(&role)
+    .bind(role)
     .bind(expires_at)
     .bind(now)
     .execute(pool)
@@ -388,22 +375,6 @@ pub async fn revoke_api_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn validate_role_accepts_valid_roles() {
-        assert!(validate_role("owner").is_ok());
-        assert!(validate_role("admin").is_ok());
-        assert!(validate_role("member").is_ok());
-    }
-
-    #[test]
-    fn validate_role_rejects_invalid_roles() {
-        assert!(validate_role("superadmin").is_err());
-        assert!(validate_role("").is_err());
-        assert!(validate_role("Admin").is_err()); // case-sensitive
-        assert!(validate_role("OWNER").is_err());
-        assert!(validate_role("viewer").is_err());
-    }
 
     #[test]
     fn generate_api_key_has_correct_prefix_and_length() {
