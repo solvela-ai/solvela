@@ -195,6 +195,10 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             state.clone(),
             middleware::x402::extract_payment,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::api_key::extract_api_key,
+        ))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10 MB
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn(
@@ -289,7 +293,14 @@ fn build_cors() -> CorsLayer {
 
     CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
