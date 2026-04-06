@@ -3,6 +3,12 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 
+/// Global mutex serializing tests that mutate the HOME environment variable.
+/// All test modules that call `std::env::set_var("HOME", ...)` must hold this
+/// lock for their entire test duration to prevent races in parallel test runs.
+#[cfg(test)]
+pub(crate) static ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Parser)]
 #[command(name = "rcr")]
 #[command(about = "RustyClawRouter CLI — AI agent payments with USDC on Solana")]

@@ -112,3 +112,187 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{header_exists, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Bind a TCP listener to get an OS-assigned port, then drop it.
+    /// The returned URL will be connection-refused immediately (ECONNREFUSED).
+    fn dead_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// Create a temp home with a valid wallet for payment tests.
+    fn setup_wallet() -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::env::set_var("HOME", tmp.path());
+        let dir = tmp.path().join(".rustyclawrouter");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        // Generate a real keypair for the wallet
+        let mut seed = [0u8; 32];
+        seed[0] = 42; // deterministic for tests
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let verifying_key = signing_key.verifying_key();
+        let mut full_key = [0u8; 64];
+        full_key[..32].copy_from_slice(&seed);
+        full_key[32..].copy_from_slice(verifying_key.as_bytes());
+
+        let wallet = serde_json::json!({
+            "private_key": bs58::encode(&full_key).into_string(),
+            "address": bs58::encode(verifying_key.as_bytes()).into_string(),
+            "created_at": "2026-01-01T00:00:00Z"
+        });
+        std::fs::write(
+            dir.join("wallet.json"),
+            serde_json::to_string_pretty(&wallet).expect("json"),
+        )
+        .expect("write wallet");
+        tmp
+    }
+
+    #[tokio::test]
+    async fn test_chat_free_response() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "Hello! Solana is a blockchain."}}]
+            })))
+            .mount(&mock)
+            .await;
+
+        let result = run(&mock.uri(), "auto", "What is Solana?", true).await;
+        assert!(result.is_ok(), "chat should succeed on 200 response");
+    }
+
+    #[tokio::test]
+    async fn test_chat_server_error() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&mock)
+            .await;
+
+        let result = run(&mock.uri(), "auto", "test", true).await;
+        assert!(result.is_ok(), "chat should handle 500 gracefully");
+    }
+
+    #[tokio::test]
+    async fn test_chat_402_payment_flow() {
+        // Hold the async mutex for the full test to prevent HOME from being
+        // clobbered by another test while load_wallet() reads it.
+        let _lock = crate::ENV_MUTEX.lock().await;
+        let _wallet = setup_wallet();
+        let mock = MockServer::start().await;
+
+        let payment_required = serde_json::json!({
+            "x402_version": 2,
+            "resource": {"url": "/v1/chat/completions", "method": "POST"},
+            "accepts": [{
+                "scheme": "exact",
+                "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+                "amount": "1000",
+                "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "pay_to": "TestRecipient11111111111111111111111111111",
+                "max_timeout_seconds": 300
+            }],
+            "cost_breakdown": {
+                "provider_cost": "0.001000",
+                "platform_fee": "0.000050",
+                "fee_percent": 5,
+                "total": "0.001050",
+                "currency": "USDC"
+            },
+            "error": "Payment required"
+        });
+
+        // Mount 402 first (lower priority in wiremock — last mounted wins)
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(402).set_body_json(serde_json::json!({
+                "error": {
+                    "message": serde_json::to_string(&payment_required).expect("serialize PR")
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&mock)
+            .await;
+
+        // Mount paid response last (higher priority — last mounted wins in wiremock 0.6)
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header_exists("PAYMENT-SIGNATURE"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "Paid response!"}}]
+            })))
+            .mount(&mock)
+            .await;
+
+        let result = run(&mock.uri(), "auto", "What is Solana?", true).await;
+        assert!(
+            result.is_ok(),
+            "chat payment flow should succeed with --yes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_402_no_wallet_returns_error() {
+        // Hold the async mutex for the full test to prevent HOME from being
+        // clobbered by another test while load_wallet() reads it.
+        let _lock = crate::ENV_MUTEX.lock().await;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::env::set_var("HOME", tmp.path());
+
+        let mock = MockServer::start().await;
+        let payment_required = serde_json::json!({
+            "x402_version": 2,
+            "resource": {"url": "/v1/chat/completions", "method": "POST"},
+            "accepts": [{
+                "scheme": "exact",
+                "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+                "amount": "1000",
+                "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "pay_to": "TestRecipient11111111111111111111111111111",
+                "max_timeout_seconds": 300
+            }],
+            "cost_breakdown": {
+                "provider_cost": "0.001000",
+                "platform_fee": "0.000050",
+                "fee_percent": 5,
+                "total": "0.001050",
+                "currency": "USDC"
+            },
+            "error": "Payment required"
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(402).set_body_json(serde_json::json!({
+                "error": {
+                    "message": serde_json::to_string(&payment_required).expect("serialize")
+                }
+            })))
+            .mount(&mock)
+            .await;
+
+        let result = run(&mock.uri(), "auto", "test", true).await;
+        assert!(
+            result.is_err(),
+            "chat should fail when wallet is missing for payment"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_connection_error() {
+        let result = run(&dead_url(), "auto", "test", true).await;
+        assert!(result.is_err(), "chat should error on connection failure");
+    }
+}
