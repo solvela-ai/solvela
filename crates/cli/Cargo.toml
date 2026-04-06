@@ -22,3 +22,7 @@ bs58 = { workspace = true }
 chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
 getrandom = { version = "0.2", features = ["std"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"

@@ -36,3 +36,91 @@ pub async fn list(api_url: &str) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Bind a TCP listener to get an OS-assigned port, then drop it.
+    /// The returned URL will be connection-refused immediately (ECONNREFUSED).
+    fn dead_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn test_models_list_ok() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "openai/gpt-4o",
+                        "provider": "openai",
+                        "pricing": {
+                            "input_cost_per_million": 2.50,
+                            "output_cost_per_million": 10.00
+                        }
+                    },
+                    {
+                        "id": "anthropic/claude-sonnet-4-20250514",
+                        "provider": "anthropic",
+                        "pricing": {
+                            "input_cost_per_million": 3.00,
+                            "output_cost_per_million": 15.00
+                        }
+                    }
+                ]
+            })))
+            .mount(&mock)
+            .await;
+
+        let result = list(&mock.uri()).await;
+        assert!(result.is_ok(), "models list should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_models_list_empty() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .mount(&mock)
+            .await;
+
+        let result = list(&mock.uri()).await;
+        assert!(result.is_ok(), "models list should handle empty response");
+    }
+
+    #[tokio::test]
+    async fn test_models_list_no_data_field() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"models": []})),
+            )
+            .mount(&mock)
+            .await;
+
+        let result = list(&mock.uri()).await;
+        assert!(
+            result.is_ok(),
+            "models list should handle missing data field"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_models_list_connection_error() {
+        let result = list(&dead_url()).await;
+        assert!(
+            result.is_err(),
+            "models list should error on connection failure"
+        );
+    }
+}
