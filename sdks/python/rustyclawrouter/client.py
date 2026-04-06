@@ -187,9 +187,15 @@ class LLMClient:
     def _create_payment_header(
         self, payment_info: PaymentRequired, resource_url: str
     ) -> str:
-        """Create a PAYMENT-SIGNATURE header value."""
+        """Create a PAYMENT-SIGNATURE header value.
+
+        Uses real Solana signing when a private key and deps are available.
+        """
         accept = payment_info.accepts[0]
-        return encode_payment_header(accept, resource_url)
+        private_key = self.wallet._private_key if self.wallet.has_key else None
+        return encode_payment_header(
+            accept, resource_url, private_key=private_key
+        )
 
 
 class AsyncLLMClient:
@@ -323,6 +329,12 @@ class AsyncLLMClient:
     def _create_payment_header(
         self, payment_info: PaymentRequired, resource_url: str
     ) -> str:
-        """Create a PAYMENT-SIGNATURE header value."""
+        """Create a PAYMENT-SIGNATURE header value.
+
+        Uses real Solana signing when a private key and deps are available.
+        """
         accept = payment_info.accepts[0]
-        return encode_payment_header(accept, resource_url)
+        private_key = self.wallet._private_key if self.wallet.has_key else None
+        return encode_payment_header(
+            accept, resource_url, private_key=private_key
+        )
