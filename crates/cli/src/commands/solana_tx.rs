@@ -1,16 +1,16 @@
 //! USDC-SPL TransferChecked transaction builder for the CLI.
 //!
-//! Constructs and signs a Solana versioned transaction (legacy message) that
-//! transfers USDC-SPL from the payer's ATA to the recipient's ATA, using the
-//! x402 crate's lightweight Solana types to avoid the heavy `solana-sdk`
-//! dependency chain (openssl-sys, etc.).
+//! Constructs and signs a Solana legacy transaction that transfers USDC-SPL
+//! from the payer's ATA to the recipient's ATA, using the x402 crate's
+//! lightweight Solana types to avoid the heavy `solana-sdk` dependency chain
+//! (openssl-sys, etc.).
 //!
 //! Wire format produced:
 //!   compact-u16(1)              -- signature count
 //!   64 bytes                    -- ed25519 signature
 //!   0x01                        -- header: 1 required signer
 //!   0x00                        -- header: 0 readonly signed
-//!   0x01                        -- header: 1 readonly unsigned (token program)
+//!   0x02                        -- header: 2 readonly unsigned (mint + token program)
 //!   compact-u16(N)              -- account key count
 //!   N × 32 bytes                -- account keys
 //!   32 bytes                    -- recent blockhash
@@ -21,9 +21,9 @@
 //!   compact-u16(D)              -- data length
 //!   D bytes                     -- instruction data (TransferChecked)
 
-use anyhow::{Context, Result, anyhow};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use x402::solana_types::{Pubkey, derive_ata};
+use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use x402::solana_types::{derive_ata, Pubkey};
 
 /// USDC mint on Solana mainnet-beta.
 const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -144,8 +144,8 @@ fn build_message(
 
 /// Build and sign a USDC-SPL TransferChecked transaction.
 ///
-/// Returns the transaction as a base64-encoded bincode-serialised
-/// `VersionedTransaction` (same format that the x402 gateway verifies).
+/// Returns the transaction as a base64-encoded Solana legacy transaction in
+/// native wire format (same format that the x402 gateway verifies).
 ///
 /// # Arguments
 /// * `payer_keypair_b58` — 64-byte Solana keypair in base58 (seed || pubkey)
@@ -212,11 +212,11 @@ pub async fn build_usdc_transfer(
     //   index 3: usdc_mint (readonly)
     //   index 4: token_program (readonly, program)
     let account_keys = vec![
-        payer_pubkey,    // 0: signer + writable (fee payer / authority)
-        payer_ata,       // 1: writable (source token account)
-        recipient_ata,   // 2: writable (destination token account)
-        usdc_mint,       // 3: readonly (mint for TransferChecked)
-        token_program,   // 4: readonly (SPL Token program)
+        payer_pubkey,  // 0: signer + writable (fee payer / authority)
+        payer_ata,     // 1: writable (source token account)
+        recipient_ata, // 2: writable (destination token account)
+        usdc_mint,     // 3: readonly (mint for TransferChecked)
+        token_program, // 4: readonly (SPL Token program)
     ];
 
     // Message header: [num_required_signatures, num_readonly_signed, num_readonly_unsigned]

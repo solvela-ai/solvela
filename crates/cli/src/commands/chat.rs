@@ -21,6 +21,12 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
         let resp_body: serde_json::Value = resp.json().await?;
         if let Some(content) = resp_body["choices"][0]["message"]["content"].as_str() {
             println!("{}", content);
+        } else {
+            eprintln!("Warning: response contained no text content");
+            eprintln!(
+                "Raw response: {}",
+                serde_json::to_string_pretty(&resp_body).unwrap_or_default()
+            );
         }
         return Ok(());
     }
@@ -28,8 +34,7 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
     if resp.status().as_u16() != 402 {
         let status = resp.status();
         let text = resp.text().await?;
-        println!("Error {}: {}", status, text);
-        return Ok(());
+        return Err(anyhow::anyhow!("Gateway error {}: {}", status, text));
     }
 
     // --- 402 Payment Required ---
@@ -89,7 +94,10 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
     let signed_tx = crate::commands::solana_tx::build_usdc_transfer(
         private_key_b58,
         &accepted.pay_to,
-        accepted.amount.parse::<u64>().context("invalid payment amount from gateway")?,
+        accepted
+            .amount
+            .parse::<u64>()
+            .context("invalid payment amount from gateway")?,
         &rpc_url,
         &client,
     )
@@ -125,11 +133,21 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
         let resp_body: serde_json::Value = retry_resp.json().await?;
         if let Some(content) = resp_body["choices"][0]["message"]["content"].as_str() {
             println!("{}", content);
+        } else {
+            eprintln!("Warning: response contained no text content");
+            eprintln!(
+                "Raw response: {}",
+                serde_json::to_string_pretty(&resp_body).unwrap_or_default()
+            );
         }
     } else {
         let status = retry_resp.status();
         let text = retry_resp.text().await?;
-        println!("Error {}: {}", status, text);
+        return Err(anyhow::anyhow!(
+            "Payment submitted but gateway returned error {}: {}",
+            status,
+            text
+        ));
     }
 
     Ok(())
@@ -204,7 +222,11 @@ mod tests {
             .await;
 
         let result = run(&mock.uri(), "auto", "test", true).await;
-        assert!(result.is_ok(), "chat should handle 500 gracefully");
+        assert!(result.is_err(), "chat should return error on 500 response");
+        assert!(
+            result.unwrap_err().to_string().contains("Gateway error"),
+            "error message should mention gateway error"
+        );
     }
 
     #[tokio::test]
