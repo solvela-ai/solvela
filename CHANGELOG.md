@@ -2,6 +2,16 @@
 
 All notable changes to RustyClawRouter, in reverse chronological order.
 
+## 2026-04-07 — First Real Payment + Production Fixes
+
+- **First real USDC payment processed**: Telsi Telegram app sent real USDC payment through RCR on Solana mainnet, received LLM response. End-to-end payment flow verified with actual money on mainnet.
+- **Critical Fly.io config fix (PR #5)**: Gateway was calling `AppConfig::default()` and ignoring all Fly.io env vars for Solana configuration. Root cause: missing `config/default.toml` load in startup path. Result: `recipient_wallet` was always empty despite env vars being set. Fixed by loading `config/default.toml` first, then applying env var overrides. Deployed to production.
+- **CLI resource URL fix (PR #6)**: CLI was sending full URL in payment resource field. Gateway validates resource as path only (per x402 spec). One-line fix: send path instead of full URL.
+- **PR #4 follow-up fixes**: Python SDK error hardening (ImportError fails with key message, session_spent set after success only, specific exception catches). CLI hardening (non-zero exit on errors, panic-safe env cleanup, RPC error handling, empty response warnings).
+- **Transaction format compatibility verified**: Architect confirmed gateway accepts both legacy transactions (CLI) and v0 versioned transactions (Python/TypeScript SDKs) via `ParsedMessage::from_bytes()` version prefix detection.
+- **Known issue**: Second test request hit 429 rate limit from LLM provider. Payment was processed but no response returned. This is exact use case for escrow (pay only for what you receive). Escrow deployment still pending attorney consultation scheduled 2026-04-07.
+- **6 PRs merged total** (#1-6 all merged). Status: Gateway deployed and processing real payments on mainnet.
+
 ## 2026-04-06 — Test Coverage, Real Signing, Product Docs, Error Hardening
 
 - **CLI test suite**: 0 → 30 tests across all 8 commands (wallet, chat, models, health, stats, doctor, nonce, services). wiremock for HTTP mocking, tempfile for filesystem isolation, test isolation, error cases.
