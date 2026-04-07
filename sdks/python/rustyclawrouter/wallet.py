@@ -35,6 +35,11 @@ class Wallet:
         return self._private_key is not None
 
     @property
+    def private_key(self) -> Optional[str]:
+        """The base58-encoded private key, or None if not configured."""
+        return self._private_key
+
+    @property
     def address(self) -> Optional[str]:
         """Derive the public address from the private key.
 
@@ -55,29 +60,21 @@ class Wallet:
             return None
 
     def sign_transaction(self, transaction_bytes: bytes) -> bytes:
-        """Sign a serialized Solana transaction with the wallet's private key.
+        """Sign a serialized Solana transaction.
 
-        This is a stub — full implementation requires constructing proper
-        Solana versioned transactions with ``solders``.
+        .. deprecated::
+            Use ``build_solana_transfer_checked()`` from ``x402`` module instead.
 
         Args:
             transaction_bytes: The raw transaction bytes to sign.
 
-        Returns:
-            The signed transaction bytes.
-
         Raises:
             ValueError: If no private key is configured.
-            ImportError: If solders is not installed.
+            NotImplementedError: Always — direct transaction signing is not supported.
         """
         if not self._private_key:
             raise ValueError("No private key configured")
-        try:
-            from solders.keypair import Keypair  # type: ignore[import-untyped]  # noqa: F401
-
-            # Stub — real signing requires constructing proper Solana tx
-            return transaction_bytes
-        except ImportError:
-            raise ImportError(
-                "Install solana extras: pip install rustyclawrouter[solana]"
-            )
+        raise NotImplementedError(
+            "Direct transaction signing is not supported. "
+            "Use rustyclawrouter.x402.build_solana_transfer_checked() instead."
+        )

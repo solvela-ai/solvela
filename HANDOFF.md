@@ -1,7 +1,7 @@
 # HANDOFF.md — RustyClawRouter Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-05 (from actual repo inspection, not docs)
+> **Last verified:** 2026-04-06 (from actual repo inspection, not docs)
 
 ---
 
@@ -58,20 +58,21 @@ Next.js 16 + Tailwind + Recharts. 5 pages: Overview, Usage, Models, Wallet, Sett
 
 ## Test Counts (run `cargo test` to verify — these go stale)
 
-Last verified 2026-04-05:
+Last verified 2026-04-06:
 
 ```
-gateway unit:        368
+gateway unit:        401
 gateway integration: 122
 router:               13
 protocol:             18
 x402:                 99
-cli:                   0  (no tests written yet)
+cli:                  30  (fully tested, 8 commands)
 ───────────────────────
-workspace total:     620
+workspace total:     683
 
 escrow (standalone):  21
 dashboard (vitest):   82
+python sdk:           63
 ```
 
 ---
@@ -96,8 +97,12 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 ### Immediate
 
-- **CLI tests**: `rcr-cli` crate has 0 tests. Commands exist (wallet, chat, models, health, stats, doctor) but no test coverage.
-- **Redeploy gateway**: The enterprise features + A2A adapter haven't been deployed to Fly.io yet. Current production is pre-enterprise.
+- **PR #4 review + merge**: Real signing (Python + CLI), product docs, error hardening. Open, needs review + merge.
+- **Escrow program deployment**: Program verified (not deployed to any network). Upgrade authority decision pending attorney consultation (scheduled 2026-04-06).
+- **End-to-end devnet payment test**: Integration test with real Solana signing not yet written.
+- **Docs site setup**: User wants design input before building docs site.
+- **Go SDK signing**: Still using stub. TypeScript SDK has real signing; Python + CLI migrated in PR #4.
+- **MCP server signing**: Stub signing intentional (agent-only protocol).
 
 ### Deferred
 
@@ -107,8 +112,8 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 - **Per-user fairness queuing**: Not started.
 - **Secret rotation plan**: No automated rotation.
 - **API reference docs**: Incomplete.
-- **Rust 2021 → 2024 edition**: Planned but not blocking.
-- **SDK publishing**: SDKs exist but npm/PyPI/crates.io publishing status unclear.
+- **Rust 2021 → 2024 edition**: Planned but not blocking (currently 2021).
+- **SDK publishing**: SDKs exist (Python 63 tests, TypeScript, Go, MCP). PyPI/npm/crates.io publishing status unclear.
 
 ### Ecosystem (in priority order)
 
