@@ -1,5 +1,5 @@
 /**
- * Basic tests for @rustyclaw/clawrouter
+ * Basic tests for @rustyclaw/rcr
  *
  * Run with:
  *   node --import tsx --test tests/plugin.test.ts
@@ -159,7 +159,7 @@ describe('ConfigError', () => {
   });
 });
 
-describe('ClawRouter — non-streaming', () => {
+describe('RcrClient — non-streaming', () => {
   it('returns a chat response on 200', async () => {
     mock.setMode('ok');
     const router = createRouter({
@@ -222,7 +222,7 @@ describe('OpenClaw plugin interface', () => {
       walletKey: 'stub-key',
     });
 
-    assert.equal(plugin.name, '@rustyclaw/clawrouter');
+    assert.equal(plugin.name, '@rustyclaw/rcr');
 
     const resp = await plugin.intercept({
       messages: [{ role: 'user', content: 'Test' }],

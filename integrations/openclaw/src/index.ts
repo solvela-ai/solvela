@@ -1,11 +1,11 @@
 /**
- * @rustyclaw/clawrouter — OpenClaw plugin
+ * @rustyclaw/rcr — OpenClaw plugin
  *
- * Drop-in replacement for @blockrun/clawrouter. Routes OpenClaw LLM requests
+ * Routes OpenClaw LLM requests
  * through RustyClawRouter with Solana-native x402 USDC micropayments.
  *
  * Installation (on tenant VPS):
- *   openclaw plugins install @rustyclaw/clawrouter
+ *   openclaw plugins install @rustyclaw/rcr
  *
  * Required env vars (already present on all Telsi tenant VPSes):
  *   LLM_ROUTER_API_URL     — RustyClawRouter gateway base URL
@@ -16,14 +16,14 @@
  *                            (required when @solana/web3.js is installed)
  *
  * Usage as a standalone client:
- *   import { createRouter } from '@rustyclaw/clawrouter';
+ *   import { createRouter } from '@rustyclaw/rcr';
  *
  *   const router = createRouter();
  *   const response = await router.chat([{ role: 'user', content: 'Hello!' }]);
  *   console.log(response.choices[0].message.content);
  */
 
-import { loadConfig, type ClawRouterConfig } from './config.js';
+import { loadConfig, type RcrConfig } from './config.js';
 import {
   routeRequest,
   routeStreamingRequest,
@@ -32,7 +32,7 @@ import {
   type ChatResponse,
 } from './router.js';
 
-export type { ClawRouterConfig } from './config.js';
+export type { RcrConfig } from './config.js';
 export { ConfigError } from './config.js';
 export type { ChatMessage, ChatRequest, ChatResponse } from './router.js';
 export { PaymentError, RouterError } from './router.js';
@@ -65,15 +65,15 @@ export interface OpenClawPlugin {
 }
 
 /**
- * Create the ClawRouter OpenClaw plugin.
+ * Create the RcrClient OpenClaw plugin.
  *
  * @param overrides - Optional config overrides (useful for testing).
  */
-export function createPlugin(overrides: Partial<ClawRouterConfig> = {}): OpenClawPlugin {
+export function createPlugin(overrides: Partial<RcrConfig> = {}): OpenClawPlugin {
   const config = loadConfig(overrides);
 
   return {
-    name: '@rustyclaw/clawrouter',
+    name: '@rustyclaw/rcr',
     version: '0.1.0',
     description: 'RustyClawRouter — Solana-native LLM routing with x402 USDC payments',
 
@@ -93,10 +93,10 @@ export function createPlugin(overrides: Partial<ClawRouterConfig> = {}): OpenCla
  * High-level router client with a clean async API.
  * Useful when importing the plugin as a library rather than via OpenClaw.
  */
-export class ClawRouter {
-  private readonly config: ClawRouterConfig;
+export class RcrClient {
+  private readonly config: RcrConfig;
 
-  constructor(overrides: Partial<ClawRouterConfig> = {}) {
+  constructor(overrides: Partial<RcrConfig> = {}) {
     this.config = loadConfig(overrides);
   }
 
@@ -134,17 +134,17 @@ export class ClawRouter {
   }
 
   /** The resolved configuration (gateway URL, default model). */
-  getConfig(): Readonly<ClawRouterConfig> {
+  getConfig(): Readonly<RcrConfig> {
     return this.config;
   }
 }
 
 /**
- * Create a ClawRouter client using environment variables.
- * Shorthand for `new ClawRouter()`.
+ * Create an RCR client using environment variables.
+ * Shorthand for `new RcrClient()`.
  */
-export function createRouter(overrides: Partial<ClawRouterConfig> = {}): ClawRouter {
-  return new ClawRouter(overrides);
+export function createRouter(overrides: Partial<RcrConfig> = {}): RcrClient {
+  return new RcrClient(overrides);
 }
 
 // ── Default export (OpenClaw plugin entry point) ──────────────────────────────

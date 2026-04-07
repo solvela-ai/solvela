@@ -240,7 +240,7 @@ async function routeStreamingRequest(request, config) {
 function createPlugin(overrides = {}) {
   const config = loadConfig(overrides);
   return {
-    name: "@rustyclaw/clawrouter",
+    name: "@rustyclaw/rcr",
     version: "0.1.0",
     description: "RustyClawRouter \u2014 Solana-native LLM routing with x402 USDC payments",
     async intercept(request) {
@@ -251,7 +251,7 @@ function createPlugin(overrides = {}) {
     }
   };
 }
-var ClawRouter = class {
+var RcrClient = class {
   config;
   constructor(overrides = {}) {
     this.config = loadConfig(overrides);
@@ -285,13 +285,13 @@ var ClawRouter = class {
   }
 };
 function createRouter(overrides = {}) {
-  return new ClawRouter(overrides);
+  return new RcrClient(overrides);
 }
 var index_default = createPlugin;
 export {
-  ClawRouter,
   ConfigError,
   PaymentError,
+  RcrClient,
   RouterError,
   createPlugin,
   createRouter,

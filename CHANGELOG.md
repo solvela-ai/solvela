@@ -2,6 +2,18 @@
 
 All notable changes to RustyClawRouter, in reverse chronological order.
 
+## 2026-04-06 — Test Coverage, Real Signing, Product Docs, Error Hardening
+
+- **CLI test suite**: 0 → 30 tests across all 8 commands (wallet, chat, models, health, stats, doctor, nonce, services). wiremock for HTTP mocking, tempfile for filesystem isolation, test isolation, error cases.
+- **Real Solana signing**: Replaced STUB_BASE64_TX in Python SDK (solders + spl-token for signing) and CLI (x402 crate types, no new deps). TypeScript SDK already had signing. MCP server kept stub intentional.
+- **Product documentation**: Added to `docs/product/` — regulatory-position.md (attorney-ready), how-it-works.md, use-cases.md, faq.md.
+- **Error hardening**: Python SDK ImportError hard-fails with key, session_spent after success only, specific exception catches. CLI: non-zero exit on errors, empty response warnings.
+- **PR review + fixes**: Comprehensive 5-agent review of enterprise + A2A features (2026-04-05 PR #1). All 5 critical + 8 important + 10 suggestions fixed: privilege escalation guard, fail-closed budgets, API key debug redaction, audit actor fields, type safety, 26 validation tests added.
+- **Doc restructure**: Split into CLAUDE.md (how to work), HANDOFF.md (current state), CHANGELOG.md (history). Removed hardcoded test counts from CLAUDE.md.
+- **Gateway deployed** to Fly.io with all enterprise + A2A features live (rustyclawrouter-gateway.fly.dev).
+- **Escrow program status** verified: NOT deployed to any network. Program ID is local testing only. Upgrade authority decision pending attorney consultation.
+- **Test counts**: Gateway 523 (401 unit + 122 integration), CLI 30, Python SDK 63, total workspace 683 + escrow 21 + dashboard 82.
+
 ## 2026-04-05 — A2A Protocol Adapter + Enterprise Polish
 
 - **A2A protocol adapter**: `GET /.well-known/agent.json` (AgentCard discovery), `POST /a2a` (JSON-RPC 2.0 dispatcher), `message/send` handler with full x402 payment flow, Redis-backed task state store. 7 commits, 38 new tests.
