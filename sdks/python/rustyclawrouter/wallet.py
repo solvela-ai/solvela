@@ -35,6 +35,11 @@ class Wallet:
         return self._private_key is not None
 
     @property
+    def private_key(self) -> Optional[str]:
+        """The base58-encoded private key, or None if not configured."""
+        return self._private_key
+
+    @property
     def address(self) -> Optional[str]:
         """Derive the public address from the private key.
 

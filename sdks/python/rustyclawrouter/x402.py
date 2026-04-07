@@ -198,6 +198,11 @@ def encode_payment_header(
                 "Install with: pip install rustyclawrouter[solana]"
             )
         # SigningError propagates — caller must handle
+    else:
+        logger.warning(
+            "No private key provided — using stub transaction. "
+            "Payments will be rejected by the gateway."
+        )
 
     payload = build_payment_payload(
         accept, resource_url, transaction_b64=transaction_b64, resource_method=resource_method
