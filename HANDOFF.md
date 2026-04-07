@@ -1,7 +1,7 @@
 # HANDOFF.md — RustyClawRouter Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-06 (from actual repo inspection, not docs)
+> **Last verified:** 2026-04-07 (from actual repo inspection, not docs)
 
 ---
 
@@ -97,11 +97,10 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 ### Immediate
 
-- **PR #4 review + merge**: Real signing (Python + CLI), product docs, error hardening. Open, needs review + merge.
-- **Escrow program deployment**: Program verified (not deployed to any network). Upgrade authority decision pending attorney consultation (scheduled 2026-04-06).
+- **Escrow program deployment**: Program verified (not deployed to any network). Upgrade authority decision pending attorney consultation (scheduled 2026-04-07).
 - **End-to-end devnet payment test**: Integration test with real Solana signing not yet written.
 - **Docs site setup**: User wants design input before building docs site.
-- **Go SDK signing**: Still using stub. TypeScript SDK has real signing; Python + CLI migrated in PR #4.
+- **Go SDK signing**: Still using stub. TypeScript SDK has real signing; Python + CLI have real signing (merged).
 - **MCP server signing**: Stub signing intentional (agent-only protocol).
 
 ### Deferred
