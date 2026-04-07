@@ -109,7 +109,7 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
     let payment_payload = PaymentPayload {
         x402_version: x402::types::X402_VERSION,
         resource: Resource {
-            url: endpoint_url.clone(),
+            url: "/v1/chat/completions".to_string(),
             method: "POST".to_string(),
         },
         accepted,
