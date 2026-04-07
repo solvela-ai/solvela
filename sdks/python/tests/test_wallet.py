@@ -73,14 +73,7 @@ class TestWalletSignTransaction:
             with pytest.raises(ValueError, match="No private key configured"):
                 wallet.sign_transaction(b"fake_tx")
 
-    def test_sign_with_key_no_solders(self):
+    def test_sign_with_key_raises_not_implemented(self):
         wallet = Wallet(private_key="SomeBase58Key")
-        # If solders is not installed, should raise ImportError
-        # If solders IS installed, the stub returns the input unchanged
-        try:
-            result = wallet.sign_transaction(b"fake_tx")
-            # solders is installed — stub returns input
-            assert result == b"fake_tx"
-        except ImportError:
-            # solders not installed — expected
-            pass
+        with pytest.raises(NotImplementedError, match="build_solana_transfer_checked"):
+            wallet.sign_transaction(b"fake_tx")

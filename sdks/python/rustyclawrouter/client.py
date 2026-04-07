@@ -1,11 +1,14 @@
 """RustyClawRouter LLM client with transparent x402 payment handling."""
 
 import json
+import logging
 from typing import List, Optional
 
 import httpx
 
 from .config import DEFAULT_API_URL
+
+logger = logging.getLogger(__name__)
 from .types import (
     ChatMessage,
     ChatResponse,
@@ -90,6 +93,7 @@ class LLMClient:
         # First attempt — may get 402
         resp = self._client.post(url, json=request_body)
 
+        cost = 0.0
         if resp.status_code == 402:
             payment_info = self._parse_402(resp)
             if payment_info is None:
@@ -113,9 +117,9 @@ class LLMClient:
                 json=request_body,
                 headers={"payment-signature": payment_header},
             )
-            self._session_spent += cost
 
         resp.raise_for_status()
+        self._session_spent += cost  # Only count if request succeeded
         return ChatResponse.model_validate(resp.json())
 
     def smart_chat(self, prompt: str, profile: str = "auto") -> ChatResponse:
@@ -181,7 +185,8 @@ class LLMClient:
             error_msg = body.get("error", {}).get("message", "")
             payment_data = json.loads(error_msg)
             return PaymentRequired.model_validate(payment_data)
-        except (json.JSONDecodeError, Exception):
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning("Could not parse 402 response: %s", e)
             return None
 
     def _create_payment_header(
@@ -259,6 +264,7 @@ class AsyncLLMClient:
         url = f"{self.api_url}/v1/chat/completions"
         resp = await self._client.post(url, json=request_body)
 
+        cost = 0.0
         if resp.status_code == 402:
             payment_info = self._parse_402(resp)
             if payment_info is None:
@@ -280,9 +286,9 @@ class AsyncLLMClient:
                 json=request_body,
                 headers={"payment-signature": payment_header},
             )
-            self._session_spent += cost
 
         resp.raise_for_status()
+        self._session_spent += cost  # Only count if request succeeded
         return ChatResponse.model_validate(resp.json())
 
     async def list_models(self) -> dict:
@@ -323,7 +329,8 @@ class AsyncLLMClient:
             error_msg = body.get("error", {}).get("message", "")
             payment_data = json.loads(error_msg)
             return PaymentRequired.model_validate(payment_data)
-        except (json.JSONDecodeError, Exception):
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning("Could not parse 402 response: %s", e)
             return None
 
     def _create_payment_header(
