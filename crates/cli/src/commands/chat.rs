@@ -25,7 +25,8 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
             eprintln!("Warning: response contained no text content");
             eprintln!(
                 "Raw response: {}",
-                serde_json::to_string_pretty(&resp_body).unwrap_or_default()
+                serde_json::to_string_pretty(&resp_body)
+                    .unwrap_or_else(|e| format!("<serialization failed: {e}>"))
             );
         }
         return Ok(());
@@ -137,7 +138,8 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
             eprintln!("Warning: response contained no text content");
             eprintln!(
                 "Raw response: {}",
-                serde_json::to_string_pretty(&resp_body).unwrap_or_default()
+                serde_json::to_string_pretty(&resp_body)
+                    .unwrap_or_else(|e| format!("<serialization failed: {e}>"))
             );
         }
     } else {
@@ -158,6 +160,14 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// RAII guard that removes an env var on drop (panic-safe cleanup).
+    struct EnvGuard(&'static str);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
 
     /// Bind a TCP listener to get an OS-assigned port, then drop it.
     /// The returned URL will be connection-refused immediately (ECONNREFUSED).
@@ -302,11 +312,9 @@ mod tests {
 
         // Point SOLANA_RPC_URL at the mock server root (same server, path "/").
         std::env::set_var("SOLANA_RPC_URL", &mock.uri());
+        let _env_guard = EnvGuard("SOLANA_RPC_URL");
 
         let result = run(&mock.uri(), "auto", "What is Solana?", true).await;
-
-        // Clean up env var regardless of test outcome.
-        std::env::remove_var("SOLANA_RPC_URL");
 
         assert!(
             result.is_ok(),

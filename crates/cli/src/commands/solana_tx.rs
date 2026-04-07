@@ -49,10 +49,23 @@ async fn fetch_blockhash(rpc_url: &str, client: &reqwest::Client) -> Result<[u8;
         .await
         .context("failed to connect to Solana RPC")?;
 
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("Solana RPC returned HTTP {}: {}", status, text));
+    }
+
     let json: serde_json::Value = resp
         .json()
         .await
         .context("failed to parse Solana RPC response")?;
+
+    if let Some(err) = json.get("error") {
+        return Err(anyhow!(
+            "Solana RPC error: {}",
+            serde_json::to_string(err).unwrap_or_default()
+        ));
+    }
 
     let blockhash_b58 = json["result"]["value"]["blockhash"]
         .as_str()
@@ -182,6 +195,14 @@ pub async fn build_usdc_transfer(
 
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
     let verifying_key = signing_key.verifying_key();
+
+    // Validate that the derived pubkey matches bytes 32-63 of the keypair.
+    let expected_pubkey = &key_bytes[32..];
+    if verifying_key.as_bytes() != expected_pubkey {
+        return Err(anyhow!(
+            "keypair is corrupt: derived pubkey does not match stored pubkey"
+        ));
+    }
 
     let payer_pubkey = Pubkey(verifying_key.to_bytes());
 
@@ -326,6 +347,36 @@ mod tests {
         assert!(
             err.to_string().contains("64 bytes"),
             "expected key length error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_corrupt_keypair_rejected() {
+        // Build a 64-byte array where bytes 32-63 don't match the derived pubkey.
+        let seed = [42u8; 32];
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let verifying_key = signing_key.verifying_key();
+        let mut full = [0u8; 64];
+        full[..32].copy_from_slice(&seed);
+        full[32..].copy_from_slice(verifying_key.as_bytes());
+        // Corrupt the stored pubkey (flip one byte).
+        full[32] ^= 0xFF;
+        let corrupt_keypair_b58 = bs58::encode(&full).into_string();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let client = reqwest::Client::new();
+        let err = rt
+            .block_on(build_usdc_transfer(
+                &corrupt_keypair_b58,
+                RECIPIENT,
+                1_000_000,
+                "http://localhost:8899",
+                &client,
+            ))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("corrupt"),
+            "expected corrupt keypair error, got: {err}"
         );
     }
 
