@@ -62,3 +62,4 @@ dashboard/out/
 .claude/skills/systems-programming-rust-project
 .vercel
 .env*.local
+sdks/python/.omc/
