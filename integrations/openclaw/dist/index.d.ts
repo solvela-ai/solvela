@@ -1,11 +1,11 @@
 /**
- * Configuration for the @rustyclaw/clawrouter OpenClaw plugin.
+ * Configuration for the @rustyclaw/rcr OpenClaw plugin.
  *
  * Reads from the same env vars already present on all tenant VPSes:
  *   LLM_ROUTER_API_URL     — RustyClawRouter gateway base URL
  *   LLM_ROUTER_WALLET_KEY  — Base58 Solana private key for x402 payments
  */
-interface ClawRouterConfig {
+interface RcrConfig {
     /** RustyClawRouter gateway base URL (no trailing slash). */
     gatewayUrl: string;
     /** Base58-encoded Solana private key for signing x402 payments. */
@@ -21,7 +21,7 @@ declare class ConfigError extends Error {
 }
 
 /**
- * Core routing logic for @rustyclaw/clawrouter.
+ * Core routing logic for @rustyclaw/rcr.
  *
  * Forwards OpenClaw chat requests to RustyClawRouter, handling the full
  * x402 payment flow: initial request → 402 response → sign payment → retry.
@@ -70,13 +70,13 @@ declare class RouterError extends Error {
 }
 
 /**
- * @rustyclaw/clawrouter — OpenClaw plugin
+ * @rustyclaw/rcr — OpenClaw plugin
  *
- * Drop-in replacement for @blockrun/clawrouter. Routes OpenClaw LLM requests
+ * Routes OpenClaw LLM requests
  * through RustyClawRouter with Solana-native x402 USDC micropayments.
  *
  * Installation (on tenant VPS):
- *   openclaw plugins install @rustyclaw/clawrouter
+ *   openclaw plugins install @rustyclaw/rcr
  *
  * Required env vars (already present on all Telsi tenant VPSes):
  *   LLM_ROUTER_API_URL     — RustyClawRouter gateway base URL
@@ -87,7 +87,7 @@ declare class RouterError extends Error {
  *                            (required when @solana/web3.js is installed)
  *
  * Usage as a standalone client:
- *   import { createRouter } from '@rustyclaw/clawrouter';
+ *   import { createRouter } from '@rustyclaw/rcr';
  *
  *   const router = createRouter();
  *   const response = await router.chat([{ role: 'user', content: 'Hello!' }]);
@@ -119,18 +119,18 @@ interface OpenClawPlugin {
     interceptStream: (request: ChatRequest) => Promise<Response | null>;
 }
 /**
- * Create the ClawRouter OpenClaw plugin.
+ * Create the RcrClient OpenClaw plugin.
  *
  * @param overrides - Optional config overrides (useful for testing).
  */
-declare function createPlugin(overrides?: Partial<ClawRouterConfig>): OpenClawPlugin;
+declare function createPlugin(overrides?: Partial<RcrConfig>): OpenClawPlugin;
 /**
  * High-level router client with a clean async API.
  * Useful when importing the plugin as a library rather than via OpenClaw.
  */
-declare class ClawRouter {
+declare class RcrClient {
     private readonly config;
-    constructor(overrides?: Partial<ClawRouterConfig>);
+    constructor(overrides?: Partial<RcrConfig>);
     /**
      * Send a non-streaming chat completion through RustyClawRouter.
      *
@@ -153,12 +153,12 @@ declare class ClawRouter {
         top_p?: number;
     }): Promise<Response>;
     /** The resolved configuration (gateway URL, default model). */
-    getConfig(): Readonly<ClawRouterConfig>;
+    getConfig(): Readonly<RcrConfig>;
 }
 /**
- * Create a ClawRouter client using environment variables.
- * Shorthand for `new ClawRouter()`.
+ * Create an RCR client using environment variables.
+ * Shorthand for `new RcrClient()`.
  */
-declare function createRouter(overrides?: Partial<ClawRouterConfig>): ClawRouter;
+declare function createRouter(overrides?: Partial<RcrConfig>): RcrClient;
 
-export { type ChatMessage, type ChatRequest, type ChatResponse, ClawRouter, type ClawRouterConfig, ConfigError, type OpenClawPlugin, PaymentError, RouterError, createPlugin, createRouter, createPlugin as default };
+export { type ChatMessage, type ChatRequest, type ChatResponse, ConfigError, type OpenClawPlugin, PaymentError, RcrClient, type RcrConfig, RouterError, createPlugin, createRouter, createPlugin as default };

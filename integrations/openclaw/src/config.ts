@@ -1,11 +1,11 @@
 /**
- * Configuration for the @rustyclaw/clawrouter OpenClaw plugin.
+ * Configuration for the @rustyclaw/rcr OpenClaw plugin.
  *
  * Reads from the same env vars already present on all tenant VPSes:
  *   LLM_ROUTER_API_URL     — RustyClawRouter gateway base URL
  *   LLM_ROUTER_WALLET_KEY  — Base58 Solana private key for x402 payments
  */
-export interface ClawRouterConfig {
+export interface RcrConfig {
   /** RustyClawRouter gateway base URL (no trailing slash). */
   gatewayUrl: string;
   /** Base58-encoded Solana private key for signing x402 payments. */
@@ -28,7 +28,7 @@ export class ConfigError extends Error {
  * Loads and validates plugin configuration from environment variables.
  * Throws ConfigError if required vars are missing.
  */
-export function loadConfig(overrides: Partial<ClawRouterConfig> = {}): ClawRouterConfig {
+export function loadConfig(overrides: Partial<RcrConfig> = {}): RcrConfig {
   const gatewayUrl = (
     overrides.gatewayUrl ||
     process.env.LLM_ROUTER_API_URL ||
