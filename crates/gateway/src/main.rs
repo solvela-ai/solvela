@@ -34,8 +34,50 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Load configuration
-    let app_config = config::AppConfig::default();
+    // Load configuration: TOML file as base, then env var overrides
+    let mut app_config = match std::fs::read_to_string("config/default.toml") {
+        Ok(toml_str) => toml::from_str::<config::AppConfig>(&toml_str).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to parse config/default.toml, using defaults");
+            config::AppConfig::default()
+        }),
+        Err(_) => config::AppConfig::default(),
+    };
+
+    // Override Solana config from environment variables.
+    // Supports both double-underscore (Fly.io style: RCR_SOLANA__RPC_URL) and
+    // single-underscore (RCR_SOLANA_RPC_URL) conventions.
+    if let Ok(val) = std::env::var("RCR_SOLANA__RPC_URL")
+        .or_else(|_| std::env::var("RCR_SOLANA_RPC_URL"))
+    {
+        app_config.solana.rpc_url = val;
+    }
+    if let Ok(val) = std::env::var("RCR_SOLANA__RECIPIENT_WALLET")
+        .or_else(|_| std::env::var("RCR_SOLANA_RECIPIENT_WALLET"))
+    {
+        app_config.solana.recipient_wallet = val;
+    }
+    if let Ok(val) = std::env::var("RCR_SOLANA__USDC_MINT") {
+        app_config.solana.usdc_mint = val;
+    }
+    if let Ok(val) = std::env::var("RCR_SOLANA__ESCROW_PROGRAM_ID")
+        .or_else(|_| std::env::var("RCR_SOLANA_ESCROW_PROGRAM_ID"))
+    {
+        app_config.solana.escrow_program_id = Some(val);
+    }
+    if let Ok(val) = std::env::var("RCR_SOLANA__FEE_PAYER_KEY")
+        .or_else(|_| std::env::var("RCR_SOLANA_FEE_PAYER_KEY"))
+    {
+        app_config.solana.fee_payer_key = Some(val);
+    }
+    // Server config overrides
+    if let Ok(val) = std::env::var("RCR_HOST") {
+        app_config.server.host = val;
+    }
+    if let Ok(val) = std::env::var("RCR_PORT") {
+        if let Ok(port) = val.parse::<u16>() {
+            app_config.server.port = port;
+        }
+    }
 
     // Load model registry from config file
     let models_toml = std::fs::read_to_string("config/models.toml")
