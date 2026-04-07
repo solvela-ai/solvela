@@ -22,7 +22,7 @@ For this reason, the **escrow flow** is recommended for high-value requests. Wit
 
 ## How fast is the payment?
 
-Sub-second. Solana transaction finality is approximately 400 milliseconds. The full round-trip -- send request, receive price, sign payment, verify, proxy to provider, return response -- typically completes in 1-3 seconds, depending on the LLM provider's response time. The payment verification adds less than a second of overhead.
+Sub-second. Solana transaction confirmation typically takes 1-2 seconds. The full round-trip -- send request, receive price, sign payment, verify, proxy to provider, return response -- typically completes in 1-3 seconds, depending on the LLM provider's response time. The payment verification adds less than a second of overhead.
 
 ## What wallets work?
 

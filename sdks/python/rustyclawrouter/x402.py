@@ -29,10 +29,13 @@ def build_solana_transfer_checked(
 
     Requires: ``pip install rustyclawrouter[solana]``
 
+    Environment Variables:
+        SOLANA_RPC_URL: Solana RPC endpoint URL (required, e.g. https://api.mainnet-beta.solana.com).
+
     Args:
         pay_to: Gateway recipient wallet address (base58).
         amount: Amount in atomic USDC (6 decimals), e.g. 2625 = $0.002625.
-        private_key: Agent's base58-encoded 64-byte Solana keypair.
+        private_key: Base58-encoded Solana keypair (64-byte seed+pubkey or 32-byte secret key).
 
     Returns:
         Base64-encoded serialized VersionedTransaction.
@@ -127,8 +130,9 @@ def build_solana_transfer_checked(
 def build_payment_payload(
     accept: PaymentAccept,
     resource_url: str,
+    *,
+    transaction_b64: str,
     resource_method: str = "POST",
-    transaction_b64: str = "STUB_BASE64_TX",
 ) -> Dict[str, Any]:
     """Build the x402 PaymentPayload dict.
 
@@ -178,20 +182,25 @@ def encode_payment_header(
     if private_key:
         try:
             amount = int(accept.amount)
+        except (ValueError, TypeError) as e:
+            raise SigningError(
+                f"Payment amount '{accept.amount}' must be an integer (atomic USDC units): {e}"
+            ) from e
+        try:
             transaction_b64 = build_solana_transfer_checked(
                 pay_to=accept.pay_to,
                 amount=amount,
                 private_key=private_key,
             )
         except ImportError:
-            logger.warning(
-                "Solana packages not installed — using stub transaction. "
+            raise ImportError(
+                "Private key was provided but Solana signing packages are not installed. "
                 "Install with: pip install rustyclawrouter[solana]"
             )
         # SigningError propagates — caller must handle
 
     payload = build_payment_payload(
-        accept, resource_url, resource_method, transaction_b64
+        accept, resource_url, transaction_b64=transaction_b64, resource_method=resource_method
     )
     payload_json = json.dumps(payload)
     return base64.b64encode(payload_json.encode()).decode()
