@@ -18,6 +18,7 @@ dependencies = [
 solana = [
     "solders>=0.21",
     "solana>=0.34",
+    "spl-token>=0.1",
 ]
 dev = [
     "pytest>=7.0",

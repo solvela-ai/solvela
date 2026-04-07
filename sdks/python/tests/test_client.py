@@ -201,7 +201,8 @@ class TestPaymentFlow:
 
         client.close()
 
-    def test_402_then_200_payment_flow(self):
+    @patch("rustyclawrouter.x402.build_solana_transfer_checked", return_value="MOCK_SIGNED_TX")
+    def test_402_then_200_payment_flow(self, _mock_sign):
         """402 → payment → retry → 200."""
         client = LLMClient(api_url="http://test", private_key="TestKey")
 
@@ -226,7 +227,8 @@ class TestPaymentFlow:
         assert client.session_spent == pytest.approx(0.002625)
         client.close()
 
-    def test_402_with_payment_header_sent(self):
+    @patch("rustyclawrouter.x402.build_solana_transfer_checked", return_value="MOCK_SIGNED_TX")
+    def test_402_with_payment_header_sent(self, _mock_sign):
         """Verify the retry includes the payment-signature header."""
         client = LLMClient(api_url="http://test", private_key="TestKey")
 
@@ -390,7 +392,8 @@ class TestAsyncPaymentFlow:
 
         await client.close()
 
-    async def test_402_then_200(self):
+    @patch("rustyclawrouter.x402.build_solana_transfer_checked", return_value="MOCK_SIGNED_TX")
+    async def test_402_then_200(self, _mock_sign):
         client = AsyncLLMClient(api_url="http://test", private_key="TestKey")
 
         responses = [

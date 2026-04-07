@@ -21,6 +21,12 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
         let resp_body: serde_json::Value = resp.json().await?;
         if let Some(content) = resp_body["choices"][0]["message"]["content"].as_str() {
             println!("{}", content);
+        } else {
+            eprintln!("Warning: response contained no text content");
+            eprintln!(
+                "Raw response: {}",
+                serde_json::to_string_pretty(&resp_body).unwrap_or_default()
+            );
         }
         return Ok(());
     }
@@ -28,8 +34,7 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
     if resp.status().as_u16() != 402 {
         let status = resp.status();
         let text = resp.text().await?;
-        println!("Error {}: {}", status, text);
-        return Ok(());
+        return Err(anyhow::anyhow!("Gateway error {}: {}", status, text));
     }
 
     // --- 402 Payment Required ---
@@ -62,9 +67,11 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
         }
     }
 
-    // Load wallet (needed to identify the payer; actual tx signing is stubbed).
+    // Load wallet.
     let wallet = load_wallet()?;
-    let _address = wallet["address"].as_str().unwrap_or("unknown");
+    let private_key_b58 = wallet["private_key"]
+        .as_str()
+        .context("wallet missing private_key field")?;
 
     // Take the first accepted payment method.
     let accepted = payment_required
@@ -72,6 +79,30 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
         .into_iter()
         .next()
         .context("gateway returned no accepted payment methods")?;
+
+    // Resolve the Solana RPC URL from the environment.
+    let rpc_url = std::env::var("SOLANA_RPC_URL")
+        .or_else(|_| std::env::var("RCR_SOLANA_RPC_URL"))
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "SOLANA_RPC_URL required for payment signing. \
+                 Set it to your Solana RPC endpoint (e.g. https://api.mainnet-beta.solana.com)."
+            )
+        })?;
+
+    // Build and sign a real USDC-SPL TransferChecked transaction.
+    let signed_tx = crate::commands::solana_tx::build_usdc_transfer(
+        private_key_b58,
+        &accepted.pay_to,
+        accepted
+            .amount
+            .parse::<u64>()
+            .context("invalid payment amount from gateway")?,
+        &rpc_url,
+        &client,
+    )
+    .await
+    .context("failed to build Solana payment transaction")?;
 
     // Build the PaymentPayload.
     let payment_payload = PaymentPayload {
@@ -82,8 +113,7 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
         },
         accepted,
         payload: x402::types::PayloadData::Direct(SolanaPayload {
-            // Real versioned-transaction construction is out of scope here.
-            transaction: "STUB_BASE64_TX".to_string(),
+            transaction: signed_tx,
         }),
     };
 
@@ -103,11 +133,21 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
         let resp_body: serde_json::Value = retry_resp.json().await?;
         if let Some(content) = resp_body["choices"][0]["message"]["content"].as_str() {
             println!("{}", content);
+        } else {
+            eprintln!("Warning: response contained no text content");
+            eprintln!(
+                "Raw response: {}",
+                serde_json::to_string_pretty(&resp_body).unwrap_or_default()
+            );
         }
     } else {
         let status = retry_resp.status();
         let text = retry_resp.text().await?;
-        println!("Error {}: {}", status, text);
+        return Err(anyhow::anyhow!(
+            "Payment submitted but gateway returned error {}: {}",
+            status,
+            text
+        ));
     }
 
     Ok(())
@@ -182,7 +222,11 @@ mod tests {
             .await;
 
         let result = run(&mock.uri(), "auto", "test", true).await;
-        assert!(result.is_ok(), "chat should handle 500 gracefully");
+        assert!(result.is_err(), "chat should return error on 500 response");
+        assert!(
+            result.unwrap_err().to_string().contains("Gateway error"),
+            "error message should mention gateway error"
+        );
     }
 
     #[tokio::test]
@@ -191,7 +235,27 @@ mod tests {
         // clobbered by another test while load_wallet() reads it.
         let _lock = crate::ENV_MUTEX.lock().await;
         let _wallet = setup_wallet();
+
+        // One mock server handles both the gateway and the Solana RPC
+        // (all distinguished by path or method+body).
         let mock = MockServer::start().await;
+
+        // Mock the Solana RPC getLatestBlockhash call.
+        // The system blockhash (all zeros) base58-encodes to 32 '1' characters.
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "value": {
+                        "blockhash": "11111111111111111111111111111111",
+                        "lastValidBlockHeight": 9999
+                    }
+                }
+            })))
+            .mount(&mock)
+            .await;
 
         let payment_required = serde_json::json!({
             "x402_version": 2,
@@ -201,7 +265,7 @@ mod tests {
                 "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
                 "amount": "1000",
                 "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                "pay_to": "TestRecipient11111111111111111111111111111",
+                "pay_to": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
                 "max_timeout_seconds": 300
             }],
             "cost_breakdown": {
@@ -236,7 +300,14 @@ mod tests {
             .mount(&mock)
             .await;
 
+        // Point SOLANA_RPC_URL at the mock server root (same server, path "/").
+        std::env::set_var("SOLANA_RPC_URL", &mock.uri());
+
         let result = run(&mock.uri(), "auto", "What is Solana?", true).await;
+
+        // Clean up env var regardless of test outcome.
+        std::env::remove_var("SOLANA_RPC_URL");
+
         assert!(
             result.is_ok(),
             "chat payment flow should succeed with --yes"
