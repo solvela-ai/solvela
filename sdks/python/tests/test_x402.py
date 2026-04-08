@@ -140,7 +140,7 @@ class TestEncodePaymentHeaderEscrowScheme:
         assert payload["deposit_tx"] == "STUB_ESCROW_DEPOSIT_TX"
         assert payload["agent_pubkey"] == "STUB_AGENT_PUBKEY"
 
-    def test_escrow_service_id_is_hex_string(self):
+    def test_escrow_service_id_is_base64_string(self):
         accept = self._make_escrow_accept()
         header = encode_payment_header(
             accept,
@@ -149,11 +149,11 @@ class TestEncodePaymentHeaderEscrowScheme:
             request_body=b"test body",
         )
         decoded = json.loads(base64.b64decode(header))
-        service_id_hex = decoded["payload"]["service_id"]
-        # Must be a valid hex string of 64 chars (32 bytes)
-        assert isinstance(service_id_hex, str)
-        assert len(service_id_hex) == 64
-        int(service_id_hex, 16)  # raises ValueError if not hex
+        service_id_b64 = decoded["payload"]["service_id"]
+        # Must be a valid base64 string decoding to 32 bytes
+        assert isinstance(service_id_b64, str)
+        decoded_bytes = base64.b64decode(service_id_b64)
+        assert len(decoded_bytes) == 32
 
     def test_escrow_service_id_is_random_per_call(self):
         accept = self._make_escrow_accept()
@@ -247,13 +247,13 @@ class TestBuildEscrowPaymentPayload:
         )
         assert payload["deposit_tx"] == "STUB_TX"
         assert payload["agent_pubkey"] == "AgentPubkeyBase58"
-        assert payload["service_id"] == service_id.hex()
+        assert payload["service_id"] == base64.b64encode(service_id).decode()
 
-    def test_service_id_hex_length(self):
+    def test_service_id_base64_decodes_to_32_bytes(self):
         service_id = b"\xde\xad\xbe\xef" * 8
         payload = build_escrow_payment_payload(
             deposit_tx="TX",
             service_id=service_id,
             agent_pubkey="PK",
         )
-        assert len(payload["service_id"]) == 64
+        assert len(base64.b64decode(payload["service_id"])) == 32

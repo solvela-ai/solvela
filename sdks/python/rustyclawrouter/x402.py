@@ -134,6 +134,7 @@ def build_escrow_deposit(
     amount: int,
     service_id: bytes,
     private_key: str,
+    max_timeout_seconds: int = 120,
 ) -> str:
     """Build and sign an Anchor escrow deposit transaction.
 
@@ -162,6 +163,7 @@ def build_escrow_deposit(
         from solders.keypair import Keypair
         from solders.message import MessageV0
         from solders.pubkey import Pubkey
+        from solders.system_program import ID as SYSTEM_PROGRAM_ID
         from solders.transaction import VersionedTransaction
         from spl.token.constants import (
             ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -209,7 +211,8 @@ def build_escrow_deposit(
         blockhash = blockhash_resp.value.blockhash
         slot_resp = client.get_slot()
         current_slot = slot_resp.value
-        expiry_slot = current_slot + 300  # ~2 min at 400ms/slot
+        timeout_slots = max((max_timeout_seconds * 1000) // 400, 10)
+        expiry_slot = current_slot + timeout_slots
 
         # Build Anchor deposit discriminator: sha256("global:deposit")[:8]
         discriminator = hashlib.sha256(b"global:deposit").digest()[:8]
@@ -226,13 +229,15 @@ def build_escrow_deposit(
             program_id=program_id,
             data=bytes(ix_data),
             accounts=[
-                AccountMeta(pubkey=kp.pubkey(), is_signer=True, is_writable=True),
-                AccountMeta(pubkey=recipient, is_signer=False, is_writable=False),
-                AccountMeta(pubkey=escrow_pda, is_signer=False, is_writable=True),
-                AccountMeta(pubkey=agent_ata, is_signer=False, is_writable=True),
-                AccountMeta(pubkey=escrow_ata, is_signer=False, is_writable=True),
-                AccountMeta(pubkey=usdc_mint, is_signer=False, is_writable=False),
-                AccountMeta(pubkey=TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
+                AccountMeta(pubkey=kp.pubkey(), is_signer=True, is_writable=True),   # 0: agent
+                AccountMeta(pubkey=recipient, is_signer=False, is_writable=False),    # 1: provider
+                AccountMeta(pubkey=usdc_mint, is_signer=False, is_writable=False),    # 2: mint
+                AccountMeta(pubkey=escrow_pda, is_signer=False, is_writable=True),    # 3: escrow PDA
+                AccountMeta(pubkey=agent_ata, is_signer=False, is_writable=True),     # 4: agent ATA
+                AccountMeta(pubkey=escrow_ata, is_signer=False, is_writable=True),    # 5: vault ATA
+                AccountMeta(pubkey=TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),          # 6
+                AccountMeta(pubkey=ASSOCIATED_TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),  # 7
+                AccountMeta(pubkey=SYSTEM_PROGRAM_ID, is_signer=False, is_writable=False),            # 8
             ],
         )
 
@@ -268,7 +273,7 @@ def build_escrow_payment_payload(
     """
     return {
         "deposit_tx": deposit_tx,
-        "service_id": service_id.hex(),
+        "service_id": base64.b64encode(service_id).decode(),
         "agent_pubkey": agent_pubkey,
     }
 
@@ -350,6 +355,7 @@ def encode_payment_header(
                     amount=amount,
                     service_id=service_id,
                     private_key=private_key,
+                    max_timeout_seconds=accept.max_timeout_seconds,
                 )
             except ImportError:
                 raise ImportError(
