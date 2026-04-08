@@ -113,6 +113,13 @@ async function buildEscrowPaymentHeader(
 
   const serviceIdB64 = serviceId.toString('base64');
 
+  if (privateKey && !isSolanaAvailable()) {
+    throw new Error(
+      'Private key provided but @solana/web3.js is not installed. ' +
+      'Install with: npm install @solana/web3.js @solana/spl-token bs58',
+    );
+  }
+
   if (privateKey && isSolanaAvailable()) {
     // Real escrow deposit — throws SigningError on failure
     const { depositTx, agentPubkey } = await buildEscrowDeposit(
@@ -121,6 +128,7 @@ async function buildEscrowPaymentHeader(
       accept.escrow_program_id!,
       privateKey,
       serviceId,
+      accept.max_timeout_seconds,
     );
     return { deposit_tx: depositTx, service_id: serviceIdB64, agent_pubkey: agentPubkey };
   }
@@ -144,7 +152,8 @@ async function buildEscrowPaymentHeader(
  * @param amountStr        - Amount in USDC micro-units (6 decimals)
  * @param programIdStr     - Escrow program ID (base58)
  * @param privateKey       - Agent's base58-encoded 64-byte Solana keypair secret key
- * @param serviceId        - 32-byte service ID buffer
+ * @param serviceId          - 32-byte service ID buffer
+ * @param maxTimeoutSeconds  - Maximum timeout in seconds; converted to slots (~400ms/slot, min 10 slots)
  * @throws SigningError on any signing or RPC failure
  */
 async function buildEscrowDeposit(
@@ -153,6 +162,7 @@ async function buildEscrowDeposit(
   programIdStr: string,
   privateKey: string,
   serviceId: Buffer,
+  maxTimeoutSeconds: number,
 ): Promise<{ depositTx: string; agentPubkey: string }> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const solanaWeb3 = require('@solana/web3.js');
@@ -199,7 +209,7 @@ async function buildEscrowDeposit(
     const agentAta = await getAssociatedTokenAddress(USDC_MINT, payer.publicKey);
     const vaultAta = await getAssociatedTokenAddress(USDC_MINT, escrowPda, true);
 
-    // Fetch recent blockhash
+    // Fetch recent blockhash and current slot
     const rpcUrl = process.env.SOLANA_RPC_URL;
     if (!rpcUrl) {
       throw new SigningError(
@@ -208,7 +218,14 @@ async function buildEscrowDeposit(
       );
     }
     const connection = new Connection(rpcUrl, 'confirmed');
-    const { blockhash } = await connection.getLatestBlockhash('finalized');
+    const [{ blockhash }, currentSlot] = await Promise.all([
+      connection.getLatestBlockhash('finalized'),
+      connection.getSlot('confirmed'),
+    ]);
+
+    // Compute expiry slot from timeout (Solana ~400ms/slot)
+    const timeoutSlots = Math.max(Math.floor((maxTimeoutSeconds * 1000) / 400), 10);
+    const expirySlot = BigInt(currentSlot + timeoutSlots);
 
     // Build instruction data: sha256("global:deposit")[0:8] + amount(u64 LE) + serviceId + expirySlot(u64 LE)
     const discriminator = crypto
@@ -224,8 +241,12 @@ async function buildEscrowDeposit(
     amountBuf.writeUInt32LE(amountLow, 0);
     amountBuf.writeUInt32LE(amountHigh, 4);
 
-    // expirySlot: 0 (no expiry)
-    const expiryBuf = Buffer.alloc(8, 0);
+    // expirySlot as u64 LE
+    const expiryBuf = Buffer.allocUnsafe(8);
+    const expiryLow = Number(expirySlot & 0xffffffffn);
+    const expiryHigh = Number((expirySlot >> 32n) & 0xffffffffn);
+    expiryBuf.writeUInt32LE(expiryLow, 0);
+    expiryBuf.writeUInt32LE(expiryHigh, 4);
 
     const data = Buffer.concat([discriminator, amountBuf, serviceId, expiryBuf]);
 
