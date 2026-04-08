@@ -11,6 +11,7 @@ pub mod claim_processor;
 pub mod claim_queue;
 
 mod claimer;
+pub mod deposit;
 pub mod pda;
 mod verifier;
 
