@@ -7,25 +7,25 @@ use crate::commands::wallet::load_wallet;
 
 /// Select the preferred payment scheme from the accepts list.
 /// Prefers "escrow" (agent gets deposit protection) over "exact".
-fn select_payment_scheme(accepts: &[PaymentAccept]) -> &PaymentAccept {
+fn select_payment_scheme(accepts: &[PaymentAccept]) -> Result<&PaymentAccept> {
     accepts
         .iter()
         .find(|a| a.scheme == "escrow" && a.escrow_program_id.is_some())
         .or_else(|| accepts.first())
-        .expect("at least one accept required")
+        .context("payment required but accepts list is empty")
 }
 
 /// Generate a unique 32-byte service_id by hashing the request body + random nonce.
-fn generate_service_id(request_body: &[u8]) -> [u8; 32] {
+fn generate_service_id(request_body: &[u8]) -> Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     hasher.update(request_body);
     let mut nonce = [0u8; 8];
-    getrandom::getrandom(&mut nonce).expect("getrandom failed");
+    getrandom::getrandom(&mut nonce).context("getrandom failed to generate nonce")?;
     hasher.update(nonce);
     let hash = hasher.finalize();
     let mut id = [0u8; 32];
     id.copy_from_slice(&hash);
-    id
+    Ok(id)
 }
 
 pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<()> {
@@ -99,7 +99,7 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
         .context("wallet missing private_key field")?;
 
     // Select the preferred payment scheme (escrow > exact).
-    let accepted = select_payment_scheme(&payment_required.accepts).clone();
+    let accepted = select_payment_scheme(&payment_required.accepts)?.clone();
 
     // Resolve the Solana RPC URL from the environment.
     let rpc_url = std::env::var("SOLANA_RPC_URL")
@@ -120,7 +120,7 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
                 .escrow_program_id
                 .as_deref()
                 .context("escrow scheme missing program ID")?;
-            let service_id = generate_service_id(&body_bytes);
+            let service_id = generate_service_id(&body_bytes)?;
             let current_slot = crate::commands::solana_tx::fetch_current_slot(&rpc_url, &client)
                 .await
                 .context("failed to fetch current slot for escrow expiry")?;
@@ -481,14 +481,16 @@ mod tests {
     #[test]
     fn test_select_escrow_scheme_prefers_escrow() {
         let accepts = vec![make_exact_accept(), make_escrow_accept()];
-        let selected = select_payment_scheme(&accepts);
+        // Safe: non-empty accepts list always yields Ok
+        let selected = select_payment_scheme(&accepts).unwrap();
         assert_eq!(selected.scheme, "escrow");
     }
 
     #[test]
     fn test_select_escrow_scheme_falls_back_to_exact() {
         let accepts = vec![make_exact_accept()];
-        let selected = select_payment_scheme(&accepts);
+        // Safe: non-empty accepts list always yields Ok
+        let selected = select_payment_scheme(&accepts).unwrap();
         assert_eq!(selected.scheme, "exact");
     }
 
@@ -497,7 +499,8 @@ mod tests {
         let mut escrow_no_id = make_escrow_accept();
         escrow_no_id.escrow_program_id = None;
         let accepts = vec![make_exact_accept(), escrow_no_id];
-        let selected = select_payment_scheme(&accepts);
+        // Safe: non-empty accepts list always yields Ok
+        let selected = select_payment_scheme(&accepts).unwrap();
         assert_eq!(
             selected.scheme, "exact",
             "escrow without program ID should be skipped"
@@ -506,14 +509,16 @@ mod tests {
 
     #[test]
     fn test_generate_service_id_length() {
-        let id = generate_service_id(b"test request body");
+        // Safe: getrandom is available in the test environment
+        let id = generate_service_id(b"test request body").unwrap();
         assert_eq!(id.len(), 32);
     }
 
     #[test]
     fn test_generate_service_id_unique_with_nonce() {
-        let id1 = generate_service_id(b"same body");
-        let id2 = generate_service_id(b"same body");
+        // Safe: getrandom is available in the test environment
+        let id1 = generate_service_id(b"same body").unwrap();
+        let id2 = generate_service_id(b"same body").unwrap();
         assert_ne!(id1, id2, "service IDs should differ due to random nonce");
     }
 

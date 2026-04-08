@@ -33,6 +33,19 @@ pub struct DepositParams {
     pub recent_blockhash: [u8; 32],
 }
 
+impl std::fmt::Debug for DepositParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DepositParams")
+            .field("agent_keypair_b58", &"[REDACTED]")
+            .field("provider_wallet_b58", &self.provider_wallet_b58)
+            .field("usdc_mint_b58", &self.usdc_mint_b58)
+            .field("escrow_program_id_b58", &self.escrow_program_id_b58)
+            .field("amount", &self.amount)
+            .field("expiry_slot", &self.expiry_slot)
+            .finish()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Transaction builder
 // ---------------------------------------------------------------------------
@@ -78,22 +91,24 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, String> {
     // Validate that the stored pubkey in bytes 32..64 matches the derived one
     let stored_pubkey = &keypair_bytes[32..64];
     if stored_pubkey != agent_pubkey {
-        return Err("keypair pubkey mismatch: derived pubkey does not match stored pubkey".to_string());
+        return Err(
+            "keypair pubkey mismatch: derived pubkey does not match stored pubkey".to_string(),
+        );
     }
 
     // Step 3: Parse all addresses
     let provider_pubkey = decode_bs58_pubkey(&params.provider_wallet_b58)
         .map_err(|e| format!("provider_wallet: {e}"))?;
-    let usdc_mint = decode_bs58_pubkey(&params.usdc_mint_b58)
-        .map_err(|e| format!("usdc_mint: {e}"))?;
+    let usdc_mint =
+        decode_bs58_pubkey(&params.usdc_mint_b58).map_err(|e| format!("usdc_mint: {e}"))?;
     let escrow_program_id = decode_bs58_pubkey(&params.escrow_program_id_b58)
         .map_err(|e| format!("escrow_program_id: {e}"))?;
-    let token_program = decode_bs58_pubkey(TOKEN_PROGRAM_ID)
-        .map_err(|e| format!("token_program: {e}"))?;
-    let ata_program = decode_bs58_pubkey(ATA_PROGRAM_ID)
-        .map_err(|e| format!("ata_program: {e}"))?;
-    let system_program = decode_bs58_pubkey(SYSTEM_PROGRAM_ID)
-        .map_err(|e| format!("system_program: {e}"))?;
+    let token_program =
+        decode_bs58_pubkey(TOKEN_PROGRAM_ID).map_err(|e| format!("token_program: {e}"))?;
+    let ata_program =
+        decode_bs58_pubkey(ATA_PROGRAM_ID).map_err(|e| format!("ata_program: {e}"))?;
+    let system_program =
+        decode_bs58_pubkey(SYSTEM_PROGRAM_ID).map_err(|e| format!("system_program: {e}"))?;
 
     // Step 4: Derive escrow PDA
     let (escrow_pda, _bump) = find_program_address(
@@ -108,28 +123,29 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, String> {
     let vault_ata = derive_ata_address(&escrow_pda, &usdc_mint)
         .ok_or_else(|| "failed to derive vault ATA".to_string())?;
 
-    // Step 6: Build account keys in the exact order matching the on-chain Deposit accounts struct
+    // Step 6: Build account keys sorted by writability (Solana legacy message requirement):
+    //   writable signers first, then writable non-signers, then readonly non-signers.
     // 0: agent_pubkey        (signer, writable)
-    // 1: provider            (readonly)
-    // 2: usdc_mint           (readonly)
-    // 3: escrow_pda          (writable)
-    // 4: agent_ata           (writable)
-    // 5: vault_ata           (writable)
-    // 6: token_program       (readonly)
-    // 7: ata_program         (readonly)
-    // 8: system_program      (readonly)
+    // 1: escrow_pda          (writable, non-signer)
+    // 2: agent_ata           (writable, non-signer)
+    // 3: vault_ata           (writable, non-signer)
+    // 4: provider            (readonly, non-signer)
+    // 5: usdc_mint           (readonly, non-signer)
+    // 6: token_program       (readonly, non-signer)
+    // 7: ata_program         (readonly, non-signer)
+    // 8: system_program      (readonly, non-signer)
     // 9: escrow_program_id   (program invoked — appended last)
     let accounts: Vec<[u8; 32]> = vec![
-        agent_pubkey,     // 0: signer, writable
-        provider_pubkey,  // 1: readonly
-        usdc_mint,        // 2: readonly
-        escrow_pda,       // 3: writable
-        agent_ata,        // 4: writable
-        vault_ata,        // 5: writable
-        token_program,    // 6: readonly
-        ata_program,      // 7: readonly
-        system_program,   // 8: readonly
-        // escrow_program_id appended separately as index 9
+        agent_pubkey,    // 0: signer, writable
+        escrow_pda,      // 1: writable, non-signer
+        agent_ata,       // 2: writable, non-signer
+        vault_ata,       // 3: writable, non-signer
+        provider_pubkey, // 4: readonly
+        usdc_mint,       // 5: readonly
+        token_program,   // 6: readonly
+        ata_program,     // 7: readonly
+        system_program,  // 8: readonly
+                         // escrow_program_id appended separately as index 9
     ];
 
     // Step 7: Build instruction data
@@ -143,12 +159,14 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, String> {
     ix_data.extend_from_slice(&params.expiry_slot.to_le_bytes());
     debug_assert_eq!(ix_data.len(), 56, "deposit ix_data must be 56 bytes");
 
-    // Instruction account indices: all 9 data accounts + program at index 9
-    let ix_account_indices: Vec<u8> = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
+    // Instruction account indices remapped to the new sorted order.
+    // Anchor program expects: agent, provider, mint, escrow, agent_ata, vault, token, ata, system
+    // New positions:          0,     4,        5,    1,      2,         3,     6,     7,   8
+    let ix_account_indices: Vec<u8> = vec![0, 4, 5, 1, 2, 3, 6, 7, 8];
 
     // Step 8: Build the legacy message
     // Header: [1, 0, 6] — 1 signer, 0 readonly signed, 6 readonly unsigned
-    // Readonly unsigned: provider(1), mint(2), token_program(6), ata_program(7),
+    // Readonly unsigned: provider(4), mint(5), token_program(6), ata_program(7),
     //                    system_program(8), escrow_program(9) = 6
     let msg = build_legacy_message(
         [1, 0, 6],
@@ -269,7 +287,11 @@ mod tests {
     #[test]
     fn test_build_deposit_tx_produces_valid_base64() {
         let result = build_deposit_tx(&base_params());
-        assert!(result.is_ok(), "build_deposit_tx failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "build_deposit_tx failed: {:?}",
+            result.err()
+        );
         let b64 = result.unwrap();
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(&b64)
@@ -288,10 +310,11 @@ mod tests {
             .decode(&b64)
             .unwrap();
         let disc = anchor_discriminator("deposit");
-        let found = tx_bytes
-            .windows(8)
-            .any(|w| w == disc);
-        assert!(found, "transaction bytes must contain the deposit discriminator");
+        let found = tx_bytes.windows(8).any(|w| w == disc);
+        assert!(
+            found,
+            "transaction bytes must contain the deposit discriminator"
+        );
     }
 
     #[test]
