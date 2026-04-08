@@ -76,7 +76,7 @@ curl -s http://localhost:8402/v1/escrow/config | jq
 
 ```json
 {
-  "program_id": "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+  "program_id": "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
   "current_slot": 298451623,
   "usdc_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 }

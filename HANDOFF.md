@@ -1,7 +1,7 @@
 # HANDOFF.md — RustyClawRouter Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-07 (from actual repo inspection, not docs)
+> **Last verified:** 2026-04-08 (from actual repo inspection, not docs)
 
 ---
 
@@ -15,7 +15,7 @@ Part of the **rustyclaw.ai** ecosystem:
 |---------|---------|--------|
 | **RustyClawRouter** | LLM payment gateway (this repo) | Deployed on Fly.io |
 | **RustyClaw Terminal** | Crypto trading terminal + AI agent | Backend deployed, frontend not yet |
-| **Telsi.ai** | Multi-tenant AI assistant SaaS | Live on BlockRun, planned RCR migration |
+| **Telsi.ai** | Multi-tenant AI assistant SaaS | Live on RCR (migrated from BlockRun 2026-04-07) |
 
 ---
 
@@ -44,7 +44,7 @@ Core tables (wallet_budgets, escrow, claims), escrow claim queue, session tracki
 
 ### Escrow Program (Anchor, standalone)
 
-Trustless USDC-SPL escrow: deposit/claim/refund. PDA vault with timeout refunds. Not a workspace member (dep conflicts).
+Trustless USDC-SPL escrow: deposit/claim/refund. PDA vault with timeout refunds. Not a workspace member (dep conflicts). **Deployed to mainnet** (`9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`) with upgrade authority retained by deployer (`B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A`).
 
 ### SDKs
 
@@ -58,7 +58,7 @@ Next.js 16 + Tailwind + Recharts. 5 pages: Overview, Usage, Models, Wallet, Sett
 
 ## Test Counts (run `cargo test` to verify — these go stale)
 
-Last verified 2026-04-06:
+Last verified 2026-04-08:
 
 ```
 gateway unit:        401
@@ -97,8 +97,8 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 ### Immediate
 
-- **Escrow program deployment**: Program verified (not deployed to any network). Upgrade authority decision pending attorney consultation (scheduled 2026-04-07).
-- **End-to-end devnet payment test**: Integration test with real Solana signing not yet written.
+- **Escrow client SDK support**: CLI and SDKs only support "exact" scheme. Escrow scheme client support not yet implemented.
+- **End-to-end escrow payment test**: Escrow program deployed, gateway advertises escrow scheme, but no client can exercise it yet.
 - **Docs site setup**: User wants design input before building docs site.
 - **Go SDK signing**: Still using stub. TypeScript SDK has real signing; Python + CLI have real signing (merged).
 - **MCP server signing**: Stub signing intentional (agent-only protocol).
@@ -119,7 +119,7 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 1. Deploy Terminal frontend to Vercel
 2. Harden RCR under real Terminal load
 3. Build OpenClaw plugin (`@rustyclaw/clawrouter`)
-4. Migrate Telsi from BlockRun to RCR
+4. ~~Migrate Telsi from BlockRun to RCR~~ (completed 2026-04-07)
 5. Build Sky64 network agent
 6. Open-source (`rcr-router`, `rcr-protocol`)
 
@@ -129,7 +129,7 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 - **Safe (no licensing)**: AP2 discovery endpoints, x402 crypto settlement (wallet-to-wallet), mandate verification as metadata
 - **DO NOT build (triggers MSB + 49 state licenses)**: Card payment processing, fiat ↔ crypto conversion, custodial fund holding
-- **Gray area**: Anchor escrow PDAs (trustless, PDA-controlled) — FinCEN guidance on custodial wallets is evolving. Attorney consultation scheduled 2026-04-06.
+- **Gray area**: Anchor escrow PDAs (trustless, PDA-controlled) — FinCEN guidance on custodial wallets is evolving. Escrow deployed to mainnet 2026-04-08 with upgrade authority retained.
 - **Watch**: California DFAL takes effect July 2026.
 
 ---

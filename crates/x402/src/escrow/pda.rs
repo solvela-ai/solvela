@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn test_pda_derivation() {
         // Use known inputs and verify we get a deterministic PDA
-        let program_id = decode_bs58_pubkey("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy")
+        let program_id = decode_bs58_pubkey("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU")
             .expect("valid program id");
         let agent = [1u8; 32];
         let service_id = [2u8; 32];
