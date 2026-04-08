@@ -64,6 +64,7 @@ class PaymentAccept(BaseModel):
     asset: str
     pay_to: str
     max_timeout_seconds: int
+    escrow_program_id: Optional[str] = None
 
 
 class PaymentRequired(BaseModel):
