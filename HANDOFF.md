@@ -15,7 +15,7 @@ Part of the **rustyclaw.ai** ecosystem:
 |---------|---------|--------|
 | **RustyClawRouter** | LLM payment gateway (this repo) | Deployed on Fly.io |
 | **RustyClaw Terminal** | Crypto trading terminal + AI agent | Backend deployed, frontend not yet |
-| **Telsi.ai** | Multi-tenant AI assistant SaaS | Live on BlockRun, planned RCR migration |
+| **Telsi.ai** | Multi-tenant AI assistant SaaS | Live on RCR (migrated from BlockRun 2026-04-07) |
 
 ---
 
@@ -119,7 +119,7 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 1. Deploy Terminal frontend to Vercel
 2. Harden RCR under real Terminal load
 3. Build OpenClaw plugin (`@rustyclaw/clawrouter`)
-4. Migrate Telsi from BlockRun to RCR
+4. ~~Migrate Telsi from BlockRun to RCR~~ (completed 2026-04-07)
 5. Build Sky64 network agent
 6. Open-source (`rcr-router`, `rcr-protocol`)
 
