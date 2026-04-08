@@ -34,7 +34,7 @@ const USDC_DECIMALS: u8 = 6;
 /// Fetch the latest blockhash from a Solana JSON-RPC endpoint.
 ///
 /// Returns the blockhash as 32 raw bytes.
-async fn fetch_blockhash(rpc_url: &str, client: &reqwest::Client) -> Result<[u8; 32]> {
+pub async fn fetch_blockhash(rpc_url: &str, client: &reqwest::Client) -> Result<[u8; 32]> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -269,6 +269,57 @@ pub async fn build_usdc_transfer(
     Ok(BASE64.encode(&tx_bytes))
 }
 
+/// Fetch the current slot from a Solana JSON-RPC endpoint.
+pub async fn fetch_current_slot(rpc_url: &str, client: &reqwest::Client) -> Result<u64> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getSlot",
+        "params": [{"commitment": "confirmed"}]
+    });
+    let resp = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .context("failed to connect to Solana RPC for getSlot")?;
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .context("failed to parse getSlot response")?;
+    json["result"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("getSlot response missing result field"))
+}
+
+/// Build and sign an escrow deposit transaction.
+///
+/// Wraps `x402::escrow::deposit::build_deposit_tx` with blockhash fetching.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_escrow_deposit(
+    payer_keypair_b58: &str,
+    provider_wallet: &str,
+    escrow_program_id: &str,
+    amount: u64,
+    service_id: [u8; 32],
+    expiry_slot: u64,
+    rpc_url: &str,
+    client: &reqwest::Client,
+) -> Result<String> {
+    let recent_blockhash = fetch_blockhash(rpc_url, client).await?;
+    x402::escrow::deposit::build_deposit_tx(&x402::escrow::deposit::DepositParams {
+        agent_keypair_b58: payer_keypair_b58.to_string(),
+        provider_wallet_b58: provider_wallet.to_string(),
+        usdc_mint_b58: USDC_MINT.to_string(),
+        escrow_program_id_b58: escrow_program_id.to_string(),
+        amount,
+        service_id,
+        expiry_slot,
+        recent_blockhash,
+    })
+    .map_err(|e| anyhow!("escrow deposit tx build failed: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,15 +452,32 @@ mod tests {
     #[test]
     fn test_x402_escrow_pda_exports_accessible() {
         // Verify that x402 escrow PDA helpers are publicly accessible
-        let program_id = x402::escrow::pda::decode_bs58_pubkey(
-            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
-        ).unwrap();
+        let program_id =
+            x402::escrow::pda::decode_bs58_pubkey("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU")
+                .unwrap();
         let agent = [1u8; 32];
         let service_id = [2u8; 32];
-        let result = x402::escrow::pda::find_program_address(
-            &[b"escrow", &agent, &service_id],
-            &program_id,
-        );
+        let result =
+            x402::escrow::pda::find_program_address(&[b"escrow", &agent, &service_id], &program_id);
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_fetch_current_slot_bad_rpc() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let client = reqwest::Client::new();
+        let err = rt
+            .block_on(fetch_current_slot(
+                &format!("http://127.0.0.1:{port}"),
+                &client,
+            ))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("connect") || err.to_string().contains("RPC"),
+            "expected connection error, got: {err}"
+        );
     }
 }

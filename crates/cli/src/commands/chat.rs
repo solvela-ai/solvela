@@ -1,8 +1,32 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use x402::types::{PaymentPayload, PaymentRequired, Resource, SolanaPayload};
+use sha2::{Digest, Sha256};
+use x402::types::{PaymentAccept, PaymentPayload, PaymentRequired, Resource, SolanaPayload};
 
 use crate::commands::wallet::load_wallet;
+
+/// Select the preferred payment scheme from the accepts list.
+/// Prefers "escrow" (agent gets deposit protection) over "exact".
+fn select_payment_scheme(accepts: &[PaymentAccept]) -> &PaymentAccept {
+    accepts
+        .iter()
+        .find(|a| a.scheme == "escrow" && a.escrow_program_id.is_some())
+        .or_else(|| accepts.first())
+        .expect("at least one accept required")
+}
+
+/// Generate a unique 32-byte service_id by hashing the request body + random nonce.
+fn generate_service_id(request_body: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(request_body);
+    let mut nonce = [0u8; 8];
+    getrandom::getrandom(&mut nonce).expect("getrandom failed");
+    hasher.update(nonce);
+    let hash = hasher.finalize();
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&hash);
+    id
+}
 
 pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<()> {
     let client = reqwest::Client::new();
@@ -74,12 +98,8 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
         .as_str()
         .context("wallet missing private_key field")?;
 
-    // Take the first accepted payment method.
-    let accepted = payment_required
-        .accepts
-        .into_iter()
-        .next()
-        .context("gateway returned no accepted payment methods")?;
+    // Select the preferred payment scheme (escrow > exact).
+    let accepted = select_payment_scheme(&payment_required.accepts).clone();
 
     // Resolve the Solana RPC URL from the environment.
     let rpc_url = std::env::var("SOLANA_RPC_URL")
@@ -91,31 +111,88 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
             )
         })?;
 
-    // Build and sign a real USDC-SPL TransferChecked transaction.
-    let signed_tx = crate::commands::solana_tx::build_usdc_transfer(
-        private_key_b58,
-        &accepted.pay_to,
-        accepted
-            .amount
-            .parse::<u64>()
-            .context("invalid payment amount from gateway")?,
-        &rpc_url,
-        &client,
-    )
-    .await
-    .context("failed to build Solana payment transaction")?;
+    let body_bytes = serde_json::to_vec(&body).context("failed to serialize request body")?;
 
-    // Build the PaymentPayload.
-    let payment_payload = PaymentPayload {
-        x402_version: x402::types::X402_VERSION,
-        resource: Resource {
-            url: "/v1/chat/completions".to_string(),
-            method: "POST".to_string(),
-        },
-        accepted,
-        payload: x402::types::PayloadData::Direct(SolanaPayload {
-            transaction: signed_tx,
-        }),
+    // Build the PaymentPayload based on scheme.
+    let payment_payload = match accepted.scheme.as_str() {
+        "escrow" => {
+            let escrow_program_id = accepted
+                .escrow_program_id
+                .as_deref()
+                .context("escrow scheme missing program ID")?;
+            let service_id = generate_service_id(&body_bytes);
+            let current_slot = crate::commands::solana_tx::fetch_current_slot(&rpc_url, &client)
+                .await
+                .context("failed to fetch current slot for escrow expiry")?;
+            let timeout_slots = (accepted.max_timeout_seconds * 1000) / 400;
+            let expiry_slot = current_slot + timeout_slots;
+            let deposit_tx = crate::commands::solana_tx::build_escrow_deposit(
+                private_key_b58,
+                &accepted.pay_to,
+                escrow_program_id,
+                accepted
+                    .amount
+                    .parse::<u64>()
+                    .context("invalid payment amount from gateway")?,
+                service_id,
+                expiry_slot,
+                &rpc_url,
+                &client,
+            )
+            .await
+            .context("failed to build escrow deposit transaction")?;
+
+            // Derive agent pubkey from keypair.
+            let key_bytes = bs58::decode(private_key_b58)
+                .into_vec()
+                .context("keypair decode")?;
+            let seed: [u8; 32] = key_bytes[..32]
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("bad seed"))?;
+            let agent_pubkey = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+            let agent_pubkey_b58 = bs58::encode(agent_pubkey.as_bytes()).into_string();
+
+            PaymentPayload {
+                x402_version: x402::types::X402_VERSION,
+                resource: Resource {
+                    url: "/v1/chat/completions".to_string(),
+                    method: "POST".to_string(),
+                },
+                accepted: accepted.clone(),
+                payload: x402::types::PayloadData::Escrow(x402::types::EscrowPayload {
+                    deposit_tx,
+                    service_id: BASE64.encode(service_id),
+                    agent_pubkey: agent_pubkey_b58,
+                }),
+            }
+        }
+        _ => {
+            // Exact / direct payment scheme.
+            let signed_tx = crate::commands::solana_tx::build_usdc_transfer(
+                private_key_b58,
+                &accepted.pay_to,
+                accepted
+                    .amount
+                    .parse::<u64>()
+                    .context("invalid payment amount from gateway")?,
+                &rpc_url,
+                &client,
+            )
+            .await
+            .context("failed to build Solana payment transaction")?;
+
+            PaymentPayload {
+                x402_version: x402::types::X402_VERSION,
+                resource: Resource {
+                    url: "/v1/chat/completions".to_string(),
+                    method: "POST".to_string(),
+                },
+                accepted,
+                payload: x402::types::PayloadData::Direct(SolanaPayload {
+                    transaction: signed_tx,
+                }),
+            }
+        }
     };
 
     // Encode as base64(JSON(payload)).
@@ -158,7 +235,7 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header_exists, method, path};
+    use wiremock::matchers::{body_string_contains, header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// RAII guard that removes an env var on drop (panic-safe cleanup).
@@ -311,7 +388,7 @@ mod tests {
             .await;
 
         // Point SOLANA_RPC_URL at the mock server root (same server, path "/").
-        std::env::set_var("SOLANA_RPC_URL", &mock.uri());
+        std::env::set_var("SOLANA_RPC_URL", mock.uri());
         let _env_guard = EnvGuard("SOLANA_RPC_URL");
 
         let result = run(&mock.uri(), "auto", "What is Solana?", true).await;
@@ -373,5 +450,162 @@ mod tests {
     async fn test_chat_connection_error() {
         let result = run(&dead_url(), "auto", "test", true).await;
         assert!(result.is_err(), "chat should error on connection failure");
+    }
+
+    // --- select_payment_scheme tests ---
+
+    fn make_exact_accept() -> PaymentAccept {
+        PaymentAccept {
+            scheme: "exact".to_string(),
+            network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp".to_string(),
+            amount: "1000".to_string(),
+            asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            max_timeout_seconds: 300,
+            escrow_program_id: None,
+        }
+    }
+
+    fn make_escrow_accept() -> PaymentAccept {
+        PaymentAccept {
+            scheme: "escrow".to_string(),
+            network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp".to_string(),
+            amount: "1000".to_string(),
+            asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            max_timeout_seconds: 300,
+            escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_select_escrow_scheme_prefers_escrow() {
+        let accepts = vec![make_exact_accept(), make_escrow_accept()];
+        let selected = select_payment_scheme(&accepts);
+        assert_eq!(selected.scheme, "escrow");
+    }
+
+    #[test]
+    fn test_select_escrow_scheme_falls_back_to_exact() {
+        let accepts = vec![make_exact_accept()];
+        let selected = select_payment_scheme(&accepts);
+        assert_eq!(selected.scheme, "exact");
+    }
+
+    #[test]
+    fn test_select_escrow_scheme_skips_escrow_without_program_id() {
+        let mut escrow_no_id = make_escrow_accept();
+        escrow_no_id.escrow_program_id = None;
+        let accepts = vec![make_exact_accept(), escrow_no_id];
+        let selected = select_payment_scheme(&accepts);
+        assert_eq!(
+            selected.scheme, "exact",
+            "escrow without program ID should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_generate_service_id_length() {
+        let id = generate_service_id(b"test request body");
+        assert_eq!(id.len(), 32);
+    }
+
+    #[test]
+    fn test_generate_service_id_unique_with_nonce() {
+        let id1 = generate_service_id(b"same body");
+        let id2 = generate_service_id(b"same body");
+        assert_ne!(id1, id2, "service IDs should differ due to random nonce");
+    }
+
+    #[tokio::test]
+    async fn test_chat_402_escrow_payment_flow() {
+        let _lock = crate::ENV_MUTEX.lock().await;
+        let _wallet = setup_wallet();
+
+        let mock = MockServer::start().await;
+
+        // Mock getSlot RPC call.
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("getSlot"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": 12345
+            })))
+            .mount(&mock)
+            .await;
+
+        // Mock getLatestBlockhash RPC call.
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains("getLatestBlockhash"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "value": {
+                        "blockhash": "11111111111111111111111111111111",
+                        "lastValidBlockHeight": 9999
+                    }
+                }
+            })))
+            .mount(&mock)
+            .await;
+
+        let payment_required = serde_json::json!({
+            "x402_version": 2,
+            "resource": {"url": "/v1/chat/completions", "method": "POST"},
+            "accepts": [{
+                "scheme": "escrow",
+                "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+                "amount": "1000",
+                "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "pay_to": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+                "max_timeout_seconds": 300,
+                "escrow_program_id": "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+            }],
+            "cost_breakdown": {
+                "provider_cost": "0.001000",
+                "platform_fee": "0.000050",
+                "fee_percent": 5,
+                "total": "0.001050",
+                "currency": "USDC"
+            },
+            "error": "Payment required"
+        });
+
+        // Mount 402 first (lower priority).
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(402).set_body_json(serde_json::json!({
+                "error": {
+                    "message": serde_json::to_string(&payment_required).expect("serialize PR")
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&mock)
+            .await;
+
+        // Mount paid response last (higher priority).
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header_exists("PAYMENT-SIGNATURE"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "Escrow paid response!"}}]
+            })))
+            .mount(&mock)
+            .await;
+
+        std::env::set_var("SOLANA_RPC_URL", mock.uri());
+        let _env_guard = EnvGuard("SOLANA_RPC_URL");
+
+        let result = run(&mock.uri(), "auto", "What is Solana?", true).await;
+
+        assert!(
+            result.is_ok(),
+            "escrow payment flow should succeed: {:?}",
+            result.err()
+        );
     }
 }
