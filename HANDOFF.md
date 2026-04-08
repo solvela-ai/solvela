@@ -44,7 +44,7 @@ Core tables (wallet_budgets, escrow, claims), escrow claim queue, session tracki
 
 ### Escrow Program (Anchor, standalone)
 
-Trustless USDC-SPL escrow: deposit/claim/refund. PDA vault with timeout refunds. Not a workspace member (dep conflicts).
+Trustless USDC-SPL escrow: deposit/claim/refund. PDA vault with timeout refunds. Not a workspace member (dep conflicts). **Deployed to mainnet** (`9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`) with upgrade authority retained by deployer (`B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A`).
 
 ### SDKs
 
@@ -97,8 +97,8 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 ### Immediate
 
-- **Escrow program deployment**: Program verified (not deployed to any network). Upgrade authority decision pending attorney consultation (scheduled 2026-04-07).
-- **End-to-end devnet payment test**: Integration test with real Solana signing not yet written.
+- **Escrow client SDK support**: CLI and SDKs only support "exact" scheme. Escrow scheme client support not yet implemented.
+- **End-to-end escrow payment test**: Escrow program deployed, gateway advertises escrow scheme, but no client can exercise it yet.
 - **Docs site setup**: User wants design input before building docs site.
 - **Go SDK signing**: Still using stub. TypeScript SDK has real signing; Python + CLI have real signing (merged).
 - **MCP server signing**: Stub signing intentional (agent-only protocol).

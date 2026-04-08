@@ -686,11 +686,11 @@ mod tests {
             asset: USDC_MINT.to_string(),
             pay_to: "RecipientWalletPubkeyHere".to_string(),
             max_timeout_seconds: MAX_TIMEOUT_SECONDS,
-            escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+            escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
         };
         let json = serde_json::to_string(&accept).unwrap();
         assert!(json.contains("escrow_program_id"));
-        assert!(json.contains("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy"));
+        assert!(json.contains("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"));
     }
 
     #[test]

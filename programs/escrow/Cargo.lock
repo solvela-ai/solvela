@@ -2460,6 +2460,8 @@ dependencies = [
  "anchor-spl",
  "litesvm",
  "solana-sdk",
+ "spl-associated-token-account",
+ "spl-token",
 ]
 
 [[package]]

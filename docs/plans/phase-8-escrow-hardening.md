@@ -165,7 +165,7 @@ Public endpoint that returns escrow configuration for clients to discover escrow
 **Response (200):**
 ```json
 {
-  "escrow_program_id": "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+  "escrow_program_id": "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
   "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
   "usdc_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
   "provider_wallet": "RecipientWallet...",

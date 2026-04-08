@@ -418,7 +418,7 @@ fn test_app_with_mock_provider_and_escrow() -> axum::Router {
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
     config.solana.escrow_program_id =
-        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+        Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
 
     let test_keypair = {
         use ed25519_dalek::SigningKey;
@@ -435,7 +435,7 @@ fn test_app_with_mock_provider_and_escrow() -> axum::Router {
     let escrow_claimer = x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
         test_fee_payer_pool.clone(),
-        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
         "11111111111111111111111111111111",
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
         None,
@@ -481,7 +481,7 @@ fn test_app_with_escrow() -> axum::Router {
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
     config.solana.escrow_program_id =
-        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+        Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
 
     // Create a dummy claimer — won't actually submit claims in tests
     // We need a valid 64-byte key. Use a test keypair.
@@ -500,7 +500,7 @@ fn test_app_with_escrow() -> axum::Router {
     let escrow_claimer = x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
         test_fee_payer_pool.clone(),
-        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
         "11111111111111111111111111111111",
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
         None,
@@ -572,7 +572,7 @@ fn valid_escrow_payment_header(resource_url: &str) -> String {
             asset: USDC_MINT.to_string(),
             pay_to: TEST_RECIPIENT_WALLET.to_string(),
             max_timeout_seconds: 300,
-            escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+            escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
         },
         payload: PayloadData::Escrow(EscrowPayload {
             deposit_tx: base64::engine::general_purpose::STANDARD.encode(b"mock_deposit_tx_bytes"),
@@ -1531,7 +1531,7 @@ async fn test_escrow_scheme_dispatches_to_escrow_verifier() {
             asset: USDC_MINT.to_string(),
             pay_to: "TestRecipient".to_string(),
             max_timeout_seconds: 300,
-            escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+            escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
         },
         payload: PayloadData::Escrow(EscrowPayload {
             deposit_tx: base64::engine::general_purpose::STANDARD.encode(b"mock_deposit_tx"),
@@ -3176,7 +3176,7 @@ async fn test_escrow_config_returns_200_when_configured() {
 
     assert_eq!(
         json["escrow_program_id"],
-        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy"
+        "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
     );
     assert_eq!(json["network"], SOLANA_NETWORK);
     assert_eq!(json["usdc_mint"], USDC_MINT);
@@ -3317,7 +3317,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
     config.solana.escrow_program_id =
-        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+        Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
 
     let test_keypair = {
         use ed25519_dalek::SigningKey;
@@ -3334,7 +3334,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
     let escrow_claimer = x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
         test_fee_payer_pool.clone(),
-        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
         "11111111111111111111111111111111",
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
         None,
@@ -3446,7 +3446,7 @@ async fn test_escrow_config_returns_correct_program_id() {
 
     // Program ID must match exactly what was configured
     assert_eq!(
-        json["escrow_program_id"], "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        json["escrow_program_id"], "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
         "escrow_program_id must match configured value"
     );
 
@@ -3487,7 +3487,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
     config.solana.escrow_program_id =
-        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+        Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
 
     let test_keypair = {
         use ed25519_dalek::SigningKey;
@@ -3504,7 +3504,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
     let escrow_claimer = x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
         test_fee_payer_pool.clone(),
-        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
         "11111111111111111111111111111111",
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
         None,
@@ -3621,7 +3621,7 @@ fn mismatched_escrow_scheme_direct_payload_header(resource_url: &str) -> String 
             asset: USDC_MINT.to_string(),
             pay_to: TEST_RECIPIENT_WALLET.to_string(),
             max_timeout_seconds: 300,
-            escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+            escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
         },
         payload: PayloadData::Direct(SolanaPayload {
             // <-- but contains direct transfer data
@@ -3740,7 +3740,7 @@ async fn test_escrow_health_status_down_without_claimer() {
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
     config.solana.escrow_program_id =
-        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+        Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
 
     let state = Arc::new(AppState {
         config,

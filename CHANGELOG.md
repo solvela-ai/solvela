@@ -2,6 +2,13 @@
 
 All notable changes to RustyClawRouter, in reverse chronological order.
 
+## 2026-04-08 — Escrow Program Deployed to Mainnet
+
+- **Escrow program deployed to Solana mainnet**: Program ID `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`, upgrade authority retained by deployer. Built with Anchor 0.31.1, deployed via `solana program deploy`.
+- **Gateway advertises escrow scheme**: 402 responses now include both "exact" and "escrow" payment schemes. Escrow program ID served from Fly.io secret.
+- **Program ID updated across entire codebase**: All source files, tests, docs, and config updated from placeholder to mainnet program ID. All 684 workspace tests + 21 escrow tests pass.
+- **Regulatory docs updated**: `regulatory-position.md` updated to reflect mainnet deployment with upgrade authority retained.
+
 ## 2026-04-07 — First Real Payment + Production Fixes + Telsi Migration Complete
 
 - **Telsi.ai migration to RCR complete**: Telsi has successfully migrated from BlockRun to RustyClawRouter. Second production product now live on the gateway, processing real payments.
