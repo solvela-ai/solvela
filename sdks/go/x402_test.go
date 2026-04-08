@@ -7,6 +7,7 @@ import (
 )
 
 func TestCreatePaymentHeaderEscrowScheme(t *testing.T) {
+	// Escrow signing is not implemented in the Go SDK — expect an error.
 	info := &PaymentRequired{
 		X402Version: 2,
 		Accepts: []PaymentAccept{{
@@ -21,52 +22,36 @@ func TestCreatePaymentHeaderEscrowScheme(t *testing.T) {
 		CostBreakdown: CostBreakdown{Total: "0.001"},
 	}
 
-	header, err := createPaymentHeader(info, "/v1/chat/completions")
-	if err != nil {
-		t.Fatalf("createPaymentHeader: %v", err)
+	_, err := createPaymentHeader(info, "/v1/chat/completions")
+	if err == nil {
+		t.Fatal("createPaymentHeader: expected error for escrow scheme, got nil")
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(header)
-	if err != nil {
-		t.Fatalf("base64 decode: %v", err)
+	payErr, ok := err.(*PaymentError)
+	if !ok {
+		t.Fatalf("expected *PaymentError, got %T: %v", err, err)
 	}
 
-	var payload escrowPaymentPayload
-	if err := json.Unmarshal(decoded, &payload); err != nil {
-		t.Fatalf("json unmarshal: %v", err)
+	const wantSubstr = "escrow deposit signing is not yet implemented in the Go SDK"
+	if payErr.Message == "" || len(payErr.Message) < len(wantSubstr) {
+		t.Errorf("error message too short: %q", payErr.Message)
 	}
+	if !containsSubstr(payErr.Message, wantSubstr) {
+		t.Errorf("error message = %q, want it to contain %q", payErr.Message, wantSubstr)
+	}
+}
 
-	// Verify x402_version
-	if payload.X402Version != 2 {
-		t.Errorf("x402_version = %d, want 2", payload.X402Version)
-	}
-
-	// Verify resource
-	if payload.Resource.URL != "/v1/chat/completions" {
-		t.Errorf("resource URL = %q, want /v1/chat/completions", payload.Resource.URL)
-	}
-	if payload.Resource.Method != "POST" {
-		t.Errorf("resource method = %q, want POST", payload.Resource.Method)
-	}
-
-	// Verify accepted
-	if payload.Accepted.Scheme != "escrow" {
-		t.Errorf("accepted scheme = %q, want escrow", payload.Accepted.Scheme)
-	}
-	if payload.Accepted.EscrowProgramID != "EscProgram123" {
-		t.Errorf("accepted escrow_program_id = %q, want EscProgram123", payload.Accepted.EscrowProgramID)
-	}
-
-	// Verify payload (escrow stub values)
-	if payload.Payload.DepositTx != StubEscrowDepositTx {
-		t.Errorf("deposit_tx = %q, want %q", payload.Payload.DepositTx, StubEscrowDepositTx)
-	}
-	if payload.Payload.ServiceID != StubServiceID {
-		t.Errorf("service_id = %q, want %q", payload.Payload.ServiceID, StubServiceID)
-	}
-	if payload.Payload.AgentPubkey != StubAgentPubkey {
-		t.Errorf("agent_pubkey = %q, want %q", payload.Payload.AgentPubkey, StubAgentPubkey)
-	}
+// containsSubstr is a simple substring check to avoid importing strings in test.
+func containsSubstr(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
+		func() bool {
+			for i := 0; i <= len(s)-len(sub); i++ {
+				if s[i:i+len(sub)] == sub {
+					return true
+				}
+			}
+			return false
+		}())
 }
 
 func TestPaymentAcceptEscrowProgramID(t *testing.T) {
@@ -98,7 +83,8 @@ func TestPaymentAcceptEscrowProgramID(t *testing.T) {
 }
 
 func TestCreatePaymentHeaderPrefersEscrow(t *testing.T) {
-	// Test that escrow scheme is preferred when available
+	// Escrow is preferred when available, but the Go SDK returns an error for
+	// escrow scheme since deposit signing is not implemented.
 	info := &PaymentRequired{
 		X402Version: 2,
 		Accepts: []PaymentAccept{
@@ -123,27 +109,17 @@ func TestCreatePaymentHeaderPrefersEscrow(t *testing.T) {
 		CostBreakdown: CostBreakdown{Total: "0.001"},
 	}
 
-	header, err := createPaymentHeader(info, "/v1/chat/completions")
-	if err != nil {
-		t.Fatalf("createPaymentHeader: %v", err)
+	_, err := createPaymentHeader(info, "/v1/chat/completions")
+	if err == nil {
+		t.Fatal("createPaymentHeader: expected error when escrow scheme selected, got nil")
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(header)
-	if err != nil {
-		t.Fatalf("base64 decode: %v", err)
+	payErr, ok := err.(*PaymentError)
+	if !ok {
+		t.Fatalf("expected *PaymentError, got %T: %v", err, err)
 	}
-
-	// Should be escrow payload, not exact
-	var payload escrowPaymentPayload
-	if err := json.Unmarshal(decoded, &payload); err != nil {
-		t.Fatalf("json unmarshal as escrow: %v", err)
-	}
-
-	if payload.Accepted.Scheme != "escrow" {
-		t.Errorf("selected scheme = %q, want escrow (should prefer escrow)", payload.Accepted.Scheme)
-	}
-	if payload.Accepted.EscrowProgramID != "EscProgram456" {
-		t.Errorf("selected escrow_program_id = %q, want EscProgram456", payload.Accepted.EscrowProgramID)
+	if !containsSubstr(payErr.Message, "escrow deposit signing is not yet implemented") {
+		t.Errorf("unexpected error message: %q", payErr.Message)
 	}
 }
 

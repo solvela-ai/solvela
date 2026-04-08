@@ -10,6 +10,30 @@ use super::pda::{
 };
 
 // ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur while building an escrow deposit transaction.
+#[derive(Debug, thiserror::Error)]
+pub enum DepositError {
+    /// The deposit amount was zero.
+    #[error("deposit amount must not be zero")]
+    ZeroAmount,
+    /// The agent keypair was invalid (bad base58, wrong length, or pubkey mismatch).
+    #[error("invalid agent keypair: {0}")]
+    InvalidKeypair(String),
+    /// An address field failed to decode from base58.
+    #[error("invalid address for {field}: {reason}")]
+    InvalidAddress {
+        field: &'static str,
+        reason: String,
+    },
+    /// A PDA or ATA derivation failed.
+    #[error("failed to derive {0}")]
+    DerivationFailed(&'static str),
+}
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -57,71 +81,90 @@ impl std::fmt::Debug for DepositParams {
 ///
 /// # Errors
 ///
-/// Returns `Err(String)` if:
+/// Returns [`DepositError`] if:
 /// - `amount` is zero
 /// - Any address fails to decode from base58
 /// - The keypair is invalid or the derived pubkey does not match the stored one
 /// - PDA or ATA derivation fails
-pub fn build_deposit_tx(params: &DepositParams) -> Result<String, String> {
+pub fn build_deposit_tx(params: &DepositParams) -> Result<String, DepositError> {
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
 
     // Step 1: Validate amount
     if params.amount == 0 {
-        return Err("deposit amount must be non-zero".to_string());
+        return Err(DepositError::ZeroAmount);
     }
 
     // Step 2: Decode the 64-byte keypair and validate derived pubkey
     let keypair_bytes = bs58::decode(&params.agent_keypair_b58)
         .into_vec()
-        .map_err(|e| format!("invalid base58 keypair: {e}"))?;
+        .map_err(|e| DepositError::InvalidKeypair(format!("invalid base58: {e}")))?;
     if keypair_bytes.len() != 64 {
-        return Err(format!(
-            "keypair must be 64 bytes, got {}",
+        return Err(DepositError::InvalidKeypair(format!(
+            "must be 64 bytes, got {}",
             keypair_bytes.len()
-        ));
+        )));
     }
     let mut keypair_arr = [0u8; 64];
     keypair_arr.copy_from_slice(&keypair_bytes);
 
     let signing_key = SigningKey::from_keypair_bytes(&keypair_arr)
-        .map_err(|e| format!("invalid keypair: {e}"))?;
+        .map_err(|e| DepositError::InvalidKeypair(format!("ed25519 error: {e}")))?;
     let agent_pubkey = signing_key.verifying_key().to_bytes();
 
     // Validate that the stored pubkey in bytes 32..64 matches the derived one
     let stored_pubkey = &keypair_bytes[32..64];
     if stored_pubkey != agent_pubkey {
-        return Err(
-            "keypair pubkey mismatch: derived pubkey does not match stored pubkey".to_string(),
-        );
+        return Err(DepositError::InvalidKeypair(
+            "derived pubkey does not match stored pubkey".to_string(),
+        ));
     }
 
     // Step 3: Parse all addresses
-    let provider_pubkey = decode_bs58_pubkey(&params.provider_wallet_b58)
-        .map_err(|e| format!("provider_wallet: {e}"))?;
+    let provider_pubkey =
+        decode_bs58_pubkey(&params.provider_wallet_b58).map_err(|e| DepositError::InvalidAddress {
+            field: "provider_wallet",
+            reason: e.to_string(),
+        })?;
     let usdc_mint =
-        decode_bs58_pubkey(&params.usdc_mint_b58).map_err(|e| format!("usdc_mint: {e}"))?;
-    let escrow_program_id = decode_bs58_pubkey(&params.escrow_program_id_b58)
-        .map_err(|e| format!("escrow_program_id: {e}"))?;
+        decode_bs58_pubkey(&params.usdc_mint_b58).map_err(|e| DepositError::InvalidAddress {
+            field: "usdc_mint",
+            reason: e.to_string(),
+        })?;
+    let escrow_program_id = decode_bs58_pubkey(&params.escrow_program_id_b58).map_err(|e| {
+        DepositError::InvalidAddress {
+            field: "escrow_program_id",
+            reason: e.to_string(),
+        }
+    })?;
     let token_program =
-        decode_bs58_pubkey(TOKEN_PROGRAM_ID).map_err(|e| format!("token_program: {e}"))?;
+        decode_bs58_pubkey(TOKEN_PROGRAM_ID).map_err(|e| DepositError::InvalidAddress {
+            field: "token_program",
+            reason: e.to_string(),
+        })?;
     let ata_program =
-        decode_bs58_pubkey(ATA_PROGRAM_ID).map_err(|e| format!("ata_program: {e}"))?;
+        decode_bs58_pubkey(ATA_PROGRAM_ID).map_err(|e| DepositError::InvalidAddress {
+            field: "ata_program",
+            reason: e.to_string(),
+        })?;
     let system_program =
-        decode_bs58_pubkey(SYSTEM_PROGRAM_ID).map_err(|e| format!("system_program: {e}"))?;
+        decode_bs58_pubkey(SYSTEM_PROGRAM_ID).map_err(|e| DepositError::InvalidAddress {
+            field: "system_program",
+            reason: e.to_string(),
+        })?;
 
     // Step 4: Derive escrow PDA
     let (escrow_pda, _bump) = find_program_address(
         &[b"escrow", &agent_pubkey, &params.service_id],
         &escrow_program_id,
     )
-    .ok_or_else(|| "failed to derive escrow PDA".to_string())?;
+    .ok_or(DepositError::DerivationFailed("escrow PDA"))?;
 
     // Step 5: Derive agent ATA and vault ATA
     let agent_ata = derive_ata_address(&agent_pubkey, &usdc_mint)
-        .ok_or_else(|| "failed to derive agent ATA".to_string())?;
+        .ok_or(DepositError::DerivationFailed("agent ATA"))?;
     let vault_ata = derive_ata_address(&escrow_pda, &usdc_mint)
-        .ok_or_else(|| "failed to derive vault ATA".to_string())?;
+        .ok_or(DepositError::DerivationFailed("vault ATA"))?;
 
     // Step 6: Build account keys sorted by writability (Solana legacy message requirement):
     //   writable signers first, then writable non-signers, then readonly non-signers.
@@ -340,7 +383,11 @@ mod tests {
         assert!(result.is_err(), "zero amount should be rejected");
         let err = result.unwrap_err();
         assert!(
-            err.to_lowercase().contains("zero") || err.contains("non-zero"),
+            matches!(err, DepositError::ZeroAmount),
+            "expected ZeroAmount variant, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("zero"),
             "error message should mention zero: {err}"
         );
     }

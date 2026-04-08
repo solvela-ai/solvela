@@ -59,23 +59,13 @@ func createPaymentHeader(info *PaymentRequired, resourceURL string) (string, err
 		selectedAccept = &info.Accepts[0]
 	}
 
-	// Build appropriate payload based on scheme
+	// Escrow signing is not implemented in the Go SDK — return a clear error
+	// rather than silently producing a stub payload that will be rejected.
 	if selectedAccept.Scheme == "escrow" && selectedAccept.EscrowProgramID != "" {
-		payload := escrowPaymentPayload{
-			X402Version: X402Version,
-			Resource:    paymentResource{URL: resourceURL, Method: "POST"},
-			Accepted:    *selectedAccept,
-			Payload: escrowPayload{
-				DepositTx:   StubEscrowDepositTx,
-				ServiceID:   StubServiceID,
-				AgentPubkey: StubAgentPubkey,
-			},
+		return "", &PaymentError{
+			Message: "escrow deposit signing is not yet implemented in the Go SDK; " +
+				"use the Python, TypeScript, or Rust CLI for escrow payments",
 		}
-		jsonBytes, err := json.Marshal(payload)
-		if err != nil {
-			return "", err
-		}
-		return base64.StdEncoding.EncodeToString(jsonBytes), nil
 	}
 
 	// Exact scheme (default)

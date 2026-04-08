@@ -252,7 +252,7 @@ def build_escrow_deposit(
 
     except SigningError:
         raise
-    except Exception as e:
+    except (ValueError, TypeError, AttributeError) as e:
         raise SigningError(f"Failed to build escrow deposit transaction: {e}") from e
 
 
