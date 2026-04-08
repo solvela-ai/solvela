@@ -1,7 +1,7 @@
 # HANDOFF.md — RustyClawRouter Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-07 (from actual repo inspection, not docs)
+> **Last verified:** 2026-04-08 (from actual repo inspection, not docs)
 
 ---
 
@@ -58,7 +58,7 @@ Next.js 16 + Tailwind + Recharts. 5 pages: Overview, Usage, Models, Wallet, Sett
 
 ## Test Counts (run `cargo test` to verify — these go stale)
 
-Last verified 2026-04-06:
+Last verified 2026-04-08:
 
 ```
 gateway unit:        401
@@ -129,7 +129,7 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 - **Safe (no licensing)**: AP2 discovery endpoints, x402 crypto settlement (wallet-to-wallet), mandate verification as metadata
 - **DO NOT build (triggers MSB + 49 state licenses)**: Card payment processing, fiat ↔ crypto conversion, custodial fund holding
-- **Gray area**: Anchor escrow PDAs (trustless, PDA-controlled) — FinCEN guidance on custodial wallets is evolving. Attorney consultation scheduled 2026-04-06.
+- **Gray area**: Anchor escrow PDAs (trustless, PDA-controlled) — FinCEN guidance on custodial wallets is evolving. Escrow deployed to mainnet 2026-04-08 with upgrade authority retained.
 - **Watch**: California DFAL takes effect July 2026.
 
 ---
