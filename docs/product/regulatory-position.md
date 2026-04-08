@@ -120,10 +120,10 @@ RCR charges a **5% platform fee** on every request. This fee is included in the 
 **Question**: Could the PDA escrow account be classified as a "custodial wallet" by regulators?
 
 **Relevant facts**:
-- The escrow program has been **designed and tested locally** (comprehensive test suite with 20 tests passing) but **has not been deployed** to Solana mainnet or devnet. The program ID in the codebase is a locally-generated keypair for testing only.
-- When deployed, the PDA will be controlled by the on-chain program logic, not by the gateway operator. No one holds a private key to the PDA.
+- The escrow program has been **deployed to Solana mainnet** (program ID: `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`, tx: `XGtZf6KHWnis6bY8T8NCULsngdC2kqy3GkuppVriyFFqJ8ud2NiBkAgcBRsYjvUMmMZcLUmYBw9RhhUnNNRYnZx`) with comprehensive test suite (21 tests passing).
+- The PDA is controlled by the on-chain program logic, not by the gateway operator. No one holds a private key to the PDA.
 - The program logic enforces: claim amounts cannot exceed deposited amount, claims must occur before expiry slot, agent can unilaterally reclaim after timeout.
-- **Deployment decision pending attorney guidance**: Upon deployment, upgrade authority can be either **retained** (allows bug fixes, but regulators could argue de facto control) or **revoked** (program becomes immutable, strongest "no human control" argument). This decision should be made with legal counsel.
+- **Upgrade authority is retained** by the deployer (`B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A`). This allows bug fixes but regulators could argue de facto control. Authority can be revoked later (`solana program set-upgrade-authority --final`) to make the program immutable.
 - FinCEN guidance on smart-contract-controlled wallets is evolving and has not definitively addressed this pattern.
 
 ### California Digital Financial Assets Law (DFAL)

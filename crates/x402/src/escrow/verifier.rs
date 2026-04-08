@@ -354,7 +354,7 @@ mod tests {
             rpc_url: "https://api.devnet.solana.com".to_string(),
             recipient_wallet: "11111111111111111111111111111111".to_string(),
             usdc_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
-            escrow_program_id: "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string(),
+            escrow_program_id: "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -370,7 +370,7 @@ mod tests {
             rpc_url: "https://api.devnet.solana.com".to_string(),
             recipient_wallet: "11111111111111111111111111111111".to_string(),
             usdc_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
-            escrow_program_id: "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string(),
+            escrow_program_id: "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -390,7 +390,7 @@ mod tests {
                 asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
                 pay_to: "11111111111111111111111111111111".to_string(),
                 max_timeout_seconds: 300,
-                escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+                escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
             },
             payload: PayloadData::Direct(SolanaPayload {
                 transaction: "dGVzdA==".to_string(),
