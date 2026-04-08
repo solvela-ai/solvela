@@ -397,4 +397,19 @@ mod tests {
         assert_eq!(&data[1..9], &1_000_000u64.to_le_bytes());
         assert_eq!(data[9], 6); // decimals
     }
+
+    #[test]
+    fn test_x402_escrow_pda_exports_accessible() {
+        // Verify that x402 escrow PDA helpers are publicly accessible
+        let program_id = x402::escrow::pda::decode_bs58_pubkey(
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+        ).unwrap();
+        let agent = [1u8; 32];
+        let service_id = [2u8; 32];
+        let result = x402::escrow::pda::find_program_address(
+            &[b"escrow", &agent, &service_id],
+            &program_id,
+        );
+        assert!(result.is_some());
+    }
 }
