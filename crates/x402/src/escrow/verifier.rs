@@ -28,12 +28,14 @@ fn extract_deposit_amount(
     message: &ParsedMessage,
     escrow_program_id: &[u8; 32],
 ) -> Option<u64> {
+    let expected_disc = anchor_discriminator("deposit");
     let deposit_ix = message.instructions.iter().find(|ix| {
-        message
+        let is_escrow = message
             .account_keys
             .get(ix.program_id_index as usize)
             .map(|key| key.0 == *escrow_program_id)
-            .unwrap_or(false)
+            .unwrap_or(false);
+        is_escrow && ix.data.len() >= 8 && ix.data[..8] == expected_disc
     })?;
     if deposit_ix.data.len() < 16 {
         return None;
@@ -352,11 +354,12 @@ impl PaymentVerifier for EscrowVerifier {
         // Re-extract the verified deposit amount from the transaction by
         // parsing the Anchor `deposit` instruction (not the SPL transfer, which
         // only exists as a CPI inside the on-chain program execution).
-        let program_id_bytes = decode_bs58_pubkey(&self.escrow_program_id).ok();
-        let verified_amount = tx.parse_message().ok().and_then(|msg| {
-            let program_id = program_id_bytes?;
-            extract_deposit_amount(&msg, &program_id)
-        });
+        let program_id_bytes = decode_bs58_pubkey(&self.escrow_program_id)
+            .map_err(|e| Error::InvalidTransaction(format!("escrow_program_id: {e}")))?;
+        let verified_amount = tx
+            .parse_message()
+            .ok()
+            .and_then(|msg| extract_deposit_amount(&msg, &program_id_bytes));
 
         // Base58-encode the first signature as the tx identifier
         let sig_b58 = bs58::encode(&tx.signatures[0].0).into_string();
@@ -591,5 +594,182 @@ mod tests {
         let vr = result.unwrap();
         assert!(vr.valid);
         assert_eq!(vr.verified_amount, Some(5000));
+    }
+
+    /// Helper: build a base verifier and the agent keypair used across negative tests.
+    fn make_verifier() -> EscrowVerifier {
+        EscrowVerifier {
+            rpc_url: "https://api.mainnet-beta.solana.com".to_string(),
+            recipient_wallet: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            usdc_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            escrow_program_id: "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
+            http_client: reqwest::Client::new(),
+        }
+    }
+
+    /// Build a deposit tx and return (deposit_tx_b64, agent_pubkey_b58) for the given parameters.
+    fn build_test_tx(
+        service_id: [u8; 32],
+        amount: u64,
+        escrow_program_id_b58: &str,
+    ) -> (String, String) {
+        use crate::escrow::deposit::{build_deposit_tx, DepositParams};
+        let seed = [42u8; 32];
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let verifying_key = signing_key.verifying_key();
+        let mut full = [0u8; 64];
+        full[..32].copy_from_slice(&seed);
+        full[32..].copy_from_slice(verifying_key.as_bytes());
+        let agent_keypair_b58 = bs58::encode(&full).into_string();
+        let agent_pubkey_b58 = bs58::encode(verifying_key.as_bytes()).into_string();
+
+        let params = DepositParams {
+            agent_keypair_b58,
+            provider_wallet_b58: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            usdc_mint_b58: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            escrow_program_id_b58: escrow_program_id_b58.to_string(),
+            amount,
+            service_id,
+            expiry_slot: 999_999_999,
+            recent_blockhash: [0u8; 32],
+        };
+        let deposit_tx_b64 = build_deposit_tx(&params).expect("tx build");
+        (deposit_tx_b64, agent_pubkey_b58)
+    }
+
+    #[tokio::test]
+    async fn test_escrow_verifier_rejects_mismatched_service_id() {
+        use base64::Engine;
+
+        // Tx built with service_id=[7;32], but payload claims service_id=[8;32]
+        let tx_service_id = [7u8; 32];
+        let payload_service_id = [8u8; 32];
+        let (deposit_tx_b64, agent_pubkey_b58) =
+            build_test_tx(tx_service_id, 5000, "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
+
+        let service_id_b64 =
+            base64::engine::general_purpose::STANDARD.encode(payload_service_id);
+
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "escrow".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "5000".to_string(),
+                asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: Some(
+                    "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
+                ),
+            },
+            payload: PayloadData::Escrow(EscrowPayload {
+                deposit_tx: deposit_tx_b64,
+                service_id: service_id_b64,
+                agent_pubkey: agent_pubkey_b58,
+            }),
+        };
+
+        let result = make_verifier().verify_payment(&payload).await;
+        assert!(result.is_err(), "expected error for mismatched service_id");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("service_id"),
+            "error should mention service_id, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_escrow_verifier_rejects_insufficient_amount() {
+        use base64::Engine;
+
+        // Tx encodes amount=1000, but gateway requires 5000
+        let service_id = [7u8; 32];
+        let (deposit_tx_b64, agent_pubkey_b58) =
+            build_test_tx(service_id, 1000, "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
+        let service_id_b64 = base64::engine::general_purpose::STANDARD.encode(service_id);
+
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "escrow".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "5000".to_string(), // gateway requires 5000
+                asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: Some(
+                    "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
+                ),
+            },
+            payload: PayloadData::Escrow(EscrowPayload {
+                deposit_tx: deposit_tx_b64,
+                service_id: service_id_b64,
+                agent_pubkey: agent_pubkey_b58,
+            }),
+        };
+
+        let result = make_verifier().verify_payment(&payload).await;
+        assert!(result.is_err(), "expected InsufficientPayment error");
+        match result.unwrap_err() {
+            Error::InsufficientPayment { expected, actual } => {
+                assert_eq!(expected, 5000);
+                assert_eq!(actual, 1000);
+            }
+            other => panic!("expected InsufficientPayment, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_escrow_verifier_rejects_wrong_escrow_program() {
+        use base64::Engine;
+
+        // Tx built against a different escrow program than the verifier is configured with.
+        // Use a valid-length base58 pubkey that is distinct from the configured one.
+        let wrong_program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+        let service_id = [7u8; 32];
+        let (deposit_tx_b64, agent_pubkey_b58) = build_test_tx(service_id, 5000, wrong_program);
+        let service_id_b64 = base64::engine::general_purpose::STANDARD.encode(service_id);
+
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "escrow".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "5000".to_string(),
+                asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: Some(
+                    "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
+                ),
+            },
+            payload: PayloadData::Escrow(EscrowPayload {
+                deposit_tx: deposit_tx_b64,
+                service_id: service_id_b64,
+                agent_pubkey: agent_pubkey_b58,
+            }),
+        };
+
+        // Verifier uses the canonical escrow program; tx targets wrong_program → no instruction found
+        let result = make_verifier().verify_payment(&payload).await;
+        assert!(result.is_err(), "expected error for wrong escrow program");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("no escrow program instruction found"),
+            "error should mention missing instruction, got: {err}"
+        );
     }
 }
