@@ -51,6 +51,7 @@ export interface PaymentAccept {
   asset: string;
   pay_to: string;
   max_timeout_seconds: number;
+  escrow_program_id?: string;
 }
 
 export interface PaymentRequired {

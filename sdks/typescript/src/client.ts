@@ -82,7 +82,8 @@ export class LLMClient {
         );
       }
 
-      const paymentHeader = await createPaymentHeader(paymentInfo, url);
+      const requestBodyStr = JSON.stringify(body);
+      const paymentHeader = await createPaymentHeader(paymentInfo, url, undefined, requestBodyStr);
       resp = await this.fetchWithTimeout(url, {
         method: 'POST',
         headers: {
