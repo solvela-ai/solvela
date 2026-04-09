@@ -1,5 +1,7 @@
 //! EscrowVerifier — verifies on-chain escrow deposits and settles payments.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use tracing::info;
 
@@ -366,169 +368,68 @@ impl PaymentVerifier for EscrowVerifier {
 
         // Submit the signed deposit tx to Solana RPC.
         // The tx is already signed by the agent; we're just broadcasting it.
-        // If the tx is already on-chain (double-submission), sendTransaction returns
-        // the same signature — idempotent.
-        let polling_sig = match self.send_transaction(&escrow_payload.deposit_tx).await {
-            Ok(sig) => {
-                info!(signature = %sig, "escrow deposit submitted to Solana RPC");
-                sig
+        // If the tx is already on-chain (double-submission), we treat the
+        // known "already processed" error variants as idempotent success.
+        match crate::solana_rpc::send_transaction(
+            &self.http_client,
+            &self.rpc_url,
+            &escrow_payload.deposit_tx,
+        )
+        .await
+        {
+            Ok(rpc_sig) => {
+                if rpc_sig != sig_b58 {
+                    tracing::warn!(
+                        local = %sig_b58,
+                        rpc = %rpc_sig,
+                        "RPC returned non-matching signature"
+                    );
+                }
+                info!(signature = %sig_b58, "escrow deposit submitted");
+            }
+            Err(e) if crate::solana_rpc::is_already_processed_error(&e) => {
+                info!(
+                    signature = %sig_b58,
+                    "escrow deposit already on-chain, proceeding to confirmation"
+                );
             }
             Err(e) => {
-                // Check if the error is "already processed" (tx already on-chain) — that's OK
-                let err_str = e.to_string();
-                if err_str.contains("already been processed") || err_str.contains("already processed") {
-                    info!("escrow deposit already on-chain, proceeding to confirmation check");
-                    sig_b58.clone()
-                } else {
-                    tracing::warn!(error = %err_str, "escrow deposit submission failed");
-                    return Ok(SettlementResult {
-                        success: false,
-                        tx_signature: Some(sig_b58),
-                        network: SOLANA_NETWORK.to_string(),
-                        error: Some(format!("submission failed: {err_str}")),
-                        verified_amount,
-                    });
-                }
-            }
-        };
-
-        // Poll for confirmation (up to ~10 seconds, 20 attempts at 500ms intervals)
-        for attempt in 0..20u32 {
-            if attempt > 0 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            }
-
-            let body = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getSignatureStatuses",
-                "params": [[polling_sig]],
-            });
-
-            let response = self
-                .http_client
-                .post(&self.rpc_url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| Error::Rpc(e.to_string()))?;
-
-            let result: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|e| Error::Rpc(e.to_string()))?;
-
-            if let Some(error) = result.get("error") {
-                return Err(Error::Rpc(error.to_string()));
-            }
-
-            if let Some(value) = result.get("result").and_then(|r| r.get("value")) {
-                if let Some(status) = value.as_array().and_then(|arr| arr.first()) {
-                    if !status.is_null() {
-                        if let Some(err) = status.get("err") {
-                            if !err.is_null() {
-                                return Err(Error::EscrowNotConfirmed(format!(
-                                    "deposit transaction failed on-chain: {err}"
-                                )));
-                            }
-                        }
-                        if let Some(confirmation) =
-                            status.get("confirmationStatus").and_then(|s| s.as_str())
-                        {
-                            match confirmation {
-                                "confirmed" | "finalized" => {
-                                    info!(
-                                        signature = %polling_sig,
-                                        status = confirmation,
-                                        attempt,
-                                        "escrow deposit confirmed"
-                                    );
-                                    return Ok(SettlementResult {
-                                        success: true,
-                                        tx_signature: Some(polling_sig),
-                                        network: SOLANA_NETWORK.to_string(),
-                                        error: None,
-                                        verified_amount,
-                                    });
-                                }
-                                "processed" => {
-                                    info!(
-                                        signature = %polling_sig,
-                                        status = confirmation,
-                                        attempt,
-                                        "escrow deposit processed (optimistic settle)"
-                                    );
-                                    return Ok(SettlementResult {
-                                        success: true,
-                                        tx_signature: Some(polling_sig),
-                                        network: SOLANA_NETWORK.to_string(),
-                                        error: None,
-                                        verified_amount,
-                                    });
-                                }
-                                _ => {
-                                    // Unknown confirmation status — continue polling
-                                }
-                            }
-                        }
-                    }
-                }
+                tracing::warn!(error = %e, "escrow deposit submission failed");
+                return Ok(SettlementResult {
+                    success: false,
+                    tx_signature: Some(sig_b58),
+                    network: SOLANA_NETWORK.to_string(),
+                    error: Some(format!("submission failed: {e}")),
+                    verified_amount,
+                });
             }
         }
 
-        // Exceeded poll budget — deposit not confirmed within ~10 seconds
-        Ok(SettlementResult {
-            success: false,
-            tx_signature: Some(sig_b58),
-            network: SOLANA_NETWORK.to_string(),
-            error: Some("escrow deposit not confirmed within 10 seconds".to_string()),
-            verified_amount,
-        })
-    }
-}
-
-impl EscrowVerifier {
-    /// Broadcast a signed transaction to the Solana cluster.
-    async fn send_transaction(&self, base64_tx: &str) -> Result<String, Error> {
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "sendTransaction",
-            "params": [
-                base64_tx,
-                {
-                    "encoding": "base64",
-                    "skipPreflight": false,
-                    "preflightCommitment": "confirmed",
-                    "maxRetries": 3,
-                }
-            ],
-        });
-
-        let response = self
-            .http_client
-            .post(&self.rpc_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| Error::Rpc(e.to_string()))?;
-
-        let result: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| Error::Rpc(e.to_string()))?;
-
-        if let Some(error) = result.get("error") {
-            return Err(Error::Rpc(error.to_string()));
+        // Poll for confirmation using shared helper (30s budget, resilient to
+        // transient RPC errors, handles processed/confirmed/finalized uniformly).
+        match crate::solana_rpc::poll_for_confirmation(
+            &self.http_client,
+            &self.rpc_url,
+            &sig_b58,
+            Duration::from_secs(30),
+        )
+        .await
+        {
+            Ok(()) => Ok(SettlementResult {
+                success: true,
+                tx_signature: Some(sig_b58),
+                network: SOLANA_NETWORK.to_string(),
+                error: None,
+                verified_amount,
+            }),
+            Err(e) => Ok(SettlementResult {
+                success: false,
+                tx_signature: Some(sig_b58),
+                network: SOLANA_NETWORK.to_string(),
+                error: Some(e.to_string()),
+                verified_amount,
+            }),
         }
-
-        result
-            .get("result")
-            .and_then(|r| r.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| {
-                Error::Rpc("sendTransaction did not return a signature".to_string())
-            })
     }
 }
 
