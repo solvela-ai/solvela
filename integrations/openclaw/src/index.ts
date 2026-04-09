@@ -37,6 +37,31 @@ export { ConfigError } from './config.js';
 export type { ChatMessage, ChatRequest, ChatResponse } from './router.js';
 export { PaymentError, RouterError } from './router.js';
 
+// ── Message normalization ─────────────────────────────────────────────────────
+
+/**
+ * Normalize OpenAI-style content arrays to plain strings.
+ *
+ * OpenClaw (and some OpenAI-compatible clients) may send messages where
+ * `content` is an array of content parts rather than a plain string:
+ *   { role: "user", content: [{ type: "text", text: "Hello" }] }
+ *
+ * RustyClawRouter expects `content` to be a string. This function extracts
+ * all text parts and joins them, discarding non-text parts (e.g. image_url).
+ */
+function normalizeMessages(messages: unknown[]): unknown[] {
+  return messages.map((msg) => {
+    const m = msg as Record<string, unknown>;
+    if (Array.isArray(m.content)) {
+      const textParts = (m.content as Array<{ type: string; text?: string }>)
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text ?? '');
+      return { ...m, content: textParts.join('\n') };
+    }
+    return msg;
+  });
+}
+
 // ── OpenClaw plugin interface ─────────────────────────────────────────────────
 
 /**
@@ -78,11 +103,13 @@ export function createPlugin(overrides: Partial<RcrConfig> = {}): OpenClawPlugin
     description: 'RustyClawRouter — Solana-native LLM routing with x402 USDC payments',
 
     async intercept(request: ChatRequest): Promise<ChatResponse | null> {
-      return routeRequest(request, config);
+      const normalized = { ...request, messages: normalizeMessages(request.messages) as ChatMessage[] };
+      return routeRequest(normalized, config);
     },
 
     async interceptStream(request: ChatRequest): Promise<Response | null> {
-      return routeStreamingRequest(request, config);
+      const normalized = { ...request, messages: normalizeMessages(request.messages) as ChatMessage[] };
+      return routeStreamingRequest(normalized, config);
     },
   };
 }
