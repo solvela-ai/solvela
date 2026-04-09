@@ -4,10 +4,10 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-pub(crate) const ATA_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bxs";
-pub(crate) const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-pub(crate) const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
-pub(crate) const SYSVAR_RENT_ID: &str = "SysvarRent111111111111111111111111111111111";
+pub const ATA_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bxs";
+pub const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+pub const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
+pub const SYSVAR_RENT_ID: &str = "SysvarRent111111111111111111111111111111111";
 
 // ---------------------------------------------------------------------------
 // PDA derivation helpers
@@ -16,7 +16,7 @@ pub(crate) const SYSVAR_RENT_ID: &str = "SysvarRent11111111111111111111111111111
 /// Derive a Program Derived Address using SHA-256 (same as Solana runtime).
 ///
 /// Returns `(pubkey_bytes, bump)` or `None` if no valid off-curve point is found.
-pub(crate) fn find_program_address(
+pub fn find_program_address(
     seeds: &[&[u8]],
     program_id: &[u8; 32],
 ) -> Option<([u8; 32], u8)> {
@@ -44,13 +44,13 @@ pub(crate) fn find_program_address(
 }
 
 /// Check if 32 bytes represent a valid compressed point on the ed25519 curve.
-pub(crate) fn is_on_ed25519_curve(bytes: &[u8; 32]) -> bool {
+pub fn is_on_ed25519_curve(bytes: &[u8; 32]) -> bool {
     use curve25519_dalek::edwards::CompressedEdwardsY;
     CompressedEdwardsY(*bytes).decompress().is_some()
 }
 
 /// Derive the Associated Token Account address for a given wallet and mint.
-pub(crate) fn derive_ata_address(wallet: &[u8; 32], mint: &[u8; 32]) -> Option<[u8; 32]> {
+pub fn derive_ata_address(wallet: &[u8; 32], mint: &[u8; 32]) -> Option<[u8; 32]> {
     let token_program = decode_bs58_pubkey(TOKEN_PROGRAM_ID).ok()?;
     let ata_program = decode_bs58_pubkey(ATA_PROGRAM_ID).ok()?;
 
@@ -59,7 +59,7 @@ pub(crate) fn derive_ata_address(wallet: &[u8; 32], mint: &[u8; 32]) -> Option<[
 }
 
 /// Decode a base58-encoded pubkey into 32 bytes.
-pub(crate) fn decode_bs58_pubkey(s: &str) -> Result<[u8; 32], String> {
+pub fn decode_bs58_pubkey(s: &str) -> Result<[u8; 32], String> {
     let bytes = bs58::decode(s)
         .into_vec()
         .map_err(|e| format!("invalid base58: {e}"))?;
@@ -72,7 +72,7 @@ pub(crate) fn decode_bs58_pubkey(s: &str) -> Result<[u8; 32], String> {
 }
 
 /// Compute the Anchor instruction discriminator: sha256("global:<name>")[..8].
-pub(crate) fn anchor_discriminator(name: &str) -> [u8; 8] {
+pub fn anchor_discriminator(name: &str) -> [u8; 8] {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(format!("global:{name}"));

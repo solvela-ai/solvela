@@ -68,6 +68,7 @@ type PaymentAccept struct {
 	Asset             string `json:"asset"`
 	PayTo             string `json:"pay_to"`
 	MaxTimeoutSeconds int    `json:"max_timeout_seconds"`
+	EscrowProgramID   string `json:"escrow_program_id,omitempty"`
 }
 
 // PaymentRequired is the parsed body of an HTTP 402 response.
