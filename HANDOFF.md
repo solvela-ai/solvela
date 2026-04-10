@@ -98,7 +98,6 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 ### Immediate
 
-- **Docs site setup**: User wants design input before building docs site.
 - **MCP server signing**: Stub signing intentional (agent-only protocol).
 
 ### Deferred
