@@ -47,8 +47,7 @@ impl MetricsCollector {
             dropped_requests: AtomicU64::new(0),
             // Track up to 60_000ms with 3 significant figures.
             latency_hist: Mutex::new(
-                Histogram::new_with_bounds(1, 60_000, 3)
-                    .expect("histogram bounds are valid"),
+                Histogram::new_with_bounds(1, 60_000, 3).expect("histogram bounds are valid"),
             ),
         }
     }
@@ -68,9 +67,7 @@ impl MetricsCollector {
             RequestOutcome::PaymentRequired402 => {
                 self.payment_required_402.fetch_add(1, Ordering::Relaxed)
             }
-            RequestOutcome::RateLimited429 => {
-                self.rate_limited_429.fetch_add(1, Ordering::Relaxed)
-            }
+            RequestOutcome::RateLimited429 => self.rate_limited_429.fetch_add(1, Ordering::Relaxed),
             RequestOutcome::ServerError5xx => {
                 self.server_errors_5xx.fetch_add(1, Ordering::Relaxed)
             }
@@ -88,7 +85,7 @@ impl MetricsCollector {
     fn record_latency(&self, latency: Duration) {
         let ms = latency.as_millis().min(60_000) as u64;
         let ms = ms.max(1); // Histogram minimum is 1.
-        // Mutex poisoning is non-recoverable in a load test — unwrap is acceptable.
+                            // Mutex poisoning is non-recoverable in a load test — unwrap is acceptable.
         let mut hist = self.latency_hist.lock().expect("histogram lock poisoned");
         // Saturate at max trackable value rather than error.
         let _ = hist.record(ms);
@@ -109,9 +106,13 @@ impl MetricsCollector {
             p50_ms: hist.value_at_quantile(0.50),
             p95_ms: hist.value_at_quantile(0.95),
             p99_ms: hist.value_at_quantile(0.99),
-            min_ms: if hist.len() > 0 { hist.min() } else { 0 },
-            max_ms: if hist.len() > 0 { hist.max() } else { 0 },
-            mean_ms: if hist.len() > 0 { hist.mean() as u64 } else { 0 },
+            min_ms: if !hist.is_empty() { hist.min() } else { 0 },
+            max_ms: if !hist.is_empty() { hist.max() } else { 0 },
+            mean_ms: if !hist.is_empty() {
+                hist.mean() as u64
+            } else {
+                0
+            },
         }
     }
 }
@@ -198,7 +199,10 @@ mod tests {
     #[test]
     fn test_record_various_errors() {
         let m = MetricsCollector::new();
-        m.record_outcome(RequestOutcome::PaymentRequired402, Duration::from_millis(10));
+        m.record_outcome(
+            RequestOutcome::PaymentRequired402,
+            Duration::from_millis(10),
+        );
         m.record_outcome(RequestOutcome::RateLimited429, Duration::from_millis(20));
         m.record_outcome(RequestOutcome::ServerError5xx, Duration::from_millis(30));
         m.record_outcome(RequestOutcome::Timeout, Duration::from_millis(40));
@@ -221,9 +225,21 @@ mod tests {
         }
         let snap = m.snapshot();
         // p50 should be near 50ms, p99 near 99-100ms.
-        assert!(snap.p50_ms >= 45 && snap.p50_ms <= 55, "p50 was {}ms", snap.p50_ms);
-        assert!(snap.p95_ms >= 90 && snap.p95_ms <= 100, "p95 was {}ms", snap.p95_ms);
-        assert!(snap.p99_ms >= 95 && snap.p99_ms <= 100, "p99 was {}ms", snap.p99_ms);
+        assert!(
+            snap.p50_ms >= 45 && snap.p50_ms <= 55,
+            "p50 was {}ms",
+            snap.p50_ms
+        );
+        assert!(
+            snap.p95_ms >= 90 && snap.p95_ms <= 100,
+            "p95 was {}ms",
+            snap.p95_ms
+        );
+        assert!(
+            snap.p99_ms >= 95 && snap.p99_ms <= 100,
+            "p99 was {}ms",
+            snap.p99_ms
+        );
     }
 
     #[test]
@@ -237,7 +253,10 @@ mod tests {
         }
         let snap = m.snapshot();
         let rate = snap.error_rate();
-        assert!((rate - 0.10).abs() < 0.01, "error rate should be ~10%, got {rate}");
+        assert!(
+            (rate - 0.10).abs() < 0.01,
+            "error rate should be ~10%, got {rate}"
+        );
     }
 
     #[test]
