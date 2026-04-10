@@ -73,6 +73,7 @@ workspace total:     683
 escrow (standalone):  21
 dashboard (vitest):   82
 python sdk:           63
+go sdk:               58  (53 pass, 5 skip/live-gated)
 ```
 
 ---
@@ -97,10 +98,7 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 ### Immediate
 
-- **Escrow client SDK support**: CLI and SDKs only support "exact" scheme. Escrow scheme client support not yet implemented.
-- **End-to-end escrow payment test**: Escrow program deployed, gateway advertises escrow scheme, but no client can exercise it yet.
 - **Docs site setup**: User wants design input before building docs site.
-- **Go SDK signing**: Still using stub. TypeScript SDK has real signing; Python + CLI have real signing (merged).
 - **MCP server signing**: Stub signing intentional (agent-only protocol).
 
 ### Deferred
