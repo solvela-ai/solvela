@@ -23,6 +23,8 @@ chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
 getrandom = { version = "0.2", features = ["std"] }
+hdrhistogram = "7"
+secrecy = "0.8"
 
 [dev-dependencies]
 wiremock = "0.6"
