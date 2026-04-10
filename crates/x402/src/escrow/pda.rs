@@ -20,10 +20,7 @@ pub const SYSVAR_RENT_ID: &str = "SysvarRent111111111111111111111111111111111";
 /// Hash input order matches `solana_program::pubkey::Pubkey::create_program_address`:
 /// `seeds || bump || program_id || "ProgramDerivedAddress"`.
 /// Note: the program id comes BEFORE the PDA marker, not after.
-pub fn find_program_address(
-    seeds: &[&[u8]],
-    program_id: &[u8; 32],
-) -> Option<([u8; 32], u8)> {
+pub fn find_program_address(seeds: &[&[u8]], program_id: &[u8; 32]) -> Option<([u8; 32], u8)> {
     use sha2::{Digest, Sha256};
 
     for nonce in (0u8..=255).rev() {
@@ -157,8 +154,8 @@ mod tests {
     fn test_derive_ata_for_known_wallet() {
         let wallet = decode_bs58_pubkey("4P8mSmvv3nfzUtoqhNKG1mfGrHMVbXvKBXR7fDivv6qp")
             .expect("valid wallet");
-        let mint = decode_bs58_pubkey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
-            .expect("valid mint");
+        let mint =
+            decode_bs58_pubkey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").expect("valid mint");
         let ata = derive_ata_address(&wallet, &mint).expect("derivation succeeds");
         let expected = decode_bs58_pubkey("CYHVCkLwiEjMBdRiz5MsrrCbVL2YTZuv57TjV3ggxoSN")
             .expect("valid expected ATA");
@@ -179,8 +176,7 @@ mod tests {
                 .expect("valid wallet"),
         );
         let mint = Pubkey(
-            decode_bs58_pubkey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
-                .expect("valid mint"),
+            decode_bs58_pubkey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").expect("valid mint"),
         );
         let ata = sol_derive_ata(&wallet, &mint, &Pubkey::TOKEN_PROGRAM_ID).expect("derivation");
         assert_eq!(
@@ -219,9 +215,8 @@ mod tests {
         let agent = [1u8; 32];
         let service_id = [2u8; 32];
 
-        let (pda, bump) =
-            find_program_address(&[b"escrow", &agent, &service_id], &program_id)
-                .expect("PDA derivation should succeed for these inputs");
+        let (pda, bump) = find_program_address(&[b"escrow", &agent, &service_id], &program_id)
+            .expect("PDA derivation should succeed for these inputs");
 
         // Externally computed via solders `Pubkey.find_program_address` — see doc comment above.
         let expected_pda = decode_bs58_pubkey("BEAUsvsWvV4o6y7XkC1bkyTq4FtQnKErcV3dzTFPT5hX")

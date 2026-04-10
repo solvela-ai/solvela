@@ -40,7 +40,13 @@ fn generate_service_id(request_body: &[u8]) -> Result<[u8; 32]> {
     Ok(id)
 }
 
-pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool, scheme: Option<&str>) -> Result<()> {
+pub async fn run(
+    api_url: &str,
+    model: &str,
+    prompt: &str,
+    yes: bool,
+    scheme: Option<&str>,
+) -> Result<()> {
     let client = reqwest::Client::new();
 
     let body = serde_json::json!({

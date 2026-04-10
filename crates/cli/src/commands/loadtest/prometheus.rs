@@ -34,7 +34,11 @@ pub struct SloCheckResult {
 impl SloCheckResult {
     /// Short display string: "PASS" or "FAIL".
     pub fn status(&self) -> &'static str {
-        if self.passed { "PASS" } else { "FAIL" }
+        if self.passed {
+            "PASS"
+        } else {
+            "FAIL"
+        }
     }
 }
 
@@ -96,10 +100,7 @@ pub async fn scrape_metrics(url: &str) -> Result<Vec<(String, f64)>> {
         .with_context(|| format!("failed to connect to Prometheus endpoint at {url}"))?;
 
     if !resp.status().is_success() {
-        anyhow::bail!(
-            "Prometheus scrape returned HTTP {}: {url}",
-            resp.status()
-        );
+        anyhow::bail!("Prometheus scrape returned HTTP {}: {url}", resp.status());
     }
 
     let text = resp
@@ -118,12 +119,8 @@ pub async fn scrape_metrics(url: &str) -> Result<Vec<(String, f64)>> {
 /// value (defaulting to 0.0 for metrics that appeared only in `after`).
 /// Metrics present only in `before` are omitted (they did not change or
 /// were reset, both of which are unusual for counters).
-pub fn compute_deltas(
-    before: &[(String, f64)],
-    after: &[(String, f64)],
-) -> HashMap<String, f64> {
-    let before_map: HashMap<&str, f64> =
-        before.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+pub fn compute_deltas(before: &[(String, f64)], after: &[(String, f64)]) -> HashMap<String, f64> {
+    let before_map: HashMap<&str, f64> = before.iter().map(|(k, v)| (k.as_str(), *v)).collect();
 
     after
         .iter()
@@ -196,13 +193,9 @@ mod tests {
 
     #[test]
     fn test_parse_prometheus_line_counter() {
-        let line =
-            r#"rcr_http_requests_total{method="POST",path="/v1/chat/completions"} 42"#;
+        let line = r#"rcr_http_requests_total{method="POST",path="/v1/chat/completions"} 42"#;
         let parsed = parse_metric_line(line);
-        assert_eq!(
-            parsed,
-            Some(("rcr_http_requests_total".to_string(), 42.0))
-        );
+        assert_eq!(parsed, Some(("rcr_http_requests_total".to_string(), 42.0)));
     }
 
     #[test]
@@ -306,7 +299,11 @@ mod tests {
         let results = validate_slos(&snapshot, &thresholds);
         assert_eq!(results.len(), 2);
         for r in &results {
-            assert!(r.passed, "SLO '{}' should pass but measured={} threshold={} {}", r.label, r.measured, r.threshold, r.unit);
+            assert!(
+                r.passed,
+                "SLO '{}' should pass but measured={} threshold={} {}",
+                r.label, r.measured, r.threshold, r.unit
+            );
         }
     }
 
@@ -323,7 +320,10 @@ mod tests {
         };
         let results = validate_slos(&snapshot, &thresholds);
         let p99_check = results.iter().find(|r| r.label == "p99 latency").unwrap();
-        assert!(!p99_check.passed, "p99 SLO should fail when latency exceeds threshold");
+        assert!(
+            !p99_check.passed,
+            "p99 SLO should fail when latency exceeds threshold"
+        );
     }
 
     #[test]
@@ -345,7 +345,10 @@ mod tests {
         };
         let results = validate_slos(&snapshot, &thresholds);
         let err_check = results.iter().find(|r| r.label == "error rate").unwrap();
-        assert!(!err_check.passed, "error rate SLO should fail at 50% error rate");
+        assert!(
+            !err_check.passed,
+            "error rate SLO should fail at 50% error rate"
+        );
         assert!(
             (err_check.measured - 50.0).abs() < 1.0,
             "measured error rate should be ~50%, got {}",

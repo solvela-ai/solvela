@@ -210,9 +210,8 @@ mod tests {
 
     #[test]
     fn test_is_already_processed_error_jsonrpc_code() {
-        let e = Error::Rpc(
-            r#"{"code":-32002,"message":"Transaction simulation failed"}"#.to_string(),
-        );
+        let e =
+            Error::Rpc(r#"{"code":-32002,"message":"Transaction simulation failed"}"#.to_string());
         assert!(is_already_processed_error(&e));
     }
 
