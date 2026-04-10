@@ -15,7 +15,9 @@ use secrecy::SecretString;
 use self::config::{LoadTestConfig, LoadTestMode, SloThresholds, TierWeights};
 use self::dispatcher::{run_dispatcher, DispatcherConfig};
 use self::metrics::MetricsCollector;
-use self::payment::{DevBypassStrategy, ExactPaymentStrategy, PaymentStrategy};
+use self::payment::{
+    DevBypassStrategy, EscrowPaymentStrategy, ExactPaymentStrategy, PaymentStrategy,
+};
 use self::report::{print_terminal_report, write_json_report};
 use self::worker::execute_request;
 
@@ -151,11 +153,12 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
 
     // --- Build shared resources ---
     let rpc_url: String = match config.mode {
-        LoadTestMode::Exact => std::env::var("SOLANA_RPC_URL")
+        LoadTestMode::Exact | LoadTestMode::Escrow => std::env::var("SOLANA_RPC_URL")
             .or_else(|_| std::env::var("RCR_SOLANA_RPC_URL"))
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "SOLANA_RPC_URL (or RCR_SOLANA_RPC_URL) is required for exact payment mode"
+                    "SOLANA_RPC_URL (or RCR_SOLANA_RPC_URL) is required for {:?} payment mode",
+                    config.mode
                 )
             })?,
         _ => String::new(),
@@ -178,7 +181,22 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
                 rpc_client,
             ))
         }
-        LoadTestMode::Escrow => bail!("escrow payment mode not yet implemented"),
+        LoadTestMode::Escrow => {
+            let keypair_b58 = std::env::var("SOLANA_WALLET_KEY").map_err(|_| {
+                anyhow::anyhow!(
+                    "SOLANA_WALLET_KEY env var is required for escrow payment mode. \
+                         Set it to your 64-byte Solana keypair in base58."
+                )
+            })?;
+            let rpc_client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()?;
+            Arc::new(EscrowPaymentStrategy::new(
+                SecretString::new(keypair_b58),
+                rpc_client,
+                rpc_url.clone(),
+            ))
+        }
     };
 
     let client = Arc::new(
