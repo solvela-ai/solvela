@@ -10,11 +10,12 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use clap::Args;
+use secrecy::SecretString;
 
 use self::config::{LoadTestConfig, LoadTestMode, SloThresholds, TierWeights};
 use self::dispatcher::{run_dispatcher, DispatcherConfig};
 use self::metrics::MetricsCollector;
-use self::payment::{DevBypassStrategy, PaymentStrategy};
+use self::payment::{DevBypassStrategy, ExactPaymentStrategy, PaymentStrategy};
 use self::report::{print_terminal_report, write_json_report};
 use self::worker::execute_request;
 
@@ -149,9 +150,34 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
     }
 
     // --- Build shared resources ---
+    let rpc_url: String = match config.mode {
+        LoadTestMode::Exact => std::env::var("SOLANA_RPC_URL")
+            .or_else(|_| std::env::var("RCR_SOLANA_RPC_URL"))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "SOLANA_RPC_URL (or RCR_SOLANA_RPC_URL) is required for exact payment mode"
+                )
+            })?,
+        _ => String::new(),
+    };
+
     let strategy: Arc<dyn PaymentStrategy> = match config.mode {
         LoadTestMode::DevBypass => Arc::new(DevBypassStrategy),
-        LoadTestMode::Exact => bail!("exact payment mode not yet implemented"),
+        LoadTestMode::Exact => {
+            let keypair_b58 = std::env::var("SOLANA_WALLET_KEY").map_err(|_| {
+                anyhow::anyhow!(
+                    "SOLANA_WALLET_KEY env var is required for exact payment mode. \
+                         Set it to your 64-byte Solana keypair in base58."
+                )
+            })?;
+            let rpc_client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()?;
+            Arc::new(ExactPaymentStrategy::new(
+                SecretString::new(keypair_b58),
+                rpc_client,
+            ))
+        }
         LoadTestMode::Escrow => bail!("escrow payment mode not yet implemented"),
     };
 
@@ -171,6 +197,7 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
     };
 
     let api_url_shared: Arc<str> = Arc::from(config.api_url.as_str());
+    let rpc_url_shared: Arc<str> = Arc::from(rpc_url.as_str());
 
     // --- Run the load test ---
     println!(
@@ -185,6 +212,7 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
         let client = client.clone();
         let strategy = strategy.clone();
         let api_url_shared = api_url_shared.clone();
+        let rpc_url_shared = rpc_url_shared.clone();
 
         run_dispatcher(
             dispatcher_config,
@@ -194,16 +222,16 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
                 let client = client.clone();
                 let strategy = strategy.clone();
                 let api_url = api_url_shared.clone();
+                let rpc_url = rpc_url_shared.clone();
 
                 async move {
                     let body = build_request_body(tier);
-                    // rpc_url is only needed for real payment modes; empty for dev-bypass.
                     let _ = execute_request(
                         &client,
                         &api_url,
                         &body,
                         strategy.as_ref(),
-                        "",
+                        &rpc_url,
                         &metrics,
                         scheduled_at,
                     )
