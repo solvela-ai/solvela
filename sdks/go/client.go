@@ -132,7 +132,7 @@ func (c *Client) ChatCompletion(ctx context.Context, req ChatRequest) (*ChatResp
 			}
 		}
 
-		header, headerErr := createPaymentHeader(paymentInfo, url)
+		header, headerErr := createPaymentHeader(paymentInfo, url, c.wallet, body)
 		if headerErr != nil {
 			return nil, headerErr
 		}
