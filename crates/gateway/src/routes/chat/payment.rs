@@ -83,11 +83,25 @@ pub(crate) fn uses_durable_nonce(b64_tx: &str) -> bool {
     is_system_program && is_advance_nonce
 }
 
+/// Cap the claim amount against the verified deposit and client-advertised amount.
+///
+/// - If the verifier extracted a deposit amount, cap to that.
+/// - If not (parse failure in verifier), fall back to `client_amount` as a defense-in-depth
+///   upper bound to prevent over-claiming that would waste tx fees on an on-chain rejection.
+fn cap_claim_amount(claim_atomic: u64, deposited: Option<u64>, client_amount: u64) -> u64 {
+    match deposited {
+        Some(d) => claim_atomic.min(d),
+        None => claim_atomic.min(client_amount),
+    }
+}
+
 /// Fire an escrow claim transaction if the payment scheme is escrow.
 ///
 /// Prefers the durable claim queue (PostgreSQL) when a DB pool is available,
 /// falling back to fire-and-forget via `claim_async` when it is not.
 /// Caps the claim amount to the verified deposit to prevent over-claiming.
+/// When the verifier could not extract the deposit amount, falls back to
+/// `client_amount` (the gateway-advertised amount) as a defense-in-depth bound.
 pub(crate) fn fire_escrow_claim(
     state: &Arc<AppState>,
     payment_scheme: &str,
@@ -95,16 +109,22 @@ pub(crate) fn fire_escrow_claim(
     escrow_agent_pubkey: &Option<String>,
     escrow_deposited_amount: Option<u64>,
     claim_atomic: u64,
+    client_amount: u64,
 ) {
     if payment_scheme != "escrow" {
         return;
     }
     if let (Some(ref sid_b64), Some(ref agent_b58)) = (escrow_service_id, escrow_agent_pubkey) {
-        // Cap claim amount to the verified deposit amount
-        let claim_amount = match escrow_deposited_amount {
-            Some(deposited) => claim_atomic.min(deposited),
-            None => claim_atomic,
-        };
+        // Cap claim amount to the verified deposit amount, falling back to client_amount
+        if escrow_deposited_amount.is_none() {
+            tracing::warn!(
+                service_id = ?escrow_service_id,
+                client_amount,
+                claim_atomic,
+                "escrow claim using client_amount as fallback bound (verifier did not extract deposit amount)"
+            );
+        }
+        let claim_amount = cap_claim_amount(claim_atomic, escrow_deposited_amount, client_amount);
 
         // Never claim 0 -- if cost computation failed, skip the claim entirely
         if claim_amount == 0 {
@@ -177,6 +197,24 @@ fn decode_agent_pubkey(b58: &str) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // cap_claim_amount
+    // =========================================================================
+
+    #[test]
+    fn test_cap_claim_amount_with_deposited() {
+        assert_eq!(cap_claim_amount(2625, Some(2625), 2625), 2625);
+        assert_eq!(cap_claim_amount(3000, Some(2625), 5000), 2625); // capped at deposit
+        assert_eq!(cap_claim_amount(2000, Some(2625), 5000), 2000); // claim less than deposit
+    }
+
+    #[test]
+    fn test_cap_claim_amount_falls_back_to_client_amount() {
+        assert_eq!(cap_claim_amount(2625, None, 2625), 2625);
+        assert_eq!(cap_claim_amount(3000, None, 2625), 2625); // capped at client_amount
+        assert_eq!(cap_claim_amount(2000, None, 2625), 2000); // claim less than client_amount, no cap
+    }
 
     // =========================================================================
     // decode_payment_from_header
