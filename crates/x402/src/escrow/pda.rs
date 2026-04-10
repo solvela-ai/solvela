@@ -4,7 +4,7 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-pub const ATA_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bxs";
+pub const ATA_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 pub const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 pub const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
 pub const SYSVAR_RENT_ID: &str = "SysvarRent111111111111111111111111111111111";
@@ -16,6 +16,10 @@ pub const SYSVAR_RENT_ID: &str = "SysvarRent111111111111111111111111111111111";
 /// Derive a Program Derived Address using SHA-256 (same as Solana runtime).
 ///
 /// Returns `(pubkey_bytes, bump)` or `None` if no valid off-curve point is found.
+///
+/// Hash input order matches `solana_program::pubkey::Pubkey::create_program_address`:
+/// `seeds || bump || program_id || "ProgramDerivedAddress"`.
+/// Note: the program id comes BEFORE the PDA marker, not after.
 pub fn find_program_address(
     seeds: &[&[u8]],
     program_id: &[u8; 32],
@@ -28,8 +32,8 @@ pub fn find_program_address(
             hasher.update(seed);
         }
         hasher.update([nonce]);
-        hasher.update(b"ProgramDerivedAddress");
         hasher.update(program_id);
+        hasher.update(b"ProgramDerivedAddress");
         let hash = hasher.finalize();
 
         let mut bytes = [0u8; 32];
@@ -138,6 +142,51 @@ mod tests {
         // Deterministic
         let ata2 = derive_ata_address(&wallet, &mint);
         assert_eq!(ata, ata2);
+    }
+
+    /// Regression test for ATA derivation. This caught a typo in the
+    /// `ATA_PROGRAM_ID` constant that produced addresses that did not match
+    /// the on-chain ATA, causing escrow deposits to fail with
+    /// `AccountNotInitialized` (Anchor error 3012).
+    ///
+    /// Verified on mainnet via Helius getTokenAccounts:
+    ///   wallet = 4P8mSmvv3nfzUtoqhNKG1mfGrHMVbXvKBXR7fDivv6qp
+    ///   mint   = EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v (USDC)
+    ///   ata    = CYHVCkLwiEjMBdRiz5MsrrCbVL2YTZuv57TjV3ggxoSN
+    #[test]
+    fn test_derive_ata_for_known_wallet() {
+        let wallet = decode_bs58_pubkey("4P8mSmvv3nfzUtoqhNKG1mfGrHMVbXvKBXR7fDivv6qp")
+            .expect("valid wallet");
+        let mint = decode_bs58_pubkey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+            .expect("valid mint");
+        let ata = derive_ata_address(&wallet, &mint).expect("derivation succeeds");
+        let expected = decode_bs58_pubkey("CYHVCkLwiEjMBdRiz5MsrrCbVL2YTZuv57TjV3ggxoSN")
+            .expect("valid expected ATA");
+        assert_eq!(
+            ata, expected,
+            "derived ATA does not match expected on-chain ATA"
+        );
+    }
+
+    /// Cross-check: the stand-alone `solana_types::derive_ata` should now also
+    /// produce the canonical ATA after the hash-order fix.
+    #[test]
+    fn test_solana_types_derive_ata_matches() {
+        use crate::solana_types::{derive_ata as sol_derive_ata, Pubkey};
+
+        let wallet = Pubkey(
+            decode_bs58_pubkey("4P8mSmvv3nfzUtoqhNKG1mfGrHMVbXvKBXR7fDivv6qp")
+                .expect("valid wallet"),
+        );
+        let mint = Pubkey(
+            decode_bs58_pubkey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+                .expect("valid mint"),
+        );
+        let ata = sol_derive_ata(&wallet, &mint, &Pubkey::TOKEN_PROGRAM_ID).expect("derivation");
+        assert_eq!(
+            ata.to_string(),
+            "CYHVCkLwiEjMBdRiz5MsrrCbVL2YTZuv57TjV3ggxoSN"
+        );
     }
 
     #[test]

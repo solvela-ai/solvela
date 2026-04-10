@@ -118,14 +118,16 @@ pub fn derive_ata(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Opt
 
     // find_program_address: iterate nonce 255 down to 0, return first off-curve hash
     for nonce in (0u8..=255).rev() {
-        // Hash: SHA256(seed0 || seed1 || seed2 || nonce || "ProgramDerivedAddress" || program_id)
+        // Hash: SHA256(seed0 || seed1 || seed2 || nonce || program_id || "ProgramDerivedAddress")
+        // Matches `solana_program::pubkey::Pubkey::create_program_address` exactly —
+        // the program id comes BEFORE the PDA marker.
         let mut hasher = Sha256::new();
         for seed in seeds {
             hasher.update(seed);
         }
         hasher.update([nonce]);
-        hasher.update(b"ProgramDerivedAddress");
         hasher.update(program_id.0);
+        hasher.update(b"ProgramDerivedAddress");
         let hash = hasher.finalize();
 
         let mut bytes = [0u8; 32];
