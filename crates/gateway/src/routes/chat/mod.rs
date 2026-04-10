@@ -250,6 +250,8 @@ pub async fn chat_completions(
     let mut escrow_agent_pubkey: Option<String> = None;
     // FIX 3: Track the verified deposit amount to cap claim amounts
     let escrow_deposited_amount: Option<u64>;
+    // Gateway-advertised amount — used as defense-in-depth cap when deposit amount is unknown
+    let client_amount: u64;
 
     match payment_payload {
         Some(payload) => {
@@ -341,7 +343,7 @@ pub async fn chat_completions(
                         "failed to parse expected payment amount as u64".to_string(),
                     )
                 })?;
-            let client_amount: u64 = payload.accepted.amount.parse().map_err(|_| {
+            client_amount = payload.accepted.amount.parse().map_err(|_| {
                 GatewayError::BadRequest(format!(
                     "invalid payment amount '{}': must be a valid integer",
                     payload.accepted.amount
@@ -569,6 +571,7 @@ pub async fn chat_completions(
                     &escrow_agent_pubkey,
                     escrow_deposited_amount,
                     amount,
+                    client_amount,
                 );
             } else {
                 warn!(

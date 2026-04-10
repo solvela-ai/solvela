@@ -46,8 +46,8 @@ async fn main() -> anyhow::Result<()> {
     // Override Solana config from environment variables.
     // Supports both double-underscore (Fly.io style: RCR_SOLANA__RPC_URL) and
     // single-underscore (RCR_SOLANA_RPC_URL) conventions.
-    if let Ok(val) = std::env::var("RCR_SOLANA__RPC_URL")
-        .or_else(|_| std::env::var("RCR_SOLANA_RPC_URL"))
+    if let Ok(val) =
+        std::env::var("RCR_SOLANA__RPC_URL").or_else(|_| std::env::var("RCR_SOLANA_RPC_URL"))
     {
         app_config.solana.rpc_url = val;
     }
