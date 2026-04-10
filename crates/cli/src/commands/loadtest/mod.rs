@@ -1,4 +1,5 @@
 pub mod config;
+pub mod metrics;
 
 use anyhow::Result;
 use clap::Args;
