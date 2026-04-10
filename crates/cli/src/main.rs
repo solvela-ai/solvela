@@ -52,6 +52,18 @@ enum Commands {
     Health,
     /// AI-powered diagnostics
     Doctor,
+    /// Recover stranded escrow deposits (refund expired PDAs)
+    Recover {
+        /// Submit refund transactions (default is dry-run list)
+        #[arg(long)]
+        execute: bool,
+        /// Skip the confirmation prompt (requires --execute)
+        #[arg(short, long)]
+        yes: bool,
+        /// Override escrow program ID (defaults to mainnet)
+        #[arg(long)]
+        program_id: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -81,6 +93,11 @@ async fn main() -> Result<()> {
         Commands::Stats { days } => commands::stats::show(&cli.api_url, days).await?,
         Commands::Health => commands::health::check(&cli.api_url).await?,
         Commands::Doctor => commands::doctor::run(&cli.api_url).await?,
+        Commands::Recover {
+            execute,
+            yes,
+            program_id,
+        } => commands::recover::run(&cli.api_url, execute, yes, program_id).await?,
     }
 
     Ok(())

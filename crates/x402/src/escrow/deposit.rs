@@ -247,7 +247,7 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, DepositError> 
 /// - 32-byte recent blockhash
 /// - compact-u16 instruction count (always 1)
 /// - instruction: program_id_index || compact-u16 accts || accts || compact-u16 data_len || data
-fn build_legacy_message(
+pub(super) fn build_legacy_message(
     header: [u8; 3],
     accounts: &[[u8; 32]],
     program_id: &[u8; 32],
