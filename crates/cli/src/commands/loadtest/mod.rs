@@ -5,10 +5,18 @@ pub mod payment;
 pub mod report;
 pub mod worker;
 
-use anyhow::Result;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{bail, Result};
 use clap::Args;
 
 use self::config::{LoadTestConfig, LoadTestMode, SloThresholds, TierWeights};
+use self::dispatcher::{run_dispatcher, DispatcherConfig};
+use self::metrics::MetricsCollector;
+use self::payment::{DevBypassStrategy, PaymentStrategy};
+use self::report::{print_terminal_report, write_json_report};
+use self::worker::execute_request;
 
 /// Load test the RustyClawRouter gateway with real payment transactions.
 #[derive(Args, Debug)]
@@ -140,9 +148,108 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
         return Ok(());
     }
 
-    // TODO: dispatcher + workers + report (Tasks 2-8)
-    println!("Load test not yet fully implemented. Use --dry-run to preview config.");
+    // --- Build shared resources ---
+    let strategy: Arc<dyn PaymentStrategy> = match config.mode {
+        LoadTestMode::DevBypass => Arc::new(DevBypassStrategy),
+        LoadTestMode::Exact => bail!("exact payment mode not yet implemented"),
+        LoadTestMode::Escrow => bail!("escrow payment mode not yet implemented"),
+    };
+
+    let client = Arc::new(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(config.concurrency)
+            .build()?,
+    );
+
+    let metrics = Arc::new(MetricsCollector::new());
+
+    let dispatcher_config = DispatcherConfig {
+        rps: config.rps,
+        duration_secs: config.duration_secs,
+        concurrency: config.concurrency,
+    };
+
+    let api_url_shared: Arc<str> = Arc::from(config.api_url.as_str());
+
+    // --- Run the load test ---
+    println!(
+        "Starting load test: {} RPS x {}s = {} requests (mode: {:?})",
+        config.rps,
+        config.duration_secs,
+        config.total_requests(),
+        config.mode,
+    );
+
+    {
+        let client = client.clone();
+        let strategy = strategy.clone();
+        let api_url_shared = api_url_shared.clone();
+
+        run_dispatcher(
+            dispatcher_config,
+            config.tier_weights.clone(),
+            metrics.clone(),
+            move |scheduled_at, tier, metrics| {
+                let client = client.clone();
+                let strategy = strategy.clone();
+                let api_url = api_url_shared.clone();
+
+                async move {
+                    let body = build_request_body(tier);
+                    // rpc_url is only needed for real payment modes; empty for dev-bypass.
+                    let _ = execute_request(
+                        &client,
+                        &api_url,
+                        &body,
+                        strategy.as_ref(),
+                        "",
+                        &metrics,
+                        scheduled_at,
+                    )
+                    .await;
+                }
+            },
+        )
+        .await;
+    }
+
+    // --- Report results ---
+    let snapshot = metrics.snapshot();
+    print_terminal_report(&snapshot, &config);
+
+    if let Some(ref path) = config.report_json {
+        write_json_report(&snapshot, &config, path)?;
+    }
+
+    // Return non-zero exit via error if SLO fails.
+    let p99_pass = snapshot.p99_ms <= config.slo.p99_ms;
+    let error_rate_pass = snapshot.error_rate() <= config.slo.error_rate;
+    if !p99_pass || !error_rate_pass {
+        bail!("SLO check failed (p99_pass={p99_pass}, error_rate_pass={error_rate_pass})");
+    }
+
     Ok(())
+}
+
+/// Build a representative chat request body for the given complexity tier.
+///
+/// Each tier uses a different prompt length and model hint so the gateway's
+/// smart router classifies them into the expected scoring bucket.
+fn build_request_body(tier: &str) -> serde_json::Value {
+    let (model, prompt) = match tier {
+        "simple" => ("auto", "Say hello."),
+        "medium" => ("auto", "Explain how HTTP caching works with ETags and Cache-Control headers."),
+        "complex" => ("auto", "Write a Rust function that implements a lock-free concurrent hash map with linear probing. Include detailed comments explaining the memory ordering constraints."),
+        "reasoning" => ("auto", "Prove that every continuous function on a closed interval is uniformly continuous. Then explain why this fails for open intervals with a concrete counterexample."),
+        _ => ("auto", "Say hello."),
+    };
+
+    serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 64
+    })
 }
 
 #[cfg(test)]

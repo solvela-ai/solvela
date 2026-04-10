@@ -55,9 +55,18 @@ fn print_report_to(out: &mut impl Write, snapshot: &MetricsSnapshot, config: &Lo
     let errors = snapshot.total_requests.saturating_sub(snapshot.successful);
 
     let _ = writeln!(out);
-    let _ = writeln!(out, "{BOLD}{CYAN}╔══════════════════════════════════════════════╗{RESET}");
-    let _ = writeln!(out, "{BOLD}{CYAN}║        RustyClawRouter Load Test Report      ║{RESET}");
-    let _ = writeln!(out, "{BOLD}{CYAN}╚══════════════════════════════════════════════╝{RESET}");
+    let _ = writeln!(
+        out,
+        "{BOLD}{CYAN}╔══════════════════════════════════════════════╗{RESET}"
+    );
+    let _ = writeln!(
+        out,
+        "{BOLD}{CYAN}║        RustyClawRouter Load Test Report      ║{RESET}"
+    );
+    let _ = writeln!(
+        out,
+        "{BOLD}{CYAN}╚══════════════════════════════════════════════╝{RESET}"
+    );
 
     // --- Configuration summary ---
     let _ = writeln!(out, "\n{BOLD}Configuration{RESET}");
@@ -72,18 +81,34 @@ fn print_report_to(out: &mut impl Write, snapshot: &MetricsSnapshot, config: &Lo
     // --- Request breakdown ---
     let _ = writeln!(out, "\n{BOLD}Requests{RESET}");
     let _ = writeln!(out, "  Total:       {}", snapshot.total_requests);
+    let _ = writeln!(out, "  Successful:  {GREEN}{}{RESET}", snapshot.successful);
+    let _ = writeln!(out, "  Errors:      {}", errors);
     let _ = writeln!(
         out,
-        "  Successful:  {GREEN}{}{RESET}",
-        snapshot.successful
+        "    402 (payment required): {}",
+        snapshot.payment_required_402
     );
-    let _ = writeln!(out, "  Errors:      {}", errors);
-    let _ = writeln!(out, "    402 (payment required): {}", snapshot.payment_required_402);
-    let _ = writeln!(out, "    429 (rate limited):      {}", snapshot.rate_limited_429);
-    let _ = writeln!(out, "    5xx (server error):      {}", snapshot.server_errors_5xx);
+    let _ = writeln!(
+        out,
+        "    429 (rate limited):      {}",
+        snapshot.rate_limited_429
+    );
+    let _ = writeln!(
+        out,
+        "    5xx (server error):      {}",
+        snapshot.server_errors_5xx
+    );
     let _ = writeln!(out, "    Timeout:                 {}", snapshot.timeouts);
-    let _ = writeln!(out, "    Other:                   {}", snapshot.other_errors);
-    let _ = writeln!(out, "  Dropped (backpressure): {}", snapshot.dropped_requests);
+    let _ = writeln!(
+        out,
+        "    Other:                   {}",
+        snapshot.other_errors
+    );
+    let _ = writeln!(
+        out,
+        "  Dropped (backpressure): {}",
+        snapshot.dropped_requests
+    );
 
     // --- Latency ---
     let _ = writeln!(out, "\n{BOLD}Latency{RESET}");
@@ -191,8 +216,7 @@ pub fn write_json_report(
         slo,
     };
 
-    let json = serde_json::to_string_pretty(&report)
-        .context("failed to serialize JSON report")?;
+    let json = serde_json::to_string_pretty(&report).context("failed to serialize JSON report")?;
 
     fs::write(path, json).with_context(|| format!("failed to write JSON report to '{path}'"))?;
 
@@ -218,10 +242,7 @@ mod tests {
             concurrency: 20,
             mode: LoadTestMode::DevBypass,
             tier_weights: TierWeights::default(),
-            slo: SloThresholds {
-                p99_ms,
-                error_rate,
-            },
+            slo: SloThresholds { p99_ms, error_rate },
             report_json: None,
             prometheus_url: None,
             dry_run: false,
@@ -254,7 +275,10 @@ mod tests {
         let snap = make_snapshot_all_success(100, 6000);
         let config = make_config(5000, 0.05);
         let slo = SloResult::evaluate(&snap, &config);
-        assert!(!slo.p99_pass, "p99 should fail when all latencies are 6000ms > 5000ms SLO");
+        assert!(
+            !slo.p99_pass,
+            "p99 should fail when all latencies are 6000ms > 5000ms SLO"
+        );
         assert!(!slo.overall_pass);
     }
 
@@ -349,13 +373,16 @@ mod tests {
         let config = make_config(5000, 0.05);
 
         let dir = tempfile::tempdir().expect("tmpdir");
-        let path = dir.path().join("report.json").to_string_lossy().into_owned();
+        let path = dir
+            .path()
+            .join("report.json")
+            .to_string_lossy()
+            .into_owned();
 
         write_json_report(&snap, &config, &path).expect("write should succeed");
 
         let contents = std::fs::read_to_string(&path).expect("file readable");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&contents).expect("valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&contents).expect("valid JSON");
 
         assert_eq!(parsed["metrics"]["total_requests"], 50);
         assert_eq!(parsed["slo"]["overall_pass"], true);
@@ -378,7 +405,11 @@ mod tests {
         let config = make_config(5000, 0.05);
 
         let dir = tempfile::tempdir().expect("tmpdir");
-        let path = dir.path().join("report.json").to_string_lossy().into_owned();
+        let path = dir
+            .path()
+            .join("report.json")
+            .to_string_lossy()
+            .into_owned();
 
         write_json_report(&snap, &config, &path).expect("write should succeed");
 
