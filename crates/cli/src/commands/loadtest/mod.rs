@@ -2,6 +2,7 @@ pub mod config;
 pub mod dispatcher;
 pub mod metrics;
 pub mod payment;
+pub mod prometheus;
 pub mod report;
 pub mod worker;
 
@@ -217,6 +218,19 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
     let api_url_shared: Arc<str> = Arc::from(config.api_url.as_str());
     let rpc_url_shared: Arc<str> = Arc::from(rpc_url.as_str());
 
+    // --- Prometheus pre-test scrape ---
+    let prom_before = if let Some(ref prom_url) = config.prometheus_url {
+        match prometheus::scrape_metrics(prom_url).await {
+            Ok(metrics) => Some(metrics),
+            Err(e) => {
+                eprintln!("WARNING: Prometheus pre-test scrape failed (will skip delta report): {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // --- Run the load test ---
     println!(
         "Starting load test: {} RPS x {}s = {} requests (mode: {:?})",
@@ -258,6 +272,19 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
             },
         )
         .await;
+    }
+
+    // --- Prometheus post-test scrape and delta report ---
+    if let (Some(ref prom_url), Some(ref before)) = (&config.prometheus_url, &prom_before) {
+        match prometheus::scrape_metrics(prom_url).await {
+            Ok(after) => {
+                let deltas = prometheus::compute_deltas(before, &after);
+                prometheus::print_prometheus_deltas(&deltas);
+            }
+            Err(e) => {
+                eprintln!("WARNING: Prometheus post-test scrape failed (skipping delta report): {e}");
+            }
+        }
     }
 
     // --- Report results ---
