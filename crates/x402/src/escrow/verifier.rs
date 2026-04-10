@@ -26,10 +26,7 @@ use super::pda::{
 /// then reads the `amount` field (u64 LE at offset 8 after the 8-byte Anchor
 /// discriminator). Returns `None` if no matching instruction is found or the
 /// data is malformed.
-fn extract_deposit_amount(
-    message: &ParsedMessage,
-    escrow_program_id: &[u8; 32],
-) -> Option<u64> {
+fn extract_deposit_amount(message: &ParsedMessage, escrow_program_id: &[u8; 32]) -> Option<u64> {
     let expected_disc = anchor_discriminator("deposit");
     let deposit_ix = message.instructions.iter().find(|ix| {
         let is_escrow = message
@@ -215,9 +212,7 @@ impl PaymentVerifier for EscrowVerifier {
         // Parse instruction data: discriminator(8) + amount(u64 LE)
         //                         + service_id([u8;32]) + expiry_slot(u64 LE)
         let amount_bytes: [u8; 8] = deposit_ix.data[8..16].try_into().map_err(|_| {
-            Error::InvalidTransaction(
-                "failed to parse amount from instruction data".to_string(),
-            )
+            Error::InvalidTransaction("failed to parse amount from instruction data".to_string())
         })?;
         let ix_amount = u64::from_le_bytes(amount_bytes);
 
@@ -256,21 +251,16 @@ impl PaymentVerifier for EscrowVerifier {
 
         let get_key = |pos: usize| -> Result<[u8; 32], Error> {
             let idx = deposit_ix.accounts[pos] as usize;
-            message
-                .account_keys
-                .get(idx)
-                .map(|k| k.0)
-                .ok_or_else(|| {
-                    Error::InvalidTransaction(format!("account index {idx} out of range"))
-                })
+            message.account_keys.get(idx).map(|k| k.0).ok_or_else(|| {
+                Error::InvalidTransaction(format!("account index {idx} out of range"))
+            })
         };
 
         // Position 0: agent (must match payload agent_pubkey / signer)
         let ix_agent = get_key(0)?;
         if ix_agent != agent_pubkey {
             return Err(Error::InvalidSignature(
-                "deposit instruction agent account does not match payload agent_pubkey"
-                    .to_string(),
+                "deposit instruction agent account does not match payload agent_pubkey".to_string(),
             ));
         }
 
@@ -621,11 +611,13 @@ mod tests {
         // Tx built with service_id=[7;32], but payload claims service_id=[8;32]
         let tx_service_id = [7u8; 32];
         let payload_service_id = [8u8; 32];
-        let (deposit_tx_b64, agent_pubkey_b58) =
-            build_test_tx(tx_service_id, 5000, "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
+        let (deposit_tx_b64, agent_pubkey_b58) = build_test_tx(
+            tx_service_id,
+            5000,
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
+        );
 
-        let service_id_b64 =
-            base64::engine::general_purpose::STANDARD.encode(payload_service_id);
+        let service_id_b64 = base64::engine::general_purpose::STANDARD.encode(payload_service_id);
 
         let payload = PaymentPayload {
             x402_version: 2,
@@ -640,9 +632,7 @@ mod tests {
                 asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
                 pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
                 max_timeout_seconds: 300,
-                escrow_program_id: Some(
-                    "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
-                ),
+                escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
             },
             payload: PayloadData::Escrow(EscrowPayload {
                 deposit_tx: deposit_tx_b64,
@@ -666,8 +656,11 @@ mod tests {
 
         // Tx encodes amount=1000, but gateway requires 5000
         let service_id = [7u8; 32];
-        let (deposit_tx_b64, agent_pubkey_b58) =
-            build_test_tx(service_id, 1000, "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
+        let (deposit_tx_b64, agent_pubkey_b58) = build_test_tx(
+            service_id,
+            1000,
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
+        );
         let service_id_b64 = base64::engine::general_purpose::STANDARD.encode(service_id);
 
         let payload = PaymentPayload {
@@ -683,9 +676,7 @@ mod tests {
                 asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
                 pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
                 max_timeout_seconds: 300,
-                escrow_program_id: Some(
-                    "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
-                ),
+                escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
             },
             payload: PayloadData::Escrow(EscrowPayload {
                 deposit_tx: deposit_tx_b64,
@@ -729,9 +720,7 @@ mod tests {
                 asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
                 pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
                 max_timeout_seconds: 300,
-                escrow_program_id: Some(
-                    "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
-                ),
+                escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
             },
             payload: PayloadData::Escrow(EscrowPayload {
                 deposit_tx: deposit_tx_b64,
@@ -745,7 +734,8 @@ mod tests {
         assert!(result.is_err(), "expected error for wrong escrow program");
         let err = result.unwrap_err();
         assert!(
-            err.to_string().contains("no escrow program instruction found"),
+            err.to_string()
+                .contains("no escrow program instruction found"),
             "error should mention missing instruction, got: {err}"
         );
     }

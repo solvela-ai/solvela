@@ -111,13 +111,21 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Placeholder worker that completes instantly and records success.
-    async fn fast_worker(scheduled_at: Instant, _tier: &'static str, metrics: Arc<MetricsCollector>) {
+    async fn fast_worker(
+        scheduled_at: Instant,
+        _tier: &'static str,
+        metrics: Arc<MetricsCollector>,
+    ) {
         let latency = scheduled_at.elapsed();
         metrics.record_success(latency);
     }
 
     /// Placeholder worker that sleeps 200ms to simulate slow responses.
-    async fn slow_worker(scheduled_at: Instant, _tier: &'static str, metrics: Arc<MetricsCollector>) {
+    async fn slow_worker(
+        scheduled_at: Instant,
+        _tier: &'static str,
+        metrics: Arc<MetricsCollector>,
+    ) {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let latency = scheduled_at.elapsed();
         metrics.record_success(latency);
@@ -194,10 +202,7 @@ mod tests {
         let valid = ["simple", "medium", "complex", "reasoning"];
         for _ in 0..100 {
             let tier = select_tier(&weights);
-            assert!(
-                valid.contains(&tier),
-                "unexpected tier: {tier}"
-            );
+            assert!(valid.contains(&tier), "unexpected tier: {tier}");
         }
     }
 
@@ -209,22 +214,23 @@ mod tests {
         let call_count = Arc::new(AtomicU64::new(0));
 
         let counter = call_count.clone();
-        let worker = move |scheduled_at: Instant, _tier: &'static str, metrics: Arc<MetricsCollector>| {
-            let counter = counter.clone();
-            async move {
-                // Simulate a small delay.
-                tokio::time::sleep(Duration::from_millis(5)).await;
-                let latency = scheduled_at.elapsed();
-                // Latency should be >= 5ms since we slept.
-                assert!(
-                    latency >= Duration::from_millis(4),
-                    "latency should include sleep time, got {:?}",
-                    latency
-                );
-                metrics.record_success(latency);
-                counter.fetch_add(1, Ordering::Relaxed);
-            }
-        };
+        let worker =
+            move |scheduled_at: Instant, _tier: &'static str, metrics: Arc<MetricsCollector>| {
+                let counter = counter.clone();
+                async move {
+                    // Simulate a small delay.
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    let latency = scheduled_at.elapsed();
+                    // Latency should be >= 5ms since we slept.
+                    assert!(
+                        latency >= Duration::from_millis(4),
+                        "latency should include sleep time, got {:?}",
+                        latency
+                    );
+                    metrics.record_success(latency);
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            };
 
         let config = DispatcherConfig {
             rps: 5,

@@ -24,10 +24,7 @@ pub enum DepositError {
     InvalidKeypair(String),
     /// An address field failed to decode from base58.
     #[error("invalid address for {field}: {reason}")]
-    InvalidAddress {
-        field: &'static str,
-        reason: String,
-    },
+    InvalidAddress { field: &'static str, reason: String },
     /// A PDA or ATA derivation failed.
     #[error("failed to derive {0}")]
     DerivationFailed(&'static str),
@@ -121,11 +118,12 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, DepositError> 
     }
 
     // Step 3: Parse all addresses
-    let provider_pubkey =
-        decode_bs58_pubkey(&params.provider_wallet_b58).map_err(|e| DepositError::InvalidAddress {
+    let provider_pubkey = decode_bs58_pubkey(&params.provider_wallet_b58).map_err(|e| {
+        DepositError::InvalidAddress {
             field: "provider_wallet",
             reason: e.to_string(),
-        })?;
+        }
+    })?;
     let usdc_mint =
         decode_bs58_pubkey(&params.usdc_mint_b58).map_err(|e| DepositError::InvalidAddress {
             field: "usdc_mint",
