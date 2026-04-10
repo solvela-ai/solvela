@@ -184,6 +184,9 @@ func putUint64LE(dst *[8]byte, v uint64) {
 //
 // Mirrors `SigningKey::from_keypair_bytes` in crates/x402/src/escrow/deposit.rs.
 func decodeAndValidateKeypair(b58 string) (ed25519.PrivateKey, [32]byte, error) {
+	if b58 == "" {
+		return nil, [32]byte{}, &SigningError{Message: "keypair must be 64 bytes, got 0"}
+	}
 	kpBytes, err := base58.Decode(b58)
 	if err != nil {
 		return nil, [32]byte{}, &SigningError{Message: "invalid base58 keypair: " + err.Error(), cause: err}
