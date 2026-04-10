@@ -1,6 +1,8 @@
 pub mod config;
 pub mod dispatcher;
 pub mod metrics;
+pub mod payment;
+pub mod worker;
 
 use anyhow::Result;
 use clap::Args;
