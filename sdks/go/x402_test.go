@@ -7,7 +7,7 @@ import (
 )
 
 func TestCreatePaymentHeaderEscrowScheme(t *testing.T) {
-	// Escrow signing is not implemented in the Go SDK — expect an error.
+	// With no wallet key, escrow scheme now returns a stub payload (no error).
 	info := &PaymentRequired{
 		X402Version: 2,
 		Accepts: []PaymentAccept{{
@@ -22,22 +22,25 @@ func TestCreatePaymentHeaderEscrowScheme(t *testing.T) {
 		CostBreakdown: CostBreakdown{Total: "0.001"},
 	}
 
-	_, err := createPaymentHeader(info, "/v1/chat/completions")
-	if err == nil {
-		t.Fatal("createPaymentHeader: expected error for escrow scheme, got nil")
+	header, err := createPaymentHeader(info, "/v1/chat/completions", nil, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("createPaymentHeader: unexpected error: %v", err)
 	}
 
-	payErr, ok := err.(*PaymentError)
-	if !ok {
-		t.Fatalf("expected *PaymentError, got %T: %v", err, err)
+	decoded, decErr := base64.StdEncoding.DecodeString(header)
+	if decErr != nil {
+		t.Fatalf("base64 decode: %v", decErr)
 	}
 
-	const wantSubstr = "escrow deposit signing is not yet implemented in the Go SDK"
-	if payErr.Message == "" || len(payErr.Message) < len(wantSubstr) {
-		t.Errorf("error message too short: %q", payErr.Message)
+	var payload escrowPaymentPayload
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		t.Fatalf("json unmarshal: %v", err)
 	}
-	if !containsSubstr(payErr.Message, wantSubstr) {
-		t.Errorf("error message = %q, want it to contain %q", payErr.Message, wantSubstr)
+	if payload.Accepted.Scheme != "escrow" {
+		t.Errorf("scheme = %q, want escrow", payload.Accepted.Scheme)
+	}
+	if payload.Payload.DepositTx != "STUB_ESCROW_DEPOSIT_TX" {
+		t.Errorf("deposit_tx = %q, want STUB_ESCROW_DEPOSIT_TX", payload.Payload.DepositTx)
 	}
 }
 
@@ -83,8 +86,7 @@ func TestPaymentAcceptEscrowProgramID(t *testing.T) {
 }
 
 func TestCreatePaymentHeaderPrefersEscrow(t *testing.T) {
-	// Escrow is preferred when available, but the Go SDK returns an error for
-	// escrow scheme since deposit signing is not implemented.
+	// Escrow is preferred when available. With no wallet key, returns stub payload.
 	info := &PaymentRequired{
 		X402Version: 2,
 		Accepts: []PaymentAccept{
@@ -109,17 +111,22 @@ func TestCreatePaymentHeaderPrefersEscrow(t *testing.T) {
 		CostBreakdown: CostBreakdown{Total: "0.001"},
 	}
 
-	_, err := createPaymentHeader(info, "/v1/chat/completions")
-	if err == nil {
-		t.Fatal("createPaymentHeader: expected error when escrow scheme selected, got nil")
+	header, err := createPaymentHeader(info, "/v1/chat/completions", nil, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("createPaymentHeader: unexpected error: %v", err)
 	}
 
-	payErr, ok := err.(*PaymentError)
-	if !ok {
-		t.Fatalf("expected *PaymentError, got %T: %v", err, err)
+	decoded, decErr := base64.StdEncoding.DecodeString(header)
+	if decErr != nil {
+		t.Fatalf("base64 decode: %v", decErr)
 	}
-	if !containsSubstr(payErr.Message, "escrow deposit signing is not yet implemented") {
-		t.Errorf("unexpected error message: %q", payErr.Message)
+
+	var payload escrowPaymentPayload
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		t.Fatalf("json unmarshal: %v", err)
+	}
+	if payload.Accepted.Scheme != "escrow" {
+		t.Errorf("selected scheme = %q, want escrow", payload.Accepted.Scheme)
 	}
 }
 
@@ -140,7 +147,7 @@ func TestCreatePaymentHeaderExactFallback(t *testing.T) {
 		CostBreakdown: CostBreakdown{Total: "0.001"},
 	}
 
-	header, err := createPaymentHeader(info, "/v1/chat/completions")
+	header, err := createPaymentHeader(info, "/v1/chat/completions", nil, nil)
 	if err != nil {
 		t.Fatalf("createPaymentHeader: %v", err)
 	}
