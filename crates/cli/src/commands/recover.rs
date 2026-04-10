@@ -34,6 +34,18 @@ const BUMP_OFFSET: usize = DISC_LEN + 144; // 152
 const ESCROW_ACCOUNT_LEN: usize = DISC_LEN + 145; // 153
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Format a μUSDC atomic amount as a decimal USDC string with 6 decimal places.
+/// 1 USDC = 1_000_000 μUSDC.
+fn atomic_to_usdc(atomic: u64) -> String {
+    let whole = atomic / 1_000_000;
+    let frac = atomic % 1_000_000;
+    format!("{whole}.{frac:06}")
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -150,8 +162,9 @@ pub async fn run(
             .map(|b| format!("{b:02x}"))
             .collect();
         println!(
-            "  {pda_b58}  {amount:>12} USDC  {status:>7}  service_id={sid_hex}…  rent={lamports} lamports  expiry_slot={expiry}",
+            "  {pda_b58}  {amount:>12} atomic ({usdc} USDC)  {status:>7}  service_id={sid_hex}…  rent={lamports} lamports  expiry_slot={expiry}",
             amount = esc.amount,
+            usdc = atomic_to_usdc(esc.amount),
             lamports = esc.lamports,
             expiry = esc.expiry_slot,
         );
@@ -159,10 +172,11 @@ pub async fn run(
 
     println!();
     println!(
-        "Totals: {} escrows, {} expired, {} atomic USDC locked, {} lamports rent",
+        "Totals: {} escrows, {} expired, {} atomic ({} USDC) locked, {} lamports rent",
         escrows.len(),
         expired.len(),
         total_locked,
+        atomic_to_usdc(total_locked),
         total_rent
     );
     println!();
@@ -550,6 +564,15 @@ mod tests {
     }
 
     // --- Pure unit tests ---
+
+    #[test]
+    fn test_atomic_to_usdc() {
+        assert_eq!(atomic_to_usdc(0), "0.000000");
+        assert_eq!(atomic_to_usdc(2625), "0.002625");
+        assert_eq!(atomic_to_usdc(1_000_000), "1.000000");
+        assert_eq!(atomic_to_usdc(7_879), "0.007879");
+        assert_eq!(atomic_to_usdc(1_500_000), "1.500000");
+    }
 
     #[test]
     fn test_decode_escrow_account_layout() {

@@ -189,6 +189,51 @@ mod tests {
         );
     }
 
+    /// Regression test for escrow PDA derivation against an externally-computed
+    /// canonical Solana value.
+    ///
+    /// This test anchors `find_program_address` to the output of the reference
+    /// implementation — `solders` (Rust-backed Python bindings to `solana-sdk`).
+    ///
+    /// External computation (run 2026-04-10):
+    /// ```python
+    /// from solders.pubkey import Pubkey
+    /// program_id = Pubkey.from_string("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU")
+    /// agent      = bytes([1] * 32)
+    /// service_id = bytes([2] * 32)
+    /// pda, bump  = Pubkey.find_program_address([b"escrow", agent, service_id], program_id)
+    /// # PDA:  BEAUsvsWvV4o6y7XkC1bkyTq4FtQnKErcV3dzTFPT5hX
+    /// # bump: 255
+    /// ```
+    ///
+    /// `solders` delegates to `solana_program::pubkey::Pubkey::find_program_address`,
+    /// which is the same algorithm used by the Solana runtime.  The expected value
+    /// therefore represents canonical on-chain behavior.
+    ///
+    /// DO NOT update `expected_pda` to match what this crate produces.
+    /// If this test fails, recompute the expected value from an external source first.
+    #[test]
+    fn test_escrow_pda_derivation_external_ground_truth() {
+        let program_id = decode_bs58_pubkey("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU")
+            .expect("valid program id");
+        let agent = [1u8; 32];
+        let service_id = [2u8; 32];
+
+        let (pda, bump) =
+            find_program_address(&[b"escrow", &agent, &service_id], &program_id)
+                .expect("PDA derivation should succeed for these inputs");
+
+        // Externally computed via solders `Pubkey.find_program_address` — see doc comment above.
+        let expected_pda = decode_bs58_pubkey("BEAUsvsWvV4o6y7XkC1bkyTq4FtQnKErcV3dzTFPT5hX")
+            .expect("valid expected PDA");
+
+        assert_eq!(
+            pda, expected_pda,
+            "escrow PDA derivation does not match externally-computed canonical value"
+        );
+        assert_eq!(bump, 255, "expected bump seed mismatch");
+    }
+
     #[test]
     fn test_decode_bs58_pubkey_valid() {
         let result = decode_bs58_pubkey("11111111111111111111111111111111");

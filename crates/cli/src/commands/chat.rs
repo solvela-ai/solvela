@@ -6,13 +6,25 @@ use x402::types::{PaymentAccept, PaymentPayload, PaymentRequired, Resource, Sola
 use crate::commands::wallet::load_wallet;
 
 /// Select the preferred payment scheme from the accepts list.
-/// Prefers "escrow" (agent gets deposit protection) over "exact".
-fn select_payment_scheme(accepts: &[PaymentAccept]) -> Result<&PaymentAccept> {
+///
+/// If `override_scheme` is `Some`, the scheme with that name must be present in
+/// `accepts` or an error is returned. Otherwise the default preference is used:
+/// "escrow" (when a program ID is advertised) over "exact".
+fn select_payment_scheme<'a>(
+    accepts: &'a [PaymentAccept],
+    override_scheme: Option<&str>,
+) -> Result<&'a PaymentAccept> {
+    if let Some(scheme) = override_scheme {
+        return accepts
+            .iter()
+            .find(|a| a.scheme == scheme)
+            .with_context(|| format!("requested scheme '{scheme}' not advertised by gateway"));
+    }
     accepts
         .iter()
         .find(|a| a.scheme == "escrow" && a.escrow_program_id.is_some())
         .or_else(|| accepts.first())
-        .context("payment required but accepts list is empty")
+        .context("gateway returned no accepted payment methods")
 }
 
 /// Generate a unique 32-byte service_id by hashing the request body + random nonce.
@@ -28,7 +40,7 @@ fn generate_service_id(request_body: &[u8]) -> Result<[u8; 32]> {
     Ok(id)
 }
 
-pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<()> {
+pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool, scheme: Option<&str>) -> Result<()> {
     let client = reqwest::Client::new();
 
     let body = serde_json::json!({
@@ -98,8 +110,8 @@ pub async fn run(api_url: &str, model: &str, prompt: &str, yes: bool) -> Result<
         .as_str()
         .context("wallet missing private_key field")?;
 
-    // Select the preferred payment scheme (escrow > exact).
-    let accepted = select_payment_scheme(&payment_required.accepts)?.clone();
+    // Select the preferred payment scheme (escrow > exact, or override).
+    let accepted = select_payment_scheme(&payment_required.accepts, scheme)?.clone();
 
     // Resolve the Solana RPC URL from the environment.
     let rpc_url = std::env::var("SOLANA_RPC_URL")
@@ -295,7 +307,7 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let result = run(&mock.uri(), "auto", "What is Solana?", true).await;
+        let result = run(&mock.uri(), "auto", "What is Solana?", true, None).await;
         assert!(result.is_ok(), "chat should succeed on 200 response");
     }
 
@@ -308,7 +320,7 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let result = run(&mock.uri(), "auto", "test", true).await;
+        let result = run(&mock.uri(), "auto", "test", true, None).await;
         assert!(result.is_err(), "chat should return error on 500 response");
         assert!(
             result.unwrap_err().to_string().contains("Gateway error"),
@@ -391,7 +403,7 @@ mod tests {
         std::env::set_var("SOLANA_RPC_URL", mock.uri());
         let _env_guard = EnvGuard("SOLANA_RPC_URL");
 
-        let result = run(&mock.uri(), "auto", "What is Solana?", true).await;
+        let result = run(&mock.uri(), "auto", "What is Solana?", true, None).await;
 
         assert!(
             result.is_ok(),
@@ -439,7 +451,7 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let result = run(&mock.uri(), "auto", "test", true).await;
+        let result = run(&mock.uri(), "auto", "test", true, None).await;
         assert!(
             result.is_err(),
             "chat should fail when wallet is missing for payment"
@@ -448,7 +460,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chat_connection_error() {
-        let result = run(&dead_url(), "auto", "test", true).await;
+        let result = run(&dead_url(), "auto", "test", true, None).await;
         assert!(result.is_err(), "chat should error on connection failure");
     }
 
@@ -482,7 +494,7 @@ mod tests {
     fn test_select_escrow_scheme_prefers_escrow() {
         let accepts = vec![make_exact_accept(), make_escrow_accept()];
         // Safe: non-empty accepts list always yields Ok
-        let selected = select_payment_scheme(&accepts).unwrap();
+        let selected = select_payment_scheme(&accepts, None).unwrap();
         assert_eq!(selected.scheme, "escrow");
     }
 
@@ -490,7 +502,7 @@ mod tests {
     fn test_select_escrow_scheme_falls_back_to_exact() {
         let accepts = vec![make_exact_accept()];
         // Safe: non-empty accepts list always yields Ok
-        let selected = select_payment_scheme(&accepts).unwrap();
+        let selected = select_payment_scheme(&accepts, None).unwrap();
         assert_eq!(selected.scheme, "exact");
     }
 
@@ -500,10 +512,42 @@ mod tests {
         escrow_no_id.escrow_program_id = None;
         let accepts = vec![make_exact_accept(), escrow_no_id];
         // Safe: non-empty accepts list always yields Ok
-        let selected = select_payment_scheme(&accepts).unwrap();
+        let selected = select_payment_scheme(&accepts, None).unwrap();
         assert_eq!(
             selected.scheme, "exact",
             "escrow without program ID should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_select_payment_scheme_with_override() {
+        let accepts = vec![make_exact_accept(), make_escrow_accept()];
+        // --scheme exact should select exact even when escrow is available
+        let selected = select_payment_scheme(&accepts, Some("exact")).unwrap();
+        assert_eq!(
+            selected.scheme, "exact",
+            "--scheme exact should override default escrow preference"
+        );
+    }
+
+    #[test]
+    fn test_select_payment_scheme_override_escrow() {
+        let accepts = vec![make_exact_accept(), make_escrow_accept()];
+        let selected = select_payment_scheme(&accepts, Some("escrow")).unwrap();
+        assert_eq!(selected.scheme, "escrow");
+    }
+
+    #[test]
+    fn test_select_payment_scheme_override_not_advertised() {
+        let accepts = vec![make_exact_accept()];
+        let result = select_payment_scheme(&accepts, Some("escrow"));
+        assert!(
+            result.is_err(),
+            "requesting an unavailable scheme should return an error"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("escrow"),
+            "error should mention the requested scheme"
         );
     }
 
@@ -605,7 +649,7 @@ mod tests {
         std::env::set_var("SOLANA_RPC_URL", mock.uri());
         let _env_guard = EnvGuard("SOLANA_RPC_URL");
 
-        let result = run(&mock.uri(), "auto", "What is Solana?", true).await;
+        let result = run(&mock.uri(), "auto", "What is Solana?", true, None).await;
 
         assert!(
             result.is_ok(),
