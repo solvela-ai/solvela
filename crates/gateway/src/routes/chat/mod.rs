@@ -150,7 +150,7 @@ pub async fn chat_completions(
             "DEV MODE: payment bypassed for request to {}",
             req.model
         );
-        counter!("rcr_payments_total", "status" => "dev_bypass").increment(1);
+        counter!("solvela_payments_total", "status" => "dev_bypass").increment(1);
 
         let ctx = ProviderCallContext {
             state: &state,
@@ -182,7 +182,7 @@ pub async fn chat_completions(
 
     if payment_header.is_none() {
         // Return 402 with pricing info
-        counter!("rcr_payments_total", "status" => "none").increment(1);
+        counter!("solvela_payments_total", "status" => "none").increment(1);
         info!(model = %req.model, "no payment signature, returning 402");
 
         let cost = state
@@ -429,8 +429,8 @@ pub async fn chat_completions(
             };
 
             if replay_detected {
-                counter!("rcr_replay_rejections_total").increment(1);
-                counter!("rcr_payments_total", "status" => "failed").increment(1);
+                counter!("solvela_replay_rejections_total").increment(1);
+                counter!("solvela_payments_total", "status" => "failed").increment(1);
                 warn!(tx = %tx_raw, "replay attack detected — transaction already used");
                 return Err(GatewayError::InvalidPayment(
                     "transaction has already been used; each payment signature may only be submitted once".to_string()
@@ -442,7 +442,7 @@ pub async fn chat_completions(
             match state.facilitator.verify_and_settle(&payload).await {
                 Ok(settlement) if !settlement.success => {
                     // Settlement returned Ok but the transaction was not confirmed
-                    counter!("rcr_payments_total", "status" => "failed").increment(1);
+                    counter!("solvela_payments_total", "status" => "failed").increment(1);
                     tracing::warn!(
                         tx_signature = %settlement.tx_signature.as_deref().unwrap_or("unknown"),
                         error = ?settlement.error,
@@ -454,8 +454,8 @@ pub async fn chat_completions(
                 }
                 Ok(settlement) => {
                     escrow_deposited_amount = settlement.verified_amount;
-                    counter!("rcr_payments_total", "status" => "verified").increment(1);
-                    histogram!("rcr_payment_amount_usdc")
+                    counter!("solvela_payments_total", "status" => "verified").increment(1);
+                    histogram!("solvela_payment_amount_usdc")
                         .record(client_amount as f64 / 1_000_000.0);
                     info!(
                         tx_signature = ?settlement.tx_signature,
@@ -465,7 +465,7 @@ pub async fn chat_completions(
                     );
                 }
                 Err(e) => {
-                    counter!("rcr_payments_total", "status" => "failed").increment(1);
+                    counter!("solvela_payments_total", "status" => "failed").increment(1);
                     warn!(error = %e, "payment verification failed");
                     return Err(GatewayError::InvalidPayment(format!(
                         "payment verification failed: {e}"
@@ -474,7 +474,7 @@ pub async fn chat_completions(
             }
         }
         None => {
-            counter!("rcr_payments_total", "status" => "failed").increment(1);
+            counter!("solvela_payments_total", "status" => "failed").increment(1);
             return Err(GatewayError::InvalidPayment(
                 "PAYMENT-SIGNATURE header is present but could not be decoded. \
                  Encode a valid PaymentPayload as standard base64 JSON."
@@ -629,7 +629,7 @@ pub async fn chat_completions(
                 wallet = %wallet_address,
                 "paid request failed: no provider available — returning error instead of stub"
             );
-            counter!("rcr_paid_stub_rejections_total").increment(1);
+            counter!("solvela_paid_stub_rejections_total").increment(1);
 
             Err(GatewayError::Internal(format!(
                 "all providers failed for model '{}'. Your payment was submitted but no response \

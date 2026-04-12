@@ -83,7 +83,7 @@ async fn check_all_services(state: &AppState) {
             );
         }
 
-        gauge!("rcr_service_health", "service_id" => service_id.to_string()).set(if healthy {
+        gauge!("solvela_service_health", "service_id" => service_id.to_string()).set(if healthy {
             1.0
         } else {
             0.0
