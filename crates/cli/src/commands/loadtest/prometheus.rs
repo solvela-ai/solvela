@@ -193,50 +193,50 @@ mod tests {
 
     #[test]
     fn test_parse_prometheus_line_counter() {
-        let line = r#"rcr_http_requests_total{method="POST",path="/v1/chat/completions"} 42"#;
+        let line = r#"solvela_http_requests_total{method="POST",path="/v1/chat/completions"} 42"#;
         let parsed = parse_metric_line(line);
-        assert_eq!(parsed, Some(("rcr_http_requests_total".to_string(), 42.0)));
+        assert_eq!(parsed, Some(("solvela_http_requests_total".to_string(), 42.0)));
     }
 
     #[test]
     fn test_parse_prometheus_line_skips_comments() {
-        let line = "# HELP rcr_http_requests_total Total requests";
+        let line = "# HELP solvela_http_requests_total Total requests";
         let parsed = parse_metric_line(line);
         assert!(parsed.is_none());
     }
 
     #[test]
     fn test_parse_prometheus_line_skips_type_annotation() {
-        let line = "# TYPE rcr_http_requests_total counter";
+        let line = "# TYPE solvela_http_requests_total counter";
         assert!(parse_metric_line(line).is_none());
     }
 
     #[test]
     fn test_parse_prometheus_line_unlabelled_gauge() {
-        let line = "rcr_active_requests 7";
+        let line = "solvela_active_requests 7";
         let parsed = parse_metric_line(line);
-        assert_eq!(parsed, Some(("rcr_active_requests".to_string(), 7.0)));
+        assert_eq!(parsed, Some(("solvela_active_requests".to_string(), 7.0)));
     }
 
     #[test]
     fn test_parse_prometheus_line_float_value() {
-        let line = "rcr_request_duration_seconds_sum 0.123456";
+        let line = "solvela_request_duration_seconds_sum 0.123456";
         let parsed = parse_metric_line(line);
         assert_eq!(
             parsed,
-            Some(("rcr_request_duration_seconds_sum".to_string(), 0.123_456))
+            Some(("solvela_request_duration_seconds_sum".to_string(), 0.123_456))
         );
     }
 
     #[test]
     fn test_parse_prometheus_line_skips_inf() {
-        let line = r#"rcr_request_duration_seconds_bucket{le="+Inf"} 1000"#;
+        let line = r#"solvela_request_duration_seconds_bucket{le="+Inf"} 1000"#;
         // The metric name parses fine; the value token after '}' is "1000", not "+Inf".
         // "+Inf" is inside the label, so this should parse successfully.
         let parsed = parse_metric_line(line);
         assert_eq!(
             parsed,
-            Some(("rcr_request_duration_seconds_bucket".to_string(), 1000.0))
+            Some(("solvela_request_duration_seconds_bucket".to_string(), 1000.0))
         );
     }
 
@@ -251,36 +251,36 @@ mod tests {
     #[test]
     fn test_compute_deltas() {
         let before = vec![
-            ("rcr_requests_total".to_string(), 100.0),
-            ("rcr_errors_total".to_string(), 5.0),
+            ("solvela_requests_total".to_string(), 100.0),
+            ("solvela_errors_total".to_string(), 5.0),
         ];
         let after = vec![
-            ("rcr_requests_total".to_string(), 200.0),
-            ("rcr_errors_total".to_string(), 8.0),
-            ("rcr_new_metric".to_string(), 10.0),
+            ("solvela_requests_total".to_string(), 200.0),
+            ("solvela_errors_total".to_string(), 8.0),
+            ("solvela_new_metric".to_string(), 10.0),
         ];
 
         let deltas = compute_deltas(&before, &after);
-        assert_eq!(deltas.get("rcr_requests_total"), Some(&100.0));
-        assert_eq!(deltas.get("rcr_errors_total"), Some(&3.0));
+        assert_eq!(deltas.get("solvela_requests_total"), Some(&100.0));
+        assert_eq!(deltas.get("solvela_errors_total"), Some(&3.0));
         // New metric defaults before-value to 0.0.
-        assert_eq!(deltas.get("rcr_new_metric"), Some(&10.0));
+        assert_eq!(deltas.get("solvela_new_metric"), Some(&10.0));
     }
 
     #[test]
     fn test_compute_deltas_empty_before() {
         let before: Vec<(String, f64)> = vec![];
-        let after = vec![("rcr_requests_total".to_string(), 50.0)];
+        let after = vec![("solvela_requests_total".to_string(), 50.0)];
         let deltas = compute_deltas(&before, &after);
-        assert_eq!(deltas.get("rcr_requests_total"), Some(&50.0));
+        assert_eq!(deltas.get("solvela_requests_total"), Some(&50.0));
     }
 
     #[test]
     fn test_compute_deltas_no_change() {
-        let before = vec![("rcr_requests_total".to_string(), 42.0)];
-        let after = vec![("rcr_requests_total".to_string(), 42.0)];
+        let before = vec![("solvela_requests_total".to_string(), 42.0)];
+        let after = vec![("solvela_requests_total".to_string(), 42.0)];
         let deltas = compute_deltas(&before, &after);
-        assert_eq!(deltas.get("rcr_requests_total"), Some(&0.0));
+        assert_eq!(deltas.get("solvela_requests_total"), Some(&0.0));
     }
 
     // --- validate_slos ---

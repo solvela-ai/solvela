@@ -4379,7 +4379,7 @@ async fn test_metrics_contains_request_total_after_request() {
         .unwrap();
     assert_eq!(health_response.status(), StatusCode::OK);
 
-    // Now fetch /metrics and check for rcr_requests_total
+    // Now fetch /metrics and check for solvela_requests_total
     let metrics_response = app
         .oneshot(
             Request::builder()
@@ -4402,18 +4402,18 @@ async fn test_metrics_contains_request_total_after_request() {
     let body_str = String::from_utf8_lossy(&body);
 
     // The global recorder is shared across all tests so we may see metrics
-    // from other tests too, but rcr_requests_total should be present.
+    // from other tests too, but solvela_requests_total should be present.
     // Also verify via the handle directly.
     let rendered = state.prometheus_handle.as_ref().unwrap().render();
     assert!(
-        rendered.contains("rcr_requests_total"),
-        "metrics output should contain rcr_requests_total, got:\n{rendered}"
+        rendered.contains("solvela_requests_total"),
+        "metrics output should contain solvela_requests_total, got:\n{rendered}"
     );
 
     // Body from the endpoint should also contain it
     assert!(
-        body_str.contains("rcr_requests_total"),
-        "metrics body should contain rcr_requests_total"
+        body_str.contains("solvela_requests_total"),
+        "metrics body should contain solvela_requests_total"
     );
 }
 
@@ -4436,8 +4436,8 @@ async fn test_metrics_contains_request_duration() {
     // Check that the histogram metric exists
     let rendered = state.prometheus_handle.as_ref().unwrap().render();
     assert!(
-        rendered.contains("rcr_request_duration_seconds"),
-        "metrics should contain rcr_request_duration_seconds histogram, got:\n{rendered}"
+        rendered.contains("solvela_request_duration_seconds"),
+        "metrics should contain solvela_request_duration_seconds histogram, got:\n{rendered}"
     );
 }
 
@@ -4474,14 +4474,14 @@ async fn test_metrics_not_counted_in_own_requests() {
         .await
         .unwrap();
 
-    // Primary assertion: the /metrics path must not appear in rcr_requests_total.
+    // Primary assertion: the /metrics path must not appear in solvela_requests_total.
     let rendered = state.prometheus_handle.as_ref().unwrap().render();
     let has_metrics_path = rendered
         .lines()
-        .any(|line| line.contains("rcr_requests_total") && line.contains("path=\"/metrics\""));
+        .any(|line| line.contains("solvela_requests_total") && line.contains("path=\"/metrics\""));
     assert!(
         !has_metrics_path,
-        "/metrics path should not be counted in rcr_requests_total"
+        "/metrics path should not be counted in solvela_requests_total"
     );
 }
 

@@ -113,7 +113,7 @@ pub(crate) async fn execute_provider_call(
     let provider_name = &ctx.model_info.provider;
 
     let mut cache_status = if ctx.req.stream {
-        counter!("rcr_cache_total", "result" => "skip").increment(1);
+        counter!("solvela_cache_total", "result" => "skip").increment(1);
         CacheStatus::Skip
     } else {
         CacheStatus::Miss
@@ -123,7 +123,7 @@ pub(crate) async fn execute_provider_call(
     if !ctx.req.stream {
         if let Some(cache) = &ctx.state.cache {
             if let Some(cached) = cache.get(ctx.req).await {
-                counter!("rcr_cache_total", "result" => "hit").increment(1);
+                counter!("solvela_cache_total", "result" => "hit").increment(1);
                 info!(model = %ctx.req.model, "serving from cache");
                 cache_status = CacheStatus::Hit;
                 let mut resp = Json(
@@ -155,9 +155,9 @@ pub(crate) async fn execute_provider_call(
                     actual_provider: None,
                 });
             }
-            counter!("rcr_cache_total", "result" => "miss").increment(1);
+            counter!("solvela_cache_total", "result" => "miss").increment(1);
         } else {
-            counter!("rcr_cache_total", "result" => "miss").increment(1);
+            counter!("solvela_cache_total", "result" => "miss").increment(1);
         }
     }
 
@@ -241,7 +241,7 @@ async fn execute_streaming_call(
         };
 
     let provider_duration = provider_start.elapsed();
-    histogram!("rcr_provider_request_duration_seconds", "provider" => provider_name.to_string())
+    histogram!("solvela_provider_request_duration_seconds", "provider" => provider_name.to_string())
         .record(provider_duration.as_secs_f64());
 
     match result {
@@ -301,7 +301,7 @@ async fn execute_streaming_call(
         }
         Err(e) => {
             let error_type = classify_provider_error(&e);
-            counter!("rcr_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => error_type).increment(1);
+            counter!("solvela_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => error_type).increment(1);
             Err(ProviderCallError::AllProvidersFailed {
                 model: ctx.req.model.clone(),
                 provider: provider_name.to_string(),
@@ -342,7 +342,7 @@ async fn execute_non_streaming_call(
         };
 
     let provider_duration = provider_start.elapsed();
-    histogram!("rcr_provider_request_duration_seconds", "provider" => provider_name.to_string())
+    histogram!("solvela_provider_request_duration_seconds", "provider" => provider_name.to_string())
         .record(provider_duration.as_secs_f64());
 
     match result {
@@ -408,7 +408,7 @@ async fn execute_non_streaming_call(
         }
         Err(e) => {
             let error_type = classify_provider_error(&e);
-            counter!("rcr_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => error_type).increment(1);
+            counter!("solvela_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => error_type).increment(1);
             Err(ProviderCallError::AllProvidersFailed {
                 model: ctx.req.model.clone(),
                 provider: provider_name.to_string(),

@@ -10,13 +10,13 @@ use axum::extract::{MatchedPath, Request};
 use axum::middleware::Next;
 use axum::response::Response;
 
-/// Drop guard that decrements `rcr_active_requests` on drop, ensuring the
+/// Drop guard that decrements `solvela_active_requests` on drop, ensuring the
 /// gauge is decremented even if the inner handler panics.
 struct ActiveRequestGuard;
 
 impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
-        metrics::gauge!("rcr_active_requests").decrement(1.0);
+        metrics::gauge!("solvela_active_requests").decrement(1.0);
     }
 }
 
@@ -41,11 +41,11 @@ fn normalize_method(method: &axum::http::Method) -> &'static str {
 /// Axum middleware function that records Prometheus request metrics.
 ///
 /// On each request:
-/// 1. Increments `rcr_active_requests` gauge (with drop guard for safety)
+/// 1. Increments `solvela_active_requests` gauge (with drop guard for safety)
 /// 2. Runs the inner handler
-/// 3. Decrements `rcr_active_requests` gauge (via drop guard)
-/// 4. Records `rcr_request_duration_seconds` histogram (labels: method, path)
-/// 5. Increments `rcr_requests_total` counter (labels: method, path, status)
+/// 3. Decrements `solvela_active_requests` gauge (via drop guard)
+/// 4. Records `solvela_request_duration_seconds` histogram (labels: method, path)
+/// 5. Increments `solvela_requests_total` counter (labels: method, path, status)
 ///
 /// Requests to `/metrics` are passed through without recording to prevent
 /// the Prometheus scraper from inflating request counts.
@@ -60,7 +60,7 @@ pub async fn record_metrics(request: Request, next: Next) -> Response {
     let should_record = path.as_deref() != Some("/metrics");
 
     let _guard = if should_record {
-        metrics::gauge!("rcr_active_requests").increment(1.0);
+        metrics::gauge!("solvela_active_requests").increment(1.0);
         Some(ActiveRequestGuard)
     } else {
         None
@@ -78,9 +78,9 @@ pub async fn record_metrics(request: Request, next: Next) -> Response {
         // Drop the guard before recording so the gauge is decremented first
         drop(_guard);
 
-        metrics::histogram!("rcr_request_duration_seconds", "method" => method_str, "path" => path_str.clone())
+        metrics::histogram!("solvela_request_duration_seconds", "method" => method_str, "path" => path_str.clone())
             .record(duration);
-        metrics::counter!("rcr_requests_total", "method" => method_str, "path" => path_str, "status" => status_str)
+        metrics::counter!("solvela_requests_total", "method" => method_str, "path" => path_str, "status" => status_str)
             .increment(1);
     }
 
