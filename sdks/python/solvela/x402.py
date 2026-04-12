@@ -27,7 +27,7 @@ def build_solana_transfer_checked(
 ) -> str:
     """Build and sign a USDC-SPL TransferChecked versioned transaction.
 
-    Requires: ``pip install rustyclawrouter[solana]``
+    Requires: ``pip install solvela[solana]``
 
     Environment Variables:
         SOLANA_RPC_URL: Solana RPC endpoint URL (required, e.g. https://api.mainnet-beta.solana.com).
@@ -62,7 +62,7 @@ def build_solana_transfer_checked(
         )
     except ImportError:
         raise ImportError(
-            "Solana signing requires: pip install rustyclawrouter[solana]"
+            "Solana signing requires: pip install solvela[solana]"
         )
 
     rpc_url = os.environ.get("SOLANA_RPC_URL")
@@ -195,7 +195,7 @@ def encode_payment_header(
         except ImportError:
             raise ImportError(
                 "Private key was provided but Solana signing packages are not installed. "
-                "Install with: pip install rustyclawrouter[solana]"
+                "Install with: pip install solvela[solana]"
             )
         # SigningError propagates — caller must handle
 
