@@ -15,7 +15,7 @@ import type { PaymentRequired } from '../src/types';
 describe('LLMClient', () => {
   it('uses default API URL when none provided', () => {
     const client = new LLMClient();
-    assert.strictEqual(client.getApiUrl(), 'https://api.rustyclawrouter.com');
+    assert.strictEqual(client.getApiUrl(), 'https://api.solvela.ai');
   });
 
   it('accepts custom API URL', () => {

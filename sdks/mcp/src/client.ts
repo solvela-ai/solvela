@@ -1,5 +1,5 @@
 /**
- * Minimal RustyClawRouter gateway client for the MCP server.
+ * Minimal Solvela gateway client for the MCP server.
  *
  * Handles the x402 payment flow (402 → build payment header → retry)
  * without requiring the full TypeScript SDK as a dependency. The MCP
@@ -84,7 +84,7 @@ export interface SpendSummary {
 }
 
 export interface GatewayClientOptions {
-  /** Gateway URL. Defaults to RCR_API_URL env var or https://api.rustyclawrouter.com */
+  /** Gateway URL. Defaults to SOLVELA_API_URL env var or https://api.solvela.ai */
   apiUrl?: string;
   /** Session spend budget in USDC. Requests are rejected if this would be exceeded. */
   sessionBudget?: number;
@@ -108,7 +108,7 @@ export class GatewayClient {
 
   constructor(opts: GatewayClientOptions = {}) {
     this.apiUrl = (
-      opts.apiUrl ?? process.env['RCR_API_URL'] ?? 'https://api.rustyclawrouter.com'
+      opts.apiUrl ?? process.env['SOLVELA_API_URL'] ?? process.env['RCR_API_URL'] ?? 'https://api.solvela.ai'
     ).replace(/\/$/, '');
     this.sessionBudget = opts.sessionBudget;
     this.timeoutMs = opts.timeoutMs ?? 60_000;

@@ -1,4 +1,4 @@
-"""RustyClawRouter LLM client with transparent x402 payment handling."""
+"""Solvela LLM client with transparent x402 payment handling."""
 
 import json
 import logging

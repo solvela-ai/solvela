@@ -1,7 +1,7 @@
 package rcr
 
 const (
-	DefaultAPIURL    = "https://api.rustyclawrouter.com"
+	DefaultAPIURL    = "https://api.solvela.ai"
 	DefaultDevnetURL = "http://localhost:8402"
 	DefaultTimeout   = 60 // seconds
 

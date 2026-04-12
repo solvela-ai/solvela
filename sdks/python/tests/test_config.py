@@ -13,7 +13,7 @@ from rustyclawrouter.config import (
 
 class TestConfigConstants:
     def test_default_api_url(self):
-        assert DEFAULT_API_URL == "https://api.rustyclawrouter.com"
+        assert DEFAULT_API_URL == "https://api.solvela.ai"
 
     def test_default_devnet_url(self):
         assert DEFAULT_DEVNET_URL == "http://localhost:8402"

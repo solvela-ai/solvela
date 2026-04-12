@@ -129,9 +129,9 @@ class TestURLConstruction:
         client.close()
 
     def test_models_url(self):
-        client = LLMClient(api_url="https://api.rustyclawrouter.com")
+        client = LLMClient(api_url="https://api.solvela.ai")
         url = f"{client.api_url}/v1/models"
-        assert url == "https://api.rustyclawrouter.com/v1/models"
+        assert url == "https://api.solvela.ai/v1/models"
         client.close()
 
     def test_health_url(self):

@@ -1,11 +1,11 @@
 import { ChatMessage, ChatResponse, ClientOptions, PaymentRequired } from './types';
 import { createPaymentHeader } from './x402';
 
-const DEFAULT_API_URL = 'https://api.rustyclawrouter.com';
+const DEFAULT_API_URL = 'https://api.solvela.ai';
 const DEFAULT_TIMEOUT = 60000;
 
 /**
- * RustyClawRouter LLM client with transparent x402 payment handling.
+ * Solvela LLM client with transparent x402 payment handling.
  *
  * Usage:
  *   const client = new LLMClient({ apiUrl: 'http://localhost:8402' });

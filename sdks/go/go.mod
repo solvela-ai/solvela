@@ -1,4 +1,4 @@
-module github.com/rustyclawrouter/sdk-go
+module github.com/solvela/sdk-go
 
 go 1.21
 
