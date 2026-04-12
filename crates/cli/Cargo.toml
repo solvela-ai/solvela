@@ -1,15 +1,15 @@
 [package]
-name = "rustyclawrouter-cli"
+name = "solvela-cli"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "rcr"
+name = "solvela"
 path = "src/main.rs"
 
 [dependencies]
 x402 = { workspace = true }
-router = { workspace = true }
+solvela-router = { workspace = true }
 
 clap = { workspace = true }
 reqwest = { workspace = true }

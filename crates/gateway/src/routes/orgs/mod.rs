@@ -290,7 +290,7 @@ supports_vision = true
     pub(crate) fn test_router(admin_token: Option<&str>) -> Router {
         use crate::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
         use crate::services::ServiceRegistry;
-        use router::models::ModelRegistry;
+        use solvela_router::models::ModelRegistry;
         use tokio::sync::RwLock;
 
         let model_registry =
@@ -455,7 +455,7 @@ mod tests {
 
         let state = AppState {
             config: AppConfig::default(),
-            model_registry: router::models::ModelRegistry::from_toml(
+            model_registry: solvela_router::models::ModelRegistry::from_toml(
                 super::test_helpers::TEST_MODELS_TOML,
             )
             .unwrap(),
@@ -498,7 +498,7 @@ mod tests {
 
         let state = AppState {
             config: AppConfig::default(),
-            model_registry: router::models::ModelRegistry::from_toml(
+            model_registry: solvela_router::models::ModelRegistry::from_toml(
                 super::test_helpers::TEST_MODELS_TOML,
             )
             .unwrap(),
@@ -544,7 +544,7 @@ mod tests {
 
         let state = AppState {
             config: AppConfig::default(),
-            model_registry: router::models::ModelRegistry::from_toml(
+            model_registry: solvela_router::models::ModelRegistry::from_toml(
                 super::test_helpers::TEST_MODELS_TOML,
             )
             .unwrap(),

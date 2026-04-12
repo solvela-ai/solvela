@@ -8,13 +8,13 @@ name = "gateway"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rustyclawrouter"
+name = "solvela-gateway"
 path = "src/main.rs"
 
 [dependencies]
-rustyclaw-protocol = { workspace = true }
+solvela-protocol = { workspace = true }
 x402 = { workspace = true, features = ["postgres"] }
-router = { workspace = true }
+solvela-router = { workspace = true }
 
 # Web
 axum = { workspace = true }

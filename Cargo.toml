@@ -12,7 +12,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/sky64/RustyClawRouter"
+repository = "https://github.com/sky64/Solvela"
 
 [workspace.dependencies]
 # Async runtime
@@ -75,5 +75,5 @@ dotenvy = "0.15"
 
 # Workspace crates
 x402 = { path = "crates/x402" }
-router = { path = "crates/router" }
-rustyclaw-protocol = { path = "crates/protocol" }
+solvela-router = { path = "crates/router" }
+solvela-protocol = { path = "crates/protocol" }

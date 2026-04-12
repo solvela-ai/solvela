@@ -25,7 +25,7 @@ pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("9neDHouXgEgHZDde5SpmqqEZ9Uv3
 pub const USDC_MINT: Pubkey = solana_sdk::pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 /// Compiled program bytes
-const PROGRAM_SO: &[u8] = include_bytes!("../target/deploy/rustyclawrouter_escrow.so");
+const PROGRAM_SO: &[u8] = include_bytes!("../target/deploy/solvela_escrow.so");
 
 pub struct TestCtx {
     pub svm: LiteSVM,

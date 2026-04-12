@@ -21,9 +21,9 @@ use axum::Json;
 use metrics::{counter, histogram};
 use tracing::{info, warn};
 
-use router::profiles::{self, Profile};
-use router::scorer;
-use rustyclaw_protocol::ChatRequest;
+use solvela_protocol::ChatRequest;
+use solvela_router::profiles::{self, Profile};
+use solvela_router::scorer;
 
 use crate::error::GatewayError;
 use crate::middleware::prompt_guard::{self, GuardResult, PromptGuardConfig};
@@ -587,7 +587,7 @@ pub async fn chat_completions(
                     .estimate_cost(&req.model, u.prompt_tokens, u.completion_tokens)
                     .and_then(|c| {
                         c.total.parse::<f64>().map_err(|e| {
-                            router::models::ModelRegistryError::ParseError(e.to_string())
+                            solvela_router::models::ModelRegistryError::ParseError(e.to_string())
                         })
                     }) {
                     Ok(cost) => {

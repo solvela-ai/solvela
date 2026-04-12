@@ -41,7 +41,7 @@ pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse
                     "required": true,
                     "params": {
                         "network": "solana",
-                        "asset": rustyclaw_protocol::USDC_MINT,
+                        "asset": solvela_protocol::USDC_MINT,
                         "schemes": schemes
                     }
                 }
@@ -76,7 +76,7 @@ mod tests {
     use crate::services::ServiceRegistry;
     use crate::usage::UsageTracker;
     use crate::AppState;
-    use router::models::ModelRegistry;
+    use solvela_router::models::ModelRegistry;
     use x402::facilitator::Facilitator;
 
     fn make_state() -> Arc<AppState> {

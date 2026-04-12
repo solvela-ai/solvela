@@ -22,11 +22,11 @@ use gateway::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
 use gateway::providers::{ChatStream, LLMProvider, ProviderRegistry};
 use gateway::services::ServiceRegistry;
 use gateway::{build_router, AppState};
-use router::models::ModelRegistry;
-use rustyclaw_protocol::{
+use solvela_protocol::{
     ChatChoice, ChatChunk, ChatChunkChoice, ChatDelta, ChatMessage, ChatResponse, ModelInfo, Role,
     Usage,
 };
+use solvela_router::models::ModelRegistry;
 use x402::traits::{Error as X402Error, PaymentVerifier};
 use x402::types::{
     EscrowPayload, PayloadData, PaymentAccept, PaymentPayload, Resource, SettlementResult,
@@ -315,14 +315,14 @@ impl LLMProvider for MockProvider {
 
     async fn chat_completion(
         &self,
-        req: rustyclaw_protocol::ChatRequest,
+        req: solvela_protocol::ChatRequest,
     ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self::mock_response(&req.model))
     }
 
     async fn chat_completion_stream(
         &self,
-        req: rustyclaw_protocol::ChatRequest,
+        req: solvela_protocol::ChatRequest,
     ) -> Result<ChatStream, Box<dyn std::error::Error + Send + Sync>> {
         let chunk = ChatChunk {
             id: "mock-chatcmpl-001".to_string(),

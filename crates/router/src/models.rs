@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use thiserror::Error;
 
-use rustyclaw_protocol::{CostBreakdown, ModelInfo, PLATFORM_FEE_MULTIPLIER, PLATFORM_FEE_PERCENT};
+use solvela_protocol::{CostBreakdown, ModelInfo, PLATFORM_FEE_MULTIPLIER, PLATFORM_FEE_PERCENT};
 
 /// Errors from the model registry.
 #[derive(Debug, Error)]

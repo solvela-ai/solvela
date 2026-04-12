@@ -6,13 +6,13 @@ seeds = true
 skip-lint = false
 
 [programs.localnet]
-rustyclawrouter_escrow = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+solvela_escrow = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
 
 [programs.devnet]
-rustyclawrouter_escrow = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+solvela_escrow = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
 
 [programs.mainnet]
-rustyclawrouter_escrow = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+solvela_escrow = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
 
 [registry]
 url = "https://api.apr.dev"
