@@ -595,7 +595,7 @@ async fn main() -> anyhow::Result<()> {
     info!(
         addr,
         models = model_count,
-        "RustyClawRouter gateway started"
+        "Solvela gateway started"
     );
 
     axum::serve(

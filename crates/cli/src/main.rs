@@ -10,12 +10,12 @@ mod commands;
 pub(crate) static ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Parser)]
-#[command(name = "rcr")]
-#[command(about = "RustyClawRouter CLI — AI agent payments with USDC on Solana")]
+#[command(name = "solvela")]
+#[command(about = "Solvela CLI — AI agent payments with USDC on Solana")]
 #[command(version)]
 struct Cli {
     /// Gateway API URL
-    #[arg(long, env = "RCR_API_URL", default_value = "http://localhost:8402")]
+    #[arg(long, env = "SOLVELA_API_URL", default_value = "http://localhost:8402")]
     api_url: String,
 
     #[command(subcommand)]

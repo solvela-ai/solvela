@@ -1,4 +1,4 @@
-//! `rcr recover` — discover and refund stranded escrow PDAs.
+//! `solvela recover` — discover and refund stranded escrow PDAs.
 //!
 //! Walks the escrow program, filters by the local wallet's pubkey, decodes each
 //! on-chain account, and (optionally) submits refund transactions for any
@@ -505,7 +505,7 @@ mod tests {
     fn setup_wallet() -> (tempfile::TempDir, [u8; 32], String) {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         std::env::set_var("HOME", tmp.path());
-        let dir = tmp.path().join(".rustyclawrouter");
+        let dir = tmp.path().join(".solvela");
         std::fs::create_dir_all(&dir).expect("mkdir");
 
         let mut seed = [0u8; 32];
