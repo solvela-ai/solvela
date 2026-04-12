@@ -22,7 +22,7 @@ pub async fn image_generations() -> impl IntoResponse {
                             Integrate an image provider (e.g., openai/dall-e-3, \
                             stability-ai/stable-diffusion-xl) in \
                             crates/gateway/src/providers/ to enable this endpoint.",
-                "docs": "https://docs.rustyclawrouter.com/images",
+                "docs": "https://docs.solvela.ai/images",
                 "roadmap_phase": "Phase 3 extension",
             }
         })),

@@ -1,6 +1,6 @@
 # Monitoring
 
-RustyClawRouter exposes Prometheus metrics at `GET /metrics` (admin-gated). This chapter covers the full metrics reference, Grafana dashboard suggestions, and alerting rules.
+Solvela exposes Prometheus metrics at `GET /metrics` (admin-gated). This chapter covers the full metrics reference, Grafana dashboard suggestions, and alerting rules.
 
 ## Prometheus Setup
 
@@ -10,12 +10,12 @@ Add to your `prometheus.yml`:
 
 ```yaml
 scrape_configs:
-  - job_name: 'rustyclawrouter'
+  - job_name: 'solvela'
     scrape_interval: 15s
     scheme: https
     bearer_token: '<RCR_ADMIN_TOKEN>'
     static_configs:
-      - targets: ['rustyclawrouter-gateway.fly.dev']
+      - targets: ['solvela-gateway.fly.dev']
     metrics_path: '/metrics'
 ```
 
@@ -23,7 +23,7 @@ For local development:
 
 ```yaml
 scrape_configs:
-  - job_name: 'rustyclawrouter-local'
+  - job_name: 'solvela-local'
     scrape_interval: 5s
     bearer_token: '<RCR_ADMIN_TOKEN>'
     static_configs:
@@ -113,7 +113,7 @@ Example Prometheus alerting rules:
 
 ```yaml
 groups:
-  - name: rustyclawrouter
+  - name: solvela
     rules:
       - alert: HighErrorRate
         expr: |

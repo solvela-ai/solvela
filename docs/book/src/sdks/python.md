@@ -1,23 +1,23 @@
 # Python SDK
 
-The Python SDK provides a synchronous and asynchronous client for RustyClawRouter with transparent x402 payment handling.
+The Python SDK provides a synchronous and asynchronous client for Solvela with transparent x402 payment handling.
 
 ## Installation
 
 ```bash
-pip install rustyclawrouter
+pip install solvela
 ```
 
 With Solana wallet support (transaction signing):
 
 ```bash
-pip install rustyclawrouter[solana]
+pip install solvela[solana]
 ```
 
 ## Quick Start
 
 ```python
-from rustyclawrouter import LLMClient
+from solvela import LLMClient
 
 client = LLMClient(api_url="http://localhost:8402")
 
@@ -47,7 +47,7 @@ Or configure explicitly:
 
 ```python
 client = LLMClient(
-    api_url="https://rustyclawrouter-gateway.fly.dev",
+    api_url="https://solvela-gateway.fly.dev",
     wallet_key="your-base58-private-key",
     rpc_url="https://api.mainnet-beta.solana.com",
 )
@@ -57,7 +57,7 @@ client = LLMClient(
 
 ```python
 import asyncio
-from rustyclawrouter import AsyncLLMClient
+from solvela import AsyncLLMClient
 
 async def main():
     async with AsyncLLMClient(api_url="http://localhost:8402") as client:
@@ -87,7 +87,7 @@ async for chunk in client.chat_stream("openai/gpt-4o", "Write a poem"):
 Set a maximum USDC spend per session to prevent runaway costs:
 
 ```python
-from rustyclawrouter import LLMClient, BudgetExceededError
+from solvela import LLMClient, BudgetExceededError
 
 client = LLMClient(session_budget=0.50)  # Max $0.50 USDC
 
@@ -116,7 +116,7 @@ Profile options: `eco`, `auto`, `premium`, `free`
 For full control over the request:
 
 ```python
-from rustyclawrouter import LLMClient
+from solvela import LLMClient
 
 client = LLMClient(api_url="http://localhost:8402")
 
@@ -137,7 +137,7 @@ print(f"Tokens used: {response['usage']['total_tokens']}")
 ## Error Handling
 
 ```python
-from rustyclawrouter import (
+from solvela import (
     LLMClient,
     BudgetExceededError,
     PaymentError,

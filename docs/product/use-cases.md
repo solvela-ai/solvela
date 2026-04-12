@@ -2,11 +2,11 @@
 
 ## Autonomous AI Agents
 
-AI agents that run continuously -- monitoring markets, managing infrastructure, conducting research -- need to call LLM APIs without waiting for a human to approve each charge. Credit cards require a human account holder. API keys require a managed account and leak risk. With RustyClawRouter, the agent just needs a funded Solana wallet. It pays per call, autonomously, with cryptographic proof of every transaction. No accounts, no approvals, no billing disputes.
+AI agents that run continuously -- monitoring markets, managing infrastructure, conducting research -- need to call LLM APIs without waiting for a human to approve each charge. Credit cards require a human account holder. API keys require a managed account and leak risk. With Solvela, the agent just needs a funded Solana wallet. It pays per call, autonomously, with cryptographic proof of every transaction. No accounts, no approvals, no billing disputes.
 
 ## Multi-Model Routing
 
-Different questions need different models. A simple classification task doesn't need the same model as a complex reasoning problem. RustyClawRouter's smart router analyzes each request across 15 dimensions and selects the best model from five providers (OpenAI, Anthropic, Google, xAI, DeepSeek). The agent sends one request to one endpoint, pays one price, and gets the optimal response. No need to manage multiple API keys or learn each provider's pricing.
+Different questions need different models. A simple classification task doesn't need the same model as a complex reasoning problem. Solvela's smart router analyzes each request across 15 dimensions and selects the best model from five providers (OpenAI, Anthropic, Google, xAI, DeepSeek). The agent sends one request to one endpoint, pays one price, and gets the optimal response. No need to manage multiple API keys or learn each provider's pricing.
 
 ## Pay-Per-Call Billing
 

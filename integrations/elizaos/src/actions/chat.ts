@@ -9,7 +9,7 @@ import type {
 export const chatViaRustyClaw: Action = {
   name: "CHAT_VIA_RUSTYCLAW",
   description:
-    "Send a chat completion through RustyClawRouter with Solana x402 payment",
+    "Send a chat completion through Solvela with Solana x402 payment",
   similes: ["llm call", "ai inference", "model query", "ask ai"],
 
   validate: async (runtime: IAgentRuntime) => {
@@ -76,7 +76,7 @@ export const chatViaRustyClaw: Action = {
       {
         user: "{{agentName}}",
         content: {
-          text: "I'll query RustyClawRouter for that.",
+          text: "I'll query Solvela for that.",
           action: "CHAT_VIA_RUSTYCLAW",
         },
       },

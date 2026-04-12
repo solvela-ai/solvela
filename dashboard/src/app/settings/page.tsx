@@ -379,12 +379,12 @@ export default function SettingsPage() {
         <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
           <h2 className="text-sm font-semibold text-gray-900 mb-1">Gateway</h2>
           <p className="text-xs text-gray-500 mb-4">
-            RustyClawRouter API endpoint configuration
+            Solvela API endpoint configuration
           </p>
           <div>
             <SettingRow
               label="Gateway URL"
-              description="Base URL of your RustyClawRouter gateway (NEXT_PUBLIC_GATEWAY_URL)"
+              description="Base URL of your Solvela gateway (NEXT_PUBLIC_GATEWAY_URL)"
             >
               <Input
                 value={gatewayUrl}

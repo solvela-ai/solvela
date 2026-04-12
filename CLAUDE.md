@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-RustyClawRouter is a Solana-native AI agent payment gateway built in Rust (Axum). AI agents pay for LLM API calls with USDC-SPL on Solana via the x402 protocol. No API keys, no accounts, just wallets.
+Solvela is a Solana-native AI agent payment gateway built in Rust (Axum). AI agents pay for LLM API calls with USDC-SPL on Solana via the x402 protocol. No API keys, no accounts, just wallets.
 
 Read `.claude/plan/rustyclawrouter.md` for the full implementation plan. See `HANDOFF.md` for current project status and what's been completed. See `CHANGELOG.md` for chronological history.
 
@@ -22,8 +22,8 @@ cargo test                        # all workspace tests
 cargo test -p gateway             # gateway (unit + integration)
 cargo test -p x402                # x402 protocol
 cargo test -p router              # smart router
-cargo test -p rustyclaw-protocol  # wire-format types
-cargo test -p rcr-cli             # CLI
+cargo test -p solvela-protocol    # wire-format types
+cargo test -p solvela-cli         # CLI
 
 # Single test
 cargo test -p gateway test_health_endpoint -- --exact
@@ -70,11 +70,11 @@ Migrations in `migrations/` are applied automatically by `docker compose up` and
   - `routes/orgs/` — Org API endpoints (crud.rs, teams.rs, api_keys.rs, audit.rs, budget.rs, analytics.rs)
   - `audit.rs` — Fire-and-forget audit log writer
   - `middleware/api_key.rs` — `OrgContext`, `RequireOrg`/`RequireOrgAdmin` extractors
-  - Binary name: `rustyclawrouter`
+  - Binary name: `solvela-gateway`
 - **x402** — Pure protocol library (no Axum dependency). Solana verification, escrow integration, fee payer pool, nonce pool. Chain-agnostic `PaymentVerifier` trait for future EVM support.
 - **router** — 15-dimension rule-based request scorer, routing profiles (eco/auto/premium/free), and model registry (loads `config/models.toml`).
-- **protocol** (`rustyclaw-protocol`) — Shared wire-format types. Payment protocol types, OpenAI-compatible chat types, model info, constants. Zero workspace dependencies.
-- **cli** (`rcr-cli`) — `rcr` CLI binary (clap derive): wallet, chat, models, health, stats, doctor commands.
+- **protocol** (`solvela-protocol`) — Shared wire-format types. Payment protocol types, OpenAI-compatible chat types, model info, constants. Zero workspace dependencies.
+- **cli** (`solvela-cli`) — `solvela` CLI binary (clap derive): wallet, chat, models, health, stats, doctor commands.
 
 ### Standalone Anchor Program (`programs/escrow/`)
 
@@ -122,7 +122,7 @@ Next.js 16 + Tailwind + Recharts. Pages: Overview, Usage, Models, Wallet, Settin
 
 ## A2A Request Flow (POST /a2a, method: message/send)
 
-1. Agent discovers RustyClawRouter via `GET /.well-known/agent.json` (AgentCard with AP2 + x402 extensions)
+1. Agent discovers Solvela via `GET /.well-known/agent.json` (AgentCard with AP2 + x402 extensions)
 2. Agent sends `message/send` JSON-RPC with text prompt → gateway computes cost → returns Task (`input-required`) with `x402.payment.required` metadata
 3. Agent signs Solana USDC-SPL transaction → sends `message/send` with `taskId` + `x402.payment.payload` metadata
 4. Gateway verifies payment (reuses facilitator), proxies to LLM provider → returns Task (`completed`) with artifacts + receipt
@@ -133,7 +133,7 @@ The scorer in `crates/router/src/scorer.rs` classifies requests across 15 weight
 
 ## Environment Variables
 
-Provider API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`. Gateway config uses `RCR_` prefix. Solana keys: `RCR_SOLANA_RPC_URL`, `RCR_SOLANA_RECIPIENT_WALLET`, `RCR_SOLANA_FEE_PAYER_KEY`. Optional: `DATABASE_URL`, `REDIS_URL`. See `.env.example` for full list.
+Provider API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`. Gateway config uses `SOLVELA_` prefix (legacy `RCR_` accepted with deprecation warning). Solana keys: `SOLVELA_SOLANA_RPC_URL`, `SOLVELA_SOLANA_RECIPIENT_WALLET`, `SOLVELA_SOLANA_FEE_PAYER_KEY`. Optional: `DATABASE_URL`, `REDIS_URL`. See `.env.example` for full list.
 
 ## Code Conventions
 
@@ -173,7 +173,7 @@ use axum::{Router, routing::{get, post}};   // 2. External crates (alphabetical)
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use rustyclaw_protocol::ChatRequest;         // 3. Workspace crates
+use solvela_protocol::ChatRequest;           // 3. Workspace crates
 
 use crate::config::AppConfig;               // 4. Crate-internal modules
 ```
@@ -226,7 +226,7 @@ These skills contain patterns, checklists, and constraints specific to this proj
 ## Deployment
 
 - Dockerfile: 3-stage build with cargo-chef for dependency caching
-- Fly.io config in `fly.toml` (app: `rustyclawrouter-gateway`, port 8402, region ord)
+- Fly.io config in `fly.toml` (app: `solvela-gateway`, port 8402, region ord)
 - Docker Compose for local dev: PostgreSQL 16 + Redis 7
-- Dashboard: Next.js on Vercel (`rusty-claw-router.vercel.app`)
+- Dashboard: Next.js on Vercel (`solvela.vercel.app`)
 - Migrations in `migrations/` run automatically on startup (idempotent `CREATE IF NOT EXISTS`)

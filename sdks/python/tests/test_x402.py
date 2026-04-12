@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from rustyclawrouter.types import CostBreakdown, PaymentAccept, PaymentRequired
-from rustyclawrouter.x402 import (
+from solvela.types import CostBreakdown, PaymentAccept, PaymentRequired
+from solvela.x402 import (
     build_escrow_payment_payload,
     decode_payment_header,
     encode_payment_header,

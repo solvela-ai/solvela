@@ -134,14 +134,14 @@ If PostgreSQL-dependent features (stats, spend logging) are not working:
 docker compose ps postgres
 
 # Check connectivity
-psql postgres://rcr:rcr_dev_password@localhost:5432/rustyclawrouter -c "SELECT 1"
+psql postgres://rcr:rcr_dev_password@localhost:5432/solvela -c "SELECT 1"
 
 # Check migrations ran
-psql postgres://rcr:rcr_dev_password@localhost:5432/rustyclawrouter \
+psql postgres://rcr:rcr_dev_password@localhost:5432/solvela \
   -c "\dt"
 
 # Check spend logs
-psql postgres://rcr:rcr_dev_password@localhost:5432/rustyclawrouter \
+psql postgres://rcr:rcr_dev_password@localhost:5432/solvela \
   -c "SELECT COUNT(*) FROM spend_log"
 ```
 

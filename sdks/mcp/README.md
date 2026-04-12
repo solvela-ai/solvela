@@ -1,19 +1,19 @@
-# @rustyclawrouter/mcp
+# @solvela/mcp
 
-MCP (Model Context Protocol) server for RustyClawRouter -- lets Claude Code, Claude Desktop, and any MCP-compatible host pay for LLM calls with USDC on Solana transparently.
+MCP (Model Context Protocol) server for Solvela -- lets Claude Code, Claude Desktop, and any MCP-compatible host pay for LLM calls with USDC on Solana transparently.
 
-MCP is an open protocol that allows AI assistants to use external tools. This server exposes the RustyClawRouter gateway as a set of MCP tools: chat with any LLM model, use smart routing, check wallet status, list models, and track spending -- all with automatic x402 payment handling.
+MCP is an open protocol that allows AI assistants to use external tools. This server exposes the Solvela gateway as a set of MCP tools: chat with any LLM model, use smart routing, check wallet status, list models, and track spending -- all with automatic x402 payment handling.
 
 ## Installation
 
 ```bash
-npm install -g @rustyclawrouter/mcp
+npm install -g @solvela/mcp
 ```
 
 Or run directly:
 
 ```bash
-npx @rustyclawrouter/mcp
+npx @solvela/mcp
 ```
 
 ## Setup with Claude Code
@@ -23,9 +23,9 @@ Add to your Claude Code MCP configuration (`.claude/settings.json` or project-le
 ```json
 {
   "mcpServers": {
-    "rustyclawrouter": {
+    "solvela": {
       "command": "npx",
-      "args": ["@rustyclawrouter/mcp"],
+      "args": ["@solvela/mcp"],
       "env": {
         "RCR_API_URL": "http://localhost:8402",
         "RCR_SESSION_BUDGET": "1.00",
@@ -43,9 +43,9 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
-    "rustyclawrouter": {
+    "solvela": {
       "command": "npx",
-      "args": ["@rustyclawrouter/mcp"],
+      "args": ["@solvela/mcp"],
       "env": {
         "RCR_API_URL": "http://localhost:8402",
         "RCR_SESSION_BUDGET": "1.00",
@@ -62,7 +62,7 @@ All configuration is via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RCR_API_URL` | `https://api.rustyclawrouter.com` | Gateway URL |
+| `RCR_API_URL` | `https://api.solvela.com` | Gateway URL |
 | `RCR_SESSION_BUDGET` | unlimited | Max USDC to spend this session (e.g. `"1.00"`) |
 | `RCR_TIMEOUT_MS` | `60000` | Request timeout in milliseconds |
 | `SOLANA_WALLET_ADDRESS` | not configured | Wallet pubkey shown in `wallet_status` and `spending` |
@@ -145,7 +145,7 @@ The MCP server ships its own lightweight gateway client (`GatewayClient`) rather
 The server communicates over stdio using the `@modelcontextprotocol/sdk` library. It:
 
 1. Accepts tool calls from the MCP host (Claude Code, Claude Desktop, etc.)
-2. Translates them into HTTP requests to the RustyClawRouter gateway
+2. Translates them into HTTP requests to the Solvela gateway
 3. Handles the x402 payment flow (402 -> build payment header -> retry)
 4. Tracks session spending and budget enforcement
 5. Returns results as MCP tool responses

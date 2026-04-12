@@ -1,4 +1,4 @@
-# HANDOFF.md — RustyClawRouter Current State
+# HANDOFF.md — Solvela Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
 > **Last verified:** 2026-04-08 (from actual repo inspection, not docs)
@@ -7,15 +7,15 @@
 
 ## What Is This
 
-RustyClawRouter (RCR) is a Solana-native LLM payment gateway. AI agents pay for LLM API calls with USDC-SPL on Solana via x402. Revenue: 5% fee per call.
+Solvela (formerly RustyClawRouter) is a Solana-native LLM payment gateway. AI agents pay for LLM API calls with USDC-SPL on Solana via x402. Revenue: 5% fee per call.
 
-Part of the **rustyclaw.ai** ecosystem:
+Part of the **solvela.ai** ecosystem:
 
 | Product | Purpose | Status |
 |---------|---------|--------|
-| **RustyClawRouter** | LLM payment gateway (this repo) | Deployed on Fly.io |
-| **RustyClaw Terminal** | Crypto trading terminal + AI agent | Backend deployed, frontend not yet |
-| **Telsi.ai** | Multi-tenant AI assistant SaaS | Live on RCR (migrated from BlockRun 2026-04-07) |
+| **Solvela** | LLM payment gateway (this repo) | Deployed on Fly.io |
+| **RustyClaw Terminal** | Crypto trading terminal + AI agent (rustyclaw.ai) | Backend deployed, frontend not yet |
+| **Telsi.ai** | Multi-tenant AI assistant SaaS | Live on Solvela (migrated from BlockRun 2026-04-07) |
 
 ---
 
@@ -52,7 +52,7 @@ Python (`sdks/python/`), TypeScript (`sdks/typescript/`), Go (`sdks/go/`), MCP s
 
 ### Dashboard
 
-Next.js 16 + Tailwind + Recharts. 5 pages: Overview, Usage, Models, Wallet, Settings. Deployed to Vercel (`rusty-claw-router.vercel.app`). Note: no `vercel.json` in repo — deployed via Vercel UI.
+Next.js 16 + Tailwind + Recharts. 5 pages: Overview, Usage, Models, Wallet, Settings. Deployed to Vercel (`solvela.vercel.app`). Note: no `vercel.json` in repo — deployed via Vercel UI.
 
 ---
 
@@ -82,10 +82,10 @@ go sdk:               58  (53 pass, 5 skip/live-gated)
 
 | Resource | Location | Status |
 |----------|----------|--------|
-| **Gateway** | `rustyclawrouter-gateway.fly.dev` | Running (ord region) |
-| **PostgreSQL** | `rustyclawrouter-db` on Fly.io | Running (Postgres 17.2) |
-| **Redis** | Upstash (`rustyclawrouter-cache`) | Running (ord + iad) |
-| **Dashboard** | `rusty-claw-router.vercel.app` | Deployed |
+| **Gateway** | `solvela-gateway.fly.dev` | Running (ord region) |
+| **PostgreSQL** | `solvela-db` on Fly.io | Running (Postgres 17.2) |
+| **Redis** | Upstash (`solvela-cache`) | Running (ord + iad) |
+| **Dashboard** | `solvela.vercel.app` | Deployed |
 | **Terminal backend** | `rclawterm-gateway.fly.dev` | Running (ord, 2 machines) |
 
 ### Secrets on Fly.io
@@ -104,7 +104,7 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 - **Multi-chain support**: `PaymentVerifier` trait is chain-agnostic by design. Base/EVM implementation deferred.
 - **x402 V2 sessions**: V2 adds sessions and service discovery. Wire format migrated but session features not implemented.
-- **Load testing**: Not started.
+- **Load testing**: `rcr loadtest` CLI built (dev-bypass, exact, escrow modes). Needs real-world runs against deployed gateway.
 - **Per-user fairness queuing**: Not started.
 - **Secret rotation plan**: No automated rotation.
 - **API reference docs**: Incomplete.
@@ -114,11 +114,11 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 ### Ecosystem (in priority order)
 
 1. Deploy Terminal frontend to Vercel
-2. Harden RCR under real Terminal load
-3. Build OpenClaw plugin (`@rustyclaw/clawrouter`)
-4. ~~Migrate Telsi from BlockRun to RCR~~ (completed 2026-04-07)
+2. Harden Solvela under real Terminal load
+3. Build OpenClaw plugin (`@solvela/router`)
+4. ~~Migrate Telsi from BlockRun to Solvela~~ (completed 2026-04-07)
 5. Build Sky64 network agent
-6. Open-source (`rcr-router`, `rcr-protocol`)
+6. Open-source (`solvela-router`, `solvela-protocol`)
 
 ---
 

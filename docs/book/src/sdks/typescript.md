@@ -5,13 +5,13 @@ The TypeScript SDK provides an `LLMClient` class with transparent x402 payment h
 ## Installation
 
 ```bash
-npm install @rustyclawrouter/sdk
+npm install @solvela/sdk
 ```
 
 ## Quick Start
 
 ```typescript
-import { LLMClient } from '@rustyclawrouter/sdk';
+import { LLMClient } from '@solvela/sdk';
 
 const client = new LLMClient({ apiUrl: 'http://localhost:8402' });
 
@@ -33,7 +33,7 @@ Environment variables:
 
 | Variable | Description |
 |----------|-------------|
-| `RCR_API_URL` | Gateway URL (default: `https://api.rustyclawrouter.com`) |
+| `RCR_API_URL` | Gateway URL (default: `https://api.solvela.com`) |
 | `SOLANA_WALLET_KEY` | Base58 wallet private key |
 | `SOLANA_RPC_URL` | Solana RPC endpoint |
 
@@ -80,7 +80,7 @@ const reply3 = await client.chat('premium', 'Deep analysis'); // best quality
 ## Error Handling
 
 ```typescript
-import { LLMClient, PaymentError, BudgetExceededError } from '@rustyclawrouter/sdk';
+import { LLMClient, PaymentError, BudgetExceededError } from '@solvela/sdk';
 
 const client = new LLMClient({
   apiUrl: 'http://localhost:8402',
@@ -116,7 +116,7 @@ for (const model of models) {
 The SDK provides an OpenAI-compatible wrapper that works as a drop-in replacement:
 
 ```typescript
-import { OpenAICompat } from '@rustyclawrouter/sdk';
+import { OpenAICompat } from '@solvela/sdk';
 
 const openai = new OpenAICompat({ apiUrl: 'http://localhost:8402' });
 

@@ -1,11 +1,11 @@
 /**
  * Core routing logic for @rustyclaw/rcr.
  *
- * Forwards OpenClaw chat requests to RustyClawRouter, handling the full
+ * Forwards OpenClaw chat requests to Solvela, handling the full
  * x402 payment flow: initial request → 402 response → sign payment → retry.
  * Supports both streaming (SSE) and non-streaming responses.
  *
- * Payment logic is inlined from the RustyClawRouter TypeScript SDK so this
+ * Payment logic is inlined from the Solvela TypeScript SDK so this
  * plugin has zero runtime dependencies.
  */
 
@@ -261,7 +261,7 @@ async function fetchWithTimeout(
 // ── Main routing function ─────────────────────────────────────────────────────
 
 /**
- * Route a chat completion request through RustyClawRouter.
+ * Route a chat completion request through Solvela.
  *
  * Handles the x402 payment flow transparently:
  *   1. POST to /v1/chat/completions
@@ -323,7 +323,7 @@ export async function routeRequest(
 }
 
 /**
- * Route a streaming chat completion request through RustyClawRouter.
+ * Route a streaming chat completion request through Solvela.
  *
  * Returns the raw Response with the SSE body so the caller can stream
  * chunks directly to the OpenClaw client. The x402 payment is handled

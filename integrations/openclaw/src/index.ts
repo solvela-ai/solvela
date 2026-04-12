@@ -2,13 +2,13 @@
  * @rustyclaw/rcr — OpenClaw plugin
  *
  * Routes OpenClaw LLM requests
- * through RustyClawRouter with Solana-native x402 USDC micropayments.
+ * through Solvela with Solana-native x402 USDC micropayments.
  *
  * Installation (on tenant VPS):
  *   openclaw plugins install @rustyclaw/rcr
  *
  * Required env vars (already present on all Telsi tenant VPSes):
- *   LLM_ROUTER_API_URL     — RustyClawRouter gateway base URL
+ *   LLM_ROUTER_API_URL     — Solvela gateway base URL
  *   LLM_ROUTER_WALLET_KEY  — Base58 Solana private key for x402 payments
  *
  * Optional env vars:
@@ -46,7 +46,7 @@ export { PaymentError, RouterError } from './router.js';
  * `content` is an array of content parts rather than a plain string:
  *   { role: "user", content: [{ type: "text", text: "Hello" }] }
  *
- * RustyClawRouter expects `content` to be a string. This function extracts
+ * Solvela expects `content` to be a string. This function extracts
  * all text parts and joins them, discarding non-text parts (e.g. image_url).
  */
 function normalizeMessages(messages: unknown[]): unknown[] {
@@ -69,7 +69,7 @@ function normalizeMessages(messages: unknown[]): unknown[] {
  *
  * OpenClaw loads plugins via this default export and calls `intercept` for
  * every outbound LLM request. Returning a response short-circuits the default
- * provider, routing the call through RustyClawRouter instead.
+ * provider, routing the call through Solvela instead.
  */
 export interface OpenClawPlugin {
   name: string;
@@ -100,7 +100,7 @@ export function createPlugin(overrides: Partial<RcrConfig> = {}): OpenClawPlugin
   return {
     name: '@rustyclaw/rcr',
     version: '0.1.0',
-    description: 'RustyClawRouter — Solana-native LLM routing with x402 USDC payments',
+    description: 'Solvela — Solana-native LLM routing with x402 USDC payments',
 
     async intercept(request: ChatRequest): Promise<ChatResponse | null> {
       const normalized = { ...request, messages: normalizeMessages(request.messages) as ChatMessage[] };
@@ -128,7 +128,7 @@ export class RcrClient {
   }
 
   /**
-   * Send a non-streaming chat completion through RustyClawRouter.
+   * Send a non-streaming chat completion through Solvela.
    *
    * @param messages     - Conversation messages
    * @param model        - Model ID (defaults to config.defaultModel, i.e. "auto")
@@ -146,7 +146,7 @@ export class RcrClient {
   }
 
   /**
-   * Send a streaming chat completion through RustyClawRouter.
+   * Send a streaming chat completion through Solvela.
    * Returns the raw SSE Response — iterate with a ReadableStream reader.
    */
   async chatStream(
