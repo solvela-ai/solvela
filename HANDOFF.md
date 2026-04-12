@@ -1,7 +1,7 @@
 # HANDOFF.md — Solvela Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-08 (from actual repo inspection, not docs)
+> **Last verified:** 2026-04-12 (load tested all 7 phases, all 5 providers verified with real USDC)
 
 ---
 
@@ -56,6 +56,27 @@ Next.js 16 + Tailwind + Recharts. 5 pages: Overview, Usage, Models, Wallet, Sett
 
 ---
 
+## Load Test Results (2026-04-12)
+
+Full report: `docs/load-tests/2026-04-12-results.md`
+
+| Phase | Target | Result |
+|-------|--------|--------|
+| Phase 1: Baseline | 10-200 RPS | PASS (0% errors, p99 <5s) |
+| Phase 2: Break-point | 250-450 RPS | Ceiling ~400 RPS (rate limiter bottleneck) |
+| Phase 5: SLO validation | 50 RPS x 5 min | PASS (0% errors, p99 297ms) |
+| Phase 6: Exact payment | Real USDC | PASS (5/5 successful) |
+| Phase 7: Per-provider | Real USDC x 5 providers | PASS (24/25 successful) |
+
+**Provider status (all 5 verified with real payments):** xAI, Google, Anthropic, OpenAI, DeepSeek
+
+**Bugs fixed during testing:**
+- Provider model prefix stripping (OpenAI, xAI, DeepSeek sent `provider/model` to upstream)
+- Google response parsing (`GeminiPart.text` required but newer models return `thought` parts)
+- Anthropic model name (`claude-3-5-haiku-20241022` → `claude-haiku-4-5-20251001`)
+
+---
+
 ## Test Counts (run `cargo test` to verify — these go stale)
 
 Last verified 2026-04-08:
@@ -82,7 +103,7 @@ go sdk:               58  (53 pass, 5 skip/live-gated)
 
 | Resource | Location | Status |
 |----------|----------|--------|
-| **Gateway** | `solvela-gateway.fly.dev` | Running (ord region) |
+| **Gateway** | `rustyclawrouter-gateway.fly.dev` | Running (ord region, shared-cpu-1x/512MB) |
 | **PostgreSQL** | `solvela-db` on Fly.io | Running (Postgres 17.2) |
 | **Redis** | Upstash (`solvela-cache`) | Running (ord + iad) |
 | **Dashboard** | `solvela.vercel.app` | Deployed |
@@ -90,7 +111,7 @@ go sdk:               58  (53 pass, 5 skip/live-gated)
 
 ### Secrets on Fly.io
 
-All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana config set (RPC, recipient wallet, USDC mint, escrow program, fee payer key). Database + Redis URLs set. Admin token rotated 2026-03-31.
+All 5 provider keys set and verified working (OpenAI, Anthropic, Google, xAI, DeepSeek) — refreshed 2026-04-12. Solana config set (RPC, recipient wallet, USDC mint, escrow program, fee payer key). Database + Redis URLs set. Admin token rotated 2026-03-31. Note: Fly app is still `rustyclawrouter-gateway`, not yet renamed to `solvela-gateway`.
 
 ---
 
@@ -104,7 +125,10 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 - **Multi-chain support**: `PaymentVerifier` trait is chain-agnostic by design. Base/EVM implementation deferred.
 - **x402 V2 sessions**: V2 adds sessions and service discovery. Wire format migrated but session features not implemented.
-- **Load testing**: `rcr loadtest` CLI built (dev-bypass, exact, escrow modes). Needs real-world runs against deployed gateway.
+- **Load testing**: COMPLETED 2026-04-12. All 7 phases passed. See `docs/load-tests/2026-04-12-results.md`. T1 ceiling ~400 RPS, SLO validated at 50 RPS x 5 min, all 5 providers verified with real USDC payments. CLI features added: `--model` flag, live progress output, `SOLVELA_RATE_LIMIT_MAX` env override.
+- **Fly app rename**: `rustyclawrouter-gateway` → `solvela-gateway` (deferred — requires DNS migration)
+- **Docs theme rename**: `@rustyclaw/docs-theme` → `@solvela/docs-theme`
+- **Rate limiter redesign**: Current `tokio::sync::Mutex<HashMap>` is the bottleneck at 400+ RPS. Replace with sharded or Redis-based approach when traffic demands it.
 - **Per-user fairness queuing**: Not started.
 - **Secret rotation plan**: No automated rotation.
 - **API reference docs**: Incomplete.
