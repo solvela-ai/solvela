@@ -1,6 +1,6 @@
-# RustyClawRouter
+# Solvela
 
-RustyClawRouter is a Solana-native AI agent payment gateway built in Rust. AI agents pay for LLM API calls with USDC-SPL on Solana via the x402 protocol. No API keys, no accounts, just wallets.
+Solvela is a Solana-native AI agent payment gateway built in Rust. AI agents pay for LLM API calls with USDC-SPL on Solana via the x402 protocol. No API keys, no accounts, just wallets.
 
 ## What Problem Does This Solve
 
@@ -11,7 +11,7 @@ Traditional LLM API access requires account creation, API key management, credit
 - Per-organization billing does not map to per-agent cost attribution
 - Settlement happens days or weeks after usage
 
-RustyClawRouter replaces all of this with a single primitive: **pay-per-request with USDC on Solana**. An agent holds a wallet, signs a payment for each request, and receives the LLM response. Settlement is immediate. Attribution is automatic (wallet address = identity).
+Solvela replaces all of this with a single primitive: **pay-per-request with USDC on Solana**. An agent holds a wallet, signs a payment for each request, and receives the LLM response. Settlement is immediate. Attribution is automatic (wallet address = identity).
 
 ## Architecture
 
@@ -26,7 +26,7 @@ graph TB
         MCP[MCP Server]
     end
 
-    subgraph Gateway["RustyClawRouter Gateway (Rust / Axum)"]
+    subgraph Gateway["Solvela Gateway (Rust / Axum)"]
         MW[x402 Middleware]
         PG[Prompt Guard]
         SR[Smart Router]
@@ -70,7 +70,7 @@ graph TB
 | `gateway` | The only binary. Axum HTTP server with routes, middleware, provider proxies, usage tracking, caching, and `ServiceRegistry`. |
 | `x402` | Pure protocol library. Solana verification, escrow integration, fee payer pool, nonce pool. No Axum dependency. |
 | `router` | 15-dimension rule-based request scorer, routing profiles (eco/auto/premium/free), model registry. |
-| `protocol` | Shared wire-format types (`rustyclaw-protocol`). Payment types, OpenAI-compatible chat types, model info. Published to crates.io. |
+| `protocol` | Shared wire-format types (`solvela-protocol`). Payment types, OpenAI-compatible chat types, model info. Published to crates.io. |
 | `cli` | `rcr` CLI binary: wallet, chat, models, health, stats, doctor commands. |
 
 The Anchor escrow program lives in `programs/escrow/` and is **not** a workspace member to avoid dependency version conflicts.

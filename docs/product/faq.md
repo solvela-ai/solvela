@@ -2,11 +2,11 @@
 
 ## Is this legal?
 
-We are actively consulting with legal counsel on the regulatory implications of the system. RustyClawRouter operates exclusively in USDC (a dollar-pegged stablecoin) on the Solana blockchain. It does not process fiat currency, hold custody of user funds, or perform currency exchange. We have deliberately excluded features -- card payments, fiat conversion, custodial wallets -- that would trigger money transmitter licensing requirements. The regulatory landscape for crypto payment infrastructure is evolving, and we are tracking it closely.
+We are actively consulting with legal counsel on the regulatory implications of the system. Solvela operates exclusively in USDC (a dollar-pegged stablecoin) on the Solana blockchain. It does not process fiat currency, hold custody of user funds, or perform currency exchange. We have deliberately excluded features -- card payments, fiat conversion, custodial wallets -- that would trigger money transmitter licensing requirements. The regulatory landscape for crypto payment infrastructure is evolving, and we are tracking it closely.
 
 ## Who controls the money?
 
-The agent controls its own wallet. In a direct payment, USDC moves from the agent's wallet to the gateway operator's wallet on the Solana blockchain. RustyClawRouter verifies that the transfer happened but never touches the funds.
+The agent controls its own wallet. In a direct payment, USDC moves from the agent's wallet to the gateway operator's wallet on the Solana blockchain. Solvela verifies that the transfer happened but never touches the funds.
 
 In an escrow payment, USDC is held by a smart contract on Solana -- a program with deterministic rules, not a person or company. The gateway can claim only the actual cost, and the agent can reclaim unclaimed funds after a timeout. Neither party needs to trust the other.
 
@@ -30,7 +30,7 @@ Any Solana wallet that can sign transactions and hold USDC-SPL tokens. For auton
 
 ## Can I use this without Solana?
 
-Not today. RustyClawRouter currently supports only Solana with USDC-SPL. The architecture is designed for multi-chain support (the payment verification system uses a chain-agnostic trait), and Base/EVM support is planned for the future. But right now, you need a Solana wallet with USDC.
+Not today. Solvela currently supports only Solana with USDC-SPL. The architecture is designed for multi-chain support (the payment verification system uses a chain-agnostic trait), and Base/EVM support is planned for the future. But right now, you need a Solana wallet with USDC.
 
 ## How much does it cost?
 
@@ -44,7 +44,7 @@ All prices are in USDC, which is pegged 1:1 to the US dollar. There are no month
 
 ## Is the code open source?
 
-The core protocol library (`rustyclaw-protocol`) and SDKs (Python, TypeScript, Go) are available on GitHub. The full gateway source code is in the repository. Open-source publishing to crates.io, npm, and PyPI is planned.
+The core protocol library (`solvela-protocol`) and SDKs (Python, TypeScript, Go) are available on GitHub. The full gateway source code is in the repository. Open-source publishing to crates.io, npm, and PyPI is planned.
 
 ## What's the escrow and why would I use it?
 

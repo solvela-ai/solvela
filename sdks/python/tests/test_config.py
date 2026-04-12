@@ -1,6 +1,6 @@
 """Tests for SDK configuration constants."""
 
-from rustyclawrouter.config import (
+from solvela.config import (
     DEFAULT_API_URL,
     DEFAULT_DEVNET_URL,
     SOLANA_DEVNET_RPC,

@@ -2,7 +2,7 @@
 
 import pytest
 
-from rustyclawrouter.types import (
+from solvela.types import (
     ChatChoice,
     ChatMessage,
     ChatRequest,

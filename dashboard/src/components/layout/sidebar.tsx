@@ -50,7 +50,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-500 text-white">
           <Zap size={16} />
         </div>
-        <span className="font-semibold text-gray-900 text-sm">RustyClawRouter</span>
+        <span className="font-semibold text-gray-900 text-sm">Solvela</span>
       </div>
 
       {/* Nav */}

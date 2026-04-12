@@ -59,7 +59,7 @@ pub async fn pricing(State(state): State<Arc<AppState>>) -> Json<Value> {
 
     Json(json!({
         "platform": {
-            "name": "RustyClawRouter",
+            "name": "Solvela",
             "chain": "solana",
             "token": "USDC-SPL",
             "usdc_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",

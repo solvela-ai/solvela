@@ -54,10 +54,10 @@ RUN apt-get update && apt-get install -y \
     ca-certificates libssl3 libpq5 \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 1001 --no-create-home --shell /bin/false rcr
-COPY --from=builder /app/target/release/rustyclawrouter /usr/local/bin/rustyclawrouter
+COPY --from=builder /app/target/release/solvela /usr/local/bin/solvela
 EXPOSE 8402
 USER rcr
-CMD ["/usr/local/bin/rustyclawrouter"]
+CMD ["/usr/local/bin/solvela"]
 ```
 
 Key points:
@@ -70,7 +70,7 @@ Key points:
 Build the image:
 
 ```bash
-docker build -t rustyclawrouter .
+docker build -t solvela .
 ```
 
 Run:
@@ -80,7 +80,7 @@ docker run -p 8402:8402 \
   -e OPENAI_API_KEY=sk-... \
   -e RCR_SOLANA_RPC_URL=https://api.devnet.solana.com \
   -e RCR_SOLANA_RECIPIENT_WALLET=your-wallet \
-  rustyclawrouter
+  solvela
 ```
 
 ## Fly.io Deployment
@@ -88,7 +88,7 @@ docker run -p 8402:8402 \
 The gateway is configured for Fly.io with `fly.toml`:
 
 ```toml
-app = "rustyclawrouter-gateway"
+app = "solvela-gateway"
 primary_region = "ord"
 
 [build]

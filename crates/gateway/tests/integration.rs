@@ -1,4 +1,4 @@
-//! Integration tests for the RustyClawRouter gateway.
+//! Integration tests for the Solvela gateway.
 //!
 //! These tests spin up the Axum app in-process using `tower::ServiceExt`
 //! and exercise the HTTP endpoints without needing a running server.
@@ -1579,7 +1579,7 @@ async fn test_supported_endpoint() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["gateway"], "RustyClawRouter");
+    assert_eq!(json["gateway"], "Solvela");
     assert!(json["pricing_url"].is_string());
 
     let kinds = json["kinds"].as_array().unwrap();
@@ -4977,7 +4977,7 @@ async fn test_a2a_agent_card_returns_capabilities() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["name"], "RustyClawRouter");
+    assert_eq!(json["name"], "Solvela");
     assert_eq!(json["version"], "0.1.0");
     let extensions = json["capabilities"]["extensions"].as_array().unwrap();
     assert!(extensions.len() >= 2, "should have AP2 + x402 extensions");

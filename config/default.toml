@@ -1,4 +1,4 @@
-# RustyClawRouter Gateway Configuration
+# Solvela Gateway Configuration
 
 [server]
 host = "0.0.0.0"

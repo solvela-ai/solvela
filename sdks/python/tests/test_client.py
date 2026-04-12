@@ -7,21 +7,21 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from rustyclawrouter.client import (
+from solvela.client import (
     AsyncLLMClient,
     BudgetExceededError,
     LLMClient,
     PaymentError,
 )
-from rustyclawrouter.config import DEFAULT_API_URL
-from rustyclawrouter.types import (
+from solvela.config import DEFAULT_API_URL
+from solvela.types import (
     ChatMessage,
     CostBreakdown,
     PaymentAccept,
     PaymentRequired,
     Role,
 )
-from rustyclawrouter.x402 import decode_payment_header, encode_payment_header
+from solvela.x402 import decode_payment_header, encode_payment_header
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +201,7 @@ class TestPaymentFlow:
 
         client.close()
 
-    @patch("rustyclawrouter.x402.build_solana_transfer_checked", return_value="MOCK_SIGNED_TX")
+    @patch("solvela.x402.build_solana_transfer_checked", return_value="MOCK_SIGNED_TX")
     def test_402_then_200_payment_flow(self, _mock_sign):
         """402 → payment → retry → 200."""
         client = LLMClient(api_url="http://test", private_key="TestKey")
@@ -227,7 +227,7 @@ class TestPaymentFlow:
         assert client.session_spent == pytest.approx(0.002625)
         client.close()
 
-    @patch("rustyclawrouter.x402.build_solana_transfer_checked", return_value="MOCK_SIGNED_TX")
+    @patch("solvela.x402.build_solana_transfer_checked", return_value="MOCK_SIGNED_TX")
     def test_402_with_payment_header_sent(self, _mock_sign):
         """Verify the retry includes the payment-signature header."""
         client = LLMClient(api_url="http://test", private_key="TestKey")
@@ -392,7 +392,7 @@ class TestAsyncPaymentFlow:
 
         await client.close()
 
-    @patch("rustyclawrouter.x402.build_solana_transfer_checked", return_value="MOCK_SIGNED_TX")
+    @patch("solvela.x402.build_solana_transfer_checked", return_value="MOCK_SIGNED_TX")
     async def test_402_then_200(self, _mock_sign):
         client = AsyncLLMClient(api_url="http://test", private_key="TestKey")
 

@@ -1,4 +1,4 @@
-//! RustyClawRouter gateway — Axum HTTP server for AI agent LLM payments.
+//! Solvela gateway — Axum HTTP server for AI agent LLM payments.
 //!
 //! This module exposes the gateway internals for integration testing.
 //! The binary entry point is in `main.rs`.

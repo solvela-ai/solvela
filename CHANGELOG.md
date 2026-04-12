@@ -1,6 +1,16 @@
 # Changelog
 
-All notable changes to RustyClawRouter, in reverse chronological order.
+All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
+
+## 2026-04-11 — Solvela Rebrand
+
+- **Rebranded from RustyClawRouter to Solvela**: All crate names, CLI binary, env var prefixes, HTTP headers, SDK packages, infrastructure config, documentation, and dashboard UI updated. RustyClaw.ai remains the separate trading terminal product.
+- **Crate renames**: `rustyclaw-protocol` -> `solvela-protocol`, `rcr-cli` -> `solvela-cli`. Binary: `rustyclawrouter` -> `solvela-gateway`, CLI: `rcr` -> `solvela`.
+- **Env var prefix**: `SOLVELA_` prefix (legacy `RCR_` accepted with deprecation warning).
+- **HTTP headers**: `X-RCR-*` -> `X-Solvela-*` (legacy headers accepted).
+- **Prometheus metrics**: `rcr_*` -> `solvela_*` prefix.
+- **Dashboard**: All UI text updated from RustyClawRouter to Solvela.
+- **Infrastructure**: Fly.io app, Docker, fly.toml updated to `solvela-gateway`.
 
 ## 2026-04-08 — Escrow Program Deployed to Mainnet
 
@@ -11,7 +21,7 @@ All notable changes to RustyClawRouter, in reverse chronological order.
 
 ## 2026-04-07 — First Real Payment + Production Fixes + Telsi Migration Complete
 
-- **Telsi.ai migration to RCR complete**: Telsi has successfully migrated from BlockRun to RustyClawRouter. Second production product now live on the gateway, processing real payments.
+- **Telsi.ai migration to RCR complete**: Telsi has successfully migrated from BlockRun to Solvela. Second production product now live on the gateway, processing real payments.
 - **First real USDC payment processed**: Telsi Telegram app sent real USDC payment through RCR on Solana mainnet, received LLM response. End-to-end payment flow verified with actual money on mainnet.
 - **Critical Fly.io config fix (PR #5)**: Gateway was calling `AppConfig::default()` and ignoring all Fly.io env vars for Solana configuration. Root cause: missing `config/default.toml` load in startup path. Result: `recipient_wallet` was always empty despite env vars being set. Fixed by loading `config/default.toml` first, then applying env var overrides. Deployed to production.
 - **CLI resource URL fix (PR #6)**: CLI was sending full URL in payment resource field. Gateway validates resource as path only (per x402 spec). One-line fix: send path instead of full URL.
@@ -28,7 +38,7 @@ All notable changes to RustyClawRouter, in reverse chronological order.
 - **Error hardening**: Python SDK ImportError hard-fails with key, session_spent after success only, specific exception catches. CLI: non-zero exit on errors, empty response warnings.
 - **PR review + fixes**: Comprehensive 5-agent review of enterprise + A2A features (2026-04-05 PR #1). All 5 critical + 8 important + 10 suggestions fixed: privilege escalation guard, fail-closed budgets, API key debug redaction, audit actor fields, type safety, 26 validation tests added.
 - **Doc restructure**: Split into CLAUDE.md (how to work), HANDOFF.md (current state), CHANGELOG.md (history). Removed hardcoded test counts from CLAUDE.md.
-- **Gateway deployed** to Fly.io with all enterprise + A2A features live (rustyclawrouter-gateway.fly.dev).
+- **Gateway deployed** to Fly.io with all enterprise + A2A features live (solvela-gateway.fly.dev).
 - **Escrow program status** verified: NOT deployed to any network. Program ID is local testing only. Upgrade authority decision pending attorney consultation.
 - **Test counts**: Gateway 523 (401 unit + 122 integration), CLI 30, Python SDK 63, total workspace 683 + escrow 21 + dashboard 82.
 
@@ -62,7 +72,7 @@ All notable changes to RustyClawRouter, in reverse chronological order.
 ## 2026-03-18 — Terminal Backend Deploy
 
 - `rclawterm-gateway.fly.dev` deployed, 2 machines (ord)
-- Shared Upstash Redis instance (`rustyclawrouter-cache`)
+- Shared Upstash Redis instance (`solvela-cache`)
 - OpenAI + Google API keys set on Fly.io
 
 ## Earlier — Core Gateway (Phases 1-4, 8-9, 12-14)

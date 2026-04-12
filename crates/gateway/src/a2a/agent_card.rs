@@ -21,7 +21,7 @@ pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse
     }
 
     Json(json!({
-        "name": "RustyClawRouter",
+        "name": "Solvela",
         "description": "Solana-native AI agent payment gateway — pay for LLM API calls with USDC-SPL via x402",
         "url": format!("http://{}:{}", state.config.server.host, state.config.server.port),
         "version": "0.1.0",
@@ -149,7 +149,7 @@ supports_vision = false
             .expect("read body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
 
-        assert_eq!(json["name"], "RustyClawRouter");
+        assert_eq!(json["name"], "Solvela");
         assert_eq!(json["version"], "0.1.0");
     }
 

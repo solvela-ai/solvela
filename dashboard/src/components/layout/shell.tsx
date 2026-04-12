@@ -30,7 +30,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
           >
             <Menu size={20} />
           </button>
-          <span className="text-sm font-semibold text-gray-900">RustyClawRouter</span>
+          <span className="text-sm font-semibold text-gray-900">Solvela</span>
         </div>
 
         <main className="flex-1 overflow-y-auto">{children}</main>

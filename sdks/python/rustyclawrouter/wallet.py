@@ -44,7 +44,7 @@ class Wallet:
         """Derive the public address from the private key.
 
         Requires the ``solders`` package (install with
-        ``pip install rustyclawrouter[solana]``).
+        ``pip install solvela[solana]``).
         """
         if self._address:
             return self._address
@@ -76,5 +76,5 @@ class Wallet:
             raise ValueError("No private key configured")
         raise NotImplementedError(
             "Direct transaction signing is not supported. "
-            "Use rustyclawrouter.x402.build_solana_transfer_checked() instead."
+            "Use solvela.x402.build_solana_transfer_checked() instead."
         )

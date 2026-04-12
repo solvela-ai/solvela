@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from rustyclawrouter.wallet import Wallet
+from solvela.wallet import Wallet
 
 
 class TestWalletInit:
