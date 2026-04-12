@@ -64,6 +64,10 @@ pub struct LoadTestArgs {
     /// Print what would happen without sending requests.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Model to use for requests (default: "auto" for smart routing).
+    #[arg(long, default_value = "auto")]
+    pub model: String,
 }
 
 /// Parse a duration string like "60s", "5m", "1h" into seconds.
@@ -115,6 +119,7 @@ impl LoadTestArgs {
             report_json: self.report_json,
             prometheus_url: self.prometheus_url,
             dry_run: self.dry_run,
+            model: self.model,
         };
         config.validate()?;
         Ok(config)
@@ -129,6 +134,7 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
         println!("=== DRY RUN ===");
         println!("Target:       {}", config.api_url);
         println!("Mode:         {:?}", config.mode);
+        println!("Model:        {}", config.model);
         println!("RPS:          {}", config.rps);
         println!("Duration:     {}s", config.duration_secs);
         println!("Concurrency:  {}", config.concurrency);
@@ -218,6 +224,7 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
 
     let api_url_shared: Arc<str> = Arc::from(config.api_url.as_str());
     let rpc_url_shared: Arc<str> = Arc::from(rpc_url.as_str());
+    let model_shared: Arc<str> = Arc::from(config.model.as_str());
 
     // --- Prometheus pre-test scrape ---
     let prom_before = if let Some(ref prom_url) = config.prometheus_url {
@@ -248,6 +255,7 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
         let strategy = strategy.clone();
         let api_url_shared = api_url_shared.clone();
         let rpc_url_shared = rpc_url_shared.clone();
+        let model_shared = model_shared.clone();
 
         run_dispatcher(
             dispatcher_config,
@@ -258,9 +266,10 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
                 let strategy = strategy.clone();
                 let api_url = api_url_shared.clone();
                 let rpc_url = rpc_url_shared.clone();
+                let model = model_shared.clone();
 
                 async move {
-                    let body = build_request_body(tier);
+                    let body = build_request_body(tier, &model);
                     let _ = execute_request(
                         &client,
                         &api_url,
@@ -314,13 +323,13 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
 ///
 /// Each tier uses a different prompt length and model hint so the gateway's
 /// smart router classifies them into the expected scoring bucket.
-fn build_request_body(tier: &str) -> serde_json::Value {
-    let (model, prompt) = match tier {
-        "simple" => ("auto", "Say hello."),
-        "medium" => ("auto", "Explain how HTTP caching works with ETags and Cache-Control headers."),
-        "complex" => ("auto", "Write a Rust function that implements a lock-free concurrent hash map with linear probing. Include detailed comments explaining the memory ordering constraints."),
-        "reasoning" => ("auto", "Prove that every continuous function on a closed interval is uniformly continuous. Then explain why this fails for open intervals with a concrete counterexample."),
-        _ => ("auto", "Say hello."),
+fn build_request_body(tier: &str, model: &str) -> serde_json::Value {
+    let prompt = match tier {
+        "simple" => "Say hello.",
+        "medium" => "Explain how HTTP caching works with ETags and Cache-Control headers.",
+        "complex" => "Write a Rust function that implements a lock-free concurrent hash map with linear probing. Include detailed comments explaining the memory ordering constraints.",
+        "reasoning" => "Prove that every continuous function on a closed interval is uniformly continuous. Then explain why this fails for open intervals with a concrete counterexample.",
+        _ => "Say hello.",
     };
 
     serde_json::json!({
@@ -392,6 +401,7 @@ mod integration_tests {
             report_json: None,
             prometheus_url: None,
             dry_run: false,
+            model: "auto".to_string(),
         };
 
         let result = run(&mock.uri(), args).await;
@@ -429,6 +439,7 @@ mod integration_tests {
             report_json: Some(json_path.clone()),
             prometheus_url: None,
             dry_run: false,
+            model: "auto".to_string(),
         };
 
         let result = run(&mock.uri(), args).await;
@@ -482,6 +493,7 @@ mod integration_tests {
             report_json: None,
             prometheus_url: None,
             dry_run: false,
+            model: "auto".to_string(),
         };
 
         let result = run(&mock.uri(), args).await;
@@ -515,6 +527,7 @@ mod integration_tests {
             report_json: None,
             prometheus_url: None,
             dry_run: false,
+            model: "auto".to_string(),
         };
 
         let result = run(&mock.uri(), args).await;
@@ -565,6 +578,7 @@ mod integration_tests {
             report_json: None,
             prometheus_url: None,
             dry_run: false,
+            model: "auto".to_string(),
         };
 
         let result = run(&mock.uri(), args).await;

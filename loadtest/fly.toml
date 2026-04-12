@@ -1,0 +1,8 @@
+app = "solvela-loadtest-runner"
+primary_region = "ord"
+
+[build]
+
+[[vm]]
+size = "performance-1x"
+memory = "512mb"

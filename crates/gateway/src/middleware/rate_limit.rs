@@ -34,6 +34,17 @@ impl Default for RateLimitConfig {
     }
 }
 
+impl RateLimitConfig {
+    /// Create a config with a custom max_requests value.
+    /// Used for env var override during load testing.
+    pub fn with_max_requests(max: u32) -> Self {
+        Self {
+            max_requests: max,
+            ..Self::default()
+        }
+    }
+}
+
 /// Per-client rate limit state.
 #[derive(Debug)]
 struct RateLimitEntry {
@@ -323,6 +334,14 @@ mod tests {
         assert!(limiter.check("wallet-b").await.is_ok());
         assert!(limiter.check("wallet-b").await.is_ok());
         assert!(limiter.check("wallet-b").await.is_err());
+    }
+
+    #[test]
+    fn test_rate_limit_config_with_max_requests() {
+        let config = RateLimitConfig::with_max_requests(10000);
+        assert_eq!(config.max_requests, 10000);
+        assert_eq!(config.unknown_max_requests, 10); // unchanged from default
+        assert_eq!(config.window, Duration::from_secs(60)); // unchanged
     }
 
     #[test]

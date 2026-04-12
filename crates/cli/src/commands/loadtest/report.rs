@@ -246,6 +246,7 @@ mod tests {
             report_json: None,
             prometheus_url: None,
             dry_run: false,
+            model: "auto".to_string(),
         }
     }
 

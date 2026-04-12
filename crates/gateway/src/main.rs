@@ -604,7 +604,19 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Rate limiter + periodic cleanup ───────────────────────────────────────
-    let rate_limiter = RateLimiter::new(RateLimitConfig::default());
+    let rate_limit_config = match env_with_fallback("SOLVELA_RATE_LIMIT_MAX", "RCR_RATE_LIMIT_MAX")
+    {
+        Ok(val) => {
+            let max: u32 = val.parse().unwrap_or_else(|_| {
+                tracing::warn!(value = %val, "Invalid SOLVELA_RATE_LIMIT_MAX, using default");
+                60
+            });
+            tracing::info!(max_requests = max, "Rate limit override from env");
+            RateLimitConfig::with_max_requests(max)
+        }
+        Err(_) => RateLimitConfig::default(),
+    };
+    let rate_limiter = RateLimiter::new(rate_limit_config);
 
     // Spawn periodic cleanup task — removes expired entries every 60 seconds
     // to prevent the in-memory HashMap from growing without bound.
