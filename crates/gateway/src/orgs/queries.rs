@@ -9,14 +9,14 @@ use crate::orgs::models::{
     CreateOrgRequest, CreateTeamRequest, OrgMember, OrgRole, Organization, Team, TeamWallet,
 };
 
-/// Length of the stored key prefix: "rcr_k_" (6) + first 4 hex chars of the key = 10. Used for display only; uniqueness is ensured by the full key hash.
-const KEY_PREFIX_LEN: usize = 10;
+/// Length of the stored key prefix: "solvela_k_" (10) + first 4 hex chars of the key = 14. Used for display only; uniqueness is ensured by the full key hash.
+const KEY_PREFIX_LEN: usize = 14;
 
-/// Generate a new API key: "rcr_k_" + 32 random hex chars.
+/// Generate a new API key: "solvela_k_" + 32 random hex chars.
 pub fn generate_api_key() -> String {
     let mut rng = rand::rng();
     let bytes: [u8; 16] = rng.random();
-    format!("rcr_k_{}", hex::encode(bytes))
+    format!("solvela_k_{}", hex::encode(bytes))
 }
 
 /// Compute the SHA-256 hex digest of an API key.
@@ -379,22 +379,22 @@ mod tests {
     #[test]
     fn generate_api_key_has_correct_prefix_and_length() {
         let key = generate_api_key();
-        // Prefix: "rcr_k_" (6 chars) + 32 hex chars from 16 bytes = 38 total
+        // Prefix: "solvela_k_" (10 chars) + 32 hex chars from 16 bytes = 42 total
         assert!(
-            key.starts_with("rcr_k_"),
-            "key should start with 'rcr_k_', got: {key}"
+            key.starts_with("solvela_k_"),
+            "key should start with 'solvela_k_', got: {key}"
         );
         assert_eq!(
             key.len(),
-            38,
-            "key should be 38 chars long (6 prefix + 32 hex), got: {}",
+            42,
+            "key should be 42 chars long (10 prefix + 32 hex), got: {}",
             key.len()
         );
     }
 
     #[test]
     fn hash_api_key_is_deterministic_and_64_chars() {
-        let key = "rcr_k_abc123testkey";
+        let key = "solvela_k_abc123testkey";
         let hash1 = hash_api_key(key);
         let hash2 = hash_api_key(key);
 
@@ -407,7 +407,7 @@ mod tests {
         );
 
         // Different inputs must produce different hashes
-        let hash_other = hash_api_key("rcr_k_different");
+        let hash_other = hash_api_key("solvela_k_different");
         assert_ne!(hash1, hash_other, "different keys must hash differently");
     }
 }

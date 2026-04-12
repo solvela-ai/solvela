@@ -167,8 +167,8 @@ mod tests {
     fn api_key_created_debug_redacts_key() {
         let key_created = ApiKeyCreated {
             id: Uuid::new_v4(),
-            key: "rcr_k_supersecretkey".to_string(),
-            key_prefix: "rcr_k_sup".to_string(),
+            key: "solvela_k_supersecretkey".to_string(),
+            key_prefix: "solvela_k_su".to_string(),
             name: "Test Key".to_string(),
             role: OrgRole::Admin,
             expires_at: None,
