@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn test_escrow_config_serializes_correctly() {
         let config = EscrowConfig {
-            escrow_program_id: "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string(),
+            escrow_program_id: "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
             current_slot: Some(298_765_432),
             network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp".to_string(),
             usdc_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
@@ -307,7 +307,7 @@ mod tests {
         let json = serde_json::to_value(&config).unwrap();
         assert_eq!(
             json["escrow_program_id"],
-            "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy"
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
         );
         assert_eq!(json["current_slot"], 298_765_432);
         assert_eq!(json["network"], "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");

@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Value};
 
-use rustyclaw_protocol::PLATFORM_FEE_PERCENT;
+use solvela_protocol::PLATFORM_FEE_PERCENT;
 
 use crate::AppState;
 
@@ -59,7 +59,7 @@ pub async fn pricing(State(state): State<Arc<AppState>>) -> Json<Value> {
 
     Json(json!({
         "platform": {
-            "name": "RustyClawRouter",
+            "name": "Solvela",
             "chain": "solana",
             "token": "USDC-SPL",
             "usdc_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",

@@ -1,6 +1,6 @@
 # Configuration
 
-RustyClawRouter is configured through environment variables and TOML config files. Environment variables take precedence. Secrets (API keys, private keys) are **only** accepted via environment variables, never config files.
+Solvela is configured through environment variables and TOML config files. Environment variables take precedence. Secrets (API keys, private keys) are **only** accepted via environment variables, never config files.
 
 ## Environment Variables
 

@@ -23,7 +23,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Json<Value> {
                     "input_per_million": m.input_cost_per_million,
                     "output_per_million": m.output_cost_per_million,
                     "currency": "USDC",
-                    "fee_percent": rustyclaw_protocol::PLATFORM_FEE_PERCENT,
+                    "fee_percent": solvela_protocol::PLATFORM_FEE_PERCENT,
                 },
                 "capabilities": {
                     "streaming": m.supports_streaming,

@@ -67,7 +67,7 @@ describe("fetchPricing", () => {
 
   const pricingPayload = {
     platform: {
-      name: "RustyClawRouter",
+      name: "Solvela",
       chain: "solana",
       token: "USDC",
       usdc_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
@@ -108,7 +108,7 @@ describe("fetchPricing", () => {
 
     const result = await fetchPricing();
 
-    expect(result.platform.name).toBe("RustyClawRouter");
+    expect(result.platform.name).toBe("Solvela");
     expect(result.models).toHaveLength(1);
     expect(result.models[0].id).toBe("gpt-4o-mini");
   });

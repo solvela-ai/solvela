@@ -1,4 +1,18 @@
-# How RustyClawRouter Works
+# How Solvela Works
+
+## Why Now: The API Pricing Shift
+
+LLM providers like Anthropic, OpenAI, and Google are fundamentally reshaping how developers access their models. Subscription tiers (like Anthropic's Claude Pro or ChatGPT Plus) are increasingly off-limits to apps and app harnesses that wrap these models for end users. Instead, developers must use the API, which charges per-token -- often 2-10x the cost of a subscription for the same usage.
+
+This creates a hard problem for autonomous AI agents:
+
+- **API costs compound fast** — An agent making thousands of calls autonomously can run up bills that would bankrupt a subscription model.
+- **Traditional billing doesn't work** — Credit cards and monthly invoices assume predictable usage. Agents don't fit that pattern.
+- **Managed API services add markup** — Proxy services that handle billing add another layer of cost, taking a cut on every call.
+
+The result: developers need a way to let agents pay for API calls instantly, per-call, with granular cost control -- and they need it now.
+
+Solvela addresses this with payment settling directly on Solana. Agents hold USDC, compute the exact cost upfront, and pay atomically per request -- no subscriptions, no overpaying, no mystery bills.
 
 ## The Problem
 
@@ -8,7 +22,7 @@ AI agents are becoming autonomous. They run 24/7, make decisions, and call APIs 
 - **API keys** require an account, and if the key leaks, someone else runs up the bill.
 - **Monthly subscriptions** don't make sense for agents that might make 3 calls or 3 million.
 
-RustyClawRouter (RCR) solves this. An AI agent just needs a Solana wallet with some USDC (a dollar-pegged stablecoin), and it can pay for any LLM API call instantly, with no account and no human in the loop.
+Solvela (RCR) solves this. An AI agent just needs a Solana wallet with some USDC (a dollar-pegged stablecoin), and it can pay for any LLM API call instantly, with no account and no human in the loop.
 
 ## The Payment Flow
 

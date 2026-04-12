@@ -2,7 +2,7 @@ import { LLMClient } from './client';
 import type { ChatMessage, ChatResponse, ClientOptions } from './types';
 
 /**
- * OpenAI-compatible drop-in replacement backed by RustyClawRouter.
+ * OpenAI-compatible drop-in replacement backed by Solvela.
  *
  * This lets existing code that uses the OpenAI SDK pattern switch to
  * paying with USDC on Solana with a one-line import change:
@@ -11,7 +11,7 @@ import type { ChatMessage, ChatResponse, ClientOptions } from './types';
  *   import OpenAI from 'openai';
  *
  *   // After:
- *   import { OpenAI } from '@rustyclawrouter/sdk';
+ *   import { OpenAI } from '@solvela/sdk';
  *
  *   const client = new OpenAI({ apiUrl: 'http://localhost:8402' });
  *   const resp = await client.chat.completions.create({

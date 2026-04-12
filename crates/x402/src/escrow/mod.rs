@@ -11,7 +11,9 @@ pub mod claim_processor;
 pub mod claim_queue;
 
 mod claimer;
-mod pda;
+pub mod deposit;
+pub mod pda;
+pub mod refund;
 mod verifier;
 
 #[cfg(feature = "postgres")]

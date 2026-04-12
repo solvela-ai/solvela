@@ -1,4 +1,4 @@
-# AGENTS.md — RustyClawRouter
+# AGENTS.md — Solvela
 
 Guidelines for AI coding agents operating in this repository.
 

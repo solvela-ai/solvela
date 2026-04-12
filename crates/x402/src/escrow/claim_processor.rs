@@ -269,7 +269,7 @@ async fn process_pending_claims(
         .await
         .map_err(|e| format!("failed to fetch pending claims: {e}"))?;
 
-    gauge!("rcr_escrow_queue_depth").set(pending.len() as f64);
+    gauge!("solvela_escrow_queue_depth").set(pending.len() as f64);
 
     if pending.is_empty() {
         return Ok(());
@@ -303,7 +303,7 @@ async fn process_pending_claims(
                 );
             }
             circuit_breaker.record_failure();
-            counter!("rcr_escrow_claims_total", "result" => "failure").increment(1);
+            counter!("solvela_escrow_claims_total", "result" => "failure").increment(1);
             if let Some(m) = metrics {
                 m.claims_failed.fetch_add(1, Ordering::Relaxed);
             }
@@ -334,7 +334,7 @@ async fn process_pending_claims(
                 )
                 .await;
                 circuit_breaker.record_failure();
-                counter!("rcr_escrow_claims_total", "result" => "failure").increment(1);
+                counter!("solvela_escrow_claims_total", "result" => "failure").increment(1);
                 if let Some(m) = metrics {
                     m.claims_failed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -360,7 +360,7 @@ async fn process_pending_claims(
                     );
                 }
                 circuit_breaker.record_success();
-                counter!("rcr_escrow_claims_total", "result" => "success").increment(1);
+                counter!("solvela_escrow_claims_total", "result" => "success").increment(1);
                 if let Some(m) = metrics {
                     m.claims_succeeded.fetch_add(1, Ordering::Relaxed);
                 }
@@ -389,7 +389,7 @@ async fn process_pending_claims(
                     );
                 }
                 circuit_breaker.record_failure();
-                counter!("rcr_escrow_claims_total", "result" => "failure").increment(1);
+                counter!("solvela_escrow_claims_total", "result" => "failure").increment(1);
                 if let Some(m) = metrics {
                     // If this claim has exceeded max attempts, count as permanently failed.
                     // Otherwise, it's a retry.

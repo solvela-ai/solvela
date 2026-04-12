@@ -83,7 +83,7 @@ use spl_token::{
 use solana_sdk::program_pack::Pack;
 
 /// Program ID — must match declare_id!() in lib.rs
-pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy");
+pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
 
 /// Mainnet USDC mint — must match USDC_MINT in lib.rs
 pub const USDC_MINT: Pubkey = solana_sdk::pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");

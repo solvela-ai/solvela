@@ -1,10 +1,10 @@
 # MCP Server
 
-The MCP (Model Context Protocol) server integrates RustyClawRouter directly into Claude Code and other MCP-compatible AI assistants. Agents can call LLM models, check wallet status, and manage spending through MCP tool calls.
+The MCP (Model Context Protocol) server integrates Solvela directly into Claude Code and other MCP-compatible AI assistants. Agents can call LLM models, check wallet status, and manage spending through MCP tool calls.
 
 ## What Is MCP
 
-The [Model Context Protocol](https://modelcontextprotocol.io/) is a standard for connecting AI assistants to external tools and data sources. The RustyClawRouter MCP server exposes gateway capabilities as structured tools that Claude Code can invoke during conversations.
+The [Model Context Protocol](https://modelcontextprotocol.io/) is a standard for connecting AI assistants to external tools and data sources. The Solvela MCP server exposes gateway capabilities as structured tools that Claude Code can invoke during conversations.
 
 ## Installation
 
@@ -19,7 +19,7 @@ npm run build
 Or run directly with npx:
 
 ```bash
-npx @rustyclawrouter/mcp
+npx @solvela/mcp
 ```
 
 ## Setup with Claude Code
@@ -33,7 +33,7 @@ Add to your MCP config (typically `~/.claude/mcp.json` or project-level `.claude
 ```json
 {
   "mcpServers": {
-    "rustyclawrouter": {
+    "solvela": {
       "command": "node",
       "args": ["/path/to/sdks/mcp/dist/index.js"],
       "env": {
@@ -115,7 +115,7 @@ View session spend summary and budget status.
 
 Once configured, you can use natural language with Claude Code:
 
-> "What models are available through RustyClawRouter?"
+> "What models are available through Solvela?"
 
 Claude Code calls the `list_models` tool and presents the results.
 

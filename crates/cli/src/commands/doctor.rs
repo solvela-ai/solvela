@@ -19,13 +19,13 @@ pub async fn run(api_url: &str) -> Result<()> {
 
     // Check 2: Wallet
     let wallet_path = std::env::var("HOME")
-        .map(|h| format!("{}/.rustyclawrouter/wallet.json", h))
-        .unwrap_or_else(|_| ".rustyclawrouter/wallet.json".to_string());
+        .map(|h| format!("{}/.solvela/wallet.json", h))
+        .unwrap_or_else(|_| ".solvela/wallet.json".to_string());
     print!("Wallet ({})... ", wallet_path);
     if Path::new(&wallet_path).exists() {
         println!("FOUND");
     } else {
-        println!("NOT FOUND (run 'rcr wallet init')");
+        println!("NOT FOUND (run 'solvela wallet init')");
     }
 
     // Check 3: Models endpoint
@@ -73,7 +73,7 @@ mod tests {
         let _lock = crate::ENV_MUTEX.lock().await;
         let tmp = tempfile::TempDir::new().expect("tempdir");
         std::env::set_var("HOME", tmp.path());
-        let wallet_dir = tmp.path().join(".rustyclawrouter");
+        let wallet_dir = tmp.path().join(".solvela");
         std::fs::create_dir_all(&wallet_dir).expect("mkdir");
         std::fs::write(
             wallet_dir.join("wallet.json"),

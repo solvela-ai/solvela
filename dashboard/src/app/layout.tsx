@@ -6,7 +6,7 @@ import { Sidebar } from "@/components/layout/sidebar";
 const geist = Geist({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "RustyClawRouter Dashboard",
+  title: "Solvela Dashboard",
   description: "AI agent payment analytics — USDC-SPL on Solana",
 };
 

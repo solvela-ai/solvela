@@ -1,31 +1,31 @@
-# @rustyclawrouter/sdk
+# @solvela/sdk
 
-TypeScript SDK for RustyClawRouter -- AI agent payments with USDC on Solana via the x402 protocol.
+TypeScript SDK for Solvela -- AI agent payments with USDC on Solana via the x402 protocol.
 
 ## Installation
 
 ```bash
-npm install @rustyclawrouter/sdk
+npm install @solvela/sdk
 ```
 
 ```bash
-yarn add @rustyclawrouter/sdk
+yarn add @solvela/sdk
 ```
 
 ```bash
-pnpm add @rustyclawrouter/sdk
+pnpm add @solvela/sdk
 ```
 
 With Solana wallet support (transaction signing):
 
 ```bash
-npm install @rustyclawrouter/sdk @solana/web3.js
+npm install @solvela/sdk @solana/web3.js
 ```
 
 ## Quick Start
 
 ```typescript
-import { LLMClient } from '@rustyclawrouter/sdk';
+import { LLMClient } from '@solvela/sdk';
 
 const client = new LLMClient({ apiUrl: 'http://localhost:8402' });
 
@@ -62,7 +62,7 @@ Switch existing OpenAI SDK code to pay with USDC by changing one import:
 // import OpenAI from 'openai';
 
 // After:
-import { OpenAI } from '@rustyclawrouter/sdk';
+import { OpenAI } from '@solvela/sdk';
 
 const client = new OpenAI({ apiUrl: 'http://localhost:8402' });
 
@@ -115,7 +115,7 @@ try {
 ## Error Handling
 
 ```typescript
-import { LLMClient, PaymentError, BudgetExceededError } from '@rustyclawrouter/sdk';
+import { LLMClient, PaymentError, BudgetExceededError } from '@solvela/sdk';
 
 const client = new LLMClient({ apiUrl: 'http://localhost:8402' });
 
@@ -155,7 +155,7 @@ console.log(client.getApiUrl());              // Configured gateway URL
 The `Wallet` class manages Solana key access. It reads from the `SOLANA_WALLET_KEY` environment variable by default, or accepts a key directly:
 
 ```typescript
-import { Wallet } from '@rustyclawrouter/sdk';
+import { Wallet } from '@solvela/sdk';
 
 const wallet = new Wallet(); // Uses SOLANA_WALLET_KEY env var
 console.log(wallet.hasKey);     // true if a key is available
@@ -167,7 +167,7 @@ console.log(wallet.redactedKey); // "5K1g...w5gS"
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `apiUrl` | `string` | `$RCR_API_URL` or `https://api.rustyclawrouter.com` | Gateway URL |
+| `apiUrl` | `string` | `$RCR_API_URL` or `https://api.solvela.com` | Gateway URL |
 | `privateKey` | `string` | `$SOLANA_WALLET_KEY` | Base58 Solana private key for signing |
 | `sessionBudget` | `number` | `undefined` | Max USDC spend per session |
 | `timeout` | `number` | `60000` | HTTP timeout in milliseconds |

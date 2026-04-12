@@ -1,4 +1,5 @@
-import { PaymentRequired } from './types';
+import * as crypto from 'crypto';
+import { PaymentAccept, PaymentRequired } from './types';
 
 const X402_VERSION = 2;
 
@@ -34,31 +35,52 @@ export async function createPaymentHeader(
   paymentInfo: PaymentRequired,
   resourceUrl: string,
   privateKey?: string,
+  requestBody?: string,
 ): Promise<string> {
   if (!paymentInfo.accepts || paymentInfo.accepts.length === 0) {
     throw new Error('No payment accept options in 402 response');
   }
 
-  const accept = paymentInfo.accepts[0];
+  // Prefer escrow scheme if available, fall back to first accept
+  const escrowAccept = paymentInfo.accepts.find(
+    (a) => a.scheme === 'escrow' && a.escrow_program_id,
+  );
+  const accept = escrowAccept ?? paymentInfo.accepts[0];
 
-  let transaction = 'STUB_BASE64_TX';
-  if (privateKey) {
-    // Attempt real signing; if @solana/web3.js is missing, degrade to stub.
-    // If the package IS available but signing fails, propagate as SigningError.
-    const solanaAvailable = isSolanaAvailable();
-    if (solanaAvailable) {
-      // Throws SigningError on failure — do not catch here.
-      transaction = await buildSolanaTransferChecked(accept.pay_to, accept.amount, privateKey);
+  let payload: Record<string, unknown>;
+
+  if (accept.scheme === 'escrow' && accept.escrow_program_id) {
+    const escrowPayload = await buildEscrowPaymentHeader(
+      accept,
+      privateKey,
+      requestBody,
+    );
+    payload = {
+      x402_version: X402_VERSION,
+      resource: { url: resourceUrl, method: 'POST' },
+      accepted: accept,
+      payload: escrowPayload,
+    };
+  } else {
+    let transaction = 'STUB_BASE64_TX';
+    if (privateKey) {
+      // Attempt real signing; if @solana/web3.js is missing, degrade to stub.
+      // If the package IS available but signing fails, propagate as SigningError.
+      const solanaAvailable = isSolanaAvailable();
+      if (solanaAvailable) {
+        // Throws SigningError on failure — do not catch here.
+        transaction = await buildSolanaTransferChecked(accept.pay_to, accept.amount, privateKey);
+      }
+      // else: package not installed → stub is acceptable (development / CI mode)
     }
-    // else: package not installed → stub is acceptable (development / CI mode)
-  }
 
-  const payload = {
-    x402_version: X402_VERSION,
-    resource: { url: resourceUrl, method: 'POST' },
-    accepted: accept,
-    payload: { transaction },
-  };
+    payload = {
+      x402_version: X402_VERSION,
+      resource: { url: resourceUrl, method: 'POST' },
+      accepted: accept,
+      payload: { transaction },
+    };
+  }
 
   const json = JSON.stringify(payload);
 
@@ -66,6 +88,208 @@ export async function createPaymentHeader(
     return btoa(json);
   }
   return Buffer.from(json, 'utf-8').toString('base64');
+}
+
+/**
+ * Build the escrow payment payload (stub or real).
+ *
+ * Generates a unique service_id from the request body and random bytes,
+ * then either builds a real escrow deposit transaction (if @solana/web3.js
+ * is available and a private key is supplied) or returns stubs.
+ */
+async function buildEscrowPaymentHeader(
+  accept: PaymentAccept,
+  privateKey?: string,
+  requestBody?: string,
+): Promise<{ deposit_tx: string; service_id: string; agent_pubkey: string }> {
+  // Generate service_id: sha256(bodyBytes + randomBytes(8))
+  const bodyBytes = Buffer.from(requestBody ?? '', 'utf-8');
+  const randomBytes = crypto.randomBytes(8);
+  const serviceId = crypto
+    .createHash('sha256')
+    .update(bodyBytes)
+    .update(randomBytes)
+    .digest();
+
+  const serviceIdB64 = serviceId.toString('base64');
+
+  if (privateKey && !isSolanaAvailable()) {
+    throw new Error(
+      'Private key provided but @solana/web3.js is not installed. ' +
+      'Install with: npm install @solana/web3.js @solana/spl-token bs58',
+    );
+  }
+
+  if (privateKey && isSolanaAvailable()) {
+    // Real escrow deposit — throws SigningError on failure
+    const { depositTx, agentPubkey } = await buildEscrowDeposit(
+      accept.pay_to,
+      accept.amount,
+      accept.escrow_program_id!,
+      privateKey,
+      serviceId,
+      accept.max_timeout_seconds,
+    );
+    return { deposit_tx: depositTx, service_id: serviceIdB64, agent_pubkey: agentPubkey };
+  }
+
+  // Stub mode (no key or no @solana/web3.js)
+  return {
+    deposit_tx: 'STUB_ESCROW_DEPOSIT_TX',
+    service_id: serviceIdB64,
+    agent_pubkey: 'STUB_AGENT_PUBKEY',
+  };
+}
+
+/**
+ * Build and sign a real escrow deposit VersionedTransaction.
+ *
+ * Derives the escrow PDA and ATAs, constructs the Anchor deposit instruction,
+ * signs with the agent keypair, and returns the base64-encoded transaction
+ * plus the agent's base58 public key.
+ *
+ * @param providerWallet   - Gateway/provider wallet (base58)
+ * @param amountStr        - Amount in USDC micro-units (6 decimals)
+ * @param programIdStr     - Escrow program ID (base58)
+ * @param privateKey       - Agent's base58-encoded 64-byte Solana keypair secret key
+ * @param serviceId          - 32-byte service ID buffer
+ * @param maxTimeoutSeconds  - Maximum timeout in seconds; converted to slots (~400ms/slot, min 10 slots)
+ * @throws SigningError on any signing or RPC failure
+ */
+async function buildEscrowDeposit(
+  providerWallet: string,
+  amountStr: string,
+  programIdStr: string,
+  privateKey: string,
+  serviceId: Buffer,
+  maxTimeoutSeconds: number,
+): Promise<{ depositTx: string; agentPubkey: string }> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const solanaWeb3 = require('@solana/web3.js');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const splToken = require('@solana/spl-token');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const bs58 = require('bs58');
+
+  const {
+    Connection,
+    Keypair,
+    PublicKey,
+    SystemProgram,
+    TransactionMessage,
+    VersionedTransaction,
+  } = solanaWeb3;
+  const { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = splToken;
+
+  // USDC mainnet mint (6 decimals)
+  const USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+
+  // Validate amount before touching the key
+  const amount = BigInt(amountStr);
+  if (amount <= 0n) {
+    throw new SigningError(`Escrow deposit amount must be positive, got: ${amountStr}`);
+  }
+
+  let secretKey: Uint8Array | null = null;
+  try {
+    secretKey = bs58.decode(privateKey) as Uint8Array;
+    const payer = Keypair.fromSecretKey(secretKey);
+    const agentPubkey = payer.publicKey.toBase58() as string;
+
+    const providerPubkey = new PublicKey(providerWallet);
+    const programId = new PublicKey(programIdStr);
+
+    // Derive escrow PDA: ["escrow", agent, serviceId]
+    const [escrowPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from('escrow'), payer.publicKey.toBuffer(), serviceId],
+      programId,
+    );
+
+    // Derive ATAs
+    const agentAta = await getAssociatedTokenAddress(USDC_MINT, payer.publicKey);
+    const vaultAta = await getAssociatedTokenAddress(USDC_MINT, escrowPda, true);
+
+    // Fetch recent blockhash and current slot
+    const rpcUrl = process.env.SOLANA_RPC_URL;
+    if (!rpcUrl) {
+      throw new SigningError(
+        'SOLANA_RPC_URL environment variable is required for on-chain signing. ' +
+        'Set it to your RPC endpoint (e.g. https://api.mainnet-beta.solana.com).',
+      );
+    }
+    const connection = new Connection(rpcUrl, 'confirmed');
+    const [{ blockhash }, currentSlot] = await Promise.all([
+      connection.getLatestBlockhash('finalized'),
+      connection.getSlot('confirmed'),
+    ]);
+
+    // Compute expiry slot from timeout (Solana ~400ms/slot)
+    const timeoutSlots = Math.max(Math.floor((maxTimeoutSeconds * 1000) / 400), 10);
+    const expirySlot = BigInt(currentSlot + timeoutSlots);
+
+    // Build instruction data: sha256("global:deposit")[0:8] + amount(u64 LE) + serviceId + expirySlot(u64 LE)
+    const discriminator = crypto
+      .createHash('sha256')
+      .update(Buffer.from('global:deposit', 'utf-8'))
+      .digest()
+      .subarray(0, 8);
+
+    const amountBuf = Buffer.allocUnsafe(8);
+    // Write u64 LE as two 32-bit halves to avoid BigInt64Array on older Node
+    const amountLow = Number(amount & 0xffffffffn);
+    const amountHigh = Number((amount >> 32n) & 0xffffffffn);
+    amountBuf.writeUInt32LE(amountLow, 0);
+    amountBuf.writeUInt32LE(amountHigh, 4);
+
+    // expirySlot as u64 LE
+    const expiryBuf = Buffer.allocUnsafe(8);
+    const expiryLow = Number(expirySlot & 0xffffffffn);
+    const expiryHigh = Number((expirySlot >> 32n) & 0xffffffffn);
+    expiryBuf.writeUInt32LE(expiryLow, 0);
+    expiryBuf.writeUInt32LE(expiryHigh, 4);
+
+    const data = Buffer.concat([discriminator, amountBuf, serviceId, expiryBuf]);
+
+    // 9 account keys in order
+    const keys = [
+      { pubkey: payer.publicKey, isSigner: true, isWritable: true },   // agent
+      { pubkey: providerPubkey, isSigner: false, isWritable: false },   // provider
+      { pubkey: USDC_MINT, isSigner: false, isWritable: false },        // mint
+      { pubkey: escrowPda, isSigner: false, isWritable: true },         // escrowPda
+      { pubkey: agentAta, isSigner: false, isWritable: true },          // agentAta
+      { pubkey: vaultAta, isSigner: false, isWritable: true },          // vaultAta
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // token program
+      { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // ATA program
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },     // system program
+    ];
+
+    const ix = { programId, keys, data };
+
+    const message = new TransactionMessage({
+      payerKey: payer.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [ix],
+    }).compileToV0Message();
+
+    const tx = new VersionedTransaction(message);
+    tx.sign([payer]);
+
+    const serialized = tx.serialize();
+    const depositTx = typeof btoa === 'function'
+      ? btoa(String.fromCharCode(...serialized))
+      : Buffer.from(serialized).toString('base64');
+
+    return { depositTx, agentPubkey };
+  } catch (err) {
+    if (err instanceof SigningError) throw err;
+    throw new SigningError(
+      `Failed to build escrow deposit transaction: ${err instanceof Error ? err.message : String(err)}`,
+      err,
+    );
+  } finally {
+    // Zero the secret key bytes to minimise in-memory exposure window
+    if (secretKey) secretKey.fill(0);
+  }
 }
 
 /** Returns true if @solana/web3.js can be required (optional peer dep). */

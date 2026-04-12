@@ -10,7 +10,7 @@
 //!
 //! Each check is optional and controlled by `PromptGuardConfig`.
 
-use rustyclaw_protocol::ChatMessage;
+use solvela_protocol::ChatMessage;
 
 /// Configuration for the prompt guard.
 #[derive(Debug, Clone)]
@@ -269,7 +269,7 @@ fn contains_phone(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustyclaw_protocol::Role;
+    use solvela_protocol::Role;
 
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {

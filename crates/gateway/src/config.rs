@@ -48,7 +48,7 @@ pub struct SolanaConfig {
     #[serde(default)]
     pub fee_payer_key: Option<String>,
     /// Additional hot wallet keys for rotation (base58, 64 bytes each).
-    /// Loaded from `RCR_SOLANA__FEE_PAYER_KEY_2` .. `_8` env vars.
+    /// Loaded from `SOLVELA_SOLANA__FEE_PAYER_KEY_2` .. `_8` (or `RCR_SOLANA__FEE_PAYER_KEY_2` .. `_8`) env vars.
     #[serde(default)]
     pub fee_payer_keys: Vec<String>,
 }

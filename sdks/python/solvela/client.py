@@ -1,4 +1,4 @@
-"""RustyClawRouter LLM client with transparent x402 payment handling."""
+"""Solvela LLM client with transparent x402 payment handling."""
 
 import json
 import logging
@@ -7,8 +7,6 @@ from typing import List, Optional
 import httpx
 
 from .config import DEFAULT_API_URL
-
-logger = logging.getLogger(__name__)
 from .types import (
     ChatMessage,
     ChatResponse,
@@ -18,6 +16,8 @@ from .types import (
 )
 from .wallet import Wallet
 from .x402 import encode_payment_header
+
+logger = logging.getLogger(__name__)
 
 
 class PaymentError(Exception):
@@ -109,7 +109,10 @@ class LLMClient:
                     f"this request: ${cost:.4f})"
                 )
 
-            payment_header = self._create_payment_header(payment_info, url)
+            request_bytes = json.dumps(request_body).encode()
+            payment_header = self._create_payment_header(
+                payment_info, url, request_body=request_bytes
+            )
 
             # Retry with payment
             resp = self._client.post(
@@ -185,21 +188,33 @@ class LLMClient:
             error_msg = body.get("error", {}).get("message", "")
             payment_data = json.loads(error_msg)
             return PaymentRequired.model_validate(payment_data)
-        except (json.JSONDecodeError, KeyError) as e:
+        except (json.JSONDecodeError, KeyError, AttributeError) as e:
             logger.warning("Could not parse 402 response: %s", e)
+            return None
+        except Exception as e:
+            logger.error("Unexpected error parsing 402 response: %s", e)
             return None
 
     def _create_payment_header(
-        self, payment_info: PaymentRequired, resource_url: str
+        self,
+        payment_info: PaymentRequired,
+        resource_url: str,
+        request_body: Optional[bytes] = None,
     ) -> str:
         """Create a PAYMENT-SIGNATURE header value.
 
-        Uses real Solana signing when a private key and deps are available.
+        Prefers the escrow scheme when available. Uses real Solana signing
+        when a private key and deps are available.
         """
-        accept = payment_info.accepts[0]
-        private_key = self.wallet._private_key if self.wallet.has_key else None
+        if not payment_info.accepts:
+            raise PaymentError("Gateway returned no accepted payment methods")
+        accept = next(
+            (a for a in payment_info.accepts if a.scheme == "escrow" and a.escrow_program_id),
+            payment_info.accepts[0],
+        )
+        private_key = self.wallet.private_key if self.wallet.has_key else None
         return encode_payment_header(
-            accept, resource_url, private_key=private_key
+            accept, resource_url, private_key=private_key, request_body=request_body
         )
 
 
@@ -280,7 +295,10 @@ class AsyncLLMClient:
                     f"this request: ${cost:.4f})"
                 )
 
-            payment_header = self._create_payment_header(payment_info, url)
+            request_bytes = json.dumps(request_body).encode()
+            payment_header = self._create_payment_header(
+                payment_info, url, request_body=request_bytes
+            )
             resp = await self._client.post(
                 url,
                 json=request_body,
@@ -329,19 +347,31 @@ class AsyncLLMClient:
             error_msg = body.get("error", {}).get("message", "")
             payment_data = json.loads(error_msg)
             return PaymentRequired.model_validate(payment_data)
-        except (json.JSONDecodeError, KeyError) as e:
+        except (json.JSONDecodeError, KeyError, AttributeError) as e:
             logger.warning("Could not parse 402 response: %s", e)
+            return None
+        except Exception as e:
+            logger.error("Unexpected error parsing 402 response: %s", e)
             return None
 
     def _create_payment_header(
-        self, payment_info: PaymentRequired, resource_url: str
+        self,
+        payment_info: PaymentRequired,
+        resource_url: str,
+        request_body: Optional[bytes] = None,
     ) -> str:
         """Create a PAYMENT-SIGNATURE header value.
 
-        Uses real Solana signing when a private key and deps are available.
+        Prefers the escrow scheme when available. Uses real Solana signing
+        when a private key and deps are available.
         """
-        accept = payment_info.accepts[0]
-        private_key = self.wallet._private_key if self.wallet.has_key else None
+        if not payment_info.accepts:
+            raise PaymentError("Gateway returned no accepted payment methods")
+        accept = next(
+            (a for a in payment_info.accepts if a.scheme == "escrow" and a.escrow_program_id),
+            payment_info.accepts[0],
+        )
+        private_key = self.wallet.private_key if self.wallet.has_key else None
         return encode_payment_header(
-            accept, resource_url, private_key=private_key
+            accept, resource_url, private_key=private_key, request_body=request_body
         )

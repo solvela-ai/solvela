@@ -1,6 +1,6 @@
 ---
 name: rustyclaw-orchestration
-description: Project-specific skill router for the RustyClaw monorepo (RustyClawRouter, RustyClawClient). Use when working on Solana payment gateway, x402 protocol, escrow, USDC-SPL, smart routing, or any task in a RustyClaw workspace. Maps files and task types to domain skills (solana-dev, security-review, domain-fintech, etc.) and provides correct cargo verification commands.
+description: Project-specific skill router for the RustyClaw monorepo (Solvela, RustyClawClient). Use when working on Solana payment gateway, x402 protocol, escrow, USDC-SPL, smart routing, or any task in a RustyClaw workspace. Maps files and task types to domain skills (solana-dev, security-review, domain-fintech, etc.) and provides correct cargo verification commands.
 ---
 
 # Skill: rustyclaw-orchestration
@@ -13,7 +13,7 @@ domain skills get loaded based on which files/areas the task touches.
 
 ## When to Activate
 
-Any task in the RustyClaw monorepo (RustyClawRouter or RustyClawClient).
+Any task in the RustyClaw monorepo (Solvela or RustyClawClient).
 
 ## What This Skill Does
 

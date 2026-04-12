@@ -9,7 +9,7 @@ pub mod tools;
 pub mod vision;
 
 // Flat re-exports so consumers write:
-//   use rustyclaw_protocol::{ChatRequest, PaymentRequired, CostBreakdown};
+//   use solvela_protocol::{ChatRequest, PaymentRequired, CostBreakdown};
 pub use chat::*;
 pub use constants::*;
 pub use cost::*;

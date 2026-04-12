@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use rustyclaw_protocol::{
+use solvela_protocol::{
     ChatChoice, ChatChunk, ChatChunkChoice, ChatDelta, ChatMessage, ChatRequest, ChatResponse,
     ModelInfo, Role, Usage,
 };

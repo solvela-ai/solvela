@@ -1,45 +1,46 @@
 # Changelog
 
-All notable changes to Solvela, in reverse chronological order.
+All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
 ## 2026-04-11 — Solvela Rebrand
 
-- **Full rebrand from RustyClawRouter to Solvela**: renamed all workspace crates (`solvela-protocol`, `solvela-router`, `solvela-gateway`, `solvela-cli`), CLI binary (`solvela`), Fly.io app (`solvela-gateway`), Dockerfile binary target, SDK packages (`solvela-sdk`, `@solvela/sdk`, `@solvela/mcp-server`)
-- **Documentation site** (`rcr-docs-site`): Next.js 16 + Fumadocs MDX, 18 pages (Getting Started, Core Concepts, API Reference, SDK Guides, Operations). Deployed to Vercel as `solvela-docs` at `docs.solvela.ai`. Shared theme library (`@rustyclaw/docs-theme`) with `createPresetCSS()` and `createThemeConfig()`. In-repo mdBook at `docs/book/` also rebranded.
-- Added `SOLVELA_*` env var prefix with `RCR_*` backward compatibility and deprecation warnings
-- Added `X-Solvela-*` HTTP headers with `X-RCR-*` backward compatibility
-- Updated Prometheus metrics to `solvela_*` prefix
-- Renamed API key prefix from `rcr_k_` to `solvela_k_`
-- Updated all documentation (README, HANDOFF.md, CHANGELOG.md) for Solvela branding
+- **Rebranded from RustyClawRouter to Solvela**: All crate names, CLI binary, env var prefixes, HTTP headers, SDK packages, infrastructure config, documentation, and dashboard UI updated. RustyClaw.ai remains the separate trading terminal product.
+- **Crate renames**: `rustyclaw-protocol` -> `solvela-protocol`, `rcr-cli` -> `solvela-cli`. Binary: `rustyclawrouter` -> `solvela-gateway`, CLI: `rcr` -> `solvela`.
+- **Env var prefix**: `SOLVELA_` prefix (legacy `RCR_` accepted with deprecation warning).
+- **HTTP headers**: `X-RCR-*` -> `X-Solvela-*` (legacy headers accepted).
+- **Prometheus metrics**: `rcr_*` -> `solvela_*` prefix.
+- **Dashboard**: All UI text updated from RustyClawRouter to Solvela.
+- **Infrastructure**: Fly.io app, Docker, fly.toml updated to `solvela-gateway`.
 
-## 2026-04-10 — CLI Load Test Framework + Go SDK Real Signing
+## 2026-04-08 — Escrow Program Deployed to Mainnet
 
-- **Go SDK real Solana signing**: Added crypto primitives (PDA, ATA, discriminator derivation), TransferChecked tx builder, Anchor escrow deposit tx builder, wallet signing methods, externally-anchored KATs. Replaced stub `createPaymentHeader` with real signing dispatch.
-- **CLI load test framework** (`solvela loadtest`): Constant-arrival-rate dispatcher with backpressure tracking, latency histogram metrics collector, load test worker with 402 dance and `PaymentStrategy` trait, terminal + JSON report formatters, ExactPayment strategy (real SPL TransferChecked), EscrowPayment strategy (Anchor deposit), Prometheus scraper + SLO validation, integration tests.
+- **Escrow program deployed to Solana mainnet**: Program ID `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`, upgrade authority retained by deployer. Built with Anchor 0.31.1, deployed via `solana program deploy`.
+- **Gateway advertises escrow scheme**: 402 responses now include both "exact" and "escrow" payment schemes. Escrow program ID served from Fly.io secret.
+- **Program ID updated across entire codebase**: All source files, tests, docs, and config updated from placeholder to mainnet program ID. All 684 workspace tests + 21 escrow tests pass.
+- **Regulatory docs updated**: `regulatory-position.md` updated to reflect mainnet deployment with upgrade authority retained.
 
-## 2026-04-09 — Escrow Hardening + CLI Recovery
+## 2026-04-07 — First Real Payment + Production Fixes + Telsi Migration Complete
 
-- **Escrow payment scheme**: End-to-end escrow support for CLI and all SDKs (#9)
-- **Escrow fixes**: Verifier now parses Anchor deposit instead of SPL transfer (#10), `settle_payment` submits tx + polls for confirmation (#11), corrected ATA derivation in escrow PDA helper (#12), capped escrow claim at `client_amount` when verified deposit unknown (#16)
-- **CLI `recover` subcommand**: Refunds expired escrow PDAs with atomic + decimal USDC display (#13)
-- **CLI `chat --scheme`**: Added `--scheme` flag to select exact vs escrow payment (#15)
-- Externally-anchored escrow PDA regression test (#14)
+- **Telsi.ai migration to RCR complete**: Telsi has successfully migrated from BlockRun to Solvela. Second production product now live on the gateway, processing real payments.
+- **First real USDC payment processed**: Telsi Telegram app sent real USDC payment through RCR on Solana mainnet, received LLM response. End-to-end payment flow verified with actual money on mainnet.
+- **Critical Fly.io config fix (PR #5)**: Gateway was calling `AppConfig::default()` and ignoring all Fly.io env vars for Solana configuration. Root cause: missing `config/default.toml` load in startup path. Result: `recipient_wallet` was always empty despite env vars being set. Fixed by loading `config/default.toml` first, then applying env var overrides. Deployed to production.
+- **CLI resource URL fix (PR #6)**: CLI was sending full URL in payment resource field. Gateway validates resource as path only (per x402 spec). One-line fix: send path instead of full URL.
+- **PR #4 follow-up fixes**: Python SDK error hardening (ImportError fails with key message, session_spent set after success only, specific exception catches). CLI hardening (non-zero exit on errors, panic-safe env cleanup, RPC error handling, empty response warnings).
+- **Transaction format compatibility verified**: Architect confirmed gateway accepts both legacy transactions (CLI) and v0 versioned transactions (Python/TypeScript SDKs) via `ParsedMessage::from_bytes()` version prefix detection.
+- **Known issue**: Second test request hit 429 rate limit from LLM provider. Payment was processed but no response returned. This is exact use case for escrow (pay only for what you receive). Escrow deployment still pending attorney consultation scheduled 2026-04-07.
+- **6 PRs merged total** (#1-6 all merged). Status: Gateway deployed and processing real payments on mainnet.
 
-## 2026-04-08 — Escrow Mainnet Deployment
+## 2026-04-06 — Test Coverage, Real Signing, Product Docs, Error Hardening
 
-- **Deployed escrow program to Solana mainnet** (#8). Program ID: `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`
-
-## 2026-04-07 — First Real Payment + Production Fixes
-
-- **First real Solana payment processed** on mainnet
-- Fixed: use path-only resource URL in payment payload (#6)
-- Fixed: wire environment variables to gateway config (#5)
-- API pricing context + session handoff update (#7)
-- Real Solana signing, CLI tests, product docs, error hardening (#4)
-
-## 2026-04-06 — CLI Tests + PR Review
-
-- CLI test suite (25+ tests across all commands) + PR review findings (#2)
+- **CLI test suite**: 0 → 30 tests across all 8 commands (wallet, chat, models, health, stats, doctor, nonce, services). wiremock for HTTP mocking, tempfile for filesystem isolation, test isolation, error cases.
+- **Real Solana signing**: Replaced STUB_BASE64_TX in Python SDK (solders + spl-token for signing) and CLI (x402 crate types, no new deps). TypeScript SDK already had signing. MCP server kept stub intentional.
+- **Product documentation**: Added to `docs/product/` — regulatory-position.md (attorney-ready), how-it-works.md, use-cases.md, faq.md.
+- **Error hardening**: Python SDK ImportError hard-fails with key, session_spent after success only, specific exception catches. CLI: non-zero exit on errors, empty response warnings.
+- **PR review + fixes**: Comprehensive 5-agent review of enterprise + A2A features (2026-04-05 PR #1). All 5 critical + 8 important + 10 suggestions fixed: privilege escalation guard, fail-closed budgets, API key debug redaction, audit actor fields, type safety, 26 validation tests added.
+- **Doc restructure**: Split into CLAUDE.md (how to work), HANDOFF.md (current state), CHANGELOG.md (history). Removed hardcoded test counts from CLAUDE.md.
+- **Gateway deployed** to Fly.io with all enterprise + A2A features live (solvela-gateway.fly.dev).
+- **Escrow program status** verified: NOT deployed to any network. Program ID is local testing only. Upgrade authority decision pending attorney consultation.
+- **Test counts**: Gateway 523 (401 unit + 122 integration), CLI 30, Python SDK 63, total workspace 683 + escrow 21 + dashboard 82.
 
 ## 2026-04-05 — A2A Protocol Adapter + Enterprise Polish
 
@@ -53,7 +54,7 @@ All notable changes to Solvela, in reverse chronological order.
 
 ## 2026-03-31 — Production Wiring
 
-- Wired Terminal → Solvela gateway (removed direct Anthropic key from rclawterm-gateway)
+- Wired Terminal → RCR (removed direct Anthropic key from rclawterm-gateway)
 - Set all 5 provider API keys on Fly.io (Anthropic, xAI, DeepSeek added)
 - Funded fee-payer wallet (0.09 SOL)
 - Redeployed gateway with Dockerfile fix (`crates/common/` → `crates/protocol/`)
@@ -71,7 +72,7 @@ All notable changes to Solvela, in reverse chronological order.
 ## 2026-03-18 — Terminal Backend Deploy
 
 - `rclawterm-gateway.fly.dev` deployed, 2 machines (ord)
-- Shared Upstash Redis instance (`rustyclawrouter-cache`, later renamed to `solvela-cache`)
+- Shared Upstash Redis instance (`solvela-cache`)
 - OpenAI + Google API keys set on Fly.io
 
 ## Earlier — Core Gateway (Phases 1-4, 8-9, 12-14)
@@ -86,4 +87,3 @@ All notable changes to Solvela, in reverse chronological order.
 - **Gateway extras**: Debug headers, stats endpoint, session tracking, SSE heartbeat, nonce endpoint
 - **Security audits**: Multiple rounds — 7 CRITICAL, 7 HIGH, 4 HIGH, 12 MEDIUM — all resolved
 - **Chat route refactor**: Monolithic `chat.rs` (2405 lines) → `chat/` module directory
-- Note: crates were originally named `rcr-router`/`rcr-protocol`; now `solvela-router`/`solvela-protocol` following the Apr 11 rebrand

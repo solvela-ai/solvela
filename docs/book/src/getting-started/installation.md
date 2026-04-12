@@ -18,8 +18,8 @@ Optional:
 ## Clone and Build
 
 ```bash
-git clone https://github.com/sky64/RustyClawRouter.git
-cd RustyClawRouter
+git clone https://github.com/sky64/Solvela.git
+cd Solvela
 cargo build
 ```
 
@@ -29,7 +29,7 @@ For a release build:
 cargo build --release
 ```
 
-The release binary is located at `target/release/rustyclawrouter`.
+The release binary is located at `target/release/solvela`.
 
 ## Start Backing Services
 
@@ -46,7 +46,7 @@ docker compose up -d
 
 This starts:
 
-- **PostgreSQL 16** on `127.0.0.1:5432` (user: `rcr`, db: `rustyclawrouter`)
+- **PostgreSQL 16** on `127.0.0.1:5432` (user: `rcr`, db: `solvela`)
 - **Redis 7** on `127.0.0.1:6379` (256MB LRU eviction, no persistence)
 
 Migrations in `migrations/` run automatically on first start and are idempotent (`CREATE TABLE IF NOT EXISTS`).
@@ -96,7 +96,7 @@ cargo test
 cargo test -p gateway             # 199 tests (161 unit + 38 integration)
 cargo test -p x402                # 74 tests
 cargo test -p router              # 13 tests
-cargo test -p rustyclaw-protocol  # 18 tests
+cargo test -p solvela-protocol  # 18 tests
 
 # Lint (must pass before committing)
 cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings

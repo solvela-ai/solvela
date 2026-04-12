@@ -113,7 +113,7 @@ curl -X POST http://localhost:8402/v1/chat/completions \
 ### Via Python SDK
 
 ```python
-from rustyclawrouter import LLMClient
+from solvela import LLMClient
 
 client = LLMClient(api_url="http://localhost:8402")
 response = client.smart_chat("Explain quantum entanglement", profile="eco")

@@ -58,7 +58,7 @@ func TestCreatePaymentHeader(t *testing.T) {
 		CostBreakdown: CostBreakdown{Total: "0.001"},
 	}
 
-	header, err := createPaymentHeader(info, "/v1/chat/completions")
+	header, err := createPaymentHeader(info, "/v1/chat/completions", nil, nil)
 	if err != nil {
 		t.Fatalf("createPaymentHeader: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestCreatePaymentHeaderNoAccepts(t *testing.T) {
 		X402Version: 2,
 		Accepts:     []PaymentAccept{},
 	}
-	_, err := createPaymentHeader(info, "/v1/chat/completions")
+	_, err := createPaymentHeader(info, "/v1/chat/completions", nil, nil)
 	if err == nil {
 		t.Fatal("expected error for empty accepts")
 	}

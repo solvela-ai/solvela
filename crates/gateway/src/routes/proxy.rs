@@ -120,7 +120,7 @@ pub async fn proxy_service(
     };
 
     if payment_header.is_none() {
-        counter!("rcr_payments_total", "status" => "none").increment(1);
+        counter!("solvela_payments_total", "status" => "none").increment(1);
         info!(service_id = %service_id, "no payment signature, returning 402");
 
         // Format cost breakdown from integer-derived values for display
@@ -268,8 +268,8 @@ pub async fn proxy_service(
     };
 
     if replay_detected {
-        counter!("rcr_replay_rejections_total").increment(1);
-        counter!("rcr_payments_total", "status" => "failed").increment(1);
+        counter!("solvela_replay_rejections_total").increment(1);
+        counter!("solvela_payments_total", "status" => "failed").increment(1);
         warn!(tx = %tx_raw, "replay attack detected — transaction already used");
         return Err(GatewayError::InvalidPayment(
             "transaction has already been used; each payment signature may only be submitted once"
@@ -280,8 +280,8 @@ pub async fn proxy_service(
     // Verify and settle via Facilitator
     match state.facilitator.verify_and_settle(&payload).await {
         Ok(settlement) => {
-            counter!("rcr_payments_total", "status" => "verified").increment(1);
-            histogram!("rcr_payment_amount_usdc").record(client_amount as f64 / 1_000_000.0);
+            counter!("solvela_payments_total", "status" => "verified").increment(1);
+            histogram!("solvela_payment_amount_usdc").record(client_amount as f64 / 1_000_000.0);
             info!(
                 tx_signature = ?settlement.tx_signature,
                 network = %settlement.network,
@@ -290,7 +290,7 @@ pub async fn proxy_service(
             );
         }
         Err(e) => {
-            counter!("rcr_payments_total", "status" => "failed").increment(1);
+            counter!("solvela_payments_total", "status" => "failed").increment(1);
             warn!(error = %e, service_id = %service_id, "proxy payment verification failed");
             return Err(GatewayError::InvalidPayment(format!(
                 "payment verification failed: {e}"
@@ -373,7 +373,7 @@ pub async fn proxy_service(
 
     // Attach request ID for traceability
     if let Some(ref rid) = request_id {
-        upstream_req = upstream_req.header("x-rcr-request-id", rid.as_str());
+        upstream_req = upstream_req.header("x-solvela-request-id", rid.as_str());
     }
 
     // Step 6: Send request and handle response

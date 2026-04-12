@@ -1,13 +1,13 @@
 import type { Plugin } from "@elizaos/core";
-import { chatViaRustyClaw } from "./actions/chat.js";
+import { chatViaSolvela } from "./actions/chat.js";
 import { gatewayProvider } from "./providers/gateway.js";
 
-export const rustyClawPlugin: Plugin = {
-  name: "rustyclaw",
+export const solvelaPlugin: Plugin = {
+  name: "solvela",
   description:
-    "RustyClawRouter integration — Solana-native AI agent payments via x402",
-  actions: [chatViaRustyClaw],
+    "Solvela integration — Solana-native AI agent payments via x402",
+  actions: [chatViaSolvela],
   providers: [gatewayProvider],
 };
 
-export default rustyClawPlugin;
+export default solvelaPlugin;

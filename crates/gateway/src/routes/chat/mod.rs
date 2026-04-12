@@ -21,9 +21,9 @@ use axum::Json;
 use metrics::{counter, histogram};
 use tracing::{info, warn};
 
-use router::profiles::{self, Profile};
-use router::scorer;
-use rustyclaw_protocol::ChatRequest;
+use solvela_protocol::ChatRequest;
+use solvela_router::profiles::{self, Profile};
+use solvela_router::scorer;
 
 use crate::error::GatewayError;
 use crate::middleware::prompt_guard::{self, GuardResult, PromptGuardConfig};
@@ -150,7 +150,7 @@ pub async fn chat_completions(
             "DEV MODE: payment bypassed for request to {}",
             req.model
         );
-        counter!("rcr_payments_total", "status" => "dev_bypass").increment(1);
+        counter!("solvela_payments_total", "status" => "dev_bypass").increment(1);
 
         let ctx = ProviderCallContext {
             state: &state,
@@ -182,7 +182,7 @@ pub async fn chat_completions(
 
     if payment_header.is_none() {
         // Return 402 with pricing info
-        counter!("rcr_payments_total", "status" => "none").increment(1);
+        counter!("solvela_payments_total", "status" => "none").increment(1);
         info!(model = %req.model, "no payment signature, returning 402");
 
         let cost = state
@@ -250,6 +250,8 @@ pub async fn chat_completions(
     let mut escrow_agent_pubkey: Option<String> = None;
     // FIX 3: Track the verified deposit amount to cap claim amounts
     let escrow_deposited_amount: Option<u64>;
+    // Gateway-advertised amount — used as defense-in-depth cap when deposit amount is unknown
+    let client_amount: u64;
 
     match payment_payload {
         Some(payload) => {
@@ -341,7 +343,7 @@ pub async fn chat_completions(
                         "failed to parse expected payment amount as u64".to_string(),
                     )
                 })?;
-            let client_amount: u64 = payload.accepted.amount.parse().map_err(|_| {
+            client_amount = payload.accepted.amount.parse().map_err(|_| {
                 GatewayError::BadRequest(format!(
                     "invalid payment amount '{}': must be a valid integer",
                     payload.accepted.amount
@@ -427,8 +429,8 @@ pub async fn chat_completions(
             };
 
             if replay_detected {
-                counter!("rcr_replay_rejections_total").increment(1);
-                counter!("rcr_payments_total", "status" => "failed").increment(1);
+                counter!("solvela_replay_rejections_total").increment(1);
+                counter!("solvela_payments_total", "status" => "failed").increment(1);
                 warn!(tx = %tx_raw, "replay attack detected — transaction already used");
                 return Err(GatewayError::InvalidPayment(
                     "transaction has already been used; each payment signature may only be submitted once".to_string()
@@ -440,7 +442,7 @@ pub async fn chat_completions(
             match state.facilitator.verify_and_settle(&payload).await {
                 Ok(settlement) if !settlement.success => {
                     // Settlement returned Ok but the transaction was not confirmed
-                    counter!("rcr_payments_total", "status" => "failed").increment(1);
+                    counter!("solvela_payments_total", "status" => "failed").increment(1);
                     tracing::warn!(
                         tx_signature = %settlement.tx_signature.as_deref().unwrap_or("unknown"),
                         error = ?settlement.error,
@@ -452,8 +454,8 @@ pub async fn chat_completions(
                 }
                 Ok(settlement) => {
                     escrow_deposited_amount = settlement.verified_amount;
-                    counter!("rcr_payments_total", "status" => "verified").increment(1);
-                    histogram!("rcr_payment_amount_usdc")
+                    counter!("solvela_payments_total", "status" => "verified").increment(1);
+                    histogram!("solvela_payment_amount_usdc")
                         .record(client_amount as f64 / 1_000_000.0);
                     info!(
                         tx_signature = ?settlement.tx_signature,
@@ -463,7 +465,7 @@ pub async fn chat_completions(
                     );
                 }
                 Err(e) => {
-                    counter!("rcr_payments_total", "status" => "failed").increment(1);
+                    counter!("solvela_payments_total", "status" => "failed").increment(1);
                     warn!(error = %e, "payment verification failed");
                     return Err(GatewayError::InvalidPayment(format!(
                         "payment verification failed: {e}"
@@ -472,7 +474,7 @@ pub async fn chat_completions(
             }
         }
         None => {
-            counter!("rcr_payments_total", "status" => "failed").increment(1);
+            counter!("solvela_payments_total", "status" => "failed").increment(1);
             return Err(GatewayError::InvalidPayment(
                 "PAYMENT-SIGNATURE header is present but could not be decoded. \
                  Encode a valid PaymentPayload as standard base64 JSON."
@@ -536,6 +538,9 @@ pub async fn chat_completions(
                     if let Ok(hv) = HeaderValue::from_str(&token) {
                         response
                             .headers_mut()
+                            .insert(HeaderName::from_static("x-solvela-session"), hv.clone());
+                        response
+                            .headers_mut()
                             .insert(HeaderName::from_static("x-rcr-session"), hv);
                     }
                 }
@@ -569,6 +574,7 @@ pub async fn chat_completions(
                     &escrow_agent_pubkey,
                     escrow_deposited_amount,
                     amount,
+                    client_amount,
                 );
             } else {
                 warn!(
@@ -584,7 +590,7 @@ pub async fn chat_completions(
                     .estimate_cost(&req.model, u.prompt_tokens, u.completion_tokens)
                     .and_then(|c| {
                         c.total.parse::<f64>().map_err(|e| {
-                            router::models::ModelRegistryError::ParseError(e.to_string())
+                            solvela_router::models::ModelRegistryError::ParseError(e.to_string())
                         })
                     }) {
                     Ok(cost) => {
@@ -623,7 +629,7 @@ pub async fn chat_completions(
                 wallet = %wallet_address,
                 "paid request failed: no provider available — returning error instead of stub"
             );
-            counter!("rcr_paid_stub_rejections_total").increment(1);
+            counter!("solvela_paid_stub_rejections_total").increment(1);
 
             Err(GatewayError::Internal(format!(
                 "all providers failed for model '{}'. Your payment was submitted but no response \
@@ -704,7 +710,9 @@ mod tests {
     #[test]
     fn test_fallback_header_name_is_valid() {
         use axum::http::HeaderName;
-        let name = HeaderName::from_static("x-rcr-fallback");
-        assert_eq!(name.as_str(), "x-rcr-fallback");
+        let name = HeaderName::from_static("x-solvela-fallback");
+        assert_eq!(name.as_str(), "x-solvela-fallback");
+        let legacy = HeaderName::from_static("x-rcr-fallback");
+        assert_eq!(legacy.as_str(), "x-rcr-fallback");
     }
 }

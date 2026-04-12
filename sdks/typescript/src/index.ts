@@ -1,4 +1,4 @@
-// RustyClawRouter TypeScript SDK
+// Solvela TypeScript SDK
 // AI agent payments with USDC on Solana via the x402 protocol.
 
 export { LLMClient, PaymentError, BudgetExceededError } from './client';

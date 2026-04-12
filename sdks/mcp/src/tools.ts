@@ -1,5 +1,5 @@
 /**
- * MCP tool definitions for RustyClawRouter.
+ * MCP tool definitions for Solvela.
  *
  * Each tool maps directly to a capability of the gateway:
  *   chat          — send a prompt to any model
@@ -15,7 +15,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'chat',
     description:
-      'Send a prompt to a specific LLM model through the RustyClawRouter gateway. ' +
+      'Send a prompt to a specific LLM model through the Solvela gateway. ' +
       'Payment is handled automatically via USDC on Solana (x402 protocol). ' +
       'Use list_models to see available models and their pricing.',
     inputSchema: {
@@ -93,7 +93,7 @@ export const TOOLS: Tool[] = [
   {
     name: 'list_models',
     description:
-      'List all LLM models available through the RustyClawRouter gateway, ' +
+      'List all LLM models available through the Solvela gateway, ' +
       'including their USDC pricing per million tokens (input and output).',
     inputSchema: {
       type: 'object',

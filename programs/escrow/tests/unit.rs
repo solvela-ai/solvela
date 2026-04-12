@@ -10,7 +10,7 @@
 #[cfg(test)]
 mod tests {
     use anchor_lang::Space;
-    use rustyclawrouter_escrow::state::Escrow;
+    use solvela_escrow::state::Escrow;
     use solana_sdk::pubkey::Pubkey;
 
     // Expected space: 8 (discriminator) + InitSpace
@@ -44,7 +44,7 @@ mod tests {
 
     #[test]
     fn test_pda_derivation_is_deterministic() {
-        let program_id = rustyclawrouter_escrow::ID;
+        let program_id = solvela_escrow::ID;
         let agent = Pubkey::new_unique();
         let service_id = [42u8; 32];
 
@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn test_pda_differs_for_different_service_ids() {
-        let program_id = rustyclawrouter_escrow::ID;
+        let program_id = solvela_escrow::ID;
         let agent = Pubkey::new_unique();
         let service_id_a = [1u8; 32];
         let service_id_b = [2u8; 32];
@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn test_pda_differs_for_different_agents() {
-        let program_id = rustyclawrouter_escrow::ID;
+        let program_id = solvela_escrow::ID;
         let agent_a = Pubkey::new_unique();
         let agent_b = Pubkey::new_unique();
         let service_id = [99u8; 32];
