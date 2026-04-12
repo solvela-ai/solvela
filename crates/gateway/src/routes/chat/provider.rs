@@ -48,7 +48,7 @@ pub(crate) fn classify_provider_error(err: &impl std::fmt::Display) -> &'static 
     }
 }
 
-/// Parse the `X-RCR-Fallback-Preference` header value.
+/// Parse the `X-Solvela-Fallback-Preference` (or `X-RCR-Fallback-Preference`) header value.
 ///
 /// Format: `"provider/model,provider/model,..."`
 /// Returns `(provider, model)` tuples. Invalid entries are silently skipped.
@@ -161,10 +161,11 @@ pub(crate) async fn execute_provider_call(
         }
     }
 
-    // Check for agent-specified fallback preferences
+    // Check for agent-specified fallback preferences (accept both new and legacy headers)
     let fallback_pref = ctx
         .headers
-        .get("x-rcr-fallback-preference")
+        .get("x-solvela-fallback-preference")
+        .or_else(|| ctx.headers.get("x-rcr-fallback-preference"))
         .and_then(|v| v.to_str().ok());
 
     if ctx.req.stream {
@@ -270,6 +271,8 @@ async fn execute_streaming_call(
                     format!("{} -> {}", result.original_model, result.actual_model);
                 if let Ok(hv) = HeaderValue::from_str(&fallback_value) {
                     resp.headers_mut()
+                        .insert(HeaderName::from_static("x-solvela-fallback"), hv.clone());
+                    resp.headers_mut()
                         .insert(HeaderName::from_static("x-rcr-fallback"), hv);
                 }
             }
@@ -358,6 +361,8 @@ async fn execute_non_streaming_call(
                 let fallback_value =
                     format!("{} -> {}", result.original_model, result.actual_model);
                 if let Ok(hv) = HeaderValue::from_str(&fallback_value) {
+                    resp.headers_mut()
+                        .insert(HeaderName::from_static("x-solvela-fallback"), hv.clone());
                     resp.headers_mut()
                         .insert(HeaderName::from_static("x-rcr-fallback"), hv);
                 }

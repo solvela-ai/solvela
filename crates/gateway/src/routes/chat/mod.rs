@@ -538,6 +538,9 @@ pub async fn chat_completions(
                     if let Ok(hv) = HeaderValue::from_str(&token) {
                         response
                             .headers_mut()
+                            .insert(HeaderName::from_static("x-solvela-session"), hv.clone());
+                        response
+                            .headers_mut()
                             .insert(HeaderName::from_static("x-rcr-session"), hv);
                     }
                 }
@@ -707,7 +710,9 @@ mod tests {
     #[test]
     fn test_fallback_header_name_is_valid() {
         use axum::http::HeaderName;
-        let name = HeaderName::from_static("x-rcr-fallback");
-        assert_eq!(name.as_str(), "x-rcr-fallback");
+        let name = HeaderName::from_static("x-solvela-fallback");
+        assert_eq!(name.as_str(), "x-solvela-fallback");
+        let legacy = HeaderName::from_static("x-rcr-fallback");
+        assert_eq!(legacy.as_str(), "x-rcr-fallback");
     }
 }

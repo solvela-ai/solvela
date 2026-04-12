@@ -373,7 +373,7 @@ pub async fn proxy_service(
 
     // Attach request ID for traceability
     if let Some(ref rid) = request_id {
-        upstream_req = upstream_req.header("x-rcr-request-id", rid.as_str());
+        upstream_req = upstream_req.header("x-solvela-request-id", rid.as_str());
     }
 
     // Step 6: Send request and handle response
