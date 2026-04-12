@@ -6,14 +6,14 @@ import type {
   State,
 } from "@elizaos/core";
 
-export const chatViaRustyClaw: Action = {
-  name: "CHAT_VIA_RUSTYCLAW",
+export const chatViaSolvela: Action = {
+  name: "CHAT_VIA_SOLVELA",
   description:
-    "Send a chat completion through RustyClawRouter with Solana x402 payment",
+    "Send a chat completion through Solvela with Solana x402 payment",
   similes: ["llm call", "ai inference", "model query", "ask ai"],
 
   validate: async (runtime: IAgentRuntime) => {
-    return !!runtime.getSetting("RUSTYCLAW_GATEWAY_URL");
+    return !!runtime.getSetting("SOLVELA_GATEWAY_URL");
   },
 
   handler: async (
@@ -23,9 +23,9 @@ export const chatViaRustyClaw: Action = {
     _options: Record<string, unknown>,
     callback: HandlerCallback,
   ) => {
-    const gatewayUrl = runtime.getSetting("RUSTYCLAW_GATEWAY_URL");
+    const gatewayUrl = runtime.getSetting("SOLVELA_GATEWAY_URL");
     const model =
-      runtime.getSetting("RUSTYCLAW_DEFAULT_MODEL") || "auto";
+      runtime.getSetting("SOLVELA_DEFAULT_MODEL") || "auto";
 
     const reqBody = {
       model,
@@ -76,8 +76,8 @@ export const chatViaRustyClaw: Action = {
       {
         user: "{{agentName}}",
         content: {
-          text: "I'll query RustyClawRouter for that.",
-          action: "CHAT_VIA_RUSTYCLAW",
+          text: "I'll query Solvela for that.",
+          action: "CHAT_VIA_SOLVELA",
         },
       },
     ],

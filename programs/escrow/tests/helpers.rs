@@ -19,13 +19,13 @@ use spl_token::{
 };
 
 /// Program ID — must match declare_id!() in lib.rs
-pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy");
+pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
 
 /// Mainnet USDC mint — must match USDC_MINT in lib.rs
 pub const USDC_MINT: Pubkey = solana_sdk::pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 /// Compiled program bytes
-const PROGRAM_SO: &[u8] = include_bytes!("../target/deploy/rustyclawrouter_escrow.so");
+const PROGRAM_SO: &[u8] = include_bytes!("../target/deploy/solvela_escrow.so");
 
 pub struct TestCtx {
     pub svm: LiteSVM,

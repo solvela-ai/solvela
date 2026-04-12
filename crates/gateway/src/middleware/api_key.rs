@@ -36,7 +36,7 @@ pub async fn extract_api_key(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
-        if auth.starts_with("rcr_k_") {
+        if auth.starts_with("solvela_k_") || auth.starts_with("rcr_k_") {
             if let Some(pool) = &state.db_pool {
                 match crate::orgs::queries::verify_api_key(pool, auth).await {
                     Ok(Some((api_key, org_id))) => {
@@ -160,7 +160,7 @@ mod tests {
     use crate::routes::escrow::new_slot_cache;
     use crate::services::ServiceRegistry;
     use crate::usage::UsageTracker;
-    use router::models::ModelRegistry;
+    use solvela_router::models::ModelRegistry;
     use x402::facilitator::Facilitator;
 
     /// Helper: build a minimal Router that runs `extract_api_key` middleware
@@ -242,7 +242,7 @@ supports_vision = false
     }
 
     #[tokio::test]
-    async fn test_non_rcr_key_ignored() {
+    async fn test_non_solvela_key_ignored() {
         let state = make_state();
         let app = test_router(state);
 
@@ -258,7 +258,7 @@ supports_vision = false
         let body = axum::body::to_bytes(resp.into_body(), 1024)
             .await
             .expect("read body");
-        assert_eq!(&body[..], b"none", "non-rcr_k_ tokens must be ignored");
+        assert_eq!(&body[..], b"none", "non-solvela_k_ tokens must be ignored");
     }
 
     #[tokio::test]

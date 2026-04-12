@@ -1,7 +1,7 @@
 //! GET /v1/supported — x402 facilitator discovery endpoint.
 //!
 //! Returns the x402 payment schemes and networks this gateway supports.
-//! Follows the OpenFacilitator `/supported` standard so RustyClawRouter
+//! Follows the OpenFacilitator `/supported` standard so Solvela
 //! is discoverable by x402 ecosystem tooling and dashboards.
 
 use axum::Json;
@@ -45,7 +45,7 @@ pub async fn supported() -> Json<SupportedResponse> {
             network: SOLANA_NETWORK.to_string(),
             asset: USDC_MINT.to_string(),
         }],
-        gateway: "RustyClawRouter",
+        gateway: "Solvela",
         pricing_url: "/v1/models",
     })
 }
@@ -63,6 +63,6 @@ mod tests {
         assert_eq!(resp.kinds[0].scheme, "exact");
         assert_eq!(resp.kinds[0].network, SOLANA_NETWORK);
         assert_eq!(resp.kinds[0].asset, USDC_MINT);
-        assert_eq!(resp.gateway, "RustyClawRouter");
+        assert_eq!(resp.gateway, "Solvela");
     }
 }

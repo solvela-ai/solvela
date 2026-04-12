@@ -1,6 +1,6 @@
 # Quick Start
 
-This walkthrough takes you from zero to a working LLM request through RustyClawRouter.
+This walkthrough takes you from zero to a working LLM request through Solvela.
 
 ## 1. Start the Gateway
 
@@ -100,7 +100,7 @@ This is the x402 protocol in action. The agent must:
 With an SDK (recommended), payment is transparent:
 
 ```python
-from rustyclawrouter import LLMClient
+from solvela import LLMClient
 
 client = LLMClient(api_url="http://localhost:8402")
 reply = client.chat("openai/gpt-4o-mini", "Hello!")

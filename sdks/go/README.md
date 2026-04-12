@@ -1,13 +1,13 @@
-# RustyClawRouter Go SDK
+# Solvela Go SDK
 
-Go SDK for RustyClawRouter -- AI agent payments with USDC on Solana via the x402 protocol.
+Go SDK for Solvela -- AI agent payments with USDC on Solana via the x402 protocol.
 
-Module path: `github.com/rustyclawrouter/sdk-go`
+Module path: `github.com/solvela/sdk-go`
 
 ## Installation
 
 ```bash
-go get github.com/rustyclawrouter/sdk-go
+go get github.com/solvela/sdk-go
 ```
 
 Requires Go 1.21 or later.
@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"log"
 
-	rcr "github.com/rustyclawrouter/sdk-go"
+	rcr "github.com/solvela/sdk-go"
 )
 
 func main() {
@@ -162,7 +162,7 @@ Options are applied via functional option pattern:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `WithAPIURL(url)` | `https://api.rustyclawrouter.com` | Gateway URL (trailing slash trimmed) |
+| `WithAPIURL(url)` | `https://api.solvela.com` | Gateway URL (trailing slash trimmed) |
 | `WithPrivateKey(key)` | `$SOLANA_WALLET_KEY` | Base58 Solana private key for signing |
 | `WithSessionBudget(budget)` | `nil` (unlimited) | Max USDC spend per session |
 | `WithTimeout(duration)` | `60s` | HTTP request timeout |
@@ -205,7 +205,7 @@ Options are applied via functional option pattern:
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `DefaultAPIURL` | `https://api.rustyclawrouter.com` | Production gateway URL |
+| `DefaultAPIURL` | `https://api.solvela.com` | Production gateway URL |
 | `DefaultDevnetURL` | `http://localhost:8402` | Local development URL |
 | `DefaultTimeout` | `60` | Default timeout in seconds |
 | `USDCMint` | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | USDC SPL token mint address |

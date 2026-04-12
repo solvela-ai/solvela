@@ -1,23 +1,23 @@
-# RustyClawRouter Python SDK
+# Solvela Python SDK
 
-Python SDK for RustyClawRouter — AI agent payments with USDC on Solana via the x402 protocol.
+Python SDK for Solvela — AI agent payments with USDC on Solana via the x402 protocol.
 
 ## Installation
 
 ```bash
-pip install rustyclawrouter
+pip install solvela
 ```
 
 With Solana wallet support (signing transactions):
 
 ```bash
-pip install rustyclawrouter[solana]
+pip install solvela[solana]
 ```
 
 ## Quick Start
 
 ```python
-from rustyclawrouter import LLMClient
+from solvela import LLMClient
 
 # Uses SOLANA_WALLET_KEY env var for payment
 client = LLMClient(api_url="http://localhost:8402")
@@ -31,7 +31,7 @@ print(reply)
 
 ```python
 import asyncio
-from rustyclawrouter import AsyncLLMClient
+from solvela import AsyncLLMClient
 
 async def main():
     async with AsyncLLMClient(api_url="http://localhost:8402") as client:
@@ -63,7 +63,7 @@ response = client.smart_chat("Explain quantum computing", profile="eco")
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `private_key` | `$SOLANA_WALLET_KEY` | Base58 Solana private key |
-| `api_url` | `https://api.rustyclawrouter.com` | Gateway URL |
+| `api_url` | `https://api.solvela.com` | Gateway URL |
 | `session_budget` | `None` | Max USDC spend per session |
 | `timeout` | `60.0` | HTTP timeout in seconds |
 

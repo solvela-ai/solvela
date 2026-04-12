@@ -1,4 +1,4 @@
-//! RustyClawRouter Escrow Program
+//! Solvela Escrow Program
 //!
 //! Trustless USDC-SPL escrow for AI agent payment settlement on Solana.
 //!
@@ -40,11 +40,10 @@ use instructions::*;
 /// Mainnet USDC-SPL mint address. The escrow only accepts this mint.
 pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
-// Placeholder program ID — replace with output of `anchor build` + `anchor keys list`
-declare_id!("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy");
+declare_id!("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
 
 #[program]
-pub mod rustyclawrouter_escrow {
+pub mod solvela_escrow {
     use super::*;
 
     /// Agent deposits USDC into PDA vault.

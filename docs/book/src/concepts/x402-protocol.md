@@ -1,6 +1,6 @@
 # x402 Payment Protocol
 
-The [x402 protocol](https://www.x402.org/) is an HTTP-native payment protocol that uses the HTTP 402 status code ("Payment Required") as a machine-readable payment negotiation mechanism. RustyClawRouter implements x402 for Solana USDC-SPL payments.
+The [x402 protocol](https://www.x402.org/) is an HTTP-native payment protocol that uses the HTTP 402 status code ("Payment Required") as a machine-readable payment negotiation mechanism. Solvela implements x402 for Solana USDC-SPL payments.
 
 ## How x402 Works
 

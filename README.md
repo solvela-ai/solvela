@@ -1,4 +1,4 @@
-# RustyClawRouter
+# Solvela
 
 Solana-native AI agent payment gateway. No API keys, no accounts -- just wallets.
 
@@ -84,8 +84,8 @@ Client libraries for Python, TypeScript, and Go. Each SDK includes wallet manage
 ### Build and Run
 
 ```bash
-git clone https://github.com/sky64/RustyClawRouter.git
-cd RustyClawRouter
+git clone https://github.com/sky64/Solvela.git
+cd Solvela
 cargo build
 ```
 
@@ -207,11 +207,11 @@ All prices are provider cost in USDC. A 5% platform fee is applied on top. See `
 ### Python
 
 ```bash
-pip install rustyclawrouter
+pip install solvela
 ```
 
 ```python
-from rustyclawrouter import LLMClient
+from solvela import LLMClient
 
 client = LLMClient()
 response = client.chat("openai/gpt-4o", "Hello!")
@@ -220,11 +220,11 @@ response = client.chat("openai/gpt-4o", "Hello!")
 ### TypeScript
 
 ```bash
-npm install @rustyclawrouter/sdk
+npm install @solvela/sdk
 ```
 
 ```typescript
-import { LLMClient } from '@rustyclawrouter/sdk';
+import { LLMClient } from '@solvela/sdk';
 
 const client = new LLMClient();
 const response = await client.chat('openai/gpt-4o', 'Hello!');
@@ -233,11 +233,11 @@ const response = await client.chat('openai/gpt-4o', 'Hello!');
 ### Go
 
 ```bash
-go get github.com/rustyclawrouter/sdk-go
+go get github.com/solvela/sdk-go
 ```
 
 ```go
-client, _ := rustyclawrouter.NewClient()
+client, _ := solvela.NewClient()
 response, _ := client.Chat(ctx, "openai/gpt-4o", "Hello!")
 ```
 
@@ -258,12 +258,12 @@ The `rcr` CLI provides wallet management, model discovery, chat, and diagnostics
 ```bash
 cargo install --path crates/cli
 
-rcr wallet init              # Generate Solana keypair
-rcr models                   # List models and pricing
-rcr chat "Explain x402"      # Chat with auto-routing
-rcr health                   # Gateway health check
-rcr stats                    # Wallet spend statistics
-rcr doctor                   # Run diagnostics
+solvela wallet init          # Generate Solana keypair
+solvela models               # List models and pricing
+solvela chat "Explain x402"  # Chat with auto-routing
+solvela health               # Gateway health check
+solvela stats                # Wallet spend statistics
+solvela doctor               # Run diagnostics
 ```
 
 ---
@@ -287,7 +287,7 @@ cargo test                            # All workspace tests
 cargo test -p gateway                 # 199 tests (161 unit + 38 integration)
 cargo test -p x402                    # 74 tests
 cargo test -p router                  # 13 tests
-cargo test -p rustyclaw-protocol      # 18 tests
+cargo test -p solvela-protocol      # 18 tests
 
 # Single test
 cargo test -p gateway test_health_endpoint -- --exact
@@ -356,14 +356,14 @@ crates/
   gateway/          Axum HTTP server, routes, middleware, provider adapters
   x402/             x402 protocol, Solana verification, escrow, fee payer pool
   router/           Smart routing, 15-dimension scorer, profiles, model registry
-  protocol/         Shared wire-format types (rustyclaw-protocol, published to crates.io)
-  cli/              rcr CLI binary (wallet, chat, models, health, stats, doctor)
+  protocol/         Shared wire-format types (solvela-protocol, published to crates.io)
+  cli/              solvela CLI binary (wallet, chat, models, health, stats, doctor)
 programs/
   escrow/           Anchor escrow program (deposit/claim/refund, PDA vault)
 sdks/
-  python/           pip install rustyclawrouter
-  typescript/       npm install @rustyclawrouter/sdk
-  go/               go get github.com/rustyclawrouter/sdk-go
+  python/           pip install solvela
+  typescript/       npm install @solvela/sdk
+  go/               go get github.com/solvela/sdk-go
   mcp/              Claude Code MCP server
 config/
   models.toml       Model registry + pricing
@@ -376,24 +376,24 @@ migrations/         PostgreSQL migrations (idempotent, auto-applied on startup)
 
 ## Deployment
 
-RCR is deployed on Fly.io:
+Solvela is deployed on Fly.io:
 
 | Resource | URL / Name |
 |----------|------------|
-| Gateway | `rustyclawrouter-gateway.fly.dev` |
-| PostgreSQL | `rustyclawrouter-db` (Fly Postgres 17.2) |
-| Redis | `rustyclawrouter-cache` (Upstash, ord + iad) |
+| Gateway | `solvela-gateway.fly.dev` |
+| PostgreSQL | `solvela-db` (Fly Postgres 17.2) |
+| Redis | `solvela-cache` (Upstash, ord + iad) |
 
 ```bash
 # Deploy
-cd crates/gateway && fly deploy -a rustyclawrouter-gateway
+cd crates/gateway && fly deploy -a solvela-gateway
 
 # Set provider keys
-fly secrets set -a rustyclawrouter-gateway OPENAI_API_KEY=... ANTHROPIC_API_KEY=...
+fly secrets set -a solvela-gateway OPENAI_API_KEY=... ANTHROPIC_API_KEY=...
 
 # Check status
-fly status -a rustyclawrouter-gateway
-curl https://rustyclawrouter-gateway.fly.dev/health
+fly status -a solvela-gateway
+curl https://solvela-gateway.fly.dev/health
 ```
 
 See `HANDOFF.md` for full deployment status and blockers.

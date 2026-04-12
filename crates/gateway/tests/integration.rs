@@ -1,4 +1,4 @@
-//! Integration tests for the RustyClawRouter gateway.
+//! Integration tests for the Solvela gateway.
 //!
 //! These tests spin up the Axum app in-process using `tower::ServiceExt`
 //! and exercise the HTTP endpoints without needing a running server.
@@ -22,11 +22,11 @@ use gateway::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
 use gateway::providers::{ChatStream, LLMProvider, ProviderRegistry};
 use gateway::services::ServiceRegistry;
 use gateway::{build_router, AppState};
-use router::models::ModelRegistry;
-use rustyclaw_protocol::{
+use solvela_protocol::{
     ChatChoice, ChatChunk, ChatChunkChoice, ChatDelta, ChatMessage, ChatResponse, ModelInfo, Role,
     Usage,
 };
+use solvela_router::models::ModelRegistry;
 use x402::traits::{Error as X402Error, PaymentVerifier};
 use x402::types::{
     EscrowPayload, PayloadData, PaymentAccept, PaymentPayload, Resource, SettlementResult,
@@ -315,14 +315,14 @@ impl LLMProvider for MockProvider {
 
     async fn chat_completion(
         &self,
-        req: rustyclaw_protocol::ChatRequest,
+        req: solvela_protocol::ChatRequest,
     ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self::mock_response(&req.model))
     }
 
     async fn chat_completion_stream(
         &self,
-        req: rustyclaw_protocol::ChatRequest,
+        req: solvela_protocol::ChatRequest,
     ) -> Result<ChatStream, Box<dyn std::error::Error + Send + Sync>> {
         let chunk = ChatChunk {
             id: "mock-chatcmpl-001".to_string(),
@@ -418,7 +418,7 @@ fn test_app_with_mock_provider_and_escrow() -> axum::Router {
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
     config.solana.escrow_program_id =
-        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+        Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
 
     let test_keypair = {
         use ed25519_dalek::SigningKey;
@@ -435,7 +435,7 @@ fn test_app_with_mock_provider_and_escrow() -> axum::Router {
     let escrow_claimer = x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
         test_fee_payer_pool.clone(),
-        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
         "11111111111111111111111111111111",
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
         None,
@@ -481,7 +481,7 @@ fn test_app_with_escrow() -> axum::Router {
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
     config.solana.escrow_program_id =
-        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+        Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
 
     // Create a dummy claimer — won't actually submit claims in tests
     // We need a valid 64-byte key. Use a test keypair.
@@ -500,7 +500,7 @@ fn test_app_with_escrow() -> axum::Router {
     let escrow_claimer = x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
         test_fee_payer_pool.clone(),
-        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
         "11111111111111111111111111111111",
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
         None,
@@ -572,7 +572,7 @@ fn valid_escrow_payment_header(resource_url: &str) -> String {
             asset: USDC_MINT.to_string(),
             pay_to: TEST_RECIPIENT_WALLET.to_string(),
             max_timeout_seconds: 300,
-            escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+            escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
         },
         payload: PayloadData::Escrow(EscrowPayload {
             deposit_tx: base64::engine::general_purpose::STANDARD.encode(b"mock_deposit_tx_bytes"),
@@ -1531,7 +1531,7 @@ async fn test_escrow_scheme_dispatches_to_escrow_verifier() {
             asset: USDC_MINT.to_string(),
             pay_to: "TestRecipient".to_string(),
             max_timeout_seconds: 300,
-            escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+            escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
         },
         payload: PayloadData::Escrow(EscrowPayload {
             deposit_tx: base64::engine::general_purpose::STANDARD.encode(b"mock_deposit_tx"),
@@ -1579,7 +1579,7 @@ async fn test_supported_endpoint() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["gateway"], "RustyClawRouter");
+    assert_eq!(json["gateway"], "Solvela");
     assert!(json["pricing_url"].is_string());
 
     let kinds = json["kinds"].as_array().unwrap();
@@ -3176,7 +3176,7 @@ async fn test_escrow_config_returns_200_when_configured() {
 
     assert_eq!(
         json["escrow_program_id"],
-        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy"
+        "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
     );
     assert_eq!(json["network"], SOLANA_NETWORK);
     assert_eq!(json["usdc_mint"], USDC_MINT);
@@ -3317,7 +3317,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
     config.solana.escrow_program_id =
-        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+        Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
 
     let test_keypair = {
         use ed25519_dalek::SigningKey;
@@ -3334,7 +3334,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
     let escrow_claimer = x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
         test_fee_payer_pool.clone(),
-        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
         "11111111111111111111111111111111",
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
         None,
@@ -3446,7 +3446,7 @@ async fn test_escrow_config_returns_correct_program_id() {
 
     // Program ID must match exactly what was configured
     assert_eq!(
-        json["escrow_program_id"], "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        json["escrow_program_id"], "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
         "escrow_program_id must match configured value"
     );
 
@@ -3487,7 +3487,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
     config.solana.escrow_program_id =
-        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+        Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
 
     let test_keypair = {
         use ed25519_dalek::SigningKey;
@@ -3504,7 +3504,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
     let escrow_claimer = x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
         test_fee_payer_pool.clone(),
-        "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+        "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
         "11111111111111111111111111111111",
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
         None,
@@ -3621,7 +3621,7 @@ fn mismatched_escrow_scheme_direct_payload_header(resource_url: &str) -> String 
             asset: USDC_MINT.to_string(),
             pay_to: TEST_RECIPIENT_WALLET.to_string(),
             max_timeout_seconds: 300,
-            escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+            escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
         },
         payload: PayloadData::Direct(SolanaPayload {
             // <-- but contains direct transfer data
@@ -3740,7 +3740,7 @@ async fn test_escrow_health_status_down_without_claimer() {
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
     config.solana.escrow_program_id =
-        Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string());
+        Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
 
     let state = Arc::new(AppState {
         config,
@@ -4379,7 +4379,7 @@ async fn test_metrics_contains_request_total_after_request() {
         .unwrap();
     assert_eq!(health_response.status(), StatusCode::OK);
 
-    // Now fetch /metrics and check for rcr_requests_total
+    // Now fetch /metrics and check for solvela_requests_total
     let metrics_response = app
         .oneshot(
             Request::builder()
@@ -4402,18 +4402,18 @@ async fn test_metrics_contains_request_total_after_request() {
     let body_str = String::from_utf8_lossy(&body);
 
     // The global recorder is shared across all tests so we may see metrics
-    // from other tests too, but rcr_requests_total should be present.
+    // from other tests too, but solvela_requests_total should be present.
     // Also verify via the handle directly.
     let rendered = state.prometheus_handle.as_ref().unwrap().render();
     assert!(
-        rendered.contains("rcr_requests_total"),
-        "metrics output should contain rcr_requests_total, got:\n{rendered}"
+        rendered.contains("solvela_requests_total"),
+        "metrics output should contain solvela_requests_total, got:\n{rendered}"
     );
 
     // Body from the endpoint should also contain it
     assert!(
-        body_str.contains("rcr_requests_total"),
-        "metrics body should contain rcr_requests_total"
+        body_str.contains("solvela_requests_total"),
+        "metrics body should contain solvela_requests_total"
     );
 }
 
@@ -4436,8 +4436,8 @@ async fn test_metrics_contains_request_duration() {
     // Check that the histogram metric exists
     let rendered = state.prometheus_handle.as_ref().unwrap().render();
     assert!(
-        rendered.contains("rcr_request_duration_seconds"),
-        "metrics should contain rcr_request_duration_seconds histogram, got:\n{rendered}"
+        rendered.contains("solvela_request_duration_seconds"),
+        "metrics should contain solvela_request_duration_seconds histogram, got:\n{rendered}"
     );
 }
 
@@ -4474,14 +4474,14 @@ async fn test_metrics_not_counted_in_own_requests() {
         .await
         .unwrap();
 
-    // Primary assertion: the /metrics path must not appear in rcr_requests_total.
+    // Primary assertion: the /metrics path must not appear in solvela_requests_total.
     let rendered = state.prometheus_handle.as_ref().unwrap().render();
     let has_metrics_path = rendered
         .lines()
-        .any(|line| line.contains("rcr_requests_total") && line.contains("path=\"/metrics\""));
+        .any(|line| line.contains("solvela_requests_total") && line.contains("path=\"/metrics\""));
     assert!(
         !has_metrics_path,
-        "/metrics path should not be counted in rcr_requests_total"
+        "/metrics path should not be counted in solvela_requests_total"
     );
 }
 
@@ -4977,7 +4977,7 @@ async fn test_a2a_agent_card_returns_capabilities() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["name"], "RustyClawRouter");
+    assert_eq!(json["name"], "Solvela");
     assert_eq!(json["version"], "0.1.0");
     let extensions = json["capabilities"]["extensions"].as_array().unwrap();
     assert!(extensions.len() >= 2, "should have AP2 + x402 extensions");

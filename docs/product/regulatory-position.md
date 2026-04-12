@@ -1,14 +1,14 @@
-# RustyClawRouter -- Regulatory Position
+# Solvela -- Regulatory Position
 
-> **Purpose**: Technical description of how money flows in the RustyClawRouter system, prepared for attorney consultation. This document describes system behavior, not legal conclusions.
+> **Purpose**: Technical description of how money flows in the Solvela system, prepared for attorney consultation. This document describes system behavior, not legal conclusions.
 
 > **Date**: April 2026
 
 ---
 
-## What RustyClawRouter Is
+## What Solvela Is
 
-RustyClawRouter (RCR) is **software infrastructure** -- a protocol adapter and API proxy written in Rust. It sits between AI agents and LLM providers (OpenAI, Anthropic, Google, xAI, DeepSeek) and does three things:
+Solvela (RCR) is **software infrastructure** -- a protocol adapter and API proxy written in Rust. It sits between AI agents and LLM providers (OpenAI, Anthropic, Google, xAI, DeepSeek) and does three things:
 
 1. **Routes HTTP requests** from agents to the appropriate LLM provider.
 2. **Verifies on-chain payment signatures** on the Solana blockchain before proxying requests.
@@ -16,7 +16,7 @@ RustyClawRouter (RCR) is **software infrastructure** -- a protocol adapter and A
 
 RCR is comparable to a reverse proxy (like Nginx or Cloudflare) that checks for a valid payment receipt before forwarding a request. The payment itself happens on the Solana blockchain, not through RCR.
 
-## What RustyClawRouter Is Not
+## What Solvela Is Not
 
 - **Not a money transmitter.** RCR does not move, hold, or control funds. It reads blockchain state to verify that a transfer occurred.
 - **Not a custodian.** RCR never has access to private keys or the ability to move funds on behalf of users.
@@ -120,10 +120,10 @@ RCR charges a **5% platform fee** on every request. This fee is included in the 
 **Question**: Could the PDA escrow account be classified as a "custodial wallet" by regulators?
 
 **Relevant facts**:
-- The escrow program has been **designed and tested locally** (comprehensive test suite with 20 tests passing) but **has not been deployed** to Solana mainnet or devnet. The program ID in the codebase is a locally-generated keypair for testing only.
-- When deployed, the PDA will be controlled by the on-chain program logic, not by the gateway operator. No one holds a private key to the PDA.
+- The escrow program has been **deployed to Solana mainnet** (program ID: `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`, tx: `XGtZf6KHWnis6bY8T8NCULsngdC2kqy3GkuppVriyFFqJ8ud2NiBkAgcBRsYjvUMmMZcLUmYBw9RhhUnNNRYnZx`) with comprehensive test suite (21 tests passing).
+- The PDA is controlled by the on-chain program logic, not by the gateway operator. No one holds a private key to the PDA.
 - The program logic enforces: claim amounts cannot exceed deposited amount, claims must occur before expiry slot, agent can unilaterally reclaim after timeout.
-- **Deployment decision pending attorney guidance**: Upon deployment, upgrade authority can be either **retained** (allows bug fixes, but regulators could argue de facto control) or **revoked** (program becomes immutable, strongest "no human control" argument). This decision should be made with legal counsel.
+- **Upgrade authority is retained** by the deployer (`B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A`). This allows bug fixes but regulators could argue de facto control. Authority can be revoked later (`solana program set-upgrade-authority --final`) to make the program immutable.
 - FinCEN guidance on smart-contract-controlled wallets is evolving and has not definitively addressed this pattern.
 
 ### California Digital Financial Assets Law (DFAL)

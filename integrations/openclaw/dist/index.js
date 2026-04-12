@@ -237,21 +237,33 @@ async function routeStreamingRequest(request, config) {
 }
 
 // src/index.ts
+function normalizeMessages(messages) {
+  return messages.map((msg) => {
+    const m = msg;
+    if (Array.isArray(m.content)) {
+      const textParts = m.content.filter((part) => part.type === "text").map((part) => part.text ?? "");
+      return { ...m, content: textParts.join("\n") };
+    }
+    return msg;
+  });
+}
 function createPlugin(overrides = {}) {
   const config = loadConfig(overrides);
   return {
-    name: "@rustyclaw/clawrouter",
+    name: "@rustyclaw/rcr",
     version: "0.1.0",
     description: "RustyClawRouter \u2014 Solana-native LLM routing with x402 USDC payments",
     async intercept(request) {
-      return routeRequest(request, config);
+      const normalized = { ...request, messages: normalizeMessages(request.messages) };
+      return routeRequest(normalized, config);
     },
     async interceptStream(request) {
-      return routeStreamingRequest(request, config);
+      const normalized = { ...request, messages: normalizeMessages(request.messages) };
+      return routeStreamingRequest(normalized, config);
     }
   };
 }
-var ClawRouter = class {
+var RcrClient = class {
   config;
   constructor(overrides = {}) {
     this.config = loadConfig(overrides);
@@ -285,13 +297,13 @@ var ClawRouter = class {
   }
 };
 function createRouter(overrides = {}) {
-  return new ClawRouter(overrides);
+  return new RcrClient(overrides);
 }
 var index_default = createPlugin;
 export {
-  ClawRouter,
   ConfigError,
   PaymentError,
+  RcrClient,
   RouterError,
   createPlugin,
   createRouter,

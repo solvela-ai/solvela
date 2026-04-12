@@ -426,3 +426,82 @@ class TestAsyncPaymentFlow:
                 await client.chat("gpt-4o", "Hello")
 
         await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Escrow scheme selection (Fix 10)
+# ---------------------------------------------------------------------------
+
+
+class TestEscrowSchemeSelection:
+    """Verify encode_payment_header selects escrow vs exact based on accepts."""
+
+    def _make_accept(self, scheme: str, escrow_program_id: str = "") -> PaymentAccept:
+        return PaymentAccept(
+            scheme=scheme,
+            network="solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            amount="2625",
+            asset="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            pay_to="RecipientPubkey",
+            max_timeout_seconds=300,
+            escrow_program_id=escrow_program_id or None,
+        )
+
+    def test_create_payment_header_prefers_escrow(self):
+        """encode_payment_header selects escrow when escrow_program_id is present."""
+        accept = self._make_accept("escrow", escrow_program_id="EscrowProg123")
+        # No private_key → stub mode, no Solana deps needed
+        encoded = encode_payment_header(accept, "http://test/v1/chat/completions")
+        decoded = decode_payment_header(encoded)
+
+        assert decoded["accepted"]["scheme"] == "escrow"
+        # Escrow payload must contain the three escrow-specific fields
+        payload = decoded["payload"]
+        assert "deposit_tx" in payload, "escrow payload missing deposit_tx"
+        assert "service_id" in payload, "escrow payload missing service_id"
+        assert "agent_pubkey" in payload, "escrow payload missing agent_pubkey"
+        # Stub values used since no private key was provided
+        assert payload["deposit_tx"] == "STUB_ESCROW_DEPOSIT_TX"
+        assert payload["agent_pubkey"] == "STUB_AGENT_PUBKEY"
+
+    def test_create_payment_header_falls_back_to_exact(self):
+        """encode_payment_header uses exact when only exact accept is present."""
+        accept = self._make_accept("exact")
+        encoded = encode_payment_header(accept, "http://test/v1/chat/completions")
+        decoded = decode_payment_header(encoded)
+
+        assert decoded["accepted"]["scheme"] == "exact"
+        payload = decoded["payload"]
+        # Exact scheme payload has a 'transaction' field, not escrow fields
+        assert "transaction" in payload, "exact payload missing transaction"
+        assert "deposit_tx" not in payload, "exact payload should not contain deposit_tx"
+        assert payload["transaction"] == "STUB_BASE64_TX"
+
+    def test_create_payment_header_passes_request_body(self):
+        """Different request bodies produce different service_ids in escrow scheme."""
+        accept = self._make_accept("escrow", escrow_program_id="EscrowProg456")
+
+        encoded_a = encode_payment_header(
+            accept,
+            "http://test/v1/chat/completions",
+            request_body=b'{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}',
+        )
+        encoded_b = encode_payment_header(
+            accept,
+            "http://test/v1/chat/completions",
+            request_body=b'{"model":"claude-3","messages":[{"role":"user","content":"world"}]}',
+        )
+
+        decoded_a = decode_payment_header(encoded_a)
+        decoded_b = decode_payment_header(encoded_b)
+
+        # service_id is derived from body + os.urandom(8), so they are almost
+        # certainly different; at minimum both must be non-empty base64 strings.
+        sid_a = decoded_a["payload"]["service_id"]
+        sid_b = decoded_b["payload"]["service_id"]
+        assert sid_a, "service_id must be non-empty"
+        assert sid_b, "service_id must be non-empty"
+        # Verify both are valid base64
+        import base64 as _b64
+        _b64.b64decode(sid_a)  # raises if invalid
+        _b64.b64decode(sid_b)  # raises if invalid

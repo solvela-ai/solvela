@@ -15,7 +15,7 @@ import type { PaymentRequired } from '../src/types';
 describe('LLMClient', () => {
   it('uses default API URL when none provided', () => {
     const client = new LLMClient();
-    assert.strictEqual(client.getApiUrl(), 'https://api.rustyclawrouter.com');
+    assert.strictEqual(client.getApiUrl(), 'https://api.solvela.ai');
   });
 
   it('accepts custom API URL', () => {
@@ -124,6 +124,99 @@ describe('createPaymentHeader', () => {
       () => createPaymentHeader(badInfo, 'http://localhost:8402/v1/chat/completions'),
       /No payment accept options/
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Escrow payment header
+// ---------------------------------------------------------------------------
+
+describe('createPaymentHeader (escrow scheme)', () => {
+  const mockEscrowPayment: PaymentRequired = {
+    x402_version: 2,
+    accepts: [
+      {
+        scheme: 'escrow',
+        network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+        amount: '2625',
+        asset: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+        pay_to: 'RCRgateway111111111111111111111111111111111',
+        max_timeout_seconds: 300,
+        escrow_program_id: 'RCRescrow1111111111111111111111111111111111',
+      },
+    ],
+    cost_breakdown: {
+      provider_cost: '0.002500',
+      platform_fee: '0.000125',
+      total: '0.002625',
+      currency: 'USDC',
+      fee_percent: 5,
+    },
+    error: 'Payment required',
+  };
+
+  it('stub mode: escrow header contains deposit_tx, service_id, agent_pubkey', async () => {
+    const url = 'http://localhost:8402/v1/chat/completions';
+    const header = await createPaymentHeader(mockEscrowPayment, url, undefined, '{"model":"gpt-4o"}');
+    const decoded = decodePaymentHeader(header) as Record<string, unknown>;
+
+    assert.strictEqual(decoded.x402_version, 2);
+    assert.deepStrictEqual(decoded.resource, { url, method: 'POST' });
+
+    const accepted = decoded.accepted as Record<string, unknown>;
+    assert.strictEqual(accepted.scheme, 'escrow');
+    assert.strictEqual(accepted.escrow_program_id, 'RCRescrow1111111111111111111111111111111111');
+
+    const payload = decoded.payload as Record<string, unknown>;
+    assert.strictEqual(payload.deposit_tx, 'STUB_ESCROW_DEPOSIT_TX');
+    assert.strictEqual(payload.agent_pubkey, 'STUB_AGENT_PUBKEY');
+    // service_id is a base64-encoded sha256 hash — verify it's a non-empty string
+    assert.strictEqual(typeof payload.service_id, 'string');
+    assert.ok((payload.service_id as string).length > 0);
+  });
+
+  it('stub mode: service_id differs across calls (random component)', async () => {
+    const url = 'http://localhost:8402/v1/chat/completions';
+    const body = '{"model":"gpt-4o"}';
+    const h1 = await createPaymentHeader(mockEscrowPayment, url, undefined, body);
+    const h2 = await createPaymentHeader(mockEscrowPayment, url, undefined, body);
+    const d1 = decodePaymentHeader(h1) as Record<string, unknown>;
+    const d2 = decodePaymentHeader(h2) as Record<string, unknown>;
+    const p1 = d1.payload as Record<string, unknown>;
+    const p2 = d2.payload as Record<string, unknown>;
+    // service_id must be unique per call due to random bytes
+    assert.notStrictEqual(p1.service_id, p2.service_id);
+  });
+
+  it('falls back to exact scheme when no escrow_program_id present', async () => {
+    const mixedPayment: PaymentRequired = {
+      ...mockEscrowPayment,
+      accepts: [
+        {
+          scheme: 'escrow',
+          network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+          amount: '2625',
+          asset: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+          pay_to: 'RCRgateway111111111111111111111111111111111',
+          max_timeout_seconds: 300,
+          // no escrow_program_id
+        },
+        {
+          scheme: 'exact',
+          network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+          amount: '2625',
+          asset: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+          pay_to: 'RCRgateway111111111111111111111111111111111',
+          max_timeout_seconds: 300,
+        },
+      ],
+    };
+    const url = 'http://localhost:8402/v1/chat/completions';
+    const header = await createPaymentHeader(mixedPayment, url);
+    const decoded = decodePaymentHeader(header) as Record<string, unknown>;
+    // Should use first accept (escrow without program_id) → falls back to exact path
+    const payload = decoded.payload as Record<string, unknown>;
+    assert.strictEqual(payload.transaction, 'STUB_BASE64_TX');
   });
 });
 

@@ -2,7 +2,7 @@
 
 ## Security Model
 
-RustyClawRouter operates in a zero-trust model: every request must prove payment before receiving service. The gateway never stores private keys, never trusts client-provided data without verification, and degrades safely when dependencies are unavailable.
+Solvela operates in a zero-trust model: every request must prove payment before receiving service. The gateway never stores private keys, never trusts client-provided data without verification, and degrades safely when dependencies are unavailable.
 
 ## Payment Verification
 

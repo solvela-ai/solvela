@@ -1,16 +1,47 @@
 //! EscrowVerifier — verifies on-chain escrow deposits and settles payments.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use tracing::info;
 
-use crate::solana_types::VersionedTransaction;
-use crate::spl_transfer::extract_spl_transfer;
+use crate::solana_types::{ParsedMessage, VersionedTransaction};
 use crate::traits::{Error, PaymentVerifier};
 use crate::types::{
     PayloadData, PaymentPayload, SettlementResult, VerificationResult, SOLANA_NETWORK,
 };
 
-use super::pda::{decode_bs58_pubkey, derive_ata_address, find_program_address};
+use super::pda::{
+    anchor_discriminator, decode_bs58_pubkey, derive_ata_address, find_program_address,
+};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Parse the Anchor `deposit` instruction from a versioned transaction message
+/// and return the deposit amount from the instruction data.
+///
+/// Searches for the top-level instruction whose program is the escrow program,
+/// then reads the `amount` field (u64 LE at offset 8 after the 8-byte Anchor
+/// discriminator). Returns `None` if no matching instruction is found or the
+/// data is malformed.
+fn extract_deposit_amount(message: &ParsedMessage, escrow_program_id: &[u8; 32]) -> Option<u64> {
+    let expected_disc = anchor_discriminator("deposit");
+    let deposit_ix = message.instructions.iter().find(|ix| {
+        let is_escrow = message
+            .account_keys
+            .get(ix.program_id_index as usize)
+            .map(|key| key.0 == *escrow_program_id)
+            .unwrap_or(false);
+        is_escrow && ix.data.len() >= 8 && ix.data[..8] == expected_disc
+    })?;
+    if deposit_ix.data.len() < 16 {
+        return None;
+    }
+    let amount_bytes: [u8; 8] = deposit_ix.data[8..16].try_into().ok()?;
+    Some(u64::from_le_bytes(amount_bytes))
+}
 
 // ---------------------------------------------------------------------------
 // EscrowVerifier
@@ -141,55 +172,132 @@ impl PaymentVerifier for EscrowVerifier {
             .parse()
             .map_err(|_| Error::InvalidTransaction("invalid amount format".to_string()))?;
 
-        // FIX 2: Extract and verify SPL transfer from the deposit transaction.
-        // This ensures the deposit tx actually transfers the right amount of the
-        // right token to the right destination — never trust client-claimed amounts.
-        let transfer = extract_spl_transfer(&message)?;
+        // Parse the Anchor `deposit` instruction directly. The actual SPL token
+        // transfer happens as a CPI inside the on-chain program, so the
+        // client-submitted transaction only contains the top-level deposit call.
+        // We verify the instruction is well-formed, targets the right program,
+        // encodes the required amount/service_id, and references the expected
+        // PDA accounts — the on-chain program enforces the rest.
+        let deposit_ix = message
+            .instructions
+            .iter()
+            .find(|ix| {
+                message
+                    .account_keys
+                    .get(ix.program_id_index as usize)
+                    .map(|key| key.0 == program_id)
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| {
+                Error::InvalidTransaction(
+                    "no escrow program instruction found in deposit tx".to_string(),
+                )
+            })?;
 
-        // Verify amount >= required
-        if transfer.amount < required_amount {
+        // Verify instruction data starts with the Anchor `deposit` discriminator
+        // and has the expected length: 8 + 8 + 32 + 8 = 56 bytes.
+        let expected_disc = anchor_discriminator("deposit");
+        if deposit_ix.data.len() < 56 {
+            return Err(Error::InvalidTransaction(format!(
+                "deposit instruction data too short: {} bytes (expected 56)",
+                deposit_ix.data.len()
+            )));
+        }
+        if deposit_ix.data[..8] != expected_disc {
+            return Err(Error::InvalidTransaction(
+                "instruction is not an Anchor deposit call".to_string(),
+            ));
+        }
+
+        // Parse instruction data: discriminator(8) + amount(u64 LE)
+        //                         + service_id([u8;32]) + expiry_slot(u64 LE)
+        let amount_bytes: [u8; 8] = deposit_ix.data[8..16].try_into().map_err(|_| {
+            Error::InvalidTransaction("failed to parse amount from instruction data".to_string())
+        })?;
+        let ix_amount = u64::from_le_bytes(amount_bytes);
+
+        let ix_service_id: [u8; 32] = deposit_ix.data[16..48].try_into().map_err(|_| {
+            Error::InvalidTransaction(
+                "failed to parse service_id from instruction data".to_string(),
+            )
+        })?;
+
+        // Verify amount >= required (gateway-set, never trust client claims)
+        if ix_amount < required_amount {
             return Err(Error::InsufficientPayment {
                 expected: required_amount,
-                actual: transfer.amount,
+                actual: ix_amount,
             });
         }
 
-        // Verify mint is USDC (only TransferChecked provides mint — reject plain Transfer)
-        let usdc_mint_bytes = decode_bs58_pubkey(&self.usdc_mint)
-            .map_err(|e| Error::InvalidTransaction(format!("usdc_mint config: {e}")))?;
-        match transfer.mint {
-            Some(mint) => {
-                if mint.0 != usdc_mint_bytes {
-                    return Err(Error::WrongAsset {
-                        expected: self.usdc_mint.clone(),
-                        actual: mint.to_string(),
-                    });
-                }
-            }
-            None => {
-                return Err(Error::InvalidTransaction(
-                    "plain SPL Transfer instructions are not accepted; \
-                     use TransferChecked (instruction discriminator 12) \
-                     so the USDC mint can be verified"
-                        .to_string(),
-                ));
-            }
+        // Verify the instruction's service_id matches the payload's service_id
+        if ix_service_id != service_id {
+            return Err(Error::InvalidTransaction(
+                "instruction service_id does not match payload service_id".to_string(),
+            ));
         }
 
-        // Verify destination is the vault ATA (escrow PDA's token account)
+        // Verify the deposit instruction's account layout matches what the
+        // Anchor program expects. Positions are within the instruction's
+        // account indices list, mapped back to message.account_keys.
+        // Program layout (from programs/escrow): agent=0, provider=1, mint=2,
+        // escrow=3, agent_ata=4, vault=5, token_program=6, ata_program=7, system=8.
+        if deposit_ix.accounts.len() < 6 {
+            return Err(Error::InvalidTransaction(format!(
+                "deposit instruction has {} accounts, expected at least 6",
+                deposit_ix.accounts.len()
+            )));
+        }
+
+        let get_key = |pos: usize| -> Result<[u8; 32], Error> {
+            let idx = deposit_ix.accounts[pos] as usize;
+            message.account_keys.get(idx).map(|k| k.0).ok_or_else(|| {
+                Error::InvalidTransaction(format!("account index {idx} out of range"))
+            })
+        };
+
+        // Position 0: agent (must match payload agent_pubkey / signer)
+        let ix_agent = get_key(0)?;
+        if ix_agent != agent_pubkey {
+            return Err(Error::InvalidSignature(
+                "deposit instruction agent account does not match payload agent_pubkey".to_string(),
+            ));
+        }
+
+        // Position 2: mint (must be the configured USDC mint)
+        let usdc_mint_bytes = decode_bs58_pubkey(&self.usdc_mint)
+            .map_err(|e| Error::InvalidTransaction(format!("usdc_mint config: {e}")))?;
+        let ix_mint = get_key(2)?;
+        if ix_mint != usdc_mint_bytes {
+            return Err(Error::WrongAsset {
+                expected: self.usdc_mint.clone(),
+                actual: bs58::encode(&ix_mint).into_string(),
+            });
+        }
+
+        // Position 3: escrow PDA (must match the PDA derived from agent + service_id)
+        let ix_escrow = get_key(3)?;
+        if ix_escrow != escrow_pda {
+            return Err(Error::InvalidTransaction(
+                "deposit instruction escrow PDA does not match derived PDA".to_string(),
+            ));
+        }
+
+        // Position 5: vault ATA (must be the ATA owned by the escrow PDA for USDC)
         let vault_ata = derive_ata_address(&escrow_pda, &usdc_mint_bytes).ok_or_else(|| {
             Error::InvalidTransaction("failed to derive vault ATA for verification".to_string())
         })?;
-        if transfer.destination.0 != vault_ata {
+        let ix_vault = get_key(5)?;
+        if ix_vault != vault_ata {
             return Err(Error::WrongRecipient {
                 expected: bs58::encode(&vault_ata).into_string(),
-                actual: transfer.destination.to_string(),
+                actual: bs58::encode(&ix_vault).into_string(),
             });
         }
 
         info!(
             required_amount,
-            verified_amount = transfer.amount,
+            verified_amount = ix_amount,
             agent = %escrow_payload.agent_pubkey,
             "escrow deposit verification passed"
         );
@@ -197,7 +305,7 @@ impl PaymentVerifier for EscrowVerifier {
         Ok(VerificationResult {
             valid: true,
             reason: None,
-            verified_amount: Some(transfer.amount),
+            verified_amount: Some(ix_amount),
         })
     }
 
@@ -206,7 +314,7 @@ impl PaymentVerifier for EscrowVerifier {
             network = SOLANA_NETWORK,
             scheme = "escrow",
             resource = %payload.resource.url,
-            "settling escrow payment (checking deposit confirmation)"
+            "settling escrow payment (submitting and confirming deposit)"
         );
 
         // Extract escrow payload
@@ -235,105 +343,83 @@ impl PaymentVerifier for EscrowVerifier {
             ));
         }
 
-        // Re-extract the verified deposit amount from the transaction
+        // Re-extract the verified deposit amount from the transaction by
+        // parsing the Anchor `deposit` instruction (not the SPL transfer, which
+        // only exists as a CPI inside the on-chain program execution).
+        let program_id_bytes = decode_bs58_pubkey(&self.escrow_program_id)
+            .map_err(|e| Error::InvalidTransaction(format!("escrow_program_id: {e}")))?;
         let verified_amount = tx
             .parse_message()
             .ok()
-            .and_then(|msg| extract_spl_transfer(&msg).ok())
-            .map(|t| t.amount);
+            .and_then(|msg| extract_deposit_amount(&msg, &program_id_bytes));
 
         // Base58-encode the first signature as the tx identifier
         let sig_b58 = bs58::encode(&tx.signatures[0].0).into_string();
 
-        // Check signature status via RPC (using shared client — FIX 7)
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getSignatureStatuses",
-            "params": [[sig_b58]],
-        });
-
-        let response = self
-            .http_client
-            .post(&self.rpc_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| Error::Rpc(e.to_string()))?;
-
-        let result: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| Error::Rpc(e.to_string()))?;
-
-        if let Some(error) = result.get("error") {
-            return Err(Error::Rpc(error.to_string()));
-        }
-
-        // Check confirmation status
-        if let Some(value) = result.get("result").and_then(|r| r.get("value")) {
-            if let Some(status) = value.as_array().and_then(|arr| arr.first()) {
-                if !status.is_null() {
-                    if let Some(err) = status.get("err") {
-                        if !err.is_null() {
-                            return Err(Error::EscrowNotConfirmed(format!(
-                                "deposit transaction failed: {err}"
-                            )));
-                        }
-                    }
-                    if let Some(confirmation) =
-                        status.get("confirmationStatus").and_then(|s| s.as_str())
-                    {
-                        match confirmation {
-                            "confirmed" | "finalized" => {
-                                info!(
-                                    signature = %sig_b58,
-                                    status = confirmation,
-                                    "escrow deposit confirmed"
-                                );
-                                return Ok(SettlementResult {
-                                    success: true,
-                                    tx_signature: Some(sig_b58),
-                                    network: SOLANA_NETWORK.to_string(),
-                                    error: None,
-                                    verified_amount,
-                                });
-                            }
-                            "processed" => {
-                                info!(
-                                    signature = %sig_b58,
-                                    status = confirmation,
-                                    "escrow deposit processed (optimistic settle)"
-                                );
-                                return Ok(SettlementResult {
-                                    success: true,
-                                    tx_signature: Some(sig_b58),
-                                    network: SOLANA_NETWORK.to_string(),
-                                    error: None,
-                                    verified_amount,
-                                });
-                            }
-                            _ => {
-                                // Unknown confirmation status — reject
-                            }
-                        }
-                    }
+        // Submit the signed deposit tx to Solana RPC.
+        // The tx is already signed by the agent; we're just broadcasting it.
+        // If the tx is already on-chain (double-submission), we treat the
+        // known "already processed" error variants as idempotent success.
+        match crate::solana_rpc::send_transaction(
+            &self.http_client,
+            &self.rpc_url,
+            &escrow_payload.deposit_tx,
+        )
+        .await
+        {
+            Ok(rpc_sig) => {
+                if rpc_sig != sig_b58 {
+                    tracing::warn!(
+                        local = %sig_b58,
+                        rpc = %rpc_sig,
+                        "RPC returned non-matching signature"
+                    );
                 }
+                info!(signature = %sig_b58, "escrow deposit submitted");
+            }
+            Err(e) if crate::solana_rpc::is_already_processed_error(&e) => {
+                info!(
+                    signature = %sig_b58,
+                    "escrow deposit already on-chain, proceeding to confirmation"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "escrow deposit submission failed");
+                return Ok(SettlementResult {
+                    success: false,
+                    tx_signature: Some(sig_b58),
+                    network: SOLANA_NETWORK.to_string(),
+                    error: Some(format!("submission failed: {e}")),
+                    verified_amount,
+                });
             }
         }
 
-        // Not yet confirmed — reject to prevent servicing unconfirmed deposits
-        Ok(SettlementResult {
-            success: false,
-            tx_signature: Some(sig_b58),
-            network: SOLANA_NETWORK.to_string(),
-            error: Some(
-                "escrow deposit not yet confirmed on-chain; \
-                 transaction must reach at least \"processed\" status"
-                    .to_string(),
-            ),
-            verified_amount,
-        })
+        // Poll for confirmation using shared helper (30s budget, resilient to
+        // transient RPC errors, handles processed/confirmed/finalized uniformly).
+        match crate::solana_rpc::poll_for_confirmation(
+            &self.http_client,
+            &self.rpc_url,
+            &sig_b58,
+            Duration::from_secs(30),
+        )
+        .await
+        {
+            Ok(()) => Ok(SettlementResult {
+                success: true,
+                tx_signature: Some(sig_b58),
+                network: SOLANA_NETWORK.to_string(),
+                error: None,
+                verified_amount,
+            }),
+            Err(e) => Ok(SettlementResult {
+                success: false,
+                tx_signature: Some(sig_b58),
+                network: SOLANA_NETWORK.to_string(),
+                error: Some(e.to_string()),
+                verified_amount,
+            }),
+        }
     }
 }
 
@@ -345,7 +431,8 @@ impl PaymentVerifier for EscrowVerifier {
 mod tests {
     use super::*;
     use crate::types::{
-        PayloadData, PaymentAccept, PaymentPayload, Resource, SolanaPayload, SOLANA_NETWORK,
+        EscrowPayload, PayloadData, PaymentAccept, PaymentPayload, Resource, SolanaPayload,
+        SOLANA_NETWORK,
     };
 
     #[test]
@@ -354,7 +441,7 @@ mod tests {
             rpc_url: "https://api.devnet.solana.com".to_string(),
             recipient_wallet: "11111111111111111111111111111111".to_string(),
             usdc_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
-            escrow_program_id: "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string(),
+            escrow_program_id: "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -370,7 +457,7 @@ mod tests {
             rpc_url: "https://api.devnet.solana.com".to_string(),
             recipient_wallet: "11111111111111111111111111111111".to_string(),
             usdc_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
-            escrow_program_id: "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string(),
+            escrow_program_id: "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -390,7 +477,7 @@ mod tests {
                 asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
                 pay_to: "11111111111111111111111111111111".to_string(),
                 max_timeout_seconds: 300,
-                escrow_program_id: Some("GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy".to_string()),
+                escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
             },
             payload: PayloadData::Direct(SolanaPayload {
                 transaction: "dGVzdA==".to_string(),
@@ -401,5 +488,255 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("expected escrow"));
+    }
+
+    #[tokio::test]
+    async fn test_escrow_verifier_accepts_valid_deposit_tx() {
+        use crate::escrow::deposit::{build_deposit_tx, DepositParams};
+
+        // Build a valid deposit tx using the same builder the CLI uses
+        let seed = [42u8; 32];
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let verifying_key = signing_key.verifying_key();
+        let mut full = [0u8; 64];
+        full[..32].copy_from_slice(&seed);
+        full[32..].copy_from_slice(verifying_key.as_bytes());
+        let agent_keypair_b58 = bs58::encode(&full).into_string();
+
+        let service_id = [7u8; 32];
+        let params = DepositParams {
+            agent_keypair_b58,
+            provider_wallet_b58: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            usdc_mint_b58: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            escrow_program_id_b58: "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
+            amount: 5000,
+            service_id,
+            expiry_slot: 999_999_999,
+            recent_blockhash: [0u8; 32],
+        };
+        let deposit_tx_b64 = build_deposit_tx(&params).expect("tx build");
+
+        let agent_pubkey_b58 = bs58::encode(verifying_key.as_bytes()).into_string();
+
+        use base64::Engine;
+        let service_id_b64 = base64::engine::general_purpose::STANDARD.encode(service_id);
+
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "escrow".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "5000".to_string(),
+                asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
+            },
+            payload: PayloadData::Escrow(EscrowPayload {
+                deposit_tx: deposit_tx_b64,
+                service_id: service_id_b64,
+                agent_pubkey: agent_pubkey_b58,
+            }),
+        };
+
+        let verifier = EscrowVerifier {
+            rpc_url: "https://api.mainnet-beta.solana.com".to_string(),
+            recipient_wallet: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            usdc_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            escrow_program_id: "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
+            http_client: reqwest::Client::new(),
+        };
+
+        // verify_payment doesn't hit the network (only settle_payment does)
+        let result = verifier.verify_payment(&payload).await;
+        assert!(
+            result.is_ok(),
+            "verification should succeed: {:?}",
+            result.err()
+        );
+        let vr = result.unwrap();
+        assert!(vr.valid);
+        assert_eq!(vr.verified_amount, Some(5000));
+    }
+
+    /// Helper: build a base verifier and the agent keypair used across negative tests.
+    fn make_verifier() -> EscrowVerifier {
+        EscrowVerifier {
+            rpc_url: "https://api.mainnet-beta.solana.com".to_string(),
+            recipient_wallet: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            usdc_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            escrow_program_id: "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
+            http_client: reqwest::Client::new(),
+        }
+    }
+
+    /// Build a deposit tx and return (deposit_tx_b64, agent_pubkey_b58) for the given parameters.
+    fn build_test_tx(
+        service_id: [u8; 32],
+        amount: u64,
+        escrow_program_id_b58: &str,
+    ) -> (String, String) {
+        use crate::escrow::deposit::{build_deposit_tx, DepositParams};
+        let seed = [42u8; 32];
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let verifying_key = signing_key.verifying_key();
+        let mut full = [0u8; 64];
+        full[..32].copy_from_slice(&seed);
+        full[32..].copy_from_slice(verifying_key.as_bytes());
+        let agent_keypair_b58 = bs58::encode(&full).into_string();
+        let agent_pubkey_b58 = bs58::encode(verifying_key.as_bytes()).into_string();
+
+        let params = DepositParams {
+            agent_keypair_b58,
+            provider_wallet_b58: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            usdc_mint_b58: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            escrow_program_id_b58: escrow_program_id_b58.to_string(),
+            amount,
+            service_id,
+            expiry_slot: 999_999_999,
+            recent_blockhash: [0u8; 32],
+        };
+        let deposit_tx_b64 = build_deposit_tx(&params).expect("tx build");
+        (deposit_tx_b64, agent_pubkey_b58)
+    }
+
+    #[tokio::test]
+    async fn test_escrow_verifier_rejects_mismatched_service_id() {
+        use base64::Engine;
+
+        // Tx built with service_id=[7;32], but payload claims service_id=[8;32]
+        let tx_service_id = [7u8; 32];
+        let payload_service_id = [8u8; 32];
+        let (deposit_tx_b64, agent_pubkey_b58) = build_test_tx(
+            tx_service_id,
+            5000,
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
+        );
+
+        let service_id_b64 = base64::engine::general_purpose::STANDARD.encode(payload_service_id);
+
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "escrow".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "5000".to_string(),
+                asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
+            },
+            payload: PayloadData::Escrow(EscrowPayload {
+                deposit_tx: deposit_tx_b64,
+                service_id: service_id_b64,
+                agent_pubkey: agent_pubkey_b58,
+            }),
+        };
+
+        let result = make_verifier().verify_payment(&payload).await;
+        assert!(result.is_err(), "expected error for mismatched service_id");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("service_id"),
+            "error should mention service_id, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_escrow_verifier_rejects_insufficient_amount() {
+        use base64::Engine;
+
+        // Tx encodes amount=1000, but gateway requires 5000
+        let service_id = [7u8; 32];
+        let (deposit_tx_b64, agent_pubkey_b58) = build_test_tx(
+            service_id,
+            1000,
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
+        );
+        let service_id_b64 = base64::engine::general_purpose::STANDARD.encode(service_id);
+
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "escrow".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "5000".to_string(), // gateway requires 5000
+                asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
+            },
+            payload: PayloadData::Escrow(EscrowPayload {
+                deposit_tx: deposit_tx_b64,
+                service_id: service_id_b64,
+                agent_pubkey: agent_pubkey_b58,
+            }),
+        };
+
+        let result = make_verifier().verify_payment(&payload).await;
+        assert!(result.is_err(), "expected InsufficientPayment error");
+        match result.unwrap_err() {
+            Error::InsufficientPayment { expected, actual } => {
+                assert_eq!(expected, 5000);
+                assert_eq!(actual, 1000);
+            }
+            other => panic!("expected InsufficientPayment, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_escrow_verifier_rejects_wrong_escrow_program() {
+        use base64::Engine;
+
+        // Tx built against a different escrow program than the verifier is configured with.
+        // Use a valid-length base58 pubkey that is distinct from the configured one.
+        let wrong_program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+        let service_id = [7u8; 32];
+        let (deposit_tx_b64, agent_pubkey_b58) = build_test_tx(service_id, 5000, wrong_program);
+        let service_id_b64 = base64::engine::general_purpose::STANDARD.encode(service_id);
+
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "escrow".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "5000".to_string(),
+                asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
+            },
+            payload: PayloadData::Escrow(EscrowPayload {
+                deposit_tx: deposit_tx_b64,
+                service_id: service_id_b64,
+                agent_pubkey: agent_pubkey_b58,
+            }),
+        };
+
+        // Verifier uses the canonical escrow program; tx targets wrong_program → no instruction found
+        let result = make_verifier().verify_payment(&payload).await;
+        assert!(result.is_err(), "expected error for wrong escrow program");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no escrow program instruction found"),
+            "error should mention missing instruction, got: {err}"
+        );
     }
 }

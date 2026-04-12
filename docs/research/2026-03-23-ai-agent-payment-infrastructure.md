@@ -1,13 +1,13 @@
 # AI Agent Payment Infrastructure — Market Research
 
 **Date:** 2026-03-23
-**Purpose:** Competitive landscape, market sizing, and strategic positioning for RustyClawRouter
+**Purpose:** Competitive landscape, market sizing, and strategic positioning for Solvela
 
 ---
 
 ## Executive Summary
 
-The AI agent payment infrastructure market is real, growing fast, and consolidating around the x402 protocol. Solana holds ~50-70% of x402 transaction volume and is the preferred chain for agent payments. The market has massive tailwinds (80% of Fortune 500 deploying agents, $52B projected market by 2030) but also a clear warning: daily x402 volumes collapsed 92% from Dec 2025 to Feb 2026, suggesting early adoption was speculative. The opportunity for RustyClawRouter is in the **trustless escrow layer** — no competitor offers on-chain escrow for agent payments. BlockRun, the closest competitor, uses direct transfers only. The risk is that Google's AP2 and Stripe's Agentic Commerce Suite absorb the market through distribution before protocol-level differentiation matters.
+The AI agent payment infrastructure market is real, growing fast, and consolidating around the x402 protocol. Solana holds ~50-70% of x402 transaction volume and is the preferred chain for agent payments. The market has massive tailwinds (80% of Fortune 500 deploying agents, $52B projected market by 2030) but also a clear warning: daily x402 volumes collapsed 92% from Dec 2025 to Feb 2026, suggesting early adoption was speculative. The opportunity for Solvela is in the **trustless escrow layer** — no competitor offers on-chain escrow for agent payments. BlockRun, the closest competitor, uses direct transfers only. The risk is that Google's AP2 and Stripe's Agentic Commerce Suite absorb the market through distribution before protocol-level differentiation matters.
 
 ---
 
@@ -50,11 +50,11 @@ The protocol is stateless, HTTP-native, and chain-agnostic. On Solana it uses SP
 | Company | Chain | Escrow | Smart Routing | Model Access | Status |
 |---------|-------|--------|---------------|--------------|--------|
 | **BlockRun** | Base (EVM) | No | No | 30+ LLMs + data marketplace | Live, ClawRouter open-source |
-| **RustyClawRouter** | Solana | Yes (Anchor) | Yes (15-dim) | 26 models, 5 providers | In development |
+| **Solvela** | Solana | Yes (Anchor) | Yes (15-dim) | 26 models, 5 providers | In development |
 | **PayAI** | Solana | Unknown | No | Marketplace focus | Early stage |
 | **Corbits** | Multi-chain | No | No | API/data pay-per-use | Early stage |
 
-**BlockRun** is the closest competitor. They're Node.js/TypeScript, Base-only, direct transfers only. Their ClawRouter is open-source. They lack escrow (no trustless settlement), lack smart routing, and are EVM-only. RustyClawRouter's differentiators: Rust performance, Anchor escrow, 15-dimension smart router, Solana-native.
+**BlockRun** is the closest competitor. They're Node.js/TypeScript, Base-only, direct transfers only. Their ClawRouter is open-source. They lack escrow (no trustless settlement), lack smart routing, and are EVM-only. Solvela's differentiators: Rust performance, Anchor escrow, 15-dimension smart router, Solana-native.
 
 #### Adjacent Competitors (LLM Gateways without x402)
 
@@ -109,7 +109,7 @@ For every VC dollar invested into crypto in 2025, $0.40 went to companies also b
 
 ---
 
-## Implications for RustyClawRouter
+## Implications for Solvela
 
 ### Strengths (What We Have That Others Don't)
 

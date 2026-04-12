@@ -138,7 +138,7 @@ impl BalanceMonitor {
             match self.fetch_balance(pubkey).await {
                 Ok(lamports) => {
                     let balance_sol = lamports as f64 / LAMPORTS_PER_SOL as f64;
-                    gauge!("rcr_fee_payer_balance_sol", "pubkey" => pubkey.clone())
+                    gauge!("solvela_fee_payer_balance_sol", "pubkey" => pubkey.clone())
                         .set(balance_sol);
                     let alert_level = self.alert_level(balance_sol);
                     results.push(BalanceCheckResult {

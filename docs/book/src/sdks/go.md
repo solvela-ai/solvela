@@ -5,7 +5,7 @@ The Go SDK provides a `Client` with transparent x402 payment handling using the 
 ## Installation
 
 ```bash
-go get github.com/rustyclawrouter/sdk-go
+go get github.com/solvela/sdk-go
 ```
 
 ## Quick Start
@@ -18,7 +18,7 @@ import (
     "fmt"
     "log"
 
-    rcr "github.com/rustyclawrouter/sdk-go"
+    rcr "github.com/solvela/sdk-go"
 )
 
 func main() {

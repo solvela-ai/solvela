@@ -61,8 +61,9 @@ describe('GatewayClient', () => {
 
   it('falls back to production URL when no env var or option', () => {
     delete process.env['RCR_API_URL'];
+    delete process.env['SOLVELA_API_URL'];
     const c = new GatewayClient();
-    assert.equal(c.apiUrl, 'https://api.rustyclawrouter.com');
+    assert.equal(c.apiUrl, 'https://api.solvela.ai');
   });
 
   it('chat succeeds on 200', async () => {

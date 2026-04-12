@@ -110,7 +110,7 @@ LiteSVM's `send_transaction()` returns `Err(FailedTransactionMetadata)` on failu
 
 ## Prerequisites
 
-1. `anchor build` must run first to produce `target/deploy/rustyclawrouter_escrow.so`
+1. `anchor build` must run first to produce `target/deploy/solvela_escrow.so`
 2. Tests load `.so` via `include_bytes!` — compilation fails if file doesn't exist
 3. Add to CI: `cd programs/escrow && anchor build && cargo test`
 

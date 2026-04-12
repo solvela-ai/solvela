@@ -630,7 +630,7 @@ mod tests {
         let result = EscrowClaimer::new(
             "https://api.devnet.solana.com".to_string(),
             pool,
-            "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
             "11111111111111111111111111111111",
             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
             None,
@@ -647,7 +647,7 @@ mod tests {
         let result = EscrowClaimer::new(
             "https://api.devnet.solana.com".to_string(),
             pool,
-            "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
             "11111111111111111111111111111111",
             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
             Some(nonce_pool),
@@ -662,7 +662,7 @@ mod tests {
         let claimer = EscrowClaimer::new(
             "https://api.devnet.solana.com".to_string(),
             pool,
-            "GTs7ik3NbW3xwSXq33jyVRGgmshNEyW1h9rxDNATiFLy",
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
             "11111111111111111111111111111111",
             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
             None,

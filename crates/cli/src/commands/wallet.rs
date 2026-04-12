@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 fn wallet_dir() -> PathBuf {
-    home_dir().join(".rustyclawrouter")
+    home_dir().join(".solvela")
 }
 
 fn home_dir() -> PathBuf {
@@ -23,7 +23,7 @@ pub async fn init() -> Result<()> {
 
     if wallet_file().exists() {
         println!("Wallet already exists at {}", wallet_file().display());
-        println!("Use 'rcr wallet export' to view the private key.");
+        println!("Use 'solvela wallet export' to view the private key.");
         return Ok(());
     }
 
@@ -118,7 +118,7 @@ pub(crate) fn load_wallet() -> Result<serde_json::Value> {
     let path = wallet_file();
     if !path.exists() {
         anyhow::bail!(
-            "No wallet found at {}.\nRun 'rcr wallet init' to create one.",
+            "No wallet found at {}.\nRun 'solvela wallet init' to create one.",
             path.display()
         );
     }
@@ -145,10 +145,8 @@ mod tests {
         let _tmp = with_temp_home();
         let path = wallet_file();
         assert!(
-            path.to_str()
-                .unwrap()
-                .contains(".rustyclawrouter/wallet.json"),
-            "wallet path should include .rustyclawrouter/wallet.json"
+            path.to_str().unwrap().contains(".solvela/wallet.json"),
+            "wallet path should include .solvela/wallet.json"
         );
     }
 

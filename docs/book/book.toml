@@ -1,5 +1,5 @@
 [book]
-title = "RustyClawRouter Documentation"
+title = "Solvela Documentation"
 authors = ["Kenneth Dixon"]
 language = "en"
 multilingual = false
@@ -11,7 +11,7 @@ build-dir = "../../target/book"
 [output.html]
 default-theme = "coal"
 preferred-dark-theme = "coal"
-git-repository-url = "https://github.com/kennethdixon/RustyClawRouter"
+git-repository-url = "https://github.com/kennethdixon/Solvela"
 
 [preprocessor.mermaid]
 command = "mdbook-mermaid"

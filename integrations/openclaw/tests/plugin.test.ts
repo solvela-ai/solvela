@@ -1,5 +1,5 @@
 /**
- * Basic tests for @rustyclaw/clawrouter
+ * Basic tests for @solvela/router
  *
  * Run with:
  *   node --import tsx --test tests/plugin.test.ts
@@ -159,7 +159,7 @@ describe('ConfigError', () => {
   });
 });
 
-describe('ClawRouter — non-streaming', () => {
+describe('RcrClient — non-streaming', () => {
   it('returns a chat response on 200', async () => {
     mock.setMode('ok');
     const router = createRouter({
@@ -214,6 +214,64 @@ describe('ClawRouter — non-streaming', () => {
   });
 });
 
+describe('normalizeMessages — content array → string', () => {
+  it('normalizes content array to joined string via intercept', async () => {
+    mock.setMode('ok');
+    const plugin = createPlugin({
+      gatewayUrl: mock.url,
+      walletKey: 'stub-key',
+    });
+
+    // Simulate OpenClaw sending content as an array of text parts
+    const resp = await plugin.intercept({
+      messages: [
+        {
+          role: 'user',
+          // Cast to satisfy TypeScript — content arrays are the runtime shape we must handle
+          content: [{ type: 'text', text: 'Hello' }, { type: 'text', text: 'World' }] as unknown as string,
+        },
+      ],
+    });
+    assert.ok(resp !== null);
+    assert.ok(resp!.choices.length > 0);
+  });
+
+  it('normalizes content array to joined string via interceptStream', async () => {
+    mock.setMode('ok');
+    const plugin = createPlugin({
+      gatewayUrl: mock.url,
+      walletKey: 'stub-key',
+    });
+
+    const streamResp = await plugin.interceptStream({
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Stream hello' }] as unknown as string,
+        },
+      ],
+      stream: true,
+    });
+
+    assert.ok(streamResp instanceof Response);
+    assert.ok(streamResp.ok);
+  });
+
+  it('leaves plain string content unchanged', async () => {
+    mock.setMode('ok');
+    const plugin = createPlugin({
+      gatewayUrl: mock.url,
+      walletKey: 'stub-key',
+    });
+
+    const resp = await plugin.intercept({
+      messages: [{ role: 'user', content: 'Already a string' }],
+    });
+    assert.ok(resp !== null);
+    assert.ok(resp!.choices.length > 0);
+  });
+});
+
 describe('OpenClaw plugin interface', () => {
   it('intercept returns a ChatResponse', async () => {
     mock.setMode('ok');
@@ -222,7 +280,7 @@ describe('OpenClaw plugin interface', () => {
       walletKey: 'stub-key',
     });
 
-    assert.equal(plugin.name, '@rustyclaw/clawrouter');
+    assert.equal(plugin.name, '@solvela/router');
 
     const resp = await plugin.intercept({
       messages: [{ role: 'user', content: 'Test' }],

@@ -121,7 +121,7 @@ mod tests {
     use crate::routes::escrow::new_slot_cache;
     use crate::services::ServiceRegistry;
     use crate::usage::UsageTracker;
-    use router::models::ModelRegistry;
+    use solvela_router::models::ModelRegistry;
     use x402::facilitator::Facilitator;
 
     fn test_state() -> Arc<AppState> {

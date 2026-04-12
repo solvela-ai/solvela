@@ -15,7 +15,7 @@ use futures::StreamExt;
 use metrics::{counter, histogram};
 use tracing::info;
 
-use rustyclaw_protocol::ChatRequest;
+use solvela_protocol::ChatRequest;
 
 use crate::providers::fallback;
 use crate::providers::heartbeat::{HeartbeatConfig, HeartbeatItem, HeartbeatStream};
@@ -48,7 +48,7 @@ pub(crate) fn classify_provider_error(err: &impl std::fmt::Display) -> &'static 
     }
 }
 
-/// Parse the `X-RCR-Fallback-Preference` header value.
+/// Parse the `X-Solvela-Fallback-Preference` (or `X-RCR-Fallback-Preference`) header value.
 ///
 /// Format: `"provider/model,provider/model,..."`
 /// Returns `(provider, model)` tuples. Invalid entries are silently skipped.
@@ -74,7 +74,7 @@ pub(crate) fn parse_fallback_preference(header: &str) -> Vec<(&str, &str)> {
 pub(crate) struct ProviderCallContext<'a> {
     pub state: &'a Arc<AppState>,
     pub req: &'a ChatRequest,
-    pub model_info: &'a rustyclaw_protocol::ModelInfo,
+    pub model_info: &'a solvela_protocol::ModelInfo,
     pub headers: &'a HeaderMap,
     pub debug_enabled: bool,
     pub request_start: Instant,
@@ -92,7 +92,7 @@ pub(crate) struct ProviderCallContext<'a> {
 pub(crate) struct ProviderCallResult {
     pub response: Response,
     /// Actual token usage from the provider (non-streaming only).
-    pub usage: Option<rustyclaw_protocol::Usage>,
+    pub usage: Option<solvela_protocol::Usage>,
     /// The provider that actually served the request (may differ from primary due to fallback).
     pub actual_provider: Option<String>,
 }
@@ -113,7 +113,7 @@ pub(crate) async fn execute_provider_call(
     let provider_name = &ctx.model_info.provider;
 
     let mut cache_status = if ctx.req.stream {
-        counter!("rcr_cache_total", "result" => "skip").increment(1);
+        counter!("solvela_cache_total", "result" => "skip").increment(1);
         CacheStatus::Skip
     } else {
         CacheStatus::Miss
@@ -123,7 +123,7 @@ pub(crate) async fn execute_provider_call(
     if !ctx.req.stream {
         if let Some(cache) = &ctx.state.cache {
             if let Some(cached) = cache.get(ctx.req).await {
-                counter!("rcr_cache_total", "result" => "hit").increment(1);
+                counter!("solvela_cache_total", "result" => "hit").increment(1);
                 info!(model = %ctx.req.model, "serving from cache");
                 cache_status = CacheStatus::Hit;
                 let mut resp = Json(
@@ -155,16 +155,17 @@ pub(crate) async fn execute_provider_call(
                     actual_provider: None,
                 });
             }
-            counter!("rcr_cache_total", "result" => "miss").increment(1);
+            counter!("solvela_cache_total", "result" => "miss").increment(1);
         } else {
-            counter!("rcr_cache_total", "result" => "miss").increment(1);
+            counter!("solvela_cache_total", "result" => "miss").increment(1);
         }
     }
 
-    // Check for agent-specified fallback preferences
+    // Check for agent-specified fallback preferences (accept both new and legacy headers)
     let fallback_pref = ctx
         .headers
-        .get("x-rcr-fallback-preference")
+        .get("x-solvela-fallback-preference")
+        .or_else(|| ctx.headers.get("x-rcr-fallback-preference"))
         .and_then(|v| v.to_str().ok());
 
     if ctx.req.stream {
@@ -240,7 +241,7 @@ async fn execute_streaming_call(
         };
 
     let provider_duration = provider_start.elapsed();
-    histogram!("rcr_provider_request_duration_seconds", "provider" => provider_name.to_string())
+    histogram!("solvela_provider_request_duration_seconds", "provider" => provider_name.to_string())
         .record(provider_duration.as_secs_f64());
 
     match result {
@@ -270,6 +271,8 @@ async fn execute_streaming_call(
                     format!("{} -> {}", result.original_model, result.actual_model);
                 if let Ok(hv) = HeaderValue::from_str(&fallback_value) {
                     resp.headers_mut()
+                        .insert(HeaderName::from_static("x-solvela-fallback"), hv.clone());
+                    resp.headers_mut()
                         .insert(HeaderName::from_static("x-rcr-fallback"), hv);
                 }
             }
@@ -298,7 +301,7 @@ async fn execute_streaming_call(
         }
         Err(e) => {
             let error_type = classify_provider_error(&e);
-            counter!("rcr_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => error_type).increment(1);
+            counter!("solvela_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => error_type).increment(1);
             Err(ProviderCallError::AllProvidersFailed {
                 model: ctx.req.model.clone(),
                 provider: provider_name.to_string(),
@@ -339,7 +342,7 @@ async fn execute_non_streaming_call(
         };
 
     let provider_duration = provider_start.elapsed();
-    histogram!("rcr_provider_request_duration_seconds", "provider" => provider_name.to_string())
+    histogram!("solvela_provider_request_duration_seconds", "provider" => provider_name.to_string())
         .record(provider_duration.as_secs_f64());
 
     match result {
@@ -358,6 +361,8 @@ async fn execute_non_streaming_call(
                 let fallback_value =
                     format!("{} -> {}", result.original_model, result.actual_model);
                 if let Ok(hv) = HeaderValue::from_str(&fallback_value) {
+                    resp.headers_mut()
+                        .insert(HeaderName::from_static("x-solvela-fallback"), hv.clone());
                     resp.headers_mut()
                         .insert(HeaderName::from_static("x-rcr-fallback"), hv);
                 }
@@ -403,7 +408,7 @@ async fn execute_non_streaming_call(
         }
         Err(e) => {
             let error_type = classify_provider_error(&e);
-            counter!("rcr_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => error_type).increment(1);
+            counter!("solvela_provider_errors_total", "provider" => provider_name.to_string(), "error_type" => error_type).increment(1);
             Err(ProviderCallError::AllProvidersFailed {
                 model: ctx.req.model.clone(),
                 provider: provider_name.to_string(),
