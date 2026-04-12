@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Value};
 
-use rustyclaw_protocol::PLATFORM_FEE_PERCENT;
+use solvela_protocol::PLATFORM_FEE_PERCENT;
 
 use crate::AppState;
 

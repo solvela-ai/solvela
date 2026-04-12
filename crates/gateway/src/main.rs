@@ -10,7 +10,7 @@ use gateway::{
     providers::ProviderRegistry,
     AppState,
 };
-use router::models::ModelRegistry;
+use solvela_router::models::ModelRegistry;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

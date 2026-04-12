@@ -14,7 +14,7 @@ use futures::Stream;
 use pin_project_lite::pin_project;
 use tokio::time::{Instant, Sleep};
 
-use rustyclaw_protocol::ChatChunk;
+use solvela_protocol::ChatChunk;
 
 use super::ProviderError;
 
@@ -146,7 +146,7 @@ mod tests {
     use futures::StreamExt;
     use tokio_stream::wrappers::ReceiverStream;
 
-    use rustyclaw_protocol::{ChatChunk, ChatChunkChoice, ChatDelta};
+    use solvela_protocol::{ChatChunk, ChatChunkChoice, ChatDelta};
 
     use super::*;
 

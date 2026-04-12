@@ -39,7 +39,7 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::services::ServiceRegistry;
-use router::models::ModelRegistry;
+use solvela_router::models::ModelRegistry;
 use x402::facilitator::Facilitator;
 
 use crate::middleware::rate_limit::RateLimiter;

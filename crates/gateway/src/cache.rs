@@ -12,7 +12,7 @@ use lru::LruCache;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-use rustyclaw_protocol::{ChatRequest, ChatResponse};
+use solvela_protocol::{ChatRequest, ChatResponse};
 
 /// Cache configuration.
 #[derive(Debug, Clone)]
@@ -368,7 +368,7 @@ pub enum CacheError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustyclaw_protocol::{ChatMessage, Role};
+    use solvela_protocol::{ChatMessage, Role};
 
     /// Helper to build a ChatRequest for testing.
     fn make_request(

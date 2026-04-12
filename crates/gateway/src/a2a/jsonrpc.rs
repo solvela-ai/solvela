@@ -82,7 +82,7 @@ mod tests {
     use crate::services::ServiceRegistry;
     use crate::usage::UsageTracker;
     use crate::AppState;
-    use router::models::ModelRegistry;
+    use solvela_router::models::ModelRegistry;
     use x402::facilitator::Facilitator;
 
     fn test_app() -> axum::Router {

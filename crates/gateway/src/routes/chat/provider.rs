@@ -15,7 +15,7 @@ use futures::StreamExt;
 use metrics::{counter, histogram};
 use tracing::info;
 
-use rustyclaw_protocol::ChatRequest;
+use solvela_protocol::ChatRequest;
 
 use crate::providers::fallback;
 use crate::providers::heartbeat::{HeartbeatConfig, HeartbeatItem, HeartbeatStream};
@@ -74,7 +74,7 @@ pub(crate) fn parse_fallback_preference(header: &str) -> Vec<(&str, &str)> {
 pub(crate) struct ProviderCallContext<'a> {
     pub state: &'a Arc<AppState>,
     pub req: &'a ChatRequest,
-    pub model_info: &'a rustyclaw_protocol::ModelInfo,
+    pub model_info: &'a solvela_protocol::ModelInfo,
     pub headers: &'a HeaderMap,
     pub debug_enabled: bool,
     pub request_start: Instant,
@@ -92,7 +92,7 @@ pub(crate) struct ProviderCallContext<'a> {
 pub(crate) struct ProviderCallResult {
     pub response: Response,
     /// Actual token usage from the provider (non-streaming only).
-    pub usage: Option<rustyclaw_protocol::Usage>,
+    pub usage: Option<solvela_protocol::Usage>,
     /// The provider that actually served the request (may differ from primary due to fallback).
     pub actual_provider: Option<String>,
 }

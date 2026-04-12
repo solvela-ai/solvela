@@ -217,7 +217,7 @@ mod tests {
         use crate::orgs::models::OrgRole;
         use crate::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
         use crate::services::ServiceRegistry;
-        use router::models::ModelRegistry;
+        use solvela_router::models::ModelRegistry;
         use tokio::sync::RwLock;
 
         let org_id = Uuid::new_v4();

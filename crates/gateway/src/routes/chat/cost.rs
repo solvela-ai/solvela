@@ -5,7 +5,7 @@
 
 use tracing::warn;
 
-use rustyclaw_protocol::{ChatRequest, ModelInfo};
+use solvela_protocol::{ChatRequest, ModelInfo};
 
 /// Rough token estimate: ~4 chars per token.
 pub(crate) fn estimate_input_tokens(req: &ChatRequest) -> u32 {
@@ -46,7 +46,7 @@ pub(crate) fn compute_actual_atomic_cost(
 /// failure, etc.) so callers can distinguish "failed to compute" from "genuinely
 /// zero cost".
 pub(crate) fn estimated_atomic_cost(
-    registry: &router::models::ModelRegistry,
+    registry: &solvela_router::models::ModelRegistry,
     model: &str,
     req: &ChatRequest,
 ) -> Option<u64> {
@@ -59,7 +59,7 @@ pub(crate) fn estimated_atomic_cost(
         .and_then(|c| {
             c.total
                 .parse::<f64>()
-                .map_err(|e| router::models::ModelRegistryError::ParseError(e.to_string()))
+                .map_err(|e| solvela_router::models::ModelRegistryError::ParseError(e.to_string()))
         }) {
         Ok(f) => Some((f * 1_000_000.0) as u64),
         Err(e) => {
@@ -112,7 +112,7 @@ fn usdc_atomic_amount(decimal_str: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustyclaw_protocol::{ChatMessage, ModelInfo, Role};
+    use solvela_protocol::{ChatMessage, ModelInfo, Role};
 
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {

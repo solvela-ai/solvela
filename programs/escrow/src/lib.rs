@@ -1,4 +1,4 @@
-//! RustyClawRouter Escrow Program
+//! Solvela Escrow Program
 //!
 //! Trustless USDC-SPL escrow for AI agent payment settlement on Solana.
 //!
@@ -43,7 +43,7 @@ pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTD
 declare_id!("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
 
 #[program]
-pub mod rustyclawrouter_escrow {
+pub mod solvela_escrow {
     use super::*;
 
     /// Agent deposits USDC into PDA vault.

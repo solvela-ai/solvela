@@ -6,10 +6,10 @@
 [workspace]
 
 [package]
-name = "rustyclawrouter-escrow"
+name = "solvela-escrow"
 version = "0.1.0"
 edition = "2021"
-description = "Anchor escrow program for RustyClawRouter USDC-SPL payments"
+description = "Anchor escrow program for Solvela USDC-SPL payments"
 license = "MIT"
 
 # This crate is NOT a member of the workspace root. Anchor programs require
@@ -19,7 +19,7 @@ license = "MIT"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "rustyclawrouter_escrow"
+name = "solvela_escrow"
 
 [features]
 no-entrypoint = []

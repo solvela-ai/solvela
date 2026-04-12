@@ -12,9 +12,9 @@ use axum::http::HeaderMap;
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
-use router::profiles::{self, Profile};
-use router::scorer;
-use rustyclaw_protocol::{ChatMessage, ChatRequest, Role};
+use solvela_protocol::{ChatMessage, ChatRequest, Role};
+use solvela_router::profiles::{self, Profile};
+use solvela_router::scorer;
 
 use crate::a2a::task_store::{self, new_task_id, TaskRecord};
 use crate::a2a::types::*;
@@ -516,7 +516,7 @@ mod tests {
     use crate::routes::escrow::new_slot_cache;
     use crate::services::ServiceRegistry;
     use crate::usage::UsageTracker;
-    use router::models::ModelRegistry;
+    use solvela_router::models::ModelRegistry;
     use x402::facilitator::Facilitator;
 
     fn test_state() -> Arc<AppState> {
