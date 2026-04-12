@@ -330,18 +330,68 @@ fn build_cors() -> CorsLayer {
             "payment-signature"
                 .parse()
                 .expect("'payment-signature' is a valid header name"),
-            // Debug + request correlation headers
+            // Debug + request correlation headers (accept both prefixes)
             "x-request-id"
                 .parse()
                 .expect("'x-request-id' is a valid header name"),
+            "x-solvela-debug"
+                .parse()
+                .expect("'x-solvela-debug' is a valid header name"),
             "x-rcr-debug"
                 .parse()
                 .expect("'x-rcr-debug' is a valid header name"),
+            "x-solvela-fallback-preference"
+                .parse()
+                .expect("'x-solvela-fallback-preference' is a valid header name"),
+            "x-rcr-fallback-preference"
+                .parse()
+                .expect("'x-rcr-fallback-preference' is a valid header name"),
             "x-session-id"
                 .parse()
                 .expect("'x-session-id' is a valid header name"),
         ])
         .expose_headers([
+            // New x-solvela-* headers
+            "x-solvela-request-id"
+                .parse()
+                .expect("'x-solvela-request-id' is a valid header name"),
+            "x-solvela-model"
+                .parse()
+                .expect("'x-solvela-model' is a valid header name"),
+            "x-solvela-tier"
+                .parse()
+                .expect("'x-solvela-tier' is a valid header name"),
+            "x-solvela-score"
+                .parse()
+                .expect("'x-solvela-score' is a valid header name"),
+            "x-solvela-profile"
+                .parse()
+                .expect("'x-solvela-profile' is a valid header name"),
+            "x-solvela-provider"
+                .parse()
+                .expect("'x-solvela-provider' is a valid header name"),
+            "x-solvela-cache"
+                .parse()
+                .expect("'x-solvela-cache' is a valid header name"),
+            "x-solvela-latency-ms"
+                .parse()
+                .expect("'x-solvela-latency-ms' is a valid header name"),
+            "x-solvela-payment-status"
+                .parse()
+                .expect("'x-solvela-payment-status' is a valid header name"),
+            "x-solvela-token-estimate-in"
+                .parse()
+                .expect("'x-solvela-token-estimate-in' is a valid header name"),
+            "x-solvela-token-estimate-out"
+                .parse()
+                .expect("'x-solvela-token-estimate-out' is a valid header name"),
+            "x-solvela-session"
+                .parse()
+                .expect("'x-solvela-session' is a valid header name"),
+            "x-solvela-fallback"
+                .parse()
+                .expect("'x-solvela-fallback' is a valid header name"),
+            // Legacy x-rcr-* headers (backward compat)
             "x-rcr-request-id"
                 .parse()
                 .expect("'x-rcr-request-id' is a valid header name"),
@@ -375,6 +425,12 @@ fn build_cors() -> CorsLayer {
             "x-rcr-token-estimate-out"
                 .parse()
                 .expect("'x-rcr-token-estimate-out' is a valid header name"),
+            "x-rcr-session"
+                .parse()
+                .expect("'x-rcr-session' is a valid header name"),
+            "x-rcr-fallback"
+                .parse()
+                .expect("'x-rcr-fallback' is a valid header name"),
             "x-session-id"
                 .parse()
                 .expect("'x-session-id' is a valid header name"),

@@ -1,8 +1,9 @@
 //! Request ID middleware — generates or validates a unique ID for every request.
 //!
-//! The `X-RCR-Request-Id` response header is **always** present (not gated by
-//! the debug flag). Clients can provide their own ID via the `X-Request-Id`
-//! request header; if absent or invalid, the gateway generates a UUID v4.
+//! The `X-Solvela-Request-Id` (and legacy `X-RCR-Request-Id`) response header
+//! is **always** present (not gated by the debug flag). Clients can provide
+//! their own ID via the `X-Request-Id` request header; if absent or invalid,
+//! the gateway generates a UUID v4.
 
 use axum::http::{HeaderName, HeaderValue, Request, Response};
 use futures::future::BoxFuture;
@@ -13,8 +14,10 @@ use uuid::Uuid;
 /// Maximum length for a client-provided request ID.
 const MAX_REQUEST_ID_LEN: usize = 128;
 
-/// Response header name for the request ID.
-pub static REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-rcr-request-id");
+/// Response header name for the request ID (new prefix).
+pub static REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-solvela-request-id");
+/// Legacy response header name for the request ID.
+static REQUEST_ID_HEADER_LEGACY: HeaderName = HeaderName::from_static("x-rcr-request-id");
 
 /// Request header name for client-provided request IDs.
 static CLIENT_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
@@ -84,9 +87,14 @@ where
         Box::pin(async move {
             let mut response = inner.call(req).await?;
 
-            // Always attach X-RCR-Request-Id to response
+            // Always attach both X-Solvela-Request-Id and X-RCR-Request-Id to response
             if let Ok(hv) = HeaderValue::from_str(&request_id) {
-                response.headers_mut().insert(REQUEST_ID_HEADER.clone(), hv);
+                response
+                    .headers_mut()
+                    .insert(REQUEST_ID_HEADER.clone(), hv.clone());
+                response
+                    .headers_mut()
+                    .insert(REQUEST_ID_HEADER_LEGACY.clone(), hv);
             }
 
             Ok(response)
