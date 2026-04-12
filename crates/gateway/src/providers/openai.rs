@@ -32,8 +32,9 @@ impl LLMProvider for OpenAIProvider {
 
     async fn chat_completion(
         &self,
-        req: ChatRequest,
+        mut req: ChatRequest,
     ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        req.model = req.model.strip_prefix("openai/").unwrap_or(&req.model).to_string();
         let req_body = serde_json::to_value(&req)?;
         let response = super::retry_with_backoff(2, || {
             self.client
@@ -49,7 +50,8 @@ impl LLMProvider for OpenAIProvider {
         Ok(body)
     }
 
-    async fn chat_completion_stream(&self, req: ChatRequest) -> Result<ChatStream, ProviderError> {
+    async fn chat_completion_stream(&self, mut req: ChatRequest) -> Result<ChatStream, ProviderError> {
+        req.model = req.model.strip_prefix("openai/").unwrap_or(&req.model).to_string();
         let mut body = serde_json::to_value(&req)?;
         body["stream"] = serde_json::Value::Bool(true);
 
