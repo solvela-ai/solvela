@@ -1,0 +1,37 @@
+{
+  "config": {
+    "api_url": "https://rustyclawrouter-gateway.fly.dev",
+    "mode": "DevBypass",
+    "rps": 100,
+    "duration_secs": 60,
+    "concurrency": 200,
+    "slo_p99_ms": 5000,
+    "slo_error_rate": 0.1
+  },
+  "metrics": {
+    "total_requests": 6000,
+    "successful": 5997,
+    "payment_required_402": 0,
+    "rate_limited_429": 0,
+    "server_errors_5xx": 0,
+    "timeouts": 0,
+    "other_errors": 3,
+    "dropped_requests": 0,
+    "p50_ms": 242,
+    "p95_ms": 391,
+    "p99_ms": 695,
+    "min_ms": 43,
+    "max_ms": 1270,
+    "mean_ms": 304
+  },
+  "computed": {
+    "effective_rps": 100.0,
+    "error_rate": 0.0005,
+    "error_count": 3
+  },
+  "slo": {
+    "p99_pass": true,
+    "error_rate_pass": true,
+    "overall_pass": true
+  }
+}
