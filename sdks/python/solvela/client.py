@@ -37,7 +37,7 @@ class LLMClient:
 
     Example::
 
-        from rustyclawrouter import LLMClient
+        from solvela import LLMClient
 
         client = LLMClient(api_url="http://localhost:8402")
         reply = client.chat("openai/gpt-4o", "Hello!")
@@ -209,7 +209,7 @@ class AsyncLLMClient:
     Example::
 
         import asyncio
-        from rustyclawrouter import AsyncLLMClient
+        from solvela import AsyncLLMClient
 
         async def main():
             async with AsyncLLMClient(api_url="http://localhost:8402") as client:

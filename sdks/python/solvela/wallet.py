@@ -10,7 +10,7 @@ class Wallet:
     """Manages a Solana keypair for x402 payments.
 
     Key resolution order: constructor parameter -> SOLANA_WALLET_KEY env var
-    -> ~/.rustyclawrouter/wallet.json file -> no key (read-only mode).
+    -> ~/.solvela/wallet.json file -> no key (read-only mode).
     """
 
     def __init__(self, private_key: Optional[str] = None):
@@ -22,7 +22,7 @@ class Wallet:
         """
         self._private_key = private_key or os.environ.get("SOLANA_WALLET_KEY")
         if not self._private_key:
-            key_file = Path.home() / ".rustyclawrouter" / "wallet.json"
+            key_file = Path.home() / ".solvela" / "wallet.json"
             if key_file.exists():
                 data = json.loads(key_file.read_text())
                 self._private_key = data.get("private_key")
@@ -39,7 +39,7 @@ class Wallet:
         """Derive the public address from the private key.
 
         Requires the ``solders`` package (install with
-        ``pip install rustyclawrouter[solana]``).
+        ``pip install solvela[solana]``).
         """
         if self._address:
             return self._address
@@ -71,5 +71,5 @@ class Wallet:
             raise ValueError("No private key configured")
         raise NotImplementedError(
             "Direct transaction signing is not supported. "
-            "Use rustyclawrouter.x402.build_solana_transfer_checked() instead."
+            "Use solvela.x402.build_solana_transfer_checked() instead."
         )

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from rustyclawrouter.wallet import Wallet
+from solvela.wallet import Wallet
 
 
 class TestWalletInit:
@@ -34,7 +34,7 @@ class TestWalletInit:
             assert wallet._private_key == "ConstructorKey"
 
     def test_key_from_file(self, tmp_path: Path):
-        key_dir = tmp_path / ".rustyclawrouter"
+        key_dir = tmp_path / ".solvela"
         key_dir.mkdir()
         key_file = key_dir / "wallet.json"
         key_file.write_text(json.dumps({"private_key": "FileBase58Key"}))

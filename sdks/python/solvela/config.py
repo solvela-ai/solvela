@@ -1,6 +1,6 @@
-"""Configuration and constants for the RustyClawRouter SDK."""
+"""Configuration and constants for the Solvela SDK."""
 
-DEFAULT_API_URL = "https://api.rustyclawrouter.com"
+DEFAULT_API_URL = "https://api.solvela.ai"
 DEFAULT_DEVNET_URL = "http://localhost:8402"
 
 SOLANA_MAINNET_RPC = "https://api.mainnet-beta.solana.com"
