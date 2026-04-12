@@ -113,8 +113,7 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 ### Immediate
 
-- **SDK repo renames**: External SDK repos (`rustyclaw-go`, `rustyclaw-python`, `rustyclaw-ts`, `RustyClawClient`) still use RustyClaw naming. Need rename to `solvela-*`.
-- **Python SDK directory**: In-tree `sdks/python/` package directory still named `rustyclawrouter/`, should be `solvela/`.
+- **Load testing**: Implementation plan written (`docs/superpowers/plans/2026-04-12-load-testing.md`), spec at (`docs/superpowers/specs/2026-04-12-load-testing-design.md`). Plan review identified 4 fixes needed before execution: (1) `--api-url` goes before `loadtest` subcommand in all CLI invocations, (2) `run.sh` Phase 2 needs `set +e` for break-point detection, (3) add warmup/cooldown between phases per spec, (4) add memory monitoring between phases. Tasks 1-4 are implementation (--model flag, live progress, rate limit override, runner infra), Tasks 5-11 are execution + teardown. **Estimated cost: ~$6-20 USDC + ~$0.50 Fly.io compute.**
 - **Docs theme rename**: `@rustyclaw/docs-theme` package needs rename to `@solvela/docs-theme`.
 - **Docs repos not git-tracked**: `rcr-docs-site` and `docs-theme` have no git repos initialized.
 
