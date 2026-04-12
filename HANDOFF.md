@@ -1,21 +1,21 @@
-# HANDOFF.md — RustyClawRouter Current State
+# HANDOFF.md — Solvela Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-05 (from actual repo inspection, not docs)
+> **Last verified:** 2026-04-12 (from actual repo inspection, not docs)
 
 ---
 
 ## What Is This
 
-RustyClawRouter (RCR) is a Solana-native LLM payment gateway. AI agents pay for LLM API calls with USDC-SPL on Solana via x402. Revenue: 5% fee per call.
+Solvela (formerly RustyClawRouter) is a Solana-native LLM payment gateway. AI agents pay for LLM API calls with USDC-SPL on Solana via x402. Revenue: 5% fee per call.
 
-Part of the **rustyclaw.ai** ecosystem:
+Part of the **solvela.ai** ecosystem:
 
 | Product | Purpose | Status |
 |---------|---------|--------|
-| **RustyClawRouter** | LLM payment gateway (this repo) | Deployed on Fly.io |
-| **RustyClaw Terminal** | Crypto trading terminal + AI agent | Backend deployed, frontend not yet |
-| **Telsi.ai** | Multi-tenant AI assistant SaaS | Live on BlockRun, planned RCR migration |
+| **Solvela** (solvela.ai) | x402 payment gateway, SDKs, CLI, escrow, dashboard (this repo) | Live on Fly.io + Vercel |
+| **RustyClaw Terminal** (rustyclaw.ai) | Crypto trading terminal + AI agent | Live on Vercel + Fly.io |
+| **Telsi.ai** | Multi-tenant AI assistant SaaS | Live on BlockRun, planned Solvela migration |
 
 ---
 
@@ -46,29 +46,43 @@ Core tables (wallet_budgets, escrow, claims), escrow claim queue, session tracki
 
 Trustless USDC-SPL escrow: deposit/claim/refund. PDA vault with timeout refunds. Not a workspace member (dep conflicts).
 
+**Escrow deployed to Solana mainnet** (Apr 8). Program ID: `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`.
+
 ### SDKs
 
-Python (`sdks/python/`), TypeScript (`sdks/typescript/`), Go (`sdks/go/`), MCP server (`sdks/mcp/`).
+Python (`sdks/python/`), TypeScript (`sdks/typescript/`), Go (`sdks/go/`), MCP server (`sdks/mcp/`). Packages renamed to `solvela-sdk` / `@solvela/sdk` / `@solvela/mcp-server`.
 
 ### Dashboard
 
-Next.js 16 + Tailwind + Recharts. 5 pages: Overview, Usage, Models, Wallet, Settings. Deployed to Vercel (`rusty-claw-router.vercel.app`). Note: no `vercel.json` in repo — deployed via Vercel UI.
+Next.js 16 + Tailwind + Recharts. 5 pages: Overview, Usage, Models, Wallet, Settings. Deployed to Vercel (`solvela.vercel.app`). Note: no `vercel.json` in repo — deployed via Vercel UI.
+
+### Documentation Site
+
+Separate repo (`rcr-docs-site`). Next.js 16 + Fumadocs MDX. 18 pages across 5 sections (Getting Started, Core Concepts, API Reference, SDK Guides, Operations). Deployed to Vercel as `solvela-docs` at `docs.solvela.ai`. Uses `@rustyclaw/docs-theme` shared theme library (separate repo: `docs-theme`). Also includes an in-repo mdBook at `docs/book/` for offline/developer reference.
+
+### CLI Load Test Framework
+
+Built-in load testing via `solvela loadtest`. Constant-arrival-rate dispatcher, latency histograms, backpressure tracking, Prometheus scraper, SLO validation. Payment strategies: dev-bypass, exact (SPL TransferChecked), escrow (Anchor deposit). Terminal + JSON report output.
+
+### CLI Escrow Recovery
+
+`solvela recover` subcommand refunds expired escrow PDAs. Shows atomic + decimal USDC amounts. `--scheme` flag on `solvela chat` selects exact vs escrow payment.
 
 ---
 
 ## Test Counts (run `cargo test` to verify — these go stale)
 
-Last verified 2026-04-05:
+Last verified 2026-04-12:
 
 ```
-gateway unit:        368
+gateway unit:        401
 gateway integration: 122
 router:               13
 protocol:             18
 x402:                 99
-cli:                   0  (no tests written yet)
+cli:                  30
 ───────────────────────
-workspace total:     620
+workspace total:     683
 
 escrow (standalone):  21
 dashboard (vitest):   82
@@ -80,15 +94,18 @@ dashboard (vitest):   82
 
 | Resource | Location | Status |
 |----------|----------|--------|
-| **Gateway** | `rustyclawrouter-gateway.fly.dev` | Running (ord region) |
-| **PostgreSQL** | `rustyclawrouter-db` on Fly.io | Running (Postgres 17.2) |
-| **Redis** | Upstash (`rustyclawrouter-cache`) | Running (ord + iad) |
-| **Dashboard** | `rusty-claw-router.vercel.app` | Deployed |
+| **Gateway** | `solvela-gateway.fly.dev` | Running (ord region) |
+| **PostgreSQL** | `solvela-db` on Fly.io | Running (Postgres 17.2) |
+| **Redis** | Upstash (`solvela-cache`) | Running (ord + iad) |
+| **Dashboard** | `solvela.vercel.app` | Deployed |
+| **Docs site** | `docs.solvela.ai` | Deployed on Vercel |
 | **Terminal backend** | `rclawterm-gateway.fly.dev` | Running (ord, 2 machines) |
+| **Terminal frontend** | `rustyclaw.ai` | Deployed on Vercel |
+| **Escrow program** | Solana mainnet | `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU` |
 
 ### Secrets on Fly.io
 
-All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana config set (RPC, recipient wallet, USDC mint, escrow program, fee payer key). Database + Redis URLs set. Admin token rotated 2026-03-31.
+All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana config set (RPC, recipient wallet, USDC mint, escrow program, fee payer key). Database + Redis URLs set. Admin token rotated 2026-03-31. Env vars use `SOLVELA_` prefix (legacy `RCR_` accepted with deprecation warnings).
 
 ---
 
@@ -96,28 +113,29 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 ### Immediate
 
-- **CLI tests**: `rcr-cli` crate has 0 tests. Commands exist (wallet, chat, models, health, stats, doctor) but no test coverage.
-- **Redeploy gateway**: The enterprise features + A2A adapter haven't been deployed to Fly.io yet. Current production is pre-enterprise.
+- **SDK repo renames**: External SDK repos (`rustyclaw-go`, `rustyclaw-python`, `rustyclaw-ts`, `RustyClawClient`) still use RustyClaw naming. Need rename to `solvela-*`.
+- **Python SDK directory**: In-tree `sdks/python/` package directory still named `rustyclawrouter/`, should be `solvela/`.
+- **Docs theme rename**: `@rustyclaw/docs-theme` package needs rename to `@solvela/docs-theme`.
+- **Docs repos not git-tracked**: `rcr-docs-site` and `docs-theme` have no git repos initialized.
 
 ### Deferred
 
-- **Multi-chain support**: `PaymentVerifier` trait is chain-agnostic by design. Base/EVM implementation deferred.
-- **x402 V2 sessions**: V2 adds sessions and service discovery. Wire format migrated but session features not implemented.
-- **Load testing**: Not started.
+- **Multi-chain support**: `PaymentVerifier` trait is chain-agnostic. Base/EVM deferred.
+- **x402 V2 sessions**: Wire format migrated, session features not implemented.
 - **Per-user fairness queuing**: Not started.
 - **Secret rotation plan**: No automated rotation.
 - **API reference docs**: Incomplete.
 - **Rust 2021 → 2024 edition**: Planned but not blocking.
-- **SDK publishing**: SDKs exist but npm/PyPI/crates.io publishing status unclear.
+- **SDK publishing**: `@rustyclaw/sdk` on npm. PyPI and crates.io not published.
+- **Mainnet load testing**: CLI load test framework built but not run against production yet.
 
 ### Ecosystem (in priority order)
 
-1. Deploy Terminal frontend to Vercel
-2. Harden RCR under real Terminal load
-3. Build OpenClaw plugin (`@rustyclaw/clawrouter`)
-4. Migrate Telsi from BlockRun to RCR
-5. Build Sky64 network agent
-6. Open-source (`rcr-router`, `rcr-protocol`)
+1. Harden Solvela under real Terminal load
+2. Build OpenClaw plugin (`@solvela/clawrouter`)
+3. Migrate Telsi from BlockRun to Solvela
+4. Build Sky64 network agent
+5. Open-source (`solvela-router`, `solvela-protocol`)
 
 ---
 
@@ -125,7 +143,7 @@ All 5 provider keys set (OpenAI, Anthropic, Google, xAI, DeepSeek). Solana confi
 
 - **Safe (no licensing)**: AP2 discovery endpoints, x402 crypto settlement (wallet-to-wallet), mandate verification as metadata
 - **DO NOT build (triggers MSB + 49 state licenses)**: Card payment processing, fiat ↔ crypto conversion, custodial fund holding
-- **Gray area**: Anchor escrow PDAs (trustless, PDA-controlled) — FinCEN guidance on custodial wallets is evolving. Attorney consultation scheduled 2026-04-06.
+- **Gray area**: Anchor escrow PDAs (trustless, PDA-controlled) — FinCEN guidance on custodial wallets is evolving. Attorney consultation pending (was scheduled 2026-04-06).
 - **Watch**: California DFAL takes effect July 2026.
 
 ---
