@@ -50,7 +50,10 @@ struct GeminiContent {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GeminiPart {
+    #[serde(default)]
     text: String,
+    // Newer Gemini models may return `thought`, `executableCode`, etc.
+    // These are silently ignored via default serde behavior.
 }
 
 #[derive(Debug, Serialize)]
@@ -264,10 +267,17 @@ impl LLMProvider for GoogleProvider {
         })
         .await?;
 
-        let gemini_resp = response
-            .error_for_status()?
-            .json::<GeminiResponse>()
-            .await?;
+        let response = response.error_for_status()?;
+        let body_text = response.text().await?;
+        let gemini_resp: GeminiResponse = serde_json::from_str(&body_text).map_err(|e| {
+            warn!(
+                model = %original_model,
+                error = %e,
+                body_preview = %&body_text[..body_text.len().min(500)],
+                "failed to parse Gemini response"
+            );
+            e
+        })?;
 
         Ok(from_gemini_response(gemini_resp, &original_model))
     }

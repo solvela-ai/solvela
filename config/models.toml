@@ -82,7 +82,7 @@ reasoning = true
 
 [models.anthropic-claude-haiku-4-5]
 provider = "anthropic"
-model_id = "claude-3-5-haiku-20241022"
+model_id = "claude-haiku-4-5-20251001"
 display_name = "Claude Haiku 4.5"
 input_cost_per_million = 1.00
 output_cost_per_million = 5.00
