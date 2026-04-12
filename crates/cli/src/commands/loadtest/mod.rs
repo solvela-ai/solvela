@@ -22,7 +22,7 @@ use self::payment::{
 use self::report::{print_terminal_report, write_json_report};
 use self::worker::execute_request;
 
-/// Load test the RustyClawRouter gateway with real payment transactions.
+/// Load test the Solvela gateway with real payment transactions.
 #[derive(Args, Debug)]
 pub struct LoadTestArgs {
     /// Requests per second (constant arrival rate).
@@ -121,7 +121,7 @@ impl LoadTestArgs {
     }
 }
 
-/// Entry point for `rcr loadtest`.
+/// Entry point for `solvela loadtest`.
 pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
     let config = args.into_config(api_url)?;
 

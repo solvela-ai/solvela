@@ -61,7 +61,7 @@ fn print_report_to(out: &mut impl Write, snapshot: &MetricsSnapshot, config: &Lo
     );
     let _ = writeln!(
         out,
-        "{BOLD}{CYAN}║        RustyClawRouter Load Test Report      ║{RESET}"
+        "{BOLD}{CYAN}║          Solvela Load Test Report            ║{RESET}"
     );
     let _ = writeln!(
         out,

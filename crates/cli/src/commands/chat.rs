@@ -277,7 +277,7 @@ mod tests {
     fn setup_wallet() -> tempfile::TempDir {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         std::env::set_var("HOME", tmp.path());
-        let dir = tmp.path().join(".rustyclawrouter");
+        let dir = tmp.path().join(".solvela");
         std::fs::create_dir_all(&dir).expect("mkdir");
 
         // Generate a real keypair for the wallet

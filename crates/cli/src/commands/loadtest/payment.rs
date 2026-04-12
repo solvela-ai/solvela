@@ -37,7 +37,7 @@ pub trait PaymentStrategy: Send + Sync {
 
 /// No-op payment strategy for dev-bypass mode.
 ///
-/// Relies on the gateway having `RCR_DEV_BYPASS_PAYMENT=true` set.
+/// Relies on the gateway having `SOLVELA_DEV_BYPASS_PAYMENT=true` (or `RCR_DEV_BYPASS_PAYMENT=true`) set.
 /// No wallet needed, no Solana RPC calls.
 pub struct DevBypassStrategy;
 
