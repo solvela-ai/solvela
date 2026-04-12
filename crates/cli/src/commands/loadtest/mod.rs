@@ -155,10 +155,11 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
     // --- Build shared resources ---
     let rpc_url: String = match config.mode {
         LoadTestMode::Exact | LoadTestMode::Escrow => std::env::var("SOLANA_RPC_URL")
+            .or_else(|_| std::env::var("SOLVELA_SOLANA_RPC_URL"))
             .or_else(|_| std::env::var("RCR_SOLANA_RPC_URL"))
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "SOLANA_RPC_URL (or RCR_SOLANA_RPC_URL) is required for {:?} payment mode",
+                    "SOLANA_RPC_URL (or SOLVELA_SOLANA_RPC_URL) is required for {:?} payment mode",
                     config.mode
                 )
             })?,

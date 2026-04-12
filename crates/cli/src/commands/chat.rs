@@ -121,6 +121,7 @@ pub async fn run(
 
     // Resolve the Solana RPC URL from the environment.
     let rpc_url = std::env::var("SOLANA_RPC_URL")
+        .or_else(|_| std::env::var("SOLVELA_SOLANA_RPC_URL"))
         .or_else(|_| std::env::var("RCR_SOLANA_RPC_URL"))
         .map_err(|_| {
             anyhow::anyhow!(
