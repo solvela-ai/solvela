@@ -43,7 +43,7 @@ type escrowPayload struct {
 
 // GenerateServiceID produces a 32-byte correlation ID for an escrow deposit
 // from the request body and 8 random bytes. Matches the Python/TS helpers in
-// sdks/python/rustyclawrouter/x402.py and sdks/typescript/src/x402.ts.
+// sdks/python/solvela/x402.py and sdks/typescript/src/x402.ts.
 func GenerateServiceID(requestBody []byte) ([32]byte, error) {
 	var out [32]byte
 	var nonce [8]byte

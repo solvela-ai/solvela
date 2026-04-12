@@ -41,7 +41,7 @@ func WithHTTPClient(client *http.Client) Option {
 	return func(c *Client) { c.httpClient = client }
 }
 
-// Client is the main entry point for the RustyClawRouter Go SDK.
+// Client is the main entry point for the Solvela Go SDK.
 type Client struct {
 	apiURL        string
 	wallet        *Wallet

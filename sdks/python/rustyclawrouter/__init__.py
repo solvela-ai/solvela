@@ -1,4 +1,4 @@
-"""RustyClawRouter Python SDK — AI agent payments with USDC on Solana."""
+"""Solvela Python SDK — AI agent payments with USDC on Solana."""
 
 from .client import AsyncLLMClient, BudgetExceededError, LLMClient, PaymentError
 from .config import DEFAULT_API_URL

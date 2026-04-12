@@ -1,4 +1,4 @@
-"""Pydantic v2 models for the RustyClawRouter SDK."""
+"""Pydantic v2 models for the Solvela SDK."""
 
 from enum import Enum
 from typing import List, Optional

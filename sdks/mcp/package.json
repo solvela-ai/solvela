@@ -1,11 +1,11 @@
 {
-  "name": "@rustyclawrouter/mcp",
+  "name": "@solvela/mcp-server",
   "version": "0.1.0",
-  "description": "MCP server for RustyClawRouter — AI agents pay for LLM calls with USDC on Solana",
+  "description": "MCP server for Solvela — AI agents pay for LLM calls with USDC on Solana",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "rcr-mcp": "dist/index.js"
+    "solvela-mcp": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",
