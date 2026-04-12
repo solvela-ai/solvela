@@ -191,10 +191,7 @@ mod tests {
             "anthropic"
         );
         assert_eq!(resp.headers().get("x-solvela-cache").unwrap(), "miss");
-        assert_eq!(
-            resp.headers().get("x-solvela-latency-ms").unwrap(),
-            "1847"
-        );
+        assert_eq!(resp.headers().get("x-solvela-latency-ms").unwrap(), "1847");
         assert_eq!(
             resp.headers().get("x-solvela-payment-status").unwrap(),
             "verified"

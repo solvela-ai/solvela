@@ -72,33 +72,35 @@ async fn main() -> anyhow::Result<()> {
     {
         app_config.solana.rpc_url = val;
     }
-    if let Ok(val) =
-        env_with_fallback("SOLVELA_SOLANA__RECIPIENT_WALLET", "RCR_SOLANA__RECIPIENT_WALLET")
-            .or_else(|_| {
-                env_with_fallback("SOLVELA_SOLANA_RECIPIENT_WALLET", "RCR_SOLANA_RECIPIENT_WALLET")
-            })
-    {
+    if let Ok(val) = env_with_fallback(
+        "SOLVELA_SOLANA__RECIPIENT_WALLET",
+        "RCR_SOLANA__RECIPIENT_WALLET",
+    )
+    .or_else(|_| {
+        env_with_fallback(
+            "SOLVELA_SOLANA_RECIPIENT_WALLET",
+            "RCR_SOLANA_RECIPIENT_WALLET",
+        )
+    }) {
         app_config.solana.recipient_wallet = val;
     }
     if let Ok(val) = env_with_fallback("SOLVELA_SOLANA__USDC_MINT", "RCR_SOLANA__USDC_MINT") {
         app_config.solana.usdc_mint = val;
     }
-    if let Ok(val) =
-        env_with_fallback("SOLVELA_SOLANA__ESCROW_PROGRAM_ID", "RCR_SOLANA__ESCROW_PROGRAM_ID")
-            .or_else(|_| {
-                env_with_fallback(
-                    "SOLVELA_SOLANA_ESCROW_PROGRAM_ID",
-                    "RCR_SOLANA_ESCROW_PROGRAM_ID",
-                )
-            })
-    {
+    if let Ok(val) = env_with_fallback(
+        "SOLVELA_SOLANA__ESCROW_PROGRAM_ID",
+        "RCR_SOLANA__ESCROW_PROGRAM_ID",
+    )
+    .or_else(|_| {
+        env_with_fallback(
+            "SOLVELA_SOLANA_ESCROW_PROGRAM_ID",
+            "RCR_SOLANA_ESCROW_PROGRAM_ID",
+        )
+    }) {
         app_config.solana.escrow_program_id = Some(val);
     }
-    if let Ok(val) =
-        env_with_fallback("SOLVELA_SOLANA__FEE_PAYER_KEY", "RCR_SOLANA__FEE_PAYER_KEY")
-            .or_else(|_| {
-                env_with_fallback("SOLVELA_SOLANA_FEE_PAYER_KEY", "RCR_SOLANA_FEE_PAYER_KEY")
-            })
+    if let Ok(val) = env_with_fallback("SOLVELA_SOLANA__FEE_PAYER_KEY", "RCR_SOLANA__FEE_PAYER_KEY")
+        .or_else(|_| env_with_fallback("SOLVELA_SOLANA_FEE_PAYER_KEY", "RCR_SOLANA_FEE_PAYER_KEY"))
     {
         app_config.solana.fee_payer_key = Some(val);
     }
@@ -309,10 +311,11 @@ async fn main() -> anyhow::Result<()> {
     //
     // Set DATABASE_URL to enable persistent spend logging and wallet budgets.
     // Without it, requests still work but spend data is only logged to stdout.
-    let max_connections: u32 = env_with_fallback("SOLVELA_DB_MAX_CONNECTIONS", "RCR_DB_MAX_CONNECTIONS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20);
+    let max_connections: u32 =
+        env_with_fallback("SOLVELA_DB_MAX_CONNECTIONS", "RCR_DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
 
     let db_pool = match std::env::var("DATABASE_URL") {
         Ok(url) => {
@@ -439,12 +442,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Dev-mode payment bypass — only when SOLVELA_DEV_BYPASS_PAYMENT=true AND not production
     let dev_bypass_payment = if is_production {
-        if env_with_fallback("SOLVELA_DEV_BYPASS_PAYMENT", "RCR_DEV_BYPASS_PAYMENT").as_deref() == Ok("true") {
+        if env_with_fallback("SOLVELA_DEV_BYPASS_PAYMENT", "RCR_DEV_BYPASS_PAYMENT").as_deref()
+            == Ok("true")
+        {
             warn!("SOLVELA_DEV_BYPASS_PAYMENT is set but ignored — payment bypass is NEVER allowed in production");
         }
         false
     } else {
-        let enabled = env_with_fallback("SOLVELA_DEV_BYPASS_PAYMENT", "RCR_DEV_BYPASS_PAYMENT").as_deref() == Ok("true");
+        let enabled = env_with_fallback("SOLVELA_DEV_BYPASS_PAYMENT", "RCR_DEV_BYPASS_PAYMENT")
+            .as_deref()
+            == Ok("true");
         if enabled {
             warn!("DEV MODE: payment bypass ENABLED — all chat requests will skip payment verification. DO NOT use in production!");
         }
@@ -625,11 +632,7 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", app_config.server.host, app_config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    info!(
-        addr,
-        models = model_count,
-        "Solvela gateway started"
-    );
+    info!(addr, models = model_count, "Solvela gateway started");
 
     axum::serve(
         listener,

@@ -1,5 +1,5 @@
 {
-  "name": "@rustyclaw/rcr",
+  "name": "@solvela/router",
   "version": "0.1.0",
   "description": "OpenClaw plugin for Solvela — Solana-native LLM routing with x402 payments",
   "type": "module",

@@ -1,5 +1,5 @@
 /**
- * Basic tests for @rustyclaw/rcr
+ * Basic tests for @solvela/router
  *
  * Run with:
  *   node --import tsx --test tests/plugin.test.ts
@@ -280,7 +280,7 @@ describe('OpenClaw plugin interface', () => {
       walletKey: 'stub-key',
     });
 
-    assert.equal(plugin.name, '@rustyclaw/rcr');
+    assert.equal(plugin.name, '@solvela/router');
 
     const resp = await plugin.intercept({
       messages: [{ role: 'user', content: 'Test' }],

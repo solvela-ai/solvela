@@ -3,7 +3,7 @@ import type { Provider, IAgentRuntime, Memory } from "@elizaos/core";
 export const gatewayProvider: Provider = {
   get: async (runtime: IAgentRuntime, _message: Memory) => {
     const gatewayUrl =
-      runtime.getSetting("RUSTYCLAW_GATEWAY_URL") || "http://localhost:8402";
+      runtime.getSetting("SOLVELA_GATEWAY_URL") || "http://localhost:8402";
 
     try {
       const resp = await fetch(`${gatewayUrl}/health`);

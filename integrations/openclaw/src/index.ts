@@ -1,11 +1,11 @@
 /**
- * @rustyclaw/rcr — OpenClaw plugin
+ * @solvela/router — OpenClaw plugin
  *
  * Routes OpenClaw LLM requests
  * through Solvela with Solana-native x402 USDC micropayments.
  *
  * Installation (on tenant VPS):
- *   openclaw plugins install @rustyclaw/rcr
+ *   openclaw plugins install @solvela/router
  *
  * Required env vars (already present on all Telsi tenant VPSes):
  *   LLM_ROUTER_API_URL     — Solvela gateway base URL
@@ -16,7 +16,7 @@
  *                            (required when @solana/web3.js is installed)
  *
  * Usage as a standalone client:
- *   import { createRouter } from '@rustyclaw/rcr';
+ *   import { createRouter } from '@solvela/router';
  *
  *   const router = createRouter();
  *   const response = await router.chat([{ role: 'user', content: 'Hello!' }]);
@@ -98,7 +98,7 @@ export function createPlugin(overrides: Partial<RcrConfig> = {}): OpenClawPlugin
   const config = loadConfig(overrides);
 
   return {
-    name: '@rustyclaw/rcr',
+    name: '@solvela/router',
     version: '0.1.0',
     description: 'Solvela — Solana-native LLM routing with x402 USDC payments',
 
