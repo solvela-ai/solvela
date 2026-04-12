@@ -75,6 +75,38 @@ pub async fn run_dispatcher<F, Fut>(
     let mut join_set = tokio::task::JoinSet::new();
     let worker_fn = Arc::new(worker_fn);
 
+    // Live progress output — prints metrics every second.
+    let progress_metrics = metrics.clone();
+    let total_duration = Duration::from_secs(config.duration_secs);
+    let progress_handle = tokio::spawn(async move {
+        let start = Instant::now();
+        let mut tick = time::interval(Duration::from_secs(1));
+        tick.tick().await; // skip immediate first tick
+        loop {
+            tick.tick().await;
+            let elapsed = start.elapsed();
+            if elapsed >= total_duration + Duration::from_secs(5) {
+                break; // safety exit
+            }
+            let snap = progress_metrics.snapshot();
+            let elapsed_secs = elapsed.as_secs();
+            let duration_secs = total_duration.as_secs();
+            let effective_rps = if elapsed_secs > 0 {
+                snap.total_requests as f64 / elapsed_secs as f64
+            } else {
+                0.0
+            };
+            eprint!(
+                "\r[{elapsed_secs}s/{duration_secs}s] RPS: {effective_rps:.1} | OK: {} | 4xx: {} | 5xx: {} | drop: {} | p99: {}ms   ",
+                snap.successful,
+                snap.payment_required_402 + snap.rate_limited_429,
+                snap.server_errors_5xx,
+                snap.dropped_requests,
+                snap.p99_ms,
+            );
+        }
+    });
+
     for _i in 0..total_requests {
         interval.tick().await;
 
@@ -103,6 +135,9 @@ pub async fn run_dispatcher<F, Fut>(
 
     // Wait for all in-flight requests to complete.
     while join_set.join_next().await.is_some() {}
+
+    progress_handle.abort();
+    eprintln!(); // newline after progress line
 }
 
 #[cfg(test)]

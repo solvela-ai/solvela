@@ -113,6 +113,7 @@ pub struct LoadTestConfig {
     pub report_json: Option<String>,
     pub prometheus_url: Option<String>,
     pub dry_run: bool,
+    pub model: String,
 }
 
 impl LoadTestConfig {
@@ -196,6 +197,7 @@ mod tests {
             report_json: None,
             prometheus_url: None,
             dry_run: false,
+            model: "auto".to_string(),
         };
         assert!(config.validate().is_err(), "zero RPS should be rejected");
     }
@@ -213,6 +215,7 @@ mod tests {
             report_json: None,
             prometheus_url: None,
             dry_run: false,
+            model: "auto".to_string(),
         };
         assert!(config.validate().is_err());
     }
