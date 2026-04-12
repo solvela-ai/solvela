@@ -6,6 +6,7 @@ use hdrhistogram::Histogram;
 
 /// Categorized request outcome for error bucketing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum RequestOutcome {
     Success,
     PaymentRequired402,

@@ -18,6 +18,7 @@ use crate::commands::loadtest::metrics::MetricsSnapshot;
 
 /// Result of a single SLO check.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SloCheckResult {
     /// Human-readable label for the check (e.g. "p99 latency").
     pub label: String,
@@ -31,6 +32,7 @@ pub struct SloCheckResult {
     pub unit: &'static str,
 }
 
+#[allow(dead_code)]
 impl SloCheckResult {
     /// Short display string: "PASS" or "FAIL".
     pub fn status(&self) -> &'static str {
@@ -134,6 +136,7 @@ pub fn compute_deltas(before: &[(String, f64)], after: &[(String, f64)]) -> Hash
 /// Validate a `MetricsSnapshot` against `SloThresholds`.
 ///
 /// Returns one `SloCheckResult` per SLO dimension checked.
+#[allow(dead_code)]
 pub fn validate_slos(
     snapshot: &MetricsSnapshot,
     thresholds: &SloThresholds,
@@ -195,7 +198,10 @@ mod tests {
     fn test_parse_prometheus_line_counter() {
         let line = r#"solvela_http_requests_total{method="POST",path="/v1/chat/completions"} 42"#;
         let parsed = parse_metric_line(line);
-        assert_eq!(parsed, Some(("solvela_http_requests_total".to_string(), 42.0)));
+        assert_eq!(
+            parsed,
+            Some(("solvela_http_requests_total".to_string(), 42.0))
+        );
     }
 
     #[test]
@@ -224,7 +230,10 @@ mod tests {
         let parsed = parse_metric_line(line);
         assert_eq!(
             parsed,
-            Some(("solvela_request_duration_seconds_sum".to_string(), 0.123_456))
+            Some((
+                "solvela_request_duration_seconds_sum".to_string(),
+                0.123_456
+            ))
         );
     }
 
@@ -236,7 +245,10 @@ mod tests {
         let parsed = parse_metric_line(line);
         assert_eq!(
             parsed,
-            Some(("solvela_request_duration_seconds_bucket".to_string(), 1000.0))
+            Some((
+                "solvela_request_duration_seconds_bucket".to_string(),
+                1000.0
+            ))
         );
     }
 

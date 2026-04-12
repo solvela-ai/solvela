@@ -18,6 +18,7 @@ use crate::commands::solana_tx::{build_escrow_deposit, build_usdc_transfer, fetc
 /// The worker calls `prepare_payment` after receiving a 402 response
 /// and uses the returned header value (if any) to retry the request.
 #[async_trait::async_trait]
+#[allow(dead_code)]
 pub trait PaymentStrategy: Send + Sync {
     /// Human-readable name for reporting.
     fn name(&self) -> &'static str;

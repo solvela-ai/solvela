@@ -1,5 +1,5 @@
 /**
- * Configuration for the @rustyclaw/rcr OpenClaw plugin.
+ * Configuration for the @solvela/router OpenClaw plugin.
  *
  * Reads from the same env vars already present on all tenant VPSes:
  *   LLM_ROUTER_API_URL     — Solvela gateway base URL

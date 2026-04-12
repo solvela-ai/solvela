@@ -145,9 +145,7 @@ mod tests {
         let _tmp = with_temp_home();
         let path = wallet_file();
         assert!(
-            path.to_str()
-                .unwrap()
-                .contains(".solvela/wallet.json"),
+            path.to_str().unwrap().contains(".solvela/wallet.json"),
             "wallet path should include .solvela/wallet.json"
         );
     }

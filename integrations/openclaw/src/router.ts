@@ -1,5 +1,5 @@
 /**
- * Core routing logic for @rustyclaw/rcr.
+ * Core routing logic for @solvela/router.
  *
  * Forwards OpenClaw chat requests to Solvela, handling the full
  * x402 payment flow: initial request → 402 response → sign payment → retry.

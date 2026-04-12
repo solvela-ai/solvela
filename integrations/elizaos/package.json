@@ -1,5 +1,5 @@
 {
-  "name": "@rustyclaw/elizaos-plugin",
+  "name": "@solvela/elizaos-plugin",
   "version": "0.1.0",
   "description": "ElizaOS plugin for Solvela — Solana-native AI agent payment gateway",
   "type": "module",
