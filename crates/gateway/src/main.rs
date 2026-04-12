@@ -2,6 +2,27 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
+/// Read an environment variable with dual-prefix support.
+///
+/// Checks `SOLVELA_*` first, then falls back to the legacy `RCR_*` prefix.
+/// Emits a deprecation warning via `tracing::warn!` when the old prefix is used.
+fn env_with_fallback(solvela_name: &str, rcr_name: &str) -> Result<String, std::env::VarError> {
+    if let Ok(val) = std::env::var(solvela_name) {
+        return Ok(val);
+    }
+    match std::env::var(rcr_name) {
+        Ok(val) => {
+            tracing::warn!(
+                old = rcr_name,
+                new = solvela_name,
+                "deprecated env var: use {solvela_name} instead of {rcr_name}"
+            );
+            Ok(val)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 use gateway::services::ServiceRegistry;
 use gateway::{
     balance_monitor::BalanceMonitor,
@@ -18,11 +39,11 @@ async fn main() -> anyhow::Result<()> {
     // Existing env vars take precedence — .env values are not overwritten.
     dotenvy::dotenv().ok();
 
-    // Initialize tracing — text by default, JSON when RCR_LOG_FORMAT=json
+    // Initialize tracing — text by default, JSON when SOLVELA_LOG_FORMAT=json (or RCR_LOG_FORMAT)
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "gateway=info,tower_http=info".into());
 
-    match std::env::var("RCR_LOG_FORMAT").as_deref() {
+    match env_with_fallback("SOLVELA_LOG_FORMAT", "RCR_LOG_FORMAT").as_deref() {
         Ok("json") => {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
@@ -44,36 +65,48 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Override Solana config from environment variables.
-    // Supports both double-underscore (Fly.io style: RCR_SOLANA__RPC_URL) and
-    // single-underscore (RCR_SOLANA_RPC_URL) conventions.
-    if let Ok(val) =
-        std::env::var("RCR_SOLANA__RPC_URL").or_else(|_| std::env::var("RCR_SOLANA_RPC_URL"))
+    // Supports SOLVELA_ prefix (preferred), RCR_ prefix (deprecated), and
+    // double-underscore Fly.io convention (e.g., SOLVELA_SOLANA__RPC_URL).
+    if let Ok(val) = env_with_fallback("SOLVELA_SOLANA__RPC_URL", "RCR_SOLANA__RPC_URL")
+        .or_else(|_| env_with_fallback("SOLVELA_SOLANA_RPC_URL", "RCR_SOLANA_RPC_URL"))
     {
         app_config.solana.rpc_url = val;
     }
-    if let Ok(val) = std::env::var("RCR_SOLANA__RECIPIENT_WALLET")
-        .or_else(|_| std::env::var("RCR_SOLANA_RECIPIENT_WALLET"))
+    if let Ok(val) =
+        env_with_fallback("SOLVELA_SOLANA__RECIPIENT_WALLET", "RCR_SOLANA__RECIPIENT_WALLET")
+            .or_else(|_| {
+                env_with_fallback("SOLVELA_SOLANA_RECIPIENT_WALLET", "RCR_SOLANA_RECIPIENT_WALLET")
+            })
     {
         app_config.solana.recipient_wallet = val;
     }
-    if let Ok(val) = std::env::var("RCR_SOLANA__USDC_MINT") {
+    if let Ok(val) = env_with_fallback("SOLVELA_SOLANA__USDC_MINT", "RCR_SOLANA__USDC_MINT") {
         app_config.solana.usdc_mint = val;
     }
-    if let Ok(val) = std::env::var("RCR_SOLANA__ESCROW_PROGRAM_ID")
-        .or_else(|_| std::env::var("RCR_SOLANA_ESCROW_PROGRAM_ID"))
+    if let Ok(val) =
+        env_with_fallback("SOLVELA_SOLANA__ESCROW_PROGRAM_ID", "RCR_SOLANA__ESCROW_PROGRAM_ID")
+            .or_else(|_| {
+                env_with_fallback(
+                    "SOLVELA_SOLANA_ESCROW_PROGRAM_ID",
+                    "RCR_SOLANA_ESCROW_PROGRAM_ID",
+                )
+            })
     {
         app_config.solana.escrow_program_id = Some(val);
     }
-    if let Ok(val) = std::env::var("RCR_SOLANA__FEE_PAYER_KEY")
-        .or_else(|_| std::env::var("RCR_SOLANA_FEE_PAYER_KEY"))
+    if let Ok(val) =
+        env_with_fallback("SOLVELA_SOLANA__FEE_PAYER_KEY", "RCR_SOLANA__FEE_PAYER_KEY")
+            .or_else(|_| {
+                env_with_fallback("SOLVELA_SOLANA_FEE_PAYER_KEY", "RCR_SOLANA_FEE_PAYER_KEY")
+            })
     {
         app_config.solana.fee_payer_key = Some(val);
     }
     // Server config overrides
-    if let Ok(val) = std::env::var("RCR_HOST") {
+    if let Ok(val) = env_with_fallback("SOLVELA_HOST", "RCR_HOST") {
         app_config.server.host = val;
     }
-    if let Ok(val) = std::env::var("RCR_PORT") {
+    if let Ok(val) = env_with_fallback("SOLVELA_PORT", "RCR_PORT") {
         if let Ok(port) = val.parse::<u16>() {
             app_config.server.port = port;
         }
@@ -121,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
     // is required. Falling back to devnet in production would accept devnet
     // transactions as valid payments or cause all real payments to fail.
     let is_production = matches!(
-        std::env::var("RCR_ENV").as_deref(),
+        env_with_fallback("SOLVELA_ENV", "RCR_ENV").as_deref(),
         Ok("production") | Ok("prod")
     );
 
@@ -136,12 +169,12 @@ async fn main() -> anyhow::Result<()> {
                 if is_production {
                     panic!(
                         "FATAL: Solana RPC URL points to devnet in production mode. \
-                         Set RCR_SOLANA_RPC_URL to a mainnet-beta endpoint."
+                         Set SOLVELA_SOLANA_RPC_URL to a mainnet-beta endpoint."
                     );
                 }
                 warn!(
                     "⚠ Solana RPC URL points to devnet — payments will use devnet. \
-                     Set RCR_SOLANA_RPC_URL for mainnet-beta in production."
+                     Set SOLVELA_SOLANA_RPC_URL for mainnet-beta in production."
                 );
             }
             v
@@ -150,13 +183,13 @@ async fn main() -> anyhow::Result<()> {
             if is_production {
                 panic!(
                     "FATAL: Failed to initialize Solana verifier in production: {e}. \
-                     Set RCR_SOLANA_RPC_URL and RCR_SOLANA_RECIPIENT_WALLET."
+                     Set SOLVELA_SOLANA_RPC_URL and SOLVELA_SOLANA_RECIPIENT_WALLET."
                 );
             }
             warn!(
                 error = %e,
                 "failed to initialize Solana verifier, using devnet defaults. \
-                 THIS IS UNSAFE FOR PRODUCTION — set RCR_ENV=production to enforce."
+                 THIS IS UNSAFE FOR PRODUCTION — set SOLVELA_ENV=production to enforce."
             );
             x402::solana::SolanaVerifier::new(
                 "https://api.devnet.solana.com",
@@ -175,7 +208,7 @@ async fn main() -> anyhow::Result<()> {
     // ── Fee payer pool (hot wallet rotation) ──────────────────────────────────
     //
     // Build a FeePayerPool from all configured fee payer keys.
-    // Falls back to env-var scanning (RCR_SOLANA__FEE_PAYER_KEY[_N]) when the
+    // Falls back to env-var scanning (SOLVELA_SOLANA__FEE_PAYER_KEY[_N] or RCR_SOLANA__FEE_PAYER_KEY[_N]) when the
     // merged config list is empty.
     // Constructed before EscrowClaimer because the claimer now uses the pool.
     let fee_payer_pool = {
@@ -221,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
     let nonce_pool = {
         let pool = x402::nonce_pool::NoncePool::from_env();
         if pool.is_empty() {
-            info!("nonce pool empty — clients will use recent blockhash (set RCR_SOLANA__NONCE_ACCOUNT to enable)");
+            info!("nonce pool empty — clients will use recent blockhash (set SOLVELA_SOLANA__NONCE_ACCOUNT to enable)");
             None
         } else {
             info!(accounts = pool.len(), "durable nonce pool initialized");
@@ -265,7 +298,7 @@ async fn main() -> anyhow::Result<()> {
         if app_config.solana.escrow_program_id.is_some() && fee_payer_pool.is_none() {
             warn!("escrow program ID configured but no fee payer pool — escrow disabled");
         } else {
-            info!("escrow payment mode disabled (set RCR_SOLANA_ESCROW_PROGRAM_ID + RCR_SOLANA_FEE_PAYER_KEY to enable)");
+            info!("escrow payment mode disabled (set SOLVELA_SOLANA_ESCROW_PROGRAM_ID + SOLVELA_SOLANA_FEE_PAYER_KEY to enable)");
         }
         None
     };
@@ -276,7 +309,7 @@ async fn main() -> anyhow::Result<()> {
     //
     // Set DATABASE_URL to enable persistent spend logging and wallet budgets.
     // Without it, requests still work but spend data is only logged to stdout.
-    let max_connections: u32 = std::env::var("RCR_DB_MAX_CONNECTIONS")
+    let max_connections: u32 = env_with_fallback("SOLVELA_DB_MAX_CONNECTIONS", "RCR_DB_MAX_CONNECTIONS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(20);
@@ -400,18 +433,18 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Read admin token once at startup
-    let admin_token = std::env::var("RCR_ADMIN_TOKEN")
+    let admin_token = env_with_fallback("SOLVELA_ADMIN_TOKEN", "RCR_ADMIN_TOKEN")
         .ok()
         .filter(|t| !t.is_empty());
 
-    // Dev-mode payment bypass — only when RCR_DEV_BYPASS_PAYMENT=true AND not production
+    // Dev-mode payment bypass — only when SOLVELA_DEV_BYPASS_PAYMENT=true AND not production
     let dev_bypass_payment = if is_production {
-        if std::env::var("RCR_DEV_BYPASS_PAYMENT").as_deref() == Ok("true") {
-            warn!("RCR_DEV_BYPASS_PAYMENT is set but ignored — payment bypass is NEVER allowed in production");
+        if env_with_fallback("SOLVELA_DEV_BYPASS_PAYMENT", "RCR_DEV_BYPASS_PAYMENT").as_deref() == Ok("true") {
+            warn!("SOLVELA_DEV_BYPASS_PAYMENT is set but ignored — payment bypass is NEVER allowed in production");
         }
         false
     } else {
-        let enabled = std::env::var("RCR_DEV_BYPASS_PAYMENT").as_deref() == Ok("true");
+        let enabled = env_with_fallback("SOLVELA_DEV_BYPASS_PAYMENT", "RCR_DEV_BYPASS_PAYMENT").as_deref() == Ok("true");
         if enabled {
             warn!("DEV MODE: payment bypass ENABLED — all chat requests will skip payment verification. DO NOT use in production!");
         }
@@ -435,18 +468,18 @@ async fn main() -> anyhow::Result<()> {
         escrow_metrics: escrow_metrics.clone(),
         admin_token,
         session_secret: {
-            let secret = match std::env::var("RCR_SESSION_SECRET") {
+            let secret = match env_with_fallback("SOLVELA_SESSION_SECRET", "RCR_SESSION_SECRET") {
                 Ok(b64) => {
                     use base64::Engine;
                     base64::engine::general_purpose::STANDARD
                         .decode(&b64)
                         .unwrap_or_else(|e| {
-                            warn!(error = %e, "invalid RCR_SESSION_SECRET base64 — generating random secret");
+                            warn!(error = %e, "invalid SOLVELA_SESSION_SECRET base64 — generating random secret");
                             generate_random_secret()
                         })
                 }
                 Err(_) => {
-                    warn!("RCR_SESSION_SECRET not set — generating ephemeral session secret (sessions will not survive restarts)");
+                    warn!("SOLVELA_SESSION_SECRET not set — generating ephemeral session secret (sessions will not survive restarts)");
                     generate_random_secret()
                 }
             };
