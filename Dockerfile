@@ -23,7 +23,7 @@ RUN mkdir -p crates/protocol/src crates/x402/src crates/router/src crates/gatewa
     echo "pub fn _dummy() {}" > crates/cli/src/lib.rs && \
     echo "fn main() {}" > crates/cli/src/main.rs
 
-RUN cargo build --release --bin rustyclawrouter 2>/dev/null || true
+RUN cargo build --release --bin solvela-gateway 2>/dev/null || true
 
 # Copy actual source code
 COPY crates/ crates/
@@ -32,7 +32,7 @@ COPY config/ config/
 # Touch source files to invalidate the cache for actual compilation
 RUN touch crates/protocol/src/lib.rs crates/x402/src/lib.rs crates/router/src/lib.rs crates/gateway/src/lib.rs crates/gateway/src/main.rs
 
-RUN cargo build --release --bin rustyclawrouter
+RUN cargo build --release --bin solvela-gateway
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -41,9 +41,9 @@ RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/rustyclawrouter .
+COPY --from=builder /app/target/release/solvela-gateway .
 COPY --from=builder /app/config/ config/
 
 EXPOSE 8402
 
-CMD ["./rustyclawrouter"]
+CMD ["./solvela-gateway"]
