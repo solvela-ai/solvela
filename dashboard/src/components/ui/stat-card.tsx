@@ -16,26 +16,26 @@ export function StatCard({
   subtitle,
   icon: Icon,
   trend,
-  iconColor = "text-orange-600",
+  iconColor = "text-brand",
 }: StatCardProps) {
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+    <div className="rounded-xl border border-border bg-bg-surface p-5">
       <div className="flex items-start justify-between">
         <div className="flex-1 min-w-0">
-          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide truncate">
+          <p className="text-xs font-medium text-text-secondary uppercase tracking-wide truncate">
             {title}
           </p>
-          <p className="mt-1.5 text-2xl font-bold text-gray-900 tabular-nums">
+          <p className="mt-1.5 text-2xl font-bold text-text-primary tabular-nums">
             {value}
           </p>
           {subtitle && (
-            <p className="mt-0.5 text-xs text-gray-500">{subtitle}</p>
+            <p className="mt-0.5 text-xs text-text-secondary">{subtitle}</p>
           )}
           {trend && (
             <p
               className={cn(
                 "mt-1 text-xs font-medium",
-                trend.positive ? "text-green-600" : "text-red-500"
+                trend.positive ? "text-success" : "text-error"
               )}
             >
               {trend.positive ? "↑" : "↓"} {trend.value} vs last period
@@ -44,7 +44,7 @@ export function StatCard({
         </div>
         <div
           className={cn(
-            "flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-orange-50",
+            "flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-brand-subtle",
             iconColor
           )}
         >

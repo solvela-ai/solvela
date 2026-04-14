@@ -38,8 +38,8 @@ export function ModelPie({ data }: ModelPieProps) {
         </Pie>
         <Tooltip
           contentStyle={{
-            background: "#fff",
-            border: "1px solid #e5e7eb",
+            background: "#1c1c1c",
+            border: "1px solid #262626",
             borderRadius: 8,
             fontSize: 12,
           }}
@@ -50,7 +50,7 @@ export function ModelPie({ data }: ModelPieProps) {
         />
         <Legend
           formatter={(value) => (
-            <span style={{ fontSize: 11, color: "#6b7280" }}>{value}</span>
+            <span style={{ fontSize: 11, color: "#737373" }}>{value}</span>
           )}
         />
       </PieChart>

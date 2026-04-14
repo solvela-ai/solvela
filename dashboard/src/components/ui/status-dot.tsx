@@ -8,15 +8,19 @@ interface StatusDotProps {
 }
 
 const STATUS_STYLES: Record<Status, string> = {
-  ok:       "bg-green-500",
-  degraded: "bg-yellow-500",
-  down:     "bg-red-500",
-  unknown:  "bg-gray-400",
+  ok:       "bg-success",
+  degraded: "bg-warning",
+  down:     "bg-error",
+  unknown:  "bg-text-tertiary",
 };
 
 export function StatusDot({ status, label }: StatusDotProps) {
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs text-gray-600">
+    <span
+      className="inline-flex items-center gap-1.5 text-xs text-text-secondary"
+      role="status"
+      aria-label={`${label ?? status}: ${status}`}
+    >
       <span
         className={cn(
           "inline-block h-2 w-2 rounded-full",
