@@ -22,18 +22,18 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Mobile-only hamburger bar */}
-        <div className="flex items-center gap-3 border-b border-gray-200 bg-white px-4 py-3 md:hidden">
+        <div className="flex items-center gap-3 border-b border-border bg-bg-surface px-4 py-3 md:hidden">
           <button
             onClick={() => setSidebarOpen(true)}
-            className="rounded-lg p-1.5 text-gray-600 hover:bg-gray-50"
+            className="rounded-lg p-1.5 text-text-secondary hover:bg-bg-surface-hover"
             aria-label="Open menu"
           >
             <Menu size={20} />
           </button>
-          <span className="text-sm font-semibold text-gray-900">Solvela</span>
+          <span className="text-sm font-semibold text-text-primary">Solvela</span>
         </div>
 
-        <main className="flex-1 overflow-y-auto">{children}</main>
+        <main id="main-content" className="flex-1 overflow-y-auto">{children}</main>
       </div>
     </div>
   );

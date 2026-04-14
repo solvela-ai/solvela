@@ -1,7 +1,8 @@
-import { clsx, type ClassValue } from "clsx";
+import { clsx, type ClassValue } from 'clsx'
+import { twMerge } from 'tailwind-merge'
 
 export function cn(...inputs: ClassValue[]) {
-  return clsx(inputs);
+  return twMerge(clsx(inputs))
 }
 
 export function formatUSDC(amount: number, decimals = 4): string {
@@ -29,13 +30,13 @@ export function providerColor(provider: string): string {
 
 export function providerBadgeClass(provider: string): string {
   const map: Record<string, string> = {
-    openai: "bg-emerald-100 text-emerald-800",
-    anthropic: "bg-orange-100 text-orange-800",
-    google: "bg-blue-100 text-blue-800",
-    xai: "bg-gray-100 text-gray-800",
-    deepseek: "bg-indigo-100 text-indigo-800",
+    openai: "bg-emerald-500/15 text-emerald-400",
+    anthropic: "bg-orange-500/15 text-orange-400",
+    google: "bg-blue-500/15 text-blue-400",
+    xai: "bg-gray-500/15 text-gray-400",
+    deepseek: "bg-indigo-500/15 text-indigo-400",
   };
-  return map[provider.toLowerCase()] ?? "bg-gray-100 text-gray-700";
+  return map[provider.toLowerCase()] ?? "bg-gray-500/15 text-gray-400";
 }
 
 export function shortAddress(addr: string): string {

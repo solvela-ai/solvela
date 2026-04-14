@@ -13,11 +13,11 @@ import {
 import { cn } from "@/lib/utils";
 
 const NAV = [
-  { href: "/overview",  label: "Overview",  icon: LayoutDashboard },
-  { href: "/usage",     label: "Usage",     icon: BarChart3 },
-  { href: "/models",    label: "Models",    icon: Cpu },
-  { href: "/wallet",    label: "Wallet",    icon: Wallet },
-  { href: "/settings",  label: "Settings",  icon: Settings },
+  { href: "/dashboard/overview",  label: "Overview",  icon: LayoutDashboard },
+  { href: "/dashboard/usage",     label: "Usage",     icon: BarChart3 },
+  { href: "/dashboard/models",    label: "Models",    icon: Cpu },
+  { href: "/dashboard/wallet",    label: "Wallet",    icon: Wallet },
+  { href: "/dashboard/settings",  label: "Settings",  icon: Settings },
 ];
 
 interface SidebarProps {
@@ -40,17 +40,17 @@ export function Sidebar({ open, onClose }: SidebarProps) {
       )}
       <aside
         className={cn(
-          "flex h-screen w-56 flex-col border-r border-gray-200 bg-white",
+          "flex h-screen w-56 flex-col border-r border-border bg-bg-surface",
           "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:transition-transform max-md:duration-200",
           open ? "max-md:translate-x-0" : "max-md:-translate-x-full"
         )}
       >
       {/* Logo */}
-      <div className="flex items-center gap-2 px-5 py-5 border-b border-gray-100">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-500 text-white">
+      <div className="flex items-center gap-2 px-5 py-5 border-b border-border-subtle">
+        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand text-white">
           <Zap size={16} />
         </div>
-        <span className="font-semibold text-gray-900 text-sm">Solvela</span>
+        <span className="font-semibold text-text-primary text-sm">Solvela</span>
       </div>
 
       {/* Nav */}
@@ -64,8 +64,8 @@ export function Sidebar({ open, onClose }: SidebarProps) {
               className={cn(
                 "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
                 active
-                  ? "bg-orange-50 text-orange-700"
-                  : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"
+                  ? "bg-brand-subtle text-brand-text"
+                  : "text-text-secondary hover:bg-bg-surface-hover hover:text-text-primary"
               )}
             >
               <Icon size={16} />
@@ -76,8 +76,8 @@ export function Sidebar({ open, onClose }: SidebarProps) {
       </nav>
 
       {/* Footer */}
-      <div className="px-4 py-3 border-t border-gray-100">
-        <p className="text-xs text-gray-400">Solana · USDC-SPL · x402 v2</p>
+      <div className="px-4 py-3 border-t border-border-subtle">
+        <p className="text-xs text-text-tertiary">Solana · USDC-SPL · x402 v2</p>
       </div>
     </aside>
     </>

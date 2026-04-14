@@ -25,16 +25,16 @@ export function SpendChart({ data }: SpendChartProps) {
             <stop offset="95%" stopColor="#f97316" stopOpacity={0} />
           </linearGradient>
         </defs>
-        <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+        <CartesianGrid strokeDasharray="3 3" stroke="#1c1c1c" />
         <XAxis
           dataKey="date"
-          tick={{ fontSize: 11, fill: "#9ca3af" }}
+          tick={{ fontSize: 11, fill: "#737373" }}
           tickLine={false}
           axisLine={false}
           interval={6}
         />
         <YAxis
-          tick={{ fontSize: 11, fill: "#9ca3af" }}
+          tick={{ fontSize: 11, fill: "#737373" }}
           tickLine={false}
           axisLine={false}
           tickFormatter={(v) => `$${v.toFixed(2)}`}
@@ -42,8 +42,8 @@ export function SpendChart({ data }: SpendChartProps) {
         />
         <Tooltip
           contentStyle={{
-            background: "#fff",
-            border: "1px solid #e5e7eb",
+            background: "#1c1c1c",
+            border: "1px solid #262626",
             borderRadius: 8,
             fontSize: 12,
           }}
