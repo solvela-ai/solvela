@@ -1,0 +1,270 @@
+---
+title: Chat Completions
+description: POST /v1/chat/completions — OpenAI-compatible chat endpoint with x402 payment
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+## POST /v1/chat/completions
+
+Send a chat completion request. The endpoint is OpenAI-compatible and supports both JSON and SSE streaming responses. Payment is required via the `payment-signature` header.
+
+## Headers
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `Content-Type` | Yes | Must be `application/json` |
+| `payment-signature` | Conditional | Required to get a response. Omit to get a `402` with cost info. |
+| `X-Request-Id` | No | Request correlation ID — logged in usage records |
+| `X-Session-Id` | No | Session correlation ID |
+| `X-Debug-Payment` | No | Set to `true` to receive cost and routing info in response headers |
+
+## Request body
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `model` | string | Yes | Model ID, alias, or routing profile. See [Models](/docs/api/models). |
+| `messages` | array | Yes | Array of message objects. Max 256 messages. |
+| `messages[].role` | string | Yes | `"system"`, `"user"`, `"assistant"`, `"tool"`, or `"developer"` |
+| `messages[].content` | string | Yes | Message text |
+| `messages[].name` | string | No | Participant name |
+| `messages[].tool_calls` | array | No | Tool calls made by the assistant |
+| `messages[].tool_call_id` | string | No | ID of the tool call this message responds to |
+| `stream` | boolean | No | Enable SSE streaming. Default: `false` |
+| `max_tokens` | integer | No | Maximum output tokens. Clamped to model limit (max 128,000). |
+| `temperature` | float | No | Sampling temperature 0–2 |
+| `top_p` | float | No | Nucleus sampling probability |
+| `tools` | array | No | Tool definitions (function calling) |
+| `tool_choice` | string/object | No | Tool selection strategy (`"auto"`, `"none"`, or a specific function) |
+
+### Model values
+
+Pass any of the following as `model`:
+
+- **Routing profile**: `auto`, `eco`, `premium`, `free` — smart router picks the model
+- **Alias**: `gpt5`, `sonnet`, `opus`, `gemini`, `flash`, `grok`, `deepseek`
+- **Full model ID**: `openai/gpt-4o`, `anthropic/claude-opus-4-20250514`, etc.
+
+See [Smart Router](/docs/concepts/smart-router) for how profiles work.
+
+## Responses
+
+### 402 Payment Required — no payment header
+
+When no `payment-signature` header is present, the gateway returns `402`. Parse `error.message` as JSON to get cost and payment instructions.
+
+```json
+{
+  "error": {
+    "message": "{\"x402_version\":2,\"resource\":{\"url\":\"/v1/chat/completions\",\"method\":\"POST\"},\"accepts\":[{\"scheme\":\"exact\",\"network\":\"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp\",\"amount\":\"2625\",\"asset\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"pay_to\":\"<gateway-wallet>\",\"max_timeout_seconds\":300},{\"scheme\":\"escrow\",\"network\":\"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp\",\"amount\":\"2625\",\"asset\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"pay_to\":\"<gateway-wallet>\",\"max_timeout_seconds\":300,\"escrow_program_id\":\"9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU\"}],\"cost_breakdown\":{\"provider_cost\":\"0.002500\",\"platform_fee\":\"0.000125\",\"total\":\"0.002625\",\"currency\":\"USDC\",\"fee_percent\":5},\"error\":\"Payment required\"}"
+  }
+}
+```
+
+The decoded `PaymentRequired` object has this structure:
+
+```json
+{
+  "x402_version": 2,
+  "resource": { "url": "/v1/chat/completions", "method": "POST" },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "amount": "2625",
+      "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "pay_to": "<gateway-recipient-wallet>",
+      "max_timeout_seconds": 300
+    }
+  ],
+  "cost_breakdown": {
+    "provider_cost": "0.002500",
+    "platform_fee": "0.000125",
+    "total": "0.002625",
+    "currency": "USDC",
+    "fee_percent": 5
+  },
+  "error": "Payment required"
+}
+```
+
+### 200 OK — successful completion
+
+```json
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "created": 1712345678,
+  "model": "gpt-4o",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Solana is a high-throughput blockchain."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 8,
+    "total_tokens": 20
+  }
+}
+```
+
+Response headers on paid requests include:
+
+| Header | Description |
+|--------|-------------|
+| `x-solvela-session` | Session token for request correlation |
+| `x-solvela-fallback` | Set if the request was served by a fallback provider |
+
+### Streaming response (SSE)
+
+When `stream: true`, the gateway returns `text/event-stream`. Each chunk is an OpenAI-compatible SSE event:
+
+```
+data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1712345678,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"Solana"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1712345678,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":" is"},"finish_reason":null}]}
+
+data: [DONE]
+```
+
+## Code examples
+
+<Tabs items={['cURL', 'TypeScript', 'Python', 'Go']}>
+  <Tab value="cURL">
+    ```bash
+    # Step 1: Get the cost (no payment)
+    curl -s https://rustyclawrouter-gateway.fly.dev/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "auto",
+        "messages": [{"role": "user", "content": "What is Solana?"}]
+      }'
+
+    # Step 2: Resend with payment (build PaymentPayload, base64-encode it)
+    curl https://rustyclawrouter-gateway.fly.dev/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -H "payment-signature: <base64-encoded-PaymentPayload>" \
+      -d '{
+        "model": "auto",
+        "messages": [{"role": "user", "content": "What is Solana?"}]
+      }'
+    ```
+  </Tab>
+  <Tab value="TypeScript">
+    ```typescript
+    import { LLMClient } from '@solvela/sdk';
+
+    const client = new LLMClient({
+      apiUrl: 'https://rustyclawrouter-gateway.fly.dev',
+      // private key signs payments automatically
+    });
+
+    // Simple one-shot
+    const text = await client.chat('auto', 'What is Solana?');
+    console.log(text);
+
+    // Full request with options
+    const response = await client.chatCompletion({
+      model: 'openai/gpt-4o',
+      messages: [
+        { role: 'system', content: 'You are a blockchain expert.' },
+        { role: 'user', content: 'Explain proof of history.' },
+      ],
+      maxTokens: 500,
+      temperature: 0.7,
+    });
+    console.log(response.choices[0].message.content);
+    console.log('Spent:', client.getSessionSpent(), 'USDC');
+    ```
+  </Tab>
+  <Tab value="Python">
+    ```python
+    import os
+    from solvela import LLMClient
+
+    client = LLMClient(
+        private_key=os.environ['SOLANA_PRIVATE_KEY'],
+        api_url='https://rustyclawrouter-gateway.fly.dev',
+        session_budget=0.10,  # stop if we spend more than $0.10
+    )
+
+    # Simple one-shot
+    text = client.chat('auto', 'What is Solana?')
+    print(text)
+
+    # Full request
+    from solvela import ChatMessage, Role
+
+    response = client.chat_completion(
+        model='openai/gpt-4o',
+        messages=[
+            ChatMessage(role=Role.SYSTEM, content='You are a blockchain expert.'),
+            ChatMessage(role=Role.USER, content='Explain proof of history.'),
+        ],
+        max_tokens=500,
+        temperature=0.7,
+    )
+    print(response.choices[0].message.content)
+    print(f'Spent: {client.session_spent:.6f} USDC')
+    ```
+  </Tab>
+  <Tab value="Go">
+    ```go
+    package main
+
+    import (
+        "context"
+        "fmt"
+        "log"
+        "os"
+        rcr "github.com/solvela/sdk-go"
+    )
+
+    func main() {
+        client, err := rcr.NewClient(
+            rcr.WithAPIURL("https://rustyclawrouter-gateway.fly.dev"),
+            rcr.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
+        )
+        if err != nil {
+            log.Fatal(err)
+        }
+
+        ctx := context.Background()
+
+        // Simple one-shot
+        text, err := client.Chat(ctx, "auto", "What is Solana?")
+        if err != nil {
+            log.Fatal(err)
+        }
+        fmt.Println(text)
+
+        // Full request
+        resp, err := client.ChatCompletion(ctx, rcr.ChatRequest{
+            Model: "openai/gpt-4o",
+            Messages: []rcr.ChatMessage{
+                {Role: rcr.RoleSystem, Content: "You are a blockchain expert."},
+                {Role: rcr.RoleUser, Content: "Explain proof of history."},
+            },
+            MaxTokens:   intPtr(500),
+            Temperature: float64Ptr(0.7),
+        })
+        if err != nil {
+            log.Fatal(err)
+        }
+        fmt.Println(resp.Choices[0].Message.Content)
+        fmt.Printf("Spent: %.6f USDC\n", client.GetSessionSpent())
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Callout type="warn">
+  Do not submit the same signed transaction more than once. The gateway tracks transaction signatures and rejects replays with `402 Invalid Payment`.
+</Callout>

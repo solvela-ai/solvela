@@ -1,0 +1,79 @@
+---
+title: MCP Server
+description: Model Context Protocol server exposing Solvela tools to MCP-compatible agents
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Overview
+
+The Solvela MCP server exposes the gateway's capabilities as MCP tools, enabling MCP-compatible AI agents (like Claude Desktop) to call LLMs through Solvela's x402 payment infrastructure.
+
+## Installation
+
+```bash
+npx @solvela/mcp
+```
+
+Or install globally:
+
+```bash
+npm install -g @solvela/mcp
+solvela-mcp
+```
+
+## Configuration
+
+Set these environment variables before starting the server:
+
+```bash
+export SOLVELA_API_URL=https://rustyclawrouter-gateway.fly.dev
+export SOLVELA_SOLANA_PRIVATE_KEY=<base58-private-key>
+```
+
+## Claude Desktop integration
+
+Add to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "solvela": {
+      "command": "npx",
+      "args": ["@solvela/mcp"],
+      "env": {
+        "SOLVELA_API_URL": "https://rustyclawrouter-gateway.fly.dev",
+        "SOLVELA_SOLANA_PRIVATE_KEY": "<your-private-key>"
+      }
+    }
+  }
+}
+```
+
+## Available tools
+
+The MCP server exposes the following tools to connected agents:
+
+| Tool | Description |
+|------|-------------|
+| `chat` | Send a chat completion request to a specified model |
+| `list_models` | List available models with pricing |
+| `health` | Check gateway health |
+| `get_cost` | Estimate cost for a model and token count |
+
+## Example usage in Claude Desktop
+
+Once configured, Claude can call the Solvela gateway directly:
+
+```
+User: Use Solvela to ask GPT-4o what the capital of France is.
+Claude: [calls solvela.chat with model="openai/gpt-4o"]
+```
+
+<Callout type="warn">
+  The MCP server signing is currently a stub — it uses placeholder payment signatures. For production use, implement proper Solana transaction signing in the MCP server or use the TypeScript or Python SDK directly.
+</Callout>
+
+<Callout type="info">
+  Source code: `sdks/mcp/` in the monorepo.
+</Callout>

@@ -1,0 +1,13 @@
+{
+  "title": "Solvela Docs",
+  "pages": [
+    "index",
+    "quickstart",
+    "---Concepts---",
+    "concepts",
+    "---API Reference---",
+    "api",
+    "---SDKs---",
+    "sdks"
+  ]
+}

@@ -1,0 +1,154 @@
+---
+title: Python SDK
+description: Python client for Solvela with sync and async support via httpx
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+## Installation
+
+```bash
+pip install solvela
+```
+
+## Quick start
+
+<Tabs items={['Sync', 'Async']}>
+  <Tab value="Sync">
+    ```python
+    from solvela import LLMClient
+
+    client = LLMClient(
+        private_key="<base58-private-key>",  # or set SOLANA_PRIVATE_KEY env var
+        api_url="https://rustyclawrouter-gateway.fly.dev",
+    )
+
+    reply = client.chat("auto", "What is Solana?")
+    print(reply)
+    ```
+  </Tab>
+  <Tab value="Async">
+    ```python
+    import asyncio
+    from solvela import AsyncLLMClient
+
+    async def main():
+        async with AsyncLLMClient(
+            private_key="<base58-private-key>",
+            api_url="https://rustyclawrouter-gateway.fly.dev",
+        ) as client:
+            reply = await client.chat("auto", "What is Solana?")
+            print(reply)
+
+    asyncio.run(main())
+    ```
+  </Tab>
+</Tabs>
+
+## Constructor options
+
+```python
+client = LLMClient(
+    private_key="<base58-private-key>",  # optional — signs payments
+    api_url="https://rustyclawrouter-gateway.fly.dev",
+    session_budget=0.10,  # USDC cap — raises BudgetExceededError if exceeded
+    timeout=60.0,         # httpx timeout in seconds (default: 60.0)
+)
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `private_key` | str | Base58-encoded Solana private key for signing payments. Optional. |
+| `api_url` | str | Gateway base URL. |
+| `session_budget` | float | Optional USDC spend cap for this session. |
+| `timeout` | float | Request timeout in seconds. Default: 60.0. |
+
+## Methods
+
+### `chat(model, prompt, **kwargs)`
+
+Simple one-shot chat. Returns the assistant reply as a string.
+
+```python
+text = client.chat("openai/gpt-4o", "Explain proof of history.")
+```
+
+### `chat_completion(model, messages, ...)`
+
+Full OpenAI-compatible request. Returns a `ChatResponse` object.
+
+```python
+from solvela import ChatMessage, Role
+
+response = client.chat_completion(
+    model="auto",
+    messages=[
+        ChatMessage(role=Role.SYSTEM, content="You are a blockchain expert."),
+        ChatMessage(role=Role.USER, content="What is a validator?"),
+    ],
+    max_tokens=500,
+    temperature=0.7,
+)
+print(response.choices[0].message.content)
+print(f"Spent: {client.session_spent:.6f} USDC")
+```
+
+### `smart_chat(prompt, profile="auto")`
+
+Routes through the smart router.
+
+```python
+response = client.smart_chat("Prove quicksort complexity", profile="premium")
+```
+
+### `list_models()`
+
+Returns all available models as a dict.
+
+```python
+models = client.list_models()
+```
+
+### `health()`
+
+Gateway health check.
+
+```python
+status = client.health()
+```
+
+### `session_spent` property
+
+Total USDC spent in this session.
+
+```python
+print(f"Session total: {client.session_spent:.6f} USDC")
+```
+
+### Context manager
+
+The sync client supports `with` statements for automatic cleanup:
+
+```python
+with LLMClient(api_url="https://rustyclawrouter-gateway.fly.dev") as client:
+    reply = client.chat("auto", "Hello")
+```
+
+## Error handling
+
+```python
+from solvela import LLMClient
+from solvela.client import PaymentError, BudgetExceededError
+
+try:
+    reply = client.chat("auto", "Hello")
+except BudgetExceededError as e:
+    print(f"Budget exceeded: {e}")
+except PaymentError as e:
+    print(f"Payment failed: {e}")
+```
+
+<Callout type="info">
+  Source code: `sdks/python/solvela/` in the monorepo. The async client (`AsyncLLMClient`) has the same interface as the sync client with `await` on all methods.
+</Callout>

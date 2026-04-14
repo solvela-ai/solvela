@@ -1,0 +1,86 @@
+---
+title: API Overview
+description: Solvela REST API reference — OpenAI-compatible with x402 payment
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+
+The Solvela API is OpenAI-compatible. Any client that works with the OpenAI API works with Solvela with two changes: set the base URL and add x402 payment handling.
+
+## Base URL
+
+```
+https://rustyclawrouter-gateway.fly.dev
+```
+
+For local development (after `cargo run -p gateway`):
+
+```
+http://localhost:8402
+```
+
+## Authentication
+
+Solvela does **not** use API keys. Authentication is payment — include a valid `payment-signature` header with every request that requires payment. See [x402 Protocol](/docs/concepts/x402) for how to construct this header.
+
+```
+payment-signature: <base64-encoded PaymentPayload JSON>
+```
+
+## Request format
+
+All endpoints accept and return `application/json`. Streaming responses use SSE (`text/event-stream`).
+
+## Common headers
+
+| Header | Description |
+|--------|-------------|
+| `Content-Type: application/json` | Required for all POST requests |
+| `payment-signature: <value>` | Required for paid endpoints (chat completions) |
+| `X-Request-Id: <uuid>` | Optional — tracked in usage logs |
+| `X-Session-Id: <string>` | Optional — correlates requests in a session |
+| `X-Debug-Payment: true` | Optional — returns cost breakdown in response headers |
+
+## Endpoints
+
+<Cards>
+  <Card title="POST /v1/chat/completions" description="OpenAI-compatible chat completions. Returns 402 without payment, proxies to provider with payment." href="/docs/api/chat-completions" />
+  <Card title="GET /v1/models" description="List all available models with pricing, context window, and capability flags." href="/docs/api/models" />
+  <Card title="GET /pricing" description="Full pricing table in JSON. No payment required." href="/docs/api/models" />
+  <Card title="Error Reference" description="HTTP status codes, error shapes, and how to handle common failures." href="/docs/api/errors" />
+</Cards>
+
+### Other endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Gateway health and Solana RPC connectivity |
+| `GET` | `/metrics` | Prometheus metrics |
+| `GET` | `/v1/supported` | Supported payment networks and schemes |
+| `GET` | `/v1/nonce` | Fetch a durable nonce for replay-safe transactions |
+| `POST` | `/v1/images/generations` | Image generation (OpenAI-compatible) |
+| `GET` | `/.well-known/agent.json` | A2A AgentCard for agent discovery |
+| `POST` | `/a2a` | A2A protocol JSON-RPC endpoint |
+
+## Rate limiting
+
+The gateway enforces per-IP and per-wallet rate limits. The default ceiling is approximately 400 RPS. Exceeding the limit returns `429 Too Many Requests`.
+
+## Error format
+
+All errors use the OpenAI error envelope:
+
+```json
+{
+  "error": {
+    "message": "human-readable description"
+  }
+}
+```
+
+For `402` responses, `error.message` contains a JSON-encoded `PaymentRequired` object. See [Error Reference](/docs/api/errors) for the full list of status codes.
+
+<Callout type="info">
+  The gateway degrades gracefully when Redis or PostgreSQL are unavailable. Redis absence disables response caching and falls back to in-memory replay protection. PostgreSQL absence disables spend logging and budget enforcement.
+</Callout>

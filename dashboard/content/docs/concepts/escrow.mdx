@@ -1,0 +1,116 @@
+---
+title: Escrow System
+description: Trustless USDC-SPL escrow on Solana for guaranteed-delivery payments
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+
+The escrow system provides trustless payment guarantees via a deployed Anchor program on Solana mainnet. Instead of paying the gateway directly, the agent deposits USDC into a PDA vault. The gateway claims only the actual cost after the request succeeds. If the gateway fails, the agent reclaims their deposit.
+
+**Deployed program:** `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`
+
+## Escrow vs direct payment
+
+| | Exact (direct) | Escrow |
+|-|----------------|--------|
+| Payment method | USDC-SPL transfer to gateway wallet | Deposit to PDA vault |
+| Gateway receives | Full amount upfront | Actual cost after completion |
+| Agent protection | None — gateway gets funds before serving | Refundable if gateway fails |
+| Complexity | Simple — one transaction | Two transactions (deposit + claim) |
+| Use case | Trusted gateway, simple integrations | Trustless agent-to-gateway flows |
+
+## How it works
+
+<Steps>
+  <Step>
+    **Agent gets a 402 response**
+
+    The `402` response includes both `exact` and `escrow` payment options in the `accepts` array. The escrow option includes `escrow_program_id`.
+  </Step>
+  <Step>
+    **Agent builds a deposit transaction**
+
+    The agent builds a signed Solana transaction that deposits USDC into the escrow PDA vault. The PDA is deterministically derived from the agent's pubkey and a service ID.
+  </Step>
+  <Step>
+    **Agent sends the deposit payload**
+
+    The agent wraps the deposit transaction in an `EscrowPayload` and sends it in the `payment-signature` header.
+  </Step>
+  <Step>
+    **Gateway verifies the deposit on-chain**
+
+    The gateway checks that the deposit transaction is confirmed and the deposited amount covers the request cost.
+  </Step>
+  <Step>
+    **Gateway proxies to the LLM provider**
+
+    The request is forwarded to the provider and the response is returned to the agent.
+  </Step>
+  <Step>
+    **Gateway claims the actual cost**
+
+    After the response is sent, the gateway fires a fire-and-forget claim transaction to collect the actual token cost from the PDA vault. Any excess remains in the vault.
+  </Step>
+</Steps>
+
+## PDA account structure
+
+The escrow vault PDA is derived using:
+
+```
+seeds = [b"escrow", agent_pubkey_bytes, service_id_bytes]
+program_id = 9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU
+```
+
+The `service_id` is a 32-byte request correlation ID (base64-encoded) that the agent generates per request. It is used both as a PDA seed and to correlate the deposit with the gateway request.
+
+The PDA holds a USDC-SPL token account (Associated Token Account). The vault is owned by the program — neither the agent nor the gateway can withdraw unilaterally.
+
+## Escrow payment payload
+
+When choosing the escrow scheme, the `payment-signature` header contains a `PaymentPayload` with an `EscrowPayload`:
+
+```json
+{
+  "x402_version": 2,
+  "resource": { "url": "/v1/chat/completions", "method": "POST" },
+  "accepted": {
+    "scheme": "escrow",
+    "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+    "amount": "2625",
+    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "pay_to": "<gateway-wallet>",
+    "max_timeout_seconds": 300,
+    "escrow_program_id": "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+  },
+  "payload": {
+    "deposit_tx": "<base64-encoded-signed-deposit-tx>",
+    "service_id": "<base64-encoded-32-byte-service-id>",
+    "agent_pubkey": "<base58-agent-wallet-pubkey>"
+  }
+}
+```
+
+## Refund behavior
+
+If the gateway fails to claim within `max_timeout_seconds`, the agent can invoke the `refund` instruction on the escrow program to reclaim their deposit. The refund path is enforced on-chain by the Anchor program — no trust in the gateway is required.
+
+<Callout type="warn">
+  The escrow program is deployed to mainnet with upgrade authority retained by the deployer. Treat it as trusted-but-upgradeable software.
+</Callout>
+
+## When to use escrow
+
+Use escrow when:
+- You are building autonomous agents that require trustless guarantees
+- You want protection against gateway downtime after payment
+- You are handling large request batches and want per-request accountability
+
+Use exact (direct) payment when:
+- You want the simplest possible integration
+- You are running in a trusted environment
+- Your SDK handles payment automatically and you don't need custom logic
+
+See [x402 Protocol](/docs/concepts/x402) for the full payment flow.

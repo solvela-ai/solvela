@@ -1,0 +1,263 @@
+---
+title: Quickstart
+description: Make your first paid API call to Solvela in 5 minutes
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+
+<Steps>
+
+<Step>
+
+## Prerequisites
+
+Before you start, you need:
+
+- A **Solana wallet** with a keypair (e.g. generated with `solana-keygen new`)
+- **USDC-SPL** in that wallet on Solana mainnet (mint: `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`)
+- A small amount of **SOL** for transaction fees (about 0.002 SOL per call)
+
+</Step>
+
+<Step>
+
+## Install an SDK
+
+The SDKs handle the payment handshake automatically. Pick your language:
+
+<Tabs items={['TypeScript', 'Python', 'Go', 'None (cURL)']}>
+  <Tab value="TypeScript">
+    ```bash
+    npm install @solvela/sdk
+    ```
+  </Tab>
+  <Tab value="Python">
+    ```bash
+    pip install solvela
+    ```
+  </Tab>
+  <Tab value="Go">
+    ```bash
+    go get github.com/solvela/sdk-go
+    ```
+  </Tab>
+  <Tab value="None (cURL)">
+    No installation needed. You will need `curl` and a tool to sign Solana transactions (e.g. the `solvela` CLI).
+  </Tab>
+</Tabs>
+
+</Step>
+
+<Step>
+
+## Send a request without payment
+
+First, send a request without any payment header. The gateway will respond with `402 Payment Required` and tell you exactly what the request costs.
+
+<Tabs items={['TypeScript', 'Python', 'Go', 'cURL']}>
+  <Tab value="TypeScript">
+    ```typescript
+    import { LLMClient } from '@solvela/sdk';
+
+    const client = new LLMClient({
+      apiUrl: 'https://rustyclawrouter-gateway.fly.dev',
+    });
+
+    // The SDK automatically handles the 402 flow —
+    // you only need a private key to sign.
+    const reply = await client.chat('auto', 'What is x402?');
+    console.log(reply);
+    ```
+  </Tab>
+  <Tab value="Python">
+    ```python
+    from solvela import LLMClient
+
+    client = LLMClient(api_url='https://rustyclawrouter-gateway.fly.dev')
+
+    # The SDK automatically handles the 402 flow.
+    reply = client.chat('auto', 'What is x402?')
+    print(reply)
+    ```
+  </Tab>
+  <Tab value="Go">
+    ```go
+    package main
+
+    import (
+        "context"
+        "fmt"
+        rcr "github.com/solvela/sdk-go"
+    )
+
+    func main() {
+        client, _ := rcr.NewClient(
+            rcr.WithAPIURL("https://rustyclawrouter-gateway.fly.dev"),
+        )
+        reply, err := client.Chat(context.Background(), "auto", "What is x402?")
+        if err != nil {
+            panic(err)
+        }
+        fmt.Println(reply)
+    }
+    ```
+  </Tab>
+  <Tab value="cURL">
+    ```bash
+    curl -s https://rustyclawrouter-gateway.fly.dev/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "auto",
+        "messages": [{"role": "user", "content": "What is x402?"}]
+      }'
+    ```
+
+    You will get a `402` response. The body looks like:
+
+    ```json
+    {
+      "error": {
+        "message": "{\"x402_version\":2,\"resource\":{\"url\":\"/v1/chat/completions\",\"method\":\"POST\"},\"accepts\":[{\"scheme\":\"exact\",\"network\":\"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp\",\"amount\":\"315\",\"asset\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"pay_to\":\"<gateway-wallet>\",\"max_timeout_seconds\":300}],\"cost_breakdown\":{\"provider_cost\":\"0.000300\",\"platform_fee\":\"0.000015\",\"total\":\"0.000315\",\"currency\":\"USDC\",\"fee_percent\":5},\"error\":\"Payment required\"}"
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+</Step>
+
+<Step>
+
+## Parse the 402 response
+
+The `error.message` field contains a JSON-encoded `PaymentRequired` object. Parse it to get the cost and the accepted payment schemes.
+
+```json
+{
+  "x402_version": 2,
+  "resource": { "url": "/v1/chat/completions", "method": "POST" },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "amount": "315",
+      "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "pay_to": "<gateway-recipient-wallet>",
+      "max_timeout_seconds": 300
+    }
+  ],
+  "cost_breakdown": {
+    "provider_cost": "0.000300",
+    "platform_fee": "0.000015",
+    "total": "0.000315",
+    "currency": "USDC",
+    "fee_percent": 5
+  },
+  "error": "Payment required"
+}
+```
+
+The `amount` field is in **atomic USDC units** (6 decimal places). `315` means `$0.000315 USDC`.
+
+</Step>
+
+<Step>
+
+## Sign a Solana transaction
+
+Build and sign a USDC-SPL transfer transaction to the `pay_to` address for the `amount` specified.
+
+<Tabs items={['TypeScript', 'Python', 'Go', 'solvela CLI']}>
+  <Tab value="TypeScript">
+    ```typescript
+    import { LLMClient } from '@solvela/sdk';
+
+    // Pass your private key — the SDK signs automatically.
+    const client = new LLMClient({
+      apiUrl: 'https://rustyclawrouter-gateway.fly.dev',
+      // private key is read from SOLANA_PRIVATE_KEY env var in the SDK,
+      // or pass it as a constructor option
+    });
+
+    const reply = await client.chat('gpt-4o', 'Explain Solana in one sentence.');
+    console.log(reply);
+    console.log('Spent:', client.getSessionSpent(), 'USDC');
+    ```
+  </Tab>
+  <Tab value="Python">
+    ```python
+    import os
+    from solvela import LLMClient
+
+    client = LLMClient(
+        private_key=os.environ['SOLANA_PRIVATE_KEY'],  # base58 private key
+        api_url='https://rustyclawrouter-gateway.fly.dev',
+    )
+
+    reply = client.chat('gpt-4o', 'Explain Solana in one sentence.')
+    print(reply)
+    print(f'Spent: {client.session_spent:.6f} USDC')
+    ```
+  </Tab>
+  <Tab value="Go">
+    ```go
+    client, _ := rcr.NewClient(
+        rcr.WithAPIURL("https://rustyclawrouter-gateway.fly.dev"),
+        rcr.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
+    )
+
+    reply, err := client.Chat(ctx, "gpt-4o", "Explain Solana in one sentence.")
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println(reply)
+    fmt.Printf("Spent: %.6f USDC\n", client.GetSessionSpent())
+    ```
+  </Tab>
+  <Tab value="solvela CLI">
+    ```bash
+    # Set your private key
+    export SOLVELA_SOLANA_PRIVATE_KEY=<your-base58-private-key>
+
+    solvela chat --model gpt-4o "Explain Solana in one sentence."
+    ```
+  </Tab>
+</Tabs>
+
+</Step>
+
+<Step>
+
+## Resend with the payment signature
+
+The SDKs handle this automatically. If you're implementing manually, encode your signed transaction as a JSON `PaymentPayload`, base64-encode it, and send it in the `payment-signature` header:
+
+```bash
+curl https://rustyclawrouter-gateway.fly.dev/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "payment-signature: <base64-encoded-PaymentPayload>" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Explain Solana in one sentence."}]
+  }'
+```
+
+A successful response is standard OpenAI format plus a `x_solvela` cost field.
+
+</Step>
+
+</Steps>
+
+## What's next
+
+<Callout type="info">
+  The SDKs handle all of this for you. If you're using TypeScript, Python, or Go, you only need to pass a private key — the rest is automatic.
+</Callout>
+
+- [x402 Protocol](/docs/concepts/x402) — understand the full payment flow
+- [Smart Router](/docs/concepts/smart-router) — how `model: "auto"` picks a model
+- [API Reference](/docs/api) — full endpoint documentation
+- [SDKs](/docs/sdks) — SDK-specific guides
+- [Pricing](/docs/concepts/pricing) — model pricing table

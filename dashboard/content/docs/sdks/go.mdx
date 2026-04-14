@@ -1,0 +1,185 @@
+---
+title: Go SDK
+description: Go client for Solvela with context-aware x402 payment handling
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Installation
+
+```bash
+go get github.com/solvela/sdk-go
+```
+
+## Quick start
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    rcr "github.com/solvela/sdk-go"
+)
+
+func main() {
+    client, err := rcr.NewClient(
+        rcr.WithAPIURL("https://rustyclawrouter-gateway.fly.dev"),
+        rcr.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    ctx := context.Background()
+    reply, err := client.Chat(ctx, "auto", "What is Solana?")
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println(reply)
+}
+```
+
+## Client options
+
+```go
+client, err := rcr.NewClient(
+    rcr.WithAPIURL("https://rustyclawrouter-gateway.fly.dev"),
+    rcr.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
+    rcr.WithSessionBudget(0.10),              // USDC cap
+    rcr.WithTimeout(30 * time.Second),        // default: 60s
+    rcr.WithHTTPClient(customHTTPClient),     // replace the http.Client entirely
+)
+```
+
+| Option | Description |
+|--------|-------------|
+| `WithAPIURL(url)` | Gateway base URL. Trailing slash is trimmed. |
+| `WithPrivateKey(key)` | Base58 Solana private key for signing payments. |
+| `WithSessionBudget(budget)` | USDC spend cap. Returns `BudgetExceededError` when exceeded. |
+| `WithTimeout(d)` | Override the default 60s HTTP timeout. |
+| `WithHTTPClient(client)` | Replace the default `http.Client`. Useful for custom transports. |
+
+## Methods
+
+### `Chat(ctx, model, prompt)`
+
+Simple one-shot chat. Returns the assistant reply as a string.
+
+```go
+text, err := client.Chat(ctx, "openai/gpt-4o", "Explain proof of history.")
+```
+
+### `ChatCompletion(ctx, req)`
+
+Full OpenAI-compatible request. Returns a `*ChatResponse`.
+
+```go
+resp, err := client.ChatCompletion(ctx, rcr.ChatRequest{
+    Model: "auto",
+    Messages: []rcr.ChatMessage{
+        {Role: rcr.RoleSystem, Content: "You are a blockchain expert."},
+        {Role: rcr.RoleUser, Content: "What is a validator?"},
+    },
+    MaxTokens:   intPtr(500),
+    Temperature: float64Ptr(0.7),
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(resp.Choices[0].Message.Content)
+fmt.Printf("Spent: %.6f USDC\n", client.GetSessionSpent())
+```
+
+### `SmartChat(ctx, prompt, profile)`
+
+Routes through the smart router with the given profile (`"auto"`, `"eco"`, `"premium"`, `"free"`).
+
+```go
+resp, err := client.SmartChat(ctx, "Prove quicksort complexity", "premium")
+```
+
+### `ListModels(ctx)`
+
+Returns all available models as `json.RawMessage`.
+
+```go
+models, err := client.ListModels(ctx)
+```
+
+### `Health(ctx)`
+
+Gateway health check. Returns `map[string]any`.
+
+```go
+status, err := client.Health(ctx)
+```
+
+### `GetSessionSpent()`
+
+Returns total USDC spent this session. Thread-safe.
+
+```go
+spent := client.GetSessionSpent()
+```
+
+### `GetSpending(ctx)`
+
+Returns a `*SpendSummary` with wallet address, session spent, and remaining budget.
+
+```go
+summary, err := client.GetSpending(ctx)
+fmt.Printf("Wallet: %s, Spent: %.6f USDC\n", summary.WalletAddress, summary.SessionSpentUSDC)
+```
+
+## Concurrency
+
+The client is goroutine-safe. `sessionSpent` is protected by an internal mutex. You can share one client across goroutines.
+
+```go
+var wg sync.WaitGroup
+for _, prompt := range prompts {
+    wg.Add(1)
+    go func(p string) {
+        defer wg.Done()
+        _, err := client.Chat(ctx, "eco", p)
+        if err != nil {
+            log.Println(err)
+        }
+    }(prompt)
+}
+wg.Wait()
+fmt.Printf("Total spent: %.6f USDC\n", client.GetSessionSpent())
+```
+
+## Error handling
+
+```go
+import "errors"
+
+resp, err := client.ChatCompletion(ctx, req)
+if err != nil {
+    var payErr *rcr.PaymentError
+    var budgetErr *rcr.BudgetExceededError
+    var apiErr *rcr.APIError
+
+    switch {
+    case errors.As(err, &budgetErr):
+        fmt.Printf("Budget exceeded: spent=%.6f budget=%.6f\n",
+            budgetErr.Spent, budgetErr.Budget)
+    case errors.As(err, &payErr):
+        fmt.Println("Payment failed:", payErr.Message)
+    case errors.As(err, &apiErr):
+        fmt.Printf("API error %d: %s\n", apiErr.StatusCode, apiErr.Message)
+    default:
+        log.Fatal(err)
+    }
+}
+```
+
+<Callout type="info">
+  Source code: `sdks/go/` in the monorepo. The package name is `rcr` (import `github.com/solvela/sdk-go`).
+</Callout>

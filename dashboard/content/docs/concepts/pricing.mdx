@@ -1,0 +1,124 @@
+---
+title: Pricing
+description: Per-token USDC pricing across all 26+ models with 5% platform fee
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Solvela charges per token based on the upstream provider's list price plus a **5% platform fee**. All prices are in USDC. There are no monthly fees, no minimum spend, and no subscription.
+
+## Fee structure
+
+```
+total = provider_cost * 1.05
+```
+
+Every `402` response includes a `cost_breakdown` showing the split:
+
+```json
+{
+  "cost_breakdown": {
+    "provider_cost": "0.002500",
+    "platform_fee": "0.000125",
+    "total": "0.002625",
+    "currency": "USDC",
+    "fee_percent": 5
+  }
+}
+```
+
+Amounts in the `accepts[].amount` field are in **atomic USDC units** (6 decimal places). `2625` = `$0.002625 USDC`.
+
+## Model pricing table
+
+All prices are USDC per million tokens (provider cost before the 5% fee).
+
+### OpenAI
+
+| Model | Model ID | Input ($/M) | Output ($/M) | Context |
+|-------|----------|-------------|--------------|---------|
+| GPT-5.2 | `openai/gpt-5.2` | $1.75 | $14.00 | 400K |
+| GPT-4o | `openai/gpt-4o` | $2.50 | $10.00 | 128K |
+| GPT-4o Mini | `openai/gpt-4o-mini` | $0.15 | $0.60 | 128K |
+| o3 | `openai/o3` | $2.00 | $8.00 | 200K |
+| o3 Mini | `openai/o3-mini` | $1.10 | $4.40 | 200K |
+| o4 Mini | `openai/o4-mini` | $1.10 | $4.40 | 200K |
+| GPT-4.1 | `openai/gpt-4.1` | $2.00 | $8.00 | 1M |
+| GPT-4.1 Mini | `openai/gpt-4.1-mini` | $0.40 | $1.60 | 1M |
+| GPT-4.1 Nano | `openai/gpt-4.1-nano` | $0.10 | $0.40 | 1M |
+| GPT-OSS 120B | `openai/gpt-oss-120b` | $0.00 | $0.00 | 128K |
+
+### Anthropic
+
+| Model | Model ID | Input ($/M) | Output ($/M) | Context |
+|-------|----------|-------------|--------------|---------|
+| Claude Opus 4.6 | `anthropic/claude-opus-4-20250514` | $5.00 | $25.00 | 200K |
+| Claude Sonnet 4.6 | `anthropic/claude-sonnet-4-20250514` | $3.00 | $15.00 | 200K |
+| Claude Haiku 4.5 | `anthropic/claude-haiku-4-5-20251001` | $1.00 | $5.00 | 200K |
+
+### Google
+
+| Model | Model ID | Input ($/M) | Output ($/M) | Context |
+|-------|----------|-------------|--------------|---------|
+| Gemini 3.1 Pro | `google/gemini-3.1-pro` | $2.00 | $12.00 | 1M |
+| Gemini 2.5 Flash | `google/gemini-2.5-flash` | $0.30 | $2.50 | 1M |
+| Gemini 2.5 Flash Lite | `google/gemini-2.5-flash-lite` | $0.10 | $0.40 | 1M |
+| Gemini 2.0 Flash | `google/gemini-2.0-flash` | $0.10 | $0.40 | 1M |
+| Gemini 2.0 Flash Lite | `google/gemini-2.0-flash-lite` | $0.075 | $0.30 | 1M |
+
+### xAI
+
+| Model | Model ID | Input ($/M) | Output ($/M) | Context |
+|-------|----------|-------------|--------------|---------|
+| Grok 4 Fast (Reasoning) | `xai/grok-4-fast-reasoning` | $0.20 | $0.50 | 2M |
+| Grok Code Fast | `xai/grok-code-fast-1` | $0.20 | $1.50 | 256K |
+| Grok 3 | `xai/grok-3` | $3.00 | $15.00 | 131K |
+| Grok 3 Mini | `xai/grok-3-mini` | $0.30 | $0.50 | 131K |
+
+### DeepSeek
+
+| Model | Model ID | Input ($/M) | Output ($/M) | Context |
+|-------|----------|-------------|--------------|---------|
+| DeepSeek V3.2 Chat | `deepseek/deepseek-chat` | $0.28 | $0.42 | 128K |
+| DeepSeek V3.2 Reasoner | `deepseek/deepseek-reasoner` | $0.28 | $0.42 | 128K |
+| DeepSeek Coder V3 | `deepseek/deepseek-coder` | $0.28 | $0.42 | 128K |
+
+<Callout type="info">
+  These are provider list prices. The actual amount charged includes the 5% platform fee. Always check the `cost_breakdown` in the `402` response for the exact amount you will pay.
+</Callout>
+
+## Query pricing programmatically
+
+```bash
+GET /pricing
+```
+
+Returns the full pricing table as JSON. No payment required.
+
+```bash
+curl https://rustyclawrouter-gateway.fly.dev/pricing
+```
+
+## Cost estimation
+
+The gateway estimates cost at request time using:
+
+1. **Input tokens**: estimated from the messages in the request (character count / 4, approximately)
+2. **Output tokens**: `max_tokens` if specified, otherwise defaults to 1000
+3. **Cost**: `(input_tokens * input_rate + output_tokens * output_rate) / 1_000_000 * 1.05`
+
+The actual cost charged via escrow claim is based on the real token usage returned by the provider (when available).
+
+## Example cost calculation
+
+A request to `gpt-4o` with 500 input tokens and 200 output tokens:
+
+```
+input_cost  = 500 / 1,000,000 * $2.50  = $0.00125
+output_cost = 200 / 1,000,000 * $10.00 = $0.00200
+provider_cost = $0.00325
+platform_fee  = $0.00325 * 0.05 = $0.0001625
+total         = $0.0034125 USDC
+```
+
+Atomic amount: `3413` (multiply total by 1,000,000, round up).
