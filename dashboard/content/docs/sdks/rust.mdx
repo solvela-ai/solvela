@@ -1,0 +1,114 @@
+---
+title: Rust CLI
+description: solvela-cli — command-line tool for interacting with the Solvela gateway
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Installation
+
+```bash
+cargo install solvela-cli
+```
+
+Or build from the monorepo:
+
+```bash
+cargo build --release -p solvela-cli
+# Binary at: target/release/solvela
+```
+
+## Configuration
+
+The CLI reads configuration from environment variables:
+
+```bash
+export SOLVELA_API_URL=https://rustyclawrouter-gateway.fly.dev
+export SOLVELA_SOLANA_PRIVATE_KEY=<base58-private-key>   # for paid requests
+export RUST_LOG=info  # optional logging
+```
+
+## Commands
+
+### `solvela chat`
+
+Send a chat completion request.
+
+```bash
+solvela chat "Explain Solana in one sentence."
+
+# Specify a model
+solvela chat --model gpt-4o "Explain Solana in one sentence."
+
+# Use a routing profile
+solvela chat --model auto "Complex analysis task..."
+
+# Streaming output
+solvela chat --stream "Write a short story about a Rust programmer."
+```
+
+### `solvela models`
+
+List available models with pricing.
+
+```bash
+solvela models
+```
+
+### `solvela health`
+
+Check gateway health and Solana RPC connectivity.
+
+```bash
+solvela health
+```
+
+### `solvela wallet`
+
+Display wallet information and USDC balance.
+
+```bash
+solvela wallet
+```
+
+### `solvela stats`
+
+Show gateway usage statistics for your wallet.
+
+```bash
+solvela stats
+```
+
+### `solvela doctor`
+
+Diagnose common configuration issues.
+
+```bash
+solvela doctor
+```
+
+## Example session
+
+```bash
+$ solvela health
+{
+  "status": "ok",
+  "solana_rpc": "connected",
+  "providers": ["openai", "anthropic", "google", "xai", "deepseek"]
+}
+
+$ solvela models
+ID                                    Provider    Input $/M   Output $/M
+openai/gpt-4o                         openai      2.50        10.00
+anthropic/claude-opus-4-20250514      anthropic   5.00        25.00
+google/gemini-2.5-flash               google      0.30        2.50
+...
+
+$ solvela chat --model eco "Hello, what can you do?"
+Hello! I'm an AI assistant. I can help you with...
+Cost: $0.000042 USDC
+```
+
+<Callout type="info">
+  The CLI binary is named `solvela`. Source code: `crates/cli/` in the monorepo.
+</Callout>

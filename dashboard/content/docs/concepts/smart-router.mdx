@@ -1,0 +1,133 @@
+---
+title: Smart Router
+description: Automatic model selection based on request complexity across 15 dimensions
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+The smart router classifies each request's complexity and routes it to the most appropriate model based on a routing profile you specify. This saves cost on simple requests while ensuring complex ones get capable models.
+
+The router is pure rule-based logic with no external calls. Classification takes under 1 microsecond.
+
+## How to use it
+
+Set `model` to a routing profile name instead of a specific model ID:
+
+```json
+{
+  "model": "auto",
+  "messages": [{"role": "user", "content": "Explain recursion."}]
+}
+```
+
+| Profile | Aliases | Behavior |
+|---------|---------|----------|
+| `auto` | `balanced`, `default` | Balanced cost and quality. **Recommended default.** |
+| `eco` | `cheap`, `budget` | Cheapest capable model per tier. |
+| `premium` | `best`, `quality` | Best available model regardless of cost. |
+| `free` | `oss`, `open` | Free-tier models only (`gpt-oss-120b`). |
+
+You can also use model aliases as shortcuts to specific models:
+
+| Alias | Resolves to |
+|-------|-------------|
+| `gpt5` | `openai/gpt-5.2` |
+| `sonnet` | `anthropic/claude-sonnet-4-20250514` |
+| `opus` | `anthropic/claude-opus-4-20250514` |
+| `gemini` | `google/gemini-3.1-pro` |
+| `flash` | `google/gemini-2.5-flash` |
+| `grok` | `xai/grok-4-fast-reasoning` |
+| `deepseek` | `deepseek/deepseek-chat` |
+
+## Complexity tiers
+
+The router classifies each request into one of four tiers based on a weighted score:
+
+| Tier | Score range | Description |
+|------|-------------|-------------|
+| `Simple` | score < 0.0 | Short, factual, conversational |
+| `Medium` | 0.0 – 0.2 | Moderate complexity, some technical content |
+| `Complex` | 0.2 – 0.4 | Multi-step, technical, or domain-specific |
+| `Reasoning` | score ≥ 0.4 | Deep reasoning, proofs, multi-question |
+
+## The 15 scoring dimensions
+
+The scorer analyzes user message content across 15 weighted dimensions. Higher score = more complex request.
+
+| # | Dimension | Weight | What it checks |
+|---|-----------|--------|----------------|
+| 1 | Token count | 0.08 | Short messages score lower; long messages score higher |
+| 2 | Code presence | 0.15 | Backticks, code keywords (`fn`, `class`, `async`, etc.) |
+| 3 | Reasoning markers | 0.18 | Words like "prove", "analyze", "step by step", "explain why" |
+| 4 | Technical terms | 0.10 | "algorithm", "kubernetes", "distributed", "concurrent" |
+| 5 | Creative markers | 0.05 | "story", "poem", "brainstorm", "narrative" |
+| 6 | Simple indicators | 0.02 | "hello", "what is", "translate" — negative signal |
+| 7 | Multi-step patterns | 0.12 | "first", "then", "next", "step 1", numbered lists |
+| 8 | Question complexity | 0.05 | Number of `?` marks — more questions = more complex |
+| 9 | Agentic task markers | 0.04 | "read file", "deploy", "run command", "install" |
+| 10 | Math/logic | 0.06 | Equations, operators, "formula", "calculate" |
+| 11 | Language complexity | 0.04 | Average word length as a vocabulary proxy |
+| 12 | Conversation depth | 0.03 | Number of messages in context |
+| 13 | Tool usage | 0.04 | `+0.8` if request includes tool definitions |
+| 14 | Output format complexity | 0.02 | "json", "csv", "xml", "structured" |
+| 15 | Domain specificity | 0.02 | "medical", "legal", "clinical", "regulatory" |
+
+The weights sum to 1.0. The weighted sum produces a score that maps to a complexity tier.
+
+## Routing table
+
+Each (Profile, Tier) pair maps to a specific model:
+
+| Tier | eco | auto | premium | free |
+|------|-----|------|---------|------|
+| Simple | `deepseek/deepseek-chat` | `google/gemini-2.5-flash` | `openai/gpt-4o` | `openai/gpt-oss-120b` |
+| Medium | `google/gemini-2.5-flash-lite` | `xai/grok-code-fast-1` | `anthropic/claude-sonnet-4-20250514` | `openai/gpt-oss-120b` |
+| Complex | `deepseek/deepseek-chat` | `google/gemini-3.1-pro` | `anthropic/claude-opus-4-20250514` | `openai/gpt-oss-120b` |
+| Reasoning | `deepseek/deepseek-reasoner` | `xai/grok-4-fast-reasoning` | `openai/o3` | `openai/gpt-oss-120b` |
+
+## Example: same prompt, different profiles
+
+```
+Prompt: "Hello!"
+Tier: Simple (short, matches simple indicator keywords)
+
+  eco     → deepseek/deepseek-chat       ($0.28/M input)
+  auto    → google/gemini-2.5-flash      ($0.30/M input)
+  premium → openai/gpt-4o                ($2.50/M input)
+```
+
+```
+Prompt: "Prove step by step that quicksort has O(n log n) average complexity.
+         Analyze edge cases and compare with mergesort."
+Tier: Reasoning (reasoning markers: "prove", "step by step", "analyze", "compare")
+
+  eco     → deepseek/deepseek-reasoner   ($0.28/M input)
+  auto    → xai/grok-4-fast-reasoning    ($0.20/M input)
+  premium → openai/o3                    ($2.00/M input)
+```
+
+<Callout type="info">
+  The router classifies based on user message content only. System messages and assistant turns do not affect the score.
+</Callout>
+
+## Bypassing the router
+
+To use a specific model, pass its full ID directly:
+
+```json
+{
+  "model": "anthropic/claude-opus-4-20250514",
+  "messages": [...]
+}
+```
+
+Or use a short alias:
+
+```json
+{
+  "model": "opus",
+  "messages": [...]
+}
+```
+
+See [GET /v1/models](/docs/api/models) for the full list of model IDs.

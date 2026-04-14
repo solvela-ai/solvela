@@ -1,0 +1,157 @@
+---
+title: Error Reference
+description: HTTP status codes, error shapes, and how to handle common failures
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Error format
+
+All errors use the OpenAI error envelope. The `message` field contains a human-readable description.
+
+```json
+{
+  "error": {
+    "message": "description of what went wrong"
+  }
+}
+```
+
+For `402` responses specifically, `error.message` is a **JSON-encoded string** containing the full `PaymentRequired` object. You must parse it twice:
+
+```typescript
+const body = await response.json();
+const paymentRequired = JSON.parse(body.error.message);
+```
+
+## HTTP status codes
+
+| Code | Name | When it occurs |
+|------|------|----------------|
+| `200` | OK | Request succeeded |
+| `400` | Bad Request | Invalid parameters, unsupported model, message limit exceeded |
+| `402` | Payment Required | No `payment-signature` header, or payment verification failed |
+| `404` | Not Found | Unknown endpoint |
+| `429` | Too Many Requests | Rate limit exceeded |
+| `500` | Internal Server Error | Gateway error (bug or misconfiguration) |
+| `502` | Bad Gateway | Upstream provider returned an error |
+| `503` | Service Unavailable | Gateway temporarily unavailable |
+
+## Common errors and fixes
+
+### 402 — No payment
+
+```json
+{ "error": { "message": "<json-encoded PaymentRequired>" } }
+```
+
+**Cause:** No `payment-signature` header was included.
+
+**Fix:** Parse the `PaymentRequired` from `error.message`, build and sign a Solana USDC-SPL transaction for the `amount` to the `pay_to` address, encode it as a `PaymentPayload`, base64-encode, and resend with the `payment-signature` header.
+
+See [x402 Protocol](/docs/concepts/x402) for the full flow.
+
+---
+
+### 402 — Payment verification failed
+
+```json
+{ "error": { "message": "payment verification failed: ..." } }
+```
+
+**Cause:** The `payment-signature` header was present but the transaction could not be verified on Solana.
+
+**Common reasons:**
+- Transaction not yet confirmed — retry after a few seconds
+- Wrong recipient address (`pay_to` mismatch)
+- Wrong asset (not USDC-SPL mint)
+- Wrong network (not Solana mainnet)
+- Amount below the required minimum
+
+---
+
+### 402 — Replay attack detected
+
+```json
+{ "error": { "message": "transaction has already been used; each payment signature may only be submitted once" } }
+```
+
+**Cause:** You submitted the same signed transaction twice.
+
+**Fix:** Build a new transaction with a fresh blockhash and sign it again. Never reuse a transaction signature.
+
+---
+
+### 400 — Model not found
+
+```json
+{ "error": { "message": "model not found: 'my-custom-model'" } }
+```
+
+**Cause:** The `model` field contains an ID that isn't in the registry.
+
+**Fix:** Use a valid model ID from [GET /v1/models](/docs/api/models), a recognized alias (`sonnet`, `gpt5`, etc.), or a routing profile (`auto`, `eco`, `premium`, `free`).
+
+---
+
+### 400 — Too many messages
+
+```json
+{ "error": { "message": "too many messages: 300 exceeds maximum of 256" } }
+```
+
+**Cause:** The `messages` array exceeds 256 items.
+
+**Fix:** Truncate or summarize older messages.
+
+---
+
+### 400 — Payment amount insufficient
+
+```json
+{ "error": { "message": "payment amount insufficient: paid 100 but cost is 2625 atomic USDC" } }
+```
+
+**Cause:** The `amount` in your `PaymentPayload.accepted` is less than the gateway's computed cost.
+
+**Fix:** Use the `amount` value from the `402` response exactly. Do not reduce it.
+
+---
+
+### 400 — Request blocked by content policy
+
+```json
+{ "error": { "message": "Request blocked by content policy" } }
+```
+
+**Cause:** The prompt guard detected injection, jailbreak patterns, or other policy violations.
+
+**Fix:** Review the request content. Prompt injection patterns (e.g., "ignore previous instructions") are blocked.
+
+---
+
+### 500 — All providers failed
+
+```json
+{ "error": { "message": "all providers failed for model 'gpt-4o'. Your payment was submitted but no response could be generated." } }
+```
+
+**Cause:** The gateway verified payment but could not get a response from the upstream provider.
+
+**Fix:** Retry the request. If the issue persists, the provider may be experiencing an outage. Contact the gateway operator with the transaction signature.
+
+<Callout type="warn">
+  If you receive a 500 after a confirmed payment, your USDC was spent but no response was returned. Contact support with your transaction signature.
+</Callout>
+
+---
+
+### 429 — Rate limited
+
+```json
+{ "error": { "message": "rate limit exceeded" } }
+```
+
+**Cause:** Too many requests from this IP or wallet within the rate limit window.
+
+**Fix:** Back off and retry. The gateway ceiling is approximately 400 RPS. Use exponential backoff for retries.

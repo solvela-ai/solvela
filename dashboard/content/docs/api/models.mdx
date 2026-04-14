@@ -1,0 +1,99 @@
+---
+title: Models
+description: GET /v1/models — list available models with pricing and capabilities
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## GET /v1/models
+
+Returns all available models with pricing, context window size, and capability flags. No payment required.
+
+```bash
+curl https://rustyclawrouter-gateway.fly.dev/v1/models
+```
+
+## Response schema
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "gpt-4o",
+      "display_name": "GPT-4o",
+      "provider": "openai",
+      "context_window": 128000,
+      "supports_streaming": true,
+      "supports_tools": true,
+      "supports_vision": true,
+      "reasoning": false,
+      "pricing": {
+        "input_per_million_usdc": 2.50,
+        "output_per_million_usdc": 10.00,
+        "platform_fee_percent": 5
+      }
+    }
+  ]
+}
+```
+
+### Response fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | The model ID to pass in `model` field of requests |
+| `display_name` | string | Human-readable model name |
+| `provider` | string | Upstream provider: `openai`, `anthropic`, `google`, `xai`, `deepseek` |
+| `context_window` | integer | Maximum tokens in the combined input + output |
+| `supports_streaming` | boolean | Whether SSE streaming is available |
+| `supports_tools` | boolean | Whether function calling / tools are supported |
+| `supports_vision` | boolean | Whether image inputs are accepted |
+| `reasoning` | boolean | Whether the model performs multi-step reasoning (o3, Grok, etc.) |
+| `pricing.input_per_million_usdc` | float | Provider cost per million input tokens in USDC |
+| `pricing.output_per_million_usdc` | float | Provider cost per million output tokens in USDC |
+| `pricing.platform_fee_percent` | integer | Platform fee percentage (always `5`) |
+
+## Available models
+
+For a full pricing table, see [Pricing](/docs/concepts/pricing).
+
+| Model ID | Provider | Input $/M | Output $/M |
+|----------|----------|-----------|------------|
+| `openai/gpt-5.2` | OpenAI | $1.75 | $14.00 |
+| `openai/gpt-4o` | OpenAI | $2.50 | $10.00 |
+| `openai/gpt-4o-mini` | OpenAI | $0.15 | $0.60 |
+| `openai/o3` | OpenAI | $2.00 | $8.00 |
+| `openai/o3-mini` | OpenAI | $1.10 | $4.40 |
+| `openai/o4-mini` | OpenAI | $1.10 | $4.40 |
+| `openai/gpt-4.1` | OpenAI | $2.00 | $8.00 |
+| `openai/gpt-4.1-mini` | OpenAI | $0.40 | $1.60 |
+| `openai/gpt-4.1-nano` | OpenAI | $0.10 | $0.40 |
+| `openai/gpt-oss-120b` | OpenAI | $0.00 | $0.00 |
+| `anthropic/claude-opus-4-20250514` | Anthropic | $5.00 | $25.00 |
+| `anthropic/claude-sonnet-4-20250514` | Anthropic | $3.00 | $15.00 |
+| `anthropic/claude-haiku-4-5-20251001` | Anthropic | $1.00 | $5.00 |
+| `google/gemini-3.1-pro` | Google | $2.00 | $12.00 |
+| `google/gemini-2.5-flash` | Google | $0.30 | $2.50 |
+| `google/gemini-2.5-flash-lite` | Google | $0.10 | $0.40 |
+| `google/gemini-2.0-flash` | Google | $0.10 | $0.40 |
+| `google/gemini-2.0-flash-lite` | Google | $0.075 | $0.30 |
+| `xai/grok-4-fast-reasoning` | xAI | $0.20 | $0.50 |
+| `xai/grok-code-fast-1` | xAI | $0.20 | $1.50 |
+| `xai/grok-3` | xAI | $3.00 | $15.00 |
+| `xai/grok-3-mini` | xAI | $0.30 | $0.50 |
+| `deepseek/deepseek-chat` | DeepSeek | $0.28 | $0.42 |
+| `deepseek/deepseek-reasoner` | DeepSeek | $0.28 | $0.42 |
+| `deepseek/deepseek-coder` | DeepSeek | $0.28 | $0.42 |
+
+<Callout type="info">
+  All prices shown are provider cost before the 5% platform fee. The actual amount charged is `provider_cost * 1.05`.
+</Callout>
+
+## GET /pricing
+
+Returns the same model data in a pricing-focused format. Useful for cost estimation before making requests.
+
+```bash
+curl https://rustyclawrouter-gateway.fly.dev/pricing
+```

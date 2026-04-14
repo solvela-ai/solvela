@@ -1,0 +1,196 @@
+---
+title: x402 Protocol
+description: How AI agents pay for API calls with USDC-SPL on Solana using HTTP 402
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+
+The x402 protocol is a payment-in-HTTP mechanism built on top of the HTTP `402 Payment Required` status code. When a client sends a request without payment, the server responds with `402` and a structured description of what it costs and how to pay. The client pays, then retries.
+
+Solvela uses x402 to enable AI agents to pay for LLM API calls with USDC-SPL on Solana, without API keys or accounts.
+
+## Request flow
+
+<Steps>
+  <Step>
+    **Agent sends request without payment**
+
+    The agent sends a normal `POST /v1/chat/completions` request with no `payment-signature` header.
+  </Step>
+  <Step>
+    **Gateway returns 402**
+
+    The gateway computes the cost for the requested model, then returns `HTTP 402` with a `PaymentRequired` JSON body describing the cost and accepted payment methods.
+  </Step>
+  <Step>
+    **Agent reads cost and builds a transaction**
+
+    The agent parses the `402` body, reads the `amount` (atomic USDC) and `pay_to` (recipient wallet), and builds a signed Solana USDC-SPL transfer transaction.
+  </Step>
+  <Step>
+    **Agent encodes the PaymentPayload**
+
+    The signed transaction and metadata are wrapped in a `PaymentPayload` struct, serialized to JSON, and base64-encoded.
+  </Step>
+  <Step>
+    **Agent retries with the payment header**
+
+    The same request is resent with the `payment-signature: <base64>` header.
+  </Step>
+  <Step>
+    **Gateway verifies and proxies**
+
+    The gateway decodes the header, checks replay protection, verifies the Solana transaction on-chain, then proxies to the LLM provider and returns the response.
+  </Step>
+</Steps>
+
+## The 402 response
+
+When no `payment-signature` header is present, the gateway responds with `HTTP 402`. The body uses OpenAI error envelope format — the `PaymentRequired` JSON is inside `error.message` as a string.
+
+```json
+{
+  "error": {
+    "message": "<JSON-encoded PaymentRequired>"
+  }
+}
+```
+
+The decoded `PaymentRequired` object looks like:
+
+```json
+{
+  "x402_version": 2,
+  "resource": {
+    "url": "/v1/chat/completions",
+    "method": "POST"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "amount": "2625",
+      "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "pay_to": "<gateway-recipient-wallet>",
+      "max_timeout_seconds": 300
+    },
+    {
+      "scheme": "escrow",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "amount": "2625",
+      "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "pay_to": "<gateway-recipient-wallet>",
+      "max_timeout_seconds": 300,
+      "escrow_program_id": "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+    }
+  ],
+  "cost_breakdown": {
+    "provider_cost": "0.002500",
+    "platform_fee": "0.000125",
+    "total": "0.002625",
+    "currency": "USDC",
+    "fee_percent": 5
+  },
+  "error": "Payment required"
+}
+```
+
+### Fields
+
+| Field | Description |
+|-------|-------------|
+| `x402_version` | Protocol version. Currently `2`. |
+| `resource.url` | The endpoint path that requires payment. |
+| `resource.method` | Always `POST` for chat completions. |
+| `accepts` | Array of accepted payment methods. The agent picks one. |
+| `accepts[].scheme` | `"exact"` (direct transfer) or `"escrow"` (on-chain escrow). |
+| `accepts[].network` | Solana mainnet: `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`. |
+| `accepts[].amount` | Cost in atomic USDC units (6 decimals). `2625` = `$0.002625`. |
+| `accepts[].asset` | USDC-SPL mint: `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`. |
+| `accepts[].pay_to` | Gateway recipient wallet (base58). |
+| `accepts[].max_timeout_seconds` | How long the payment authorization is valid. |
+| `accepts[].escrow_program_id` | Only present for `scheme: "escrow"`. The deployed Anchor program. |
+| `cost_breakdown` | Human-readable cost breakdown. |
+
+## Payment payload format
+
+After building and signing a transaction, wrap it in a `PaymentPayload` and send it as the `payment-signature` header:
+
+```json
+{
+  "x402_version": 2,
+  "resource": {
+    "url": "/v1/chat/completions",
+    "method": "POST"
+  },
+  "accepted": {
+    "scheme": "exact",
+    "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+    "amount": "2625",
+    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "pay_to": "<gateway-recipient-wallet>",
+    "max_timeout_seconds": 300
+  },
+  "payload": {
+    "transaction": "<base64-encoded-signed-solana-versioned-tx>"
+  }
+}
+```
+
+For escrow payments, the `payload` field uses a different shape:
+
+```json
+{
+  "payload": {
+    "deposit_tx": "<base64-encoded-signed-deposit-tx>",
+    "service_id": "<base64-encoded-32-byte-service-id>",
+    "agent_pubkey": "<base58-agent-wallet-pubkey>"
+  }
+}
+```
+
+The entire `PaymentPayload` object is JSON-serialized and base64-encoded before being placed in the `payment-signature` header.
+
+## Payment schemes
+
+### Exact (direct transfer)
+
+The agent sends a USDC-SPL transfer transaction to the gateway's recipient wallet for the exact amount specified. The gateway verifies the transaction on Solana mainnet before serving the request.
+
+**Use when:** You want simplicity and don't need refund guarantees.
+
+### Escrow (trustless on-chain)
+
+The agent deposits USDC into a PDA vault controlled by the Solvela Anchor program (`9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`). The gateway claims the actual cost from the vault after the request completes. If the gateway fails to claim within the timeout, the agent can reclaim their deposit.
+
+PDA seeds: `[b"escrow", agent_pubkey_bytes, service_id_bytes]`
+
+**Use when:** You want trustless guarantees — the gateway can only claim what it actually earned.
+
+See [Escrow System](/docs/concepts/escrow) for full details.
+
+## Security
+
+### Replay protection
+
+Every transaction signature is tracked in Redis (or an in-memory LRU with TTL when Redis is unavailable). Submitting the same signed transaction twice returns `402 Invalid Payment`.
+
+### Amount validation
+
+The gateway recomputes the expected cost server-side and rejects any payment where `client_amount < expected_amount`. The agent cannot underpay.
+
+### Asset and network validation
+
+The gateway validates:
+- `accepted.network` must be `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`
+- `accepted.asset` must be the USDC-SPL mint
+- `accepted.pay_to` must match the gateway's configured recipient wallet
+
+### Resource binding
+
+The `resource.url` in the payload is validated against the actual endpoint. A payment for `/v1/chat/completions` cannot be used on any other endpoint.
+
+<Callout type="warn">
+  Transactions have a `max_timeout_seconds` window (default 300 seconds). Build and submit your payment within this window to avoid rejection.
+</Callout>

@@ -1,26 +1,621 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+@custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --font-display: 'Archivo', system-ui, sans-serif;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  /* Dashboard-specific tokens */
+  --color-bg-base: var(--color-bg-base);
+  --color-bg-surface: var(--color-bg-surface);
+  --color-bg-surface-raised: var(--color-bg-surface-raised);
+  --color-bg-surface-hover: var(--color-bg-surface-hover);
+  --color-bg-inset: var(--color-bg-inset);
+  --color-border-subtle: var(--color-border-subtle);
+  --color-border-emphasis: var(--color-border-emphasis);
+  --color-text-primary: var(--color-text-primary);
+  --color-text-secondary: var(--color-text-secondary);
+  --color-text-tertiary: var(--color-text-tertiary);
+  --color-brand: var(--color-brand);
+  --color-brand-hover: var(--color-brand-hover);
+  --color-brand-subtle: var(--color-brand-subtle);
+  --color-brand-text: var(--color-brand-text);
+  --color-success: var(--color-success);
+  --color-warning: var(--color-warning);
+  --color-error: var(--color-error);
+  --color-info: var(--color-info);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* ==========================================================
+   SOLVELA DOCS — Brutalism layout + ColorsForDocs palette
+   ========================================================== */
+
+/* ---- Dark Mode (Primary — this is a dark-first palette) ---- */
+:root,
+.dark {
+  --radius: 0.625rem;
+
+  /* ColorsForDocs.ini mapping */
+  --background: #262624;               /* Background */
+  --foreground: #DEDCD1;               /* Text */
+  --card: #30302E;                     /* Button/CardBG-Accent */
+  --card-foreground: #DEDCD1;          /* Text */
+  --popover: #141413;                  /* Icon BG */
+  --popover-foreground: #DEDCD1;       /* Text */
+
+  --primary: #FAF9F5;                  /* Headings — primary actions */
+  --primary-foreground: #262624;       /* Dark on light primary */
+  --secondary: #30302E;               /* Button/CardBG-Accent */
+  --secondary-foreground: #DEDCD1;     /* Text */
+  --muted: #30302E;                    /* Button/CardBG-Accent */
+  --muted-foreground: #DEDCD180;       /* Text at 50% */
+  --destructive: #FE8181;             /* AccentColor for logo (red) */
+  --border: #C8A24030;                /* Warm gold at 19% */
+  --input: #30302E;                    /* Button/CardBG-Accent */
+  --ring: #DEDCD140;                   /* Neutral focus ring */
+
+  --accent: #DEDCD1;                   /* Neutral — matches foreground */
+  --accent-foreground: #FAF9F5;        /* Headings */
+  --accent-muted: rgba(222, 220, 209, 0.08);
+
+  /* Sidebar */
+  --sidebar-bg: #1F1E1D;              /* SidebarBG */
+
+  /* Typography colors */
+  --heading-color: #FAF9F5;            /* Headings */
+  --bold-color: #FAF9F5;              /* Bold text — bright, same as headings */
+  --italic-color: #DEDCD1;            /* Text */
+  --text-faint: #DEDCD140;            /* Text at 25% */
+
+  /* Callout accents */
+  --callout-info: #DEDCD1;            /* Neutral info */
+  --callout-warn: #FE8181;            /* Logo accent (red) */
+  --callout-error: #FE8181;           /* Logo accent (red) */
+  --callout-success: #65BB30;         /* Green accent */
+
+  /* Hover */
+  --hover: #F9F9F9;                   /* Hover */
+
+  /* HTTP method colors */
+  --http-get: #34d399;
+  --http-post: #60a5fa;
+  --http-patch: #fbbf24;
+  --http-put: #fb923c;
+  --http-delete: #f87171;
+  --http-head: #c084fc;
+
+  /* Dashboard-specific tokens (preserved from original) */
+  --color-bg-base: #262624;
+  --color-bg-surface: #30302E;
+  --color-bg-surface-raised: #3A3936;
+  --color-bg-surface-hover: #404040;
+  --color-bg-inset: #1F1E1D;
+  --color-border-subtle: #C8A24020;
+  --color-border-emphasis: #C8A24060;
+  --color-text-primary: #FAF9F5;
+  --color-text-secondary: #DEDCD1;
+  --color-text-tertiary: #DEDCD180;
+  --color-brand: #f97316;
+  --color-brand-hover: #ea580c;
+  --color-brand-subtle: rgba(249, 115, 22, 0.1);
+  --color-brand-text: #fb923c;
+  --color-success: #65BB30;
+  --color-warning: #fbbf24;
+  --color-error: #FE8181;
+  --color-info: #60a5fa;
+}
+
+/* ---- Light Mode (inverted for accessibility) ---- */
+@media (prefers-color-scheme: light) {
+  :root:not(.dark) {
+    --background: #F5F4F0;
+    --foreground: #262624;
+    --card: #EAEAE6;
+    --card-foreground: #262624;
+    --popover: #EAEAE6;
+    --popover-foreground: #262624;
+
+    --primary: #1F1E1D;
+    --primary-foreground: #F5F4F0;
+    --secondary: #EAEAE6;
+    --secondary-foreground: #262624;
+    --muted: #EAEAE6;
+    --muted-foreground: #626158;
+    --destructive: #D25E65;
+    --border: #C8A24018;
+    --input: #EAEAE6;
+    --ring: #26262440;
+
+    --accent: #262624;
+    --accent-foreground: #F5F4F0;
+    --accent-muted: rgba(38, 38, 36, 0.06);
+
+    --sidebar-bg: #EAEAE6;
+
+    --heading-color: #1F1E1D;
+    --bold-color: #1F1E1D;
+    --italic-color: #626158;
+    --text-faint: #62615840;
+
+    --callout-info: #626158;
+    --callout-warn: #FE8181;
+    --callout-error: #D25E65;
+    --callout-success: #65BB30;
+
+    --hover: #262624;
+
+    /* HTTP method colors */
+    --http-get: #059669;
+    --http-post: #2563eb;
+    --http-patch: #d97706;
+    --http-put: #ea580c;
+    --http-delete: #dc2626;
+    --http-head: #9333ea;
+
+    /* Dashboard-specific tokens (light) */
+    --color-bg-base: #F5F4F0;
+    --color-bg-surface: #EAEAE6;
+    --color-bg-surface-raised: #E0E0DC;
+    --color-bg-surface-hover: #D8D8D4;
+    --color-bg-inset: #EAEAE6;
+    --color-border-subtle: #C8A24010;
+    --color-border-emphasis: #C8A24040;
+    --color-text-primary: #1F1E1D;
+    --color-text-secondary: #262624;
+    --color-text-tertiary: #626158;
+    --color-brand: #ea580c;
+    --color-brand-hover: #c2410c;
+    --color-brand-subtle: rgba(234, 88, 12, 0.1);
+    --color-brand-text: #f97316;
+    --color-success: #3F7A1F;
+    --color-warning: #d97706;
+    --color-error: #D25E65;
+    --color-info: #2563eb;
   }
 }
 
-body {
-  background: var(--background);
+@layer base {
+  * {
+    @apply border-border outline-foreground/20;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* ==========================================================
+   BRUTALISM TYPOGRAPHY
+   Uniform heading sizes, color-driven hierarchy
+   ========================================================== */
+
+/* Heading hierarchy — spacing + size create rhythm */
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6 {
+  color: var(--heading-color);
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+}
+
+/* h2 = major section break */
+.prose h2 {
+  font-size: 1.375rem !important;
+  font-weight: 600;
+  line-height: 1.3;
+  margin-top: 3rem;
+  margin-bottom: 1rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.prose h2:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+/* h3 = subsection */
+.prose h3 {
+  font-size: 1.125rem !important;
+  font-weight: 600;
+  line-height: 1.35;
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+}
+
+/* h4-h6 = detail level */
+.prose h4,
+.prose h5,
+.prose h6 {
+  font-size: 1rem !important;
+  font-weight: 500;
+  line-height: 1.4;
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+/* Page title (h1 only when first child) */
+.inline-title,
+.prose > h1:first-child,
+article header h1 {
+  font-family: var(--font-display);
+  font-size: clamp(1.5rem, 4vw + 0.5rem, 3rem) !important;
+  font-weight: 700;
+  line-height: 1.15;
+  color: var(--heading-color);
+}
+
+/* Bold and italic — color treatment */
+.prose strong {
+  color: var(--bold-color);
+  font-weight: 600;
+}
+
+.prose em {
+  color: var(--italic-color);
+  font-style: italic;
+}
+
+/* ==========================================================
+   CODE BLOCKS
+   ========================================================== */
+
+pre {
+  overflow-x: auto;
+  padding: 1rem;
+  border-radius: 0.625rem;
+  background: var(--card) !important;
+  border: 1px solid var(--border);
+}
+
+pre code {
+  display: block;
+  min-width: max-content;
+  background: transparent !important;
+  border: none !important;
+  padding: 1rem !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  color: inherit !important;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+}
+
+code {
+  font-family: var(--font-mono);
+}
+
+/* Shiki dual-theme support */
+pre code span {
+  color: var(--shiki-light);
+}
+
+.dark pre code span {
+  color: var(--shiki-dark);
+}
+
+/* Code block line highlighting */
+pre code [data-highlighted-line] {
+  background-color: rgba(222, 220, 209, 0.06);
+  display: block;
+  margin: 0 -1rem;
+  padding: 0 1rem;
+}
+
+/* Inline code */
+:not(pre) > code {
+  background: var(--card);
+  color: var(--bold-color);
+  padding: 0.15em 0.35em;
+  border-radius: calc(var(--radius) * 0.5);
+  font-size: 0.875em;
+  font-family: var(--font-mono);
+  border: 1px solid var(--border);
+}
+
+/* ==========================================================
+   BRUTALISM UI — Telsi-inspired flattened chrome
+   ========================================================== */
+
+/* Tables — minimal lines, horizontal scroll on mobile */
+.prose table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.prose th {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--heading-color);
+  text-align: left;
+  border-bottom: 2px solid var(--border);
+}
+
+.prose td {
+  border-bottom: 1px solid var(--border);
+}
+
+/* Links — foreground, no underline */
+.prose a {
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  text-decoration: none;
+}
+
+.prose a:hover {
+  color: var(--heading-color);
+}
+
+/* Blockquotes — accent left border, flat */
+.prose blockquote {
+  border-left-color: var(--border);
+  background: transparent;
+  font-style: normal;
+  color: var(--muted-foreground);
+}
+
+/* Text highlight — green accent */
+.prose mark {
+  background-color: rgba(101, 187, 48, 0.3);
+  color: inherit;
+}
+
+/* ==========================================================
+   TELSI-INSPIRED CARD & SURFACE SYSTEM
+   ========================================================== */
+
+/* Card surface — clean border, no glow */
+.card-surface {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 0.625rem);
+}
+
+/* Nested card with grid pattern overlay */
+.card-nested {
+  background: var(--popover);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 2px);
+  background-image:
+    linear-gradient(90deg, rgba(222, 220, 209, 0.03) 1px, transparent 1px),
+    linear-gradient(rgba(222, 220, 209, 0.03) 1px, transparent 1px);
+  background-size: 60px 60px;
+}
+
+/* ==========================================================
+   GRID BACKGROUND PATTERN
+   ========================================================== */
+
+.bg-grid {
+  background-image:
+    linear-gradient(90deg, rgba(222, 220, 209, 0.04) 1px, transparent 1px),
+    linear-gradient(rgba(222, 220, 209, 0.04) 1px, transparent 1px);
+  background-size: 60px 60px;
+}
+
+/* ==========================================================
+   SECTION HEADER UTILITY
+   ========================================================== */
+
+.section-header {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+
+/* ==========================================================
+   DIVIDER PATTERN
+   ========================================================== */
+
+.divider-fade {
+  height: 1px;
+  background: linear-gradient(to right, transparent, var(--border) 20%, var(--border) 80%, transparent);
+}
+
+/* ==========================================================
+   SIDEBAR — Distinct background
+   ========================================================== */
+
+/* Override sidebar to use its dedicated color */
+nav[data-sidebar],
+aside[data-sidebar],
+.docs-sidebar {
+  background: var(--sidebar-bg) !important;
+}
+
+/* ==========================================================
+   ANIMATIONS (Telsi-inspired)
+   ========================================================== */
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(32px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-fade-in {
+  animation: fade-in 0.5s ease both;
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Staggered animation delays */
+.delay-1 { animation-delay: 0.12s; }
+.delay-2 { animation-delay: 0.24s; }
+.delay-3 { animation-delay: 0.36s; }
+.delay-4 { animation-delay: 0.48s; }
+.delay-5 { animation-delay: 0.60s; }
+
+/* ==========================================================
+   DELIGHT — Subtle micro-interactions
+   ========================================================== */
+
+/* Link hover transition */
+.prose a {
+  transition: color 0.2s ease;
+}
+
+/* Content fade-in on page load */
+article {
+  animation: fade-in 0.4s ease both;
+}
+
+/* Sidebar active item — left accent bar */
+.nav-item-active {
+  position: relative;
+}
+
+.nav-item-active::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background: var(--foreground);
+  border-radius: 1px;
+}
+
+/* Smooth hover transitions on interactive elements */
+a, button {
+  transition: color 0.15s ease, background-color 0.15s ease, opacity 0.15s ease;
+}
+
+/* Code block — subtle top-bar accent line */
+pre {
+  position: relative;
+}
+
+pre::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 1rem;
+  right: 1rem;
+  height: 1px;
+  background: var(--border);
+  border-radius: 0 0 1px 1px;
+}
+
+/* ==========================================================
+   MOBILE REFINEMENTS
+   ========================================================== */
+
+@media (max-width: 639px) {
+  /* Tighter code block padding on mobile */
+  pre {
+    padding: 0.75rem;
+    border-radius: 0.5rem;
+    font-size: 0.8125rem;
+  }
+
+  pre code {
+    padding: 0.75rem !important;
+  }
+
+  /* Reduce heading spacing on mobile */
+  .prose h2 {
+    margin-top: 2em;
+    padding-top: 1em;
+  }
+
+  .prose h3 {
+    margin-top: 1.5em;
+  }
+}
+
+/* ==========================================================
+   REDUCED MOTION — Accessibility
+   ========================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ==========================================================
+   SCROLLBAR
+   ========================================================== */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--text-faint);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
 }
