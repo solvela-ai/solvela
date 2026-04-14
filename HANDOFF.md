@@ -1,7 +1,7 @@
 # HANDOFF.md — Solvela Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-12 (load tested all 7 phases, all 5 providers verified with real USDC)
+> **Last verified:** 2026-04-14 (docs site redesign — ported rcr-docs-site design into dashboard)
 
 ---
 
@@ -50,9 +50,19 @@ Trustless USDC-SPL escrow: deposit/claim/refund. PDA vault with timeout refunds.
 
 Python (`sdks/python/`), TypeScript (`sdks/typescript/`), Go (`sdks/go/`), MCP server (`sdks/mcp/`).
 
-### Dashboard
+### Dashboard & Documentation Site
 
-Next.js 16 + Tailwind + Recharts. 5 pages: Overview, Usage, Models, Wallet, Settings. Deployed to Vercel (`solvela.vercel.app`). Note: no `vercel.json` in repo — deployed via Vercel UI.
+Next.js 16 + Tailwind v4 + Fumadocs (core + mdx) + Recharts. Redesigned 2026-04-13/14 from standalone dashboard into a docs-first developer platform.
+
+**Docs engine**: Fumadocs-core + fumadocs-mdx for content pipeline (MDX, search, source loading). Custom UI components ported from `rcr-docs-site` — NOT using fumadocs-ui. Warm brutalist dark palette (#262624 bg, #DEDCD1 text, #FAF9F5 headings, gold borders). Custom fonts: DM Sans, Archivo (display), JetBrains Mono. Custom Shiki syntax themes (solvela-dark/light).
+
+**Docs pages (17 MDX)**: Welcome, Quickstart, Concepts (x402, Smart Router, Escrow, Pricing), API Reference (Overview, Chat Completions, Models, Errors), SDKs (Overview, TypeScript, Python, Go, Rust CLI, MCP).
+
+**Dashboard pages (5)**: Overview, Usage, Models, Wallet, Settings — dark-converted to match docs palette. Live under `/dashboard/*` with separate Shell layout.
+
+**Route structure**: `/` → redirect to `/docs`, `/docs/*` → Fumadocs MDX pages, `/dashboard/*` → custom dashboard pages, `/api/search` → Fumadocs Orama search.
+
+Deployed to Vercel (`solvela.vercel.app`). Note: no `vercel.json` in repo — deployed via Vercel UI.
 
 ---
 
@@ -127,11 +137,11 @@ All 5 provider keys set and verified working (OpenAI, Anthropic, Google, xAI, De
 - **x402 V2 sessions**: V2 adds sessions and service discovery. Wire format migrated but session features not implemented.
 - **Load testing**: COMPLETED 2026-04-12. All 7 phases passed. See `docs/load-tests/2026-04-12-results.md`. T1 ceiling ~400 RPS, SLO validated at 50 RPS x 5 min, all 5 providers verified with real USDC payments. CLI features added: `--model` flag, live progress output, `SOLVELA_RATE_LIMIT_MAX` env override.
 - **Fly app rename**: `rustyclawrouter-gateway` → `solvela-gateway` (deferred — requires DNS migration)
-- **Docs theme rename**: `@rustyclaw/docs-theme` → `@solvela/docs-theme`
+- **Docs theme rename**: `@rustyclaw/docs-theme` → `@solvela/docs-theme` (rcr-docs-site design system ported into dashboard 2026-04-14)
 - **Rate limiter redesign**: Current `tokio::sync::Mutex<HashMap>` is the bottleneck at 400+ RPS. Replace with sharded or Redis-based approach when traffic demands it.
 - **Per-user fairness queuing**: Not started.
 - **Secret rotation plan**: No automated rotation.
-- **API reference docs**: Incomplete.
+- **API reference docs**: 17 MDX pages written (2026-04-13). Content based on actual codebase. OpenAPI auto-generation via fumadocs-openapi deferred. Welcome page design polish in progress — iterating toward Anthropic-style visual hierarchy.
 - **Rust 2021 → 2024 edition**: Planned but not blocking (currently 2021).
 - **SDK publishing**: SDKs exist (Python 63 tests, TypeScript, Go, MCP). PyPI/npm/crates.io publishing status unclear.
 
