@@ -63,3 +63,14 @@ dashboard/out/
 .vercel
 .env*.local
 sdks/python/.omc/
+
+# Claude Code / OMC local state
+.claude/
+.omc/
+**/.omc/
+
+# Dashboard local build artifacts
+dashboard/.source/
+
+# WSL Zone.Identifier metadata
+*:Zone.Identifier
