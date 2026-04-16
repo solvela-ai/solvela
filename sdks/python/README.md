@@ -63,7 +63,7 @@ response = client.smart_chat("Explain quantum computing", profile="eco")
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `private_key` | `$SOLANA_WALLET_KEY` | Base58 Solana private key |
-| `api_url` | `https://api.solvela.com` | Gateway URL |
+| `api_url` | `https://api.solvela.ai` | Gateway URL |
 | `session_budget` | `None` | Max USDC spend per session |
 | `timeout` | `60.0` | HTTP timeout in seconds |
 

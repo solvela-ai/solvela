@@ -167,7 +167,7 @@ console.log(wallet.redactedKey); // "5K1g...w5gS"
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `apiUrl` | `string` | `$RCR_API_URL` or `https://api.solvela.com` | Gateway URL |
+| `apiUrl` | `string` | `$RCR_API_URL` or `https://api.solvela.ai` | Gateway URL |
 | `privateKey` | `string` | `$SOLANA_WALLET_KEY` | Base58 Solana private key for signing |
 | `sessionBudget` | `number` | `undefined` | Max USDC spend per session |
 | `timeout` | `number` | `60000` | HTTP timeout in milliseconds |

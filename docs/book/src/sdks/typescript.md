@@ -33,7 +33,7 @@ Environment variables:
 
 | Variable | Description |
 |----------|-------------|
-| `RCR_API_URL` | Gateway URL (default: `https://api.solvela.com`) |
+| `RCR_API_URL` | Gateway URL (default: `https://api.solvela.ai`) |
 | `SOLANA_WALLET_KEY` | Base58 wallet private key |
 | `SOLANA_RPC_URL` | Solana RPC endpoint |
 
