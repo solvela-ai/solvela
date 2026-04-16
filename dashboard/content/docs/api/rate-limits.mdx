@@ -1,0 +1,113 @@
+---
+title: Rate Limits
+description: Rate limiting and quotas
+---
+
+Solvela applies rate limiting at multiple layers to protect gateway stability and ensure fair usage across all clients.
+
+## Middleware Stack
+
+Requests pass through the following limiting layers in order:
+
+| Layer | Scope | Description |
+|-------|-------|-------------|
+| Per-IP rate limiting | Client IP address | Prevents abuse from a single origin before wallet identity is established |
+| Per-wallet rate limiting | Solana wallet address | Primary limit for x402 users; each wallet has an independent request budget |
+| Per-key rate limiting | API key | Applied for enterprise users instead of per-wallet limits |
+| Global concurrency limiting | Gateway-wide | Caps total in-flight requests across all clients to prevent overload |
+| Request timeout | Per request | Hard timeout applied globally; long-running requests are terminated |
+
+## Rate Limit Headers
+
+Every response includes headers indicating the current limit state for your wallet or key:
+
+| Header | Description |
+|--------|-------------|
+| `X-RateLimit-Limit` | Maximum requests allowed in the current window |
+| `X-RateLimit-Remaining` | Requests remaining in the current window |
+| `X-RateLimit-Reset` | Unix timestamp when the current window resets |
+
+When a request is rejected due to rate limiting, the gateway returns `429 Too Many Requests` with a `rate_limited` error type. Use the `X-RateLimit-Reset` value to determine when to retry.
+
+```bash
+# Example response headers
+HTTP/2 200
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 42
+X-RateLimit-Reset: 1712345678
+```
+
+<Note>
+Rate limit windows and exact thresholds are subject to change. Always read the headers from live responses rather than hardcoding expected values.
+</Note>
+
+## Enterprise Configuration
+
+Enterprise organizations using API keys can configure rate limits and spending controls through the dashboard:
+
+<Tabs items={["Team Budgets", "Session Budgets", "Model Restrictions"]}>
+  <Tab value="Team Budgets">
+    Set maximum spend limits per team on an hourly or daily basis. When a team reaches its budget, subsequent requests return `429` until the window resets.
+
+    ```json
+    {
+      "team_id": "team_abc123",
+      "budget": {
+        "hourly_usdc": "10.00",
+        "daily_usdc": "100.00"
+      }
+    }
+    ```
+  </Tab>
+  <Tab value="Session Budgets">
+    Assign a spend cap to a session token so individual end-users or automated jobs cannot exceed a defined cost.
+
+    ```typescript
+    const session = await client.sessions.create({
+      budget_usdc: "0.50", // This session cannot spend more than $0.50
+      ttl_seconds: 3600,
+    });
+
+    // Pass session token to end-user or automated job
+    const userClient = new SolvelaClient({ sessionToken: session.token });
+    ```
+  </Tab>
+  <Tab value="Model Restrictions">
+    Restrict which models a team or API key is permitted to call. Requests to restricted models return `403 Forbidden`.
+
+    ```json
+    {
+      "team_id": "team_abc123",
+      "allowed_models": ["eco", "gpt-4o-mini", "claude-haiku-4-5"],
+      "denied_models": ["premium", "claude-opus-4-6"]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+Use session budgets in SDKs when building user-facing products. Pass a session token to each user rather than your root API key. This prevents any single user from exhausting your organization's budget and isolates spend by user in the audit log.
+</Tip>
+
+## Handling Rate Limit Errors
+
+When you receive a `429` response, back off until the reset window expires:
+
+```typescript
+async function chatWithBackoff(client: SolvelaClient, params: ChatParams) {
+  const res = await client.chatRaw(params);
+
+  if (res.status === 429) {
+    const resetAt = parseInt(res.headers.get("X-RateLimit-Reset") ?? "0", 10);
+    const waitMs = Math.max(0, resetAt * 1000 - Date.now());
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    return client.chatRaw(params); // retry once after window resets
+  }
+
+  return res;
+}
+```
+
+<Warning>
+Do not retry on `429` immediately in a tight loop. This will not succeed and will count against your limit once the window resets. Always wait for `X-RateLimit-Reset` before retrying.
+</Warning>

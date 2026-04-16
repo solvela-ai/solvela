@@ -1,0 +1,99 @@
+---
+title: Teams
+description: Create sub-groups within an organization, assign wallets, and enforce spending limits.
+---
+
+<div className="eyebrow">Enterprise</div>
+
+# Teams
+
+Teams are sub-groups inside an organization. Use them to partition spend by department, project, or agent cluster. Each team can have its own wallet allowlist and budget limits.
+
+## Create a team
+
+Requires `admin` or `owner` role.
+
+```http title="POST /v1/orgs/:id/teams"
+POST /v1/orgs/018f1a2b-.../teams
+Authorization: Bearer <admin-token | solvela_k_...>
+Content-Type: application/json
+
+{
+  "name": "research-agents"
+}
+```
+
+**Response** — `201 Created`
+
+```json
+{
+  "id": "019c3d4e-...",
+  "org_id": "018f1a2b-...",
+  "name": "research-agents",
+  "created_at": "2025-09-01T00:00:00Z"
+}
+```
+
+## List teams
+
+Requires `member` role or higher.
+
+```http title="GET /v1/orgs/:id/teams"
+GET /v1/orgs/018f1a2b-.../teams
+Authorization: Bearer <admin-token | solvela_k_...>
+```
+
+## Add a member
+
+Requires `admin` or `owner` role. Non-owners cannot assign the `owner` role.
+
+```http title="POST /v1/orgs/:id/members"
+POST /v1/orgs/018f1a2b-.../members
+Authorization: Bearer <admin-token | solvela_k_...>
+Content-Type: application/json
+
+{
+  "wallet_address": "AgEnTwALLetAddReSs...",
+  "role": "member"
+}
+```
+
+**`role`** — one of `owner`, `admin`, `member`.
+
+## List members
+
+Requires `member` role or higher.
+
+```http title="GET /v1/orgs/:id/members"
+GET /v1/orgs/018f1a2b-.../members
+Authorization: Bearer <admin-token | solvela_k_...>
+```
+
+## Team wallets
+
+Wallets must be explicitly added to a team before they can route spend through it.
+
+### Add a wallet to a team
+
+Requires `admin` or `owner` role.
+
+```http title="POST /v1/orgs/:id/teams/:tid/wallets"
+POST /v1/orgs/018f1a2b-.../teams/019c3d4e-.../wallets
+Authorization: Bearer <admin-token | solvela_k_...>
+Content-Type: application/json
+
+{
+  "wallet_address": "AgEnTwALLetAddReSs..."
+}
+```
+
+### List wallets in a team
+
+Requires `member` role or higher.
+
+```http title="GET /v1/orgs/:id/teams/:tid/wallets"
+GET /v1/orgs/018f1a2b-.../teams/019c3d4e-.../wallets
+Authorization: Bearer <admin-token | solvela_k_...>
+```
+
+<UpgradeCta />

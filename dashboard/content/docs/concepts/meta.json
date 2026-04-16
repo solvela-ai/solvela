@@ -1,4 +1,4 @@
 {
   "title": "Concepts",
-  "pages": ["x402", "smart-router", "escrow", "pricing"]
+  "pages": ["architecture", "x402", "smart-router", "escrow", "pricing", "request-flow", "payment-flow"]
 }

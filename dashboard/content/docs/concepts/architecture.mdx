@@ -1,0 +1,114 @@
+---
+title: Architecture
+description: How Solvela is structured
+---
+
+Solvela is a Rust workspace composed of five focused crates, an on-chain Anchor escrow program, a set of multi-language SDKs, and a Next.js dashboard. Every inbound HTTP request is handled by a single binary — the gateway — which delegates to the other crates for routing logic, payment verification, and shared wire types.
+
+## Workspace Crates
+
+<CardGroup cols={2}>
+  <Card title="gateway" icon="server">
+    The **only binary** in the workspace (`solvela`). Axum HTTP server with routes, middleware, provider proxies, usage tracking, Redis caching, and Prometheus metrics.
+  </Card>
+  <Card title="x402" icon="lock">
+    Pure protocol library — **no Axum dependency**. Solana verification, escrow integration, fee payer pool, nonce pool, and the chain-agnostic `PaymentVerifier` trait.
+  </Card>
+  <Card title="router" icon="git-branch">
+    15-dimension rule-based request scorer, routing profiles (`eco` / `auto` / `premium` / `free`), and model registry that loads `config/models.toml`.
+  </Card>
+  <Card title="protocol" icon="file-code">
+    Shared wire-format types (`solvela-protocol`). Payment protocol types, OpenAI-compatible chat types, model info, and constants. **Zero workspace dependencies.**
+  </Card>
+</CardGroup>
+
+There is also a fifth crate — **cli** (`rcr-cli`) — providing `wallet`, `chat`, `models`, `health`, `stats`, and `doctor` commands for operators and developers.
+
+## Crate Dependency Graph
+
+```
+protocol (wire types, zero deps)
+    ↑
+    ├── x402 (Solana verification, escrow)
+    ├── router (scorer, profiles, model registry)
+    │
+    └── gateway (Axum HTTP server — the only binary)
+            ├── routes/chat/ (completions, cost, payment, provider)
+            ├── middleware/ (rate limit, x402, API key, CORS)
+            ├── providers/ (OpenAI, Anthropic, Google, xAI, DeepSeek)
+            └── a2a/ (Agent-to-Agent protocol adapter)
+```
+
+`protocol` sits at the bottom and carries no internal dependencies — every other crate builds on top of it without creating circular imports.
+
+<Note>
+`x402` deliberately has no Axum dependency. This keeps the payment verification logic portable and independently testable outside of any web framework.
+</Note>
+
+## Supporting Components
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| Anchor escrow program | `programs/escrow/` | Trustless USDC-SPL escrow with deposit, claim, and refund — **not** a workspace member |
+| Python SDK | `sdks/python/` | `solvela` package |
+| TypeScript SDK | `sdks/typescript/` | `solvela` npm package |
+| Go SDK | `sdks/go/` | `solvela-go` module |
+| MCP server | `sdks/mcp/` | Model Context Protocol adapter |
+| Dashboard | `dashboard/` | Next.js 16 + Tailwind + Recharts, 5 pages |
+
+## Configuration Files
+
+<Accordion title="models.toml — model registry">
+Defines every available model: provider, context window, pricing, routing tier assignment, and aliases. The `router` crate loads this at startup. To add a model, add an entry here — no code changes needed.
+</Accordion>
+
+<Accordion title="default.toml — gateway settings">
+Controls server bind address, timeout values, rate limit defaults, caching TTLs, and feature flags.
+</Accordion>
+
+<Accordion title="services.toml — external service config">
+Provider API base URLs, Facilitator endpoint, and Redis/PostgreSQL connection strings. Override via environment variables in production.
+</Accordion>
+
+## Key Architectural Rules
+
+<Steps>
+  <Step title="Gateway is the only binary">
+    All other crates are libraries. Only `gateway` exposes a network interface. This keeps deployment simple — one process, one binary.
+  </Step>
+  <Step title="x402 has no Axum dependency">
+    Payment verification is framework-agnostic. The `PaymentVerifier` trait is chain-agnostic by design — EVM support can be added without touching the gateway.
+  </Step>
+  <Step title="Provider adapters own format translation">
+    Each provider adapter translates between the OpenAI-compatible wire format (from `protocol`) and the native provider format. Callers never see provider-specific types.
+  </Step>
+  <Step title="5% platform fee on all requests">
+    The fee is applied uniformly at the gateway layer before proxying. It is included in the cost breakdown returned on 402 responses.
+  </Step>
+  <Step title="Private keys never leave the client">
+    The gateway never handles wallet private keys. All signing happens client-side; the gateway only receives and verifies the resulting transaction signature.
+  </Step>
+  <Step title="Database writes are fire-and-forget">
+    Usage logging to PostgreSQL is done with `tokio::spawn` — it does not block the response path. Both PostgreSQL and Redis are optional; the gateway degrades gracefully without them.
+  </Step>
+</Steps>
+
+<Warning>
+PostgreSQL and Redis are optional but strongly recommended in production. Without Redis, replay protection and response caching are disabled. Without PostgreSQL, usage logs and spend tracking are lost.
+</Warning>
+
+## Provider Support
+
+The `providers/` module inside `gateway` contains an adapter for each upstream LLM provider:
+
+| Provider | Models |
+|----------|--------|
+| OpenAI | GPT-4o, o3, o4-mini, and more |
+| Anthropic | Claude Sonnet, Claude Opus, Claude Haiku |
+| Google | Gemini 2.0 Flash, Gemini 2.5 Pro |
+| xAI | Grok-3, Grok-3-mini |
+| DeepSeek | DeepSeek-V3, DeepSeek-R1 |
+
+<Tip>
+All providers accept the same OpenAI-compatible request format. Switching models or providers requires only changing the `model` field — no client code changes needed.
+</Tip>

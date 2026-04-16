@@ -1,0 +1,92 @@
+---
+title: Authentication
+description: How authentication works with x402 and API keys
+---
+
+Solvela supports two authentication methods: the default **x402 payment protocol** for pay-per-use access, and **API keys** for enterprise organizations.
+
+## x402 (Default)
+
+x402 is the default auth method. No account, no API key, and no subscription required — payment itself is the proof of authorization.
+
+**How it works:**
+
+1. Send a request without any auth header.
+2. The gateway returns `402 Payment Required` with the exact cost in USDC and a list of accepted payment schemes.
+3. Sign a USDC-SPL transaction on Solana for the quoted amount.
+4. Resubmit the request with the `PAYMENT-SIGNATURE` header.
+5. The gateway verifies the payment on-chain and processes the request.
+
+```bash
+# Step 1: initial request (no auth header needed)
+curl https://api.solvela.ai/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+
+# Gateway responds 402 with cost breakdown...
+
+# Step 2: resubmit with payment signature
+curl https://api.solvela.ai/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "PAYMENT-SIGNATURE: <signed-usdc-transaction>" \
+  -d '{
+    "model": "auto",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+<Tip>
+SDKs handle the full x402 flow automatically. You call one method and receive a response — no manual signing or retries needed.
+</Tip>
+
+<Note>
+Rate limiting under x402 is applied per wallet address. Each Solana wallet is treated as an independent identity.
+</Note>
+
+## API Keys (Enterprise)
+
+Enterprise organizations can use API keys for traditional header-based authentication. Keys are prefixed with `rcr_key_` and are scoped to an organization.
+
+Pass the key in the standard `Authorization` header:
+
+```bash
+curl https://api.solvela.ai/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer rcr_key_your_key_here" \
+  -d '{
+    "model": "auto",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+<Warning>
+API keys carry full organizational permissions. Store them in environment variables, never in source code. Rotate any key you suspect has been exposed.
+</Warning>
+
+### Enterprise Features
+
+Enterprise accounts with API key auth unlock additional capabilities:
+
+| Feature | Description |
+|---------|-------------|
+| **Org hierarchy** | Manage multiple teams under a single organization |
+| **Team budgets** | Set hourly or daily spend caps per team |
+| **Session budgets** | Limit spending for individual sessions or users |
+| **Audit logs** | Full request and payment history per key |
+| **Usage analytics** | Breakdown of spend by model, team, and time period |
+| **Per-model restrictions** | Restrict which models a team or key can access |
+
+## Choosing a Method
+
+| | x402 | API Key |
+|--|------|---------|
+| Setup required | None | Enterprise account |
+| Auth mechanism | Payment signature | Bearer token |
+| Rate limiting | Per wallet address | Per API key |
+| Billing | Pay per request | Managed via org budgets |
+| Best for | Individual use, developers | Teams, production deployments |
+
+See [x402 Overview](/docs/x402-overview) for the full protocol specification.

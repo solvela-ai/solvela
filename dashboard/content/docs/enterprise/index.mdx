@@ -1,0 +1,62 @@
+---
+title: Enterprise Overview
+description: Multi-tenant organizations, team budgets, audit logs, and analytics for production AI agent deployments.
+---
+
+<div className="eyebrow">Enterprise</div>
+
+# Enterprise Overview
+
+Solvela Enterprise adds multi-tenant organizations to the payment gateway. A single gateway deployment can host many independent organizations, each with their own teams, API keys, budgets, and audit history.
+
+## What's included
+
+<LinkMap
+  eyebrow="Enterprise features"
+  heading="Everything you need for production"
+  links={[
+    {
+      href: '/docs/enterprise/orgs',
+      label: 'Organizations',
+      description: 'Top-level billing and identity units. Each org has an owner wallet and a unique slug.',
+    },
+    {
+      href: '/docs/enterprise/teams',
+      label: 'Teams',
+      description: 'Sub-groups within an org. Assign wallets and spending limits to each team.',
+    },
+    {
+      href: '/docs/enterprise/api-keys',
+      label: 'API Keys',
+      description: 'Org-scoped bearer tokens for programmatic access. Three role levels: owner, admin, member.',
+    },
+    {
+      href: '/docs/enterprise/audit',
+      label: 'Audit Logs',
+      description: 'Immutable record of every action taken in the org. Filter by action, actor, or time range.',
+    },
+    {
+      href: '/docs/enterprise/budgets',
+      label: 'Budgets',
+      description: 'Set hourly, daily, and monthly spend caps at the team or wallet level.',
+    },
+    {
+      href: '/docs/enterprise/analytics',
+      label: 'Analytics',
+      description: 'Spend and request counts by model, wallet, and team. Up to 90 days of history.',
+    },
+  ]}
+/>
+
+## Authentication
+
+Enterprise endpoints accept two forms of authentication:
+
+| Method | Header | Notes |
+|--------|--------|-------|
+| Admin token | `Authorization: Bearer <admin-token>` | Full access to all orgs |
+| Org API key | `Authorization: Bearer solvela_k_...` | Scoped to a single org |
+
+Admin-only actions (such as creating an organization) require the admin token. All other endpoints accept either form.
+
+<UpgradeCta />

@@ -228,7 +228,7 @@ export function MobileSidebar({ tree, isOpen, onClose }: MobileSidebarProps) {
               onClick={onClose}
               className={cn(
                 'flex-1 py-2 px-3 text-sm font-medium text-center rounded-md transition-colors',
-                !pathname.includes('/api-reference')
+                !pathname.includes('/docs/api')
                   ? 'bg-[var(--card)] text-foreground'
                   : 'bg-muted text-muted-foreground hover:text-foreground'
               )}
@@ -236,11 +236,11 @@ export function MobileSidebar({ tree, isOpen, onClose }: MobileSidebarProps) {
               Documentation
             </Link>
             <Link
-              href="/docs/api-reference"
+              href="/docs/api"
               onClick={onClose}
               className={cn(
                 'flex-1 py-2 px-3 text-sm font-medium text-center rounded-md transition-colors',
-                pathname.includes('/api-reference')
+                pathname.includes('/docs/api')
                   ? 'bg-[var(--card)] text-foreground'
                   : 'bg-muted text-muted-foreground hover:text-foreground'
               )}

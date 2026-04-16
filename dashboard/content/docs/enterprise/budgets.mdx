@@ -1,0 +1,91 @@
+---
+title: Budgets
+description: Set hourly, daily, and monthly USDC spend caps at the team or wallet level.
+---
+
+<div className="eyebrow">Enterprise</div>
+
+# Budgets
+
+Budgets let you cap USDC spend at two levels: per-team and per-wallet. When a limit is reached, further requests are rejected until the window resets.
+
+All amounts are in USDC (e.g. `10.0` = $10.00 USDC).
+
+<Note>
+If no wallet budget is configured, the gateway applies a default limit of **$100/day**.
+</Note>
+
+## Team budgets
+
+### Set a team budget
+
+Requires `admin` or `owner` role.
+
+```http title="PUT /v1/orgs/:id/teams/:tid/budget"
+PUT /v1/orgs/018f1a2b-.../teams/019c3d4e-.../budget
+Authorization: Bearer <admin-token | solvela_k_...>
+Content-Type: application/json
+
+{
+  "hourly": 5.0,
+  "daily": 50.0,
+  "monthly": 500.0
+}
+```
+
+**Request fields** — all optional; omit any field to leave that window unlimited.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `hourly` | float | Max USDC spend per hour |
+| `daily` | float | Max USDC spend per day |
+| `monthly` | float | Max USDC spend per calendar month |
+
+**Response** — `200 OK`
+
+```json
+{
+  "hourly_limit": 5.0,
+  "daily_limit": 50.0,
+  "monthly_limit": 500.0,
+  "hourly_spend": 1.25,
+  "daily_spend": 12.50,
+  "monthly_spend": 87.00
+}
+```
+
+### Get team budget and spend
+
+Requires `member` role or higher.
+
+```http title="GET /v1/orgs/:id/teams/:tid/budget"
+GET /v1/orgs/018f1a2b-.../teams/019c3d4e-.../budget
+Authorization: Bearer <admin-token | solvela_k_...>
+```
+
+Response shape is the same as the set response above.
+
+## Wallet budgets
+
+Wallet budgets are set and read using the admin token only.
+
+### Set a wallet budget
+
+```http title="PUT /v1/wallets/:wallet/budget"
+PUT /v1/wallets/AgEnTwALLetAddReSs.../budget
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{
+  "daily": 25.0
+}
+```
+
+### Get a wallet budget and spend
+
+```http title="GET /v1/wallets/:wallet/budget"
+GET /v1/wallets/AgEnTwALLetAddReSs.../budget
+Authorization: Bearer <admin-token>
+```
+
+<UpgradeCta />

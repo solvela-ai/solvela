@@ -1,0 +1,246 @@
+---
+title: Payment Flow
+description: Step-by-step guide to x402 payments
+---
+
+Every request to Solvela goes through a two-leg HTTP exchange. The first leg discovers the price; the second leg pays and receives the response. SDKs handle both legs automatically — this page explains what happens at each step so you can implement a custom client or debug a failing payment.
+
+<Tip>
+If you are using the TypeScript, Python, Rust, or Go SDK, you never need to implement this yourself. Call `client.chat()` and the SDK handles discovery, signing, and retry automatically.
+</Tip>
+
+## The Full Flow
+
+<Steps>
+  <Step title="Send the initial request">
+    Make a standard POST to any Solvela endpoint with no payment header. The body is a normal OpenAI-compatible chat completions payload.
+
+    ```bash title="Initial request (no payment)"
+    curl -X POST https://api.solvela.ai/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "auto",
+        "messages": [{ "role": "user", "content": "Hello" }]
+      }'
+    ```
+
+    The server will not forward this to any LLM. It responds immediately with `HTTP 402`.
+  </Step>
+
+  <Step title="Parse the 402 response">
+    The 402 body contains everything your client needs to construct a valid payment.
+
+    ```json title="402 response body"
+    {
+      "x402_version": 1,
+      "cost_breakdown": {
+        "provider_cost": "0.000150",
+        "platform_fee": "0.000008",
+        "total": "0.000158",
+        "currency": "USDC",
+        "fee_percent": 5.0
+      },
+      "accepts": [
+        {
+          "scheme": "exact",
+          "network": "solana",
+          "amount": "158",
+          "asset": "USDC-SPL",
+          "pay_to": "<recipient_wallet>",
+          "max_timeout_seconds": 300
+        }
+      ]
+    }
+    ```
+
+    Your client should read `accepts[0].amount` for the atomic-unit value and `accepts[0].pay_to` for the destination wallet. The `max_timeout_seconds` field tells you how long the signed transaction will be accepted before expiring.
+  </Step>
+
+  <Step title="Sign the Solana transaction">
+    Construct a USDC-SPL transfer for the exact `amount` to the `pay_to` address and sign it with your wallet's private key. The SDKs use `@solana/web3.js` (TypeScript), `solders` (Python), the `solana` crate (Rust), or `gagliardetto/solana-go` (Go) to do this.
+
+    The signing step never broadcasts the transaction — it only produces a signed transaction bytes object. The gateway broadcasts it after verifying the signature is valid.
+
+    <Warning>
+    Never expose your wallet's private key to a server. Signing always happens client-side. The `PAYMENT-SIGNATURE` header carries the signed transaction, not the private key.
+    </Warning>
+  </Step>
+
+  <Step title="Resubmit with the PAYMENT-SIGNATURE header">
+    Resend the original request body with the signed transaction encoded as base58 in the `PAYMENT-SIGNATURE` header.
+
+    ```bash title="Paid request"
+    curl -X POST https://api.solvela.ai/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -H "PAYMENT-SIGNATURE: 5UfgJ4...Kx29mQ" \
+      -d '{
+        "model": "auto",
+        "messages": [{ "role": "user", "content": "Hello" }]
+      }'
+    ```
+  </Step>
+
+  <Step title="Receive the LLM response">
+    If the signature is valid and the nonce is fresh, the gateway broadcasts the transaction to Solana, waits for confirmation, then proxies the request to the upstream LLM and streams the response back to you in standard OpenAI format.
+
+    ```json title="Successful response"
+    {
+      "id": "chatcmpl-abc123",
+      "object": "chat.completion",
+      "model": "gpt-4o-mini",
+      "choices": [{
+        "index": 0,
+        "message": { "role": "assistant", "content": "Hello! How can I help?" },
+        "finish_reason": "stop"
+      }],
+      "usage": { "prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18 }
+    }
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Cost Breakdown Format
+
+The `cost_breakdown` object is present on every 402 response. All monetary values are decimal strings in USDC. The `amount` field inside `accepts` is in atomic units (1 USDC = 1,000,000 atomic units).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `provider_cost` | string | What the upstream LLM charges for this request |
+| `platform_fee` | string | 5% of `provider_cost`, retained by Solvela |
+| `total` | string | `provider_cost` + `platform_fee` |
+| `currency` | string | Always `"USDC"` today |
+| `fee_percent` | number | Platform fee percentage (currently `5.0`) |
+
+---
+
+## Escrow vs Exact Payments
+
+The `accepts` array may contain one or both payment schemes. Choose based on your trust model.
+
+<Tabs items={["Exact", "Escrow"]}>
+  <Tab value="Exact">
+    **Scheme:** `"exact"`
+
+    A direct USDC-SPL transfer from your wallet to the gateway's recipient address. Payment settles immediately when the gateway broadcasts the transaction.
+
+    **Use when:** You trust the gateway to fulfill the request after payment. This is the default scheme for most requests and is sufficient for production use.
+
+    ```json
+    {
+      "scheme": "exact",
+      "network": "solana",
+      "amount": "158",
+      "asset": "USDC-SPL",
+      "pay_to": "GatewayWa11et...",
+      "max_timeout_seconds": 300
+    }
+    ```
+  </Tab>
+  <Tab value="Escrow">
+    **Scheme:** `"escrow"`
+
+    Funds are locked into a program-derived address (PDA) controlled by the escrow program. The gateway receives payment only after submitting a valid fulfillment proof on-chain. If fulfillment does not occur before `max_timeout_seconds`, funds are automatically returned to your wallet.
+
+    **Use when:** You need trustless guarantees — for example, in autonomous agent workflows where no human is watching.
+
+    ```json
+    {
+      "scheme": "escrow",
+      "network": "solana",
+      "amount": "158",
+      "asset": "USDC-SPL",
+      "escrow_program": "EscrowProg...",
+      "max_timeout_seconds": 300
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Session Budgets
+
+All official SDKs support a `sessionBudget` option that caps total spending for the lifetime of a client instance. Once the budget is reached, the SDK throws rather than signing another payment.
+
+<Tabs items={["TypeScript", "Python", "Rust", "Go"]}>
+  <Tab value="TypeScript">
+    ```typescript
+    const client = new SolvelaClient({
+      endpoint: "https://api.solvela.ai",
+      walletKey: process.env.SOLANA_PRIVATE_KEY,
+      sessionBudget: "0.10", // max $0.10 USDC this session
+    });
+    ```
+  </Tab>
+  <Tab value="Python">
+    ```python
+    client = SolvelaClient(
+        endpoint="https://api.solvela.ai",
+        wallet_key=os.environ["SOLANA_PRIVATE_KEY"],
+        session_budget="0.10",  # max $0.10 USDC this session
+    )
+    ```
+  </Tab>
+  <Tab value="Rust">
+    ```rust
+    let client = SolvelaClient::builder()
+        .endpoint("https://api.solvela.ai")
+        .wallet_key(&env::var("SOLANA_PRIVATE_KEY")?)
+        .session_budget("0.10")
+        .build()?;
+    ```
+  </Tab>
+  <Tab value="Go">
+    ```go
+    client, err := solvela.NewClient(solvela.Config{
+        Endpoint:      "https://api.solvela.ai",
+        WalletKey:     os.Getenv("SOLANA_PRIVATE_KEY"),
+        SessionBudget: "0.10",
+    })
+    ```
+  </Tab>
+</Tabs>
+
+<Info>
+`sessionBudget` is a client-side guard only — it does not communicate a limit to the server. The SDK accumulates `cost_breakdown.total` values across all signed payments and stops signing once the sum exceeds the budget.
+</Info>
+
+---
+
+## Error Handling
+
+<Accordion title="Payment invalid — signature cannot be verified">
+  **HTTP status:** `402 Payment Required` (new 402, not 200)
+
+  The gateway could not verify the signature. Common causes: wrong `pay_to` address, wrong `amount`, or a malformed base58 encoding in the header. Parse the new 402 response and re-sign with the updated parameters.
+</Accordion>
+
+<Accordion title="Payment insufficient — amount too low">
+  **HTTP status:** `402 Payment Required` (new 402)
+
+  The signed amount is less than the required `amount` in the accepts object. This can happen if prices change between your first 402 and your retry. The new 402 will contain the current required amount — re-sign and retry.
+</Accordion>
+
+<Accordion title="Payment expired — max_timeout_seconds exceeded">
+  **HTTP status:** `402 Payment Required` (new 402)
+
+  The signed transaction's validity window has elapsed. Solana transactions include a recent blockhash that expires after roughly 150 slots (~60 seconds). Re-sign with a fresh blockhash. SDKs handle this automatically on retry.
+</Accordion>
+
+<Accordion title="Replay detected — nonce already used">
+  **HTTP status:** `402 Payment Required` (new 402)
+
+  The gateway has already accepted this signature. Each signed transaction can only be redeemed once. Sign a new transaction with a fresh nonce.
+</Accordion>
+
+<Accordion title="Wallet balance too low">
+  **HTTP status:** `402 Payment Required` (new 402, with an additional `error` field)
+
+  The gateway detected that your wallet does not hold enough USDC-SPL to cover the payment. Top up your wallet and retry. The 402 payload will include `"error": "insufficient_balance"` to distinguish this from other 402 reasons.
+</Accordion>
+
+<Warning>
+Never retry a failed payment by resubmitting the same `PAYMENT-SIGNATURE` value. If a signature was accepted, retrying will be rejected as a replay. If it was rejected, the underlying issue must be fixed before re-signing.
+</Warning>

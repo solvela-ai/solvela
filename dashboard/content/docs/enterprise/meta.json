@@ -1,0 +1,14 @@
+{
+  "title": "Enterprise",
+  "pages": [
+    "index",
+    "---Multi-Tenant---",
+    "orgs",
+    "teams",
+    "api-keys",
+    "---Observability---",
+    "audit",
+    "budgets",
+    "analytics"
+  ]
+}

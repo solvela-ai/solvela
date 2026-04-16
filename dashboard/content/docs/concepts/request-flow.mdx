@@ -1,0 +1,132 @@
+---
+title: Request Flow
+description: How a request moves through the gateway
+---
+
+Every request enters the system through the `gateway` binary. The path it takes depends on whether it carries a payment signature and whether it targets the standard chat completions endpoint or the Agent-to-Agent (A2A) interface.
+
+## Chat Completions Flow
+
+**Endpoint:** `POST /v1/chat/completions`
+
+<Steps>
+  <Step title="Parse and resolve the model">
+    The gateway parses the request body and resolves the `model` field. This accepts short aliases (`sonnet`, `gpt4o`), routing profile names (`auto`, `eco`, `premium`, `free`), or full model IDs (`claude-sonnet-4-20250514`). Profile names are handed to the smart router for tier classification.
+  </Step>
+  <Step title="Prompt guard checks">
+    The request content is scanned for prompt injection attempts, jailbreak patterns, and PII. Requests that fail these checks are rejected before any payment logic runs.
+  </Step>
+  <Step title="Check for PAYMENT-SIGNATURE header">
+    If the `PAYMENT-SIGNATURE` header is absent, the gateway immediately returns **HTTP 402** with a full cost breakdown (base cost + 5% platform fee) and a list of accepted payment schemes — both exact USDC-SPL transfer and escrow deposit formats are included.
+  </Step>
+  <Step title="Decode and validate the payment signature">
+    When the header is present it is decoded (base64 or raw JSON), then checked against Redis for replay attacks. Duplicate signatures are rejected with a 402.
+  </Step>
+  <Step title="Verify via Facilitator">
+    The decoded payment is sent to the Facilitator service for on-chain verification. The `x402` crate handles this through the chain-agnostic `PaymentVerifier` trait.
+  </Step>
+  <Step title="Proxy to the LLM provider">
+    The gateway translates the OpenAI-compatible request into the provider's native format, forwards it, and streams or buffers the response.
+  </Step>
+  <Step title="Post-response housekeeping">
+    The response is cached in Redis (with a content-addressed key). Usage is logged to PostgreSQL and an escrow claim is fired if the payment used the escrow scheme. Both writes are `tokio::spawn` — they do not block the response.
+  </Step>
+  <Step title="Return response to caller">
+    The gateway returns JSON or an SSE stream depending on whether the request set `"stream": true`.
+  </Step>
+</Steps>
+
+<Note>
+Steps 7 and 8 (cache write, DB log, escrow claim) are fire-and-forget. A slow database or Redis timeout cannot delay the response the client receives.
+</Note>
+
+## A2A Request Flow
+
+**Endpoint:** `POST /a2a` — JSON-RPC method `message/send`
+
+The Agent-to-Agent interface follows the [A2A protocol](https://a2aprotocol.ai) and is designed for autonomous agents that discover the gateway's capabilities and pay for each task programmatically.
+
+<Steps>
+  <Step title="Agent discovery">
+    The calling agent fetches `GET /.well-known/agent.json` to retrieve the **AgentCard** — a machine-readable description of supported methods, accepted payment schemes, and cost tiers.
+  </Step>
+  <Step title="Send message/send request">
+    The agent sends a `message/send` JSON-RPC request to `POST /a2a`. The gateway scores the request using the smart router, computes the cost, and returns a **Task** in `input-required` state containing x402 metadata (amount, payment address, accepted schemes).
+  </Step>
+  <Step title="Agent signs and pays">
+    The calling agent signs a Solana USDC-SPL transaction for the quoted amount and resubmits the request with the `taskId` and payment payload attached.
+  </Step>
+  <Step title="Gateway verifies and proxies">
+    Payment verification follows the same path as the chat completions flow (replay check → Facilitator verify). On success the gateway proxies to the LLM provider.
+  </Step>
+  <Step title="Return completed Task">
+    The gateway returns a **Task** in `completed` state. The response content is attached as artifacts alongside a payment receipt.
+  </Step>
+</Steps>
+
+<Tip>
+The A2A interface uses the same payment verification stack as the chat completions endpoint. An agent that already knows how to pay for completions needs no additional payment logic to use A2A.
+</Tip>
+
+## Smart Router
+
+The smart router runs inside the `router` crate and is invoked whenever a routing profile (`auto`, `eco`, `premium`, `free`) is used instead of a direct model ID.
+
+**How it works:**
+
+The scorer evaluates each request across **15 weighted dimensions**:
+
+<CardGroup cols={2}>
+  <Card title="Code presence" icon="code">
+    Detects code blocks, syntax markers, and programming language keywords.
+  </Card>
+  <Card title="Reasoning markers" icon="brain">
+    Identifies step-by-step, chain-of-thought, and logical deduction signals.
+  </Card>
+  <Card title="Technical terms" icon="wrench">
+    Weighs domain-specific vocabulary density across the prompt.
+  </Card>
+  <Card title="Message length and complexity" icon="align-left">
+    Long, multi-turn, or highly structured prompts score higher tiers.
+  </Card>
+</CardGroup>
+
+The scorer produces a **tier classification**:
+
+| Tier | Description | Example tasks |
+|------|-------------|---------------|
+| `Simple` | Short, factual, or single-turn | Translations, lookups, summarization |
+| `Medium` | Moderate context, some reasoning | Code review, Q&A, light analysis |
+| `Complex` | Multi-step, long context | Refactoring, detailed explanations |
+| `Reasoning` | Deep logical chains, math, planning | Proofs, architecture design, agents |
+
+Each routing profile then maps tiers to specific models:
+
+| Profile | Simple | Medium | Complex | Reasoning |
+|---------|--------|--------|---------|-----------|
+| `eco` | Gemini Flash | Gemini Flash | DeepSeek-V3 | DeepSeek-R1 |
+| `auto` | Gemini Flash | GPT-4o mini | Claude Sonnet | o3 |
+| `premium` | GPT-4o | GPT-4o | Claude Opus | o3 |
+| `free` | Free-tier only | Free-tier only | Free-tier only | Free-tier only |
+
+<Note>
+Scoring is pure rule-based and runs in under **1 microsecond** with zero external calls. There is no ML model involved — the scorer is a deterministic weighted sum over the 15 dimensions.
+</Note>
+
+## Payment Verification Detail
+
+<Accordion title="Exact transfer (default)">
+The client signs a USDC-SPL transfer for the exact quoted amount to the gateway's fee payer address. The Facilitator confirms the transaction is finalized on-chain before the gateway proceeds.
+</Accordion>
+
+<Accordion title="Escrow deposit">
+For higher-value or batch requests, the client deposits USDC into the trustless on-chain escrow program (`programs/escrow/`). The gateway holds a claim receipt and fires a claim transaction after delivering the response. Unclaimed deposits can be refunded by the depositor after a timeout.
+</Accordion>
+
+<Accordion title="Replay protection">
+Every verified `PAYMENT-SIGNATURE` is written to Redis with a TTL that matches the payment's expiry. A second request carrying the same signature is rejected with 402 before reaching the Facilitator — protecting against double-spend without an extra on-chain call.
+</Accordion>
+
+<Warning>
+Replay protection requires Redis. Without it, the gateway skips the Redis check and relies solely on Facilitator-side nonce validation, which is slower and less reliable under high concurrency.
+</Warning>
