@@ -1,0 +1,92 @@
+---
+title: Organizations
+description: Create and manage top-level billing and identity units on Solvela Enterprise.
+---
+
+<div className="eyebrow">Enterprise</div>
+
+# Organizations
+
+An organization is the top-level container for teams, API keys, budgets, and audit logs. Every org has a unique slug, a display name, and an owner Solana wallet.
+
+## Create an organization
+
+Requires the admin token.
+
+```http title="POST /v1/orgs"
+POST /v1/orgs
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{
+  "name": "Acme AI",
+  "slug": "acme-ai",
+  "owner_wallet": "AcmEWaLLetAddReSsHere..."
+}
+```
+
+**Request fields**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Display name for the organization |
+| `slug` | string | yes | URL-safe unique identifier (lowercase, hyphens) |
+| `owner_wallet` | string | yes | Solana wallet address of the organization owner |
+
+**Response** — `201 Created`
+
+```json
+{
+  "id": "018f1a2b-...",
+  "name": "Acme AI",
+  "slug": "acme-ai",
+  "owner_wallet": "AcmEWaLLetAddReSsHere...",
+  "created_at": "2025-09-01T00:00:00Z",
+  "updated_at": "2025-09-01T00:00:00Z"
+}
+```
+
+## List organizations
+
+Returns all organizations. Accepts both the admin token and an org-scoped API key (which returns only the org the key belongs to).
+
+```http title="GET /v1/orgs"
+GET /v1/orgs
+Authorization: Bearer <admin-token | solvela_k_...>
+```
+
+**Response** — `200 OK`
+
+```json
+[
+  {
+    "id": "018f1a2b-...",
+    "name": "Acme AI",
+    "slug": "acme-ai",
+    "owner_wallet": "AcmEWaLLetAddReSsHere...",
+    "created_at": "2025-09-01T00:00:00Z",
+    "updated_at": "2025-09-01T00:00:00Z"
+  }
+]
+```
+
+## Get an organization
+
+```http title="GET /v1/orgs/:id"
+GET /v1/orgs/018f1a2b-...
+Authorization: Bearer <admin-token | solvela_k_...>
+```
+
+**Response** — `200 OK` — same shape as a single org object above.
+
+## Roles
+
+Every member of an organization has one of three roles:
+
+| Role | Description |
+|------|-------------|
+| `owner` | Full control. Can assign any role including owner. |
+| `admin` | Can manage teams, members, and API keys. Cannot assign the owner role. |
+| `member` | Read-only access to org data. Can issue payment requests. |
+
+<UpgradeCta />

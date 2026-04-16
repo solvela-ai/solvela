@@ -1,0 +1,63 @@
+---
+title: Audit Logs
+description: Query the immutable audit trail for every action taken within an organization.
+---
+
+<div className="eyebrow">Enterprise</div>
+
+# Audit Logs
+
+Every create, update, and delete action inside an organization is written to an immutable audit log. Entries capture who acted, what changed, and when — including the IP address of the request.
+
+## Query audit logs
+
+Requires `member` role or higher.
+
+```http title="GET /v1/orgs/:id/audit-logs"
+GET /v1/orgs/018f1a2b-.../audit-logs?limit=50&since=2025-09-01T00:00:00Z
+Authorization: Bearer <admin-token | solvela_k_...>
+```
+
+**Query parameters**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `action` | string | — | Filter to exact action name (e.g. `api_key.created`) |
+| `since` | ISO 8601 | — | Return only entries after this timestamp |
+| `limit` | integer | 100 | Max entries to return. Maximum is 1000. |
+
+**Response** — `200 OK`
+
+```json
+[
+  {
+    "id": "01b2c3d4-...",
+    "org_id": "018f1a2b-...",
+    "actor_wallet": null,
+    "actor_api_key": "01a4b5c6-...",
+    "action": "api_key.created",
+    "resource_type": "api_key",
+    "resource_id": "01a4b5c6-...",
+    "details": { "name": "ci-deploy", "role": "admin" },
+    "ip_address": "203.0.113.42",
+    "created_at": "2025-09-01T00:01:00Z"
+  }
+]
+```
+
+## Entry fields
+
+| Field | Description |
+|-------|-------------|
+| `id` | Unique entry ID |
+| `org_id` | Organization the entry belongs to |
+| `actor_wallet` | Wallet address of the actor (if authenticated with admin token) |
+| `actor_api_key` | API key ID of the actor (if authenticated with an org key) |
+| `action` | Dot-namespaced action name |
+| `resource_type` | Type of the affected resource |
+| `resource_id` | ID of the affected resource (nullable) |
+| `details` | Action-specific metadata (nullable JSON object) |
+| `ip_address` | Source IP of the request (nullable) |
+| `created_at` | When the entry was recorded |
+
+<UpgradeCta />

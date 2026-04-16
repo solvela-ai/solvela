@@ -1,4 +1,4 @@
 {
   "title": "API Reference",
-  "pages": ["index", "chat-completions", "models", "errors"]
+  "pages": ["index", "chat-completions", "models", "errors", "authentication", "rate-limits"]
 }

@@ -14,6 +14,11 @@ import { Frame } from './frame'
 import { YouTube } from './youtube'
 import { Pre } from './pre'
 import { ParamField, ResponseField, Expandable, RequestExample, ResponseExample, CodeGroup } from './api-components'
+import { HeroSplit } from './hero-split'
+import { FlowSteps } from './flow-steps'
+import { LinkMap } from './link-map'
+import { TierCards } from './tier-cards'
+import { UpgradeCta } from './upgrade-cta'
 
 // Re-export for direct imports
 export { Card, CardGroup } from './card'
@@ -26,6 +31,11 @@ export { Frame } from './frame'
 export { YouTube } from './youtube'
 export { Pre } from './pre'
 export { ParamField, ResponseField, Expandable, RequestExample, ResponseExample, CodeGroup } from './api-components'
+export { HeroSplit } from './hero-split'
+export { FlowSteps } from './flow-steps'
+export { LinkMap } from './link-map'
+export { TierCards } from './tier-cards'
+export { UpgradeCta } from './upgrade-cta'
 
 export function getMDXComponents(): MDXComponents {
   return {
@@ -46,6 +56,12 @@ export function getMDXComponents(): MDXComponents {
     CodeBlock,
     Frame,
     YouTube,
+    // Welcome page components
+    HeroSplit,
+    FlowSteps,
+    LinkMap,
+    TierCards,
+    UpgradeCta,
     // API documentation components
     ParamField,
     ResponseField,

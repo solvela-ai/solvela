@@ -16,7 +16,8 @@ interface DocsNavTabsProps {
 
 const defaultTabs: NavTab[] = [
   { label: 'Documentation', href: '/docs', matchPrefix: '/docs' },
-  { label: 'API Reference', href: '/docs/api-reference', matchPrefix: '/docs/api-reference' },
+  { label: 'API Reference', href: '/docs/api', matchPrefix: '/docs/api' },
+  { label: 'Enterprise', href: '/docs/enterprise', matchPrefix: '/docs/enterprise' },
 ]
 
 export function DocsNavTabs({ tabs = defaultTabs }: DocsNavTabsProps) {
