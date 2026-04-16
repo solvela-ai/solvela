@@ -10,7 +10,7 @@
 
 **Prior Art:**
 - Competitive analysis: `docs/plans/2026-03-08-blockrun-competitive-analysis.md`
-- Ecosystem plan: `.claude/plan/rustyclaw-ecosystem.md`
+- Ecosystem plan: `.claude/plan/rustyclaw-ecosystem.md` (local agent plan — see `.claude/plan/` directory, not tracked in git)
 - x402 V2 spec: https://x402.org/writing/x402-v2-launch
 - L402 delegation model (Macaroon caveats): https://docs.lightning.engineering/the-lightning-network/l402
 - ElizaOS plugin architecture: https://docs.elizaos.ai/
