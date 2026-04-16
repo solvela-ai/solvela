@@ -5,6 +5,18 @@ export function proxy(request: NextRequest) {
   const host = request.headers.get('host') || ''
   const { pathname } = request.nextUrl
 
+  // Skip Next.js internals, API routes, and common static files on all hosts —
+  // the proxy should not rewrite these, they serve from canonical paths.
+  if (
+    pathname.startsWith('/_next/') ||
+    pathname.startsWith('/api/') ||
+    pathname === '/favicon.ico' ||
+    pathname === '/robots.txt' ||
+    pathname === '/sitemap.xml'
+  ) {
+    return NextResponse.next()
+  }
+
   // docs.solvela.ai → /docs/*
   if (host === 'docs.solvela.ai') {
     if (pathname === '/docs' || pathname.startsWith('/docs/')) {
