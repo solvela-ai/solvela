@@ -3,7 +3,6 @@ title: Smart Router
 description: Automatic model selection based on request complexity across 15 dimensions
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
 
 The smart router classifies each request's complexity and routes it to the most appropriate model based on a routing profile you specify. This saves cost on simple requests while ensuring complex ones get capable models.
 
@@ -106,9 +105,9 @@ Tier: Reasoning (reasoning markers: "prove", "step by step", "analyze", "compare
   premium → openai/o3                    ($2.00/M input)
 ```
 
-<Callout type="info">
+<Note>
   The router classifies based on user message content only. System messages and assistant turns do not affect the score.
-</Callout>
+</Note>
 
 ## Bypassing the router
 

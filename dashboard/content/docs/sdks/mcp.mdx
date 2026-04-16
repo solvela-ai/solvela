@@ -3,7 +3,6 @@ title: MCP Server
 description: Model Context Protocol server exposing Solvela tools to MCP-compatible agents
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
 
 ## Overview
 
@@ -27,7 +26,7 @@ solvela-mcp
 Set these environment variables before starting the server:
 
 ```bash
-export SOLVELA_API_URL=https://rustyclawrouter-gateway.fly.dev
+export SOLVELA_API_URL=https://api.solvela.ai
 export SOLVELA_SOLANA_PRIVATE_KEY=<base58-private-key>
 ```
 
@@ -42,7 +41,7 @@ Add to your `claude_desktop_config.json`:
       "command": "npx",
       "args": ["@solvela/mcp"],
       "env": {
-        "SOLVELA_API_URL": "https://rustyclawrouter-gateway.fly.dev",
+        "SOLVELA_API_URL": "https://api.solvela.ai",
         "SOLVELA_SOLANA_PRIVATE_KEY": "<your-private-key>"
       }
     }
@@ -70,10 +69,10 @@ User: Use Solvela to ask GPT-4o what the capital of France is.
 Claude: [calls solvela.chat with model="openai/gpt-4o"]
 ```
 
-<Callout type="warn">
+<Warning>
   The MCP server signing is currently a stub — it uses placeholder payment signatures. For production use, implement proper Solana transaction signing in the MCP server or use the TypeScript or Python SDK directly.
-</Callout>
+</Warning>
 
-<Callout type="info">
+<Note>
   Source code: `sdks/mcp/` in the monorepo.
-</Callout>
+</Note>

@@ -3,7 +3,6 @@ title: SDKs
 description: Client libraries for Solvela — TypeScript, Python, Go, Rust CLI, and MCP
 ---
 
-import { Card, Cards } from 'fumadocs-ui/components/card';
 
 Official SDKs are available for four languages plus an MCP server. All SDKs handle the x402 payment handshake automatically — pass a private key and the SDK signs transactions for you.
 
@@ -26,10 +25,10 @@ All SDKs live in the monorepo under `sdks/`:
 - `sdks/go/` — Go SDK
 - `sdks/mcp/` — MCP server
 
-<Cards>
+<CardGroup>
   <Card title="TypeScript" description="npm install @solvela/sdk — Node.js and browser compatible" href="/docs/sdks/typescript" />
   <Card title="Python" description="pip install solvela — sync and async clients via httpx" href="/docs/sdks/python" />
   <Card title="Go" description="go get github.com/solvela/sdk-go — context-aware, goroutine-safe" href="/docs/sdks/go" />
   <Card title="Rust CLI" description="cargo install solvela-cli — interactive chat, model listing, health checks" href="/docs/sdks/rust" />
   <Card title="MCP Server" description="npx @solvela/mcp — expose Solvela to MCP-compatible AI agents" href="/docs/sdks/mcp" />
-</Cards>
+</CardGroup>

@@ -3,8 +3,6 @@ title: x402 Protocol
 description: How AI agents pay for API calls with USDC-SPL on Solana using HTTP 402
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-import { Step, Steps } from 'fumadocs-ui/components/steps';
 
 The x402 protocol is a payment-in-HTTP mechanism built on top of the HTTP `402 Payment Required` status code. When a client sends a request without payment, the server responds with `402` and a structured description of what it costs and how to pay. The client pays, then retries.
 
@@ -191,6 +189,6 @@ The gateway validates:
 
 The `resource.url` in the payload is validated against the actual endpoint. A payment for `/v1/chat/completions` cannot be used on any other endpoint.
 
-<Callout type="warn">
+<Warning>
   Transactions have a `max_timeout_seconds` window (default 300 seconds). Build and submit your payment within this window to avoid rejection.
-</Callout>
+</Warning>

@@ -3,8 +3,6 @@ title: Escrow System
 description: Trustless USDC-SPL escrow on Solana for guaranteed-delivery payments
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-import { Step, Steps } from 'fumadocs-ui/components/steps';
 
 The escrow system provides trustless payment guarantees via a deployed Anchor program on Solana mainnet. Instead of paying the gateway directly, the agent deposits USDC into a PDA vault. The gateway claims only the actual cost after the request succeeds. If the gateway fails, the agent reclaims their deposit.
 
@@ -97,9 +95,9 @@ When choosing the escrow scheme, the `payment-signature` header contains a `Paym
 
 If the gateway fails to claim within `max_timeout_seconds`, the agent can invoke the `refund` instruction on the escrow program to reclaim their deposit. The refund path is enforced on-chain by the Anchor program — no trust in the gateway is required.
 
-<Callout type="warn">
+<Warning>
   The escrow program is deployed to mainnet with upgrade authority retained by the deployer. Treat it as trusted-but-upgradeable software.
-</Callout>
+</Warning>
 
 ## When to use escrow
 

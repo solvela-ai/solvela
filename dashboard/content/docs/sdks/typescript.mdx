@@ -3,7 +3,6 @@ title: TypeScript SDK
 description: TypeScript/Node.js client for Solvela with automatic x402 payment handling
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
 
 ## Installation
 
@@ -17,7 +16,7 @@ npm install @solvela/sdk
 import { LLMClient } from '@solvela/sdk';
 
 const client = new LLMClient({
-  apiUrl: 'https://rustyclawrouter-gateway.fly.dev',
+  apiUrl: 'https://api.solvela.ai',
   // private key is read from SOLANA_PRIVATE_KEY env var,
   // or pass it as privateKey option
 });
@@ -30,7 +29,7 @@ console.log(reply);
 
 ```typescript
 const client = new LLMClient({
-  apiUrl: 'https://rustyclawrouter-gateway.fly.dev', // default: https://api.solvela.ai
+  apiUrl: 'https://api.solvela.ai', // default: https://api.solvela.ai
   sessionBudget: 0.10,   // stop if session spend exceeds $0.10 USDC
   timeout: 60000,        // request timeout in ms (default: 60000)
 });
@@ -134,6 +133,6 @@ try {
 }
 ```
 
-<Callout type="info">
+<Note>
   Source code: `sdks/typescript/` in the monorepo.
-</Callout>
+</Note>

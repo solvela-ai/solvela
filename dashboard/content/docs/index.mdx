@@ -3,17 +3,13 @@ title: Welcome to Solvela
 description: Solana-native AI agent payment gateway — pay for LLM calls with USDC-SPL via x402
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-import { Card, Cards } from 'fumadocs-ui/components/card';
-import { Step, Steps } from 'fumadocs-ui/components/steps';
-
 Solvela is a Solana-native LLM payment gateway for AI agents. Send a chat completion request, get a 402 response with the cost, sign a USDC-SPL transaction, and retry. No API keys, no accounts — just wallets.
 
 The gateway is OpenAI-compatible, so any existing code that targets the OpenAI API works with minimal changes.
 
-<Callout type="info">
-  The live gateway is at `https://rustyclawrouter-gateway.fly.dev`. The base URL for all API calls is `https://rustyclawrouter-gateway.fly.dev`.
-</Callout>
+<Note>
+  The live gateway is at `https://api.solvela.ai`. The base URL for all API calls is `https://api.solvela.ai`.
+</Note>
 
 ## Recommended path
 
@@ -42,11 +38,11 @@ The gateway is OpenAI-compatible, so any existing code that targets the OpenAI A
 
 ## Key capabilities
 
-<Cards>
+<CardGroup>
   <Card title="26+ models across 5 providers" description="OpenAI, Anthropic, Google, xAI, and DeepSeek — all behind one endpoint with unified USDC pricing." href="/docs/api/models" />
   <Card title="Smart routing" description="Set model to 'auto', 'eco', or 'premium' and the gateway picks the right model for your prompt's complexity." href="/docs/concepts/smart-router" />
   <Card title="Escrow payments" description="Trustless on-chain escrow with deposit/claim/refund — no upfront full payment required." href="/docs/concepts/escrow" />
   <Card title="OpenAI-compatible" description="Drop-in replacement for the OpenAI API. Change the base URL and add payment handling." href="/docs/api/chat-completions" />
   <Card title="Transparent pricing" description="5% platform fee on top of provider cost. All pricing exposed at GET /pricing." href="/docs/concepts/pricing" />
   <Card title="Agent-to-agent (A2A)" description="Solvela implements the A2A protocol. Other agents can discover and pay via GET /.well-known/agent.json." href="/docs/api" />
-</Cards>
+</CardGroup>

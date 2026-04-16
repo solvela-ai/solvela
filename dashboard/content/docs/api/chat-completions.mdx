@@ -3,8 +3,6 @@ title: Chat Completions
 description: POST /v1/chat/completions — OpenAI-compatible chat endpoint with x402 payment
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 
 ## POST /v1/chat/completions
 
@@ -140,7 +138,7 @@ data: [DONE]
   <Tab value="cURL">
     ```bash
     # Step 1: Get the cost (no payment)
-    curl -s https://rustyclawrouter-gateway.fly.dev/v1/chat/completions \
+    curl -s https://api.solvela.ai/v1/chat/completions \
       -H "Content-Type: application/json" \
       -d '{
         "model": "auto",
@@ -148,7 +146,7 @@ data: [DONE]
       }'
 
     # Step 2: Resend with payment (build PaymentPayload, base64-encode it)
-    curl https://rustyclawrouter-gateway.fly.dev/v1/chat/completions \
+    curl https://api.solvela.ai/v1/chat/completions \
       -H "Content-Type: application/json" \
       -H "payment-signature: <base64-encoded-PaymentPayload>" \
       -d '{
@@ -162,7 +160,7 @@ data: [DONE]
     import { LLMClient } from '@solvela/sdk';
 
     const client = new LLMClient({
-      apiUrl: 'https://rustyclawrouter-gateway.fly.dev',
+      apiUrl: 'https://api.solvela.ai',
       // private key signs payments automatically
     });
 
@@ -191,7 +189,7 @@ data: [DONE]
 
     client = LLMClient(
         private_key=os.environ['SOLANA_PRIVATE_KEY'],
-        api_url='https://rustyclawrouter-gateway.fly.dev',
+        api_url='https://api.solvela.ai',
         session_budget=0.10,  # stop if we spend more than $0.10
     )
 
@@ -229,7 +227,7 @@ data: [DONE]
 
     func main() {
         client, err := rcr.NewClient(
-            rcr.WithAPIURL("https://rustyclawrouter-gateway.fly.dev"),
+            rcr.WithAPIURL("https://api.solvela.ai"),
             rcr.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
         )
         if err != nil {
@@ -265,6 +263,6 @@ data: [DONE]
   </Tab>
 </Tabs>
 
-<Callout type="warn">
+<Warning>
   Do not submit the same signed transaction more than once. The gateway tracks transaction signatures and rejects replays with `402 Invalid Payment`.
-</Callout>
+</Warning>

@@ -3,7 +3,6 @@ title: Pricing
 description: Per-token USDC pricing across all 26+ models with 5% platform fee
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
 
 Solvela charges per token based on the upstream provider's list price plus a **5% platform fee**. All prices are in USDC. There are no monthly fees, no minimum spend, and no subscription.
 
@@ -83,9 +82,9 @@ All prices are USDC per million tokens (provider cost before the 5% fee).
 | DeepSeek V3.2 Reasoner | `deepseek/deepseek-reasoner` | $0.28 | $0.42 | 128K |
 | DeepSeek Coder V3 | `deepseek/deepseek-coder` | $0.28 | $0.42 | 128K |
 
-<Callout type="info">
+<Note>
   These are provider list prices. The actual amount charged includes the 5% platform fee. Always check the `cost_breakdown` in the `402` response for the exact amount you will pay.
-</Callout>
+</Note>
 
 ## Query pricing programmatically
 
@@ -96,7 +95,7 @@ GET /pricing
 Returns the full pricing table as JSON. No payment required.
 
 ```bash
-curl https://rustyclawrouter-gateway.fly.dev/pricing
+curl https://api.solvela.ai/pricing
 ```
 
 ## Cost estimation
