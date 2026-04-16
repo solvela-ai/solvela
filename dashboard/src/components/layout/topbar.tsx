@@ -1,6 +1,6 @@
 "use client";
 
-import { Bell, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 
 interface TopbarProps {
   title: string;
@@ -9,24 +9,28 @@ interface TopbarProps {
 
 export function Topbar({ title, subtitle }: TopbarProps) {
   return (
-    <header className="flex items-center justify-between border-b border-border bg-bg-surface px-6 py-4">
+    <header className="flex items-center justify-between border-b border-border bg-bg-inset px-6 py-4">
       <div>
-        <h1 className="text-lg font-semibold text-text-primary">{title}</h1>
-        {subtitle && <p className="text-sm text-text-secondary mt-0.5">{subtitle}</p>}
+        <p className="eyebrow mb-1" style={{ fontSize: '11px' }}>{title.toUpperCase()}</p>
+        <h1 style={{ fontFamily: 'var(--font-serif)', fontWeight: 500, fontSize: '22px', lineHeight: 1.15, letterSpacing: '-0.01em', color: 'var(--heading-color)' }}>
+          {title}
+        </h1>
+        {subtitle && (
+          <p className="text-xs text-text-tertiary mt-0.5">{subtitle}</p>
+        )}
       </div>
       <div className="flex items-center gap-3">
         <button
-          className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-surface-hover transition-colors"
+          className="flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-text-secondary hover:text-text-primary hover:bg-bg-surface transition-colors"
           onClick={() => window.location.reload()}
         >
-          <RefreshCw size={12} />
+          <RefreshCw size={11} />
           Refresh
         </button>
-        <button aria-label="Notifications" className="relative rounded-lg border border-border p-1.5 text-text-secondary hover:bg-bg-surface-hover transition-colors">
-          <Bell size={16} />
-          <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-brand" />
-        </button>
-        <div className="h-8 w-8 rounded-full bg-gradient-to-br from-orange-400 to-orange-600 flex items-center justify-center text-white text-xs font-bold">
+        <div
+          className="h-7 w-7 rounded border border-border flex items-center justify-center text-text-secondary text-xs font-bold font-display"
+          aria-label="User account"
+        >
           W
         </div>
       </div>

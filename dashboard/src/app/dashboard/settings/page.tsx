@@ -13,6 +13,22 @@ import {
 } from "@/lib/api";
 import type { OrgEntry, TeamEntry, AuditLogEntry } from "@/lib/api";
 
+function SectionHeader({ label, description }: { label: string; description?: string }) {
+  return (
+    <div className="terminal-card-titlebar">
+      <span className="terminal-card-dots">
+        <span className="terminal-card-dot" />
+        <span className="terminal-card-dot" />
+        <span className="terminal-card-dot" />
+      </span>
+      <span className="truncate">{label.toLowerCase().replace(/\s+/g, '.')}</span>
+      {description && (
+        <span className="ml-2 text-text-tertiary truncate" style={{ fontSize: '10px' }}>{description}</span>
+      )}
+    </div>
+  );
+}
+
 function SettingRow({
   label,
   description,
@@ -23,11 +39,11 @@ function SettingRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-start justify-between gap-8 py-5 border-b border-border-subtle last:border-0">
+    <div className="flex items-start justify-between gap-8 py-4 border-b border-border last:border-0">
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-text-primary">{label}</p>
         {description && (
-          <p className="mt-0.5 text-xs text-text-secondary">{description}</p>
+          <p className="mt-0.5 text-xs text-text-tertiary">{description}</p>
         )}
       </div>
       <div className="flex-shrink-0 w-72">{children}</div>
@@ -52,7 +68,7 @@ function Input({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className="w-full rounded-lg border border-border px-3 py-2 text-sm text-text-primary placeholder-text-tertiary bg-bg-surface focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20 transition-colors"
+      className="w-full rounded border border-border px-3 py-2 text-sm text-text-primary placeholder-text-tertiary bg-bg-inset focus:border-foreground focus:outline-none transition-colors font-mono"
     />
   );
 }
@@ -69,12 +85,12 @@ function Toggle({
       role="switch"
       aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none ${
-        checked ? "bg-brand" : "bg-bg-surface-hover"
+      className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border border-border transition-colors focus:outline-none ${
+        checked ? "bg-foreground" : "bg-bg-surface-raised"
       }`}
     >
       <span
-        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition-transform ${
+        className={`pointer-events-none inline-block h-[18px] w-[18px] transform rounded-full bg-bg-inset border border-border shadow ring-0 transition-transform ${
           checked ? "translate-x-4" : "translate-x-0"
         }`}
       />
@@ -82,7 +98,6 @@ function Toggle({
   );
 }
 
-/** Read-only env-var status row: shows whether a variable is configured. */
 function EnvVarStatus({
   name,
   set,
@@ -93,12 +108,12 @@ function EnvVarStatus({
   description: string;
 }) {
   return (
-    <div className="flex items-center justify-between py-4 border-b border-border-subtle last:border-0">
+    <div className="flex items-center justify-between py-3 border-b border-border last:border-0">
       <div className="min-w-0 flex-1">
-        <code className="text-xs font-mono font-medium text-text-secondary bg-bg-inset rounded px-1.5 py-0.5 border border-border">
+        <code className="text-xs font-mono text-text-secondary border border-border rounded px-1.5 py-0.5 bg-bg-inset">
           {name}
         </code>
-        <p className="mt-1 text-xs text-text-secondary">{description}</p>
+        <p className="mt-1 text-xs text-text-tertiary">{description}</p>
       </div>
       <StatusDot status={set ? "ok" : "down"} label={set ? "Set" : "Not set"} />
     </div>
@@ -112,24 +127,17 @@ export default function SettingsPage() {
   const [promptGuard, setPromptGuard] = useState(true);
   const [rateLimit, setRateLimit] = useState(true);
   const [corsOrigins, setCorsOrigins] = useState("http://localhost:3000");
-
-  // Pending state: true settings persistence requires a gateway API.
-  // For now, show the generated .env snippet the user should apply manually.
   const [showEnvSnippet, setShowEnvSnippet] = useState(false);
 
-  // API Key section
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [currentApiKey, setCurrentApiKey] = useState<string | null>(null);
   const [apiKeySaved, setApiKeySaved] = useState(false);
 
-  // Team management
   const [orgs, setOrgs] = useState<OrgEntry[]>([]);
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
   const [teams, setTeams] = useState<TeamEntry[]>([]);
   const [newTeamName, setNewTeamName] = useState("");
   const [creatingTeam, setCreatingTeam] = useState(false);
-
-  // Audit log
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
 
   useEffect(() => {
@@ -198,38 +206,38 @@ export default function SettingsPage() {
     <div className="flex flex-col h-full">
       <Topbar title="Settings" subtitle="Gateway configuration and budget limits" />
 
-      <div className="flex-1 p-6 space-y-6 max-w-3xl">
+      <div className="flex-1 p-6 space-y-5 max-w-3xl">
         {/* API Key */}
-        <div className="rounded-xl border border-border bg-bg-surface p-6">
-          <div className="flex items-center gap-2 mb-1">
-            <Key size={14} className="text-text-secondary" />
-            <h2 className="text-sm font-semibold text-text-primary">API Key</h2>
-          </div>
-          <p className="text-xs text-text-secondary mb-4">
-            Paste your <code className="font-mono">rcr_k_...</code> API key to
-            authenticate with org-scoped endpoints. Stored in localStorage only.
-          </p>
+        <div className="terminal-card overflow-hidden">
+          <SectionHeader
+            label="API Key"
+            description="Authenticate with org-scoped endpoints. Stored in localStorage only."
+          />
+          <div className="terminal-card-screen space-y-3">
+            <div className="flex items-center gap-1.5 text-xs text-text-tertiary font-mono mb-1">
+              <Key size={11} />
+              <span>rcr_k_... key grants access to /orgs and audit endpoints</span>
+            </div>
 
-          <div className="space-y-3">
             {currentApiKey ? (
-              <div className="flex items-center justify-between rounded-lg border border-success/20 bg-success/10 px-3 py-2">
+              <div className="flex items-center justify-between rounded border border-border px-3 py-2">
                 <div className="flex items-center gap-2">
-                  <CheckCircle size={13} className="text-success" />
-                  <code className="text-xs font-mono text-success">
+                  <CheckCircle size={12} className="text-success" />
+                  <code className="text-xs font-mono text-text-secondary">
                     {currentApiKey.slice(0, 10)}...
                   </code>
-                  <span className="text-xs text-success">configured</span>
+                  <span className="text-xs text-text-tertiary">configured</span>
                 </div>
                 <button
                   onClick={handleClearApiKey}
                   className="flex items-center gap-1 text-xs text-error hover:text-error transition-colors"
                 >
-                  <Trash2 size={12} />
+                  <Trash2 size={11} />
                   Clear
                 </button>
               </div>
             ) : (
-              <p className="text-xs text-text-tertiary italic">No API key configured</p>
+              <p className="text-xs text-text-tertiary font-mono">No API key configured</p>
             )}
 
             <div className="flex gap-2">
@@ -239,14 +247,14 @@ export default function SettingsPage() {
                 onChange={(e) => setApiKeyInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleSaveApiKey()}
                 placeholder="rcr_k_..."
-                className="flex-1 rounded-lg border border-border px-3 py-2 text-sm text-text-primary placeholder-text-tertiary bg-bg-surface focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20 transition-colors"
+                className="flex-1 rounded border border-border px-3 py-2 text-sm text-text-primary placeholder-text-tertiary bg-bg-inset focus:border-foreground focus:outline-none transition-colors font-mono"
               />
               <button
                 onClick={handleSaveApiKey}
                 disabled={!apiKeyInput.trim()}
-                className="flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white bg-brand hover:bg-brand-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                className="flex items-center gap-1.5 rounded border border-border px-4 py-2 text-sm font-medium text-text-primary hover:bg-bg-surface disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
-                {apiKeySaved ? <CheckCircle size={13} /> : <Save size={13} />}
+                {apiKeySaved ? <CheckCircle size={12} /> : <Save size={12} />}
                 {apiKeySaved ? "Saved" : "Save"}
               </button>
             </div>
@@ -254,198 +262,174 @@ export default function SettingsPage() {
         </div>
 
         {/* Team Management */}
-        <div className="rounded-xl border border-border bg-bg-surface p-6">
-          <h2 className="text-sm font-semibold text-text-primary mb-1">Team Management</h2>
-          <p className="text-xs text-text-secondary mb-4">
-            Manage teams within your organization. Requires a valid API key above.
-          </p>
+        <div className="terminal-card overflow-hidden">
+          <SectionHeader
+            label="Team Management"
+            description="Manage teams within your organization. Requires a valid API key."
+          />
+          <div className="terminal-card-screen">
+            {!currentApiKey ? (
+              <p className="text-xs text-text-tertiary font-mono">Configure an API key to view team management.</p>
+            ) : orgs.length === 0 ? (
+              <p className="text-xs text-text-tertiary font-mono">No organizations found.</p>
+            ) : (
+              <div className="space-y-4">
+                {orgs.length > 1 && (
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs text-text-tertiary font-mono">Org:</label>
+                    <select
+                      value={selectedOrgId ?? ""}
+                      onChange={(e) => setSelectedOrgId(e.target.value)}
+                      className="rounded border border-border px-2 py-1 text-xs text-text-primary bg-bg-inset focus:outline-none focus:border-foreground font-mono"
+                    >
+                      {orgs.map((o) => (
+                        <option key={o.id} value={o.id}>{o.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
 
-          {!currentApiKey ? (
-            <p className="text-xs text-text-tertiary italic">
-              Configure an API key to view team management.
-            </p>
-          ) : orgs.length === 0 ? (
-            <p className="text-xs text-text-tertiary italic">No organizations found.</p>
-          ) : (
-            <div className="space-y-4">
-              {orgs.length > 1 && (
-                <div className="flex items-center gap-2">
-                  <label className="text-xs text-text-secondary font-medium">Org:</label>
-                  <select
-                    value={selectedOrgId ?? ""}
-                    onChange={(e) => setSelectedOrgId(e.target.value)}
-                    className="rounded border border-border px-2 py-1 text-xs text-text-primary bg-bg-surface focus:outline-none focus:border-brand"
-                  >
-                    {orgs.map((o) => (
-                      <option key={o.id} value={o.id}>
-                        {o.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {/* Teams list */}
-              <div className="divide-y divide-border-subtle rounded-lg border border-border">
-                {teams.length === 0 ? (
-                  <p className="px-4 py-3 text-xs text-text-tertiary italic">No teams yet.</p>
-                ) : (
-                  teams.map((team) => (
-                    <div key={team.id} className="flex items-center justify-between px-4 py-3">
-                      <div>
-                        <p className="text-sm font-medium text-text-primary">{team.name}</p>
-                        {team.wallet_count !== undefined && (
-                          <p className="text-xs text-text-secondary">
-                            {team.wallet_count} wallet{team.wallet_count !== 1 ? "s" : ""}
-                          </p>
-                        )}
-                      </div>
-                      {team.budget && (
-                        <div className="text-xs text-text-secondary text-right">
-                          {team.budget.daily_limit != null && (
-                            <p>Daily: {team.budget.daily_limit} USDC</p>
-                          )}
-                          {team.budget.monthly_limit != null && (
-                            <p>Monthly: {team.budget.monthly_limit} USDC</p>
+                <div className="rounded border border-border divide-y divide-border">
+                  {teams.length === 0 ? (
+                    <p className="px-4 py-3 text-xs text-text-tertiary font-mono">No teams yet.</p>
+                  ) : (
+                    teams.map((team) => (
+                      <div key={team.id} className="flex items-center justify-between px-4 py-3">
+                        <div>
+                          <p className="text-sm font-medium text-text-primary">{team.name}</p>
+                          {team.wallet_count !== undefined && (
+                            <p className="text-xs text-text-tertiary font-mono">
+                              {team.wallet_count} wallet{team.wallet_count !== 1 ? "s" : ""}
+                            </p>
                           )}
                         </div>
-                      )}
-                    </div>
-                  ))
-                )}
-              </div>
+                        {team.budget && (
+                          <div className="text-xs text-text-tertiary font-mono text-right">
+                            {team.budget.daily_limit != null && (
+                              <p>Daily: {team.budget.daily_limit} USDC</p>
+                            )}
+                            {team.budget.monthly_limit != null && (
+                              <p>Monthly: {team.budget.monthly_limit} USDC</p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
 
-              {/* Create team */}
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={newTeamName}
-                  onChange={(e) => setNewTeamName(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleCreateTeam()}
-                  placeholder="New team name"
-                  className="flex-1 rounded-lg border border-border px-3 py-2 text-sm text-text-primary placeholder-text-tertiary bg-bg-surface focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20 transition-colors"
-                />
-                <button
-                  onClick={handleCreateTeam}
-                  disabled={!newTeamName.trim() || creatingTeam}
-                  className="flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white bg-brand hover:bg-brand-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                >
-                  <Plus size={13} />
-                  {creatingTeam ? "Creating..." : "Create Team"}
-                </button>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={newTeamName}
+                    onChange={(e) => setNewTeamName(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleCreateTeam()}
+                    placeholder="New team name"
+                    className="flex-1 rounded border border-border px-3 py-2 text-sm text-text-primary placeholder-text-tertiary bg-bg-inset focus:border-foreground focus:outline-none transition-colors font-mono"
+                  />
+                  <button
+                    onClick={handleCreateTeam}
+                    disabled={!newTeamName.trim() || creatingTeam}
+                    className="flex items-center gap-1.5 rounded border border-border px-4 py-2 text-sm font-medium text-text-primary hover:bg-bg-surface disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <Plus size={12} />
+                    {creatingTeam ? "Creating..." : "Create"}
+                  </button>
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         {/* Audit Log */}
-        <div className="rounded-xl border border-border bg-bg-surface p-6">
-          <h2 className="text-sm font-semibold text-text-primary mb-1">Audit Log</h2>
-          <p className="text-xs text-text-secondary mb-4">Recent organization activity (last 20 entries).</p>
-
-          {!currentApiKey ? (
-            <p className="text-xs text-text-tertiary italic">
-              Configure an API key to view audit logs.
-            </p>
-          ) : auditLogs.length === 0 ? (
-            <p className="text-xs text-text-tertiary italic">No audit log entries found.</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-border-subtle">
-                    <th className="pb-2 text-left font-medium text-text-secondary">Action</th>
-                    <th className="pb-2 text-left font-medium text-text-secondary">Resource</th>
-                    <th className="pb-2 text-left font-medium text-text-secondary">Time</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border-subtle">
-                  {auditLogs.map((entry) => (
-                    <tr key={entry.id}>
-                      <td className="py-2 pr-4 font-mono text-text-primary">{entry.action}</td>
-                      <td className="py-2 pr-4 text-text-secondary">{entry.resource_type}</td>
-                      <td className="py-2 text-text-secondary">
-                        {new Date(entry.created_at).toLocaleString()}
-                      </td>
+        <div className="terminal-card overflow-hidden">
+          <SectionHeader
+            label="Audit Log"
+            description="Recent organization activity (last 20 entries)."
+          />
+          <div className="terminal-card-screen">
+            {!currentApiKey ? (
+              <p className="text-xs text-text-tertiary font-mono">Configure an API key to view audit logs.</p>
+            ) : auditLogs.length === 0 ? (
+              <p className="text-xs text-text-tertiary font-mono">No audit log entries found.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-border">
+                      <th className="pb-2 text-left font-medium text-text-tertiary font-mono uppercase tracking-wide">Action</th>
+                      <th className="pb-2 text-left font-medium text-text-tertiary font-mono uppercase tracking-wide">Resource</th>
+                      <th className="pb-2 text-left font-medium text-text-tertiary font-mono uppercase tracking-wide">Time</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {auditLogs.map((entry) => (
+                      <tr key={entry.id}>
+                        <td className="py-2 pr-4 font-mono text-text-primary">{entry.action}</td>
+                        <td className="py-2 pr-4 text-text-secondary font-mono">{entry.resource_type}</td>
+                        <td className="py-2 text-text-tertiary font-mono">
+                          {new Date(entry.created_at).toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Gateway */}
-        <div className="rounded-xl border border-border bg-bg-surface p-6">
-          <h2 className="text-sm font-semibold text-text-primary mb-1">Gateway</h2>
-          <p className="text-xs text-text-secondary mb-4">
-            Solvela API endpoint configuration
-          </p>
-          <div>
+        <div className="terminal-card overflow-hidden">
+          <SectionHeader
+            label="Gateway"
+            description="Solvela API endpoint configuration"
+          />
+          <div className="terminal-card-screen" style={{ paddingTop: '0', paddingBottom: '0' }}>
             <SettingRow
               label="Gateway URL"
               description="Base URL of your Solvela gateway (NEXT_PUBLIC_GATEWAY_URL)"
             >
-              <Input
-                value={gatewayUrl}
-                onChange={setGatewayUrl}
-                placeholder="http://localhost:8402"
-              />
+              <Input value={gatewayUrl} onChange={setGatewayUrl} placeholder="http://localhost:8402" />
             </SettingRow>
             <SettingRow
               label="CORS Origins"
               description="Comma-separated allowed origins (RCR_CORS_ORIGINS)"
             >
-              <Input
-                value={corsOrigins}
-                onChange={setCorsOrigins}
-                placeholder="http://localhost:3000"
-              />
+              <Input value={corsOrigins} onChange={setCorsOrigins} placeholder="http://localhost:3000" />
             </SettingRow>
           </div>
         </div>
 
         {/* Budget */}
-        <div className="rounded-xl border border-border bg-bg-surface p-6">
-          <h2 className="text-sm font-semibold text-text-primary mb-1">
-            Budget Limits
-          </h2>
-          <p className="text-xs text-text-secondary mb-4">
-            Per-wallet spend limits in USDC. Requests exceeding limits return 402.
-          </p>
-          <div>
+        <div className="terminal-card overflow-hidden">
+          <SectionHeader
+            label="Budget Limits"
+            description="Per-wallet spend limits in USDC. Requests exceeding limits return 402."
+          />
+          <div className="terminal-card-screen" style={{ paddingTop: '0', paddingBottom: '0' }}>
             <SettingRow
               label="Daily Limit (USDC)"
               description="Maximum spend per wallet per day"
             >
-              <Input
-                value={dailyBudget}
-                onChange={setDailyBudget}
-                placeholder="5.00"
-                type="number"
-              />
+              <Input value={dailyBudget} onChange={setDailyBudget} placeholder="5.00" type="number" />
             </SettingRow>
             <SettingRow
               label="Monthly Limit (USDC)"
               description="Maximum spend per wallet per month"
             >
-              <Input
-                value={monthlyBudget}
-                onChange={setMonthlyBudget}
-                placeholder="50.00"
-                type="number"
-              />
+              <Input value={monthlyBudget} onChange={setMonthlyBudget} placeholder="50.00" type="number" />
             </SettingRow>
           </div>
         </div>
 
         {/* Security */}
-        <div className="rounded-xl border border-border bg-bg-surface p-6">
-          <h2 className="text-sm font-semibold text-text-primary mb-1">Security</h2>
-          <p className="text-xs text-text-secondary mb-4">
-            Middleware and protection settings
-          </p>
-          <div>
+        <div className="terminal-card overflow-hidden">
+          <SectionHeader
+            label="Security"
+            description="Middleware and protection settings"
+          />
+          <div className="terminal-card-screen" style={{ paddingTop: '0', paddingBottom: '0' }}>
             <SettingRow
               label="Prompt Guard"
               description="Block injection attacks, jailbreaks, and PII in prompts"
@@ -461,61 +445,67 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        {/* Wallet / keys — read-only env-var status panel */}
-        <div className="rounded-xl border border-border bg-bg-surface p-6">
-          <h2 className="text-sm font-semibold text-text-primary mb-1">
-            Wallet &amp; Keys
-          </h2>
-          <div className="flex items-start gap-2 mb-4 rounded-lg border border-info/20 bg-info/10 p-3">
-            <Info size={14} className="text-info mt-0.5 flex-shrink-0" />
-            <p className="text-xs text-info">
-              Private keys are never entered here. Set{" "}
-              <code className="font-mono">SOLANA_WALLET_KEY</code> in your{" "}
-              <code className="font-mono">.env</code> file or shell environment.
-              The dashboard shows connection status only.
-            </p>
-          </div>
-          <div>
-            <EnvVarStatus
-              name="SOLANA_WALLET_KEY"
-              set={false}
-              description="Base58 Solana keypair for signing x402 payments — set in .env, never in this UI"
-            />
-            <EnvVarStatus
-              name="RCR_SOLANA_RPC_URL"
-              set={true}
-              description="Solana RPC endpoint used by the gateway"
-            />
-            <EnvVarStatus
-              name="RCR_SOLANA_RECIPIENT_WALLET"
-              set={true}
-              description="Gateway payment destination wallet"
-            />
+        {/* Wallet & Keys */}
+        <div className="terminal-card overflow-hidden">
+          <SectionHeader
+            label="Wallet &amp; Keys"
+          />
+          <div className="terminal-card-screen space-y-4">
+            <div className="flex items-start gap-2 rounded border border-border p-3">
+              <Info size={13} className="text-text-tertiary mt-0.5 flex-shrink-0" />
+              <p className="text-xs text-text-secondary font-mono">
+                Private keys are never entered here. Set{" "}
+                <code>SOLANA_WALLET_KEY</code> in your{" "}
+                <code>.env</code> file or shell environment.
+              </p>
+            </div>
+            <div>
+              <EnvVarStatus
+                name="SOLANA_WALLET_KEY"
+                set={false}
+                description="Base58 Solana keypair for signing x402 payments — set in .env, never in this UI"
+              />
+              <EnvVarStatus
+                name="RCR_SOLANA_RPC_URL"
+                set={true}
+                description="Solana RPC endpoint used by the gateway"
+              />
+              <EnvVarStatus
+                name="RCR_SOLANA_RECIPIENT_WALLET"
+                set={true}
+                description="Gateway payment destination wallet"
+              />
+            </div>
           </div>
         </div>
 
-        {/* Apply button — generates env snippet */}
+        {/* Generate .env snippet */}
         <div className="space-y-3">
           <button
             onClick={() => setShowEnvSnippet(true)}
-            className="flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-medium text-white bg-brand hover:bg-brand-hover transition-colors"
+            className="flex items-center gap-2 rounded border border-border px-5 py-2.5 text-sm font-medium text-text-primary hover:bg-bg-surface transition-colors"
           >
-            <Save size={14} />
+            <Save size={13} />
             Generate .env Snippet
           </button>
 
           {showEnvSnippet && (
-            <div className="rounded-xl border border-border bg-bg-inset p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <Terminal size={13} className="text-text-secondary" />
-                <p className="text-xs font-medium text-text-secondary">
-                  Add to your gateway <code className="font-mono">.env</code> file:
-                </p>
-                <CheckCircle size={13} className="text-success ml-auto" />
+            <div className="terminal-card overflow-hidden">
+              <div className="terminal-card-titlebar">
+                <span className="terminal-card-dots">
+                  <span className="terminal-card-dot" />
+                  <span className="terminal-card-dot" />
+                  <span className="terminal-card-dot terminal-card-dot--accent" />
+                </span>
+                <Terminal size={11} className="text-text-tertiary" />
+                <span>config.env</span>
+                <CheckCircle size={11} className="text-success ml-auto" />
               </div>
-              <pre className="text-xs font-mono text-text-primary whitespace-pre-wrap break-all">
-                {envSnippet}
-              </pre>
+              <div className="terminal-card-screen" style={{ padding: '1rem' }}>
+                <pre className="text-xs font-mono text-text-primary whitespace-pre-wrap break-all">
+                  {envSnippet}
+                </pre>
+              </div>
             </div>
           )}
         </div>
