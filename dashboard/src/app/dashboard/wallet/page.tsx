@@ -1,13 +1,15 @@
 import { Copy, ExternalLink, ArrowUpRight, AlertTriangle } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { StatusDot } from "@/components/ui/status-dot";
+import { TerminalCard } from "@/components/ui/terminal-card";
 import { WALLET_TXS, DASHBOARD_STATS } from "@/lib/mock-data";
 import { fetchAdminStats, fetchEscrowConfig } from "@/lib/api";
 import { formatUSDC, formatNumber } from "@/lib/utils";
 
 const RECIPIENT_WALLET =
+  process.env.SOLVELA_SOLANA_RECIPIENT_WALLET ??
   process.env.RCR_SOLANA_RECIPIENT_WALLET ??
-  "Configure RCR_SOLANA_RECIPIENT_WALLET in .env";
+  "Configure SOLVELA_SOLANA_RECIPIENT_WALLET in .env";
 
 export default async function WalletPage() {
   const [statsResponse, escrowConfig] = await Promise.all([
@@ -42,34 +44,15 @@ export default async function WalletPage() {
       <div className="flex-1 p-6 space-y-5">
         {/* Mock data warning */}
         {usingMockData && (
-          <div className="flex items-center gap-2 rounded border border-border px-4 py-2.5 text-sm text-text-secondary">
+          <div role="status" aria-live="polite" className="flex items-center gap-2 rounded border border-border px-4 py-2.5 text-sm text-text-secondary">
             <AlertTriangle size={13} className="flex-shrink-0 text-warning" />
             <span>Gateway offline — showing sample data.</span>
           </div>
         )}
 
         {/* Balance */}
-        <div className="terminal-card">
-          <div className="terminal-card-titlebar">
-            <span className="terminal-card-dots">
-              <span className="terminal-card-dot" />
-              <span className="terminal-card-dot" />
-              <span className="terminal-card-dot" />
-            </span>
-            <span>wallet.recipient</span>
-            <span className="ml-auto"><StatusDot status="ok" label="Connected" /></span>
-          </div>
-          <div className="terminal-card-screen">
-            <p
-              className="tabular-nums leading-none"
-              style={{
-                fontFamily: 'var(--font-serif)',
-                fontSize: '36px',
-                fontWeight: 500,
-                color: 'var(--heading-color)',
-                letterSpacing: '-0.02em',
-              }}
-            >
+        <TerminalCard title="Recipient wallet" meta={<StatusDot status="ok" label="Connected" />}>
+            <p className="metric-xl">
               {formatUSDC(totalSpend, 2)}
             </p>
             <p className="mt-1.5 text-xs text-text-tertiary font-mono">
@@ -80,7 +63,8 @@ export default async function WalletPage() {
                 {short}
               </code>
               <button
-                className="rounded border border-border p-1.5 text-text-tertiary hover:text-text-primary hover:bg-bg-surface transition-colors"
+                type="button"
+                className="flex h-10 w-10 items-center justify-center rounded border border-border text-text-tertiary hover:text-text-primary hover:bg-bg-surface transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-salmon)]"
                 title="Copy address"
                 aria-label="Copy address"
               >
@@ -90,62 +74,43 @@ export default async function WalletPage() {
                 href={`https://solscan.io/account/${addr}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="rounded border border-border p-1.5 text-text-tertiary hover:text-text-primary hover:bg-bg-surface transition-colors"
+                className="flex h-10 w-10 items-center justify-center rounded border border-border text-text-tertiary hover:text-text-primary hover:bg-bg-surface transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-salmon)]"
                 title="View on Solscan"
                 aria-label="View on Solscan"
               >
                 <ExternalLink size={12} />
               </a>
             </div>
-          </div>
-        </div>
+        </TerminalCard>
 
         {/* Escrow config */}
         {escrowConfig && (
-          <div className="terminal-card">
-            <div className="terminal-card-titlebar">
-              <span className="terminal-card-dots">
-                <span className="terminal-card-dot" />
-                <span className="terminal-card-dot" />
-                <span className="terminal-card-dot" />
-              </span>
-              <span>wallet.escrow</span>
-            </div>
-            <div className="terminal-card-screen">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="rounded border border-border p-3" style={{ background: 'var(--sidebar-bg)' }}>
-                  <p className="text-xs text-text-tertiary font-mono mb-1">Network</p>
-                  <p className="text-sm font-medium text-text-primary">{escrowConfig.network}</p>
-                </div>
-                <div className="rounded border border-border p-3" style={{ background: 'var(--sidebar-bg)' }}>
-                  <p className="text-xs text-text-tertiary font-mono mb-1">Current Slot</p>
-                  <p className="text-sm font-medium text-text-primary tabular-nums font-mono">{formatNumber(escrowConfig.current_slot)}</p>
-                </div>
-                <div className="rounded border border-border p-3" style={{ background: 'var(--sidebar-bg)' }}>
-                  <p className="text-xs text-text-tertiary font-mono mb-1">USDC Mint</p>
-                  <code className="text-xs font-mono text-text-secondary break-all">{escrowConfig.usdc_mint}</code>
-                </div>
-                <div className="rounded border border-border p-3" style={{ background: 'var(--sidebar-bg)' }}>
-                  <p className="text-xs text-text-tertiary font-mono mb-1">Program ID</p>
-                  <code className="text-xs font-mono text-text-secondary break-all">{escrowConfig.escrow_program_id}</code>
-                </div>
+          <TerminalCard title="Escrow configuration">
+            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-5">
+              <div>
+                <dt className="text-[11px] text-text-tertiary font-mono uppercase tracking-wide mb-1">Network</dt>
+                <dd className="text-sm font-medium text-text-primary">{escrowConfig.network}</dd>
               </div>
-            </div>
-          </div>
+              <div>
+                <dt className="text-[11px] text-text-tertiary font-mono uppercase tracking-wide mb-1">Current Slot</dt>
+                <dd className="text-sm font-medium text-text-primary tabular-nums font-mono">{formatNumber(escrowConfig.current_slot)}</dd>
+              </div>
+              <div>
+                <dt className="text-[11px] text-text-tertiary font-mono uppercase tracking-wide mb-1">USDC Mint</dt>
+                <dd><code className="text-xs font-mono text-text-secondary break-all">{escrowConfig.usdc_mint}</code></dd>
+              </div>
+              <div>
+                <dt className="text-[11px] text-text-tertiary font-mono uppercase tracking-wide mb-1">Program ID</dt>
+                <dd><code className="text-xs font-mono text-text-secondary break-all">{escrowConfig.escrow_program_id}</code></dd>
+              </div>
+            </dl>
+          </TerminalCard>
         )}
 
         {/* Transactions / wallets table */}
         {topWallets ? (
-          <div className="terminal-card overflow-hidden">
-            <div className="terminal-card-titlebar">
-              <span className="terminal-card-dots">
-                <span className="terminal-card-dot" />
-                <span className="terminal-card-dot" />
-                <span className="terminal-card-dot" />
-              </span>
-              <span>wallet.deposits</span>
-            </div>
-            <div className="divide-y divide-border" style={{ background: 'var(--popover)' }}>
+          <TerminalCard title="wallet.deposits" bare className="overflow-hidden">
+            <div className="divide-y divide-border bg-popover">
               {topWallets.map((w) => (
                 <div
                   key={w.wallet}
@@ -165,27 +130,24 @@ export default async function WalletPage() {
                 </div>
               ))}
             </div>
-          </div>
+          </TerminalCard>
         ) : (
-          <div className="terminal-card overflow-hidden">
-            <div className="terminal-card-titlebar">
-              <span className="terminal-card-dots">
-                <span className="terminal-card-dot" />
-                <span className="terminal-card-dot" />
-                <span className="terminal-card-dot" />
-              </span>
-              <span>wallet.deposits</span>
+          <TerminalCard
+            title="wallet.deposits"
+            meta={
               <a
                 href={`https://solscan.io/account/${addr}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="ml-auto flex items-center gap-1 text-text-tertiary hover:text-text-primary transition-colors"
-                style={{ fontSize: '10px' }}
+                className="flex items-center gap-1 text-text-tertiary hover:text-text-primary transition-colors text-xxs"
               >
                 View all <ExternalLink size={10} />
               </a>
-            </div>
-            <div className="divide-y divide-border" style={{ background: 'var(--popover)' }}>
+            }
+            bare
+            className="overflow-hidden"
+          >
+            <div className="divide-y divide-border bg-popover">
               {WALLET_TXS.map((tx) => (
                 <div
                   key={tx.signature}
@@ -229,33 +191,23 @@ export default async function WalletPage() {
                 </div>
               ))}
             </div>
-          </div>
+          </TerminalCard>
         )}
 
         {/* Fund instructions */}
-        <div className="terminal-card">
-          <div className="terminal-card-titlebar">
-            <span className="terminal-card-dots">
-              <span className="terminal-card-dot" />
-              <span className="terminal-card-dot" />
-              <span className="terminal-card-dot" />
-            </span>
-            <span>wallet.fund</span>
-          </div>
-          <div className="terminal-card-screen">
-            <ol className="space-y-1.5 text-sm text-text-secondary list-decimal list-inside">
-              <li>Send USDC-SPL to your wallet address above on Solana mainnet</li>
-              <li>
-                USDC Mint:{" "}
-                <code className="font-mono text-xs border border-border rounded px-1 py-0.5 text-text-tertiary">
-                  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-                </code>
-              </li>
-              <li>Your wallet must hold a small amount of SOL for transaction fees (~0.002 SOL)</li>
-              <li>Payments are deducted automatically per API call via x402 protocol</li>
-            </ol>
-          </div>
-        </div>
+        <TerminalCard title="Fund your wallet">
+          <ol className="space-y-1.5 text-sm text-text-secondary list-decimal list-inside">
+            <li>Send USDC-SPL to your wallet address above on Solana mainnet</li>
+            <li>
+              USDC Mint:{" "}
+              <code className="font-mono text-xs border border-border rounded px-1 py-0.5 text-text-tertiary">
+                EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+              </code>
+            </li>
+            <li>Your wallet must hold a small amount of SOL for transaction fees (~0.002 SOL)</li>
+            <li>Payments are deducted automatically per API call via x402 protocol</li>
+          </ol>
+        </TerminalCard>
       </div>
     </div>
   );

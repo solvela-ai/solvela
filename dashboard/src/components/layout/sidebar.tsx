@@ -63,7 +63,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
                 key={href}
                 href={href}
                 className={cn(
-                  "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                  "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-salmon)]",
                   active
                     ? "nav-item-active text-text-primary bg-bg-surface"
                     : "text-text-secondary hover:bg-bg-surface hover:text-text-primary"

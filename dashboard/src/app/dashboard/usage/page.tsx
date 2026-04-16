@@ -1,5 +1,6 @@
 import { AlertTriangle } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
+import { TerminalCard } from "@/components/ui/terminal-card";
 import { ModelPie } from "@/components/charts/model-pie";
 import { SpendChart } from "@/components/charts/spend-chart";
 import { Badge } from "@/components/ui/badge";
@@ -74,7 +75,7 @@ export default async function UsagePage() {
       <div className="flex-1 p-6 space-y-5">
         {/* Mock data warning */}
         {usingMockData && (
-          <div className="flex items-center gap-2 rounded border border-border px-4 py-2.5 text-sm text-text-secondary">
+          <div role="status" aria-live="polite" className="flex items-center gap-2 rounded border border-border px-4 py-2.5 text-sm text-text-secondary">
             <AlertTriangle size={13} className="flex-shrink-0 text-warning" />
             <span>Gateway offline — showing sample data.</span>
           </div>
@@ -84,49 +85,25 @@ export default async function UsagePage() {
         <div>
           <p className="eyebrow mb-3">Distribution</p>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            <div className="terminal-card">
-              <div className="terminal-card-titlebar">
-                <span className="terminal-card-dots">
-                  <span className="terminal-card-dot" />
-                  <span className="terminal-card-dot" />
-                  <span className="terminal-card-dot" />
-                </span>
-                <span>requests.by.model</span>
-                <span className="ml-auto text-text-tertiary" style={{ fontSize: '10px' }}>30d</span>
-              </div>
-              <div className="terminal-card-screen">
-                <ModelPie data={modelUsage} />
-              </div>
-            </div>
+            <TerminalCard
+              title="requests.by.model"
+              meta={<span className="text-xxs text-text-tertiary font-mono">30d</span>}
+            >
+              <ModelPie data={modelUsage} />
+            </TerminalCard>
 
-            <div className="terminal-card">
-              <div className="terminal-card-titlebar">
-                <span className="terminal-card-dots">
-                  <span className="terminal-card-dot" />
-                  <span className="terminal-card-dot" />
-                  <span className="terminal-card-dot" />
-                </span>
-                <span>spend.over.time</span>
-                <span className="ml-auto text-text-tertiary" style={{ fontSize: '10px' }}>USDC · 30d</span>
-              </div>
-              <div className="terminal-card-screen">
-                <SpendChart data={history} />
-              </div>
-            </div>
+            <TerminalCard
+              title="spend.over.time"
+              meta={<span className="text-xxs text-text-tertiary font-mono">USDC · 30d</span>}
+            >
+              <SpendChart data={history} />
+            </TerminalCard>
           </div>
         </div>
 
         {/* Model breakdown table */}
-        <div className="terminal-card overflow-hidden">
-          <div className="terminal-card-titlebar">
-            <span className="terminal-card-dots">
-              <span className="terminal-card-dot" />
-              <span className="terminal-card-dot" />
-              <span className="terminal-card-dot" />
-            </span>
-            <span>model.breakdown</span>
-          </div>
-          <div className="overflow-x-auto" style={{ background: 'var(--popover)' }}>
+        <TerminalCard title="model.breakdown" bare className="overflow-hidden">
+          <div className="overflow-x-auto bg-popover">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border text-xs text-text-tertiary uppercase tracking-wide font-mono">
@@ -174,42 +151,32 @@ export default async function UsagePage() {
               </tbody>
             </table>
           </div>
-        </div>
+        </TerminalCard>
 
         {/* Wallet breakdown */}
-        <div className="terminal-card overflow-hidden">
-          <div className="terminal-card-titlebar">
-            <span className="terminal-card-dots">
-              <span className="terminal-card-dot" />
-              <span className="terminal-card-dot" />
-              <span className="terminal-card-dot" />
-            </span>
-            <span>wallets.by.spend</span>
-          </div>
-          <div className="terminal-card-screen">
-            <div className="space-y-3">
-              {topWallets.map((w) => (
-                <div key={w.wallet} className="flex items-center gap-4">
-                  <code className="w-36 text-xs text-text-tertiary font-mono truncate">
-                    {w.wallet}
-                  </code>
-                  <div className="flex-1 h-px bg-bg-surface-raised relative">
-                    <div
-                      className="absolute inset-y-0 left-0 bg-text-tertiary"
-                      style={{ width: `${w.pct}%`, height: "1px" }}
-                    />
-                  </div>
-                  <span className="w-20 text-right text-xs tabular-nums text-text-secondary font-mono">
-                    {formatUSDC(w.spend, 2)}
-                  </span>
-                  <span className="w-16 text-right text-xs text-text-tertiary font-mono">
-                    {formatNumber(w.requests)} req
-                  </span>
+        <TerminalCard title="wallets.by.spend">
+          <div className="space-y-3">
+            {topWallets.map((w) => (
+              <div key={w.wallet} className="flex items-center gap-4">
+                <code className="w-36 text-xs text-text-tertiary font-mono truncate">
+                  {w.wallet}
+                </code>
+                <div className="flex-1 h-px bg-bg-surface-raised relative">
+                  <div
+                    className="absolute inset-y-0 left-0 bg-text-tertiary"
+                    style={{ width: `${w.pct}%`, height: "1px" }}
+                  />
                 </div>
-              ))}
-            </div>
+                <span className="w-20 text-right text-xs tabular-nums text-text-secondary font-mono">
+                  {formatUSDC(w.spend, 2)}
+                </span>
+                <span className="w-16 text-right text-xs text-text-tertiary font-mono">
+                  {formatNumber(w.requests)} req
+                </span>
+              </div>
+            ))}
           </div>
-        </div>
+        </TerminalCard>
       </div>
     </div>
   );

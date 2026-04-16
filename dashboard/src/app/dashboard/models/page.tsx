@@ -2,6 +2,7 @@ import { CheckCircle, XCircle, AlertTriangle } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { Badge } from "@/components/ui/badge";
 import { StatusDot } from "@/components/ui/status-dot";
+import { TerminalCard } from "@/components/ui/terminal-card";
 import { fetchPricing } from "@/lib/api";
 import { providerBadgeClass } from "@/lib/utils";
 import type { Model } from "@/types";
@@ -76,9 +77,9 @@ export default async function ModelsPage() {
         }
       />
 
-      <div className="flex-1 p-6 space-y-4">
+      <div className="flex-1 p-6 space-y-5">
         {error && (
-          <div className="flex items-center gap-2 rounded border border-border px-4 py-2.5 text-sm text-text-secondary">
+          <div role="status" aria-live="polite" className="flex items-center gap-2 rounded border border-border px-4 py-2.5 text-sm text-text-secondary">
             <AlertTriangle size={13} className="flex-shrink-0 text-warning" />
             <span>
               Could not reach gateway ({error}). Run{" "}
@@ -89,16 +90,8 @@ export default async function ModelsPage() {
         )}
 
         {/* Models table */}
-        <div className="terminal-card overflow-hidden">
-          <div className="terminal-card-titlebar">
-            <span className="terminal-card-dots">
-              <span className="terminal-card-dot" />
-              <span className="terminal-card-dot" />
-              <span className="terminal-card-dot" />
-            </span>
-            <span>model.registry</span>
-          </div>
-          <div className="overflow-x-auto" style={{ background: 'var(--popover)' }}>
+        <TerminalCard title="model.registry" bare className="overflow-hidden">
+          <div className="overflow-x-auto bg-popover">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border text-xs text-text-tertiary uppercase tracking-wide font-mono">
@@ -132,7 +125,7 @@ export default async function ModelsPage() {
               </tbody>
             </table>
           </div>
-        </div>
+        </TerminalCard>
 
         <p className="text-xs text-text-tertiary font-mono">
           Prices in USDC per million tokens including the 5% platform fee.

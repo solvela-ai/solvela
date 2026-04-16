@@ -5,6 +5,9 @@ import solvelaLight from './src/lib/shiki/solvela-light.json' with { type: 'json
 
 export const docs = defineDocs({
   dir: 'content/docs',
+  docs: {
+    files: ['**/*.{md,mdx}', '!**/AGENTS.md'],
+  },
 })
 
 export default defineConfig({
