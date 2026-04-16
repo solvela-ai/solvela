@@ -188,7 +188,7 @@ function SearchDialog({ onClose }: SearchDialogProps) {
               placeholder="Search..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="flex-1 py-4 bg-transparent text-foreground placeholder:text-muted-foreground text-base border-none outline-none focus:outline-none focus:ring-0 focus:border-none"
+              className="flex-1 py-4 bg-transparent text-foreground placeholder:text-muted-foreground text-base border-none outline-none focus:outline-none focus:ring-0 focus:border-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-foreground"
               style={{ outline: 'none', boxShadow: 'none' }}
               autoFocus
             />
