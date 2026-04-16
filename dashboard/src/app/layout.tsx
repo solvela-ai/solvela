@@ -1,5 +1,5 @@
 import type { Metadata } from 'next'
-import { DM_Sans, JetBrains_Mono, Archivo } from 'next/font/google'
+import { DM_Sans, JetBrains_Mono, Archivo, Source_Serif_4 } from 'next/font/google'
 import { ThemeProvider } from './providers/theme-provider'
 import { siteConfig } from '@/lib/theme-config'
 import './globals.css'
@@ -25,6 +25,13 @@ const display = Archivo({
   display: 'swap',
 })
 
+const serif = Source_Serif_4({
+  subsets: ['latin'],
+  weight: ['200', '300', '400', '500', '600'],
+  variable: '--font-serif',
+  display: 'swap',
+})
+
 export const metadata: Metadata = {
   title: {
     default: siteConfig.name,
@@ -39,7 +46,7 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en" className={`${sans.variable} ${mono.variable} ${display.variable}`} suppressHydrationWarning>
+    <html lang="en" className={`${sans.variable} ${mono.variable} ${display.variable} ${serif.variable}`} suppressHydrationWarning>
       <body suppressHydrationWarning>
         <ThemeProvider
           attribute="class"

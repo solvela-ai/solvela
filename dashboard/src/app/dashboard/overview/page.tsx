@@ -28,7 +28,6 @@ export default async function OverviewPage() {
 
   const usingMockData = !statsResponse;
 
-  // Map API data to display values, falling back to mock data
   const s = statsResponse
     ? {
         totalSpend: parseFloat(statsResponse.summary.total_cost_usdc),
@@ -46,12 +45,11 @@ export default async function OverviewPage() {
         totalSpend: DASHBOARD_STATS.totalSpend,
         totalRequests: DASHBOARD_STATS.totalRequests,
         avgCostPerRequest: DASHBOARD_STATS.avgCostPerRequest,
-        uniqueWallets: 0,
+        uniqueWallets: 3,
         activeModels: DASHBOARD_STATS.activeModels,
-        cacheHitRate: 0,
+        cacheHitRate: 0.34,
       };
 
-  // Map by_day to SpendDataPoint[], falling back to mock data
   const history: SpendDataPoint[] = statsResponse
     ? statsResponse.by_day.map((day) => ({
         date: new Date(day.date).toLocaleDateString("en-US", {
@@ -73,107 +71,114 @@ export default async function OverviewPage() {
         subtitle="Last 30 days · All models · Solana mainnet"
       />
 
-      <div className="flex-1 p-6 space-y-6">
-        {/* Mock data warning banner */}
+      <div className="flex-1 p-6 space-y-5">
+        {/* Mock data warning */}
         {usingMockData && (
-          <div className="flex items-center gap-2 rounded-lg border border-warning/20 bg-warning/10 px-4 py-2.5 text-sm text-warning">
-            <AlertTriangle size={14} className="flex-shrink-0" />
-            <span>
-              Unable to reach gateway API. Showing sample data.
-            </span>
+          <div className="flex items-center gap-2 rounded border border-border px-4 py-2.5 text-sm text-text-secondary">
+            <AlertTriangle size={13} className="flex-shrink-0 text-warning" />
+            <span>Gateway offline — showing sample data.</span>
           </div>
         )}
 
-        {/* Stats row */}
-        <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-          <StatCard
-            title="Total Spend"
-            value={formatUSDC(s.totalSpend, 2)}
-            subtitle="USDC-SPL"
-            icon={DollarSign}
-            trend={{ value: "12%", positive: false }}
-          />
-          <StatCard
-            title="Requests"
-            value={formatNumber(s.totalRequests)}
-            subtitle="API calls"
-            icon={Activity}
-            trend={{ value: "8%", positive: true }}
-          />
-          <StatCard
-            title="Avg Cost"
-            value={formatUSDC(s.avgCostPerRequest, 5)}
-            subtitle="per request"
-            icon={TrendingDown}
-          />
-          <StatCard
-            title="Cache Hit Rate"
-            value={`${Math.round(s.cacheHitRate * 100)}%`}
-            subtitle="response cache"
-            icon={Zap}
-            iconColor="text-success"
-          />
-          <StatCard
-            title="Active Models"
-            value={String(s.activeModels)}
-            subtitle="in use this period"
-            icon={Cpu}
-          />
-          <StatCard
-            title="Unique Wallets"
-            value={String(s.uniqueWallets)}
-            subtitle="this period"
-            icon={Wallet}
-            iconColor="text-info"
-          />
+        {/* Stats grid */}
+        <div>
+          <p className="eyebrow mb-3">30-day metrics</p>
+          <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+            <StatCard
+              title="Total Spend"
+              value={formatUSDC(s.totalSpend, 2)}
+              subtitle="USDC-SPL"
+              icon={DollarSign}
+            />
+            <StatCard
+              title="Requests"
+              value={formatNumber(s.totalRequests)}
+              subtitle="API calls"
+              icon={Activity}
+            />
+            <StatCard
+              title="Avg Cost"
+              value={formatUSDC(s.avgCostPerRequest, 5)}
+              subtitle="per request"
+              icon={TrendingDown}
+            />
+            <StatCard
+              title="Cache Hit"
+              value={`${Math.round(s.cacheHitRate * 100)}%`}
+              subtitle="response cache"
+              icon={Zap}
+            />
+            <StatCard
+              title="Models"
+              value={String(s.activeModels)}
+              subtitle="active this period"
+              icon={Cpu}
+            />
+            <StatCard
+              title="Wallets"
+              value={String(s.uniqueWallets)}
+              subtitle="unique this period"
+              icon={Wallet}
+            />
+          </div>
         </div>
 
-        {/* Charts row */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="rounded-xl border border-border bg-bg-surface p-5">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-text-primary">
-                Daily Spend (USDC)
-              </h2>
-              <span className="text-xs text-text-tertiary">30 days</span>
+        {/* Charts */}
+        <div>
+          <p className="eyebrow mb-3">Activity</p>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div className="terminal-card">
+              <div className="terminal-card-titlebar">
+                <span className="terminal-card-dots">
+                  <span className="terminal-card-dot" />
+                  <span className="terminal-card-dot" />
+                  <span className="terminal-card-dot" />
+                </span>
+                <span>spend.usdc.daily</span>
+                <span className="ml-auto text-text-tertiary" style={{ fontSize: '10px' }}>30d</span>
+              </div>
+              <div className="terminal-card-screen">
+                <SpendChart data={history} />
+              </div>
             </div>
-            <SpendChart data={history} />
-          </div>
 
-          <div className="rounded-xl border border-border bg-bg-surface p-5">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-text-primary">
-                Daily Requests
-              </h2>
-              <span className="text-xs text-text-tertiary">30 days</span>
+            <div className="terminal-card">
+              <div className="terminal-card-titlebar">
+                <span className="terminal-card-dots">
+                  <span className="terminal-card-dot" />
+                  <span className="terminal-card-dot" />
+                  <span className="terminal-card-dot" />
+                </span>
+                <span>requests.daily</span>
+                <span className="ml-auto text-text-tertiary" style={{ fontSize: '10px' }}>30d</span>
+              </div>
+              <div className="terminal-card-screen">
+                <RequestsBar data={history} />
+              </div>
             </div>
-            <RequestsBar data={history} />
           </div>
         </div>
 
         {/* Gateway status */}
-        <div className="rounded-xl border border-border bg-bg-surface p-5">
-          <h2 className="text-sm font-semibold text-text-primary mb-3">
-            Gateway Status
-          </h2>
-          <div className="flex flex-wrap gap-6 text-sm">
-            <div className="flex items-center gap-2">
+        <div className="terminal-card">
+          <div className="terminal-card-titlebar">
+            <span className="terminal-card-dots">
+              <span className="terminal-card-dot" />
+              <span className="terminal-card-dot" />
+              <span className="terminal-card-dot" />
+            </span>
+            <span>system.health</span>
+            <span className="ml-auto text-text-tertiary" style={{ fontSize: '10px' }}>v{gatewayVersion} · x402 v2</span>
+          </div>
+          <div className="terminal-card-screen" style={{ padding: '1.25rem 1.5rem' }}>
+            <div className="flex flex-wrap gap-6">
               <StatusDot status={gatewayStatus === "ok" ? "ok" : gatewayStatus === "degraded" ? "degraded" : "down"} label="Gateway" />
-            </div>
-            <div className="flex items-center gap-2">
               <StatusDot status={gatewayStatus === "ok" ? "ok" : "degraded"} label="Solana RPC" />
-            </div>
-            <div className="flex items-center gap-2">
               <StatusDot status={gatewayStatus === "ok" ? "ok" : "degraded"} label="OpenAI" />
-            </div>
-            <div className="flex items-center gap-2">
               <StatusDot status={gatewayStatus === "ok" ? "ok" : "degraded"} label="Anthropic" />
-            </div>
-            <div className="flex items-center gap-2">
               <StatusDot status={gatewayStatus === "ok" ? "ok" : "degraded"} label="Google" />
-            </div>
-            <div className="ml-auto text-xs text-text-tertiary">
-              v{gatewayVersion} · x402 v2 · Solana mainnet
+              <StatusDot status={gatewayStatus === "ok" ? "ok" : "degraded"} label="xAI" />
+              <StatusDot status={gatewayStatus === "ok" ? "ok" : "degraded"} label="DeepSeek" />
             </div>
           </div>
         </div>

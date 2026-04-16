@@ -1,4 +1,4 @@
-import { CheckCircle, XCircle, Zap, AlertTriangle } from "lucide-react";
+import { CheckCircle, XCircle, AlertTriangle } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { Badge } from "@/components/ui/badge";
 import { StatusDot } from "@/components/ui/status-dot";
@@ -8,29 +8,29 @@ import type { Model } from "@/types";
 
 function Cap({ on }: { on: boolean }) {
   return on ? (
-    <CheckCircle size={14} className="text-success" />
+    <CheckCircle size={13} className="text-success" />
   ) : (
-    <XCircle size={14} className="text-text-tertiary" />
+    <XCircle size={13} className="text-text-tertiary" />
   );
 }
 
 function ModelRow({ m }: { m: Model }) {
   return (
-    <tr className="hover:bg-bg-surface-hover transition-colors">
+    <tr className="border-b border-border last:border-0 hover:bg-bg-surface transition-colors">
       <td className="px-5 py-3">
-        <div className="font-medium text-text-primary">{m.display_name}</div>
+        <div className="font-medium text-text-primary text-sm">{m.display_name}</div>
         <div className="text-xs text-text-tertiary font-mono mt-0.5">{m.id}</div>
       </td>
       <td className="px-5 py-3">
         <Badge className={providerBadgeClass(m.provider)}>{m.provider}</Badge>
       </td>
-      <td className="px-5 py-3 text-right tabular-nums text-text-secondary">
+      <td className="px-5 py-3 text-right tabular-nums text-text-secondary text-xs font-mono">
         ${(m.pricing.input_per_million_usdc * 1.05).toFixed(3)}
       </td>
-      <td className="px-5 py-3 text-right tabular-nums text-text-secondary">
+      <td className="px-5 py-3 text-right tabular-nums text-text-secondary text-xs font-mono">
         ${(m.pricing.output_per_million_usdc * 1.05).toFixed(3)}
       </td>
-      <td className="px-5 py-3 text-center text-text-secondary">
+      <td className="px-5 py-3 text-center text-text-secondary text-xs font-mono">
         {m.capabilities.context_window >= 1_000_000
           ? `${(m.capabilities.context_window / 1_000_000).toFixed(0)}M`
           : `${(m.capabilities.context_window / 1_000).toFixed(0)}k`}
@@ -48,7 +48,6 @@ function ModelRow({ m }: { m: Model }) {
         <Cap on={m.capabilities.reasoning} />
       </td>
       <td className="px-5 py-3 text-center">
-        {/* Live status from health endpoint — defaulting to ok for now */}
         <StatusDot status="ok" />
       </td>
     </tr>
@@ -77,45 +76,52 @@ export default async function ModelsPage() {
         }
       />
 
-      <div className="flex-1 p-6">
+      <div className="flex-1 p-6 space-y-4">
         {error && (
-          <div className="mb-4 flex items-center gap-2 rounded-lg border border-warning/20 bg-warning/10 px-4 py-3 text-sm text-warning">
-            <AlertTriangle size={14} className="flex-shrink-0" />
+          <div className="flex items-center gap-2 rounded border border-border px-4 py-2.5 text-sm text-text-secondary">
+            <AlertTriangle size={13} className="flex-shrink-0 text-warning" />
             <span>
-              Could not reach gateway ({error}). Start the gateway with{" "}
+              Could not reach gateway ({error}). Run{" "}
               <code className="font-mono text-xs">cargo run -p gateway</code>{" "}
               and refresh.
             </span>
           </div>
         )}
 
-        <div className="rounded-xl border border-border bg-bg-surface overflow-hidden">
-          <div className="overflow-x-auto">
+        {/* Models table */}
+        <div className="terminal-card overflow-hidden">
+          <div className="terminal-card-titlebar">
+            <span className="terminal-card-dots">
+              <span className="terminal-card-dot" />
+              <span className="terminal-card-dot" />
+              <span className="terminal-card-dot" />
+            </span>
+            <span>model.registry</span>
+          </div>
+          <div className="overflow-x-auto" style={{ background: 'var(--popover)' }}>
             <table className="w-full text-sm">
               <thead>
-                <tr className="bg-bg-surface-hover text-xs text-text-secondary uppercase tracking-wide border-b border-border-subtle">
-                  <th className="px-5 py-3 text-left font-medium">Model</th>
-                  <th className="px-5 py-3 text-left font-medium">Provider</th>
-                  <th className="px-5 py-3 text-right font-medium">Input /M tokens</th>
-                  <th className="px-5 py-3 text-right font-medium">Output /M tokens</th>
-                  <th className="px-5 py-3 text-center font-medium">Context</th>
-                  <th className="px-5 py-3 text-center font-medium">
-                    <Zap size={12} className="inline" /> Stream
-                  </th>
-                  <th className="px-5 py-3 text-center font-medium">Tools</th>
-                  <th className="px-5 py-3 text-center font-medium">Vision</th>
-                  <th className="px-5 py-3 text-center font-medium">Reasoning</th>
-                  <th className="px-5 py-3 text-center font-medium">Status</th>
+                <tr className="border-b border-border text-xs text-text-tertiary uppercase tracking-wide font-mono">
+                  <th className="px-5 py-2.5 text-left font-medium">Model</th>
+                  <th className="px-5 py-2.5 text-left font-medium">Provider</th>
+                  <th className="px-5 py-2.5 text-right font-medium">In /M</th>
+                  <th className="px-5 py-2.5 text-right font-medium">Out /M</th>
+                  <th className="px-5 py-2.5 text-center font-medium">Context</th>
+                  <th className="px-5 py-2.5 text-center font-medium">Stream</th>
+                  <th className="px-5 py-2.5 text-center font-medium">Tools</th>
+                  <th className="px-5 py-2.5 text-center font-medium">Vision</th>
+                  <th className="px-5 py-2.5 text-center font-medium">Reason</th>
+                  <th className="px-5 py-2.5 text-center font-medium">Status</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-border-subtle">
+              <tbody>
                 {models.length > 0 ? (
                   models.map((m) => <ModelRow key={m.id} m={m} />)
                 ) : (
                   <tr>
                     <td
                       colSpan={10}
-                      className="px-5 py-8 text-center text-sm text-text-tertiary"
+                      className="px-5 py-10 text-center text-sm text-text-tertiary font-mono"
                     >
                       {error
                         ? "No model data available — gateway offline"
@@ -128,10 +134,10 @@ export default async function ModelsPage() {
           </div>
         </div>
 
-        <p className="mt-3 text-xs text-text-tertiary">
+        <p className="text-xs text-text-tertiary font-mono">
           Prices in USDC per million tokens including the 5% platform fee.
-          Data sourced from{" "}
-          <code className="font-mono">GET /pricing</code> on the gateway.
+          Source:{" "}
+          <code>GET /pricing</code>
         </p>
       </div>
     </div>

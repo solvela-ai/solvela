@@ -5,8 +5,6 @@ import { WALLET_TXS, DASHBOARD_STATS } from "@/lib/mock-data";
 import { fetchAdminStats, fetchEscrowConfig } from "@/lib/api";
 import { formatUSDC, formatNumber } from "@/lib/utils";
 
-// Read from server-side env var — never a client-side public var (no private key here,
-// but the recipient wallet address is also fine as a non-secret display field).
 const RECIPIENT_WALLET =
   process.env.RCR_SOLANA_RECIPIENT_WALLET ??
   "Configure RCR_SOLANA_RECIPIENT_WALLET in .env";
@@ -41,105 +39,126 @@ export default async function WalletPage() {
     <div className="flex flex-col h-full">
       <Topbar title="Wallet" subtitle="Solana USDC-SPL balance and transaction history" />
 
-      <div className="flex-1 p-6 space-y-6">
-        {/* Mock data warning banner */}
+      <div className="flex-1 p-6 space-y-5">
+        {/* Mock data warning */}
         {usingMockData && (
-          <div className="flex items-center gap-2 rounded-lg border border-warning/20 bg-warning/10 px-4 py-2.5 text-sm text-warning">
-            <AlertTriangle size={14} className="flex-shrink-0" />
-            <span>
-              Unable to reach gateway API. Showing sample data.
-            </span>
+          <div className="flex items-center gap-2 rounded border border-border px-4 py-2.5 text-sm text-text-secondary">
+            <AlertTriangle size={13} className="flex-shrink-0 text-warning" />
+            <span>Gateway offline — showing sample data.</span>
           </div>
         )}
 
-        {/* Balance card */}
-        <div className="rounded-xl border border-border bg-bg-surface p-6">
-          <div className="flex items-start justify-between">
-            <div>
-              <p className="text-xs font-medium text-text-secondary uppercase tracking-wide">
-                Total Platform Spend
-              </p>
-              <p className="mt-1 text-4xl font-bold text-text-primary tabular-nums">
-                {formatUSDC(totalSpend, 2)}
-              </p>
-              <p className="mt-0.5 text-sm text-text-secondary">USDC on Solana mainnet (last 30 days)</p>
-            </div>
-            <StatusDot status="ok" label="Connected" />
+        {/* Balance */}
+        <div className="terminal-card">
+          <div className="terminal-card-titlebar">
+            <span className="terminal-card-dots">
+              <span className="terminal-card-dot" />
+              <span className="terminal-card-dot" />
+              <span className="terminal-card-dot" />
+            </span>
+            <span>wallet.recipient</span>
+            <span className="ml-auto"><StatusDot status="ok" label="Connected" /></span>
           </div>
-
-          <div className="mt-4 flex items-center gap-2">
-            <code className="rounded-lg bg-bg-inset border border-border px-3 py-1.5 text-xs font-mono text-text-secondary">
-              {short}
-            </code>
-            <button
-              className="rounded-lg border border-border p-1.5 text-text-secondary hover:bg-bg-surface-hover transition-colors"
-              title="Copy address"
-              aria-label="Copy address"
+          <div className="terminal-card-screen">
+            <p
+              className="tabular-nums leading-none"
+              style={{
+                fontFamily: 'var(--font-serif)',
+                fontSize: '36px',
+                fontWeight: 500,
+                color: 'var(--heading-color)',
+                letterSpacing: '-0.02em',
+              }}
             >
-              <Copy size={13} />
-            </button>
-            <a
-              href={`https://solscan.io/account/${addr}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="rounded-lg border border-border p-1.5 text-text-secondary hover:bg-bg-surface-hover transition-colors"
-              title="View on Solscan"
-              aria-label="View on Solscan"
-            >
-              <ExternalLink size={13} />
-            </a>
+              {formatUSDC(totalSpend, 2)}
+            </p>
+            <p className="mt-1.5 text-xs text-text-tertiary font-mono">
+              USDC on Solana mainnet · last 30 days
+            </p>
+            <div className="mt-4 flex items-center gap-2">
+              <code className="rounded border border-border bg-bg-inset px-3 py-1.5 text-xs font-mono text-text-secondary">
+                {short}
+              </code>
+              <button
+                className="rounded border border-border p-1.5 text-text-tertiary hover:text-text-primary hover:bg-bg-surface transition-colors"
+                title="Copy address"
+                aria-label="Copy address"
+              >
+                <Copy size={12} />
+              </button>
+              <a
+                href={`https://solscan.io/account/${addr}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded border border-border p-1.5 text-text-tertiary hover:text-text-primary hover:bg-bg-surface transition-colors"
+                title="View on Solscan"
+                aria-label="View on Solscan"
+              >
+                <ExternalLink size={12} />
+              </a>
+            </div>
           </div>
         </div>
 
-        {/* Escrow config (if available) */}
+        {/* Escrow config */}
         {escrowConfig && (
-          <div className="rounded-xl border border-border bg-bg-surface p-5">
-            <h2 className="text-sm font-semibold text-text-primary mb-3">
-              Escrow Configuration
-            </h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-              <div>
-                <p className="text-xs text-text-secondary">Network</p>
-                <p className="font-medium text-text-primary">{escrowConfig.network}</p>
-              </div>
-              <div>
-                <p className="text-xs text-text-secondary">Current Slot</p>
-                <p className="font-medium text-text-primary tabular-nums">{formatNumber(escrowConfig.current_slot)}</p>
-              </div>
-              <div>
-                <p className="text-xs text-text-secondary">USDC Mint</p>
-                <code className="text-xs font-mono text-text-secondary">{escrowConfig.usdc_mint}</code>
-              </div>
-              <div>
-                <p className="text-xs text-text-secondary">Program ID</p>
-                <code className="text-xs font-mono text-text-secondary">{escrowConfig.escrow_program_id}</code>
+          <div className="terminal-card">
+            <div className="terminal-card-titlebar">
+              <span className="terminal-card-dots">
+                <span className="terminal-card-dot" />
+                <span className="terminal-card-dot" />
+                <span className="terminal-card-dot" />
+              </span>
+              <span>wallet.escrow</span>
+            </div>
+            <div className="terminal-card-screen">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="rounded border border-border p-3" style={{ background: 'var(--sidebar-bg)' }}>
+                  <p className="text-xs text-text-tertiary font-mono mb-1">Network</p>
+                  <p className="text-sm font-medium text-text-primary">{escrowConfig.network}</p>
+                </div>
+                <div className="rounded border border-border p-3" style={{ background: 'var(--sidebar-bg)' }}>
+                  <p className="text-xs text-text-tertiary font-mono mb-1">Current Slot</p>
+                  <p className="text-sm font-medium text-text-primary tabular-nums font-mono">{formatNumber(escrowConfig.current_slot)}</p>
+                </div>
+                <div className="rounded border border-border p-3" style={{ background: 'var(--sidebar-bg)' }}>
+                  <p className="text-xs text-text-tertiary font-mono mb-1">USDC Mint</p>
+                  <code className="text-xs font-mono text-text-secondary break-all">{escrowConfig.usdc_mint}</code>
+                </div>
+                <div className="rounded border border-border p-3" style={{ background: 'var(--sidebar-bg)' }}>
+                  <p className="text-xs text-text-tertiary font-mono mb-1">Program ID</p>
+                  <code className="text-xs font-mono text-text-secondary break-all">{escrowConfig.escrow_program_id}</code>
+                </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* Top wallets table (from API) or recent transactions (mock fallback) */}
+        {/* Transactions / wallets table */}
         {topWallets ? (
-          <div className="rounded-xl border border-border bg-bg-surface overflow-hidden">
-            <div className="px-5 py-4 border-b border-border-subtle">
-              <h2 className="text-sm font-semibold text-text-primary">
-                Top Wallets
-              </h2>
+          <div className="terminal-card overflow-hidden">
+            <div className="terminal-card-titlebar">
+              <span className="terminal-card-dots">
+                <span className="terminal-card-dot" />
+                <span className="terminal-card-dot" />
+                <span className="terminal-card-dot" />
+              </span>
+              <span>wallet.deposits</span>
             </div>
-            <div className="divide-y divide-border-subtle">
+            <div className="divide-y divide-border" style={{ background: 'var(--popover)' }}>
               {topWallets.map((w) => (
                 <div
                   key={w.wallet}
-                  className="flex items-center gap-4 px-5 py-3 hover:bg-bg-surface-hover transition-colors"
+                  className="flex items-center gap-4 px-5 py-3 hover:bg-bg-surface transition-colors"
                 >
                   <code className="text-xs font-mono text-text-secondary min-w-0 truncate">
                     {w.wallet}
                   </code>
                   <div className="ml-auto flex items-center gap-6">
-                    <span className="text-sm font-medium text-text-primary tabular-nums">
+                    <span className="text-sm font-medium text-text-primary tabular-nums font-mono">
                       {formatUSDC(w.cost, 4)}
                     </span>
-                    <span className="text-xs text-text-tertiary tabular-nums">
+                    <span className="text-xs text-text-tertiary tabular-nums font-mono">
                       {formatNumber(w.requests)} req
                     </span>
                   </div>
@@ -148,51 +167,54 @@ export default async function WalletPage() {
             </div>
           </div>
         ) : (
-          /* Fallback: mock transaction history */
-          <div className="rounded-xl border border-border bg-bg-surface overflow-hidden">
-            <div className="px-5 py-4 border-b border-border-subtle flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-text-primary">
-                Recent Transactions
-              </h2>
+          <div className="terminal-card overflow-hidden">
+            <div className="terminal-card-titlebar">
+              <span className="terminal-card-dots">
+                <span className="terminal-card-dot" />
+                <span className="terminal-card-dot" />
+                <span className="terminal-card-dot" />
+              </span>
+              <span>wallet.deposits</span>
               <a
                 href={`https://solscan.io/account/${addr}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-1 text-xs text-info hover:underline"
+                className="ml-auto flex items-center gap-1 text-text-tertiary hover:text-text-primary transition-colors"
+                style={{ fontSize: '10px' }}
               >
                 View all <ExternalLink size={10} />
               </a>
             </div>
-            <div className="divide-y divide-border-subtle">
+            <div className="divide-y divide-border" style={{ background: 'var(--popover)' }}>
               {WALLET_TXS.map((tx) => (
                 <div
                   key={tx.signature}
-                  className="flex items-center gap-4 px-5 py-3 hover:bg-bg-surface-hover transition-colors"
+                  className="flex items-center gap-4 px-5 py-3 hover:bg-bg-surface transition-colors"
                 >
-                  <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-brand-subtle text-brand-text">
-                    <ArrowUpRight size={14} />
+                  <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded border border-border text-text-tertiary">
+                    <ArrowUpRight size={13} />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-text-primary truncate">
+                    <p className="text-xs font-medium text-text-primary truncate font-mono">
                       {tx.model}
                     </p>
-                    <p className="text-xs text-text-tertiary">
+                    <p className="text-xs text-text-tertiary font-mono">
                       {tx.timestamp} ·{" "}
                       <a
                         href={`https://solscan.io/tx/${tx.signature}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="hover:underline text-info"
+                        className="hover:text-text-primary transition-colors"
                       >
                         {tx.signature}
                       </a>
                     </p>
                   </div>
                   <div className="text-right">
-                    <p className="text-sm font-medium text-text-primary tabular-nums">
+                    <p className="text-xs font-medium text-text-primary tabular-nums font-mono">
                       −${tx.amount}
                     </p>
-                    <p className="text-xs text-text-tertiary">USDC</p>
+                    <p className="text-xs text-text-tertiary font-mono">USDC</p>
                   </div>
                   <StatusDot
                     status={
@@ -210,29 +232,29 @@ export default async function WalletPage() {
           </div>
         )}
 
-        {/* Funding instructions */}
-        <div className="rounded-xl border border-info/20 bg-info/10 p-5">
-          <h2 className="text-sm font-semibold text-info mb-2">
-            Fund Your Wallet
-          </h2>
-          <ol className="space-y-1.5 text-sm text-info list-decimal list-inside">
-            <li>
-              Send USDC-SPL to your wallet address above on Solana mainnet
-            </li>
-            <li>
-              USDC Mint:{" "}
-              <code className="font-mono text-xs bg-info/20 rounded px-1 py-0.5">
-                EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-              </code>
-            </li>
-            <li>
-              Your wallet must hold a small amount of SOL for transaction fees
-              (~0.002 SOL)
-            </li>
-            <li>
-              Payments are deducted automatically per API call via x402 protocol
-            </li>
-          </ol>
+        {/* Fund instructions */}
+        <div className="terminal-card">
+          <div className="terminal-card-titlebar">
+            <span className="terminal-card-dots">
+              <span className="terminal-card-dot" />
+              <span className="terminal-card-dot" />
+              <span className="terminal-card-dot" />
+            </span>
+            <span>wallet.fund</span>
+          </div>
+          <div className="terminal-card-screen">
+            <ol className="space-y-1.5 text-sm text-text-secondary list-decimal list-inside">
+              <li>Send USDC-SPL to your wallet address above on Solana mainnet</li>
+              <li>
+                USDC Mint:{" "}
+                <code className="font-mono text-xs border border-border rounded px-1 py-0.5 text-text-tertiary">
+                  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+                </code>
+              </li>
+              <li>Your wallet must hold a small amount of SOL for transaction fees (~0.002 SOL)</li>
+              <li>Payments are deducted automatically per API call via x402 protocol</li>
+            </ol>
+          </div>
         </div>
       </div>
     </div>
