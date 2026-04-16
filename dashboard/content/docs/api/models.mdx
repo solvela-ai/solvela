@@ -3,14 +3,13 @@ title: Models
 description: GET /v1/models — list available models with pricing and capabilities
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
 
 ## GET /v1/models
 
 Returns all available models with pricing, context window size, and capability flags. No payment required.
 
 ```bash
-curl https://rustyclawrouter-gateway.fly.dev/v1/models
+curl https://api.solvela.ai/v1/models
 ```
 
 ## Response schema
@@ -86,14 +85,14 @@ For a full pricing table, see [Pricing](/docs/concepts/pricing).
 | `deepseek/deepseek-reasoner` | DeepSeek | $0.28 | $0.42 |
 | `deepseek/deepseek-coder` | DeepSeek | $0.28 | $0.42 |
 
-<Callout type="info">
+<Note>
   All prices shown are provider cost before the 5% platform fee. The actual amount charged is `provider_cost * 1.05`.
-</Callout>
+</Note>
 
 ## GET /pricing
 
 Returns the same model data in a pricing-focused format. Useful for cost estimation before making requests.
 
 ```bash
-curl https://rustyclawrouter-gateway.fly.dev/pricing
+curl https://api.solvela.ai/pricing
 ```

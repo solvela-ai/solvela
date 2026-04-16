@@ -3,15 +3,13 @@ title: API Overview
 description: Solvela REST API reference — OpenAI-compatible with x402 payment
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-import { Card, Cards } from 'fumadocs-ui/components/card';
 
 The Solvela API is OpenAI-compatible. Any client that works with the OpenAI API works with Solvela with two changes: set the base URL and add x402 payment handling.
 
 ## Base URL
 
 ```
-https://rustyclawrouter-gateway.fly.dev
+https://api.solvela.ai
 ```
 
 For local development (after `cargo run -p gateway`):
@@ -44,12 +42,12 @@ All endpoints accept and return `application/json`. Streaming responses use SSE 
 
 ## Endpoints
 
-<Cards>
+<CardGroup>
   <Card title="POST /v1/chat/completions" description="OpenAI-compatible chat completions. Returns 402 without payment, proxies to provider with payment." href="/docs/api/chat-completions" />
   <Card title="GET /v1/models" description="List all available models with pricing, context window, and capability flags." href="/docs/api/models" />
   <Card title="GET /pricing" description="Full pricing table in JSON. No payment required." href="/docs/api/models" />
   <Card title="Error Reference" description="HTTP status codes, error shapes, and how to handle common failures." href="/docs/api/errors" />
-</Cards>
+</CardGroup>
 
 ### Other endpoints
 
@@ -81,6 +79,6 @@ All errors use the OpenAI error envelope:
 
 For `402` responses, `error.message` contains a JSON-encoded `PaymentRequired` object. See [Error Reference](/docs/api/errors) for the full list of status codes.
 
-<Callout type="info">
+<Note>
   The gateway degrades gracefully when Redis or PostgreSQL are unavailable. Redis absence disables response caching and falls back to in-memory replay protection. PostgreSQL absence disables spend logging and budget enforcement.
-</Callout>
+</Note>

@@ -3,8 +3,6 @@ title: Python SDK
 description: Python client for Solvela with sync and async support via httpx
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
 
 ## Installation
 
@@ -21,7 +19,7 @@ pip install solvela
 
     client = LLMClient(
         private_key="<base58-private-key>",  # or set SOLANA_PRIVATE_KEY env var
-        api_url="https://rustyclawrouter-gateway.fly.dev",
+        api_url="https://api.solvela.ai",
     )
 
     reply = client.chat("auto", "What is Solana?")
@@ -36,7 +34,7 @@ pip install solvela
     async def main():
         async with AsyncLLMClient(
             private_key="<base58-private-key>",
-            api_url="https://rustyclawrouter-gateway.fly.dev",
+            api_url="https://api.solvela.ai",
         ) as client:
             reply = await client.chat("auto", "What is Solana?")
             print(reply)
@@ -51,7 +49,7 @@ pip install solvela
 ```python
 client = LLMClient(
     private_key="<base58-private-key>",  # optional — signs payments
-    api_url="https://rustyclawrouter-gateway.fly.dev",
+    api_url="https://api.solvela.ai",
     session_budget=0.10,  # USDC cap — raises BudgetExceededError if exceeded
     timeout=60.0,         # httpx timeout in seconds (default: 60.0)
 )
@@ -131,7 +129,7 @@ print(f"Session total: {client.session_spent:.6f} USDC")
 The sync client supports `with` statements for automatic cleanup:
 
 ```python
-with LLMClient(api_url="https://rustyclawrouter-gateway.fly.dev") as client:
+with LLMClient(api_url="https://api.solvela.ai") as client:
     reply = client.chat("auto", "Hello")
 ```
 
@@ -149,6 +147,6 @@ except PaymentError as e:
     print(f"Payment failed: {e}")
 ```
 
-<Callout type="info">
+<Note>
   Source code: `sdks/python/solvela/` in the monorepo. The async client (`AsyncLLMClient`) has the same interface as the sync client with `await` on all methods.
-</Callout>
+</Note>

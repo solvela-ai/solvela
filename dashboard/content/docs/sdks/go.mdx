@@ -3,7 +3,6 @@ title: Go SDK
 description: Go client for Solvela with context-aware x402 payment handling
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
 
 ## Installation
 
@@ -27,7 +26,7 @@ import (
 
 func main() {
     client, err := rcr.NewClient(
-        rcr.WithAPIURL("https://rustyclawrouter-gateway.fly.dev"),
+        rcr.WithAPIURL("https://api.solvela.ai"),
         rcr.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
     )
     if err != nil {
@@ -47,7 +46,7 @@ func main() {
 
 ```go
 client, err := rcr.NewClient(
-    rcr.WithAPIURL("https://rustyclawrouter-gateway.fly.dev"),
+    rcr.WithAPIURL("https://api.solvela.ai"),
     rcr.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
     rcr.WithSessionBudget(0.10),              // USDC cap
     rcr.WithTimeout(30 * time.Second),        // default: 60s
@@ -180,6 +179,6 @@ if err != nil {
 }
 ```
 
-<Callout type="info">
+<Note>
   Source code: `sdks/go/` in the monorepo. The package name is `rcr` (import `github.com/solvela/sdk-go`).
-</Callout>
+</Note>

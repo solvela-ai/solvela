@@ -3,9 +3,6 @@ title: Quickstart
 description: Make your first paid API call to Solvela in 5 minutes
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
-import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
-import { Step, Steps } from 'fumadocs-ui/components/steps';
 
 <Steps>
 
@@ -62,7 +59,7 @@ First, send a request without any payment header. The gateway will respond with 
     import { LLMClient } from '@solvela/sdk';
 
     const client = new LLMClient({
-      apiUrl: 'https://rustyclawrouter-gateway.fly.dev',
+      apiUrl: 'https://api.solvela.ai',
     });
 
     // The SDK automatically handles the 402 flow —
@@ -75,7 +72,7 @@ First, send a request without any payment header. The gateway will respond with 
     ```python
     from solvela import LLMClient
 
-    client = LLMClient(api_url='https://rustyclawrouter-gateway.fly.dev')
+    client = LLMClient(api_url='https://api.solvela.ai')
 
     # The SDK automatically handles the 402 flow.
     reply = client.chat('auto', 'What is x402?')
@@ -94,7 +91,7 @@ First, send a request without any payment header. The gateway will respond with 
 
     func main() {
         client, _ := rcr.NewClient(
-            rcr.WithAPIURL("https://rustyclawrouter-gateway.fly.dev"),
+            rcr.WithAPIURL("https://api.solvela.ai"),
         )
         reply, err := client.Chat(context.Background(), "auto", "What is x402?")
         if err != nil {
@@ -106,7 +103,7 @@ First, send a request without any payment header. The gateway will respond with 
   </Tab>
   <Tab value="cURL">
     ```bash
-    curl -s https://rustyclawrouter-gateway.fly.dev/v1/chat/completions \
+    curl -s https://api.solvela.ai/v1/chat/completions \
       -H "Content-Type: application/json" \
       -d '{
         "model": "auto",
@@ -176,7 +173,7 @@ Build and sign a USDC-SPL transfer transaction to the `pay_to` address for the `
 
     // Pass your private key — the SDK signs automatically.
     const client = new LLMClient({
-      apiUrl: 'https://rustyclawrouter-gateway.fly.dev',
+      apiUrl: 'https://api.solvela.ai',
       // private key is read from SOLANA_PRIVATE_KEY env var in the SDK,
       // or pass it as a constructor option
     });
@@ -193,7 +190,7 @@ Build and sign a USDC-SPL transfer transaction to the `pay_to` address for the `
 
     client = LLMClient(
         private_key=os.environ['SOLANA_PRIVATE_KEY'],  # base58 private key
-        api_url='https://rustyclawrouter-gateway.fly.dev',
+        api_url='https://api.solvela.ai',
     )
 
     reply = client.chat('gpt-4o', 'Explain Solana in one sentence.')
@@ -204,7 +201,7 @@ Build and sign a USDC-SPL transfer transaction to the `pay_to` address for the `
   <Tab value="Go">
     ```go
     client, _ := rcr.NewClient(
-        rcr.WithAPIURL("https://rustyclawrouter-gateway.fly.dev"),
+        rcr.WithAPIURL("https://api.solvela.ai"),
         rcr.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
     )
 
@@ -235,7 +232,7 @@ Build and sign a USDC-SPL transfer transaction to the `pay_to` address for the `
 The SDKs handle this automatically. If you're implementing manually, encode your signed transaction as a JSON `PaymentPayload`, base64-encode it, and send it in the `payment-signature` header:
 
 ```bash
-curl https://rustyclawrouter-gateway.fly.dev/v1/chat/completions \
+curl https://api.solvela.ai/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "payment-signature: <base64-encoded-PaymentPayload>" \
   -d '{
@@ -252,9 +249,9 @@ A successful response is standard OpenAI format plus a `x_solvela` cost field.
 
 ## What's next
 
-<Callout type="info">
+<Note>
   The SDKs handle all of this for you. If you're using TypeScript, Python, or Go, you only need to pass a private key — the rest is automatic.
-</Callout>
+</Note>
 
 - [x402 Protocol](/docs/concepts/x402) — understand the full payment flow
 - [Smart Router](/docs/concepts/smart-router) — how `model: "auto"` picks a model

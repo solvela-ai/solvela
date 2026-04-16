@@ -3,7 +3,6 @@ title: Rust CLI
 description: solvela-cli — command-line tool for interacting with the Solvela gateway
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
 
 ## Installation
 
@@ -23,7 +22,7 @@ cargo build --release -p solvela-cli
 The CLI reads configuration from environment variables:
 
 ```bash
-export SOLVELA_API_URL=https://rustyclawrouter-gateway.fly.dev
+export SOLVELA_API_URL=https://api.solvela.ai
 export SOLVELA_SOLANA_PRIVATE_KEY=<base58-private-key>   # for paid requests
 export RUST_LOG=info  # optional logging
 ```
@@ -109,6 +108,6 @@ Hello! I'm an AI assistant. I can help you with...
 Cost: $0.000042 USDC
 ```
 
-<Callout type="info">
+<Note>
   The CLI binary is named `solvela`. Source code: `crates/cli/` in the monorepo.
-</Callout>
+</Note>

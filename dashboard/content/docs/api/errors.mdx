@@ -3,7 +3,6 @@ title: Error Reference
 description: HTTP status codes, error shapes, and how to handle common failures
 ---
 
-import { Callout } from 'fumadocs-ui/components/callout';
 
 ## Error format
 
@@ -140,9 +139,9 @@ See [x402 Protocol](/docs/concepts/x402) for the full flow.
 
 **Fix:** Retry the request. If the issue persists, the provider may be experiencing an outage. Contact the gateway operator with the transaction signature.
 
-<Callout type="warn">
+<Warning>
   If you receive a 500 after a confirmed payment, your USDC was spent but no response was returned. Contact support with your transaction signature.
-</Callout>
+</Warning>
 
 ---
 
