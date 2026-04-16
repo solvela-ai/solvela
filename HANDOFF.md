@@ -1,13 +1,13 @@
 # HANDOFF.md — Solvela Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-16 (dashboard ported to docs design system — Source Serif 4, salmon eyebrows, terminal-card pattern)
+> **Last verified:** 2026-04-16 (complete Solvela rebrand — GitHub, Vercel, code, docs; three-subdomain architecture live via middleware)
 
 ---
 
 ## What Is This
 
-Solvela (formerly Solvela) is a Solana-native LLM payment gateway. AI agents pay for LLM API calls with USDC-SPL on Solana via x402. Revenue: 5% fee per call.
+Solvela is a Solana-native LLM payment gateway. AI agents pay for LLM API calls with USDC-SPL on Solana via x402. Revenue: 5% fee per call.
 
 Part of the **solvela.ai** ecosystem:
 
@@ -48,23 +48,35 @@ Trustless USDC-SPL escrow: deposit/claim/refund. PDA vault with timeout refunds.
 
 ### SDKs
 
-Python (`sdks/python/`), TypeScript (`sdks/typescript/`), Go (`sdks/go/`), MCP server (`sdks/mcp/`).
+Python (`sdks/python/`), TypeScript (`sdks/typescript/`), Go (`sdks/go/`), MCP server (`sdks/mcp/`). Repos renamed to `solvela-ts`, `solvela-python`, `solvela-go`, `solvela-client` with 301 redirects from old `rustyclaw-*` names live on GitHub.
 
 ### Dashboard & Documentation Site
 
-Next.js 16 + Tailwind v4 + Fumadocs (core + mdx) + Recharts. Redesigned 2026-04-13/14 from standalone dashboard into a docs-first developer platform; design system overhauled 2026-04-16 to match the canonical `rcr-docs-site`.
+Next.js 16 + Tailwind v4 + Fumadocs (core + mdx) + Recharts. Single codebase serving three subdomains via `dashboard/src/proxy.ts` (Next.js 16 middleware pattern):
+- `solvela.ai/` → 307 redirect to `/docs`
+- `docs.solvela.ai/*` → rewrite to `/docs/*`
+- `app.solvela.ai/*` → rewrite to `/dashboard/*`
 
-**Design system (2026-04-16)**: Source Serif 4 added as `--font-serif` (editorial display weight 300/500). Salmon accent `#FE8181` as `--accent-salmon` for eyebrow labels. Terminal-window card pattern (`.terminal-card` / titlebar / screen with 14×14 radial dot pattern) ported from `rcr-docs-site`. All 5 dashboard pages restyled — stat cards now show metric values in serif inside terminal-window screens, charts wrapped in terminal-cards with dot-notation mono titlebars (`spend.usdc.daily`, `system.health`, etc.). Shared globals.css tokens guarantee visual parity with the docs site.
+**Design system (2026-04-16 audit pass):** Source Serif 4 (serif display font), salmon accent `#FE8181` for eyebrow labels. Terminal-window card pattern (`.terminal-card`) with titlebar + radial dot screen. Nine focused design audit passes completed:
+- **/harden** — focus-visible rings, ≥40px touch targets, contrast bumps, ARIA live regions, role attributes, `type="button"` semantics
+- **/clarify** — Topbar title dedup, sentence-case wallet titles
+- **/optimize** — `router.refresh()` instead of `window.location.reload()`
+- **/distill** — wallet escrow 4-tile → semantic `<dl>/<dt>/<dd>`
+- **/extract** — new `<TerminalCard>` component (13 inline copies replaced)
+- **/typeset** — `--text-xxs` (11px) token, `.metric-xl/lg/md` serif classes
+- **/arrange** — Overview stat grid redesigned (hero treasury + 2×2 support)
+- **/normalize** — stale color tokens deleted after confirming unused
+- **/polish** — 6 surgical consistency fixes, Settings grouped into 4 labeled sections
 
-**Docs engine**: Fumadocs-core + fumadocs-mdx for content pipeline (MDX, search, source loading). Custom UI components ported from `rcr-docs-site` — NOT using fumadocs-ui. Custom fonts: DM Sans (body), Archivo (legacy display), JetBrains Mono (data/labels), Source Serif 4 (headings). Custom Shiki syntax themes (solvela-dark/light).
+**Docs engine:** Fumadocs-core + fumadocs-mdx. Custom UI components ported from `rcr-docs-site` (NOT using fumadocs-ui). Fonts: DM Sans (body), Archivo (legacy display), JetBrains Mono (data/labels), Source Serif 4 (headings). Shiki syntax themes (solvela-dark/light).
 
-**Docs pages (17 MDX)**: Welcome, Quickstart, Concepts (x402, Smart Router, Escrow, Pricing), API Reference (Overview, Chat Completions, Models, Errors), SDKs (Overview, TypeScript, Python, Go, Rust CLI, MCP).
+**Docs pages:** 8 main pages (Welcome, Quickstart, Architecture, Request Flow, Payment Flow, Pricing) + 5 MDX components (`UpgradeCta`, `FlowSteps`, `HeroSplit`, `TierCards`, `LinkMap`) + 7 Enterprise pages (Organizations, Teams, API Keys, Audit, Budgets, Analytics) ported from `rcr-docs-site` — 39 total static routes.
 
-**Dashboard pages (5)**: Overview, Usage, Models, Wallet, Settings — all wrapped in terminal-window cards. Live under `/dashboard/*` with separate Shell layout. Mock data is convincing (~$247.83 spend, 12.4k requests, realistic curves) — ready for marketing screenshots.
+**Dashboard pages (5):** Overview, Usage, Models, Wallet, Settings — all themed with terminal-card pattern. Seeded with convincing mock data (~$247.83 spend, 12.4k requests, realistic curves) — ready for marketing screenshots.
 
-**Route structure**: `/` → redirect to `/docs`, `/docs/*` → Fumadocs MDX pages, `/dashboard/*` → custom dashboard pages, `/api/search` → Fumadocs Orama search.
+**Subdomain architecture:** Implemented via `proxy.ts` (Next.js 16 middleware). Host allowlist and iframe `allow` tightening deferred as nits. "Already-prefixed" guard prevents double-rewrite (`docs.solvela.ai/docs/quickstart`).
 
-Deployed to Vercel (`solvela.vercel.app`). Note: no `vercel.json` in repo — deployed via Vercel UI. **The 2026-04-16 design refresh has not yet been deployed.**
+Deployed to Vercel (`solvela.vercel.app`). **The 2026-04-16 design refresh and subdomain middleware are deployed and live.**
 
 ---
 
@@ -115,51 +127,51 @@ go sdk:               58  (53 pass, 5 skip/live-gated)
 
 | Resource | Location | Status |
 |----------|----------|--------|
-| **Gateway** | `api.solvela.ai` | Running (ord region, shared-cpu-1x/512MB) |
+| **Gateway** | `rustyclawrouter-gateway.fly.dev` | Running (ord region, shared-cpu-1x/512MB) |
+| **Dashboard + Docs** | `solvela.vercel.app` (+ `solvela.ai`, `docs.solvela.ai`, `app.solvela.ai` subdomains) | Deployed, three-subdomain routing live |
 | **PostgreSQL** | `solvela-db` on Fly.io | Running (Postgres 17.2) |
 | **Redis** | Upstash (`solvela-cache`) | Running (ord + iad) |
-| **Dashboard** | `solvela.vercel.app` | Deployed |
 | **Terminal backend** | `rclawterm-gateway.fly.dev` | Running (ord, 2 machines) |
 
 ### Secrets on Fly.io
 
-All 5 provider keys set and verified working (OpenAI, Anthropic, Google, xAI, DeepSeek) — refreshed 2026-04-12. Solana config set (RPC, recipient wallet, USDC mint, escrow program, fee payer key). Database + Redis URLs set. Admin token rotated 2026-03-31. Note: Fly app is still `solvela-gateway`, not yet renamed to `solvela-gateway`.
+All 5 provider keys set and verified working (OpenAI, Anthropic, Google, xAI, DeepSeek) — refreshed 2026-04-12. Solana config set (RPC, recipient wallet, USDC mint, escrow program, fee payer key). Database + Redis URLs set. Admin token rotated 2026-03-31. Note: Fly app is still `solvela-gateway` (rename pending).
+
+**Canonical API URL:** `api.solvela.ai` — documented in code + SDKs, will resolve once Fly app is renamed from `rustyclawrouter-gateway` to `solvela-gateway` and DNS is updated.
 
 ---
 
 ## What's NOT Done
 
-### Immediate
+### Immediate / Cleanup
 
-- **MCP server signing**: Stub signing intentional (agent-only protocol).
-- **Deploy 2026-04-16 design refresh**: dashboard restyle is committed locally but not yet deployed to `solvela.vercel.app`.
-- **Capture dashboard screenshots** for embedding in `rcr-docs-site` Enterprise pages — dashboard is themed and seeded with convincing fake data, ready to shoot.
+- **rcr-docs-site archive:** Sister repo `~/projects/rcr-docs-site/` is now a strict subset of this repo. Safe to archive or delete.
+- **Local directory rename:** `~/projects/RustyClawRouter/` → `~/projects/solvela/` (optional; git remote already updated).
+- **Dashboard 2026-04-16 screenshots:** Capture for embedding in docs (dashboard is themed and ready).
 
-### Sister repo — `rcr-docs-site` (the real docs site)
+### Fly App Rename & DNS Cutover
 
-`~/projects/rcr-docs-site/` is the canonical Solvela docs site (target domain `docs.solvela.ai`). Now git-initialized with three commits and a complete redesign as of 2026-04-16:
+**High-impact, disruptive, requires a maintenance window.** Steps:
 
-- **Editorial-serif typography** (Source Serif 4 at light weight 300 for h1, 500 for headings)
-- **Salmon eyebrow** (`#FE8181`) on every section title; salmon underline on active nav tab
-- **Terminal-window card pattern** with title bar + screen-area radial dot pattern
-- **Three top tabs**: Documentation / API Reference / **Enterprise** (new — 7 pages of org/team/api-key/audit/budget/analytics docs pulled from `crates/gateway/src/routes/orgs/`)
-- **`UpgradeCta` component** on every Enterprise page links to `solvela.ai/pricing` placeholder
-
-The dashboard now shares the same design tokens (Source Serif 4, salmon accent, terminal-card classes) so docs.solvela.ai and app.solvela.ai feel like one product. See `~/projects/rcr-docs-site/HANDOFF.md` for full details.
+1. Create new Fly app: `flyctl apps create solvela-gateway --org sky64` (or via dashboard)
+2. Copy secrets from `rustyclawrouter-gateway` to `solvela-gateway` (all env vars, volumes, postgres backup)
+3. Deploy current `main` to `solvela-gateway`
+4. Test health endpoint on new domain
+5. Update DNS: `api.solvela.ai` A record points to `solvela-gateway` IP (from `flyctl ips list solvela-gateway`)
+6. Monitor logs 15 min; rollback if needed (DNS revert + deploy to old app)
+7. Destroy old app: `flyctl apps destroy rustyclawrouter-gateway`
 
 ### Deferred
 
-- **Multi-chain support**: `PaymentVerifier` trait is chain-agnostic by design. Base/EVM implementation deferred.
-- **x402 V2 sessions**: V2 adds sessions and service discovery. Wire format migrated but session features not implemented.
-- **Load testing**: COMPLETED 2026-04-12. All 7 phases passed. See `docs/load-tests/2026-04-12-results.md`. T1 ceiling ~400 RPS, SLO validated at 50 RPS x 5 min, all 5 providers verified with real USDC payments. CLI features added: `--model` flag, live progress output, `SOLVELA_RATE_LIMIT_MAX` env override.
-- **Fly app rename**: `solvela-gateway` → `solvela-gateway` (deferred — requires DNS migration)
-- **Docs theme rename**: `@rustyclaw/docs-theme` → `@solvela/docs-theme` (rcr-docs-site design system ported into dashboard 2026-04-14)
-- **Rate limiter redesign**: Current `tokio::sync::Mutex<HashMap>` is the bottleneck at 400+ RPS. Replace with sharded or Redis-based approach when traffic demands it.
-- **Per-user fairness queuing**: Not started.
-- **Secret rotation plan**: No automated rotation.
-- **API reference docs**: 17 MDX pages written (2026-04-13). Content based on actual codebase. OpenAPI auto-generation via fumadocs-openapi deferred. Welcome page design polish in progress — iterating toward Anthropic-style visual hierarchy.
-- **Rust 2021 → 2024 edition**: Planned but not blocking (currently 2021).
-- **SDK publishing**: SDKs exist (Python 63 tests, TypeScript, Go, MCP). PyPI/npm/crates.io publishing status unclear.
+- **Multi-chain support:** `PaymentVerifier` trait is chain-agnostic by design. Base/EVM implementation deferred.
+- **x402 V2 sessions:** V2 adds sessions and service discovery. Wire format migrated but session features not implemented.
+- **Rate limiter redesign:** Current `tokio::sync::Mutex<HashMap>` is the bottleneck at 400+ RPS. Replace with sharded or Redis-based approach when traffic demands it.
+- **Per-user fairness queuing:** Not started.
+- **Secret rotation plan:** No automated rotation.
+- **Rust 2021 → 2024 edition:** Planned but not blocking (currently 2021).
+- **SDK publishing:** SDKs exist (Python 63 tests, TypeScript, Go, MCP). New repo names are `solvela-ts`, `solvela-python`, `solvela-go`, `solvela-client`; PyPI/npm/crates.io publishing status TBD.
+- **Proxy security nits:** Host allowlist and iframe `allow` tightening (defer after launch).
+- **Private-key rotation warnings:** SDK docs deferred (wallet security caveats for client-side signing).
 
 ### Ecosystem (in priority order)
 
@@ -174,10 +186,10 @@ The dashboard now shares the same design tokens (Source Serif 4, salmon accent, 
 
 ## Regulatory Notes
 
-- **Safe (no licensing)**: AP2 discovery endpoints, x402 crypto settlement (wallet-to-wallet), mandate verification as metadata
-- **DO NOT build (triggers MSB + 49 state licenses)**: Card payment processing, fiat ↔ crypto conversion, custodial fund holding
-- **Gray area**: Anchor escrow PDAs (trustless, PDA-controlled) — FinCEN guidance on custodial wallets is evolving. Escrow deployed to mainnet 2026-04-08 with upgrade authority retained.
-- **Watch**: California DFAL takes effect July 2026.
+- **Safe (no licensing):** AP2 discovery endpoints, x402 crypto settlement (wallet-to-wallet), mandate verification as metadata
+- **DO NOT build (triggers MSB + 49 state licenses):** Card payment processing, fiat ↔ crypto conversion, custodial fund holding
+- **Gray area:** Anchor escrow PDAs (trustless, PDA-controlled) — FinCEN guidance on custodial wallets is evolving. Escrow deployed to mainnet 2026-04-08 with upgrade authority retained.
+- **Watch:** California DFAL takes effect July 2026.
 
 ---
 
@@ -188,6 +200,7 @@ The dashboard now shares the same design tokens (Source Serif 4, salmon accent, 
 | `CLAUDE.md` | How to work in the repo (conventions, architecture, commands) |
 | `HANDOFF.md` | This file — current project state |
 | `CHANGELOG.md` | What changed and when |
-| `.claude/plan/rustyclawrouter.md` | Master implementation plan |
+| `.claude/plan/solvela.md` | Master implementation plan |
 | `config/models.toml` | Model registry + pricing |
 | `.env.example` | All env vars documented |
+| `dashboard/src/proxy.ts` | Next.js 16 middleware for three-subdomain routing |
