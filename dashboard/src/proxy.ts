@@ -5,11 +5,13 @@ export function proxy(request: NextRequest) {
   const host = request.headers.get('host') || ''
   const { pathname } = request.nextUrl
 
-  // Skip Next.js internals, API routes, and common static files on all hosts —
+  // Skip Next.js internals, actual API routes, and common static files on all hosts —
   // the proxy should not rewrite these, they serve from canonical paths.
+  // Add new /src/app/api/<route>/route.ts paths here explicitly.
   if (
     pathname.startsWith('/_next/') ||
-    pathname.startsWith('/api/') ||
+    pathname === '/api/search' ||
+    pathname.startsWith('/api/search/') ||
     pathname === '/favicon.ico' ||
     pathname === '/robots.txt' ||
     pathname === '/sitemap.xml'
