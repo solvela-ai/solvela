@@ -17,14 +17,13 @@ The authenticated product dashboard. One subdirectory per top-level page: Overvi
 | `overview/` | `/dashboard/overview` — stats cards + spend/requests/model-mix charts |
 | `usage/` | `/dashboard/usage` — detailed usage table + filters |
 | `models/` | `/dashboard/models` — model catalogue + per-model pricing |
-| `wallet/` | `/dashboard/wallet` — wallet connect, balance, recent payments |
+| `wallet/` | `/dashboard/wallet` — recipient wallet address, USDC balance, recent payments |
 | `settings/` | `/dashboard/settings` — preferences, API keys, org selection |
 
 ## For AI Agents
 
 ### Working In This Directory
 - Pages are Server Components fetching data through `@/lib/api.ts` + mock data in dev (`@/lib/mock-data.ts`).
-- Wallet page (`wallet/wallet-client.tsx`) is a client component because it needs browser wallet APIs.
 - Before claiming a change done, run `npm --prefix dashboard run dev` and visit the affected route.
 
 ### Testing Requirements

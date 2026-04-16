@@ -6,12 +6,11 @@ import { WALLET_TXS, DASHBOARD_STATS } from "@/lib/mock-data";
 import { fetchAdminStats, fetchEscrowConfig } from "@/lib/api";
 import { formatUSDC, formatNumber } from "@/lib/utils";
 
-const RECIPIENT_WALLET =
-  process.env.SOLVELA_SOLANA_RECIPIENT_WALLET ??
-  process.env.RCR_SOLANA_RECIPIENT_WALLET ??
-  "Configure SOLVELA_SOLANA_RECIPIENT_WALLET in .env";
-
 export default async function WalletPage() {
+  const RECIPIENT_WALLET =
+    process.env.SOLVELA_SOLANA_RECIPIENT_WALLET ??
+    process.env.RCR_SOLANA_RECIPIENT_WALLET ??
+    "Configure SOLVELA_SOLANA_RECIPIENT_WALLET in .env";
   const [statsResponse, escrowConfig] = await Promise.all([
     fetchAdminStats(30),
     fetchEscrowConfig(),
