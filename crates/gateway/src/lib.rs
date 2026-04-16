@@ -301,8 +301,18 @@ fn build_cors() -> CorsLayer {
         }
     }
 
-    // Additional origins from env var (e.g., dashboard domain in prod)
-    if let Ok(env_origins) = std::env::var("RCR_CORS_ORIGINS") {
+    // Additional origins from env var (e.g., dashboard domain in prod).
+    // SOLVELA_CORS_ORIGINS is canonical; RCR_CORS_ORIGINS is deprecated.
+    let cors_env = std::env::var("SOLVELA_CORS_ORIGINS").or_else(|_| {
+        std::env::var("RCR_CORS_ORIGINS").inspect(|_| {
+            tracing::warn!(
+                old = "RCR_CORS_ORIGINS",
+                new = "SOLVELA_CORS_ORIGINS",
+                "RCR_CORS_ORIGINS is deprecated; use SOLVELA_CORS_ORIGINS"
+            );
+        })
+    });
+    if let Ok(env_origins) = cors_env {
         for raw in env_origins.split(',') {
             let trimmed = raw.trim();
             if !trimmed.is_empty() {
