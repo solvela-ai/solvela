@@ -62,7 +62,7 @@ All configuration is via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RCR_API_URL` | `https://api.solvela.com` | Gateway URL |
+| `RCR_API_URL` | `https://api.solvela.ai` | Gateway URL |
 | `RCR_SESSION_BUDGET` | unlimited | Max USDC to spend this session (e.g. `"1.00"`) |
 | `RCR_TIMEOUT_MS` | `60000` | Request timeout in milliseconds |
 | `SOLANA_WALLET_ADDRESS` | not configured | Wallet pubkey shown in `wallet_status` and `spending` |

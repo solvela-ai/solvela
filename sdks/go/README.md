@@ -162,7 +162,7 @@ Options are applied via functional option pattern:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `WithAPIURL(url)` | `https://api.solvela.com` | Gateway URL (trailing slash trimmed) |
+| `WithAPIURL(url)` | `https://api.solvela.ai` | Gateway URL (trailing slash trimmed) |
 | `WithPrivateKey(key)` | `$SOLANA_WALLET_KEY` | Base58 Solana private key for signing |
 | `WithSessionBudget(budget)` | `nil` (unlimited) | Max USDC spend per session |
 | `WithTimeout(duration)` | `60s` | HTTP request timeout |
@@ -205,7 +205,7 @@ Options are applied via functional option pattern:
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `DefaultAPIURL` | `https://api.solvela.com` | Production gateway URL |
+| `DefaultAPIURL` | `https://api.solvela.ai` | Production gateway URL |
 | `DefaultDevnetURL` | `http://localhost:8402` | Local development URL |
 | `DefaultTimeout` | `60` | Default timeout in seconds |
 | `USDCMint` | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | USDC SPL token mint address |
