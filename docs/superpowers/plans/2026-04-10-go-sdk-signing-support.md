@@ -21,7 +21,7 @@ These values are anchored to external ground truth (`solders` / `solana-web3.js`
 | Escrow PDA regression | agent `[1u8;32]`, service_id `[2u8;32]`, program `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU` → PDA `BEAUsvsWvV4o6y7XkC1bkyTq4FtQnKErcV3dzTFPT5hX`, bump 255 | `solders.pubkey.Pubkey.find_program_address` |
 | ATA regression | wallet `4P8mSmvv3nfzUtoqhNKG1mfGrHMVbXvKBXR7fDivv6qp`, mint `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` → ATA `CYHVCkLwiEjMBdRiz5MsrrCbVL2YTZuv57TjV3ggxoSN` | Helius `getTokenAccounts` mainnet verification |
 | Anchor "deposit" discriminator | First 8 bytes of `sha256("global:deposit")` | Verify with `python -c 'import hashlib; print(hashlib.sha256(b"global:deposit").digest()[:8].hex())'` — **do NOT derive this from our own `anchorDiscriminator()` helper** |
-| Associated Token Program ID | `ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL` | Solana SPL canonical (last 5 letters: `A8knL`, **NOT** `e1bxs` — historical typo bug in the RustyClawRouter repo; see PR #12) |
+| Associated Token Program ID | `ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL` | Solana SPL canonical (last 5 letters: `A8knL`, **NOT** `e1bxs` — historical typo bug in the Solvela repo; see PR #12) |
 | Token Program ID | `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` | Solana SPL canonical |
 | System Program ID | `11111111111111111111111111111111` | Solana canonical |
 | USDC mainnet mint | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | Circle USDC mainnet |
@@ -3286,7 +3286,7 @@ After all tasks land, run the full Go SDK suite one more time plus a workspace b
 
 ```bash
 cd sdks/go && go test -v ./...
-cd /home/kennethdixon/projects/RustyClawRouter && cargo build
+cd /home/kennethdixon/projects/Solvela && cargo build
 ```
 Expected:
 - Go: all tests pass (22 existing + ~35 new = ~57 total, live + PDA-cross-verify + signature-verify tests skipped when `SOLANA_RPC_URL` / `RCR_GO_SDK_LIVE_TEST` are unset). New tests added in the second fix round: `TestAnchorDiscriminatorRefund`, `TestDecodeAndValidateKeypair_EmptyString`, `TestBuildSolanaTransferChecked_SignatureVerifies`, `TestBuildEscrowDeposit_SignatureVerifies`, and `TestWalletWrongLengthKeyLeavesHasKeyFalse`. The escrow test binary will panic at startup if the `expectedEscrowPDA` placeholder was left in place (intentional — forces the test author to run Task 7 Step 0).

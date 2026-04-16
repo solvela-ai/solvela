@@ -1,6 +1,6 @@
 {
   "config": {
-    "api_url": "https://rustyclawrouter-gateway.fly.dev",
+    "api_url": "https://api.solvela.ai",
     "mode": "DevBypass",
     "rps": 200,
     "duration_secs": 60,

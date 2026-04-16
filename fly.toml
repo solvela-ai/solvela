@@ -1,4 +1,4 @@
-app = "rustyclawrouter-gateway"
+app = "solvela-gateway"
 primary_region = "ord"
 
 [build]

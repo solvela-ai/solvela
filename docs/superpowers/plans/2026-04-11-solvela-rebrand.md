@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Rebrand RustyClawRouter to Solvela across the entire repository -- crate names, binary names, env vars, HTTP headers, SDK packages, infrastructure configs, and documentation.
+**Goal:** Rebrand Solvela to Solvela across the entire repository -- crate names, binary names, env vars, HTTP headers, SDK packages, infrastructure configs, and documentation.
 
 **Architecture:** Mechanical rename organized by blast radius. Each task produces a compilable, test-passing state. Env vars and HTTP headers use dual-accept/dual-emit for backward compatibility during the transition period. The `x402` crate keeps its name (protocol, not brand). Escrow program ID and PDA seeds are unchanged.
 
@@ -152,10 +152,10 @@ description = "Anchor escrow program for Solvela USDC-SPL payments"
 name = "solvela_escrow"
 ```
 
-Also update the comment at the top of the file to reference Solvela instead of RustyClawRouter.
+Also update the comment at the top of the file to reference Solvela instead of Solvela.
 
 In `programs/escrow/src/lib.rs`, update:
-- Doc comment: `//! RustyClawRouter Escrow Program` -> `//! Solvela Escrow Program`
+- Doc comment: `//! Solvela Escrow Program` -> `//! Solvela Escrow Program`
 - Module name: `pub mod rustyclawrouter_escrow {` -> `pub mod solvela_escrow {`
 
 In `programs/escrow/Anchor.toml`, update all program key names:
@@ -285,7 +285,7 @@ The binary rename was done in Task 1 (Cargo.toml). This task handles any remaini
 
 - [ ] **Step 1: Update CLI app metadata**
 
-In `crates/cli/src/main.rs`, find the clap derive or builder that sets the app name. Update references from "rcr" to "solvela" and from "RustyClawRouter" to "Solvela" in help text/descriptions.
+In `crates/cli/src/main.rs`, find the clap derive or builder that sets the app name. Update references from "rcr" to "solvela" and from "Solvela" to "Solvela" in help text/descriptions.
 
 - [ ] **Step 2: Search for `rcr` binary references in scripts**
 
@@ -410,14 +410,14 @@ Change all `RCR_` prefixed vars to `SOLVELA_` as the primary. Add a comment bloc
 # (Legacy RCR_ prefix is still accepted with a deprecation warning)
 ```
 
-Replace every `RCR_` with `SOLVELA_` in the file. Update the header comment from "RustyClawRouter" to "Solvela Gateway". Update `DATABASE_URL` comment to reference `solvela` instead of `rustyclawrouter`:
+Replace every `RCR_` with `SOLVELA_` in the file. Update the header comment from "Solvela" to "Solvela Gateway". Update `DATABASE_URL` comment to reference `solvela` instead of `rustyclawrouter`:
 ```
 DATABASE_URL=postgres://solvela:solvela_dev_password@localhost:5432/solvela
 ```
 
 - [ ] **Step 5: Update `config/default.toml` comments**
 
-Change the header from `# RustyClawRouter Gateway Configuration` to `# Solvela Gateway Configuration`. Update the comment `# Set via RCR_SOLANA_RECIPIENT_WALLET env var` to `# Set via SOLVELA_SOLANA_RECIPIENT_WALLET env var`.
+Change the header from `# Solvela Gateway Configuration` to `# Solvela Gateway Configuration`. Update the comment `# Set via RCR_SOLANA_RECIPIENT_WALLET env var` to `# Set via SOLVELA_SOLANA_RECIPIENT_WALLET env var`.
 
 - [ ] **Step 6: Update dashboard env var references**
 
@@ -599,7 +599,7 @@ Rename SDK packages. This is mostly config file changes.
 - Modify: `sdks/typescript/package.json`
 - Modify: `sdks/typescript/src/client.ts`
 - Modify: `sdks/go/go.mod`
-- Modify: `sdks/go/*.go` (any RustyClawRouter references)
+- Modify: `sdks/go/*.go` (any Solvela references)
 - Modify: `sdks/mcp/package.json`
 - Modify: `sdks/mcp/src/client.ts`
 
@@ -644,7 +644,7 @@ In `sdks/typescript/package.json`:
 }
 ```
 
-Update any `RustyClawRouter` references in `sdks/typescript/src/client.ts`.
+Update any `Solvela` references in `sdks/typescript/src/client.ts`.
 
 - [ ] **Step 3: Rename Go SDK**
 
@@ -791,7 +791,7 @@ Dockerfile binary name, CI workflow service names and env vars."
 
 ### Task 7: Documentation Update
 
-Update all documentation to reference Solvela instead of RustyClawRouter.
+Update all documentation to reference Solvela instead of Solvela.
 
 **Files:**
 - Modify: `CLAUDE.md`
@@ -801,14 +801,14 @@ Update all documentation to reference Solvela instead of RustyClawRouter.
 - Modify: `docs/book/src/**/*.md` (all book docs)
 - Modify: `docs/product/*.md`
 - Modify: `sdks/*/README.md`
-- Modify: Code comments mentioning "RustyClawRouter" or "rustyclaw"
+- Modify: Code comments mentioning "Solvela" or "rustyclaw"
 
 **Important:** Plan documents in `docs/plans/` reference historical context. Update only where the old name would be confusing; don't rewrite git history references.
 
 - [ ] **Step 1: Update CLAUDE.md**
 
-Replace all occurrences of "RustyClawRouter" with "Solvela" in project description, binary names, env var examples, and architecture sections. Update:
-- "RustyClawRouter is a Solana-native..." -> "Solvela is a Solana-native..."
+Replace all occurrences of "Solvela" with "Solvela" in project description, binary names, env var examples, and architecture sections. Update:
+- "Solvela is a Solana-native..." -> "Solvela is a Solana-native..."
 - Binary name references: `rustyclawrouter` -> `solvela-gateway`, `rcr` -> `solvela`
 - Env var references: `RCR_` -> `SOLVELA_` (note both are accepted)
 - Crate name references: `rustyclaw-protocol` -> `solvela-protocol`, `router` -> `solvela-router`
@@ -831,7 +831,7 @@ Add at the top:
 ## [Unreleased]
 
 ### Changed
-- **BREAKING**: Rebranded from RustyClawRouter to Solvela
+- **BREAKING**: Rebranded from Solvela to Solvela
   - Crate names: `rustyclaw-protocol` -> `solvela-protocol`, `router` -> `solvela-router`, etc.
   - Binary names: `rustyclawrouter` -> `solvela-gateway`, `rcr` -> `solvela`
   - Env vars: `SOLVELA_*` prefix (legacy `RCR_*` still accepted with deprecation warning)
@@ -843,7 +843,7 @@ Add at the top:
 - [ ] **Step 5: Update docs/book markdown files**
 
 Global search-and-replace across `docs/book/src/`:
-- "RustyClawRouter" -> "Solvela"
+- "Solvela" -> "Solvela"
 - "`rustyclawrouter`" -> "`solvela-gateway`"
 - "`rcr`" (when referring to CLI binary) -> "`solvela`"
 - "`RCR_`" -> "`SOLVELA_`" (in config examples)
@@ -857,7 +857,7 @@ Same replacements in `docs/product/faq.md`, `docs/product/how-it-works.md`, `doc
 
 - [ ] **Step 7: Update SDK READMEs**
 
-Replace "RustyClawRouter" with "Solvela" in:
+Replace "Solvela" with "Solvela" in:
 - `sdks/python/README.md`
 - `sdks/typescript/README.md`
 - `sdks/mcp/README.md`
@@ -865,8 +865,8 @@ Replace "RustyClawRouter" with "Solvela" in:
 
 - [ ] **Step 8: Update dashboard UI branding**
 
-Replace "RustyClawRouter" with "Solvela" in:
-- `dashboard/src/app/layout.tsx` (line 9: `title: "RustyClawRouter Dashboard"` -> `title: "Solvela Dashboard"`)
+Replace "Solvela" with "Solvela" in:
+- `dashboard/src/app/layout.tsx` (line 9: `title: "Solvela Dashboard"` -> `title: "Solvela Dashboard"`)
 - `dashboard/src/app/settings/page.tsx` (lines 382, 387: API endpoint description)
 - `dashboard/src/components/layout/sidebar.tsx` (line 53: brand text)
 - `dashboard/src/components/layout/shell.tsx` (line 33: brand text)
@@ -874,24 +874,24 @@ Replace "RustyClawRouter" with "Solvela" in:
 
 - [ ] **Step 9: Update code comments**
 
-Search for remaining "RustyClawRouter" or "rustyclaw" in Rust source files and update comments:
+Search for remaining "Solvela" or "rustyclaw" in Rust source files and update comments:
 - `crates/protocol/src/lib.rs` doc comment
 - `crates/gateway/src/config.rs` comments about `RCR_SOLANA__FEE_PAYER_KEY_2`
 - `programs/escrow/Cargo.toml` comments
 - `crates/gateway/src/routes/orgs/mod.rs` comment referencing `rcr_k_...` -> `solvela_k_...`
 - Any other straggling comments
 
-Run: `grep -rn "RustyClawRouter\|rustyclaw" crates/ programs/ --include="*.rs" --include="*.toml"` and fix remaining hits.
+Run: `grep -rn "Solvela\|rustyclaw" crates/ programs/ --include="*.rs" --include="*.toml"` and fix remaining hits.
 
 - [ ] **Step 10: Update integrations/openclaw references**
 
-Check `integrations/openclaw/` for RustyClawRouter references and update to Solvela.
+Check `integrations/openclaw/` for Solvela references and update to Solvela.
 
 - [ ] **Step 11: Commit**
 
 ```bash
 git add CLAUDE.md HANDOFF.md README.md CHANGELOG.md docs/ sdks/ crates/ programs/ integrations/
-git commit -m "docs: rebrand documentation from RustyClawRouter to Solvela
+git commit -m "docs: rebrand documentation from Solvela to Solvela
 
 Update project name, binary names, env var prefixes, and header prefixes
 across all documentation, READMEs, code comments, and book pages."
@@ -1045,7 +1045,7 @@ Expected: Builds cleanly.
 
 Run:
 ```bash
-grep -rn "RustyClawRouter\|rustyclaw\|rustyclawrouter" \
+grep -rn "Solvela\|rustyclaw\|rustyclawrouter" \
   --include="*.rs" --include="*.toml" --include="*.ts" --include="*.py" \
   --include="*.go" --include="*.json" --include="*.yml" --include="*.yaml" \
   --include="*.md" --include="*.toml" --include="*.sh" \

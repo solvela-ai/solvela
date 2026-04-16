@@ -1,4 +1,4 @@
--- RustyClawRouter initial schema
+-- Solvela initial schema
 -- Run: psql $DATABASE_URL -f migrations/001_initial_schema.sql
 -- Or: applied automatically by docker-compose on first start.
 

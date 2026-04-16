@@ -184,36 +184,36 @@ Expected: 0.5 SOL (or whatever you sent).
 
 - [ ] **Step 1: Set escrow program ID**
 
-Via Fly.io dashboard (https://fly.io/apps/rustyclawrouter-gateway/secrets) or CLI:
+Via Fly.io dashboard (https://fly.io/apps/solvela-gateway/secrets) or CLI:
 ```bash
-fly secrets set RCR_SOLANA__ESCROW_PROGRAM_ID=<YOUR_NEW_PROGRAM_ID> -a rustyclawrouter-gateway
+fly secrets set RCR_SOLANA__ESCROW_PROGRAM_ID=<YOUR_NEW_PROGRAM_ID> -a solvela-gateway
 ```
 
 - [ ] **Step 2: Set fee payer key**
 
 ```bash
-fly secrets set RCR_SOLANA__FEE_PAYER_KEY=<BASE58_FEE_PAYER_KEYPAIR> -a rustyclawrouter-gateway
+fly secrets set RCR_SOLANA__FEE_PAYER_KEY=<BASE58_FEE_PAYER_KEYPAIR> -a solvela-gateway
 ```
 
 - [ ] **Step 3: Verify RPC URL is mainnet**
 
 The RPC URL should already be set from PR #5. Verify:
 ```bash
-fly secrets list -a rustyclawrouter-gateway | grep RPC
+fly secrets list -a solvela-gateway | grep RPC
 ```
 
 If it still says devnet, update it:
 ```bash
-fly secrets set RCR_SOLANA__RPC_URL=https://api.mainnet-beta.solana.com -a rustyclawrouter-gateway
+fly secrets set RCR_SOLANA__RPC_URL=https://api.mainnet-beta.solana.com -a solvela-gateway
 ```
 
 - [ ] **Step 4: Redeploy gateway**
 
 Setting secrets auto-restarts, but to pick up the latest code:
 ```bash
-cd /home/kennethdixon/projects/RustyClawRouter
+cd /home/kennethdixon/projects/Solvela
 git pull origin main
-fly deploy -a rustyclawrouter-gateway
+fly deploy -a solvela-gateway
 ```
 
 ---
@@ -225,7 +225,7 @@ fly deploy -a rustyclawrouter-gateway
 - [ ] **Step 1: Check 402 response includes escrow scheme**
 
 ```bash
-curl -s -X POST https://rustyclawrouter-gateway.fly.dev/v1/chat/completions \
+curl -s -X POST https://api.solvela.ai/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"auto","messages":[{"role":"user","content":"test"}]}' \
   | python3 -c "
@@ -246,7 +246,7 @@ scheme: escrow, program: <YOUR_NEW_PROGRAM_ID>
 - [ ] **Step 2: Check escrow health endpoint**
 
 ```bash
-curl -s https://rustyclawrouter-gateway.fly.dev/v1/escrow/health \
+curl -s https://api.solvela.ai/v1/escrow/health \
   -H "Authorization: Bearer <ADMIN_TOKEN>" | python3 -m json.tool
 ```
 
@@ -255,7 +255,7 @@ Should show: escrow claimer configured, fee payer pool active, claim processor r
 - [ ] **Step 3: Check gateway logs for escrow initialization**
 
 ```bash
-fly logs -a rustyclawrouter-gateway --no-tail | grep -i escrow | head -10
+fly logs -a solvela-gateway --no-tail | grep -i escrow | head -10
 ```
 
 Should see "escrow verifier initialized" and "claim processor started" messages.
@@ -275,7 +275,7 @@ This requires a client that supports escrow (the CLI currently only supports "ex
 from rustyclawrouter import LLMClient
 
 client = LLMClient(
-    api_url="https://rustyclawrouter-gateway.fly.dev",
+    api_url="https://api.solvela.ai",
     private_key="<YOUR_AGENT_WALLET_KEYPAIR>",
 )
 # Note: the SDK currently selects the first accept (exact).
