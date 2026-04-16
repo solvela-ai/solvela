@@ -1,7 +1,7 @@
 # HANDOFF.md — Solvela Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-14 (docs site redesign — ported rcr-docs-site design into dashboard)
+> **Last verified:** 2026-04-16 (dashboard ported to docs design system — Source Serif 4, salmon eyebrows, terminal-card pattern)
 
 ---
 
@@ -52,17 +52,19 @@ Python (`sdks/python/`), TypeScript (`sdks/typescript/`), Go (`sdks/go/`), MCP s
 
 ### Dashboard & Documentation Site
 
-Next.js 16 + Tailwind v4 + Fumadocs (core + mdx) + Recharts. Redesigned 2026-04-13/14 from standalone dashboard into a docs-first developer platform.
+Next.js 16 + Tailwind v4 + Fumadocs (core + mdx) + Recharts. Redesigned 2026-04-13/14 from standalone dashboard into a docs-first developer platform; design system overhauled 2026-04-16 to match the canonical `rcr-docs-site`.
 
-**Docs engine**: Fumadocs-core + fumadocs-mdx for content pipeline (MDX, search, source loading). Custom UI components ported from `rcr-docs-site` — NOT using fumadocs-ui. Warm brutalist dark palette (#262624 bg, #DEDCD1 text, #FAF9F5 headings, gold borders). Custom fonts: DM Sans, Archivo (display), JetBrains Mono. Custom Shiki syntax themes (solvela-dark/light).
+**Design system (2026-04-16)**: Source Serif 4 added as `--font-serif` (editorial display weight 300/500). Salmon accent `#FE8181` as `--accent-salmon` for eyebrow labels. Terminal-window card pattern (`.terminal-card` / titlebar / screen with 14×14 radial dot pattern) ported from `rcr-docs-site`. All 5 dashboard pages restyled — stat cards now show metric values in serif inside terminal-window screens, charts wrapped in terminal-cards with dot-notation mono titlebars (`spend.usdc.daily`, `system.health`, etc.). Shared globals.css tokens guarantee visual parity with the docs site.
+
+**Docs engine**: Fumadocs-core + fumadocs-mdx for content pipeline (MDX, search, source loading). Custom UI components ported from `rcr-docs-site` — NOT using fumadocs-ui. Custom fonts: DM Sans (body), Archivo (legacy display), JetBrains Mono (data/labels), Source Serif 4 (headings). Custom Shiki syntax themes (solvela-dark/light).
 
 **Docs pages (17 MDX)**: Welcome, Quickstart, Concepts (x402, Smart Router, Escrow, Pricing), API Reference (Overview, Chat Completions, Models, Errors), SDKs (Overview, TypeScript, Python, Go, Rust CLI, MCP).
 
-**Dashboard pages (5)**: Overview, Usage, Models, Wallet, Settings — dark-converted to match docs palette. Live under `/dashboard/*` with separate Shell layout.
+**Dashboard pages (5)**: Overview, Usage, Models, Wallet, Settings — all wrapped in terminal-window cards. Live under `/dashboard/*` with separate Shell layout. Mock data is convincing (~$247.83 spend, 12.4k requests, realistic curves) — ready for marketing screenshots.
 
 **Route structure**: `/` → redirect to `/docs`, `/docs/*` → Fumadocs MDX pages, `/dashboard/*` → custom dashboard pages, `/api/search` → Fumadocs Orama search.
 
-Deployed to Vercel (`solvela.vercel.app`). Note: no `vercel.json` in repo — deployed via Vercel UI.
+Deployed to Vercel (`solvela.vercel.app`). Note: no `vercel.json` in repo — deployed via Vercel UI. **The 2026-04-16 design refresh has not yet been deployed.**
 
 ---
 
@@ -130,6 +132,20 @@ All 5 provider keys set and verified working (OpenAI, Anthropic, Google, xAI, De
 ### Immediate
 
 - **MCP server signing**: Stub signing intentional (agent-only protocol).
+- **Deploy 2026-04-16 design refresh**: dashboard restyle is committed locally but not yet deployed to `solvela.vercel.app`.
+- **Capture dashboard screenshots** for embedding in `rcr-docs-site` Enterprise pages — dashboard is themed and seeded with convincing fake data, ready to shoot.
+
+### Sister repo — `rcr-docs-site` (the real docs site)
+
+`~/projects/rcr-docs-site/` is the canonical Solvela docs site (target domain `docs.solvela.ai`). Now git-initialized with three commits and a complete redesign as of 2026-04-16:
+
+- **Editorial-serif typography** (Source Serif 4 at light weight 300 for h1, 500 for headings)
+- **Salmon eyebrow** (`#FE8181`) on every section title; salmon underline on active nav tab
+- **Terminal-window card pattern** with title bar + screen-area radial dot pattern
+- **Three top tabs**: Documentation / API Reference / **Enterprise** (new — 7 pages of org/team/api-key/audit/budget/analytics docs pulled from `crates/gateway/src/routes/orgs/`)
+- **`UpgradeCta` component** on every Enterprise page links to `solvela.ai/pricing` placeholder
+
+The dashboard now shares the same design tokens (Source Serif 4, salmon accent, terminal-card classes) so docs.solvela.ai and app.solvela.ai feel like one product. See `~/projects/rcr-docs-site/HANDOFF.md` for full details.
 
 ### Deferred
 
