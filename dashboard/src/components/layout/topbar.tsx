@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { RefreshCw } from "lucide-react";
 
 interface TopbarProps {
@@ -8,21 +9,22 @@ interface TopbarProps {
 }
 
 export function Topbar({ title, subtitle }: TopbarProps) {
+  const router = useRouter();
   return (
     <header className="flex items-center justify-between border-b border-border bg-bg-inset px-6 py-4">
       <div>
-        <p className="eyebrow mb-1" style={{ fontSize: '11px' }}>{title.toUpperCase()}</p>
-        <h1 style={{ fontFamily: 'var(--font-serif)', fontWeight: 500, fontSize: '22px', lineHeight: 1.15, letterSpacing: '-0.01em', color: 'var(--heading-color)' }}>
+        <h1 className="metric-md">
           {title}
         </h1>
         {subtitle && (
-          <p className="text-xs text-text-tertiary mt-0.5">{subtitle}</p>
+          <p className="text-xs text-text-tertiary mt-1">{subtitle}</p>
         )}
       </div>
       <div className="flex items-center gap-3">
         <button
-          className="flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-text-secondary hover:text-text-primary hover:bg-bg-surface transition-colors"
-          onClick={() => window.location.reload()}
+          type="button"
+          className="flex items-center gap-1.5 rounded border border-border min-h-10 px-3 py-2 text-xs text-text-secondary hover:text-text-primary hover:bg-bg-surface transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-salmon)]"
+          onClick={() => router.refresh()}
         >
           <RefreshCw size={11} />
           Refresh

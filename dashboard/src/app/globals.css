@@ -25,6 +25,8 @@
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
   --font-display: 'Archivo', system-ui, sans-serif;
   --font-serif: 'Source Serif 4', Georgia, 'Times New Roman', Times, serif;
+  --text-xxs: 0.6875rem;       /* 11px — titlebar meta, small captions */
+  --text-xxs--line-height: 1rem;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -41,10 +43,6 @@
   --color-text-primary: var(--color-text-primary);
   --color-text-secondary: var(--color-text-secondary);
   --color-text-tertiary: var(--color-text-tertiary);
-  --color-brand: var(--color-brand);
-  --color-brand-hover: var(--color-brand-hover);
-  --color-brand-subtle: var(--color-brand-subtle);
-  --color-brand-text: var(--color-brand-text);
   --color-success: var(--color-success);
   --color-warning: var(--color-warning);
   --color-error: var(--color-error);
@@ -73,7 +71,7 @@
   --secondary: #30302E;               /* Button/CardBG-Accent */
   --secondary-foreground: #DEDCD1;     /* Text */
   --muted: #30302E;                    /* Button/CardBG-Accent */
-  --muted-foreground: #DEDCD180;       /* Text at 50% */
+  --muted-foreground: #DEDCD1B3;       /* Text at 70% */
   --destructive: #FE8181;             /* AccentColor for logo (red) */
   --border: #C8A24030;                /* Warm gold at 19% */
   --input: #30302E;                    /* Button/CardBG-Accent */
@@ -90,7 +88,7 @@
   --heading-color: #FAF9F5;            /* Headings */
   --bold-color: #FAF9F5;              /* Bold text — bright, same as headings */
   --italic-color: #DEDCD1;            /* Text */
-  --text-faint: #DEDCD140;            /* Text at 25% */
+  --text-faint: #DEDCD180;            /* Text at 50% */
 
   /* Callout accents */
   --callout-info: #DEDCD1;            /* Neutral info */
@@ -123,10 +121,6 @@
   --color-text-primary: #FAF9F5;
   --color-text-secondary: #DEDCD1;
   --color-text-tertiary: #DEDCD180;
-  --color-brand: #f97316;
-  --color-brand-hover: #ea580c;
-  --color-brand-subtle: rgba(249, 115, 22, 0.1);
-  --color-brand-text: #fb923c;
   --color-success: #65BB30;
   --color-warning: #fbbf24;
   --color-error: #FE8181;
@@ -163,7 +157,7 @@
     --heading-color: #1F1E1D;
     --bold-color: #1F1E1D;
     --italic-color: #626158;
-    --text-faint: #62615840;
+    --text-faint: #626158B3;
 
     --callout-info: #626158;
     --callout-warn: #FE8181;
@@ -194,10 +188,6 @@
     --color-text-primary: #1F1E1D;
     --color-text-secondary: #262624;
     --color-text-tertiary: #626158;
-    --color-brand: #ea580c;
-    --color-brand-hover: #c2410c;
-    --color-brand-subtle: rgba(234, 88, 12, 0.1);
-    --color-brand-text: #f97316;
     --color-success: #3F7A1F;
     --color-warning: #d97706;
     --color-error: #D25E65;
@@ -344,7 +334,7 @@ pre code [data-highlighted-line] {
   color: var(--bold-color);
   padding: 0.15em 0.35em;
   border-radius: calc(var(--radius) * 0.5);
-  font-size: 0.875em;
+  font-size: max(0.875em, 0.6875rem);  /* min 11px */
   font-family: var(--font-mono);
   border: 1px solid var(--border);
 }
@@ -484,13 +474,34 @@ pre code [data-highlighted-line] {
   background: var(--accent-salmon);
 }
 
-/* Screen — deepest dark + radial dot pattern */
+/* Screen — deepest dark + grid pattern */
 .terminal-card-screen {
   background: var(--popover);
-  background-image: radial-gradient(rgba(222, 220, 209, 0.18) 1px, transparent 1.4px);
-  background-size: 14px 14px;
+  background-image:
+    linear-gradient(90deg, rgba(222, 220, 209, 0.045) 1px, transparent 1px),
+    linear-gradient(rgba(222, 220, 209, 0.045) 1px, transparent 1px);
+  background-size: 24px 24px;
   padding: 1.5rem 1.5rem 1.75rem;
 }
+
+/* ==========================================================
+   METRIC TYPE SCALE — serif display for numbers
+   ========================================================== */
+
+.metric-xl,
+.metric-lg,
+.metric-md {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--heading-color);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.metric-xl { font-size: 2.25rem; }   /* 36px — wallet balance, hero figures */
+.metric-lg { font-size: 1.75rem; }   /* 28px — stat cards */
+.metric-md { font-size: 1.375rem; line-height: 1.15; }  /* 22px — topbar h1 */
 
 /* ==========================================================
    ACCENT — eyebrow labels
