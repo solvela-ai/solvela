@@ -48,14 +48,14 @@ Rate limiting under x402 is applied per wallet address. Each Solana wallet is tr
 
 ## API Keys (Enterprise)
 
-Enterprise organizations can use API keys for traditional header-based authentication. Keys are prefixed with `rcr_key_` and are scoped to an organization.
+Enterprise organizations can use API keys for traditional header-based authentication. Keys are prefixed with `solvela_k_` and are scoped to an organization.
 
 Pass the key in the standard `Authorization` header:
 
 ```bash
 curl https://api.solvela.ai/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer rcr_key_your_key_here" \
+  -H "Authorization: Bearer solvela_k_your_key_here" \
   -d '{
     "model": "auto",
     "messages": [{"role": "user", "content": "Hello"}]
@@ -89,4 +89,4 @@ Enterprise accounts with API key auth unlock additional capabilities:
 | Billing | Pay per request | Managed via org budgets |
 | Best for | Individual use, developers | Teams, production deployments |
 
-See [x402 Overview](/docs/x402-overview) for the full protocol specification.
+See [x402 Protocol](/docs/concepts/x402) for the full protocol specification.

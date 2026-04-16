@@ -203,9 +203,9 @@ All official SDKs support a `sessionBudget` option that caps total spending for 
   </Tab>
 </Tabs>
 
-<Info>
-`sessionBudget` is a client-side guard only — it does not communicate a limit to the server. The SDK accumulates `cost_breakdown.total` values across all signed payments and stops signing once the sum exceeds the budget.
-</Info>
+<Warning>
+**Important:** `sessionBudget` is a client-side guard only and does not communicate a limit to the server. For server-enforced limits, use enterprise team budgets. The SDK accumulates `cost_breakdown.total` values across all signed payments and stops signing once the sum exceeds the budget.
+</Warning>
 
 ---
 
