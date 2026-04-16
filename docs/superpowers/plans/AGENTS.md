@@ -11,7 +11,7 @@ Implementation plans authored via the `superpowers:writing-plans` skill. High-tr
 |------|-------------|
 | `2026-04-10-go-sdk-signing-support.md` | **Active** — Go SDK signing implementation plan (high-traffic: referenced ~200× in project memory) |
 | `2026-04-12-load-testing.md` | Load-testing execution plan |
-| `2026-04-11-solvela-rebrand.md` | RustyClawRouter → Solvela rebrand plan |
+| `2026-04-11-solvela-rebrand.md` | Solvela → Solvela rebrand plan |
 | `2026-04-10-load-testing-full-payment-path.md` | Plan for the full payment-path load test |
 | `2026-04-10-load-testing-full-payment-path-review.md` | Reviewer notes on the load-testing plan |
 | `2026-04-08-escrow-client-sdk-support.md` | Escrow client-side SDK support |

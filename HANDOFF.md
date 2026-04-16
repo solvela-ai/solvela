@@ -7,7 +7,7 @@
 
 ## What Is This
 
-Solvela (formerly RustyClawRouter) is a Solana-native LLM payment gateway. AI agents pay for LLM API calls with USDC-SPL on Solana via x402. Revenue: 5% fee per call.
+Solvela (formerly Solvela) is a Solana-native LLM payment gateway. AI agents pay for LLM API calls with USDC-SPL on Solana via x402. Revenue: 5% fee per call.
 
 Part of the **solvela.ai** ecosystem:
 
@@ -115,7 +115,7 @@ go sdk:               58  (53 pass, 5 skip/live-gated)
 
 | Resource | Location | Status |
 |----------|----------|--------|
-| **Gateway** | `rustyclawrouter-gateway.fly.dev` | Running (ord region, shared-cpu-1x/512MB) |
+| **Gateway** | `api.solvela.ai` | Running (ord region, shared-cpu-1x/512MB) |
 | **PostgreSQL** | `solvela-db` on Fly.io | Running (Postgres 17.2) |
 | **Redis** | Upstash (`solvela-cache`) | Running (ord + iad) |
 | **Dashboard** | `solvela.vercel.app` | Deployed |
@@ -123,7 +123,7 @@ go sdk:               58  (53 pass, 5 skip/live-gated)
 
 ### Secrets on Fly.io
 
-All 5 provider keys set and verified working (OpenAI, Anthropic, Google, xAI, DeepSeek) — refreshed 2026-04-12. Solana config set (RPC, recipient wallet, USDC mint, escrow program, fee payer key). Database + Redis URLs set. Admin token rotated 2026-03-31. Note: Fly app is still `rustyclawrouter-gateway`, not yet renamed to `solvela-gateway`.
+All 5 provider keys set and verified working (OpenAI, Anthropic, Google, xAI, DeepSeek) — refreshed 2026-04-12. Solana config set (RPC, recipient wallet, USDC mint, escrow program, fee payer key). Database + Redis URLs set. Admin token rotated 2026-03-31. Note: Fly app is still `solvela-gateway`, not yet renamed to `solvela-gateway`.
 
 ---
 
@@ -152,7 +152,7 @@ The dashboard now shares the same design tokens (Source Serif 4, salmon accent, 
 - **Multi-chain support**: `PaymentVerifier` trait is chain-agnostic by design. Base/EVM implementation deferred.
 - **x402 V2 sessions**: V2 adds sessions and service discovery. Wire format migrated but session features not implemented.
 - **Load testing**: COMPLETED 2026-04-12. All 7 phases passed. See `docs/load-tests/2026-04-12-results.md`. T1 ceiling ~400 RPS, SLO validated at 50 RPS x 5 min, all 5 providers verified with real USDC payments. CLI features added: `--model` flag, live progress output, `SOLVELA_RATE_LIMIT_MAX` env override.
-- **Fly app rename**: `rustyclawrouter-gateway` → `solvela-gateway` (deferred — requires DNS migration)
+- **Fly app rename**: `solvela-gateway` → `solvela-gateway` (deferred — requires DNS migration)
 - **Docs theme rename**: `@rustyclaw/docs-theme` → `@solvela/docs-theme` (rcr-docs-site design system ported into dashboard 2026-04-14)
 - **Rate limiter redesign**: Current `tokio::sync::Mutex<HashMap>` is the bottleneck at 400+ RPS. Replace with sharded or Redis-based approach when traffic demands it.
 - **Per-user fairness queuing**: Not started.

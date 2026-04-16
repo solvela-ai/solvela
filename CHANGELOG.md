@@ -1,15 +1,15 @@
 # Changelog
 
-All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
+All notable changes to Solvela (formerly Solvela), in reverse chronological order.
 
 ## 2026-04-11 — Solvela Rebrand
 
-- **Rebranded from RustyClawRouter to Solvela**: All crate names, CLI binary, env var prefixes, HTTP headers, SDK packages, infrastructure config, documentation, and dashboard UI updated. RustyClaw.ai remains the separate trading terminal product.
+- **Rebranded from Solvela to Solvela**: All crate names, CLI binary, env var prefixes, HTTP headers, SDK packages, infrastructure config, documentation, and dashboard UI updated. RustyClaw.ai remains the separate trading terminal product.
 - **Crate renames**: `rustyclaw-protocol` -> `solvela-protocol`, `rcr-cli` -> `solvela-cli`. Binary: `rustyclawrouter` -> `solvela-gateway`, CLI: `rcr` -> `solvela`.
 - **Env var prefix**: `SOLVELA_` prefix (legacy `RCR_` accepted with deprecation warning).
 - **HTTP headers**: `X-RCR-*` -> `X-Solvela-*` (legacy headers accepted).
 - **Prometheus metrics**: `rcr_*` -> `solvela_*` prefix.
-- **Dashboard**: All UI text updated from RustyClawRouter to Solvela.
+- **Dashboard**: All UI text updated from Solvela to Solvela.
 - **Infrastructure**: Fly.io app, Docker, fly.toml updated to `solvela-gateway`.
 
 ## 2026-04-08 — Escrow Program Deployed to Mainnet

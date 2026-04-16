@@ -1,4 +1,4 @@
- BlockRun ClawRouter vs RustyClawRouter
+ BlockRun ClawRouter vs Solvela
 
   We win on fundamentals:
   - Server-side gateway (no client-side key custody)

@@ -25,7 +25,7 @@ Representative samples (current as of 2026-04-16):
 | `phase-12-monitoring.md` | Phase 12 monitoring |
 | `phase-14-production-hardening.md` | Phase 14 production hardening |
 | `phase-g-gateway-changes.md` | Phase G gateway changes |
-| `ClawRouter-vs-RustyClawRouter-*.md` | Brand / positioning notes from the rebrand era |
+| `ClawRouter-vs-Solvela-*.md` | Brand / positioning notes from the rebrand era |
 
 ## Subdirectories
 _(none)_

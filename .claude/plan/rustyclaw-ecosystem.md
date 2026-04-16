@@ -1,6 +1,6 @@
-# Implementation Plan: RustyClawClient Ecosystem
+# Implementation Plan: Solvela Client Ecosystem
 
-> Two products, one protocol. RustyClawRouter is the gateway (server). RustyClawClient is the client.
+> Two products, one protocol. Solvela is the gateway (server). Solvela Client is the client.
 > Together they form a self-sovereign, Solana-native AI agent payment stack.
 
 ---
@@ -9,15 +9,15 @@
 
 | Product | Role | Analogy |
 |---------|------|---------|
-| **RustyClawRouter** | Gateway server — verifies payments, routes to LLM providers, settles on-chain | BlockRun's API backend |
-| **RustyClawClient** | Client library/sidecar — holds wallet, signs payments, makes LLM calls transparent | ClawRouter (the npm package) |
+| **Solvela** | Gateway server — verifies payments, routes to LLM providers, settles on-chain | BlockRun's API backend |
+| **Solvela Client** | Client library/sidecar — holds wallet, signs payments, makes LLM calls transparent | ClawRouter (the npm package) |
 | **rustyclaw-protocol** | Shared wire format — x402 types used by both client and server | The contract between them |
 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │  YOUR APP (Python, Rust, Go, TS, or any HTTP client)     │
 │                                                          │
-│  Uses RustyClawClient library or localhost proxy           │
+│  Uses Solvela Client library or localhost proxy           │
 └────────────────────────┬─────────────────────────────────┘
                          │  OpenAI-compatible API call
                          ▼
@@ -61,7 +61,7 @@
 
 The existing "rustyclaw" trading platform project needs to be renamed to avoid confusion.
 Pick a new name for the trading platform and rename its directory/repo before starting
-RustyClawClient development.
+Solvela Client development.
 
 **Action items:**
 - [ ] Rename the trading platform project (repo, directory, references)
@@ -80,7 +80,7 @@ RustyClawClient development.
 - `CostBreakdown` (from `rcr-common`)
 - Constants: `X402_VERSION`, `USDC_MINT`, `SOLANA_NETWORK`, `MAX_TIMEOUT_SECONDS`
 
-**What stays in RustyClawRouter's `x402` crate:**
+**What stays in Solvela's `x402` crate:**
 - `traits.rs` (PaymentVerifier — server-side only)
 - `solana.rs` (on-chain verification — server-side only)
 - `facilitator.rs` (settlement orchestration)
@@ -99,28 +99,28 @@ rustyclaw-protocol/
 ```
 
 **Dependencies**: `serde`, `serde_json` only. No crypto, no Solana SDK, no HTTP framework.
-Publish to crates.io. Both RustyClawRouter and RustyClawClient depend on it.
+Publish to crates.io. Both Solvela and Solvela Client depend on it.
 
-**Decision**: This crate can live in the RustyClawRouter workspace initially (as `crates/protocol/`)
+**Decision**: This crate can live in the Solvela workspace initially (as `crates/protocol/`)
 and be published from there. It doesn't need its own repo yet.
 
 ---
 
-## Phase B: RustyClawClient — Core Library
+## Phase B: Solvela Client — Core Library
 
 > **Goal**: Rust library that any project can add as a dependency to make paid LLM calls.
 
 ### B.1: Project Scaffolding
 
 ```
-RustyClawClient/                     # New repo: github.com/<you>/RustyClawClient
+Solvela Client/                     # New repo: github.com/<you>/Solvela Client
 ├── Cargo.toml                       # Workspace root
 ├── crates/
 │   ├── rustyclaw-client/            # Core client library
 │   │   ├── Cargo.toml               # depends on: rustyclaw-protocol, solana-sdk, reqwest
 │   │   └── src/
 │   │       ├── lib.rs               # Public API surface
-│   │       ├── client.rs            # RustyClawClient — the main entry point
+│   │       ├── client.rs            # Solvela Client — the main entry point
 │   │       ├── wallet.rs            # Wallet create, import (BIP39), export, balance check
 │   │       ├── signer.rs            # Build + sign USDC-SPL transfer tx
 │   │       ├── config.rs            # Gateway URL, wallet source, timeouts, defaults
@@ -239,7 +239,7 @@ pub async fn sign_escrow_deposit(
 The main entry point. Handles the 402 → sign → resend flow transparently.
 
 ```rust
-pub struct RustyClawClient {
+pub struct Solvela Client {
     wallet: Wallet,
     gateway_url: String,
     rpc_url: String,
@@ -247,7 +247,7 @@ pub struct RustyClawClient {
     config: ClientConfig,
 }
 
-impl RustyClawClient {
+impl Solvela Client {
     pub fn builder() -> ClientBuilder;
 
     /// OpenAI-compatible chat completion. Payment handled transparently.
@@ -329,15 +329,15 @@ pub enum ClientError {
 
 ---
 
-## Phase C: RustyClawClient — Local Proxy Sidecar
+## Phase C: Solvela Client — Local Proxy Sidecar
 
-> **Goal**: HTTP proxy on localhost so any language/tool can use RustyClawClient without an SDK.
+> **Goal**: HTTP proxy on localhost so any language/tool can use Solvela Client without an SDK.
 
 This is the ClawRouter equivalent — `rustyclawclient-proxy` listens on `localhost:8402`,
 intercepts OpenAI-compatible requests, signs payments, forwards to the gateway.
 
 ```
-RustyClawClient/crates/rustyclawclient-proxy/
+Solvela Client/crates/rustyclawclient-proxy/
 ├── Cargo.toml                # depends on: rustyclaw-client, axum (lightweight)
 └── src/
     ├── main.rs               # CLI args, start server
@@ -348,7 +348,7 @@ RustyClawClient/crates/rustyclawclient-proxy/
 ```
 Any HTTP client → http://localhost:8402/v1/chat/completions
                 → rustyclaw-proxy intercepts
-                → Uses RustyClawClient internally (402 → sign → resend)
+                → Uses Solvela Client internally (402 → sign → resend)
                 → Returns response to caller
 
 The caller never sees the 402 or the payment. It just works.
@@ -369,12 +369,12 @@ can point at `localhost:8402` and get Solana-paid LLM access with zero code chan
 
 ---
 
-## Phase D: RustyClawClient — CLI
+## Phase D: Solvela Client — CLI
 
 > **Goal**: User-facing command-line tool for wallet management, chat, and diagnostics.
 
 ```
-RustyClawClient/crates/rustyclawclient-cli/
+Solvela Client/crates/rustyclawclient-cli/
 ├── Cargo.toml               # depends on: rustyclaw-client, clap
 └── src/
     ├── main.rs
@@ -411,7 +411,7 @@ rustyclawclient doctor                     # Check: wallet, gateway, Solana RPC,
 
 ---
 
-## Phase E: RustyClawClient — Smart Features
+## Phase E: Solvela Client — Smart Features
 
 > **Goal**: Feature parity with ClawRouter's battle-tested UX, then surpass it.
 
@@ -528,15 +528,15 @@ In `rustyclawclient-proxy`, send heartbeat comments during streaming to prevent 
 
 > **Goal**: Python, TypeScript, Go SDKs that wrap the same payment flow.
 
-These SDKs move from RustyClawRouter to RustyClawClient. They are client libraries.
+These SDKs move from Solvela to Solvela Client. They are client libraries.
 
 ### F.1: Python SDK
 
 ```
-RustyClawClient/sdks/python/
+Solvela Client/sdks/python/
 ├── pyproject.toml              # name = "rustyclawclient"
 ├── rustyclawclient/
-│   ├── __init__.py             # from .client import RustyClawClient
+│   ├── __init__.py             # from .client import Solvela Client
 │   ├── client.py               # Main client — chat(), chat_stream(), balance()
 │   ├── wallet.py               # Wallet create/import/export/balance
 │   ├── signer.py               # Build + sign Solana USDC transfer
@@ -549,9 +549,9 @@ RustyClawClient/sdks/python/
 
 **Usage:**
 ```python
-from rustyclawclient import RustyClawClient
+from rustyclawclient import Solvela Client
 
-client = RustyClawClient(
+client = Solvela Client(
     gateway="https://my-gateway.fly.dev",
     wallet_key=os.environ["RUSTYCLAWCLIENT_WALLET_KEY"],
 )
@@ -568,11 +568,11 @@ print(f"Cost: ${response.cost_breakdown.total} USDC")
 ### F.2: TypeScript SDK
 
 ```
-RustyClawClient/sdks/typescript/
+Solvela Client/sdks/typescript/
 ├── package.json                # name = "@rustyclawclient/sdk"
 ├── src/
 │   ├── index.ts
-│   ├── client.ts               # RustyClawClient
+│   ├── client.ts               # Solvela Client
 │   ├── wallet.ts               # Wallet management
 │   ├── signer.ts               # Solana tx signing
 │   ├── session.ts              # Session sticking
@@ -603,7 +603,7 @@ const response = await client.chat.completions.create({
 ### F.3: Go SDK
 
 ```
-RustyClawClient/sdks/go/
+Solvela Client/sdks/go/
 ├── go.mod                      # module github.com/<you>/rustyclawclient-go
 ├── client.go                   # Client struct + Chat(), ChatStream(), Balance()
 ├── wallet.go                   # Wallet management
@@ -619,9 +619,9 @@ RustyClawClient/sdks/go/
 
 ---
 
-## Phase G: Gateway Changes (RustyClawRouter)
+## Phase G: Gateway Changes (Solvela)
 
-> **Goal**: Modifications to the gateway to support RustyClawClient features.
+> **Goal**: Modifications to the gateway to support Solvela Client features.
 
 These are small, targeted changes — the gateway architecture doesn't change.
 
@@ -668,9 +668,9 @@ The CLI and SDKs use this to show the user their spend history.
 ## Build Order
 
 ```
-Phase A:  Extract rustyclaw-protocol crate (from RustyClawRouter's x402/types.rs)
+Phase A:  Extract rustyclaw-protocol crate (from Solvela's x402/types.rs)
           ↓
-Phase B:  RustyClawClient core library (wallet → signer → client)
+Phase B:  Solvela Client core library (wallet → signer → client)
           Depends on: rustyclaw-protocol published
           ↓
 Phase C:  Local proxy sidecar (rustyclawclient-proxy)
@@ -732,5 +732,5 @@ Phase G:  Gateway changes (session headers, debug headers, SSE heartbeat, stats)
 | Client wallet model | Single wallet, non-custodial | "Your wallet, your keys, your money until you spend it" |
 | Default payment scheme | Prefer escrow | Safer for agent — only pays actual cost, auto-refund on failure |
 | Proxy as optional sidecar | Separate binary, not required | Library-first design; proxy is convenience for non-Rust users |
-| SDKs are client-side only | Move from RustyClawRouter to RustyClawClient | SDKs sign payments — that's client behavior, not server behavior |
+| SDKs are client-side only | Move from Solvela to Solvela Client | SDKs sign payments — that's client behavior, not server behavior |
 | Session sticking is client-side | Client manages sessions, not gateway | Gateway is stateless by design; session is per-agent context |

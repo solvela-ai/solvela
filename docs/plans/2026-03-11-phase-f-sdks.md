@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Build Python, TypeScript, and Go SDKs for RustyClawRouter, each in its own repo, mirroring the Rust client's architecture 1:1.
+**Goal:** Build Python, TypeScript, and Go SDKs for Solvela, each in its own repo, mirroring the Rust client's architecture 1:1.
 
-> **Note:** Working SDK implementations already exist at `sdks/python/`, `sdks/typescript/`, and `sdks/go/` within the RustyClawRouter repo. This plan documents the canonical architecture and type definitions. When implementing, align with or replace the existing in-tree SDKs rather than creating new standalone repos.
+> **Note:** Working SDK implementations already exist at `sdks/python/`, `sdks/typescript/`, and `sdks/go/` within the Solvela repo. This plan documents the canonical architecture and type definitions. When implementing, align with or replace the existing in-tree SDKs rather than creating new standalone repos.
 
 **Architecture:** Layered client — thin HTTP transport + pluggable Solana signer + opt-in smart features (cache, sessions, balance monitor, quality check). Fresh implementations using the Rust client as canonical reference. OpenAI-compatible wrapper for Python and TypeScript.
 
@@ -152,7 +152,7 @@ git init
 [project]
 name = "rustyclaw"
 version = "0.1.0"
-description = "Python SDK for RustyClawRouter — Solana-native AI agent payment gateway"
+description = "Python SDK for Solvela — Solana-native AI agent payment gateway"
 requires-python = ">=3.10"
 license = "MIT"
 dependencies = [
@@ -193,13 +193,13 @@ strict = true
 ```python
 """RustyClaw Python SDK — Solana-native AI agent payment client."""
 
-from rustyclaw.client import RustyClawClient
+from rustyclaw.client import Solvela Client
 from rustyclaw.config import ClientConfig, ClientBuilder
 from rustyclaw.errors import ClientError, WalletError, SignerError
 from rustyclaw.wallet import Wallet
 
 __all__ = [
-    "RustyClawClient",
+    "Solvela Client",
     "ClientConfig",
     "ClientBuilder",
     "ClientError",
@@ -1819,30 +1819,30 @@ This is the largest task. The client wires together all modules.
 
 ```python
 # tests/unit/test_client.py
-from rustyclaw.client import RustyClawClient
+from rustyclaw.client import Solvela Client
 from rustyclaw.config import ClientConfig
 from rustyclaw.wallet import Wallet
 
 def test_client_creation():
     wallet, _ = Wallet.create()
     config = ClientConfig()
-    client = RustyClawClient(wallet=wallet, config=config)
+    client = Solvela Client(wallet=wallet, config=config)
     assert client is not None
 
 def test_client_without_wallet():
     config = ClientConfig()
-    client = RustyClawClient(config=config)
+    client = Solvela Client(config=config)
     assert client is not None
 
 def test_client_last_known_balance_initially_none():
     config = ClientConfig()
-    client = RustyClawClient(config=config)
+    client = Solvela Client(config=config)
     assert client.last_known_balance() is None
 
 def test_client_debug_redacts():
     wallet, _ = Wallet.create()
     config = ClientConfig()
-    client = RustyClawClient(wallet=wallet, config=config)
+    client = Solvela Client(wallet=wallet, config=config)
     debug = repr(client)
     assert wallet.to_keypair_b58() not in debug
 ```
@@ -1851,7 +1851,7 @@ def test_client_debug_redacts():
 # tests/integration/test_client.py
 import pytest
 from pytest_httpx import HTTPXMock
-from rustyclaw.client import RustyClawClient
+from rustyclaw.client import Solvela Client
 from rustyclaw.config import ClientConfig
 from rustyclaw.types import ChatMessage, ChatRequest, Role
 
@@ -1861,7 +1861,7 @@ def config():
 
 @pytest.fixture
 def client(config):
-    return RustyClawClient(config=config)
+    return Solvela Client(config=config)
 
 @pytest.mark.asyncio
 async def test_chat_success(client, httpx_mock: HTTPXMock):
@@ -1883,7 +1883,7 @@ async def test_chat_success(client, httpx_mock: HTTPXMock):
 @pytest.mark.asyncio
 async def test_chat_with_cache(httpx_mock: HTTPXMock):
     config = ClientConfig(gateway_url="http://test-gateway:8402", enable_cache=True)
-    client = RustyClawClient(config=config)
+    client = Solvela Client(config=config)
 
     httpx_mock.add_response(
         url="http://test-gateway:8402/v1/chat/completions",
@@ -1913,7 +1913,7 @@ async def test_chat_quality_retry(httpx_mock: HTTPXMock):
         enable_quality_check=True,
         max_quality_retries=1,
     )
-    client = RustyClawClient(config=config)
+    client = Solvela Client(config=config)
 
     # First response is degraded (empty), second is good
     httpx_mock.add_response(json={
@@ -1950,7 +1950,7 @@ from rustyclaw.types import ChatRequest, ChatResponse, ChatMessage, PaymentRequi
 from rustyclaw.wallet import Wallet
 from rustyclaw.signer import Signer
 
-class RustyClawClient:
+class Solvela Client:
     def __init__(
         self,
         config: ClientConfig | None = None,
@@ -2062,7 +2062,7 @@ class RustyClawClient:
         return self._last_balance
 
     def __repr__(self) -> str:
-        return f"RustyClawClient(gateway={self._config.gateway_url}, wallet=REDACTED)"
+        return f"Solvela Client(gateway={self._config.gateway_url}, wallet=REDACTED)"
 ```
 
 Complete the implementation with `chat_stream()`, `models()`, `estimate_cost()`, `usdc_balance()` methods following the same patterns.
@@ -2073,7 +2073,7 @@ Complete the implementation with `chat_stream()`, `models()`, `estimate_cost()`,
 
 ```bash
 git add src/rustyclaw/client.py tests/unit/test_client.py tests/integration/test_client.py
-git commit -m "feat: add RustyClawClient with smart chat flow"
+git commit -m "feat: add Solvela Client with smart chat flow"
 ```
 
 ---
@@ -2195,7 +2195,7 @@ git commit -m "feat: add OpenAI-compatible wrapper"
 # tests/live/conftest.py
 import os
 import pytest
-from rustyclaw.client import RustyClawClient
+from rustyclaw.client import Solvela Client
 from rustyclaw.config import ClientConfig
 
 GATEWAY_URL = os.environ.get("RUSTYCLAW_GATEWAY_URL", "http://localhost:8402")
@@ -2203,7 +2203,7 @@ GATEWAY_URL = os.environ.get("RUSTYCLAW_GATEWAY_URL", "http://localhost:8402")
 @pytest.fixture
 def live_client():
     config = ClientConfig(gateway_url=GATEWAY_URL)
-    return RustyClawClient(config=config)
+    return Solvela Client(config=config)
 
 def pytest_collection_modifyitems(config, items):
     """Skip live tests unless RUSTYCLAW_LIVE_TESTS=1."""
@@ -2300,7 +2300,7 @@ jobs:
 
 **Step 2: Create README.md**
 
-Include: installation, quick start (minimal and full), API reference summary, link to RustyClawRouter docs.
+Include: installation, quick start (minimal and full), API reference summary, link to Solvela docs.
 
 **Step 3: Commit**
 
@@ -2335,7 +2335,7 @@ git init
 {
   "name": "@rustyclaw/sdk",
   "version": "0.1.0",
-  "description": "TypeScript SDK for RustyClawRouter — Solana-native AI agent payment gateway",
+  "description": "TypeScript SDK for Solvela — Solana-native AI agent payment gateway",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -2394,7 +2394,7 @@ git init
 **Step 4: Create src/index.ts with re-exports**
 
 ```typescript
-export { RustyClawClient } from './client.js';
+export { Solvela Client } from './client.js';
 export { ClientConfig, ClientBuilder } from './config.js';
 export { Wallet } from './wallet.js';
 export type { Signer } from './signer.js';
@@ -2596,7 +2596,7 @@ git commit -m "feat: add balance monitor with transition-debounced callback"
 Same 7-step flow as Python P12. Wire together all modules.
 
 ```bash
-git commit -m "feat: add RustyClawClient with smart chat flow"
+git commit -m "feat: add Solvela Client with smart chat flow"
 ```
 
 ---
@@ -2608,7 +2608,7 @@ Same pattern as Python P13:
 ```typescript
 export class OpenAICompat {
     chat: { completions: { create: (params: CreateParams) => Promise<ChatResponse> } };
-    constructor(client: RustyClawClient) { ... }
+    constructor(client: Solvela Client) { ... }
 }
 ```
 
@@ -2641,7 +2641,7 @@ git commit -m "chore: add CI workflow and README"
 ```bash
 mkdir rustyclaw-go && cd rustyclaw-go
 git init
-go mod init github.com/RustyClawRouter/rustyclaw-go
+go mod init github.com/Solvela/rustyclaw-go
 ```
 
 Create empty files: `types.go`, `constants.go`, `errors.go`, `config.go`, `wallet.go`, `signer.go`, `transport.go`, `cache.go`, `session.go`, `balance.go`, `quality.go`, `client.go`
@@ -2737,7 +2737,7 @@ func WithGatewayURL(url string) Option { return func(c *ClientConfig) { c.Gatewa
 func WithTimeout(d time.Duration) Option { return func(c *ClientConfig) { c.Timeout = d } }
 // ...
 
-func NewClient(opts ...Option) (*RustyClawClient, error) {
+func NewClient(opts ...Option) (*Solvela Client, error) {
     cfg := DefaultConfig()
     for _, opt := range opts { opt(&cfg) }
     // ...
@@ -2857,13 +2857,13 @@ git commit -m "feat: add balance monitor with transition-debounced callback"
 Same 7-step flow. Go uses `context.Context` for cancellation:
 
 ```go
-func (c *RustyClawClient) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
+func (c *Solvela Client) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
     // Steps 1-7...
 }
 ```
 
 ```bash
-git commit -m "feat: add RustyClawClient with smart chat flow"
+git commit -m "feat: add Solvela Client with smart chat flow"
 ```
 
 ---
@@ -2900,5 +2900,5 @@ All three SDKs are independent — they can be implemented in parallel (one suba
 ## Dependencies
 
 - All SDKs depend on `rustyclaw-protocol` types (documented above, no code dependency)
-- Live tests depend on a running RustyClawRouter instance (`cargo run -p gateway`)
+- Live tests depend on a running Solvela instance (`cargo run -p gateway`)
 - Signer implementations depend on Solana devnet for integration testing

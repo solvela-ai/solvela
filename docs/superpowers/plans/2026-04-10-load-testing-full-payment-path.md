@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an `rcr loadtest` CLI subcommand that exercises the RustyClawRouter gateway under realistic constant-arrival-rate load with real Solana payment transactions (exact SPL TransferChecked and escrow deposit/claim), catching concurrency bugs that unit tests miss.
+**Goal:** Add an `rcr loadtest` CLI subcommand that exercises the Solvela gateway under realistic constant-arrival-rate load with real Solana payment transactions (exact SPL TransferChecked and escrow deposit/claim), catching concurrency bugs that unit tests miss.
 
 **Architecture:** Constant-arrival-rate dispatcher (tokio interval + semaphore) sends N requests/sec regardless of response time, preventing coordinated omission bias. Each request worker performs the full 402 dance (send -> get 402 -> sign payment -> resubmit with header). Three modes: dev-bypass (no payment), exact (SPL TransferChecked), escrow (Anchor deposit). Thread-safe atomic counters + HdrHistogram collect latency percentiles. Terminal + JSON report output with optional Prometheus SLO validation.
 
@@ -289,7 +289,7 @@ use clap::Args;
 
 use self::config::{LoadTestConfig, LoadTestMode, TierWeights, SloThresholds};
 
-/// Load test the RustyClawRouter gateway with real payment transactions.
+/// Load test the Solvela gateway with real payment transactions.
 #[derive(Args, Debug)]
 pub struct LoadTestArgs {
     /// Requests per second (constant arrival rate).
@@ -1744,7 +1744,7 @@ pub fn print_terminal_report(
 
     println!();
     println!("============================================================");
-    println!("  RustyClawRouter Load Test Report");
+    println!("  Solvela Load Test Report");
     println!("============================================================");
     println!("  Mode:            {mode}");
     println!("  Duration:        {duration_secs}s");

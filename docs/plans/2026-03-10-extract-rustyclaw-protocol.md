@@ -95,7 +95,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Shared wire-format types for the RustyClaw ecosystem (x402 payment protocol + OpenAI-compatible chat types)"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/sky64/RustyClawRouter"
+repository = "https://github.com/sky64/Solvela"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

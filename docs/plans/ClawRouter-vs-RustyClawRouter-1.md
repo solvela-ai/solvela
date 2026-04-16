@@ -1,4 +1,4 @@
- ClawRouter vs RustyClawRouter — Competitive Analysis
+ ClawRouter vs Solvela — Competitive Analysis
 
   Where ClawRouter Falls Short (and you already do better)
 
@@ -7,7 +7,7 @@
   ClawRouter is a single src/ directory with ~41 TypeScript files in a flat structure. proxy.ts
   alone is ~2,000 lines handling routing, payment, streaming, caching, and fallback all in one file.
 
-  RustyClawRouter has a clean workspace with separated concerns:
+  Solvela has a clean workspace with separated concerns:
   - x402 (protocol-only, no HTTP coupling)
   - router (pure scoring, no I/O)
   - gateway (HTTP layer)
@@ -19,7 +19,7 @@
   2. Security — Significant Gaps in ClawRouter
 
   ┌───────────────┬──────────────────────────────┬──────────────────────────────────────────────┐
-  │     Area      │          ClawRouter          │               RustyClawRouter                │
+  │     Area      │          ClawRouter          │               Solvela                │
   ├───────────────┼──────────────────────────────┼──────────────────────────────────────────────┤
   │ Key storage   │ Wallet private key stored on │ Keys from env vars only, never persisted     │
   │               │  disk via BIP39 mnemonic     │                                              │
@@ -49,7 +49,7 @@
   ClawRouter acts as a proxy to BlockRun's API — it doesn't verify payments itself. The flow is:
   Client → ClawRouter (local proxy) → BlockRun API (does actual x402 signing + verification)
 
-  RustyClawRouter does direct on-chain verification via Facilitator + settlement, with:
+  Solvela does direct on-chain verification via Facilitator + settlement, with:
   - Dual-scheme support (exact + escrow)
   - On-chain escrow program with PDA-based deposit/claim/refund
   - Fee payer pool with round-robin rotation + cooldown failover
@@ -63,7 +63,7 @@
   Both use rule-based scoring, but:
 
   ┌────────────────────┬───────────────────────┬───────────────────────────────────────────────┐
-  │       Aspect       │      ClawRouter       │                RustyClawRouter                │
+  │       Aspect       │      ClawRouter       │                Solvela                │
   ├────────────────────┼───────────────────────┼───────────────────────────────────────────────┤
   │ Dimensions         │ 14                    │ 15 (adds tool usage)                          │
   ├────────────────────┼───────────────────────┼───────────────────────────────────────────────┤
@@ -88,14 +88,14 @@
   ClawRouter: 3 error classes (InsufficientFundsError, EmptyWalletError, RpcError) with string
   discriminators.
 
-  RustyClawRouter: thiserror enums throughout (GatewayError, FeePayerError, ProviderError) with
+  Solvela: thiserror enums throughout (GatewayError, FeePayerError, ProviderError) with
   exhaustive match — the compiler enforces every error is handled.
 
   6. Testing — Orders of Magnitude More Rigorous
 
   ClawRouter: scattered .test.ts files, Vitest, test count unclear.
 
-  RustyClawRouter: 139 tests across all crates, including:
+  Solvela: 139 tests across all crates, including:
   - Financial calculation tests with 100% coverage markers
   - Serde roundtrip tests for all payment types
   - Integration tests via tower::ServiceExt::oneshot (no live server)
@@ -182,7 +182,7 @@
 
   Bottom Line
 
-  ClawRouter is a Node.js proxy that delegates to BlockRun's centralized API. RustyClawRouter is a
+  ClawRouter is a Node.js proxy that delegates to BlockRun's centralized API. Solvela is a
   standalone, self-sovereign payment gateway that does everything on-chain. You're building the
   infrastructure layer they depend on. The features you're missing (session sticking, heartbeats,
   degraded detection) are UX polish — straightforward to add. Their fundamental architecture

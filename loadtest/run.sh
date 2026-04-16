@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-API_URL="${API_URL:-https://rustyclawrouter-gateway.fly.dev}"
+API_URL="${API_URL:-https://api.solvela.ai}"
 RESULTS_DIR="/tmp/loadtest-results"
-GATEWAY_APP="rustyclawrouter-gateway"
+GATEWAY_APP="solvela-gateway"
 mkdir -p "$RESULTS_DIR"
 
 # --- Helper functions ---

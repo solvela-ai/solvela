@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# RustyClawRouter Load Test
+# Solvela Load Test
 #
 # Validates rate limiting, concurrency, and stability under pressure.
 # Pure bash — requires only curl and standard Unix utilities.
@@ -50,7 +50,7 @@ trap 'rm -rf "$TMPDIR_LOAD"' EXIT
 
 usage() {
     cat <<'USAGE'
-RustyClawRouter Load Test
+Solvela Load Test
 
 Validates rate limiting, concurrency limits, and stability under pressure.
 

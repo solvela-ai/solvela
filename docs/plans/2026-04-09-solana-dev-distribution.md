@@ -1,4 +1,4 @@
-# Solana Dev Distribution Plan — Getting RustyClawRouter In Front of Builders
+# Solana Dev Distribution Plan — Getting Solvela In Front of Builders
 
 **Date:** 2026-04-09
 **Author:** Solo dev strategy
@@ -9,7 +9,7 @@
 
 ## Goal
 
-Get RustyClawRouter in front of enough Solana developers that:
+Get Solvela in front of enough Solana developers that:
 1. SDK installs grow organically (pip, npm, go)
 2. At least one new production integration beyond Telsi.ai lands within 60 days
 3. RCR becomes a known name when Solana devs think "AI agent payments"
@@ -160,7 +160,7 @@ Each listing = SEO + discovery.
 #### 10. Create One Demo Video
 
 2-3 minutes, screen recording:
-- Start: "I'm a solo dev. This is RustyClawRouter. Watch an AI agent pay for an LLM call with USDC on Solana mainnet. No API keys, no account, just a wallet."
+- Start: "I'm a solo dev. This is Solvela. Watch an AI agent pay for an LLM call with USDC on Solana mainnet. No API keys, no account, just a wallet."
 - Show: Terminal → `rcr chat "hello"` → see 402 → sign → get response
 - End: Show the Solana Explorer link with the real transaction
 - Post on Twitter, YouTube, embed on docs site

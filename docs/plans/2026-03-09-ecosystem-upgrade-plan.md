@@ -1,8 +1,8 @@
-# RustyClawClient Ecosystem Upgrade — Implementation Plan
+# Solvela Client Ecosystem Upgrade — Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Close the strategic gaps in RustyClawRouter/RustyClawClient that prevent ecosystem adoption — fix the wire format, make escrow durable, eliminate double round-trips with session tokens, expand the model registry, publish the canonical Rust x402 crate, and build ElizaOS integration.
+**Goal:** Close the strategic gaps in Solvela/Solvela Client that prevent ecosystem adoption — fix the wire format, make escrow durable, eliminate double round-trips with session tokens, expand the model registry, publish the canonical Rust x402 crate, and build ElizaOS integration.
 
 **Architecture:** Seven phases, ordered by dependency and priority. Phase 1 (wire format) unblocks everything else. Phase 2 (escrow durability) and Phase 3 (model expansion) are independent and can parallelize. Phase 4 (session tokens) builds on Phase 1. Phase 5 (x402-solana crate) extracts from existing x402 code. Phase 6 (ElizaOS) depends on Phase 5. Phase 7 (observability) is independent.
 
@@ -1693,7 +1693,7 @@ Issue new session token in response after successful payment."
 
 ## Phase 5: Extract x402-solana Crate (P1)
 
-> **Why:** There is no Rust x402 implementation. Publishing the canonical one makes RustyClawRouter the infrastructure layer the Solana agent ecosystem depends on.
+> **Why:** There is no Rust x402 implementation. Publishing the canonical one makes Solvela the infrastructure layer the Solana agent ecosystem depends on.
 
 ### Task 5.1: Plan the Extraction
 
@@ -1703,7 +1703,7 @@ Issue new session token in response after successful payment."
 - Constants: `X402_VERSION`, `USDC_MINT`, `SOLANA_NETWORK`, `MAX_TIMEOUT_SECONDS`
 - `CostBreakdown` (from `rcr-common/types.rs`)
 
-**What stays in RustyClawRouter's `x402` crate:**
+**What stays in Solvela's `x402` crate:**
 - `traits.rs` (PaymentVerifier — server-side only)
 - `facilitator.rs` (settlement orchestration)
 - `fee_payer.rs`, `nonce_pool.rs` (server infrastructure)
@@ -1738,7 +1738,7 @@ version = "0.1.0"
 edition = "2021"
 description = "x402 payment protocol types and Solana verification — the canonical Rust x402 implementation"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/<org>/RustyClawRouter"
+repository = "https://github.com/<org>/Solvela"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -1815,7 +1815,7 @@ Existing x402 crate re-exports for backward compatibility."
 - Create: `integrations/elizaos/src/actions/chat.ts`
 - Create: `integrations/elizaos/src/providers/gateway.ts`
 
-> **Architecture:** ElizaOS plugins export `actions` (things the agent can do) and `providers` (data sources). Our plugin exports a `CHAT_VIA_RUSTYCLAW` action that routes LLM calls through RustyClawRouter with x402 payment.
+> **Architecture:** ElizaOS plugins export `actions` (things the agent can do) and `providers` (data sources). Our plugin exports a `CHAT_VIA_RUSTYCLAW` action that routes LLM calls through Solvela with x402 payment.
 
 **Step 1: Scaffold the plugin**
 
@@ -1823,7 +1823,7 @@ Existing x402 crate re-exports for backward compatibility."
 {
   "name": "@rustyclaw/elizaos-plugin",
   "version": "0.1.0",
-  "description": "ElizaOS plugin for RustyClawRouter — Solana-native AI agent payment gateway",
+  "description": "ElizaOS plugin for Solvela — Solana-native AI agent payment gateway",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
@@ -1854,9 +1854,9 @@ export const gatewayProvider: Provider = {
     try {
       const resp = await fetch(`${gatewayUrl}/health`);
       const health = await resp.json();
-      return `RustyClawRouter gateway at ${gatewayUrl} is ${health.status}. Models: ${health.model_count || "unknown"}.`;
+      return `Solvela gateway at ${gatewayUrl} is ${health.status}. Models: ${health.model_count || "unknown"}.`;
     } catch {
-      return `RustyClawRouter gateway at ${gatewayUrl} is unreachable.`;
+      return `Solvela gateway at ${gatewayUrl} is unreachable.`;
     }
   },
 };
@@ -1871,7 +1871,7 @@ import { type Action, type IAgentRuntime, type Memory, type HandlerCallback } fr
 
 export const chatViaRustyClaw: Action = {
   name: "CHAT_VIA_RUSTYCLAW",
-  description: "Send a chat completion through RustyClawRouter with Solana x402 payment",
+  description: "Send a chat completion through Solvela with Solana x402 payment",
   similes: ["llm call", "ai inference", "model query"],
 
   validate: async (runtime: IAgentRuntime) => {
@@ -1931,14 +1931,14 @@ export const chatViaRustyClaw: Action = {
       return true;
     }
 
-    callback({ text: "Failed to get response from RustyClawRouter" });
+    callback({ text: "Failed to get response from Solvela" });
     return false;
   },
 
   examples: [
     [
       { user: "{{user1}}", content: { text: "Ask the AI to explain quicksort" } },
-      { user: "{{agentName}}", content: { text: "I'll query RustyClawRouter for that.", action: "CHAT_VIA_RUSTYCLAW" } },
+      { user: "{{agentName}}", content: { text: "I'll query Solvela for that.", action: "CHAT_VIA_RUSTYCLAW" } },
     ],
   ],
 };
@@ -1961,7 +1961,7 @@ import { gatewayProvider } from "./providers/gateway";
 
 export const rustyClawPlugin: Plugin = {
   name: "rustyclaw",
-  description: "RustyClawRouter integration — Solana-native AI agent payments via x402",
+  description: "Solvela integration — Solana-native AI agent payments via x402",
   actions: [chatViaRustyClaw],
   providers: [gatewayProvider],
 };
@@ -1973,7 +1973,7 @@ export default rustyClawPlugin;
 
 ```bash
 git add integrations/elizaos/
-git commit -m "feat: add ElizaOS plugin for RustyClawRouter x402 integration
+git commit -m "feat: add ElizaOS plugin for Solvela x402 integration
 
 Plugin exports CHAT_VIA_RUSTYCLAW action and gateway health provider.
 Payment signing is stubbed — requires ElizaOS Solana plugin wallet API."

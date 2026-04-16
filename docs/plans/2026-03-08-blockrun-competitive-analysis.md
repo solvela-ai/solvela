@@ -2,13 +2,13 @@
 
 **Date:** 2026-03-08
 **Subject:** https://github.com/BlockRunAI/ClawRouter (v0.12.25, TypeScript)
-**Purpose:** Identify improvements, failure points, and advantages for RustyClawRouter Phase 5
+**Purpose:** Identify improvements, failure points, and advantages for Solvela Phase 5
 
 ---
 
 ## 1. Architecture Comparison
 
-| Dimension | BlockRun ClawRouter | RustyClawRouter |
+| Dimension | BlockRun ClawRouter | Solvela |
 |-----------|-------------------|-----------------|
 | Language | TypeScript (Node.js) | Rust (Axum/Tokio) |
 | Deployment model | Client-side CLI proxy (localhost:4040) | Server-side gateway (:8402) |
@@ -24,7 +24,7 @@
 | Escrow | None | Anchor PDA vault (deposit/claim/refund) |
 | Key management | Client-side BIP-39 wallet gen + file storage | Client-side only — gateway never sees keys |
 
-**Key takeaway:** BlockRun is a **local proxy** — it runs on the user's machine, holds their wallet key, and forwards requests to providers. RustyClawRouter is a **server-side gateway** — agents send pre-signed transactions and the gateway verifies + settles. These are fundamentally different trust models.
+**Key takeaway:** BlockRun is a **local proxy** — it runs on the user's machine, holds their wallet key, and forwards requests to providers. Solvela is a **server-side gateway** — agents send pre-signed transactions and the gateway verifies + settles. These are fundamentally different trust models.
 
 ---
 
@@ -162,7 +162,7 @@ Based on this analysis, ranked by impact:
 
 ## 6. Summary Matrix
 
-| Category | BlockRun | RustyClawRouter | Winner |
+| Category | BlockRun | Solvela | Winner |
 |----------|----------|-----------------|--------|
 | Latency | Node.js + localhost | Rust + server-side | RCR (Rust perf) |
 | Security | Client-side keys | Pre-signed txs, no key custody | RCR |
@@ -178,4 +178,4 @@ Based on this analysis, ranked by impact:
 | Code quality | 3500-line monolith | Modular crates (<500 LOC each) | RCR |
 | Diagnostics | Comprehensive doctor | Basic doctor | BlockRun |
 
-**Bottom line:** RustyClawRouter has a fundamentally stronger architecture (server-side, Rust, persistent state, escrow, modular). BlockRun has more features around UX (sessions, compression, model breadth, diagnostics). Phase 5 should close the feature gaps that matter (sessions, time-windowed limits, capability flags, dedup) while maintaining our architectural advantages.
+**Bottom line:** Solvela has a fundamentally stronger architecture (server-side, Rust, persistent state, escrow, modular). BlockRun has more features around UX (sessions, compression, model breadth, diagnostics). Phase 5 should close the feature gaps that matter (sessions, time-windowed limits, capability flags, dedup) while maintaining our architectural advantages.

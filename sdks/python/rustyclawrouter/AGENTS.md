@@ -4,7 +4,7 @@
 # rustyclawrouter
 
 ## Purpose
-Legacy compatibility shim for the `RustyClawRouter → Solvela` rebrand. Exists so users who `import rustyclawrouter` keep working without code changes. All real logic lives in `../solvela/`; this package only re-exports.
+Legacy compatibility shim for the `Solvela → Solvela` rebrand. Exists so users who `import rustyclawrouter` keep working without code changes. All real logic lives in `../solvela/`; this package only re-exports.
 
 ## Key Files
 | File | Description |
@@ -19,7 +19,7 @@ _(none)_
 
 ### Working In This Directory
 - **Do not add new features here.** All new code goes in `../solvela/`.
-- At most, extend this module to re-export additional names already defined in `solvela` under their old RustyClawRouter-era aliases.
+- At most, extend this module to re-export additional names already defined in `solvela` under their old Solvela-era aliases.
 - When the deprecation window closes, this package will be removed entirely.
 
 ### Testing Requirements

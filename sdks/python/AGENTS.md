@@ -4,7 +4,7 @@
 # python
 
 ## Purpose
-Python SDK for Solvela. Ships two import names during the RustyClawRouter → Solvela rebrand: `solvela` (canonical, keep current) and `rustyclawrouter` (legacy compatibility shim — avoid adding new code there).
+Python SDK for Solvela. Ships two import names during the Solvela → Solvela rebrand: `solvela` (canonical, keep current) and `rustyclawrouter` (legacy compatibility shim — avoid adding new code there).
 
 ## Key Files
 | File | Description |

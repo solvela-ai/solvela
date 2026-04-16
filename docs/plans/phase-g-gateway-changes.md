@@ -9,7 +9,7 @@
 
 ## Overview
 
-Three targeted gateway changes to support the RustyClawClient ecosystem (Rust client, Python/TS/Go SDKs, `rcr`/`rcc` CLIs). No architectural changes — additive, backward-compatible modifications.
+Three targeted gateway changes to support the Solvela Client ecosystem (Rust client, Python/TS/Go SDKs, `rcr`/`rcc` CLIs). No architectural changes — additive, backward-compatible modifications.
 
 | Item | Purpose | Audience |
 |------|---------|----------|
