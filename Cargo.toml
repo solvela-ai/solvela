@@ -41,7 +41,7 @@ curve25519-dalek = { version = "4", default-features = false, features = ["alloc
 
 # Data stores
 redis = { version = "0.27", features = ["tokio-comp"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "uuid", "macros"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "uuid", "macros", "migrate"] }
 
 # Observability
 tracing = "0.1"
