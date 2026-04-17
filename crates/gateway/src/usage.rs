@@ -884,39 +884,6 @@ pub async fn get_stats_by_day(
         .collect())
 }
 
-/// SQL migration for usage tracking tables.
-/// Run this against PostgreSQL to create the required tables.
-pub const MIGRATION_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS spend_logs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    wallet_address TEXT NOT NULL,
-    model TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
-    output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
-    cost_usdc DECIMAL(18, 6) NOT NULL CHECK (cost_usdc >= 0),
-    tx_signature TEXT,
-    request_id TEXT,
-    session_id TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Reserved for future per-wallet budget customization (see backend audit Q4).
--- Currently created but not queried; budget enforcement uses a hardcoded
--- $100/day limit checked against Redis spend counters in check_budget().
-CREATE TABLE IF NOT EXISTS wallet_budgets (
-    wallet_address TEXT PRIMARY KEY,
-    daily_limit_usdc DECIMAL(18, 6),
-    monthly_limit_usdc DECIMAL(18, 6),
-    total_spent_usdc DECIMAL(18, 6) DEFAULT 0 CHECK (total_spent_usdc >= 0),
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_spend_wallet ON spend_logs(wallet_address);
-CREATE INDEX IF NOT EXISTS idx_spend_created ON spend_logs(created_at);
-CREATE INDEX IF NOT EXISTS idx_spend_session ON spend_logs(session_id) WHERE session_id IS NOT NULL;
-"#;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -985,26 +952,6 @@ mod tests {
             request_id: None,
             session_id: None,
         });
-    }
-
-    #[test]
-    fn test_migration_sql_is_valid() {
-        assert!(!MIGRATION_SQL.is_empty());
-        assert!(MIGRATION_SQL.contains("spend_logs"));
-        assert!(MIGRATION_SQL.contains("wallet_budgets"));
-        assert!(MIGRATION_SQL.contains("idx_spend_wallet"));
-        assert!(MIGRATION_SQL.contains("idx_spend_created"));
-        assert!(MIGRATION_SQL.contains("CREATE TABLE IF NOT EXISTS"));
-        assert!(MIGRATION_SQL.contains("CREATE INDEX IF NOT EXISTS"));
-        // Phase G: request_id and session_id columns
-        assert!(MIGRATION_SQL.contains("request_id TEXT"));
-        assert!(MIGRATION_SQL.contains("session_id TEXT"));
-        assert!(MIGRATION_SQL.contains("idx_spend_session"));
-        // CHECK constraints (must match 001_initial_schema.sql)
-        assert!(MIGRATION_SQL.contains("CHECK (input_tokens >= 0)"));
-        assert!(MIGRATION_SQL.contains("CHECK (output_tokens >= 0)"));
-        assert!(MIGRATION_SQL.contains("CHECK (cost_usdc >= 0)"));
-        assert!(MIGRATION_SQL.contains("CHECK (total_spent_usdc >= 0)"));
     }
 
     #[test]
