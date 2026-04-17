@@ -28,6 +28,9 @@ RUN cargo build --release --bin solvela-gateway 2>/dev/null || true
 # Copy actual source code
 COPY crates/ crates/
 COPY config/ config/
+# Migration SQL files are read at compile time by `sqlx::migrate!("../../migrations")`
+# in crates/gateway/src/main.rs; must be present in the build context.
+COPY migrations/ migrations/
 
 # Touch source files to invalidate the cache for actual compilation
 RUN touch crates/protocol/src/lib.rs crates/x402/src/lib.rs crates/router/src/lib.rs crates/gateway/src/lib.rs crates/gateway/src/main.rs
