@@ -335,10 +335,10 @@ async fn main() -> anyhow::Result<()> {
             {
                 Ok(pool) => {
                     info!("PostgreSQL connected — spend logging enabled");
-                    // Run migrations on startup so the schema is always up to date.
-                    if let Err(e) = run_migrations(&pool).await {
-                        warn!(error = %e, "migration failed — spend logging may not work correctly");
-                    }
+                    // Run migrations on startup. If they fail, refuse to boot —
+                    // serving traffic against a broken schema would produce
+                    // silent query errors across every org / audit / budget path.
+                    run_migrations(&pool).await?;
                     Some(pool)
                 }
                 Err(e) => {
@@ -682,11 +682,13 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Apply every migration file in `../../migrations/` in filename order.
+/// Apply every migration file in `../../migrations/` in version order.
 ///
 /// Uses `sqlx::migrate!`, which embeds the migration SQL at compile time and
-/// tracks applied versions in a `_sqlx_migrations` table. Safe to run on every
-/// startup — sqlx skips migrations that have already been applied.
+/// tracks applied versions in a `_sqlx_migrations` table. Order is determined
+/// by the numeric prefix on each filename (001, 002, …), not lexicographic.
+/// Safe to run on every startup — sqlx skips migrations that have already
+/// been applied.
 async fn run_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     sqlx::migrate!("../../migrations").run(pool).await?;
     info!("database migrations applied");
