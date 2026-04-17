@@ -27,7 +27,11 @@ async fn run_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
 
 The `MIGRATION_SQL` constant in `crates/gateway/src/usage.rs:889-920` contains a hand-rolled version of migration 001 plus the additions from migration 003 (`request_id`, `session_id` columns on `spend_logs`). It does **not** include migrations 002, 004, 005, 006, or 007. Every other migration file in `migrations/` is referenced only by unit tests (via `include_str!`) and has never been executed against any production, staging, or local Fly database.
 
-As a result, the production DB as of 2026-04-17 contains only two tables: `spend_logs` and `wallet_budgets`. Every feature that reads or writes `organizations`, `teams`, `org_members`, `team_wallets`, `api_keys`, `audit_logs`, `escrow_claim_queue`, `team_budgets`, `hourly_limit_usdc` on `wallet_budgets`, or `updated_at` on `wallet_budgets` either 500s immediately or silently fails a fire-and-forget write that never hits the DB.
+As a result, the production DB as of 2026-04-17 contains only two tables: `spend_logs` and `wallet_budgets`. The breakage is worse than "enterprise endpoints 500":
+
+- **`wallet_budgets` schema drift is a live bug on every deploy.** The `WalletBudget` struct at `crates/gateway/src/usage.rs:73-80` has a field `pub hourly_limit_usdc: Option<f64>` (migration 007 adds the matching column). The live DB's `wallet_budgets` table, created from `MIGRATION_SQL`, has **neither** `hourly_limit_usdc` nor `updated_at`. Any `SELECT … FROM wallet_budgets` that maps into `WalletBudget` would fail column binding; any `UPDATE` that references `updated_at` (via the trigger migration 001 tries to create) would error at trigger-fire time. The only reason nothing has visibly crashed is that no request has touched the budget code paths that actually SELECT rows back from the table.
+- **Every org-authenticated or audit-logged path 500s.** `organizations`, `teams`, `org_members`, `team_wallets`, `api_keys`, `audit_logs`, `escrow_claim_queue`, `team_budgets` don't exist. Any route that queries them errors with `relation does not exist`.
+- **Fire-and-forget writes silently drop.** `tokio::spawn` around `INSERT INTO spend_logs` and audit writes means failures don't bubble up — but they still fail to persist. Observability is blind to this.
 
 ### Schema drift on the live solvela-db
 
@@ -81,9 +85,9 @@ The fix: drop the two legacy tables on `solvela-db` once, then let `sqlx::migrat
 
 | Path | Change |
 |---|---|
+| `Cargo.toml` (workspace root, line 44) | Add `"migrate"` to the `sqlx` feature list. This feature gates `sqlx::migrate!` — without it, both the integration test and the new `run_migrations()` body fail to compile |
 | `crates/gateway/src/main.rs` (lines 685–695) | Replace body of `run_migrations()` with `sqlx::migrate!` |
-| `crates/gateway/src/usage.rs` (lines 889–997) | Remove `pub const MIGRATION_SQL` and the three unit tests that reference it (`test_migration_sql_not_empty`, etc.) |
-| `Cargo.toml` (workspace root, dev-dependencies section of `crates/gateway/Cargo.toml`) | Ensure `sqlx` dev-dep is present for the integration test (already is) |
+| `crates/gateway/src/usage.rs` (lines 887–1008) | Remove the `pub const MIGRATION_SQL` block (lines 887–920) and the single unit test that references it, `test_migration_sql_is_valid` (around lines 990–1008). **Preserve** the `MIGRATION_00N` / `PHASE_G_MIGRATION` `include_str!` constants and their tests further down the file — those verify the on-disk migration files and are unrelated to the inline constant |
 | `HANDOFF.md` (lines under "Post-migration cleanup" section) | Replace the "Migration runner (deferred)" bullet with a "Migration runner — fixed 2026-04-17" note once deploy verified |
 | `crates/gateway/src/AGENTS.md` | One-line mention that `run_migrations()` now uses `sqlx::migrate!` |
 
@@ -100,10 +104,15 @@ The fix: drop the two legacy tables on `solvela-db` once, then let `sqlx::migrat
 
 ---
 
-## Task 1: Add integration test that runs all migrations against live Postgres
+## Task 1: Verify migration integration test + sqlx `migrate` feature flag
+
+This task's deliverables are already on disk as of the plan revision (2026-04-17):
+- `crates/gateway/tests/migrations.rs` — integration test (new file)
+- `Cargo.toml` line 44 — `"migrate"` added to the sqlx feature list
 
 **Files:**
-- Create: `crates/gateway/tests/migrations.rs`
+- Verify: `crates/gateway/tests/migrations.rs`
+- Verify: `Cargo.toml` (workspace root, line 44)
 
 - [ ] **Step 1: Confirm local Postgres is running**
 
@@ -114,21 +123,25 @@ sleep 2
 docker compose ps
 ```
 
-Expected output: a `postgres` service row with `State=running (healthy)` and port 5432 mapped.
+Expected output: `solvela_postgres` service row with `Up ... (healthy)` and `127.0.0.1:5432->5432/tcp`; same for `solvela_redis`.
 
-- [ ] **Step 2: Create an empty test DB to isolate from dev**
+- [ ] **Step 2: Create (or reset) the test DB as the `solvela` user**
+
+Docker-compose defines the Postgres superuser as `solvela` with password `solvela_dev_password` and default DB `solvela` (see `docker-compose.yml`). Use that user — there is no `postgres` role in the container.
 
 Run:
 ```bash
-PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS solvela_migrate_test;"
-PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "CREATE DATABASE solvela_migrate_test;"
+docker compose exec -T postgres psql -U solvela -d solvela <<'SQL'
+DROP DATABASE IF EXISTS solvela_migrate_test;
+CREATE DATABASE solvela_migrate_test;
+SQL
 ```
 
-Expected: `DROP DATABASE` (or NOTICE: does not exist) and `CREATE DATABASE`.
+Expected: `DROP DATABASE` (or `NOTICE: database "solvela_migrate_test" does not exist, skipping`) followed by `CREATE DATABASE`.
 
-- [ ] **Step 3: Write the failing integration test**
+- [ ] **Step 3: Verify `crates/gateway/tests/migrations.rs` matches the expected spec**
 
-Create `crates/gateway/tests/migrations.rs` with exactly this content:
+The file should exactly match the content below. If it does, skip ahead to Step 5. If not, overwrite it:
 
 ```rust
 //! Integration test: all migration files in `migrations/` apply cleanly to a
@@ -138,9 +151,9 @@ Create `crates/gateway/tests/migrations.rs` with exactly this content:
 //!
 //! ```sh
 //! docker compose up -d
-//! PGPASSWORD=postgres psql -h localhost -U postgres -d postgres \
+//! docker compose exec -T postgres psql -U solvela -d solvela \
 //!     -c "DROP DATABASE IF EXISTS solvela_migrate_test; CREATE DATABASE solvela_migrate_test;"
-//! TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/solvela_migrate_test \
+//! TEST_DATABASE_URL=postgres://solvela:solvela_dev_password@localhost:5432/solvela_migrate_test \
 //!     cargo test -p gateway --test migrations -- --ignored
 //! ```
 
@@ -235,23 +248,45 @@ async fn all_migrations_apply_cleanly() {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it fails (no `sqlx::migrate!` call wired yet, but the test should still run — it uses the macro directly)**
+- [ ] **Step 4: Verify `Cargo.toml` has the `migrate` sqlx feature**
 
 Run:
 ```bash
-TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/solvela_migrate_test \
+grep -n "^sqlx" Cargo.toml
+```
+
+Expected line 44 (or nearby — match by content):
+```toml
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "uuid", "macros", "migrate"] }
+```
+
+If `"migrate"` is missing, add it before running the test. Without it `sqlx::migrate!` does not exist and `cargo build` fails with `no function or associated item named migrate found for struct ... in the current scope`.
+
+- [ ] **Step 5: Run the test against the fresh DB**
+
+```bash
+TEST_DATABASE_URL=postgres://solvela:solvela_dev_password@localhost:5432/solvela_migrate_test \
   cargo test -p gateway --test migrations -- --ignored
 ```
 
-Expected: **PASS** — the test uses `sqlx::migrate!` directly against an empty DB, so it will already work once the path resolves. If the test fails, the most likely causes are:
-- Path mismatch: `sqlx::migrate!("../../migrations")` can't find the directory from `crates/gateway/`. Fix: confirm the path is relative to `CARGO_MANIFEST_DIR` which is `crates/gateway/`; `../../migrations` resolves to the workspace root `migrations/` directory. `ls ../../migrations` from inside `crates/gateway/` should show the seven `.sql` files.
-- `DATABASE_URL` not reachable: verify `docker compose ps` shows the postgres container.
+Expected:
+```
+running 1 test
+test all_migrations_apply_cleanly ... ok
 
-- [ ] **Step 5: Commit**
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.XXs
+```
+
+If the test fails, the most likely causes are:
+- `sqlx::migrate!("../../migrations")` path not resolving. `ls ../../migrations` from inside `crates/gateway/` should show the seven `.sql` files. The macro is evaluated at compile time relative to `CARGO_MANIFEST_DIR` of the crate calling it (`crates/gateway/`).
+- `DATABASE_URL` unreachable. `docker compose ps` should show the `solvela_postgres` container healthy.
+- `Cargo.toml` missing the `migrate` feature flag.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add crates/gateway/tests/migrations.rs
-git commit -m "test(gateway): add integration test verifying all 7 migrations apply"
+git add crates/gateway/tests/migrations.rs Cargo.toml Cargo.lock
+git commit -m "test(gateway): add migration integration test + enable sqlx migrate feature"
 ```
 
 ---
@@ -334,23 +369,37 @@ git commit -m "fix(gateway): swap run_migrations() to sqlx::migrate! so all 7 fi
 
 ---
 
-## Task 3: Remove the dead `MIGRATION_SQL` constant and its tests
+## Task 3: Remove the dead `MIGRATION_SQL` constant and its one test
 
 **Files:**
-- Modify: `crates/gateway/src/usage.rs:889-997`
+- Modify: `crates/gateway/src/usage.rs` (lines 887–920 for the const, lines 990–1008 for the one test)
 
-- [ ] **Step 1: Show current state of the constant and tests**
+**Important scope note:** Only ONE test references the inline `MIGRATION_SQL` constant: `test_migration_sql_is_valid` at around line 991. Other tests further down the file use `include_str!` to load the on-disk migration files (e.g., `PHASE_G_MIGRATION = include_str!("../../../migrations/003_…");`, `MIGRATION_007 = include_str!("../../../migrations/007_…");`) and assert things about those file contents. Those tests are unrelated to the inline constant — **preserve them**.
+
+- [ ] **Step 1: Show current state of the constant and the one test to delete**
 
 Run:
 ```bash
-sed -n '889,1000p' crates/gateway/src/usage.rs
+sed -n '887,920p' crates/gateway/src/usage.rs
+echo "---"
+sed -n '988,1010p' crates/gateway/src/usage.rs
 ```
 
-Expected: a `pub const MIGRATION_SQL: &str = r#"…"#;` block and three unit tests (`test_migration_sql_not_empty`, and two others that assert substrings like `"spend_logs"` and `"wallet_budgets"` appear in `MIGRATION_SQL`).
+Expected:
+- Lines 887–920: a `pub const MIGRATION_SQL: &str = r#"…"#;` block ending with `"#;`.
+- Lines ~990–1008: a single `#[test] fn test_migration_sql_is_valid()` function whose body calls `assert!(MIGRATION_SQL.contains(...))` several times.
 
-- [ ] **Step 2: Delete the constant and its three tests**
+- [ ] **Step 2: Delete the const block and the one test**
 
-Use the Edit tool to remove the block starting with `pub const MIGRATION_SQL: &str = r#"` and ending at the closing `"#;`. Also remove the three unit tests inside the `#[cfg(test)] mod tests { ... }` block that reference `MIGRATION_SQL`. Leave all other constants, structs (`SpendLog`, `WalletBudget`), functions, and tests in place.
+Use the Edit tool to remove:
+1. The doc comment at lines 887–888 (`/// SQL migration for usage tracking tables.\n/// Run this against PostgreSQL to create the required tables.`) plus the whole `pub const MIGRATION_SQL: &str = r#" … "#;` block.
+2. The single `#[test] fn test_migration_sql_is_valid() { … }` function.
+
+Leave everything else untouched — in particular, keep:
+- All struct definitions (`SpendLog`, `WalletBudget`, `SpendSummary`, `SpendLogEntry`, `UsageError`, `UsageTracker`).
+- All `pub fn` / `impl` blocks.
+- The `PHASE_G_MIGRATION` and `MIGRATION_007` `include_str!` constants and their tests (they test the files on disk, not the inline constant).
+- Any other `#[test]` functions.
 
 After the edit, search for lingering references:
 
@@ -359,7 +408,7 @@ Run:
 grep -rn "MIGRATION_SQL" crates/gateway/src/
 ```
 
-Expected: **no output** (empty result).
+Expected: **no output** (empty result — `MIGRATION_00N` and `PHASE_G_MIGRATION` are different identifiers and shouldn't match this exact query).
 
 - [ ] **Step 3: Confirm the crate still compiles**
 
@@ -651,12 +700,13 @@ If Task 6 verification fails (e.g., `cargo deploy` succeeds but startup errors p
    git revert HEAD~4..HEAD --no-edit   # roll back the 4 code commits
    flyctl deploy --app solvela-gateway
    ```
-2. **Then:** The `solvela-db` cluster will still have an empty public schema (the DROP TABLE ran in Task 5). To restore the "old" shape, re-run the old MIGRATION_SQL once manually via flyctl ssh + psql before re-deploying the old gateway. The prior SQL is recoverable from any commit older than the "remove inline MIGRATION_SQL" commit.
-3. **Root cause analysis:** Look for migration file bugs. The most likely failure modes at Task 6 are:
+   The old binary's `run_migrations()` uses `CREATE TABLE IF NOT EXISTS` idempotently. When it boots against the now-empty `solvela-db`, it recreates `spend_logs` and `wallet_budgets` on first startup — no manual SQL needed, no intermediate "restore old shape" step. The pre-cutover state is reached automatically.
+
+2. **Root cause analysis:** Look for migration file bugs. The most likely failure modes at Task 6 are:
    - Foreign key ordering issues if migration files were ever reordered (they shouldn't be — the plan forbids modifying 001–007).
    - `sqlx::migrate!` path not resolving at compile time — the error surfaces during `cargo build`, not at runtime, so would have been caught by Task 2 Step 3. If the deploy build failed with a path error, the macro argument needs adjustment (try `"./migrations"` or an absolute path).
 
-No user data is at risk at any point in this plan — the live DB has 0 user rows, and the rollback path leaves the DB in at worst an empty-schema state.
+No user data is at risk at any point in this plan — the live DB has 0 user rows, and the rollback path leaves the DB in at worst an empty-schema state that the old binary self-heals on next boot.
 
 ---
 
