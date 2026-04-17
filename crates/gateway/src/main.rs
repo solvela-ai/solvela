@@ -682,14 +682,13 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Apply all migrations from `migrations/001_initial_schema.sql`.
+/// Apply every migration file in `../../migrations/` in filename order.
 ///
-/// Uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` throughout,
-/// so running this multiple times is safe (idempotent).
+/// Uses `sqlx::migrate!`, which embeds the migration SQL at compile time and
+/// tracks applied versions in a `_sqlx_migrations` table. Safe to run on every
+/// startup — sqlx skips migrations that have already been applied.
 async fn run_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
-    sqlx::raw_sql(gateway::usage::MIGRATION_SQL)
-        .execute(pool)
-        .await?;
+    sqlx::migrate!("../../migrations").run(pool).await?;
     info!("database migrations applied");
     Ok(())
 }
