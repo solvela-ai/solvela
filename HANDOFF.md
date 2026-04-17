@@ -1,7 +1,7 @@
 # HANDOFF.md — Solvela Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-17 (Fly gateway + DB cutover: `rustyclawrouter-gateway` → `solvela-gateway`, `rustyclawrouter-db` → `solvela-db`; `api.solvela.ai` now serves from new app; DB is a fresh `solvela-db` cluster with the `solvela_gateway` database+user)
+> **Last verified:** 2026-04-17 (Fly gateway + DB cutover + migration-runner fix: `rustyclawrouter-gateway` → `solvela-gateway`, `rustyclawrouter-db` → `solvela-db`; `api.solvela.ai` now serves from new app; `sqlx::migrate!` wired so all 7 migration files actually apply — `solvela-db` now has 10 tables + `_sqlx_migrations` tracker with all 7 versions recorded)
 
 ---
 
@@ -154,7 +154,7 @@ All 5 provider keys set on `solvela-gateway` and verified working (OpenAI, Anthr
 - **Old gateway app:** `rustyclawrouter-gateway` still exists as rollback safety net. Destroy once confident: `flyctl apps destroy rustyclawrouter-gateway --yes`.
 - **Old DB cluster:** `rustyclawrouter-db` still exists with its original data (2 tables, 0 rows — `rustyclawrouter_gateway` user+DB intact, `solvela_gateway` user dropped). Destroy once confident: `flyctl apps destroy rustyclawrouter-db --yes`.
 - **ACME CNAME:** `_acme-challenge.api.solvela.ai` in Cloudflare was used to pre-issue the cert via DNS-01. Safe to delete once HTTP-01 has handled at least one renewal.
-- **Migration runner:** `run_migrations()` only applies the inline `MIGRATION_SQL` (spend_logs + wallet_budgets). Migrations 002–007 in `migrations/` are NEVER applied by the gateway — so orgs/teams/api_keys/audit_logs/escrow_claim_queue/hourly_spend_limits tables don't exist in any prod DB. Wire up `sqlx::migrate!("./migrations")` before shipping any org-authenticated traffic. (Deferred — separate writeup.)
+- **Migration runner:** Fixed 2026-04-17 (see `docs/superpowers/plans/2026-04-17-fix-migration-runner.md`). `run_migrations()` now uses `sqlx::migrate!("../../migrations")` which embeds all 7 migration files at compile time and tracks applied versions in `_sqlx_migrations`. Dockerfile also now `COPY migrations/` into the build context. Verified on `solvela-db`: 10 tables (api_keys, audit_logs, escrow_claim_queue, org_members, organizations, spend_logs, team_budgets, team_wallets, teams, wallet_budgets) + `_sqlx_migrations` with 7/7 successful versions. Enterprise endpoints now return proper auth errors (401) instead of `relation does not exist` 500s.
 
 ### Deferred
 

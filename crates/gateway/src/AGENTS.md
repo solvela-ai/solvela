@@ -10,7 +10,7 @@ All gateway source. `lib.rs` wires middleware, routes, and shared state into an 
 | File | Description |
 |------|-------------|
 | `lib.rs` | Library entry — declares modules, builds the top-level `axum::Router`, wires tower layers |
-| `main.rs` | Binary entry — loads config, connects PG/Redis, runs migrations, starts server |
+| `main.rs` | Binary entry — loads config, connects PG/Redis, applies all migration files via `sqlx::migrate!("../../migrations")`, starts server |
 | `config.rs` | `AppConfig` + custom `Debug` redaction; env prefix `SOLVELA_` (legacy `RCR_` accepted) |
 | `error.rs` | `GatewayError` + `IntoResponse` — converts internal errors into HTTP responses |
 | `cache.rs` | Redis-backed response cache (degrades gracefully if Redis is absent) |
