@@ -1,7 +1,7 @@
 # HANDOFF.md — Solvela Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-16 (complete Solvela rebrand — GitHub, Vercel, code, docs; three-subdomain architecture live via middleware)
+> **Last verified:** 2026-04-17 (Fly gateway + DB cutover: `rustyclawrouter-gateway` → `solvela-gateway`, `rustyclawrouter-db` → `solvela-db`; `api.solvela.ai` now serves from new app; DB is a fresh `solvela-db` cluster with the `solvela_gateway` database+user)
 
 ---
 
@@ -127,17 +127,17 @@ go sdk:               58  (53 pass, 5 skip/live-gated)
 
 | Resource | Location | Status |
 |----------|----------|--------|
-| **Gateway** | `rustyclawrouter-gateway.fly.dev` | Running (ord region, shared-cpu-1x/512MB) |
+| **Gateway** | `solvela-gateway.fly.dev` (serves `api.solvela.ai`) | Running (ord region, shared-cpu-1x/512MB, 2 machines HA) |
 | **Dashboard + Docs** | `solvela.vercel.app` (+ `solvela.ai`, `docs.solvela.ai`, `app.solvela.ai` subdomains) | Deployed, three-subdomain routing live |
-| **PostgreSQL** | `solvela-db` on Fly.io | Running (Postgres 17.2) |
+| **PostgreSQL** | `solvela-db` on Fly.io | Running (Postgres-flex 17.2, fresh cluster, `solvela_gateway` user owns `solvela_gateway` DB) |
 | **Redis** | Upstash (`solvela-cache`) | Running (ord + iad) |
 | **Terminal backend** | `rclawterm-gateway.fly.dev` | Running (ord, 2 machines) |
 
 ### Secrets on Fly.io
 
-All 5 provider keys set and verified working (OpenAI, Anthropic, Google, xAI, DeepSeek) — refreshed 2026-04-12. Solana config set (RPC, recipient wallet, USDC mint, escrow program, fee payer key). Database + Redis URLs set. Admin token rotated 2026-03-31. Note: Fly app is still `solvela-gateway` (rename pending).
+All 5 provider keys set on `solvela-gateway` and verified working (OpenAI, Anthropic, Google, xAI, DeepSeek) — refreshed 2026-04-12. Solana config set using `SOLVELA_*` prefix (RPC, recipient wallet, USDC mint, escrow program, fee payer key). DATABASE_URL points at `solvela-db.flycast/solvela_gateway`. Redis URL set. Admin token rotated 2026-03-31.
 
-**Canonical API URL:** `api.solvela.ai` — documented in code + SDKs, will resolve once Fly app is renamed from `rustyclawrouter-gateway` to `solvela-gateway` and DNS is updated.
+**Canonical API URL:** `api.solvela.ai` — live on `solvela-gateway` via Cloudflare DNS (A `66.241.125.165`, AAAA `2a09:8280:1::104:9270:0`), Let's Encrypt cert.
 
 ---
 
@@ -149,17 +149,12 @@ All 5 provider keys set and verified working (OpenAI, Anthropic, Google, xAI, De
 - **Local directory rename:** `~/projects/RustyClawRouter/` → `~/projects/solvela/` (optional; git remote already updated).
 - **Dashboard 2026-04-16 screenshots:** Capture for embedding in docs (dashboard is themed and ready).
 
-### Fly App Rename & DNS Cutover
+### Post-migration cleanup (remaining after 2026-04-17 cutover)
 
-**High-impact, disruptive, requires a maintenance window.** Steps:
-
-1. Create new Fly app: `flyctl apps create solvela-gateway --org sky64` (or via dashboard)
-2. Copy secrets from `rustyclawrouter-gateway` to `solvela-gateway` (all env vars, volumes, postgres backup)
-3. Deploy current `main` to `solvela-gateway`
-4. Test health endpoint on new domain
-5. Update DNS: `api.solvela.ai` A record points to `solvela-gateway` IP (from `flyctl ips list solvela-gateway`)
-6. Monitor logs 15 min; rollback if needed (DNS revert + deploy to old app)
-7. Destroy old app: `flyctl apps destroy rustyclawrouter-gateway`
+- **Old gateway app:** `rustyclawrouter-gateway` still exists as rollback safety net. Destroy once confident: `flyctl apps destroy rustyclawrouter-gateway --yes`.
+- **Old DB cluster:** `rustyclawrouter-db` still exists with its original data (2 tables, 0 rows — `rustyclawrouter_gateway` user+DB intact, `solvela_gateway` user dropped). Destroy once confident: `flyctl apps destroy rustyclawrouter-db --yes`.
+- **ACME CNAME:** `_acme-challenge.api.solvela.ai` in Cloudflare was used to pre-issue the cert via DNS-01. Safe to delete once HTTP-01 has handled at least one renewal.
+- **Migration runner:** `run_migrations()` only applies the inline `MIGRATION_SQL` (spend_logs + wallet_budgets). Migrations 002–007 in `migrations/` are NEVER applied by the gateway — so orgs/teams/api_keys/audit_logs/escrow_claim_queue/hourly_spend_limits tables don't exist in any prod DB. Wire up `sqlx::migrate!("./migrations")` before shipping any org-authenticated traffic. (Deferred — separate writeup.)
 
 ### Deferred
 
