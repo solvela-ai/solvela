@@ -30,10 +30,10 @@ const EXPECTED_TABLES: &[&str] = &[
 
 /// Columns whose presence proves the right ALTER TABLE migrations ran.
 const EXPECTED_COLUMNS: &[(&str, &str)] = &[
-    ("spend_logs", "request_id"),          // migration 003
-    ("spend_logs", "session_id"),          // migration 003
+    ("spend_logs", "request_id"),            // migration 003
+    ("spend_logs", "session_id"),            // migration 003
     ("escrow_claim_queue", "next_retry_at"), // migration 004
-    ("wallet_budgets", "updated_at"),      // migration 001
+    ("wallet_budgets", "updated_at"),        // migration 001
     ("wallet_budgets", "hourly_limit_usdc"), // migration 007
 ];
 
@@ -66,7 +66,10 @@ async fn all_migrations_apply_cleanly() {
         .await
         .unwrap_or_else(|e| panic!("failed to query for table {table}: {e}"));
 
-        assert!(exists, "expected table `{table}` not found in public schema");
+        assert!(
+            exists,
+            "expected table `{table}` not found in public schema"
+        );
     }
 
     for (table, column) in EXPECTED_COLUMNS {
@@ -90,13 +93,15 @@ async fn all_migrations_apply_cleanly() {
         );
     }
 
-    let migrations_run: i64 = sqlx::query(
-        "SELECT COUNT(*)::BIGINT AS n FROM _sqlx_migrations WHERE success = TRUE",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("failed to query _sqlx_migrations")
-    .get("n");
+    let migrations_run: i64 =
+        sqlx::query("SELECT COUNT(*)::BIGINT AS n FROM _sqlx_migrations WHERE success = TRUE")
+            .fetch_one(&pool)
+            .await
+            .expect("failed to query _sqlx_migrations")
+            .get("n");
 
-    assert_eq!(migrations_run, 7, "expected 7 applied migrations, got {migrations_run}");
+    assert_eq!(
+        migrations_run, 7,
+        "expected 7 applied migrations, got {migrations_run}"
+    );
 }
