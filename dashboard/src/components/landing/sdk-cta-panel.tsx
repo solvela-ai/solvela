@@ -78,6 +78,21 @@ reply, err := client.Chat.Completions.Create(ctx, solvela.ChatRequest{
 })`,
   },
   {
+    id: 'langchain',
+    label: 'langchain',
+    install: 'npm i @solvela/langchain',
+    status: 'soon',
+    code: `import { ChatSolvela } from '@solvela/langchain'
+import { createLocalWalletAdapter } from '@solvela/ai-sdk-provider/adapters/local'
+
+const model = new ChatSolvela({
+  wallet: createLocalWalletAdapter(keypair),
+  model: 'auto',
+})
+
+const reply = await model.invoke('summarize this transcript in one sentence.')`,
+  },
+  {
     id: 'rust',
     label: 'rust cli',
     install: 'cargo install solvela-cli',
@@ -92,7 +107,8 @@ reply, err := client.Chat.Completions.Create(ctx, solvela.ChatRequest{
     label: 'mcp',
     install: 'npx @solvela/mcp',
     status: 'live',
-    code: `{
+    code: `// works in claude code, cursor, and openclaw — drop into .mcp.json
+{
   "mcpServers": {
     "solvela": {
       "command": "npx",
