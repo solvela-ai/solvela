@@ -692,6 +692,142 @@ pre::before {
 }
 
 /* ==========================================================
+   LANDING PAGE — type-on caret + subtle SVG draw
+   ========================================================== */
+
+@keyframes landing-caret {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+.landing-caret::after {
+  content: '';
+  display: inline-block;
+  width: 0.5ch;
+  height: 1em;
+  margin-left: 1px;
+  transform: translateY(2px);
+  background: var(--accent-salmon);
+  animation: landing-caret 1.08s steps(1, end) infinite;
+}
+
+/* Hairline separator used across landing sections */
+.landing-rule {
+  height: 1px;
+  background: var(--border);
+  width: 100%;
+}
+
+/* Isometric diagram container — pure CSS 3D transform */
+.iso-stage {
+  perspective: 1400px;
+  perspective-origin: 50% 40%;
+}
+
+.iso-plane {
+  transform: rotateX(58deg) rotateZ(-38deg);
+  transform-style: preserve-3d;
+}
+
+/* Data strip — scrolling mono ticker (paused on reduced motion) */
+@keyframes ticker-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.ticker-track {
+  display: inline-flex;
+  gap: 3rem;
+  animation: ticker-scroll 42s linear infinite;
+  white-space: nowrap;
+  will-change: transform;
+}
+
+/* ---- Isometric diagram: arrows reveal on scroll-into-view ----
+   Dotted arrows (DEPOSIT, STREAM) fade in; they keep their inline dash pattern.
+   Solid arrows (CLAIM, REFUND) draw in via stroke-dash (requires pathLength=1).
+*/
+
+.iso-arrow {
+  opacity: 0;
+  transition: opacity 0.55s ease-out;
+}
+
+.is-visible .iso-arrow { opacity: 1; }
+
+.iso-arrow-2,
+.iso-arrow-3 {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  transition:
+    opacity 0.35s ease-out,
+    stroke-dashoffset 1.1s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.is-visible .iso-arrow-2,
+.is-visible .iso-arrow-3 {
+  stroke-dashoffset: 0;
+}
+
+.iso-arrow-1 { transition-delay: 0.10s; }
+.iso-arrow-4 { transition-delay: 0.30s; }
+.iso-arrow-2 { transition-delay: 0.55s; }
+.iso-arrow-3 { transition-delay: 0.95s; }
+
+.iso-label {
+  opacity: 0;
+  transition: opacity 0.45s ease-out;
+}
+
+.is-visible .iso-label { opacity: 1; }
+
+.iso-label-1 { transition-delay: 0.80s; }
+.iso-label-4 { transition-delay: 1.00s; }
+.iso-label-2 { transition-delay: 1.40s; }
+.iso-label-3 { transition-delay: 1.75s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track {
+    animation: none;
+  }
+  .landing-caret::after {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+/* Dotted escrow node outline */
+.node-dash {
+  border: 1px dashed var(--border);
+}
+
+/* Landing hero backdrop — layered grid + radial vignette */
+.landing-hero-bg {
+  background-color: var(--background);
+  background-image:
+    radial-gradient(ellipse 85% 60% at 20% 0%, rgba(254, 129, 129, 0.06), transparent 60%),
+    linear-gradient(90deg, rgba(222, 220, 209, 0.05) 1px, transparent 1px),
+    linear-gradient(rgba(222, 220, 209, 0.05) 1px, transparent 1px);
+  background-size: auto, 48px 48px, 48px 48px;
+  background-position: 0 0, 0 0, 0 0;
+}
+
+/* Subtle scan line for terminal screens */
+@keyframes scan-fade {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 0.4; }
+}
+
+/* Provider pill hover ring */
+.provider-pill {
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.provider-pill:hover {
+  border-color: var(--accent-salmon);
+}
+
+/* ==========================================================
    SCROLLBAR
    ========================================================== */
 
