@@ -1,89 +1,94 @@
-# Session handoff — 2026-04-16
+# Session handoff — 2026-04-18 (supersedes 2026-04-16)
 
-## Pick up here after the directory rename
+## Where we are
 
-**Initiative:** First external plugin for Solvela — `@solvela/ai-sdk-provider` for the Vercel AI SDK. Serves as the template for subsequent plugin builds (LangChain, drop-in OpenAI shims).
+Phases 1–9 of `docs/superpowers/plans/2026-04-16-vercel-ai-sdk-provider-plan.md` (rev 4.1) are **shipped and committed on branch `feat/landing-one-pager`**. All five user-side Phase 10 gates are satisfied. Remaining work: Phase 11 (live devnet smoke) then Phase 10 (publish).
 
-## Current state
+## What landed this session
 
-- **Plan:** `docs/superpowers/plans/2026-04-16-vercel-ai-sdk-provider-plan.md` — **revision 4.1, 1462 lines, 137 KB, ready for execution.**
-- **Research backing:** `docs/superpowers/research/2026-04-16-vercel-ai-sdk-provider-research.md`.
-- All 10 Open Decisions resolved with ecosystem-researched verdicts. No pending approvals.
+Three commits on `feat/landing-one-pager`:
 
-## What the session produced
+| SHA | Phase | Summary |
+|---|---|---|
+| `84aeea6` | 1–7 | scaffold + provider factory + fetch wrapper + reference adapter + codegen + typed errors + 257 unit tests |
+| `712bf5a` | 8 | 13 mocked-gateway integration scenarios + shared `mock-gateway.ts` helper |
+| `d083c84` | 9 | README + examples + Fumadocs MDX + key-leak guard; plus 6 docs fixes from the review pass |
 
-Plan went through the full delegation pipeline:
+**Test health (latest):** 23 files / 349 tests passing in ~4.2 s. `npm run check:docs` clean. `npm audit --production` reports 0 vulnerabilities. `npm pack --dry-run` produces a 47.9 kB tarball with only `dist/`, `examples/`, `README.md`, `LICENSE`, `package.json` — no secrets, no tests, no scripts.
 
-1. Research (document-specialist, primary sources)
-2. Plan authoring (planner)
-3. Round 1 review — architect + critic + security reviewers in parallel
-4. Round 1 revision (planner) addressing every Tier 1 + Tier 2 finding
-5. Round 1 verification (critic) — 0 regressions, 7 P1 items
-6. Round 1 P1 polish (planner)
-7. Round 3 — three parallel ecosystem researchers surveyed the wider ecosystem for better answers to the 10 Open Decisions
-8. Round 3 revision (planner) applied 3 overturns + 3 caveats + 4 ratifications
-9. Round 3 verification (critic) — 0 P0s, 9 stale-language residuals
-10. Round 3 janitorial sweep (planner)
+**Bundle hygiene verified:** `grep -E "(Keypair|spl-token|bs58|createPaymentHeader|secretKey)" dist/index.js` returns zero matches. Main entry tree-shakes clean; key-material lives only in `dist/adapters/local.js`.
 
-## Biggest design decisions locked in
+## Phase 10 gates — all done
 
-- **`LanguageModelV3`**, not V4. V4 is `ai@7-beta`; all real community providers target V3 on stable `ai@6`.
-- **`SolvelaWalletAdapter` interface**, not `OpaquePrivateKey` hybrid. Matches Coinbase x402 + Solana Wallet Adapter + AWS SigV4 + wagmi/viem. No runtime-gating complexity. Reference `createLocalWalletAdapter` ships from a separate `./adapters/local` sub-export — browser bundlers tree-shake it away cleanly.
-- **`@solana/kit`-first** for any new signer-core package, if the Phase 1 Turbopack spike fails.
-- **`(string & {})` escape hatch** on the generated `SolvelaModelId` union.
-- **Docs ownership inverted** — minimal README pointing to a canonical Fumadocs page.
+1. **`@solvela` npm org** — converted from the `solvela` user account; personal account is now org owner.
+2. **Automation token** — 90-day granular token, scope `@solvela`, skip-2FA, stored in the GitHub repo as `NPM_TOKEN`. Rotation reminder due **~2026-07-17**.
+3. **GitHub OIDC repo setting** — verified; `id-token: write` will be declared per-workflow when the Phase 10 publish flow gets written.
+4. **GPG signing key** — RSA 4096, key ID `702398150F21DFFE`, fingerprint `3F119E0683F30EE4F1154FAD702398150F21DFFE`, email `kd@sky64.io`, no passphrase, expires **2028-04-17**. Uploaded to `github.com/settings/keys`. Git config set: `user.signingkey = 702398150F21DFFE`, `tag.gpgsign = true`. `commit.gpgsign` intentionally NOT enabled (only tags need signing per plan).
+5. **GitHub PAT** — `public_repo` scope, 30-day expiry, saved at `/tmp/solvela-gh-pat.txt` (40 bytes, mode 600, no trailing newline). **WARNING: `/tmp/` is tmpfs on most configs — a reboot will wipe it.** If rebooting before Phase 10 executes, re-mint and re-save.
+
+## Known environment artifacts
+
+- `/tmp/solvela-gh-pat.txt` — ephemeral PAT; survives only until reboot.
+- `/tmp/solvela-gpg-public-key.asc` — copy of the GPG public key block (also in the key's `--armor --export`).
+- `~/.gnupg/openpgp-revocs.d/3F119E0683F30EE4F1154FAD702398150F21DFFE.rev` — **needs off-machine backup**. This file is what revokes the key if compromised; if this machine is wiped without it, the key can't be cleanly revoked on keyservers.
+- Git global config mutations: `user.email` corrected from `kdsky64.io` → `kd@sky64.io` (missing `@` was a typo); `user.signingkey`, `tag.gpgsign` set.
 
 ## Immediate next step on resume
 
-Execute the plan's DAG:
+**Phase 11 — live devnet smoke test.** User explicitly paused here to let adjacent work (docs-site migration?) complete before running the live test. On resume:
 
-```
-Phase 1 (package scaffolding) + Phase 5 (model registry codegen) in parallel
-  → Phase 6 (error declarations)
-  → Phase 2 (provider factory)
-  → Phase 3 (fetch wrapper — security-critical)
-  → Phase 4 (reference adapter implementation)
-  → Phase 7 (unit tests — separate test-engineer agent)
-  → Phase 8 (integration tests)
-  → Phase 9 (docs: minimal README + canonical Fumadocs MDX)
-  → Phase 11 (live devnet smoke test)
-  → Phase 10 (npm publish — provenance + signed tag + OIDC)
-```
+1. Confirm adjacent work is done and safe to continue.
+2. Provision a funded Solana **devnet** keypair (not mainnet):
+   - ≥ 0.10 devnet USDC-SPL via https://faucet.circle.com
+   - ≥ 0.05 devnet SOL via https://faucet.solana.com or `solana airdrop 1`
+   - Save somewhere readable (same `/tmp/` pattern as the PAT works).
+3. Per plan §6 Phase 11:
+   - `docker compose up -d` (Postgres + Redis + gateway).
+   - Configure `SOLVELA_SOLANA_RPC_URL` + devnet keypair env.
+   - `generateText({ model: solvela('anthropic-claude-sonnet-4-5'), prompt: 'Echo: hello' })` → expects 402 → signed tx → 200.
+   - Same for `streamText`.
+   - Abort-mid-retry scenario: `AbortController.abort()` right after signer returns; verify no double-spend on-chain via `getSignatureStatuses` / block explorer; verify warn-once fires with no signature bytes.
+   - Gateway logs show the Solana signature, not a stub.
+4. Attach tx signatures + block-explorer screenshots to completion evidence.
 
-All phase agent assignments and work items are in the plan's §6.
+## Phase 10 — after 11 passes
 
-## Gated on user-side setup (§2 of the plan)
+Not yet written: the CI publish workflow. Plan §6 Phase 10 WI-5 specifies it: tag-push-triggered GitHub Action running `npm ci` → `npm run build` → `npm test` → `npm run size` → `npm publish --access public --provenance` → tarball-SHA verification. Will be authored by an executor subagent when we start Phase 10.
 
-Execution will pause until these exist:
+Phase 10 WI-6/7 uses the PAT from `/tmp/solvela-gh-pat.txt`: fork `vercel/ai`, branch `community-provider-solvela`, add `content/docs/providers/03-community-providers/solvela.md` from the README, open PR.
 
-- [ ] **npm org `@solvela`** created, user added as owner with publish rights
-- [ ] **npm 2FA automation token** for CI publish
-- [ ] **GitHub OIDC workflow** configured with `id-token: write` permission (for `npm publish --provenance`)
-- [ ] **GPG key** for `git tag -s` (signed tags on release)
-- [ ] **GitHub PAT** with `public_repo` scope (for the `vercel/ai` community-provider listing PR)
+## Known plan gaps (non-blocking, flag for 0.2)
 
-## Related in-flight work (parallel windows)
+- **`SOLVELA_TIMEOUT_MS`** — listed in plan §5.2 but never implemented in `src/config.ts`. Either remove from plan or implement in a 0.2 bump.
+- **CI Node 18 matrix gap** — `install` job is matrixed Node 18+20; `typecheck`, `lint`, `test-unit`, `test-integration`, `size`, `guard-install-scripts`, `audit` all hardcode Node 20. Means Node 18 runtime regressions could ship undetected. Fix before Phase 10 publish: extend the matrix to `test-unit` at minimum.
+- **Deferred polish items from review rounds:** F3 (throwing-logger wrap), F4 (header-projection guard post-release), F7 (`url: ''` in parse-402 errors), F10 (`as` cast in provider.ts `fetch` plumbing), security M-2 (base64 not in redact regex). All documented, none safety-critical.
+- **Phase 5 drift-guard** works but depends on the committed `src/generated/models.ts` being regenerated when `config/models.toml` changes. No auto-sync; manual `npm run generate-models` + commit is the process.
 
-- **Docs migration to `docs.solvela.ai`** was in progress when the session ended. Plan Phase 9 currently targets `dashboard/content/docs/sdks/ai-sdk.mdx` (the verified Fumadocs home). If the docs migration completed, update the target path in §3.7 and Phase 9 work items accordingly before executing Phase 9.
-- **Directory rename** from RustyClawRouter-era naming to Solvela — the session ended immediately before this rename. Memory directory at `~/.claude/projects/-home-kennethdixon-projects-RustyClawRouter/memory/` may need parallel rename if Claude Code doesn't auto-migrate.
+## Branch state
 
-## Plugin roadmap order (user-agreed)
+- Current branch: `feat/landing-one-pager` (NOT `main` — the three session commits sit here).
+- Untracked items in repo root unrelated to this initiative: `docs/plans/claude-mem.md`, `docs/strategy/`, `pics/`, `sdks/typescript/solvela-sdk-0.1.0.tgz` (artifact left by Phase 1 spike — can delete).
 
-1. **Vercel AI SDK provider** ← in progress, plan complete
-2. **LangChain adapter** — next, should apply the template from §13 of the current plan
-3. **Drop-in OpenAI SDK shims** — one per language (Py/TS/Go), each small but four of them for parity
-4. **Go SDK signing** — separate infrastructure track (plan exists at `docs/superpowers/plans/2026-04-10-go-sdk-signing-support.md`), prerequisite for Go-native plugins
+## Plugin roadmap order (unchanged)
 
-## Process rules in effect (from saved memory `feedback_plugin_build_process.md`)
+1. **Vercel AI SDK provider** — 🟢 Phases 1–9 shipped; 11 + 10 remaining.
+2. **LangChain adapter** — next; apply the template extracted from §13 of the current plan.
+3. **Drop-in OpenAI SDK shims** — one per language (Py/TS/Go).
+4. **Go SDK signing** — plan exists at `docs/superpowers/plans/2026-04-10-go-sdk-signing-support.md`.
 
-1. Research first, via specialized skills/docs — no memory-based guessing
-2. Plan = 100% coverage (tech, env vars, creds, skills/hooks/MCPs, manual actions, infra)
-3. Plan reviewed by specialist reviewer(s) before presentation
-4. Specialist agents only — never generalists where a specialist exists
-5. All code delegated — main agent plans + reviews, never writes code
-6. If a subagent is blocked, surface to user; do not pick up the pen
-7. Quality > speed, always
+## Process rules in effect (unchanged from 2026-04-16 handoff)
 
-## Known friction from this session to address eventually (not blocking)
+1. Research first, via specialized skills/docs — no memory-based guessing.
+2. Plan = 100 % coverage (tech, env vars, creds, skills/hooks/MCPs, manual actions, infra).
+3. Specialist agents only — never generalists where a specialist exists.
+4. All code delegated — main agent plans + reviews, never writes code. Exception on this pass: I hand-ran `git add` / `git commit` / small bash verifications; no TypeScript or test files were hand-written.
+5. If a subagent is blocked, surface to user; do not pick up the pen.
+6. Quality > speed, always.
+7. Verification before completion; evidence > assertion.
 
-- The read-only specialist agents (`document-specialist`, `architect`, `critic`, `security-reviewer`, `scientist`) cannot Write. Any research-to-artifact workflow requires a two-stage dispatch (read-only specialist reports findings in reply → writable specialist persists to disk). User asked to address this eventually — three options documented: (1) formalize a "research → persist" two-stage skill; (2) grant Write to the read-only specialists; (3) accept the two-stage overhead as default.
+## Caveats for the next session
+
+- **Don't assume `/tmp/solvela-gh-pat.txt` still exists.** Check `ls /tmp/solvela-gh-pat.txt && wc -c /tmp/solvela-gh-pat.txt` first (expect 40 bytes). If gone, mint a new PAT.
+- **Don't publish from a laptop.** Plan §2 + §8 Sec-20 mandates CI-only publish via the tag-push workflow.
+- **The Phase 10 publish workflow isn't written yet.** It gets authored as part of executing Phase 10 WI-5, not before.
+- **Branch is `feat/landing-one-pager`, not `main`.** Decide on rebase/merge strategy before Phase 10 tags anything — you probably want these commits landed on `main` first, then tag `sdks/ai-sdk-provider/v0.1.0` against `main`.
