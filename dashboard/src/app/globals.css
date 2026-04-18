@@ -743,6 +743,11 @@ pre::before {
   will-change: transform;
 }
 
+.ticker-track:hover,
+.ticker-track:focus-visible {
+  animation-play-state: paused;
+}
+
 /* ---- Isometric diagram: arrows reveal on scroll-into-view ----
    Dotted arrows (DEPOSIT, STREAM) fade in; they keep their inline dash pattern.
    Solid arrows (CLAIM, REFUND) draw in via stroke-dash (requires pathLength=1).

@@ -70,8 +70,7 @@ export function EnterprisePanel() {
             </h2>
             <p className="max-w-[54ch] text-[15px] leading-[1.55] text-muted-foreground">
               Orgs, teams, per-wallet budgets, scoped keys, and a full audit
-              trail — all first-class Gateway primitives, not an afterthought
-              bolt-on.
+              trail — first-class gateway primitives, not a bolt-on.
             </p>
           </div>
           <a

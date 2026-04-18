@@ -145,7 +145,10 @@ export function SdkCtaPanel() {
                 <span>{active.install}</span>
                 <CopyButton text={active.code} label="copy" />
               </div>
-              <pre className="m-0 overflow-x-auto border-0 !bg-transparent px-5 py-6 font-mono text-[13px] leading-[1.7] text-foreground">
+              <pre
+                key={active.id}
+                className="m-0 animate-fade-in overflow-x-auto border-0 !bg-transparent px-5 py-6 font-mono text-[13px] leading-[1.7] text-foreground"
+              >
                 <code>{active.code}</code>
               </pre>
             </div>
@@ -165,7 +168,7 @@ export function SdkCtaPanel() {
               </div>
               <a
                 href={QUICKSTART_URL}
-                className="inline-flex items-center gap-2 self-start rounded-md bg-[var(--accent-salmon)] px-5 py-3 font-mono text-[12px] uppercase tracking-[0.16em] text-[#1F1E1D] transition-[transform,background] hover:bg-[#ff9a9a] active:translate-y-[1px] sm:self-auto"
+                className="inline-flex items-center gap-2 self-start rounded-md bg-[var(--accent-salmon)] px-5 py-3 font-mono text-[12px] uppercase tracking-[0.16em] text-[#1F1E1D] shadow-[0_0_0_0_rgba(254,129,129,0)] transition-all duration-200 hover:-translate-y-[1px] hover:bg-[#ff9a9a] hover:shadow-[0_8px_24px_-10px_rgba(254,129,129,0.55)] active:translate-y-0 sm:self-auto"
               >
                 open quickstart
                 <ArrowRight className="h-3.5 w-3.5" />
