@@ -110,6 +110,7 @@ Next.js 16 + Tailwind + Recharts. Pages: Overview, Usage, Models, Wallet, Settin
 12. **Both PostgreSQL and Redis are optional** — gateway degrades gracefully when either is absent
 13. **API key auth uses extractor pattern** — `RequireOrg` and `RequireOrgAdmin` are Axum extractors that populate `OrgContext`; org-scoped routes extract `OrgContext` from request extensions, never from query params or body
 14. **A2A is a protocol adapter, not new payment logic** — translates A2A JSON-RPC to existing x402 + chat pipeline. No fiat, no AP2 mandates, no card processing.
+15. **Migration failure is fatal when a DB is configured** — if `DATABASE_URL` is set and `sqlx::migrate!` fails during startup, `run_migrations()` propagates the error and `main()` exits non-zero. Do not reintroduce a `warn!` + continue pattern: serving traffic against a broken schema produces silent query errors on every org/audit/budget path. Graceful degradation only applies when `DATABASE_URL` is unset entirely.
 
 ## Request Flow (POST /v1/chat/completions)
 
