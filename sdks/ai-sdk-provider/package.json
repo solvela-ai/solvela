@@ -1,0 +1,88 @@
+{
+  "name": "@solvela/ai-sdk-provider",
+  "version": "0.1.0",
+  "description": "Vercel AI SDK provider for Solvela — AI agent payments with USDC on Solana",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./adapters/local": {
+      "import": "./dist/adapters/local.js",
+      "types": "./dist/adapters/local.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/",
+    "examples/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "generate-models": "tsx scripts/generate-models.ts",
+    "prebuild": "npm run generate-models",
+    "lint": "tsc --noEmit",
+    "size": "size-limit"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "2.0.41",
+    "@ai-sdk/provider-utils": "^4.0.0"
+  },
+  "peerDependencies": {
+    "@ai-sdk/provider": "^3.0.0",
+    "@solvela/sdk": "^0.1.0",
+    "@solana/spl-token": "^0.4.0",
+    "@solana/web3.js": "^1.87.0",
+    "ai": "^6.0.0",
+    "bs58": "^5.0.0",
+    "zod": "^3.25.76 || ^4.1.8"
+  },
+  "peerDependenciesMeta": {
+    "@solvela/sdk": {
+      "optional": true
+    },
+    "@solana/spl-token": {
+      "optional": true
+    },
+    "@solana/web3.js": {
+      "optional": true
+    },
+    "bs58": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@ai-sdk/provider": "^3.0.0",
+    "@iarna/toml": "^2.2.5",
+    "@size-limit/preset-small-lib": "^11.0.0",
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "size-limit": "^11.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0",
+    "undici": "^6.0.0",
+    "vitest": "^2.0.0"
+  },
+  "size-limit": [
+    {
+      "path": "./dist/index.js",
+      "limit": "50 kB",
+      "gzip": true
+    }
+  ]
+}
