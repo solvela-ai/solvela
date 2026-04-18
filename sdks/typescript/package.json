@@ -4,6 +4,11 @@
   "description": "TypeScript SDK for Solvela — AI agent payments with USDC on Solana",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./x402": "./dist/x402.js",
+    "./types": "./dist/types.js"
+  },
   "scripts": {
     "build": "tsc",
     "test": "node --import tsx --test tests/client.test.ts"
