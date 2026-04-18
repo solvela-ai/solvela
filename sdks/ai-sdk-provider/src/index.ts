@@ -12,7 +12,12 @@
 export { createSolvelaProvider } from './provider.js';
 export type { SolvelaProvider } from './provider.js';
 export type { SolvelaProviderSettings } from './config.js';
-export type { SolvelaWalletAdapter } from './wallet-adapter.js';
+export type {
+  SolvelaWalletAdapter,
+  SolvelaPaymentRequired,
+  SolvelaPaymentAccept,
+  SolvelaPaymentCostBreakdown,
+} from './wallet-adapter.js';
 
 // ---------------------------------------------------------------------------
 // Error classes
