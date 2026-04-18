@@ -1,4 +1,4 @@
-# @solvela/mcp
+# @solvela/mcp-server
 
 MCP (Model Context Protocol) server for Solvela -- lets Claude Code, Claude Desktop, and any MCP-compatible host pay for LLM calls with USDC on Solana transparently.
 
@@ -7,13 +7,13 @@ MCP is an open protocol that allows AI assistants to use external tools. This se
 ## Installation
 
 ```bash
-npm install -g @solvela/mcp
+npm install -g @solvela/mcp-server
 ```
 
 Or run directly:
 
 ```bash
-npx @solvela/mcp
+npx @solvela/mcp-server
 ```
 
 ## Setup with Claude Code
@@ -25,16 +25,21 @@ Add to your Claude Code MCP configuration (`.claude/settings.json` or project-le
   "mcpServers": {
     "solvela": {
       "command": "npx",
-      "args": ["@solvela/mcp"],
+      "args": ["@solvela/mcp-server"],
       "env": {
-        "RCR_API_URL": "http://localhost:8402",
-        "RCR_SESSION_BUDGET": "1.00",
+        "SOLVELA_API_URL": "http://localhost:8402",
+        "SOLVELA_SESSION_BUDGET": "1.00",
+        "SOLANA_WALLET_KEY": "YOUR_BASE58_SECRET_KEY",
+        "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com",
         "SOLANA_WALLET_ADDRESS": "YOUR_WALLET_PUBKEY"
       }
     }
   }
 }
 ```
+
+> **Security:** Never commit `SOLANA_WALLET_KEY` to version control. Store it in a
+> `.env` file with `0600` permissions or use your OS keychain. See [Security](#security).
 
 ## Setup with Claude Desktop
 
@@ -45,10 +50,12 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
   "mcpServers": {
     "solvela": {
       "command": "npx",
-      "args": ["@solvela/mcp"],
+      "args": ["@solvela/mcp-server"],
       "env": {
-        "RCR_API_URL": "http://localhost:8402",
-        "RCR_SESSION_BUDGET": "1.00",
+        "SOLVELA_API_URL": "http://localhost:8402",
+        "SOLVELA_SESSION_BUDGET": "1.00",
+        "SOLANA_WALLET_KEY": "YOUR_BASE58_SECRET_KEY",
+        "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com",
         "SOLANA_WALLET_ADDRESS": "YOUR_WALLET_PUBKEY"
       }
     }
@@ -56,16 +63,56 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
 }
 ```
 
+> **Security:** Never commit `SOLANA_WALLET_KEY` to version control. Store it in a
+> `.env` file with `0600` permissions or use your OS keychain. See [Security](#security).
+
+## Setup with Cursor
+
+Add to `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
+
+```json
+{
+  "mcpServers": {
+    "solvela": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["@solvela/mcp-server"],
+      "env": {
+        "SOLVELA_API_URL": "http://localhost:8402",
+        "SOLVELA_SESSION_BUDGET": "1.00",
+        "SOLANA_WALLET_KEY": "YOUR_BASE58_SECRET_KEY",
+        "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com",
+        "SOLANA_WALLET_ADDRESS": "YOUR_WALLET_PUBKEY"
+      }
+    }
+  }
+}
+```
+
+> **Security:** Never commit `SOLANA_WALLET_KEY` to version control. Store it in a
+> `.env` file with `0600` permissions or use your OS keychain. See [Security](#security).
+
 ## Configuration
 
 All configuration is via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RCR_API_URL` | `https://api.solvela.ai` | Gateway URL |
-| `RCR_SESSION_BUDGET` | unlimited | Max USDC to spend this session (e.g. `"1.00"`) |
-| `RCR_TIMEOUT_MS` | `60000` | Request timeout in milliseconds |
+| `SOLVELA_API_URL` | `https://api.solvela.ai` | Gateway URL |
+| `SOLVELA_SESSION_BUDGET` | unlimited | Max USDC to spend this session (e.g. `"1.00"`) |
+| `SOLVELA_TIMEOUT_MS` | `60000` | Request timeout in milliseconds |
+| `SOLVELA_SIGNING_MODE` | `auto` | Payment signing mode: `auto`, `escrow`, `direct`, or `off` |
+| `SOLVELA_ALLOW_DEV_BYPASS` | — | Set to `1` to silence the dev_bypass_payment gateway warning |
+| `SOLANA_WALLET_KEY` | required (when signing enabled) | Base58-encoded Solana keypair secret key |
+| `SOLANA_RPC_URL` | required (when signing enabled) | Solana RPC endpoint (e.g. `https://api.mainnet-beta.solana.com`) |
 | `SOLANA_WALLET_ADDRESS` | not configured | Wallet pubkey shown in `wallet_status` and `spending` |
+
+### Signing Modes
+
+- **`auto`** (default) — The SDK prefers escrow deposits when the gateway advertises them, falling back to direct TransferChecked. Recommended for production.
+- **`escrow`** — Only use escrow payment schemes. Fails if the gateway does not advertise escrow.
+- **`direct`** — Only use direct USDC TransferChecked payment schemes. Ignores escrow offers.
+- **`off`** — Do not sign payments. Useful when the gateway runs with `dev_bypass_payment` enabled (development only). `SOLANA_WALLET_KEY` and `SOLANA_RPC_URL` are not required in this mode.
 
 ## Available Tools
 
@@ -140,15 +187,26 @@ The assistant calls `spending`. Returns total requests made, USDC spent this ses
 
 ## Architecture
 
-The MCP server ships its own lightweight gateway client (`GatewayClient`) rather than depending on the TypeScript SDK. This keeps it self-contained as a standalone package.
+The MCP server depends on `@solvela/sdk` for real on-chain USDC payment signing. When a 402 Payment Required response is received from the gateway, the server:
+
+1. Parses the payment requirements (accepted schemes, amount, recipient)
+2. Applies the configured signing mode filter to the accepted schemes
+3. Calls `createPaymentHeader` from `@solvela/sdk` with the agent's private key
+4. Retries the request with the `payment-signature` header
 
 The server communicates over stdio using the `@modelcontextprotocol/sdk` library. It:
 
 1. Accepts tool calls from the MCP host (Claude Code, Claude Desktop, etc.)
 2. Translates them into HTTP requests to the Solvela gateway
-3. Handles the x402 payment flow (402 -> build payment header -> retry)
-4. Tracks session spending and budget enforcement
+3. Handles the x402 payment flow (402 -> sign -> retry)
+4. Tracks session spending and budget enforcement (concurrency-safe via mutex)
 5. Returns results as MCP tool responses
+
+## Security
+
+- The `SOLANA_WALLET_KEY` never appears in logs, error messages, stack traces, or tool responses.
+- The SDK zeroes secret key bytes in memory after signing.
+- Private key material flows only from environment variable into the signer — it is never passed through tool arguments (which are model-controlled).
 
 ## Testing
 
@@ -156,7 +214,7 @@ The server communicates over stdio using the `@modelcontextprotocol/sdk` library
 npm test
 ```
 
-Tests use Node.js built-in test runner with fetch mocking. No live gateway required:
+Tests use Node.js built-in test runner with fetch mocking. No live gateway or Solana RPC required:
 
 ```bash
 node --test tests/server.test.ts
