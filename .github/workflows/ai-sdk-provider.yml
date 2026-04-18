@@ -13,9 +13,23 @@ defaults:
     working-directory: sdks/ai-sdk-provider
 
 jobs:
+  docs-key-leak-check:
+    name: Docs key-leak check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
+      - run: npm ci
+      - run: npm run check:docs
+
   install:
     name: Install (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    needs: docs-key-leak-check
     strategy:
       matrix:
         node: ['18', '20']

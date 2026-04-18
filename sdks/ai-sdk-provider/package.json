@@ -35,6 +35,7 @@
     "test:integration": "vitest run tests/integration",
     "generate-models": "tsx scripts/generate-models.ts",
     "prebuild": "npm run generate-models",
+    "check:docs": "tsx scripts/check-docs-for-leaked-keys.ts",
     "lint": "tsc --noEmit",
     "size": "size-limit"
   },
