@@ -1,7 +1,6 @@
 import type { Metadata } from 'next'
 import { LandingTopStrip, LandingTicker } from '@/components/landing/landing-chrome'
 import { HeroPanel } from '@/components/landing/hero-panel'
-import { PartnersRow } from '@/components/landing/partners-row'
 import { EscrowPanel } from '@/components/landing/escrow-panel'
 import { ProviderRow } from '@/components/landing/provider-row'
 import { EnterprisePanel } from '@/components/landing/enterprise-panel'
@@ -37,7 +36,6 @@ export default function LandingPage() {
       <LandingTopStrip />
       <HeroPanel />
       <LandingTicker />
-      <PartnersRow />
       <EscrowPanel />
       <ProviderRow />
       <EnterprisePanel />
