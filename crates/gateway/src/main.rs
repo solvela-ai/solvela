@@ -686,9 +686,9 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// Uses `sqlx::migrate!`, which embeds the migration SQL at compile time and
 /// tracks applied versions in a `_sqlx_migrations` table. Order is determined
-/// by the numeric prefix on each filename (001, 002, …), not lexicographic.
-/// Safe to run on every startup — sqlx skips migrations that have already
-/// been applied.
+/// by the numeric version prefix on each filename (`001_…`, `002_…`). Safe
+/// to run on every startup — sqlx skips migrations that have already been
+/// applied.
 async fn run_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     sqlx::migrate!("../../migrations").run(pool).await?;
     info!("database migrations applied");
