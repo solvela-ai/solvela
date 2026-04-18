@@ -6,11 +6,14 @@ import { cn } from '@/lib/utils'
 import { CopyButton } from './copy-button'
 import { CURL_SNIPPET, QUICKSTART_URL } from './config'
 
+type SampleStatus = 'live' | 'alpha' | 'soon'
+
 interface Sample {
   id: string
   label: string
   code: string
   install: string
+  status?: SampleStatus
 }
 
 const SAMPLES: Sample[] = [
@@ -18,6 +21,7 @@ const SAMPLES: Sample[] = [
     id: 'ts',
     label: 'typescript',
     install: 'npm i @solvela/sdk',
+    status: 'live',
     code: `import { Solvela } from '@solvela/sdk'
 
 const solvela = new Solvela({ keypair: wallet })
@@ -30,9 +34,28 @@ const reply = await solvela.chat.completions.create({
 // 402 handshake + escrow claim handled for you.`,
   },
   {
+    id: 'vercel',
+    label: 'vercel ai sdk',
+    install: 'npm i @solvela/ai-sdk-provider ai',
+    status: 'alpha',
+    code: `import { createSolvela } from '@solvela/ai-sdk-provider'
+import { createLocalWalletAdapter } from '@solvela/ai-sdk-provider/adapters/local'
+import { generateText } from 'ai'
+
+const solvela = createSolvela({
+  wallet: createLocalWalletAdapter(keypair),
+})
+
+const { text } = await generateText({
+  model: solvela('auto'),
+  prompt: 'summarize this transcript in one sentence.',
+})`,
+  },
+  {
     id: 'py',
     label: 'python',
     install: 'pip install solvela',
+    status: 'live',
     code: `from solvela import Solvela
 
 solvela = Solvela(keypair=wallet)
@@ -46,6 +69,7 @@ reply = solvela.chat.completions.create(
     id: 'go',
     label: 'go',
     install: 'go get github.com/solvela/sdk-go',
+    status: 'live',
     code: `client := solvela.New(solvela.WithKeypair(wallet))
 
 reply, err := client.Chat.Completions.Create(ctx, solvela.ChatRequest{
@@ -57,6 +81,7 @@ reply, err := client.Chat.Completions.Create(ctx, solvela.ChatRequest{
     id: 'rust',
     label: 'rust cli',
     install: 'cargo install solvela-cli',
+    status: 'live',
     code: `$ solvela chat --model auto "hi"
 → 402 · 0.0042 usdc  (fee 0.0002)
   sign? [y/N] y
@@ -66,6 +91,7 @@ reply, err := client.Chat.Completions.Create(ctx, solvela.ChatRequest{
     id: 'mcp',
     label: 'mcp',
     install: 'npx @solvela/mcp',
+    status: 'live',
     code: `{
   "mcpServers": {
     "solvela": {
@@ -77,6 +103,29 @@ reply, err := client.Chat.Completions.Create(ctx, solvela.ChatRequest{
 }`,
   },
 ]
+
+const WORKS_WITH: { label: string; status: SampleStatus }[] = [
+  { label: 'vercel ai sdk', status: 'alpha' },
+  { label: 'langchain', status: 'soon' },
+  { label: 'openai-compat', status: 'live' },
+  { label: 'mcp', status: 'live' },
+  { label: 'a2a / agent-card', status: 'live' },
+]
+
+function StatusDot({ status }: { status: SampleStatus }) {
+  const color =
+    status === 'live'
+      ? 'bg-[var(--color-success)]'
+      : status === 'alpha'
+      ? 'bg-[#e0c27a]'
+      : 'bg-text-faint'
+  return (
+    <span
+      aria-label={status}
+      className={`inline-block h-1.5 w-1.5 rounded-full ${color}`}
+    />
+  )
+}
 
 export function SdkCtaPanel() {
   const [activeId, setActiveId] = useState<string>('ts')
@@ -101,6 +150,24 @@ export function SdkCtaPanel() {
             </h2>
           </div>
 
+          {/* works-with strip */}
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-3 font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+            <span className="text-text-faint">works with</span>
+            {WORKS_WITH.map((w) => (
+              <span
+                key={w.label}
+                className="inline-flex items-center gap-2"
+                title={w.status}
+              >
+                <StatusDot status={w.status} />
+                <span>{w.label}</span>
+                {w.status !== 'live' && (
+                  <span className="text-text-faint">· {w.status}</span>
+                )}
+              </span>
+            ))}
+          </div>
+
           {/* big terminal card */}
           <div className="terminal-card">
             <div className="terminal-card-titlebar">
@@ -122,13 +189,14 @@ export function SdkCtaPanel() {
                   key={s.id}
                   onClick={() => setActiveId(s.id)}
                   className={cn(
-                    'relative px-4 py-3 font-mono text-[11px] uppercase tracking-[0.18em] transition-colors',
+                    'relative inline-flex items-center gap-2 px-4 py-3 font-mono text-[11px] uppercase tracking-[0.18em] transition-colors',
                     s.id === activeId
                       ? 'text-foreground'
                       : 'text-text-faint hover:text-muted-foreground',
                   )}
                 >
-                  {s.label}
+                  {s.status && <StatusDot status={s.status} />}
+                  <span>{s.label}</span>
                   {s.id === activeId && (
                     <span
                       aria-hidden
@@ -142,7 +210,14 @@ export function SdkCtaPanel() {
             {/* code body */}
             <div className="terminal-card-screen !p-0">
               <div className="flex items-center justify-between border-b border-border/60 px-5 py-2 font-mono text-[11px] text-text-faint">
-                <span>{active.install}</span>
+                <div className="flex items-center gap-3">
+                  <span>{active.install}</span>
+                  {active.status && active.status !== 'live' && (
+                    <span className="rounded border border-[var(--color-border-emphasis)] bg-[rgba(200,162,64,0.08)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.18em] text-[#e0c27a]">
+                      {active.status} — not yet published
+                    </span>
+                  )}
+                </div>
                 <CopyButton text={active.code} label="copy" />
               </div>
               <pre
