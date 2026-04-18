@@ -79,6 +79,9 @@ export function HeroHandshake() {
   }, [])
 
   const claimActive = step > LINES.length
+  const lastActive = LINES[Math.max(0, Math.min(LINES.length - 1, step - 1))]
+  const agentActive = step > 0 && step <= LINES.length && lastActive?.side === 'agent'
+  const gatewayActive = step > 0 && step <= LINES.length && lastActive?.side === 'gateway'
 
   return (
     <div className="terminal-card select-none">
@@ -98,11 +101,23 @@ export function HeroHandshake() {
         {/* column headers */}
         <div className="grid grid-cols-2 border-b border-border/60 text-[10px] font-mono uppercase tracking-[0.2em] text-text-faint">
           <div className="flex items-center gap-2 px-5 py-3">
-            <span className="h-1.5 w-1.5 rounded-full bg-foreground/70" />
+            <span
+              className={cn(
+                'h-1.5 w-1.5 rounded-full bg-foreground/70 transition-[box-shadow,background-color] duration-300',
+                agentActive &&
+                  'bg-foreground shadow-[0_0_0_3px_rgba(222,220,209,0.18)]'
+              )}
+            />
             agent
           </div>
           <div className="flex items-center gap-2 border-l border-border/60 px-5 py-3">
-            <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent-salmon)]" />
+            <span
+              className={cn(
+                'h-1.5 w-1.5 rounded-full bg-[var(--accent-salmon)] transition-[box-shadow,background-color] duration-300',
+                gatewayActive &&
+                  'shadow-[0_0_0_3px_rgba(254,129,129,0.22)]'
+              )}
+            />
             gateway · solvela.ai
           </div>
         </div>

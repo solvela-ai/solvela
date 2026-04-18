@@ -22,39 +22,35 @@ export function EscrowPanel() {
               </span>
             </h2>
 
-            <ul className="mt-2 flex flex-col gap-4 text-[15px] leading-[1.55] text-muted-foreground">
-              <li className="flex gap-3">
-                <span
-                  aria-hidden
-                  className="mt-[9px] h-[6px] w-[6px] flex-shrink-0 rounded-full bg-[var(--color-border-emphasis)]"
-                />
-                <span>
-                  <strong className="text-foreground">Deposit</strong> to an
-                  on-chain PDA at request time. No upfront full payment.
-                </span>
-              </li>
-              <li className="flex gap-3">
-                <span
-                  aria-hidden
-                  className="mt-[9px] h-[6px] w-[6px] flex-shrink-0 rounded-full bg-[var(--color-border-emphasis)]"
-                />
-                <span>
-                  <strong className="text-foreground">Claim</strong> fires only
-                  after the provider streams a real response. No-response → no
-                  claim.
-                </span>
-              </li>
-              <li className="flex gap-3">
-                <span
-                  aria-hidden
-                  className="mt-[9px] h-[6px] w-[6px] flex-shrink-0 rounded-full bg-[var(--color-border-emphasis)]"
-                />
-                <span>
-                  <strong className="text-foreground">Refund</strong> returns
-                  unclaimed funds to the agent wallet in the same tx.
-                </span>
-              </li>
-            </ul>
+            <dl className="mt-2 flex flex-col gap-5 text-[15px] leading-[1.55] text-muted-foreground">
+              <div className="grid grid-cols-[88px_1fr] items-baseline gap-x-5">
+                <dt className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--color-border-emphasis)]">
+                  deposit
+                </dt>
+                <dd className="text-foreground">
+                  <span className="text-muted-foreground">
+                    On-chain PDA, per request. No upfront full payment.
+                  </span>
+                </dd>
+              </div>
+              <div className="grid grid-cols-[88px_1fr] items-baseline gap-x-5">
+                <dt className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--color-border-emphasis)]">
+                  claim
+                </dt>
+                <dd className="text-muted-foreground">
+                  Fires only after the provider streams a real response.
+                  No-response → no claim.
+                </dd>
+              </div>
+              <div className="grid grid-cols-[88px_1fr] items-baseline gap-x-5">
+                <dt className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--color-border-emphasis)]">
+                  refund
+                </dt>
+                <dd className="text-muted-foreground">
+                  Unclaimed funds return to the agent wallet in the same tx.
+                </dd>
+              </div>
+            </dl>
 
             <div className="mt-4 flex flex-wrap items-center gap-3 font-mono text-[11px] uppercase tracking-[0.16em] text-text-faint">
               <span className="rounded-md border border-border px-2 py-1">

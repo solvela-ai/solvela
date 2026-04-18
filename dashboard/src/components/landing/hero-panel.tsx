@@ -19,21 +19,21 @@ export function HeroPanel() {
 
       <div className="relative mx-auto max-w-[1280px] px-6 pb-16 pt-20 sm:pt-24 lg:pb-24 lg:pt-32">
         <div className="grid gap-14 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)] lg:gap-16">
-          {/* left — copy */}
-          <div className="flex flex-col gap-8 animate-fade-in-up">
-            <div className="flex flex-wrap items-center gap-3">
+          {/* left — copy (staggered reveal) */}
+          <div className="flex flex-col gap-8">
+            <div className="animate-fade-in-up flex flex-wrap items-center gap-3">
               <span className="eyebrow">Escrow-settled payments for agents</span>
               <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border-emphasis)] bg-[rgba(200,162,64,0.08)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[#e0c27a]">
                 <span
                   aria-hidden
                   className="inline-block h-1.5 w-1.5 rounded-full bg-[#e0c27a]"
                 />
-                only x402 gateway with on-chain escrow
+                only x402 gateway with trustless escrow
               </span>
             </div>
 
             <h1
-              className="font-display text-foreground leading-[0.98] tracking-[-0.03em]"
+              className="animate-fade-in-up delay-1 font-display text-foreground leading-[0.98] tracking-[-0.03em]"
               style={{
                 fontSize: 'clamp(3rem, 7vw, 6rem)',
                 fontWeight: 600,
@@ -49,16 +49,16 @@ export function HeroPanel() {
               <span className="block">agent payments.</span>
             </h1>
 
-            <p className="max-w-[56ch] text-[17px] leading-[1.55] text-muted-foreground sm:text-[18px]">
-              Your agent pays per call in USDC on Solana. The gateway only
-              claims what the provider actually delivered — refund the rest
-              on-chain, in the same transaction.
+            <p className="animate-fade-in-up delay-2 max-w-[56ch] text-[17px] leading-[1.55] text-muted-foreground sm:text-[18px]">
+              Your agent pays per call in USDC. The gateway only claims what
+              the provider actually delivered — the rest refunds on-chain, in
+              the same transaction.
             </p>
 
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="animate-fade-in-up delay-3 flex flex-wrap items-center gap-3">
               <a
                 href={QUICKSTART_URL}
-                className="inline-flex items-center gap-2 rounded-md bg-foreground px-5 py-3 font-mono text-[12px] uppercase tracking-[0.16em] text-[var(--primary-foreground)] transition-colors hover:bg-[var(--heading-color)]"
+                className="inline-flex items-center gap-2 rounded-md bg-foreground px-5 py-3 font-mono text-[12px] uppercase tracking-[0.16em] text-[var(--primary-foreground)] transition-all duration-150 hover:-translate-y-[1px] hover:bg-[var(--heading-color)] active:translate-y-0"
               >
                 start building
                 <ArrowRight className="h-3.5 w-3.5" />
@@ -74,7 +74,7 @@ export function HeroPanel() {
               </span>
             </div>
 
-            <div className="pt-4">
+            <div className="animate-fade-in-up delay-4 pt-4">
               <InlineMetrics />
             </div>
           </div>
