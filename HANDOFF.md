@@ -1,7 +1,7 @@
 # HANDOFF.md — Solvela Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-17 (Fly gateway + DB cutover + migration-runner fix: `rustyclawrouter-gateway` → `solvela-gateway`, `rustyclawrouter-db` → `solvela-db`; `api.solvela.ai` now serves from new app; `sqlx::migrate!` wired so all 7 migration files actually apply — `solvela-db` now has 10 tables + `_sqlx_migrations` tracker with all 7 versions recorded)
+> **Last verified:** 2026-04-18 (migration-runner fix merged to main & live in prod via PR #17; three-subdomain architecture re-verified end-to-end — `api.solvela.ai` → Fly gateway HTTP 200, `app.solvela.ai` → Vercel dashboard 307→overview, `docs.solvela.ai` → Vercel docs HTTP 200, `solvela.ai` apex → 307→/docs. Prior verification on 2026-04-17 covered Fly gateway+DB cutover: `rustyclawrouter-gateway` → `solvela-gateway`, `rustyclawrouter-db` → `solvela-db`, `sqlx::migrate!` wired so all 7 migration files apply — `solvela-db` has 10 tables + `_sqlx_migrations` tracker with all 7 versions recorded.)
 
 ---
 
@@ -30,7 +30,7 @@ Part of the **solvela.ai** ecosystem:
 | **A2A protocol** | `GET /.well-known/agent.json`, `POST /a2a` | Working, x402 payment flow |
 | **Models/Services** | `GET /v1/models`, `GET /v1/services`, `POST /v1/services/register`, `POST /v1/services/{id}/proxy` | Working |
 | **Escrow** | `GET /v1/escrow/config`, `GET /v1/escrow/health` | Working |
-| **Enterprise (orgs)** | 12 endpoints under `/v1/orgs/...` | Working, API key auth |
+| **Enterprise (orgs)** | 12 endpoints under `/v1/orgs/...` | Routes mounted, API key auth gate firing (401s as expected); tables now exist after 2026-04-17 migration-runner fix — full CRUD not yet exercised with real org traffic |
 | **Wallet/Stats** | `GET /v1/wallet/{addr}/stats`, `GET /v1/admin/stats` | Working |
 | **Infrastructure** | `GET /health`, `GET /pricing`, `GET /metrics`, `GET /v1/nonce`, `GET /v1/supported` | Working |
 
@@ -103,17 +103,16 @@ Full report: `docs/load-tests/2026-04-12-results.md`
 
 ## Test Counts (run `cargo test` to verify — these go stale)
 
-Last verified 2026-04-08:
+Last verified 2026-04-18 on merged `main`:
 
 ```
-gateway unit:        401
+gateway unit:        404  (was 405 before migration-runner fix removed test_migration_sql_is_valid)
 gateway integration: 122
+migrations test:       1  (#[ignore]-gated, opt-in via TEST_DATABASE_URL + -- --ignored)
 router:               13
 protocol:             18
 x402:                 99
 cli:                  30  (fully tested, 8 commands)
-───────────────────────
-workspace total:     683
 
 escrow (standalone):  21
 dashboard (vitest):   82
