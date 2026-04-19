@@ -1,0 +1,21 @@
+{
+  "x402_version": 2,
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "solana",
+      "amount": "2625",
+      "asset": "USDC",
+      "pay_to": "GatewayWalletAddressXXXXXXXXXXXXXXXXXXXXXXX",
+      "max_timeout_seconds": 300
+    }
+  ],
+  "cost_breakdown": {
+    "provider_cost": "0.002500",
+    "platform_fee": "0.000125",
+    "total": "0.002625",
+    "currency": "USDC",
+    "fee_percent": 5
+  },
+  "error": "Payment required"
+}
