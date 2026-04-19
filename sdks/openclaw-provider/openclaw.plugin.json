@@ -1,0 +1,18 @@
+{
+  "id": "solvela",
+  "version": "1.0.0-draft",
+  "name": "Solvela",
+  "description": "Pay-per-call LLM access with USDC on Solana. No API keys — just a Solana wallet.",
+  "providers": ["solvela"],
+  "providerAuthEnvVars": {
+    "solvela": ["SOLANA_WALLET_KEY", "SOLANA_RPC_URL"]
+  },
+  "providerAuthChoices": [
+    {
+      "provider": "solvela",
+      "method": "api-key",
+      "cliFlag": "--solana-wallet-key",
+      "envVar": "SOLANA_WALLET_KEY"
+    }
+  ]
+}

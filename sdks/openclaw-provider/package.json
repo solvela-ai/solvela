@@ -1,0 +1,35 @@
+{
+  "name": "@solvela/openclaw-provider",
+  "version": "1.0.0-draft",
+  "private": true,
+  "description": "OpenClaw Provider Plugin — registers Solvela as a first-class LLM provider with per-call x402 signing",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "generate:models": "node --import tsx/esm scripts/generate-models.ts",
+    "prebuild": "npm run generate:models",
+    "build": "tsc",
+    "test": "node --import tsx/esm --test tests/index.test.ts tests/signer.test.ts tests/manifest.test.ts tests/models.test.ts tests/registry.test.ts",
+    "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
+  },
+  "keywords": ["openclaw", "solvela", "solana", "usdc", "x402", "llm", "provider-plugin"],
+  "license": "MIT",
+  "dependencies": {
+    "@solvela/sdk": "file:../typescript",
+    "@solana/web3.js": "^1.87.0",
+    "@solana/spl-token": "^0.4.0",
+    "async-mutex": "^0.5.0",
+    "bs58": "^5.0.0"
+  },
+  "devDependencies": {
+    "@iarna/toml": "^2.2.5",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
