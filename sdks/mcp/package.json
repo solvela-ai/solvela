@@ -1,6 +1,7 @@
 {
   "name": "@solvela/mcp-server",
   "version": "0.1.0",
+  "private": true,
   "description": "MCP server for Solvela — AI agents pay for LLM calls with USDC on Solana",
   "type": "module",
   "main": "dist/index.js",
