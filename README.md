@@ -60,7 +60,19 @@ Proxy any x402-enabled external service through the gateway. Admin-controlled re
 
 ### SDKs
 
-Client libraries for Python, TypeScript, and Go. Each SDK includes wallet management, on-chain signing, response caching, session tracking, degraded response detection, and a 7-step smart chat flow. MCP server for Claude Code integration.
+Client libraries for Python, TypeScript, and Go. Each SDK includes wallet management, on-chain signing, response caching, session tracking, degraded response detection, and a 7-step smart chat flow. MCP server for Claude Code, Cursor, Claude Desktop, and OpenClaw integration.
+
+The `solvela` CLI includes a host-config installer that sets up the MCP server in one command:
+
+```bash
+solvela mcp install --host=claude-code    # delegates to claude mcp add (user scope)
+solvela mcp install --host=cursor         # writes ~/.cursor/mcp.json with envFile
+solvela mcp install --host=claude-desktop # writes platform-specific config
+solvela mcp install --host=openclaw       # runs openclaw mcp set solvela ...
+```
+
+The installer never writes `SOLANA_WALLET_KEY` to disk. Store it in `~/.solvela/env`
+(chmod 0600) or your shell profile. See the [MCP server security guide](sdks/mcp/README.md#security) for details.
 
 ### Security
 

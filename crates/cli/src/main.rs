@@ -57,6 +57,8 @@ enum Commands {
     Doctor,
     /// Load test the gateway with configurable concurrency and payment modes
     Loadtest(commands::loadtest::LoadTestArgs),
+    /// MCP host config installer — install/uninstall Solvela MCP server in Claude Code, Cursor, etc.
+    Mcp(commands::mcp::McpArgs),
     /// Recover stranded escrow deposits (refund expired PDAs)
     Recover {
         /// Submit refund transactions (default is dry-run list)
@@ -102,6 +104,10 @@ async fn main() -> Result<()> {
         Commands::Health => commands::health::check(&cli.api_url).await?,
         Commands::Doctor => commands::doctor::run(&cli.api_url).await?,
         Commands::Loadtest(args) => commands::loadtest::run(&cli.api_url, args).await?,
+        Commands::Mcp(args) => match args.action {
+            commands::mcp::McpAction::Install(a) => commands::mcp::run_install(a).await?,
+            commands::mcp::McpAction::Uninstall(a) => commands::mcp::run_uninstall(a).await?,
+        },
         Commands::Recover {
             execute,
             yes,

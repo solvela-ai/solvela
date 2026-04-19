@@ -4,6 +4,49 @@ MCP (Model Context Protocol) server for Solvela -- lets Claude Code, Claude Desk
 
 MCP is an open protocol that allows AI assistants to use external tools. This server exposes the Solvela gateway as a set of MCP tools: chat with any LLM model, use smart routing, check wallet status, list models, and track spending -- all with automatic x402 payment handling.
 
+## Quickstart
+
+Install the `solvela` CLI, then run the one-line installer for your host:
+
+```bash
+# Install the Solvela CLI (once)
+cargo install --path crates/cli
+
+# Install into your preferred host
+solvela mcp install --host=claude-code
+solvela mcp install --host=cursor
+solvela mcp install --host=claude-desktop
+solvela mcp install --host=openclaw
+```
+
+The installer writes the correct config for your host and prints a reminder to
+set `SOLANA_WALLET_KEY` in your shell environment (it is intentionally never
+written to disk by default):
+
+```bash
+export SOLANA_WALLET_KEY=<your-base58-keypair>
+```
+
+Options:
+
+```
+--scope=user|project    user-scoped (default) or project-scoped config
+--wallet=<pubkey>       wallet address to embed (defaults to ~/.solvela/wallet.json)
+--budget=<usdc>         set SOLVELA_SESSION_BUDGET (e.g. "2.00")
+--signing-mode=auto     auto|escrow|direct|off
+--dry-run               print config without writing
+--diff                  show what would change vs the existing config
+--force                 overwrite an existing entry without prompting
+```
+
+To remove:
+
+```bash
+solvela mcp uninstall --host=claude-code
+```
+
+The manual JSON snippets for each host are below as a fallback reference.
+
 ## Installation
 
 ```bash
@@ -204,7 +247,36 @@ The server communicates over stdio using the `@modelcontextprotocol/sdk` library
 
 ## Security
 
-- The `SOLANA_WALLET_KEY` never appears in logs, error messages, stack traces, or tool responses.
+### Key storage model
+
+`SOLANA_WALLET_KEY` is a **hot-wallet secret**. Anyone who can read it can drain your USDC. Treat it with the same care as an SSH private key.
+
+**The installer does NOT write `SOLANA_WALLET_KEY` to any config file by default.** The generated config intentionally omits the key. You must supply it through one of the secure paths below.
+
+**`--include-key` flag (dev/CI only):** Passing this flag writes a plaintext placeholder into the config file. The installer emits a prominent stderr warning. Only use this in isolated dev environments or ephemeral CI runners where the config file is never committed or shared. The placeholder must be replaced with your actual key before the MCP server will work.
+
+### Recommended: store the key in `~/.solvela/env`
+
+```bash
+mkdir -p ~/.solvela
+echo "SOLANA_WALLET_KEY=<your-base58-private-key>" > ~/.solvela/env
+chmod 0600 ~/.solvela/env
+```
+
+**Cursor users:** The installer writes `"envFile": "${userHome}/.solvela/env"` into the Cursor config by default (pass `--no-envfile` to disable). Cursor will source this file automatically, keeping the key out of the JSON config entirely. The file at `~/.solvela/env` should be `chmod 0600` and must never be committed to version control.
+
+**Claude Code / Claude Desktop / OpenClaw users:** Set the key in your shell profile:
+
+```bash
+export SOLANA_WALLET_KEY=<your-base58-private-key>
+```
+
+Or store it in a `0600` file and source it from your profile.
+
+### General rules
+
+- Never commit `SOLANA_WALLET_KEY` to version control. Add `*.env`, `.solvela/env`, and any file containing the key to `.gitignore`.
+- The MCP server never logs, echoes, or returns the key in tool responses. Stack traces and error messages are also sanitized.
 - The SDK zeroes secret key bytes in memory after signing.
 - Private key material flows only from environment variable into the signer — it is never passed through tool arguments (which are model-controlled).
 
