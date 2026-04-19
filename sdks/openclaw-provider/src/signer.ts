@@ -18,6 +18,7 @@
 import { Mutex } from 'async-mutex';
 import { createPaymentHeader, SigningError } from '@solvela/sdk/x402';
 import type { PaymentRequired } from '@solvela/sdk/types';
+import { filterAccepts as coreFilterAccepts, isStubHeader } from '@solvela/signer-core';
 
 export type { SigningError };
 
@@ -107,7 +108,8 @@ export class SolvelaSigner {
 
     // Step 3 — filterAccepts before budget reservation (HF-P3-H7)
     // Throws if no matching scheme — zero budget impact on failure.
-    const filteredPaymentInfo = this.filterAccepts(paymentInfo);
+    const filteredAccepts = coreFilterAccepts(paymentInfo.accepts, this.signingMode);
+    const filteredPaymentInfo = { ...paymentInfo, accepts: filteredAccepts };
 
     // Step 4 — atomic budget reservation (mirrors Phase 1 client.ts T1-H pattern)
     await this.budgetMutex.runExclusive(async () => {
@@ -145,30 +147,7 @@ export class SolvelaSigner {
 
     // Step 6 — Stub-header guard (HF3 pattern): reject stub tx before injecting.
     // Guard is always active when privateKey is set (key present → real signing expected).
-    let isStub = false;
-    try {
-      const decoded = JSON.parse(
-        typeof atob === 'function'
-          ? atob(paymentHeader)
-          : Buffer.from(paymentHeader, 'base64').toString('utf-8'),
-      );
-      const tx = decoded?.payload?.transaction;
-      const depositTx = decoded?.payload?.deposit_tx;
-      if (
-        (typeof tx === 'string' && tx.startsWith('STUB_')) ||
-        (typeof depositTx === 'string' && depositTx.startsWith('STUB_'))
-      ) {
-        isStub = true;
-      }
-    } catch (err) {
-      // Narrow to SyntaxError — malformed base64/JSON is not a stub (HF-P3-L3)
-      if (!(err instanceof SyntaxError)) {
-        throw err;
-      }
-      // SyntaxError: decode failure is not a stub — let the gateway handle it
-    }
-
-    if (isStub) {
+    if (isStubHeader(paymentHeader)) {
       // Refund before throwing
       await this.refundBudget(cost);
       throw new Error(
@@ -216,24 +195,4 @@ export class SolvelaSigner {
     return this.sessionSpent;
   }
 
-  /** Filter payment accepts by signing mode before passing to the SDK. */
-  private filterAccepts(paymentInfo: PaymentRequired): PaymentRequired {
-    if (this.signingMode === 'auto') return paymentInfo;
-
-    const filtered = paymentInfo.accepts.filter((a) => {
-      if (this.signingMode === 'escrow') return a.scheme === 'escrow';
-      if (this.signingMode === 'direct') return a.scheme !== 'escrow';
-      return true;
-    });
-
-    if (filtered.length === 0) {
-      throw new Error(
-        `No payment accepts match signing mode '${this.signingMode}'. ` +
-          'Gateway offered: ' +
-          paymentInfo.accepts.map((a) => a.scheme).join(', '),
-      );
-    }
-
-    return { ...paymentInfo, accepts: filtered };
-  }
 }
