@@ -41,7 +41,8 @@
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "2.0.41",
-    "@ai-sdk/provider-utils": "^4.0.0"
+    "@ai-sdk/provider-utils": "^4.0.0",
+    "@solvela/signer-core": "file:../signer-core"
   },
   "peerDependencies": {
     "@ai-sdk/provider": "^3.0.0",

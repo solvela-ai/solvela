@@ -12,12 +12,13 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "test": "node --test tests/server.test.ts tests/contract.test.ts"
+    "test": "node --test tests/server.test.ts tests/contract.test.ts tests/session.test.ts tests/escrow.test.ts"
   },
   "keywords": ["mcp", "solana", "usdc", "x402", "llm", "ai-agent"],
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@solvela/signer-core": "file:../signer-core",
     "@solvela/sdk": "file:../typescript",
     "@solana/web3.js": "^1.87.0",
     "@solana/spl-token": "^0.4.0",

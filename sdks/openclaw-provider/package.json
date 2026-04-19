@@ -20,6 +20,7 @@
   "keywords": ["openclaw", "solvela", "solana", "usdc", "x402", "llm", "provider-plugin"],
   "license": "MIT",
   "dependencies": {
+    "@solvela/signer-core": "file:../signer-core",
     "@solvela/sdk": "file:../typescript",
     "@solana/web3.js": "^1.87.0",
     "@solana/spl-token": "^0.4.0",

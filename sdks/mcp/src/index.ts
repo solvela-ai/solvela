@@ -10,14 +10,17 @@
  *   npx @solvela/mcp-server
  *
  * Environment variables:
- *   SOLVELA_API_URL          Gateway URL (default: https://api.solvela.ai)
- *   SOLVELA_SESSION_BUDGET   Max USDC to spend this session (e.g. "1.00")
- *   SOLVELA_TIMEOUT_MS       Request timeout in ms (default: 60000)
- *   SOLVELA_SIGNING_MODE     auto | escrow | direct | off (default: auto)
- *   SOLVELA_ALLOW_DEV_BYPASS Set to "1" to silence dev_bypass_payment warning
- *   SOLANA_WALLET_KEY        Base58 secret key (required unless SOLVELA_SIGNING_MODE=off)
- *   SOLANA_RPC_URL           Solana RPC endpoint (required unless SOLVELA_SIGNING_MODE=off)
- *   SOLANA_WALLET_ADDRESS    Wallet pubkey shown in wallet_status / spending
+ *   SOLVELA_API_URL             Gateway URL (default: https://api.solvela.ai)
+ *   SOLVELA_SESSION_BUDGET      Max USDC to spend this session (e.g. "1.00")
+ *   SOLVELA_TIMEOUT_MS          Request timeout in ms (default: 60000)
+ *   SOLVELA_SIGNING_MODE        auto | escrow | direct | off (default: auto)
+ *   SOLVELA_ALLOW_DEV_BYPASS    Set to "1" to silence dev_bypass_payment warning
+ *   SOLVELA_ESCROW_MODE         Set to "enabled" to expose the deposit_escrow tool
+ *   SOLVELA_MAX_ESCROW_DEPOSIT  Per-call deposit cap in USDC (default: 5.0)
+ *   SOLVELA_MAX_ESCROW_SESSION  Cumulative session deposit cap in USDC (default: 20.0)
+ *   SOLANA_WALLET_KEY           Base58 secret key (required unless SOLVELA_SIGNING_MODE=off)
+ *   SOLANA_RPC_URL              Solana RPC endpoint (required unless SOLVELA_SIGNING_MODE=off)
+ *   SOLANA_WALLET_ADDRESS       Wallet pubkey shown in wallet_status / spending
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -30,7 +33,11 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { GatewayClient, type ChatMessage } from './client.js';
-import { TOOLS } from './tools.js';
+import { getTools } from './tools.js';
+import { createSessionStore } from './session.js';
+import { createPaymentHeader } from '@solvela/sdk/x402';
+import type { PaymentRequired, PaymentAccept } from '@solvela/sdk/types';
+import { PublicKey } from '@solana/web3.js';
 
 // ---------------------------------------------------------------------------
 // Bootstrap client from environment
@@ -74,11 +81,59 @@ if (timeoutStr !== undefined) {
   timeoutMs = parsed;
 }
 
+// T-2G-D: Validate SOLVELA_ESCROW_MODE — accept only 'enabled' or unset.
+const rawEscrowMode = process.env['SOLVELA_ESCROW_MODE'];
+if (rawEscrowMode !== undefined && rawEscrowMode !== 'enabled') {
+  process.stderr.write(
+    `[solvela-mcp] Fatal: invalid SOLVELA_ESCROW_MODE='${rawEscrowMode}'. ` +
+    `Must be 'enabled' or unset. Set SOLVELA_ESCROW_MODE=enabled to activate escrow tools.\n`,
+  );
+  process.exit(1);
+}
+const escrowEnabled = rawEscrowMode === 'enabled';
+
+// When escrow is enabled, SOLVELA_ESCROW_PROGRAM_ID and SOLVELA_RECIPIENT_WALLET
+// are required — neither has a safe default. Validation happens in main() below.
+const escrowProgramId = process.env['SOLVELA_ESCROW_PROGRAM_ID'] ?? '';
+const escrowRecipientWallet = process.env['SOLVELA_RECIPIENT_WALLET'] ?? '';
+
+// T-2G-D: Validate SOLVELA_MAX_ESCROW_DEPOSIT (default $5).
+const maxEscrowDepositStr = process.env['SOLVELA_MAX_ESCROW_DEPOSIT'];
+let maxEscrowDeposit = 5.0;
+if (maxEscrowDepositStr !== undefined) {
+  const parsed = parseFloat(maxEscrowDepositStr);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    process.stderr.write(
+      `[solvela-mcp] Fatal: SOLVELA_MAX_ESCROW_DEPOSIT='${maxEscrowDepositStr}' is not a positive number.\n`,
+    );
+    process.exit(1);
+  }
+  maxEscrowDeposit = parsed;
+}
+
+// T-2G-D: Validate SOLVELA_MAX_ESCROW_SESSION (default $20).
+const maxEscrowSessionStr = process.env['SOLVELA_MAX_ESCROW_SESSION'];
+let maxEscrowSession = 20.0;
+if (maxEscrowSessionStr !== undefined) {
+  const parsed = parseFloat(maxEscrowSessionStr);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    process.stderr.write(
+      `[solvela-mcp] Fatal: SOLVELA_MAX_ESCROW_SESSION='${maxEscrowSessionStr}' is not a positive number.\n`,
+    );
+    process.exit(1);
+  }
+  maxEscrowSession = parsed;
+}
+
+// T-1K-B: Wire session store for persistence.
+const sessionStore = createSessionStore();
+
 const client = new GatewayClient({
   apiUrl: process.env['SOLVELA_API_URL'] ?? process.env['RCR_API_URL'], // compat
   sessionBudget,
   timeoutMs,
   signingMode,
+  sessionStore,
 });
 
 // ---------------------------------------------------------------------------
@@ -98,7 +153,8 @@ const server = new Server(
 // ---- list tools -----------------------------------------------------------
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS,
+  // H5: Pass escrowEnabled as argument so getTools() doesn't re-read process.env per call.
+  tools: getTools({ escrowEnabled }),
 }));
 
 // ---- call tool ------------------------------------------------------------
@@ -214,18 +270,261 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'spending': {
+        const { reset = false } = (args ?? {}) as { reset?: boolean };
+
+        if (reset) {
+          await client.resetSession();
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Session counters reset. ~/.solvela/mcp-session.json cleared.',
+              },
+            ],
+          };
+        }
+
         const spend = client.spendSummary();
+        const escrowTotal = client.getEscrowDepositsSession();
 
         const lines = [
           `Wallet:          ${spend.wallet_address ?? 'not configured'}`,
           `Requests:        ${spend.total_requests}`,
           `Session spent:   ${spend.session_usdc_spent} USDC`,
+          ...(escrowEnabled
+            ? [`Escrow deposits: ${escrowTotal.toFixed(6)} USDC (session cap: $${maxEscrowSession.toFixed(2)})`]
+            : []),
           spend.budget_remaining !== null
             ? `Budget remaining: ${spend.budget_remaining} USDC`
             : 'Budget:          unlimited',
         ];
 
         return { content: [{ type: 'text', text: lines.join('\n') }] };
+      }
+
+      case 'deposit_escrow': {
+        // T-2G-C: deposit_escrow handler
+        if (!escrowEnabled) {
+          throw new McpError(
+            ErrorCode.MethodNotFound,
+            'deposit_escrow is disabled. Set SOLVELA_ESCROW_MODE=enabled to enable.',
+          );
+        }
+
+        // deposit_escrow always requires real signing — SOLANA_WALLET_KEY and SOLANA_RPC_URL
+        // must be present regardless of SOLVELA_SIGNING_MODE.
+        const privateKey = process.env['SOLANA_WALLET_KEY'];
+        if (!privateKey) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            'deposit_escrow requires SOLANA_WALLET_KEY to be set.',
+          );
+        }
+        const rpcUrl = process.env['SOLANA_RPC_URL'];
+        if (!rpcUrl) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            'deposit_escrow requires SOLANA_RPC_URL to be set.',
+          );
+        }
+
+        const { amount_usdc, max_timeout_seconds = 300 } = args as {
+          amount_usdc: string;
+          max_timeout_seconds?: number;
+        };
+
+        // H3: Strict amount parsing — reject scientific notation, trailing garbage, non-positive.
+        // Regex accepts only plain decimal strings: digits optionally followed by '.' + digits.
+        if (!/^\d+(\.\d+)?$/.test(amount_usdc)) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            `amount_usdc must be a positive decimal number (e.g. "5.00"), got: ${JSON.stringify(amount_usdc)}`,
+          );
+        }
+        const amount = Number(amount_usdc);
+        if (!Number.isFinite(amount) || amount <= 0) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            `amount_usdc must be positive, got: ${amount_usdc}`,
+          );
+        }
+
+        // Per-call cap
+        if (amount > maxEscrowDeposit) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            `Deposit amount $${amount.toFixed(6)} USDC exceeds per-call cap $${maxEscrowDeposit.toFixed(2)} USDC ` +
+              `(SOLVELA_MAX_ESCROW_DEPOSIT). Reduce the amount or raise the cap.`,
+          );
+        }
+
+        // Convert USDC to micro-USDC (6 decimals) for the on-chain amount
+        const amountMicroUsdc = Math.round(amount * 1_000_000);
+
+        // Build a synthetic PaymentRequired with an escrow accept so we can reuse
+        // createPaymentHeader from @solvela/sdk (buildEscrowDeposit is internal).
+        // escrowProgramId and escrowRecipientWallet are validated at startup — never empty here.
+        const syntheticPaymentRequired: PaymentRequired = {
+          x402_version: 2,
+          accepts: [
+            {
+              scheme: 'escrow',
+              network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+              amount: String(amountMicroUsdc),
+              asset: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+              pay_to: escrowRecipientWallet,
+              max_timeout_seconds,
+              escrow_program_id: escrowProgramId,
+            } as PaymentAccept,
+          ],
+          cost_breakdown: {
+            provider_cost: String(amount),
+            platform_fee: '0',
+            total: String(amount),
+            currency: 'USDC',
+            fee_percent: 0,
+          },
+          error: 'Escrow deposit',
+        };
+
+        let depositTxSignature = '';
+        let escrowPda = '';
+        // count-on-broadcast policy: confirmed=true unless confirmation timed out or failed.
+        let confirmed = true;
+
+        // Use runEscrowDeposit for atomic session-cap check + commit.
+        // onDeposit MUST throw ONLY if broadcast itself failed — confirmation timeout is NOT
+        // a throw; it sets confirmed=false so the reservation is NOT rolled back.
+        const newTotal = await client.runEscrowDeposit(amount, maxEscrowSession, async () => {
+          // Build the payment header via the SDK (this builds + signs the deposit tx)
+          let paymentHeader: string;
+          try {
+            paymentHeader = await createPaymentHeader(
+              syntheticPaymentRequired,
+              `${client.apiUrl}/v1/escrow/deposit`,
+              privateKey,
+              '', // no request body for standalone deposit
+            );
+          } catch (err) {
+            throw new Error(
+              `Failed to build escrow deposit transaction: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+
+          // Decode the header to extract the deposit_tx and service_id
+          let decoded: {
+            payload?: { deposit_tx?: string; service_id?: string; agent_pubkey?: string };
+          };
+          try {
+            const json = Buffer.from(paymentHeader, 'base64').toString('utf-8');
+            decoded = JSON.parse(json) as typeof decoded;
+          } catch (err) {
+            throw new Error(`Failed to decode payment header: ${err instanceof Error ? err.message : String(err)}`);
+          }
+
+          const depositTxB64 = decoded?.payload?.deposit_tx;
+          const agentPubkey = decoded?.payload?.agent_pubkey;
+          const serviceIdB64 = decoded?.payload?.service_id;
+
+          if (!depositTxB64 || depositTxB64.startsWith('STUB_')) {
+            throw new Error(
+              'Escrow deposit tx is a stub — ensure @solana/web3.js is installed and SOLANA_WALLET_KEY is valid.',
+            );
+          }
+
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const solanaWeb3 = require('@solana/web3.js');
+          const { Connection } = solanaWeb3;
+          const connection = new Connection(rpcUrl, 'confirmed');
+
+          // Fetch blockhash BEFORE broadcast so lastValidBlockHeight is available for confirmTransaction.
+          const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed') as {
+            blockhash: string;
+            lastValidBlockHeight: number;
+          };
+
+          const txBytes = Buffer.from(depositTxB64, 'base64');
+
+          // Phase 2 boundary: ONLY throw if broadcast fails.
+          // A broadcast failure means the tx was never submitted — safe to roll back the cap.
+          let signature: string;
+          try {
+            signature = (await connection.sendRawTransaction(txBytes, {
+              skipPreflight: false,
+              preflightCommitment: 'confirmed',
+            })) as string;
+          } catch (err) {
+            throw new Error(
+              `Failed to broadcast escrow deposit: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+
+          depositTxSignature = signature;
+
+          // Confirmation: NOT part of the throw boundary.
+          // If confirmation times out, the tx is in flight — count-on-broadcast means
+          // the reservation stands. We signal pending via the confirmed flag.
+          try {
+            const confirmation = await connection.confirmTransaction(
+              { signature, blockhash, lastValidBlockHeight },
+              'confirmed',
+            ) as { value: { err: unknown } };
+            if (confirmation.value.err) {
+              // Tx landed but failed on-chain — rare. Count as broadcast-succeeded.
+              confirmed = false;
+              process.stderr.write(
+                `[solvela-mcp] WARN: deposit ${signature} landed but failed on-chain. ` +
+                `Counted against session cap per count-on-broadcast policy.\n`,
+              );
+            }
+          } catch (err) {
+            // Confirmation timeout — tx is in flight, count it.
+            confirmed = false;
+            process.stderr.write(
+              `[solvela-mcp] WARN: deposit ${signature} not confirmed within timeout; ` +
+              `counted against session cap per count-on-broadcast policy. ` +
+              `Check the signature on Solana Explorer.\n`,
+            );
+          }
+
+          // Derive the escrow PDA to return to the caller.
+          // Seeds: ["escrow", agentPubkey, serviceId]
+          if (agentPubkey && serviceIdB64) {
+            try {
+              const [pda] = PublicKey.findProgramAddressSync(
+                [
+                  Buffer.from('escrow'),
+                  new PublicKey(agentPubkey).toBuffer(),
+                  Buffer.from(serviceIdB64, 'base64'),
+                ],
+                new PublicKey(escrowProgramId),
+              );
+              escrowPda = pda.toBase58();
+            } catch {
+              escrowPda = '(derivation failed — see agent_pubkey + service_id)';
+            }
+          }
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  deposit_tx_signature: depositTxSignature,
+                  escrow_pda: escrowPda,
+                  amount_deposited_usdc: amount.toFixed(6),
+                  session_deposits_total_usdc: newTotal.toFixed(6),
+                  session_deposits_cap_usdc: maxEscrowSession.toFixed(6),
+                  confirmation_status: confirmed ? 'confirmed' : 'pending',
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
       }
 
       default:
@@ -273,9 +572,62 @@ async function main() {
     }
   }
 
+  // T-2G + HF-F2T2-H4: Startup validation — escrow mode requires explicit program ID and
+  // recipient wallet, both of which must be valid Solana base58 pubkeys.
+  if (escrowEnabled) {
+    if (!escrowProgramId) {
+      process.stderr.write(
+        'Fatal: SOLVELA_ESCROW_PROGRAM_ID required when SOLVELA_ESCROW_MODE=enabled.\n',
+      );
+      process.exit(1);
+    }
+    if (!escrowRecipientWallet) {
+      process.stderr.write(
+        'Fatal: SOLVELA_RECIPIENT_WALLET required when SOLVELA_ESCROW_MODE=enabled.\n',
+      );
+      process.exit(1);
+    }
+    // Validate format — rejects malformed or typo'd addresses early before any deposit.
+    try {
+      new PublicKey(escrowProgramId);
+    } catch {
+      process.stderr.write(
+        `Fatal: SOLVELA_ESCROW_PROGRAM_ID=${escrowProgramId} is not a valid Solana pubkey.\n`,
+      );
+      process.exit(1);
+    }
+    try {
+      new PublicKey(escrowRecipientWallet);
+    } catch {
+      process.stderr.write(
+        `Fatal: SOLVELA_RECIPIENT_WALLET=${escrowRecipientWallet} is not a valid Solana pubkey.\n`,
+      );
+      process.exit(1);
+    }
+    // SOLANA_WALLET_KEY and SOLANA_RPC_URL are also required when escrow is enabled,
+    // even if SOLVELA_SIGNING_MODE=off (escrow always needs real signing).
+    if (!process.env['SOLANA_WALLET_KEY']) {
+      process.stderr.write(
+        'Fatal: SOLANA_WALLET_KEY required when SOLVELA_ESCROW_MODE=enabled.\n',
+      );
+      process.exit(1);
+    }
+    if (!process.env['SOLANA_RPC_URL']) {
+      process.stderr.write(
+        'Fatal: SOLANA_RPC_URL required when SOLVELA_ESCROW_MODE=enabled.\n',
+      );
+      process.exit(1);
+    }
+  }
+
   // HF6: Log resolved gateway URL and signing mode at startup — makes typos visible.
   process.stderr.write(
     `[solvela-mcp] gateway=${client.apiUrl} signingMode=${signingMode}\n`,
+  );
+
+  // T-2G-D: Log escrow mode and caps.
+  process.stderr.write(
+    `[solvela-mcp] escrow=${escrowEnabled ? 'enabled' : 'disabled'} max-deposit=$${maxEscrowDeposit.toFixed(2)} max-session=$${maxEscrowSession.toFixed(2)}\n`,
   );
 
   // HF7: Health check with short timeout (5 s) so it never blocks MCP handshake.

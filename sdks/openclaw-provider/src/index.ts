@@ -55,6 +55,7 @@ import type {
   DynamicModelContext,
 } from './openclaw-types.js';
 import type { PaymentRequired } from '@solvela/sdk/types';
+import { parse402, sanitizeGatewayError } from '@solvela/signer-core';
 
 export { SOLVELA_MODELS } from './models.generated.js';
 export { ROUTING_PROFILES } from './registry.js';
@@ -176,12 +177,11 @@ async function fetchPaymentRequired(
       throw new GatewayAcceptedWithoutPayment();
     }
     // Sanitize error body — redact any payment-signature fragments (HF-P3-M2)
-    const text = (await resp.text().catch(() => '')).slice(0, 400);
-    const sanitized = text.replace(/payment-signature[^\s,}"]+/gi, '[redacted]');
+    const sanitized = sanitizeGatewayError(await resp.text().catch(() => ''), 400);
     throw new Error(`Unexpected gateway response ${resp.status}: ${sanitized}`);
   }
 
-  return parsePaymentRequired(await resp.text());
+  return parse402(await resp.text()) as PaymentRequired;
 }
 
 /** Thrown when the gateway accepted the probe request without requiring payment. */
@@ -190,45 +190,6 @@ export class GatewayAcceptedWithoutPayment extends Error {
     super('Gateway accepted request without payment (dev_bypass_payment mode?)');
     this.name = 'GatewayAcceptedWithoutPayment';
   }
-}
-
-function parsePaymentRequired(raw: string): PaymentRequired {
-  let body: unknown;
-  try {
-    body = JSON.parse(raw);
-  } catch {
-    throw new Error(
-      `Gateway returned 402 with non-JSON body (first 200 chars): ${raw.slice(0, 200)}`,
-    );
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const typed: any = body;
-  const msg = typed?.error?.message;
-  if (typeof msg === 'string') {
-    try {
-      return JSON.parse(msg) as PaymentRequired;
-    } catch {
-      throw new Error(
-        `Gateway 402 error.message is not valid JSON (first 200 chars): ${msg.slice(0, 200)}`,
-      );
-    }
-  }
-
-  if (typed?.x402_version && Array.isArray(typed?.accepts) && typed.accepts.length > 0) {
-    // Validate cost is finite before returning (HF-P3-M9)
-    const cost = parseFloat(typed.cost_breakdown?.total);
-    if (!Number.isFinite(cost) || cost < 0) {
-      throw new Error(`Gateway 402 has invalid cost: ${typed.cost_breakdown?.total}`);
-    }
-    return typed as PaymentRequired;
-  }
-
-  throw new Error(
-    `Gateway 402 body missing x402_version/accepts (received keys: ${Object.keys(
-      (body as object) ?? {},
-    ).join(',')})`,
-  );
 }
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ import { join, dirname } from 'node:path';
 
 import { GatewayClient } from '../src/client.ts';
 import type { PaymentRequired } from '../src/client.ts';
+import { parse402 } from '@solvela/signer-core';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -34,17 +35,10 @@ describe('402 envelope contract', () => {
     assert.ok(typeof fixtureBody.error.message === 'string', 'fixture.error.message must be a string');
   });
 
-  it('parse402 correctly parses the gateway fixture envelope', async () => {
-    const client = new GatewayClient({ apiUrl: 'http://test.local' });
-
-    // Simulate a Response object with the fixture as the body.
-    // parse402 calls resp.text() then JSON.parse() (HF5), so provide text().
-    const fakeResp = {
-      json: () => Promise.resolve(fixtureBody),
-      text: () => Promise.resolve(JSON.stringify(fixtureBody)),
-    } as unknown as Response;
-
-    const parsed = await client.parse402(fakeResp);
+  it('parse402 correctly parses the gateway fixture envelope', () => {
+    // parse402 is now a module-level function from @solvela/signer-core that
+    // accepts the raw response text string (the parallel executor extracted it).
+    const parsed = parse402(JSON.stringify(fixtureBody));
 
     assert.ok(parsed !== null, 'parse402 must return a non-null PaymentRequired');
     const payment = parsed as PaymentRequired;

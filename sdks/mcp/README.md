@@ -146,9 +146,65 @@ All configuration is via environment variables:
 | `SOLVELA_TIMEOUT_MS` | `60000` | Request timeout in milliseconds |
 | `SOLVELA_SIGNING_MODE` | `auto` | Payment signing mode: `auto`, `escrow`, `direct`, or `off` |
 | `SOLVELA_ALLOW_DEV_BYPASS` | — | Set to `1` to silence the dev_bypass_payment gateway warning |
+| `SOLVELA_ESCROW_MODE` | — | Set to `enabled` to expose the `deposit_escrow` tool |
+| `SOLVELA_MAX_ESCROW_DEPOSIT` | `5.0` | Per-call deposit cap in USDC (applies only when escrow mode is enabled) |
+| `SOLVELA_MAX_ESCROW_SESSION` | `20.0` | Cumulative session deposit cap in USDC (applies only when escrow mode is enabled) |
+| `SOLVELA_ESCROW_PROGRAM_ID` | required (when escrow enabled) | Base58 address of the Solvela escrow program on Solana |
+| `SOLVELA_RECIPIENT_WALLET` | required (when escrow enabled) | Base58 wallet address that receives escrow payments |
 | `SOLANA_WALLET_KEY` | required (when signing enabled) | Base58-encoded Solana keypair secret key |
 | `SOLANA_RPC_URL` | required (when signing enabled) | Solana RPC endpoint (e.g. `https://api.mainnet-beta.solana.com`) |
 | `SOLANA_WALLET_ADDRESS` | not configured | Wallet pubkey shown in `wallet_status` and `spending` |
+
+### Escrow Mode
+
+Set `SOLVELA_ESCROW_MODE=enabled` to expose the `deposit_escrow` tool. This is intended for agent-driven workloads where the agent pre-funds an escrow PDA and the gateway claims only what was actually used.
+
+**Do not enable escrow mode for interactive chat sessions** — the per-session deposit cap is a safeguard, not a substitute for careful budget management.
+
+When escrow mode is enabled, the server logs the effective caps at startup:
+
+```
+[solvela-mcp] escrow=enabled max-deposit=$5.00 max-session=$20.00
+```
+
+Caps are enforced in-process and persisted to `~/.solvela/mcp-session.json` so they survive restarts.
+
+### Session Persistence
+
+The MCP server writes `~/.solvela/mcp-session.json` on every spend event. This file tracks:
+
+- `session_spent` — cumulative USDC spent via `chat` / `smart_chat`
+- `escrow_deposits_session` — cumulative USDC deposited via `deposit_escrow`
+- `request_count` — total requests this session
+- `last_updated` — ISO timestamp of last write
+
+Example file:
+
+```json
+{
+  "session_spent": 0.012500,
+  "escrow_deposits_session": 4.000000,
+  "request_count": 5,
+  "last_updated": "2026-04-18T12:34:56.789Z",
+  "version": 1
+}
+```
+
+The file is written atomically (via a `.tmp` rename) with `0600` permissions on Unix. If the file is missing, corrupt, or has an unknown schema version, the server resets to zero and logs a `WARN` to stderr — it does not crash.
+
+To reset the session counters and delete the file, call the `spending` tool with `reset: true`:
+
+```json
+{ "tool": "spending", "arguments": { "reset": true } }
+```
+
+Or delete the file manually:
+
+```bash
+rm ~/.solvela/mcp-session.json
+```
+
+**Security:** The session file never contains wallet keys or signing material. It is safe to inspect and delete at any time.
 
 ### Signing Modes
 
@@ -202,7 +258,40 @@ List all LLM models available through the gateway, including USDC pricing per mi
 
 Show USDC spending statistics for the current session: total spent, request count, remaining budget, and wallet address.
 
-No parameters.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `reset` | `boolean` | no | If `true`, reset all session counters to zero and delete `~/.solvela/mcp-session.json` |
+
+### `deposit_escrow`
+
+Deposit USDC into a trustless escrow PDA on Solana for a future Solvela call. The gateway claims only what was actually used after the request completes; the remainder auto-refunds.
+
+**Only visible when `SOLVELA_ESCROW_MODE=enabled`.**
+
+Requires `SOLANA_WALLET_KEY` and `SOLANA_RPC_URL` regardless of `SOLVELA_SIGNING_MODE`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `amount_usdc` | `string` | yes | Amount to deposit in USDC (e.g. `"2.50"`) |
+| `max_timeout_seconds` | `number` | no | Escrow expiry in seconds (default: `300`) |
+
+Returns:
+
+```json
+{
+  "deposit_tx_signature": "<base58 Solana tx signature>",
+  "escrow_pda": "<base58 PDA address>",
+  "amount_deposited_usdc": "2.500000",
+  "session_deposits_total_usdc": "6.500000",
+  "session_deposits_cap_usdc": "20.000000"
+}
+```
+
+**Caps:**
+- Per-call: `SOLVELA_MAX_ESCROW_DEPOSIT` (default `$5.00`). Reject amounts above this threshold.
+- Session: `SOLVELA_MAX_ESCROW_SESSION` (default `$20.00`). Cumulative deposits this session, persisted across restarts.
+
+If the on-chain deposit broadcast fails, the session cap is NOT incremented. The transaction is confirmed before returning (60 s timeout). If confirmation times out, the error message includes the transaction signature so you can check Solana Explorer.
 
 ## Examples
 
@@ -246,6 +335,38 @@ The server communicates over stdio using the `@modelcontextprotocol/sdk` library
 5. Returns results as MCP tool responses
 
 ## Security
+
+### Escrow mode — model-controlled money movement
+
+When `SOLVELA_ESCROW_MODE=enabled`, the `deposit_escrow` tool becomes
+available to the AI model. The model decides when to deposit and how
+much (up to `SOLVELA_MAX_ESCROW_DEPOSIT` per call, `SOLVELA_MAX_ESCROW_SESSION`
+per session).
+
+**Threat model:** A prompt-injected or misaligned model could deposit
+up to the session cap without your explicit approval.
+
+**Mitigations:**
+- Caps are enforced both per-call and cumulatively per session.
+- The session cap is checked atomically (mutex-protected) so parallel tool
+  invocations cannot exceed the limit via a race condition.
+- Set caps conservatively (defaults: $5/call, $20/session).
+- The `spending` tool shows cumulative deposits at any time.
+- Run `spending` with `reset: true` to clear session counters.
+
+**WARNING on address trust:** `SOLVELA_RECIPIENT_WALLET` and
+`SOLVELA_ESCROW_PROGRAM_ID` control where your USDC is deposited.
+Verify these match the official Solvela addresses published at
+https://docs.solvela.ai/addresses before enabling. Both values are
+validated as valid Solana pubkeys at server startup — an invalid or
+typo'd address causes an immediate fatal error rather than a silent
+misdirected deposit. An attacker who can modify your MCP config file
+can still redirect deposits to a different valid address.
+
+**Multi-process warning:** Session cap enforcement is in-process only.
+Running two MCP server instances pointing at the same session file may
+allow the cumulative cap to be exceeded (no cross-process file lock).
+Use a single MCP server instance per session file.
 
 ### Key storage model
 
