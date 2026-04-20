@@ -21,12 +21,12 @@ Submit via: Pull Request to the upstream repo with:
 # For cursor.directory registry submission
 name: solvela
 title: Solvela — x402 USDC LLM Gateway
-description: Pay-per-call LLM access on Solana. Real USDC-SPL settlement with trustless escrow. One-line install into Cursor.
+description: Pay-per-call LLM access on Solana. Real USDC-SPL settlement with trustless escrow. One-line install into Cursor. Requires local Solana wallet key — see docs for secure storage.
 homepage: https://solvela.ai
 documentation: https://docs.solvela.ai/en/mcp
-repository: https://github.com/solveladev/solvela
+repository: https://github.com/solvela-ai/solvela
 author: Solvela
-license: Apache-2.0
+license: MIT
 tags:
   - ai
   - payments
@@ -52,7 +52,11 @@ optionalEnvironmentVariables:
 deeplink:
   scheme: cursor
   protocol: mcp+npm
-  format: cursor://install?package=@solvela/mcp-server&env=SOLANA_WALLET_KEY,SOLANA_RPC_URL,SOLVELA_API_URL
+  # VERIFY BEFORE SUBMISSION: Cursor has changed deeplink scheme more than once.
+  # Confirm current format against https://cursor.sh/docs or the cursor.directory repo
+  # before submitting — an incorrect scheme will cause the PR to be rejected or the
+  # install button to silently fail.
+  format: cursor://install?package=@solvela/mcp-server&name=solvela&displayName=Solvela&env=SOLANA_WALLET_KEY,SOLANA_RPC_URL,SOLVELA_API_URL
 ```
 
 ---
@@ -64,6 +68,8 @@ For the "Add to Cursor" button, the deeplink should look like:
 ```
 cursor://install?package=@solvela/mcp-server&name=solvela&displayName=Solvela&env=SOLANA_WALLET_KEY,SOLANA_RPC_URL,SOLVELA_API_URL
 ```
+
+> ⚠️ **Verify scheme before submission.** Cursor has changed the deeplink format more than once. Check the current format against Cursor's docs or the cursor.directory upstream repo before generating the "Add to Cursor" button — an incorrect scheme silently fails or causes the PR to be rejected.
 
 When clicked, Cursor will:
 1. Install `@solvela/mcp-server` from npm
@@ -132,7 +138,7 @@ Cost breakdown is shown in the response.
 ### Documentation
 
 Full setup guide: https://docs.solvela.ai/en/mcp  
-GitHub: https://github.com/solveladev/solvela  
+GitHub: https://github.com/solvela-ai/solvela  
 Blog: https://solvela.ai/blog
 
 ---

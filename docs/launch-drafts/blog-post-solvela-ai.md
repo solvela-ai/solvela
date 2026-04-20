@@ -8,11 +8,9 @@
 
 ---
 
-## Headline Options (Pick One)
+## Headline
 
-1. **"Agents Should Pay for Their Own LLM Calls — Here's How (on Solana)"**
-2. **"Open x402 Protocol Meets Solana: Pay-per-Call LLM Access Without Accounts"**
-3. **"Escrow-First LLM Payments: Solvela Brings x402 to Claude Code, Cursor, and OpenClaw"**
+**"Agents Should Pay for Their Own LLM Calls — Here's How (on Solana)"**
 
 ---
 
@@ -43,6 +41,16 @@ The x402 protocol, now part of Linux Foundation infrastructure, defines a standa
 Solana is the x402 carrier for LLM payments. It's where the volume is — 65–70% of all x402 transactions settle on Solana. And it's fast: finality in under a second.
 
 Solvela is the gateway that bridges x402 + Solana + your favorite LLMs.
+
+## Proof: Two Products Already Running on This
+
+We're not shipping a demo. Two commercial products already run on Solvela in production:
+
+**Telsi.ai** is a multi-tenant AI assistant SaaS that migrated from BlockRun in April. It routes LLM calls through Solvela for every tenant session — real USDC-SPL settlement, per-call, in production. Telsi's migration from BlockRun to Solvela took less than a day: swap the provider config, point the wallet, done.
+
+**RustyClaw.ai** is a crypto trading terminal with an autonomous trading agent. The agent makes LLM calls to reason about market conditions and execute trades. It pays for those calls in USDC-SPL via Solvela — no API keys managed by humans, no credit card on file. RustyClaw has paying Stripe customers whose agents are live on Solvela right now.
+
+If you're evaluating whether Solvela is production-ready: it is. We built it because we needed it. We run it. You can too.
 
 ## What Shipped
 
@@ -129,11 +137,19 @@ Solvela's gateway is written in Rust + Axum. Competitors (BlockRun, Skyfire, Ban
 
 Why it matters:
 
-- **Performance:** 400 RPS ceiling measured under load. TypeScript single-threaded event loops hit ~100 RPS.
+- **Performance:** Load-tested to 400 RPS with p99 < 300ms under sustained load.
 - **Concurrency:** Tokio async runtime handles thousands of simultaneous payment verifications. No thread-per-request overhead.
 - **Correctness:** Compile-time guarantees on thread safety and memory ownership. Payment systems need that.
 
 This isn't marketingspeak — it's the difference between a gateway that scales and one that falls over during high-agent-activity windows.
+
+## Where Solvela Sits in the x402 Stack
+
+The Rust x402 library layer is now well-populated: x402-rs, FareSide's closed beta, r402, tempo-x402. These are protocol libraries — they give you the x402 primitives to build with. Solvela is not at that layer.
+
+Solvela operates the LLM gateway on top of x402: provider aggregation across 5 LLMs, a 15-dimension smart router, trustless mainnet escrow, and a one-line MCP install. Library vendors don't run gateways. We do.
+
+If you want to build your own x402 payment layer, x402-rs is excellent. If you want to plug an agent into 26+ models with escrow-guaranteed settlement in 2 minutes, that's Solvela. These are different products for different audiences. We're not competing with the library layer — we're building on top of it.
 
 ## The Smart Router
 
@@ -161,7 +177,7 @@ For comparison: OpenRouter charges 3–5% + a credit model (top-up, sit unused).
 
 **Phase 1 (shipped):** MCP server, OpenClaw provider, CLI installer.
 
-**Phase 2 (April):** Multi-wallet adapters (Phantom deeplink, hardware wallet support). Solvela today requires a local keypair; we're adding options.
+**Phase 2 (May 2026):** Multi-wallet adapters (Phantom deeplink, hardware wallet support). Solvela today requires a local keypair; we're adding options.
 
 **Phase 3 (Q2):** EVM support. Base mainnet via Coinbase's `Upto` scheme. Same x402 flow, different chain.
 
@@ -183,18 +199,18 @@ export SOLANA_RPC_URL="https://api.mainnet-beta.solana.com"
 solvela mcp install --host=claude-code
 ```
 
+> ⚠️ Never commit this to git. Store in `~/.solvela/env` (`chmod 600`) or your shell profile — not in `.env` files in project directories.
+
 ### First Call
 
 Open Claude Code. The `chat` tool appears in your tool picker. Send a prompt.
-
-First 5 users to sign up get $5 of free USDC credit. [LINK TO SIGNUP, if applicable]
 
 ---
 
 ## Links
 
 - **Docs:** https://docs.solvela.ai
-- **GitHub:** https://github.com/solveladev/solvela
+- **GitHub:** https://github.com/solvela-ai/solvela
 - **Dashboard:** https://app.solvela.ai
 
 ---

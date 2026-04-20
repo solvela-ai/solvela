@@ -16,7 +16,7 @@ Target file: `docs/integrations/providers/solvela.md` (or `docs/plugins/solvela.
 ```markdown
 ## Add Solvela to OpenClaw Integrations
 
-Adds a new integration guide for Solvela, a pay-per-call LLM gateway on Solana with x402 protocol support.
+Adds a new integration guide for Solvela, a pay-per-call LLM gateway on Solana with x402 protocol support. Two commercial products already run on Solvela in production: **Telsi.ai** (multi-tenant AI assistant SaaS, migrated from BlockRun in April) and **RustyClaw.ai** (crypto trading terminal with autonomous trading agent, paying Stripe customers).
 
 This allows OpenClaw users to:
 - Route LLM calls through Solvela and pay transparently in USDC-SPL
@@ -96,6 +96,8 @@ openclaw mcp set solvela '{
   }
 }'
 ```
+
+> ⚠️ **Security:** `SOLANA_WALLET_KEY` in MCP config files grants *full spending authority* over the wallet. Use a dedicated hot wallet funded only with the USDC/SOL you're willing to risk. Keep seed keys for large balances on hardware wallets.
 
 ## Configuration
 
@@ -183,10 +185,13 @@ This creates a session deposit. Your first N calls draw from this until it's exh
 
 ## Pricing
 
-- **Platform fee:** 5% per call
-- **No account requirement** — just sign transactions
-- **Per-call settlement** — immediate on-chain
-- **No minimum balance** — fund as you go
+| Item | Cost |
+|---|---|
+| Platform fee | 5% per call |
+| Account requirement | None — just sign transactions |
+| Settlement | Per-call, immediate on-chain |
+| Minimum balance | None — fund as you go |
+| Escrow guarantee | No charge if gateway fails to deliver |
 
 Example: A $1.00 LLM API call costs $1.05 total (API + 5% fee).
 
@@ -208,6 +213,11 @@ Your wallet may have signed a stale transaction. Retry — nonce pools recycle a
 
 Your escrow deposit expired (typically 1 hour). Call `deposit_escrow` again to top up.
 
+<!-- TODO (operator): Verify the 1-hour TTL against the actual expiry-slot constant in
+programs/escrow/. The constant may differ from this documentation. Check
+programs/escrow/src/lib.rs or the escrow state struct for the authoritative value
+before submitting this PR. -->
+
 ### "Budget exceeded"
 
 You've hit your `SOLVELA_SESSION_BUDGET` limit. Either raise the limit or start a fresh session.
@@ -217,11 +227,11 @@ You've hit your `SOLVELA_SESSION_BUDGET` limit. Either raise the limit or start 
 - **Setup & API:** https://docs.solvela.ai/en/mcp
 - **Architecture:** https://docs.solvela.ai/en/architecture
 - **Blog & announcements:** https://solvela.ai/blog
-- **GitHub:** https://github.com/solveladev/solvela
+- **GitHub:** https://github.com/solvela-ai/solvela
 
 ## Support
 
-- **Issues:** https://github.com/solveladev/solvela/issues
+- **Issues:** https://github.com/solvela-ai/solvela/issues
 - **Email:** support@solvela.ai
 - **Discord:** [link to Solvela Discord, if exists]
 

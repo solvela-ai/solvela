@@ -149,7 +149,7 @@ curl -X POST https://api.anthropic.com/mcp-registry/v0/servers \
 # Go to https://news.ycombinator.com/submit
 # Title: "Show HN: Solvela – x402 LLM payments for autonomous agents"
 # Text: Copy from "Text Body" section
-# URL: https://solvela.ai or https://github.com/solveladev/solvela
+# URL: https://solvela.ai or https://github.com/solvela-ai/solvela
 # Submit; wait for live; post early comment within 15 min
 ```
 
@@ -174,7 +174,7 @@ curl -X POST https://api.anthropic.com/mcp-registry/v0/servers \
 
 - **Screenshots:** Each draft that calls for images includes specs (dimensions, content). User/design team should create these.
 - **Metrics:** Files reference `[X calls, Y USDC settled]` placeholders. Update with real numbers at time of launch.
-- **URLs:** All links assume domains resolve (solvela.ai, docs.solvela.ai, api.solvela.ai, github.com/solveladev/solvela). Verify live before posting.
+- **URLs:** All links assume domains resolve (solvela.ai, docs.solvela.ai, api.solvela.ai, github.com/solvela-ai/solvela). Verify live before posting.
 - **Deeplinks:** Cursor deeplink and MCP registry manifests assume v1.0.0 of `@solvela/mcp-server` is published to npm. Verify before linking.
 
 ---

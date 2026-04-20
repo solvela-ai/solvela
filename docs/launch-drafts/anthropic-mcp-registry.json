@@ -1,12 +1,13 @@
 {
   "comment": "DRAFT: Anthropic MCP Registry submission for @solvela/mcp-server. Do NOT submit — user triggers submission after private testing. Current timestamp for reference only.",
+  "_submission_note": "VERIFY BEFORE SUBMITTING: (1) 'escrowContractAddress' is a custom field not in the standard MCP Registry schema — confirm Anthropic accepts or ignores unknown fields before POSTing. (2) Verify the current MCP Registry endpoint and schema at api.anthropic.com/mcp-registry/v0/servers. Extra fields may be silently dropped or reject the submission.",
   "name": "solvela",
   "displayName": "Solvela — x402 USDC LLM Gateway",
   "description": "Pay-per-call LLM access via x402 protocol on Solana. One-line install for Claude Code, Cursor, and Claude Desktop. Real USDC-SPL settlement with trustless escrow.",
   "homepage": "https://solvela.ai",
   "repository": {
     "type": "git",
-    "url": "https://github.com/solveladev/solvela"
+    "url": "https://github.com/solvela-ai/solvela"
   },
   "author": {
     "name": "Solvela",
@@ -85,7 +86,8 @@
   },
   "worksWith": [
     "claude-code",
-    "claude-desktop"
+    "claude-desktop",
+    "cursor"
   ],
   "categories": [
     "AI",
@@ -108,12 +110,12 @@
   },
   "security": {
     "keyManagement": "Keys stored locally, never sent to Solvela. Signing happens client-side.",
-    "escrowContractAddress": "9neDHouXgEgHZDde5SpZMC7eP7UUGPvfM8v4ULiMfFJA",
-    "escrowAudit": "Anchor program audited for trustlessness. Funds held on-chain, not in Solvela custody."
+    "escrowContractAddress": "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
+    "escrowAudit": "Deployed to mainnet with 21-test suite covering deposit/claim/refund/timeout paths. Third-party audit not yet commissioned — planned before public escrow promotion."
   },
   "support": {
     "documentation": "https://docs.solvela.ai",
-    "github": "https://github.com/solveladev/solvela/issues",
+    "github": "https://github.com/solvela-ai/solvela/issues",
     "email": "support@solvela.ai"
   },
   "notes": "DRAFT ONLY. Not for submission. Research Anthropic's current MCP Registry endpoint (api.anthropic.com/mcp-registry/v0/servers) and exact schema before posting. This document captures the required fields; final POST may require additional metadata."

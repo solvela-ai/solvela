@@ -12,13 +12,9 @@
 
 ---
 
-## Title Options (Pick One — HN title ≤ 80 chars)
+## Title
 
-1. "Show HN: Solvela – Pay-per-call LLM access on Solana via x402"  
-2. "Show HN: x402 LLM payments for autonomous agents"  
-3. "Show HN: Escrow-first LLM gateway on Solana mainnet"  
-
-**Chosen:** "Show HN: Solvela – x402 LLM payments for autonomous agents"  
+**"Show HN: Solvela – x402 LLM payments for autonomous agents"**  
 **Length:** 60 chars ✓
 
 ---
@@ -35,12 +31,17 @@ One line to install:
   solvela mcp install --host=claude-code
 
 What's live:
-- MCP server for Claude Code, Cursor, Claude Desktop (6 tools: chat, 
-  smart_chat, list_models, wallet_status, spending, deposit_escrow)
+- MCP server for Claude Code, Cursor, Claude Desktop (6 tools: smart_chat, 
+  chat, list_models, wallet_status, spending, deposit_escrow)
 - Trustless escrow on Solana mainnet (Anchor program) — pay only for 
   what you receive
 - OpenClaw provider plugin (Solvela models in the picker)
 - CLI installer for all platforms (macOS, Windows, Linux)
+
+Two commercial products already run on Solvela in production: Telsi.ai 
+(multi-tenant AI assistant SaaS, migrated from BlockRun in April) and 
+RustyClaw.ai (crypto trading terminal with autonomous trading agent, 
+paying Stripe customers).
 
 How it works:
 1. You ask Claude to call an LLM via the `chat` tool
@@ -59,7 +60,7 @@ where 65–70% of x402 transactions live.
 Moat: Escrow is trustless. Competitors can't match it without an audited 
 on-chain program. We've deployed one to mainnet.
 
-Repo: https://github.com/solveladev/solvela
+Repo: https://github.com/solvela-ai/solvela
 Docs: https://docs.solvela.ai
 Live gateway: https://api.solvela.ai
 ```
@@ -118,8 +119,8 @@ We're building this in the open. GitHub issues welcome.
 Two reasons:
 
 1. Volume: x402 lives on Solana. 65–70% of the ~154M cumulative txns. 
-   Base is emerging (Coinbase launched `Upto` in 2026-02), but Solana's 
-   where the action is right now.
+   Base is emerging (Coinbase launched `Upto` in 2026-02), but Solana is 
+   where most x402 volume currently settles.
 
 2. Finality + cost: Solana txns finalize in <1s and cost $0.00025. Ethereum 
    L2s are cheaper now (Base is ~$0.001), but finality is still 12–15s. For 
@@ -241,12 +242,33 @@ unique.
 
 ---
 
+### Comment 6: "How do you differ from x402-rs / x402-chain-solana / an afternoon of Axum?"
+
+**Predicted:** Technical readers will ask why not just use the x402-rs library + roll your own gateway.
+
+**Your response:**
+
+```
+The Rust x402 library layer is now well-populated (x402-rs, FareSide's 
+closed beta, r402, tempo-x402). Solvela is not at that layer — we operate 
+the LLM gateway + escrow + smart router + provider aggregation on top of 
+x402. Library vendors don't run gateways; we do.
+
+Put differently: x402-rs gives you the protocol primitives. Solvela gives 
+you 5 LLM providers, 26+ models, a 15-dimension smart router, trustless 
+mainnet escrow, and a one-line MCP install. You could build all of that 
+yourself in an afternoon — the same way you could build your own payment 
+processor instead of using Stripe. Some people do. Most don't.
+```
+
+---
+
 ## Submission Checklist
 
 - [ ] Create HN account (if new) and verify email
 - [ ] Draft post with chosen title
 - [ ] Paste body text (exact copy from above)
-- [ ] Include URL: https://solvela.ai or https://github.com/solveladev/solvela
+- [ ] Include URL: https://solvela.ai or https://github.com/solvela-ai/solvela
 - [ ] Submit on HN (https://news.ycombinator.com/submit)
 - [ ] Wait ~1–2 min for post to go live
 - [ ] Post the "Suggested Early Comment" within 15 minutes

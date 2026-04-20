@@ -4,7 +4,7 @@
 
 ---
 
-## Thread Structure: 10 Tweets, ~80 char avg per tweet
+## Thread Structure: 11 Tweets (10-tweet blog-repurpose source)
 
 Timestamps and images: Each tweet can carry one image or video. Specify type; don't generate.
 
@@ -13,72 +13,16 @@ Timestamps and images: Each tweet can carry one image or video. Specify type; do
 ### Tweet 1 (Hook)
 
 ```
-agents should pay for their own llm calls.
-
-with usdc. on solana. no keys. no accounts.
-
-solvela is live. one line to install. ship it.
+Agents need to pay for their own LLM calls. No API keys, no accounts, no subscriptions. Solvela is live: one line to install. [link]
 
 [MEDIA: Hero image — Solana logo + "$" + "Agents"]
 ```
 
-**Length:** 96 chars
+**Length:** 134 chars
 
 ---
 
-### Tweet 2 (The Problem)
-
-```
-the problem: agents don't have api keys.
-
-they can't log into openai. they can't manage a credit card. they can't 
-authenticate like humans do.
-
-autonomous agents need a different model. they need to pay.
-
-[MEDIA: Red X on "API Keys", red X on "Accounts"]
-```
-
-**Length:** 145 chars
-
----
-
-### Tweet 3 (The Solution)
-
-```
-enter x402: an http standard for pay-per-call apis.
-
-server returns http 402. client signs a payment proof. retries with the 
-proof. payment verified. api call succeeds.
-
-it works. it's standardized. solana is where 65% of the volume lives.
-
-[MEDIA: x402 protocol diagram]
-```
-
-**Length:** 167 chars
-
----
-
-### Tweet 4 (What Shipped)
-
-```
-solvela v1.0:
-- mcp server (claude code, cursor, claude desktop)
-- trustless escrow on solana mainnet
-- openclaw provider plugin
-- cli installer for all platforms (macos, windows, linux, arm64)
-
-26+ models. 5 providers. one signature per call.
-
-[MEDIA: Terminal showing `solvela mcp install`]
-```
-
-**Length:** 168 chars
-
----
-
-### Tweet 5 (The Moat: Escrow)
+### Tweet 2 (The Moat: Escrow — promoted from #5)
 
 ```
 the real story: escrow.
@@ -98,13 +42,76 @@ pay only for what you receive.
 
 ---
 
-### Tweet 6 (Why Rust Matters)
+### Tweet 3 (The Problem)
 
 ```
-solvela's gateway is rust + axum. competitors are typescript.
+the problem: agents don't have api keys.
+
+they can't log into openai. they can't manage a credit card. they can't 
+authenticate like humans do.
+
+autonomous agents need a different model. they need to pay.
+
+[MEDIA: Red X on "API Keys", red X on "Accounts"]
+```
+
+**Length:** 145 chars
+
+---
+
+### Tweet 4 (The Solution)
+
+```
+enter x402: an http standard for pay-per-call apis.
+
+server returns http 402. client signs a payment proof. retries with the 
+proof. payment verified. api call succeeds.
+
+it works. it's standardized. solana is where 65% of the volume lives.
+
+[MEDIA: x402 protocol diagram]
+```
+
+**Length:** 167 chars
+
+---
+
+### Tweet 5 (What Shipped)
+
+```
+solvela v1.0:
+- mcp server (claude code, cursor, claude desktop)
+- trustless escrow on solana mainnet
+- openclaw provider plugin
+- cli installer for all platforms (macos, windows, linux, arm64)
+
+26+ models. 5 providers. one signature per call.
+
+[MEDIA: Terminal showing `solvela mcp install`]
+```
+
+**Length:** 168 chars
+
+---
+
+### Tweet 6 (Proof: Dog Food — new)
+
+```
+Two products already run on Solvela: Telsi (@telsi_ai — multi-tenant AI SaaS) and RustyClaw (@rustyclaw_ai — crypto terminal). We eat our own dog food. Paying customers, not demos.
+
+[MEDIA: Logos of Telsi.ai and RustyClaw.ai]
+```
+
+**Length:** 180 chars
+
+---
+
+### Tweet 7 (Why Rust Matters)
+
+```
+Solvela's gateway is Rust + Axum. Load-tested to 400 RPS with p99 < 300ms. Benchmarks: [link].
 
 why it matters:
-- 400 rps ceiling under load (ts single-threaded tops out ~100)
 - tokio async handles 1000s of concurrent payment verifications
 - compile-time guarantees on memory safety
 
@@ -113,11 +120,11 @@ payment systems need this.
 [MEDIA: Benchmark chart showing RPS under load]
 ```
 
-**Length:** 191 chars
+**Length:** 243 chars
 
 ---
 
-### Tweet 7 (First Call)
+### Tweet 8 (First Call)
 
 ```
 here's what happens:
@@ -136,7 +143,7 @@ here's what happens:
 
 ---
 
-### Tweet 8 (Pricing & Transparency)
+### Tweet 9 (Pricing & Transparency)
 
 ```
 pricing:
@@ -149,7 +156,7 @@ transparent cost breakdown in every response.
 for comparison:
 openrouter: 3–5% + credit model
 skyfire: 8–15%
-gaterrouter: 2.5% (base only)
+GateRouter: 2.5% (base only)
 
 [MEDIA: Price comparison table]
 ```
@@ -158,13 +165,14 @@ gaterrouter: 2.5% (base only)
 
 ---
 
-### Tweet 9 (Try It)
+### Tweet 10 (Try It)
 
 ```
 install:
 
 npm install -g @solvela/mcp-server
 export SOLANA_WALLET_KEY="your-key"
+(better: put it in ~/.solvela/env chmod 600, per docs).
 solvela mcp install --host=claude-code
 
 then use the `chat` tool in claude. sign once per call. done.
@@ -174,11 +182,11 @@ you need ~$0.10 usdc + ~$0.001 sol for rent.
 [MEDIA: QR code to docs.solvela.ai]
 ```
 
-**Length:** 173 chars
+**Length:** 218 chars
 
 ---
 
-### Tweet 10 (Vision / CTA)
+### Tweet 11 (Vision / CTA)
 
 ```
 where we're going:
@@ -189,7 +197,7 @@ phase 4 (q3): nosana integration (decentralized gpu on solana)
 
 open-source. shipping in the open.
 
-github: solveladev/solvela
+github: solvela-ai/solvela
 docs: docs.solvela.ai
 
 [MEDIA: Product roadmap graphic]
@@ -239,17 +247,14 @@ docs: docs.solvela.ai
 
 ---
 
-## Alt Thread Angle (Shorter, More Technical)
+## Alt Thread Angle (Shorter, More Technical) — PREFERRED FOR CURRENT X ALGO
 
-If you prefer a tighter, more technical thread (5–7 tweets instead of 10):
+**Recommendation: Use this 5-tweet version for your main X post.** The current X algorithm favors tight, high-signal threads over long explainers. Keep the 11-tweet version above as the blog-repurpose source (good for embedding in launch post, Substack, etc.).
 
-1. **Hook:** "agents need to pay for api calls, on-chain, without api keys."
-2. **What:** "x402 protocol on solana. solvela is the gateway."
+1. **Hook:** "Agents need to pay for their own LLM calls. No API keys, no accounts, no subscriptions. Solvela is live: one line to install. [link]"
+2. **Escrow:** "pay only for what you receive. anchor program on mainnet. usdc claimed only on completion."
 3. **Install:** "npm i -g @solvela/mcp-server"
-4. **Escrow:** "pay only for what you receive. anchor program on mainnet."
-5. **Why:** "autonomous agents. trustless settlement. no accounts."
-6. **Try:** "docs at docs.solvela.ai"
+4. **Proof:** "Two products already run on Solvela: Telsi (@telsi_ai — multi-tenant AI SaaS) and RustyClaw (@rustyclaw_ai — crypto terminal). Paying customers, not demos."
+5. **Try:** "docs at docs.solvela.ai | github: solvela-ai/solvela"
 
-This works better if you're speaking to a technical Solana audience and want to skip the explainer.
-
-**Recommendation:** Use the full 10-tweet version for maximum reach. Use the 5-tweet version if reposting to Solana-focused accounts.
+This works better for current X algo (fewer tweets = more reach per tweet). Use the full 11-tweet version if cross-posting to a Substack/blog thread or Solana-focused accounts where depth is valued.
