@@ -1,0 +1,24 @@
+{
+  "name": "@solvela/cli",
+  "version": "1.0.0-draft",
+  "private": true,
+  "description": "Solvela CLI — MCP installer and wallet management for Solana x402 payments",
+  "bin": {
+    "solvela": "bin/solvela.js"
+  },
+  "optionalDependencies": {
+    "@solvela/cli-linux-x64": "1.0.0-draft",
+    "@solvela/cli-win32-x64": "1.0.0-draft",
+    "@solvela/cli-darwin-x64": "1.0.0-draft",
+    "@solvela/cli-darwin-arm64": "1.0.0-draft"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sky64/Solvela.git",
+    "directory": "sdks/cli-npm"
+  },
+  "license": "MIT"
+}

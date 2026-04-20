@@ -1,0 +1,7 @@
+# Native binaries — produced by cargo-dist release workflow, NOT committed.
+# Each platforms/<platform>/bin/ directory contains only a .gitkeep in source control.
+platforms/*/bin/solvela
+platforms/*/bin/solvela.exe
+
+# Symlinks created by verify-release.sh smoke test
+node_modules/
