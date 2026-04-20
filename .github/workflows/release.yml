@@ -1,0 +1,151 @@
+# Phase 4 build-only: this workflow publishes artifacts to GitHub Releases as DRAFT only.
+# Remove 'draft: true' and add npm publish steps only when user gives Phase 4-publish green-light.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v1.0.0)"
+        required: true
+        type: string
+
+jobs:
+  # ── Build native binaries on each platform ───────────────────────────────
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            artifact_name: solvela
+            asset_name: solvela-x86_64-unknown-linux-gnu
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            artifact_name: solvela.exe
+            asset_name: solvela-x86_64-pc-windows-msvc.exe
+          - target: x86_64-apple-darwin
+            os: macos-13
+            artifact_name: solvela
+            asset_name: solvela-x86_64-apple-darwin
+          - target: aarch64-apple-darwin
+            os: macos-14
+            artifact_name: solvela
+            asset_name: solvela-aarch64-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release -p solvela-cli --target ${{ matrix.target }}
+
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
+          sha256sum ${{ matrix.asset_name }}.tar.gz > ${{ matrix.asset_name }}.tar.gz.sha256
+          echo "ASSET=${{ matrix.asset_name }}.tar.gz" >> $GITHUB_ENV
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path ${{ matrix.artifact_name }} -DestinationPath ${{ matrix.asset_name }}.zip
+          $hash = (Get-FileHash ${{ matrix.asset_name }}.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ matrix.asset_name }}.zip" | Out-File -FilePath "${{ matrix.asset_name }}.zip.sha256" -Encoding utf8
+          echo "ASSET=${{ matrix.asset_name }}.zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: |
+            target/${{ matrix.target }}/release/${{ env.ASSET }}
+            target/${{ matrix.target }}/release/${{ env.ASSET }}.sha256
+          retention-days: 7
+
+  # ── Create a DRAFT GitHub Release with all artifacts ─────────────────────
+  release:
+    name: Create Draft Release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "TAG=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.TAG }}
+          name: Solvela CLI ${{ steps.tag.outputs.TAG }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          files: artifacts/**/*
+          body: |
+            ## Solvela CLI ${{ steps.tag.outputs.TAG }}
+
+            > **Note:** This is a DRAFT release. Review artifacts before publishing.
+            > npm distribution via `@solvela/cli` is a separate publish step — see `docs/runbooks/phase-4-publish.md`.
+
+            ### Installation
+
+            **npm (all platforms):**
+            ```
+            npm install -g @solvela/cli
+            ```
+
+            **Shell (Linux/macOS):**
+            ```
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.solvela.xyz | sh
+            ```
+
+            **PowerShell (Windows):**
+            ```
+            irm https://sh.solvela.xyz/windows | iex
+            ```
+
+            **Cargo:**
+            ```
+            cargo install solvela-cli
+            ```
+
+            ### Checksums
+            SHA-256 checksums are provided alongside each artifact.

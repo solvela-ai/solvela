@@ -1,0 +1,17 @@
+{
+  "name": "@solvela/cli-win32-x64",
+  "version": "1.0.0-draft",
+  "private": true,
+  "description": "Solvela CLI — Windows x64 native binary",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "bin": {
+    "solvela-native": "bin/solvela.exe"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sky64/Solvela.git",
+    "directory": "sdks/cli-npm/platforms/win32-x64"
+  },
+  "license": "MIT"
+}

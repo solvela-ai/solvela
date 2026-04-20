@@ -1,0 +1,120 @@
+{
+  "comment": "DRAFT: Anthropic MCP Registry submission for @solvela/mcp-server. Do NOT submit — user triggers submission after private testing. Current timestamp for reference only.",
+  "name": "solvela",
+  "displayName": "Solvela — x402 USDC LLM Gateway",
+  "description": "Pay-per-call LLM access via x402 protocol on Solana. One-line install for Claude Code, Cursor, and Claude Desktop. Real USDC-SPL settlement with trustless escrow.",
+  "homepage": "https://solvela.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/solveladev/solvela"
+  },
+  "author": {
+    "name": "Solvela",
+    "email": "hello@solvela.ai",
+    "url": "https://solvela.ai"
+  },
+  "documentation": "https://docs.solvela.ai/en/mcp",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "name": "chat",
+      "description": "Send a prompt to your chosen LLM provider via x402 payment on Solana. Returns streamed completion with real-time payment signature."
+    },
+    {
+      "name": "smart_chat",
+      "description": "Route a prompt through Solvela's 15-dimension smart router to pick the best model for the task (economy, auto, premium, or free tier)."
+    },
+    {
+      "name": "list_models",
+      "description": "List available LLM models and their per-token pricing across 5 providers (OpenAI, Anthropic, Google, xAI, DeepSeek)."
+    },
+    {
+      "name": "wallet_status",
+      "description": "Check your wallet balance, session spending, and escrow status."
+    },
+    {
+      "name": "spending",
+      "description": "View cumulative spending for the current session with budget enforcement."
+    },
+    {
+      "name": "deposit_escrow",
+      "description": "Deposit USDC-SPL into Solvela's trustless escrow for pay-only-for-what-you-receive guarantees. Optional; gated behind SOLVELA_ESCROW_MODE=enabled."
+    }
+  ],
+  "requiredEnvironmentVariables": [
+    {
+      "name": "SOLANA_WALLET_KEY",
+      "description": "Your Solana wallet's base58-encoded private key. Never commit to repos. Used to sign x402 transactions. Supports escrow or direct-transfer signing modes."
+    },
+    {
+      "name": "SOLANA_RPC_URL",
+      "description": "Solana RPC endpoint (e.g., https://api.mainnet-beta.solana.com). Required when payment signing is enabled."
+    }
+  ],
+  "optionalEnvironmentVariables": [
+    {
+      "name": "SOLVELA_API_URL",
+      "description": "Gateway URL. Default: https://api.solvela.ai"
+    },
+    {
+      "name": "SOLVELA_SESSION_BUDGET",
+      "description": "Max USDC to spend in this session. Default: unlimited."
+    },
+    {
+      "name": "SOLVELA_SIGNING_MODE",
+      "description": "Payment signing mode: 'auto' (escrow-preferred, fallback direct), 'escrow' (escrow-only), 'direct' (direct transfer), 'off' (demo mode, no payment). Default: auto."
+    },
+    {
+      "name": "SOLVELA_ESCROW_MODE",
+      "description": "Enable the deposit_escrow tool. Default: disabled."
+    },
+    {
+      "name": "SOLVELA_MAX_ESCROW_DEPOSIT",
+      "description": "Max USDC per deposit_escrow call. Default: $5.00."
+    },
+    {
+      "name": "SOLVELA_MAX_ESCROW_SESSION",
+      "description": "Max cumulative escrow deposits per session. Default: $20.00."
+    }
+  ],
+  "installMethod": {
+    "type": "npm",
+    "package": "@solvela/mcp-server",
+    "command": "npm install -g @solvela/mcp-server@latest",
+    "alternativeInstallMethod": "solvela mcp install --host=claude-code"
+  },
+  "worksWith": [
+    "claude-code",
+    "claude-desktop"
+  ],
+  "categories": [
+    "AI",
+    "Payments",
+    "Blockchain",
+    "LLM Routing"
+  ],
+  "tags": [
+    "x402",
+    "Solana",
+    "USDC",
+    "LLM",
+    "Payment Gateway",
+    "Escrow",
+    "Agent Finance"
+  ],
+  "pricing": {
+    "model": "5% platform fee per call",
+    "description": "Transparent per-call USDC-SPL settlement. No account required. Escrow-first — pay only for what you receive."
+  },
+  "security": {
+    "keyManagement": "Keys stored locally, never sent to Solvela. Signing happens client-side.",
+    "escrowContractAddress": "9neDHouXgEgHZDde5SpZMC7eP7UUGPvfM8v4ULiMfFJA",
+    "escrowAudit": "Anchor program audited for trustlessness. Funds held on-chain, not in Solvela custody."
+  },
+  "support": {
+    "documentation": "https://docs.solvela.ai",
+    "github": "https://github.com/solveladev/solvela/issues",
+    "email": "support@solvela.ai"
+  },
+  "notes": "DRAFT ONLY. Not for submission. Research Anthropic's current MCP Registry endpoint (api.anthropic.com/mcp-registry/v0/servers) and exact schema before posting. This document captures the required fields; final POST may require additional metadata."
+}
