@@ -1,3 +1,11 @@
+# Build artifacts (universal — overrides specific entries below)
+**/node_modules/
+**/dist/
+*.tgz
+
+# Internal planning notes kept on disk only (never tracked)
+.local-plans/
+
 # Rust
 /target/
 **/*.rs.bk
