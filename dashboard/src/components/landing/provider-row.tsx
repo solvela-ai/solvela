@@ -2,12 +2,13 @@ import { PROVIDERS } from './config'
 
 export function ProviderRow() {
   return (
-    <section className="border-t border-border/60">
+    <section aria-labelledby="providers-heading" className="border-t border-border/60">
       <div className="mx-auto max-w-[1280px] px-6 py-14">
         <div className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
           <div className="flex flex-col gap-2">
             <span className="eyebrow">providers</span>
             <h2
+              id="providers-heading"
               className="font-display leading-[1.05] text-foreground"
               style={{ fontSize: 'clamp(1.5rem, 2.4vw, 2rem)', fontWeight: 600 }}
             >

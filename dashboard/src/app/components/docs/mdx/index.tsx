@@ -164,7 +164,7 @@ export function getMDXComponents(): MDXComponents {
       // Inline code (no className from syntax highlighter)
       if (!className) {
         return (
-          <code className="px-1.5 py-0.5 mx-0.5 rounded-md bg-muted border border-border/50 text-sm font-mono text-foreground">
+          <code className="px-1.5 py-0.5 mx-0.5 rounded-md bg-[var(--popover)] border border-border/50 text-sm font-mono text-foreground">
             {children}
           </code>
         )

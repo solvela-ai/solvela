@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 
 type Side = 'agent' | 'gateway'
@@ -43,6 +43,21 @@ const HOLD_MS = 1800
 
 export function HeroHandshake() {
   const [step, setStep] = useState(0)
+  const wrapperRef = useRef<HTMLDivElement>(null)
+  const [inView, setInView] = useState(true)
+
+  useEffect(() => {
+    const node = wrapperRef.current
+    if (!node) return
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) setInView(e.isIntersecting)
+      },
+      { rootMargin: '200px 0px' }
+    )
+    io.observe(node)
+    return () => io.disconnect()
+  }, [])
 
   useEffect(() => {
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -52,6 +67,13 @@ export function HeroHandshake() {
 
     if (reduced) {
       requestAnimationFrame(() => mounted && setStep(TOTAL_STEPS))
+      return () => {
+        mounted = false
+      }
+    }
+
+    if (!inView) {
+      // Pause loop when scrolled off-viewport; do not reset step so it resumes smoothly.
       return () => {
         mounted = false
       }
@@ -70,13 +92,14 @@ export function HeroHandshake() {
       timer = setTimeout(() => schedule(nextValue), delay)
     }
 
-    timer = setTimeout(() => schedule(1), 600)
+    timer = setTimeout(() => schedule(step === 0 ? 1 : step), 600)
 
     return () => {
       mounted = false
       clearTimeout(timer)
     }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inView])
 
   const claimActive = step > LINES.length
   const lastActive = LINES[Math.max(0, Math.min(LINES.length - 1, step - 1))]
@@ -84,7 +107,7 @@ export function HeroHandshake() {
   const gatewayActive = step > 0 && step <= LINES.length && lastActive?.side === 'gateway'
 
   return (
-    <div className="terminal-card select-none">
+    <div ref={wrapperRef} className="terminal-card select-none">
       <div className="terminal-card-titlebar">
         <span className="terminal-card-dots" aria-hidden>
           <span className="terminal-card-dot" />
@@ -105,7 +128,7 @@ export function HeroHandshake() {
               className={cn(
                 'h-1.5 w-1.5 rounded-full bg-foreground/70 transition-[box-shadow,background-color] duration-300',
                 agentActive &&
-                  'bg-foreground shadow-[0_0_0_3px_rgba(222,220,209,0.18)]'
+                  'bg-foreground shadow-[0_0_0_3px_var(--tint-neutral-ring)]'
               )}
             />
             agent
@@ -115,7 +138,7 @@ export function HeroHandshake() {
               className={cn(
                 'h-1.5 w-1.5 rounded-full bg-[var(--accent-salmon)] transition-[box-shadow,background-color] duration-300',
                 gatewayActive &&
-                  'shadow-[0_0_0_3px_rgba(254,129,129,0.22)]'
+                  'shadow-[0_0_0_3px_var(--tint-salmon-glow)]'
               )}
             />
             gateway · solvela.ai
@@ -199,7 +222,7 @@ export function HeroHandshake() {
           className={cn(
             'flex items-center justify-between border-t border-border/60 px-5 py-4 transition-[background-color,border-color,opacity] duration-[560ms]',
             claimActive
-              ? 'opacity-100 border-[var(--color-border-emphasis)] bg-[rgba(200,162,64,0.08)]'
+              ? 'opacity-100 border-[var(--color-border-emphasis)] bg-[var(--tint-gold-soft)]'
               : 'opacity-60'
           )}
         >
@@ -208,7 +231,7 @@ export function HeroHandshake() {
               className={cn(
                 'h-2 w-2 rounded-full transition-colors',
                 claimActive
-                  ? 'bg-[var(--color-border-emphasis)] shadow-[0_0_0_4px_rgba(200,162,64,0.14)]'
+                  ? 'bg-[var(--color-border-emphasis)] shadow-[0_0_0_4px_var(--tint-gold-medium)]'
                   : 'bg-border'
               )}
             />

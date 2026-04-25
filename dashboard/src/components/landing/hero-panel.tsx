@@ -6,33 +6,27 @@ import { QUICKSTART_URL, DOCS_URL } from './config'
 
 export function HeroPanel() {
   return (
-    <section className="landing-hero-bg relative overflow-hidden">
-      {/* subtle radial soft light */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 opacity-60"
-        style={{
-          background:
-            'radial-gradient(circle at 85% 10%, rgba(254,129,129,0.05), transparent 45%)',
-        }}
-      />
-
+    <section
+      aria-labelledby="hero-heading"
+      className="landing-hero-bg relative overflow-hidden"
+    >
       <div className="relative mx-auto max-w-[1280px] px-6 pb-16 pt-20 sm:pt-24 lg:pb-24 lg:pt-32">
         <div className="grid gap-14 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)] lg:gap-16">
           {/* left — copy (staggered reveal) */}
           <div className="flex flex-col gap-8">
             <div className="animate-fade-in-up flex flex-wrap items-center gap-3">
               <span className="eyebrow">Escrow-settled payments for agents</span>
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border-emphasis)] bg-[rgba(200,162,64,0.08)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[#e0c27a]">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border-emphasis)] bg-[var(--tint-gold-soft)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--accent-gold)]">
                 <span
                   aria-hidden
-                  className="inline-block h-1.5 w-1.5 rounded-full bg-[#e0c27a]"
+                  className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent-gold)]"
                 />
                 only x402 gateway with trustless escrow
               </span>
             </div>
 
             <h1
+              id="hero-heading"
               className="animate-fade-in-up delay-1 font-display text-foreground leading-[0.98] tracking-[-0.03em]"
               style={{
                 fontSize: 'clamp(3rem, 7vw, 6rem)',

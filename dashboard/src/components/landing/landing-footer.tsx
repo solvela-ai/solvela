@@ -87,7 +87,7 @@ interface FooterColumnProps {
 
 function FooterColumn({ title, links }: FooterColumnProps) {
   return (
-    <div className="flex flex-col gap-2.5">
+    <div className="flex flex-col gap-1">
       <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-text-faint">
         {title}
       </span>
@@ -95,7 +95,7 @@ function FooterColumn({ title, links }: FooterColumnProps) {
         <a
           key={l.label}
           href={l.href}
-          className="text-[13px] text-muted-foreground transition-colors hover:text-foreground"
+          className="inline-flex h-11 items-center text-[13px] text-muted-foreground transition-colors hover:text-foreground"
         >
           {l.label}
         </a>
