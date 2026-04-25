@@ -1,4 +1,8 @@
-# Launch Announcement Copy
+> **⚠️ SUPERSEDED 2026-04-19** — The canonical launch copy lives in `docs/launch-drafts/` (`hn-show-post.md`, `x-thread.md`, `blog-post-solvela-ai.md`, `cursor-directory-submission.md`, `openclaw-docs-pr.md`, `solana-foundation-grant-update.md`, `anthropic-mcp-registry.json`). Use those.
+>
+> **Kept here for:** the sequencing / timing advice (HN-before-Twitter, first-24h response plan, tracking table) is still useful supplementary material and isn't duplicated in the launch-drafts.
+
+# Launch Announcement Copy (advisory draft — superseded)
 
 > **Fire condition:** All six publish steps in `2026-04-19-sdk-publish.md` are DONE and verified.
 > **Do not stagger.** One tweet, one HN post, one changelog, one Discord, all within the same 4-hour window. Momentum compounds; drips don't.

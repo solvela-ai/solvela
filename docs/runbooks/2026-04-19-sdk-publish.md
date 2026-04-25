@@ -1,4 +1,12 @@
-# SDK + CLI + Plugin Publish Runbook
+> **⚠️ SUPERSEDED 2026-04-19** — This advisory draft was written before I'd seen `docs/runbooks/phase-4-publish.md`, which is the canonical V1.0 publish runbook and supersedes this file.
+> Key differences vs reality:
+> - The Rust CLI ships via **GitHub Releases + `@solvela/cli` npm meta-package + per-platform `@solvela/cli-{linux,darwin,win32}-*` binaries**, NOT via crates.io. That sidesteps the `x402` crate-name collision entirely — good call.
+> - V1.0 scope is **npm-only**. PyPI (`solvela-sdk`) and Go SDK are deferred beyond V1.0.
+> - The publish order, propagation waits, and `optionalDependencies` sequencing are more detailed in `phase-4-publish.md`. Use that.
+>
+> **Kept here for:** the crates.io competitive-research notes (still valid — see `docs/strategy/2026-04-19-rust-x402-landscape.md` for the full analysis), and optional rollback/verification ideas not covered in phase-4.
+
+# SDK + CLI + Plugin Publish Runbook (advisory draft — superseded)
 
 > **Fire condition:** OpenClaw plugin smoke test passes with a real paid call on devnet.
 > **Order matters.** Registries have different unpublish policies — publish the hardest-to-reverse first so failures surface early and cheaply.
