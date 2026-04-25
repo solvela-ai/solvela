@@ -70,7 +70,12 @@ jobs:
             ${{ runner.os }}-advisory-db-
 
       - name: Run cargo audit
-        run: cargo audit
+        # RUSTSEC-2023-0071 (Marvin timing sidechannel in `rsa` 0.9.x): no
+        # fixed upstream version exists. The `rsa` crate is transitive via
+        # `sqlx-mysql` only, and Solvela uses Postgres (`sqlx-postgres`) —
+        # the vulnerable code path is never reached. Re-evaluate when `rsa`
+        # ships a fix or `sqlx` drops the unused mysql/rsa transitive.
+        run: cargo audit --ignore RUSTSEC-2023-0071
 
   smoke-test:
     name: Smoke test (boot gateway + curl endpoints)
@@ -121,7 +126,7 @@ jobs:
           RCR_DEV_BYPASS_PAYMENT=true \
           RCR_ADMIN_TOKEN=ci-test-token \
           RUST_LOG=gateway=info \
-          ./target/release/solvela &
+          ./target/release/solvela-gateway &
           echo "GATEWAY_PID=$!" >> "$GITHUB_ENV"
 
       - name: Wait for gateway to be healthy
