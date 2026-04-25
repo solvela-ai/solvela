@@ -1,7 +1,7 @@
 # HANDOFF.md — Solvela Current State
 
 > **Single source of truth** for project status. See `CLAUDE.md` for how to work in the repo. See `CHANGELOG.md` for history.
-> **Last verified:** 2026-04-18 (migration-runner fix merged to main & live in prod via PR #17; three-subdomain architecture re-verified end-to-end — `api.solvela.ai` → Fly gateway HTTP 200, `app.solvela.ai` → Vercel dashboard 307→overview, `docs.solvela.ai` → Vercel docs HTTP 200, `solvela.ai` apex → 307→/docs. Prior verification on 2026-04-17 covered Fly gateway+DB cutover: `rustyclawrouter-gateway` → `solvela-gateway`, `rustyclawrouter-db` → `solvela-db`, `sqlx::migrate!` wired so all 7 migration files apply — `solvela-db` has 10 tables + `_sqlx_migrations` tracker with all 7 versions recorded.)
+> **Last verified:** 2026-04-20 (landing one-pager work on `feat/landing-one-pager` — two audit passes + full remediation queue; score 12/20 → 16/20; animated escrow explainer with 5-beat SMIL state machine, enterprise 1+5 redesign with org-tree SVG, server-rendered Shiki on landing quickstart, inline-code background switched to `--popover`. Branch not yet merged; dev server HTTP 200. Prior verification on 2026-04-18 covered migration-runner fix merged to main & live in prod via PR #17; three-subdomain architecture re-verified end-to-end — `api.solvela.ai` → Fly gateway HTTP 200, `app.solvela.ai` → Vercel dashboard 307→overview, `docs.solvela.ai` → Vercel docs HTTP 200, `solvela.ai` apex → 307→/docs.)
 
 ---
 
@@ -78,6 +78,24 @@ Next.js 16 + Tailwind v4 + Fumadocs (core + mdx) + Recharts. Single codebase ser
 
 Deployed to Vercel (`solvela.vercel.app`). **The 2026-04-16 design refresh and subdomain middleware are deployed and live.**
 
+### Landing one-pager (2026-04-20 · branch `feat/landing-one-pager`, not yet merged)
+
+Dedicated marketing page served at `solvela.ai/` (via the apex-domain proxy rewrite). Files under `dashboard/src/components/landing/` + `dashboard/src/app/page.tsx`.
+
+**Sections:** TopStrip → Hero (headline + live 402 handshake) → Ticker → Escrow (animated) → Providers → Enterprise → SDK quickstart → Footer.
+
+**Animated escrow explainer** (`escrow-sequence.tsx` + `escrow-diagram-animated.tsx`): 5-beat state machine (idle → deposit → stream → claim+refund atomically → resolved) with packets driven by native SMIL `<animateMotion>` on named `<mpath>`s. Balance labels update per beat. Gold "same-tx" ring pulses around the escrow PDA when claim+refund fire. IntersectionObserver pauses the loop off-viewport; `prefers-reduced-motion` snaps to the resolved state. Stops after 3 loops with a manual `↻ replay` button. Left-rail timeline shows the 5 steps with a gold bracket grouping the two same-tx rows.
+
+**Enterprise redesign:** asymmetric 0.55/0.45 — one `Organizations` hero card (with an inline org-tree SVG: parent `acme` org → 3 teams → 5 wallets) + 5 compact list rows for the remaining primitives. Replaces an earlier 6-identical-card grid that audit flagged as the heaviest AI-template tell on the page.
+
+**Code coloring standard (custom `solvela` Shiki theme):** `dashboard/src/lib/shiki/` already had `solvela-dark.json` + `solvela-light.json` wired into Fumadocs. Landing now uses them too via `src/lib/shiki/highlighter.ts` (server-side singleton, `getSingletonHighlighter`, dual-theme output via `--shiki-light`/`--shiki-dark` CSS custom properties). `page.tsx` pre-renders every sample at render time via `Promise.all`, passes HTML into the client `SdkCtaPanel` as a `preHighlighted` prop. 7 samples: TS / Vercel AI SDK / Python / Go / LangChain (soon) / Rust CLI / MCP. Curl preview is hand-colored with brand tokens (salmon `curl`, gold URL) to echo the Shiki theme's vocabulary.
+
+**Inline-code background:** `:not(pre) > code` + the MDX inline-code component both switched from `--card` (mid-gray) to `--popover` (near-black `#141413` in dark, light-inverse in light). Fenced `<pre>` blocks keep `--card` — the two surfaces stay visually distinct across the whole app.
+
+**Design tokens added** (`globals.css`): `--accent-gold`, `--accent-salmon-hover`, `--tint-gold-soft`, `--tint-gold-medium`, `--tint-salmon-glow`, `--tint-salmon-drop`, `--tint-neutral-ring`, plus a shared SVG palette in `src/lib/diagram-colors.ts` (includes a new `nodeBlackish: '#141413'` used for the acme-org fill).
+
+**Audit-driven polish:** `--text-faint` bumped 50% → 70% (WCAG AA on the ~20 surfaces that use it); global `focus-visible` rule with `--foreground` ring (legible on salmon CTAs); SDK tabs with full WAI-ARIA tablist semantics + arrow/Home/End navigation; 44×44 touch targets on copy button, SDK tabs, top-strip nav, footer links; escrow + org-tree SVG text bumped for mobile legibility; `landing-chrome.tsx` split into server-only top-strip + `'use client'` ticker; Source Serif 4 pruned 5 → 2 weights; ticker + handshake IO-paused off-view; `partners-row.tsx` deleted (dead code). Dev-server HTTP 200, typecheck clean, audit score 12 → 16/20.
+
 ---
 
 ## Load Test Results (2026-04-12)
@@ -144,14 +162,15 @@ All 5 provider keys set on `solvela-gateway` and verified working (OpenAI, Anthr
 
 ### Immediate / Cleanup
 
-- **rcr-docs-site archive:** Sister repo `~/projects/rcr-docs-site/` is now a strict subset of this repo. Safe to archive or delete.
-- **Local directory rename:** `~/projects/RustyClawRouter/` → `~/projects/solvela/` (optional; git remote already updated).
+- **Merge `feat/landing-one-pager`:** branch carries the landing rewrite (animated escrow sequence, enterprise 1+5 redesign, server-rendered Shiki on the quickstart, inline-code background change, global focus-ring rule, new tokens, SVG palette extraction). Remaining P2s before merge: `landing-chrome.tsx` split QA, light-mode palette QA on landing surfaces, Archivo 400/500 weight-usage audit (deferred — docs MDX uses 500 via `font-medium`). Branch green on `tsc --noEmit`; dev server serves HTTP 200.
+- ~~**rcr-docs-site archive:** Sister repo `~/projects/rcr-docs-site/` is now a strict subset of this repo. Safe to archive or delete.~~ **Archived 2026-04-21** to `~/projects/archive/rcr-docs-site-2026-04-21.tar.gz` (4.7 MB source-only tarball); source directory removed. Never had a git remote.
+- ~~**Local directory rename:** `~/projects/RustyClawRouter/` → `~/projects/solvela/` (optional; git remote already updated).~~ **Moot 2026-04-21** — `~/projects/RustyClawRouter/` does not exist on disk; no rename needed.
 - **Dashboard 2026-04-16 screenshots:** Capture for embedding in docs (dashboard is themed and ready).
 
 ### Post-migration cleanup (remaining after 2026-04-17 cutover)
 
-- **Old gateway app:** `rustyclawrouter-gateway` still exists as rollback safety net. Destroy once confident: `flyctl apps destroy rustyclawrouter-gateway --yes`.
-- **Old DB cluster:** `rustyclawrouter-db` still exists with its original data (2 tables, 0 rows — `rustyclawrouter_gateway` user+DB intact, `solvela_gateway` user dropped). Destroy once confident: `flyctl apps destroy rustyclawrouter-db --yes`.
+- ~~**Old gateway app:** `rustyclawrouter-gateway` still exists as rollback safety net.~~ **Destroyed 2026-04-20.**
+- ~~**Old DB cluster:** `rustyclawrouter-db` still exists with its original data.~~ **Destroyed 2026-04-20.**
 - **ACME CNAME:** `_acme-challenge.api.solvela.ai` in Cloudflare was used to pre-issue the cert via DNS-01. Safe to delete once HTTP-01 has handled at least one renewal.
 - **Migration runner:** Fixed 2026-04-17 (see `docs/superpowers/plans/2026-04-17-fix-migration-runner.md`). `run_migrations()` now uses `sqlx::migrate!` which embeds all migration files at compile time and tracks applied versions in `_sqlx_migrations`. Dockerfile also now copies `migrations/` into the build context. Canonical table list lives in `crates/gateway/tests/migrations.rs::EXPECTED_TABLES`; run `\dt` on the DB to verify live state. Enterprise endpoints now return proper auth errors (401) instead of `relation does not exist` 500s.
 
