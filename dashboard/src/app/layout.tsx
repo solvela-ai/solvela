@@ -20,14 +20,14 @@ const mono = JetBrains_Mono({
 
 const display = Archivo({
   subsets: ['latin'],
-  weight: ['400', '500', '600', '700', '900'],
+  weight: ['600', '700', '900'],
   variable: '--font-display',
   display: 'swap',
 })
 
 const serif = Source_Serif_4({
   subsets: ['latin'],
-  weight: ['200', '300', '400', '500', '600'],
+  weight: ['400', '500'],
   variable: '--font-serif',
   display: 'swap',
 })

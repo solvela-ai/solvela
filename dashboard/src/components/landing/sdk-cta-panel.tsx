@@ -1,139 +1,27 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState, type KeyboardEvent } from 'react'
 import { ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { CopyButton } from './copy-button'
 import { CURL_SNIPPET, QUICKSTART_URL } from './config'
+import { SAMPLES, WORKS_WITH, type SampleStatus } from './sdk-samples'
 
-type SampleStatus = 'live' | 'alpha' | 'soon'
-
-interface Sample {
-  id: string
-  label: string
-  code: string
-  install: string
-  status?: SampleStatus
+interface SdkCtaPanelProps {
+  /**
+   * Pre-rendered Shiki HTML per sample id (inner <code>…</code> markup,
+   * no outer <pre>). Produced on the server so the highlighter never
+   * ships to the client bundle.
+   */
+  preHighlighted: Record<string, string>
 }
-
-const SAMPLES: Sample[] = [
-  {
-    id: 'ts',
-    label: 'typescript',
-    install: 'npm i @solvela/sdk',
-    status: 'live',
-    code: `import { Solvela } from '@solvela/sdk'
-
-const solvela = new Solvela({ keypair: wallet })
-
-const reply = await solvela.chat.completions.create({
-  model: 'auto',
-  messages: [{ role: 'user', content: 'hi' }],
-})
-
-// 402 handshake + escrow claim handled for you.`,
-  },
-  {
-    id: 'vercel',
-    label: 'vercel ai sdk',
-    install: 'npm i @solvela/ai-sdk-provider ai',
-    status: 'alpha',
-    code: `import { createSolvela } from '@solvela/ai-sdk-provider'
-import { createLocalWalletAdapter } from '@solvela/ai-sdk-provider/adapters/local'
-import { generateText } from 'ai'
-
-const solvela = createSolvela({
-  wallet: createLocalWalletAdapter(keypair),
-})
-
-const { text } = await generateText({
-  model: solvela('auto'),
-  prompt: 'summarize this transcript in one sentence.',
-})`,
-  },
-  {
-    id: 'py',
-    label: 'python',
-    install: 'pip install solvela',
-    status: 'live',
-    code: `from solvela import Solvela
-
-solvela = Solvela(keypair=wallet)
-
-reply = solvela.chat.completions.create(
-    model="auto",
-    messages=[{"role": "user", "content": "hi"}],
-)`,
-  },
-  {
-    id: 'go',
-    label: 'go',
-    install: 'go get github.com/solvela/sdk-go',
-    status: 'live',
-    code: `client := solvela.New(solvela.WithKeypair(wallet))
-
-reply, err := client.Chat.Completions.Create(ctx, solvela.ChatRequest{
-    Model:    "auto",
-    Messages: []solvela.Message{{Role: "user", Content: "hi"}},
-})`,
-  },
-  {
-    id: 'langchain',
-    label: 'langchain',
-    install: 'npm i @solvela/langchain',
-    status: 'soon',
-    code: `import { ChatSolvela } from '@solvela/langchain'
-import { createLocalWalletAdapter } from '@solvela/ai-sdk-provider/adapters/local'
-
-const model = new ChatSolvela({
-  wallet: createLocalWalletAdapter(keypair),
-  model: 'auto',
-})
-
-const reply = await model.invoke('summarize this transcript in one sentence.')`,
-  },
-  {
-    id: 'rust',
-    label: 'rust cli',
-    install: 'cargo install solvela-cli',
-    status: 'live',
-    code: `$ solvela chat --model auto "hi"
-→ 402 · 0.0042 usdc  (fee 0.0002)
-  sign? [y/N] y
-← hello — i can help with that.`,
-  },
-  {
-    id: 'mcp',
-    label: 'mcp',
-    install: 'npx @solvela/mcp',
-    status: 'live',
-    code: `// works in claude code, cursor, and openclaw — drop into .mcp.json
-{
-  "mcpServers": {
-    "solvela": {
-      "command": "npx",
-      "args": ["@solvela/mcp"],
-      "env": { "SOLVELA_WALLET": "<keypair.json>" }
-    }
-  }
-}`,
-  },
-]
-
-const WORKS_WITH: { label: string; status: SampleStatus }[] = [
-  { label: 'vercel ai sdk', status: 'alpha' },
-  { label: 'langchain', status: 'soon' },
-  { label: 'openai-compat', status: 'live' },
-  { label: 'mcp', status: 'live' },
-  { label: 'a2a / agent-card', status: 'live' },
-]
 
 function StatusDot({ status }: { status: SampleStatus }) {
   const color =
     status === 'live'
       ? 'bg-[var(--color-success)]'
       : status === 'alpha'
-      ? 'bg-[#e0c27a]'
+      ? 'bg-[var(--accent-gold)]'
       : 'bg-text-faint'
   return (
     <span
@@ -143,18 +31,43 @@ function StatusDot({ status }: { status: SampleStatus }) {
   )
 }
 
-export function SdkCtaPanel() {
+export function SdkCtaPanel({ preHighlighted }: SdkCtaPanelProps) {
   const [activeId, setActiveId] = useState<string>('ts')
   const active = SAMPLES.find((s) => s.id === activeId) ?? SAMPLES[0]
+  const activeHtml = preHighlighted[active.id]
+  const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({})
+
+  function focusTab(id: string) {
+    setActiveId(id)
+    // Wait one tick for React to render then move focus to the new tab.
+    requestAnimationFrame(() => tabRefs.current[id]?.focus())
+  }
+
+  function handleTabKey(e: KeyboardEvent<HTMLButtonElement>, idx: number) {
+    const last = SAMPLES.length - 1
+    let nextIdx: number | null = null
+    if (e.key === 'ArrowRight') nextIdx = idx === last ? 0 : idx + 1
+    else if (e.key === 'ArrowLeft') nextIdx = idx === 0 ? last : idx - 1
+    else if (e.key === 'Home') nextIdx = 0
+    else if (e.key === 'End') nextIdx = last
+    if (nextIdx !== null) {
+      e.preventDefault()
+      focusTab(SAMPLES[nextIdx].id)
+    }
+  }
 
   return (
-    <section className="border-t border-border/60 bg-[var(--popover)]">
+    <section
+      aria-labelledby="sdk-cta-heading"
+      className="border-t border-border/60 bg-[var(--popover)]"
+    >
       <div className="mx-auto max-w-[1280px] px-6 py-16 lg:py-24">
         <div className="flex flex-col gap-10">
           {/* headline row */}
           <div className="flex flex-col gap-3">
             <span className="eyebrow">your first 402</span>
             <h2
+              id="sdk-cta-heading"
               className="font-display leading-[1.0] tracking-[-0.02em] text-foreground"
               style={{ fontSize: 'clamp(2rem, 4vw, 3.25rem)', fontWeight: 600 }}
             >
@@ -199,28 +112,45 @@ export function SdkCtaPanel() {
             </div>
 
             {/* tabs */}
-            <div className="flex overflow-x-auto border-b border-border/60">
-              {SAMPLES.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => setActiveId(s.id)}
-                  className={cn(
-                    'relative inline-flex items-center gap-2 px-4 py-3 font-mono text-[11px] uppercase tracking-[0.18em] transition-colors',
-                    s.id === activeId
-                      ? 'text-foreground'
-                      : 'text-text-faint hover:text-muted-foreground',
-                  )}
-                >
-                  {s.status && <StatusDot status={s.status} />}
-                  <span>{s.label}</span>
-                  {s.id === activeId && (
-                    <span
-                      aria-hidden
-                      className="absolute bottom-0 left-3 right-3 h-[2px] bg-[var(--accent-salmon)]"
-                    />
-                  )}
-                </button>
-              ))}
+            <div
+              role="tablist"
+              aria-label="SDK quickstart samples"
+              className="flex overflow-x-auto border-b border-border/60"
+            >
+              {SAMPLES.map((s, idx) => {
+                const selected = s.id === activeId
+                return (
+                  <button
+                    key={s.id}
+                    ref={(el) => {
+                      tabRefs.current[s.id] = el
+                    }}
+                    type="button"
+                    role="tab"
+                    id={`tab-${s.id}`}
+                    aria-selected={selected}
+                    aria-controls={`tabpanel-${s.id}`}
+                    tabIndex={selected ? 0 : -1}
+                    onClick={() => setActiveId(s.id)}
+                    onKeyDown={(e) => handleTabKey(e, idx)}
+                    className={cn(
+                      'relative inline-flex min-h-11 items-center gap-2 px-4 py-3 font-mono text-[11px] uppercase tracking-[0.18em] transition-colors',
+                      selected
+                        ? 'text-foreground'
+                        : 'text-text-faint hover:text-muted-foreground',
+                    )}
+                  >
+                    {s.status && <StatusDot status={s.status} />}
+                    <span>{s.label}</span>
+                    {selected && (
+                      <span
+                        aria-hidden
+                        className="absolute bottom-0 left-3 right-3 h-[2px] bg-[var(--accent-salmon)]"
+                      />
+                    )}
+                  </button>
+                )
+              })}
             </div>
 
             {/* code body */}
@@ -229,19 +159,35 @@ export function SdkCtaPanel() {
                 <div className="flex items-center gap-3">
                   <span>{active.install}</span>
                   {active.status && active.status !== 'live' && (
-                    <span className="rounded border border-[var(--color-border-emphasis)] bg-[rgba(200,162,64,0.08)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.18em] text-[#e0c27a]">
+                    <span className="rounded border border-[var(--color-border-emphasis)] bg-[var(--tint-gold-soft)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.18em] text-[var(--accent-gold)]">
                       {active.status} — not yet published
                     </span>
                   )}
                 </div>
                 <CopyButton text={active.code} label="copy" />
               </div>
-              <pre
-                key={active.id}
-                className="m-0 animate-fade-in overflow-x-auto border-0 !bg-transparent px-5 py-6 font-mono text-[13px] leading-[1.7] text-foreground"
-              >
-                <code>{active.code}</code>
-              </pre>
+              {activeHtml ? (
+                <pre
+                  key={active.id}
+                  role="tabpanel"
+                  id={`tabpanel-${active.id}`}
+                  aria-labelledby={`tab-${active.id}`}
+                  tabIndex={0}
+                  className="m-0 animate-fade-in overflow-x-auto border-0 !bg-transparent px-5 py-6 font-mono text-[13px] leading-[1.7] text-foreground"
+                  dangerouslySetInnerHTML={{ __html: activeHtml }}
+                />
+              ) : (
+                <pre
+                  key={active.id}
+                  role="tabpanel"
+                  id={`tabpanel-${active.id}`}
+                  aria-labelledby={`tab-${active.id}`}
+                  tabIndex={0}
+                  className="m-0 animate-fade-in overflow-x-auto border-0 !bg-transparent px-5 py-6 font-mono text-[13px] leading-[1.7] text-foreground"
+                >
+                  <code>{active.code}</code>
+                </pre>
+              )}
             </div>
 
             {/* footer row — curl + CTA */}
@@ -251,15 +197,21 @@ export function SdkCtaPanel() {
                   or, raw:
                 </div>
                 <div className="flex items-center gap-3">
-                  <pre className="m-0 flex-1 overflow-x-auto border-0 !bg-transparent p-0 font-mono text-[12px] text-muted-foreground">
-                    <code>curl https://api.solvela.ai/v1/chat/completions …</code>
+                  <pre className="m-0 flex-1 overflow-x-auto border-0 !bg-transparent p-0 font-mono text-[12px]">
+                    <code>
+                      <span className="text-[var(--accent-salmon)]">curl</span>{' '}
+                      <span className="text-[var(--accent-gold)]">
+                        https://api.solvela.ai/v1/chat/completions
+                      </span>{' '}
+                      <span className="text-text-faint">…</span>
+                    </code>
                   </pre>
                   <CopyButton text={CURL_SNIPPET} label="copy curl" />
                 </div>
               </div>
               <a
                 href={QUICKSTART_URL}
-                className="inline-flex items-center gap-2 self-start rounded-md bg-[var(--accent-salmon)] px-5 py-3 font-mono text-[12px] uppercase tracking-[0.16em] text-[#1F1E1D] shadow-[0_0_0_0_rgba(254,129,129,0)] transition-all duration-200 hover:-translate-y-[1px] hover:bg-[#ff9a9a] hover:shadow-[0_8px_24px_-10px_rgba(254,129,129,0.55)] active:translate-y-0 sm:self-auto"
+                className="inline-flex items-center gap-2 self-start rounded-md bg-[var(--accent-salmon)] px-5 py-3 font-mono text-[12px] uppercase tracking-[0.16em] text-[var(--color-bg-inset)] shadow-[0_0_0_0_transparent] transition-all duration-200 hover:-translate-y-[1px] hover:bg-[var(--accent-salmon-hover)] hover:shadow-[0_8px_24px_-10px_var(--tint-salmon-drop)] active:translate-y-0 sm:self-auto"
               >
                 open quickstart
                 <ArrowRight className="h-3.5 w-3.5" />

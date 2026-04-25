@@ -88,7 +88,7 @@
   --heading-color: #FAF9F5;            /* Headings */
   --bold-color: #FAF9F5;              /* Bold text — bright, same as headings */
   --italic-color: #DEDCD1;            /* Text */
-  --text-faint: #DEDCD180;            /* Text at 50% */
+  --text-faint: #DEDCD1B3;            /* Text at 70% — WCAG AA on #262624 */
 
   /* Callout accents */
   --callout-info: #DEDCD1;            /* Neutral info */
@@ -101,6 +101,13 @@
 
   /* Accent (eyebrow labels, tab underlines, key emphasis) */
   --accent-salmon: #FE8181;
+  --accent-salmon-hover: #ff9a9a;
+  --accent-gold: #e0c27a;
+  --tint-gold-soft: rgba(200, 162, 64, 0.08);
+  --tint-gold-medium: rgba(200, 162, 64, 0.14);
+  --tint-salmon-glow: rgba(254, 129, 129, 0.22);
+  --tint-salmon-drop: rgba(254, 129, 129, 0.55);
+  --tint-neutral-ring: rgba(222, 220, 209, 0.18);
 
   /* HTTP method colors */
   --http-get: #34d399;
@@ -168,6 +175,13 @@
 
     /* Accent (eyebrow labels, tab underlines, key emphasis) */
     --accent-salmon: #FE8181;
+    --accent-salmon-hover: #ff6464;
+    --accent-gold: #a57c12;
+    --tint-gold-soft: rgba(165, 124, 18, 0.10);
+    --tint-gold-medium: rgba(165, 124, 18, 0.18);
+    --tint-salmon-glow: rgba(210, 94, 101, 0.22);
+    --tint-salmon-drop: rgba(210, 94, 101, 0.45);
+    --tint-neutral-ring: rgba(38, 38, 36, 0.16);
 
     /* HTTP method colors */
     --http-get: #059669;
@@ -204,6 +218,16 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+  /* Visible focus indicator for every interactive surface.
+     Uses the foreground (high-contrast) colour so the ring is legible on
+     any accent surface — including salmon-tinted CTAs. */
+  a:focus-visible,
+  button:focus-visible,
+  [role='tab']:focus-visible,
+  [tabindex]:not([tabindex='-1']):focus-visible {
+    outline: 2px solid var(--foreground);
+    outline-offset: 2px;
   }
 }
 
@@ -328,9 +352,11 @@ pre code [data-highlighted-line] {
   padding: 0 1rem;
 }
 
-/* Inline code */
+/* Inline code — darkest surface to distinguish from prose and from the
+   mid-tone fenced-block backgrounds. Matches var(--popover) = #141413 in dark
+   mode; inverts to the light-mode popover in light mode automatically. */
 :not(pre) > code {
-  background: var(--card);
+  background: var(--popover);
   color: var(--bold-color);
   padding: 0.15em 0.35em;
   border-radius: calc(var(--radius) * 0.5);
@@ -474,13 +500,11 @@ pre code [data-highlighted-line] {
   background: var(--accent-salmon);
 }
 
-/* Screen — deepest dark + grid pattern */
+/* Screen — solid deep popover. No inner grid so the page only ever shows
+   one grid system at a time (hero's 48px bg grid shows around the card;
+   the card itself is a clean surface on top). */
 .terminal-card-screen {
   background: var(--popover);
-  background-image:
-    linear-gradient(90deg, rgba(222, 220, 209, 0.045) 1px, transparent 1px),
-    linear-gradient(rgba(222, 220, 209, 0.045) 1px, transparent 1px);
-  background-size: 24px 24px;
   padding: 1.5rem 1.5rem 1.75rem;
 }
 
@@ -806,15 +830,13 @@ pre::before {
   border: 1px dashed var(--border);
 }
 
-/* Landing hero backdrop — layered grid + radial vignette */
+/* Landing hero backdrop — clean grid, no radial tint */
 .landing-hero-bg {
   background-color: var(--background);
   background-image:
-    radial-gradient(ellipse 85% 60% at 20% 0%, rgba(254, 129, 129, 0.06), transparent 60%),
     linear-gradient(90deg, rgba(222, 220, 209, 0.05) 1px, transparent 1px),
     linear-gradient(rgba(222, 220, 209, 0.05) 1px, transparent 1px);
-  background-size: auto, 48px 48px, 48px 48px;
-  background-position: 0 0, 0 0, 0 0;
+  background-size: 48px 48px, 48px 48px;
 }
 
 /* Subtle scan line for terminal screens */
