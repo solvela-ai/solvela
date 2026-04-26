@@ -175,7 +175,7 @@ jobs:
               status=$(curl -s -o /dev/null -w "%{http_code}" \
                 -X POST "$0/v1/chat/completions" \
                 -H "Content-Type: application/json" \
-                -d "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
+                -d "{\"model\":\"openai-gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
               echo "  status=$status"
               [ "$status" = "402" ] || [ "$status" = "500" ] || [ "$status" = "200" ]
             ' "$BASE"
@@ -184,7 +184,7 @@ jobs:
           check "GET /metrics with admin token returns metrics" \
             bash -c '
               body=$(curl -sf "$0/metrics" -H "Authorization: Bearer ci-test-token")
-              echo "$body" | grep -q "rcr_requests_total"
+              echo "$body" | grep -q "solvela_requests_total"
             ' "$BASE"
 
           # 5. POST /v1/chat/completions with X-RCR-Debug: true → x-rcr-request-id header present
@@ -194,7 +194,7 @@ jobs:
                 -X POST "$0/v1/chat/completions" \
                 -H "Content-Type: application/json" \
                 -H "X-RCR-Debug: true" \
-                -d "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+                -d "{\"model\":\"openai-gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
               echo "$headers" | grep -qi "x-rcr-request-id"
             ' "$BASE"
 
@@ -205,7 +205,7 @@ jobs:
                 -X POST "$0/v1/chat/completions" \
                 -H "Content-Type: application/json" \
                 -H "X-Request-Id: ci-test-123" \
-                -d "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+                -d "{\"model\":\"openai-gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
               echo "$headers" | grep -q "ci-test-123"
             ' "$BASE"
 
@@ -216,12 +216,12 @@ jobs:
                 curl -s -o /dev/null \
                   -X POST "$0/v1/chat/completions" \
                   -H "Content-Type: application/json" \
-                  -d "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"test $i\"}]}"
+                  -d "{\"model\":\"openai-gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"test $i\"}]}"
               done
               headers=$(curl -sD - -o /dev/null \
                 -X POST "$0/v1/chat/completions" \
                 -H "Content-Type: application/json" \
-                -d "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"test 6\"}]}")
+                -d "{\"model\":\"openai-gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"test 6\"}]}")
               echo "$headers" | grep -qi "x-ratelimit-limit"
             ' "$BASE"
 
