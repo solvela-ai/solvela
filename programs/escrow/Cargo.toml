@@ -37,7 +37,7 @@ anchor-lang = { version = "0.31.1" }
 # LiteSVM for fast in-process Solana program unit tests
 # Requires anchor build to produce a .so first; tests skip gracefully without it
 litesvm = "0.6.1"
-solana-sdk = "2.2"
+solana-sdk = "4.0"
 spl-token = "7"
 spl-associated-token-account = "6"
 
