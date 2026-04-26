@@ -1,0 +1,130 @@
+# Dependabot configuration
+#
+# This file lists every manifest Dependabot should track and explicitly ignores
+# the Solana 1.x ecosystem transitives that are documented in SECURITY.md as
+# accepted (resolution gated on Solana 2.x / @solana/kit migration).
+#
+# Without these ignores, Dependabot would re-open the same N PRs every week.
+
+version: 2
+updates:
+  # ── Rust workspace (gateway, x402, router, protocol, cli) ───────────────
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      patch-and-minor:
+        update-types: [patch, minor]
+
+  # ── Rust escrow (programs/escrow — Solana 1.18 / Anchor 0.30) ───────────
+  # Solana 1.x pins many legacy deps. See SECURITY.md "Known transitive
+  # advisories" for the full list and resolution path.
+  - package-ecosystem: cargo
+    directory: /programs/escrow
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: curve25519-dalek
+        versions: ["<4"]            # pinned by solana-sdk 1.x
+      - dependency-name: ed25519-dalek
+        versions: ["<2"]            # pinned by solana-sdk 1.x
+      - dependency-name: rustls-webpki
+        versions: ["<0.103"]        # legacy rustls in Solana 1.x dep tree
+      - dependency-name: bincode
+        versions: ["<2"]            # bincode 2.x is a major API break for Solana
+      - dependency-name: rand
+        versions: ["<0.8"]          # rand 0.7.x pinned via solana-sdk 1.x
+      - dependency-name: rustls-pemfile
+        versions: ["<2"]            # legacy
+      - dependency-name: libsecp256k1
+        versions: ["<0.7"]          # Anchor 0.30 transitive
+      - dependency-name: ansi_term  # unmaintained, no fix exists
+      - dependency-name: atty       # unmaintained, no fix exists
+      - dependency-name: derivative # unmaintained, no fix exists
+      - dependency-name: paste      # unmaintained, no fix exists
+
+  # ── Dashboard (Next.js, Vercel prod) ────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /dashboard
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      patch-and-minor:
+        update-types: [patch, minor]
+
+  # ── @solana/web3.js 1.x consumers (mcp, openclaw-provider, integrations)
+  # bigint-buffer (high) and uuid <14.0.0 (moderate) are both pinned by
+  # @solana/web3.js 1.x. The npm-suggested "fix" downgrades to 0.9.2 which
+  # is a regression. Resolution path: migrate to @solana/kit. See SECURITY.md.
+  - package-ecosystem: npm
+    directory: /sdks/mcp
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: bigint-buffer
+      - dependency-name: uuid
+        versions: ["<14.0.0"]
+      - dependency-name: "@solana/web3.js"
+        versions: ["<2"]
+
+  - package-ecosystem: npm
+    directory: /sdks/openclaw-provider
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: bigint-buffer
+      - dependency-name: uuid
+        versions: ["<14.0.0"]
+      - dependency-name: "@solana/web3.js"
+        versions: ["<2"]
+
+  - package-ecosystem: npm
+    directory: /integrations/openclaw
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: bigint-buffer
+      - dependency-name: uuid
+        versions: ["<14.0.0"]
+      - dependency-name: "@solana/web3.js"
+        versions: ["<2"]
+
+  # ── Other npm packages ──────────────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /sdks/ai-sdk-provider
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /sdks/typescript
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /sdks/cli-npm
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # ── Go SDK ──────────────────────────────────────────────────────────────
+  - package-ecosystem: gomod
+    directory: /sdks/go
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # ── GitHub Actions (workflow file pins) ─────────────────────────────────
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
