@@ -12,7 +12,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/sky64/Solvela"
+repository = "https://github.com/solvela-ai/solvela"
 
 [workspace.dependencies]
 # Async runtime
@@ -74,6 +74,9 @@ url = "2"
 dotenvy = "0.15"
 
 # Workspace crates
-x402 = { path = "crates/x402" }
-solvela-router = { path = "crates/router" }
-solvela-protocol = { path = "crates/protocol" }
+# Path + version dual-spec: `path` lets local dev resolve to the in-tree code;
+# `version` is required by crates.io at publish time so consumers get the
+# published artifact when they pull from the registry.
+x402 = { path = "crates/x402" }                                    # not yet published (name collision on crates.io)
+solvela-router = { path = "crates/router", version = "0.1" }
+solvela-protocol = { path = "crates/protocol", version = "0.1" }
