@@ -161,7 +161,7 @@ mod tests {
     use crate::services::ServiceRegistry;
     use crate::usage::UsageTracker;
     use solvela_router::models::ModelRegistry;
-    use x402::facilitator::Facilitator;
+    use solvela_x402::facilitator::Facilitator;
 
     /// Helper: build a minimal Router that runs `extract_api_key` middleware
     /// and returns 200 with the OrgContext debug string if present, or "none".

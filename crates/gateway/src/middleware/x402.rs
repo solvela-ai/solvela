@@ -8,7 +8,7 @@ use axum::{
 use base64::Engine;
 use tracing::{info, warn};
 
-use x402::types::PaymentPayload;
+use solvela_x402::types::PaymentPayload;
 
 use crate::AppState;
 
@@ -112,7 +112,7 @@ pub fn decode_payment_header(header: &str) -> Result<PaymentPayload, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use x402::types::{PayloadData, PaymentAccept, PaymentPayload, Resource, SolanaPayload};
+    use solvela_x402::types::{PayloadData, PaymentAccept, PaymentPayload, Resource, SolanaPayload};
 
     /// Build a valid test PaymentPayload.
     fn sample_payload() -> PaymentPayload {

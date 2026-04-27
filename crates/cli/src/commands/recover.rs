@@ -228,7 +228,7 @@ pub async fn run(
         std::io::stdout().flush().ok();
 
         let refund_tx =
-            match x402::escrow::refund::build_refund_tx(&x402::escrow::refund::RefundParams {
+            match solvela_x402::escrow::refund::build_refund_tx(&solvela_x402::escrow::refund::RefundParams {
                 agent_keypair_b58: private_key_b58.to_string(),
                 escrow_pda_b58: pda_b58.clone(),
                 usdc_mint_b58: USDC_MINT.to_string(),
@@ -332,7 +332,7 @@ async fn discover_escrows(
         let pubkey_b58 = entry["pubkey"]
             .as_str()
             .ok_or_else(|| anyhow!("entry missing pubkey field"))?;
-        let pda = x402::escrow::pda::decode_bs58_pubkey(pubkey_b58)
+        let pda = solvela_x402::escrow::pda::decode_bs58_pubkey(pubkey_b58)
             .map_err(|e| anyhow!("invalid pubkey {pubkey_b58}: {e}"))?;
 
         let data_array = entry["account"]["data"]
@@ -545,7 +545,7 @@ mod tests {
         data[..DISC_LEN].copy_from_slice(&[7u8; 8]);
         data[AGENT_OFFSET..AGENT_OFFSET + 32].copy_from_slice(agent);
         data[PROVIDER_OFFSET..PROVIDER_OFFSET + 32].copy_from_slice(&[2u8; 32]);
-        let mint = x402::escrow::pda::decode_bs58_pubkey(USDC_MINT).expect("valid mint");
+        let mint = solvela_x402::escrow::pda::decode_bs58_pubkey(USDC_MINT).expect("valid mint");
         data[MINT_OFFSET..MINT_OFFSET + 32].copy_from_slice(&mint);
         data[AMOUNT_OFFSET..AMOUNT_OFFSET + 8].copy_from_slice(&amount.to_le_bytes());
         data[SERVICE_ID_OFFSET..SERVICE_ID_OFFSET + 32].copy_from_slice(service_id);
@@ -557,9 +557,9 @@ mod tests {
     /// Build the PDA b58 string for an agent + service_id combination.
     fn derived_pda_b58(agent: &[u8; 32], service_id: &[u8; 32]) -> String {
         let program_id =
-            x402::escrow::pda::decode_bs58_pubkey(ESCROW_PROGRAM_ID).expect("valid program id");
+            solvela_x402::escrow::pda::decode_bs58_pubkey(ESCROW_PROGRAM_ID).expect("valid program id");
         let (pda, _bump) =
-            x402::escrow::pda::find_program_address(&[b"escrow", agent, service_id], &program_id)
+            solvela_x402::escrow::pda::find_program_address(&[b"escrow", agent, service_id], &program_id)
                 .expect("valid PDA");
         bs58::encode(pda).into_string()
     }
@@ -591,7 +591,7 @@ mod tests {
         assert_eq!(decoded.bump, 255);
         assert_eq!(decoded.lamports, 9999);
         // Mint should match USDC
-        let usdc = x402::escrow::pda::decode_bs58_pubkey(USDC_MINT).unwrap();
+        let usdc = solvela_x402::escrow::pda::decode_bs58_pubkey(USDC_MINT).unwrap();
         assert_eq!(decoded.mint, usdc);
     }
 

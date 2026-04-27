@@ -15,13 +15,13 @@ use metrics::{counter, histogram};
 use serde_json::json;
 use tracing::{info, warn};
 
-use x402::types::{
+use solvela_x402::types::{
     CostBreakdown, PaymentAccept, PaymentRequired, Resource, PLATFORM_FEE_PERCENT, SOLANA_NETWORK,
     USDC_MINT, X402_VERSION,
 };
 
 use crate::error::GatewayError;
-use crate::middleware::x402::decode_payment_header;
+use crate::middleware::solvela_x402::decode_payment_header;
 use crate::payment_util::extract_payer_wallet;
 use crate::security;
 use crate::usage::SpendLogEntry;
@@ -140,7 +140,7 @@ pub async fn proxy_service(
                 amount: expected_atomic.to_string(),
                 asset: USDC_MINT.to_string(),
                 pay_to: state.config.solana.recipient_wallet.clone(),
-                max_timeout_seconds: x402::types::MAX_TIMEOUT_SECONDS,
+                max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
                 escrow_program_id: None,
             }],
             cost_breakdown: CostBreakdown {
@@ -227,12 +227,12 @@ pub async fn proxy_service(
 
     // Validate scheme matches payload variant
     match (payload.accepted.scheme.as_str(), &payload.payload) {
-        ("exact", x402::types::PayloadData::Escrow(_)) => {
+        ("exact", solvela_x402::types::PayloadData::Escrow(_)) => {
             return Err(GatewayError::BadRequest(
                 "scheme is 'exact' but payload contains escrow data".to_string(),
             ));
         }
-        ("escrow", x402::types::PayloadData::Direct(_)) => {
+        ("escrow", solvela_x402::types::PayloadData::Direct(_)) => {
             return Err(GatewayError::BadRequest(
                 "scheme is 'escrow' but payload contains direct transfer data".to_string(),
             ));
@@ -242,8 +242,8 @@ pub async fn proxy_service(
 
     // Replay protection
     let tx_raw = match &payload.payload {
-        x402::types::PayloadData::Direct(p) => &p.transaction,
-        x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
+        solvela_x402::types::PayloadData::Direct(p) => &p.transaction,
+        solvela_x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
     };
 
     let is_durable_nonce = crate::routes::chat::uses_durable_nonce(tx_raw);
@@ -301,8 +301,8 @@ pub async fn proxy_service(
     // Extract the actual PAYER wallet (not the recipient pay_to address)
     let wallet_address = extract_payer_wallet(&payload);
     let tx_signature = match &payload.payload {
-        x402::types::PayloadData::Direct(p) => Some(p.transaction.clone()),
-        x402::types::PayloadData::Escrow(p) => Some(p.deposit_tx.clone()),
+        solvela_x402::types::PayloadData::Direct(p) => Some(p.transaction.clone()),
+        solvela_x402::types::PayloadData::Escrow(p) => Some(p.deposit_tx.clone()),
     };
 
     // Extract request ID for traceability
@@ -505,13 +505,13 @@ mod tests {
 
     #[test]
     fn test_extract_payer_wallet_escrow() {
-        let payload = x402::types::PaymentPayload {
+        let payload = solvela_x402::types::PaymentPayload {
             x402_version: 1,
-            resource: x402::types::Resource {
+            resource: solvela_x402::types::Resource {
                 url: "/test".to_string(),
                 method: "POST".to_string(),
             },
-            accepted: x402::types::PaymentAccept {
+            accepted: solvela_x402::types::PaymentAccept {
                 scheme: "escrow".to_string(),
                 network: SOLANA_NETWORK.to_string(),
                 amount: "1000".to_string(),
@@ -520,7 +520,7 @@ mod tests {
                 max_timeout_seconds: 300,
                 escrow_program_id: None,
             },
-            payload: x402::types::PayloadData::Escrow(x402::types::EscrowPayload {
+            payload: solvela_x402::types::PayloadData::Escrow(solvela_x402::types::EscrowPayload {
                 deposit_tx: "dGVzdA==".to_string(),
                 service_id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
                 agent_pubkey: "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz".to_string(),
@@ -534,13 +534,13 @@ mod tests {
 
     #[test]
     fn test_extract_payer_wallet_direct_invalid_tx() {
-        let payload = x402::types::PaymentPayload {
+        let payload = solvela_x402::types::PaymentPayload {
             x402_version: 1,
-            resource: x402::types::Resource {
+            resource: solvela_x402::types::Resource {
                 url: "/test".to_string(),
                 method: "POST".to_string(),
             },
-            accepted: x402::types::PaymentAccept {
+            accepted: solvela_x402::types::PaymentAccept {
                 scheme: "exact".to_string(),
                 network: SOLANA_NETWORK.to_string(),
                 amount: "1000".to_string(),
@@ -549,7 +549,7 @@ mod tests {
                 max_timeout_seconds: 300,
                 escrow_program_id: None,
             },
-            payload: x402::types::PayloadData::Direct(x402::types::SolanaPayload {
+            payload: solvela_x402::types::PayloadData::Direct(solvela_x402::types::SolanaPayload {
                 transaction: "not-valid-base64!!!".to_string(),
             }),
         };

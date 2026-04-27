@@ -122,7 +122,7 @@ mod tests {
     use crate::services::ServiceRegistry;
     use crate::usage::UsageTracker;
     use solvela_router::models::ModelRegistry;
-    use x402::facilitator::Facilitator;
+    use solvela_x402::facilitator::Facilitator;
 
     fn test_state() -> Arc<AppState> {
         Arc::new(AppState {

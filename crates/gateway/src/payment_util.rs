@@ -4,7 +4,7 @@
 use base64::Engine;
 use tracing::warn;
 
-use x402::solana_types::VersionedTransaction;
+use solvela_x402::solana_types::VersionedTransaction;
 
 /// Extract the payer wallet address from a payment payload.
 ///
@@ -12,10 +12,10 @@ use x402::solana_types::VersionedTransaction;
 /// For direct payments, decodes the base64 transaction and extracts the
 /// first account key (the fee payer / signer in Solana transactions).
 /// Returns "unknown" if extraction fails.
-pub fn extract_payer_wallet(payload: &x402::types::PaymentPayload) -> String {
+pub fn extract_payer_wallet(payload: &solvela_x402::types::PaymentPayload) -> String {
     match &payload.payload {
-        x402::types::PayloadData::Escrow(p) => p.agent_pubkey.clone(),
-        x402::types::PayloadData::Direct(p) => {
+        solvela_x402::types::PayloadData::Escrow(p) => p.agent_pubkey.clone(),
+        solvela_x402::types::PayloadData::Direct(p) => {
             // Decode base64 transaction and extract first signer (fee payer)
             extract_signer_from_base64_tx(&p.transaction).unwrap_or_else(|| "unknown".to_string())
         }
@@ -42,17 +42,17 @@ pub fn extract_signer_from_base64_tx(b64_tx: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use x402::types::{SOLANA_NETWORK, USDC_MINT};
+    use solvela_x402::types::{SOLANA_NETWORK, USDC_MINT};
 
     #[test]
     fn test_extract_payer_wallet_escrow() {
-        let payload = x402::types::PaymentPayload {
+        let payload = solvela_x402::types::PaymentPayload {
             x402_version: 1,
-            resource: x402::types::Resource {
+            resource: solvela_x402::types::Resource {
                 url: "/test".to_string(),
                 method: "POST".to_string(),
             },
-            accepted: x402::types::PaymentAccept {
+            accepted: solvela_x402::types::PaymentAccept {
                 scheme: "escrow".to_string(),
                 network: SOLANA_NETWORK.to_string(),
                 amount: "1000".to_string(),
@@ -61,7 +61,7 @@ mod tests {
                 max_timeout_seconds: 300,
                 escrow_program_id: None,
             },
-            payload: x402::types::PayloadData::Escrow(x402::types::EscrowPayload {
+            payload: solvela_x402::types::PayloadData::Escrow(solvela_x402::types::EscrowPayload {
                 deposit_tx: "dGVzdA==".to_string(),
                 service_id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
                 agent_pubkey: "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz".to_string(),
@@ -75,13 +75,13 @@ mod tests {
 
     #[test]
     fn test_extract_payer_wallet_direct_invalid_tx() {
-        let payload = x402::types::PaymentPayload {
+        let payload = solvela_x402::types::PaymentPayload {
             x402_version: 1,
-            resource: x402::types::Resource {
+            resource: solvela_x402::types::Resource {
                 url: "/test".to_string(),
                 method: "POST".to_string(),
             },
-            accepted: x402::types::PaymentAccept {
+            accepted: solvela_x402::types::PaymentAccept {
                 scheme: "exact".to_string(),
                 network: SOLANA_NETWORK.to_string(),
                 amount: "1000".to_string(),
@@ -90,7 +90,7 @@ mod tests {
                 max_timeout_seconds: 300,
                 escrow_program_id: None,
             },
-            payload: x402::types::PayloadData::Direct(x402::types::SolanaPayload {
+            payload: solvela_x402::types::PayloadData::Direct(solvela_x402::types::SolanaPayload {
                 transaction: "not-valid-base64!!!".to_string(),
             }),
         };

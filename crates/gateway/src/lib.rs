@@ -40,7 +40,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::services::ServiceRegistry;
 use solvela_router::models::ModelRegistry;
-use x402::facilitator::Facilitator;
+use solvela_x402::facilitator::Facilitator;
 
 use crate::middleware::rate_limit::RateLimiter;
 use crate::middleware::request_id::RequestIdLayer;
@@ -57,11 +57,11 @@ pub struct AppState {
     pub usage: usage::UsageTracker,
     pub cache: Option<cache::ResponseCache>,
     pub provider_health: providers::health::ProviderHealthTracker,
-    pub escrow_claimer: Option<Arc<x402::escrow::EscrowClaimer>>,
+    pub escrow_claimer: Option<Arc<solvela_x402::escrow::EscrowClaimer>>,
     /// Hot wallet pool for fee payer rotation. `None` when no fee payer keys are configured.
-    pub fee_payer_pool: Option<Arc<x402::fee_payer::FeePayerPool>>,
+    pub fee_payer_pool: Option<Arc<solvela_x402::fee_payer::FeePayerPool>>,
     /// Durable nonce account pool. `None` when no nonce accounts are configured.
-    pub nonce_pool: Option<Arc<x402::nonce_pool::NoncePool>>,
+    pub nonce_pool: Option<Arc<solvela_x402::nonce_pool::NoncePool>>,
     /// Optional PostgreSQL pool for durable claim queue and other DB operations.
     pub db_pool: Option<sqlx::PgPool>,
     /// HMAC secret for signing/verifying session tokens.
@@ -76,7 +76,7 @@ pub struct AppState {
     pub slot_cache: SlotCache,
     /// In-memory escrow claim metrics (submitted, succeeded, failed, retried).
     /// `None` when escrow or claim processor is not configured.
-    pub escrow_metrics: Option<Arc<x402::escrow::EscrowMetrics>>,
+    pub escrow_metrics: Option<Arc<solvela_x402::escrow::EscrowMetrics>>,
     /// Admin token for protected endpoints. `None` when not configured.
     pub admin_token: Option<String>,
     /// Prometheus metrics handle for rendering the `/metrics` endpoint.
@@ -219,7 +219,7 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            middleware::x402::extract_payment,
+            middleware::solvela_x402::extract_payment,
         ))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10 MB
         .layer(TraceLayer::new_for_http())

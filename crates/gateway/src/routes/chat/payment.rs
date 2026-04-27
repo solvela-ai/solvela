@@ -8,9 +8,9 @@ use std::sync::Arc;
 use base64::Engine;
 use tracing::warn;
 
-use x402::solana_types::VersionedTransaction;
+use solvela_x402::solana_types::VersionedTransaction;
 
-use crate::middleware::x402::decode_payment_header;
+use crate::middleware::solvela_x402::decode_payment_header;
 use crate::payment_util::extract_payer_wallet;
 use crate::AppState;
 
@@ -20,7 +20,7 @@ use crate::AppState;
 /// compatibility with raw string headers used in tests (e.g., "fake-payment-for-testing").
 ///
 /// Delegates to the shared `decode_payment_header` in the x402 middleware.
-pub(crate) fn decode_payment_from_header(header: &str) -> Option<x402::types::PaymentPayload> {
+pub(crate) fn decode_payment_from_header(header: &str) -> Option<solvela_x402::types::PaymentPayload> {
     decode_payment_header(header).ok()
 }
 
@@ -35,8 +35,8 @@ pub(crate) fn extract_payment_info(header: &str) -> (String, Option<String>) {
         Some(payload) => {
             let wallet = extract_payer_wallet(&payload);
             let tx_sig = match &payload.payload {
-                x402::types::PayloadData::Direct(p) => Some(p.transaction.clone()),
-                x402::types::PayloadData::Escrow(p) => Some(p.deposit_tx.clone()),
+                solvela_x402::types::PayloadData::Direct(p) => Some(p.transaction.clone()),
+                solvela_x402::types::PayloadData::Escrow(p) => Some(p.deposit_tx.clone()),
             };
             (wallet, tx_sig)
         }
@@ -75,7 +75,7 @@ pub(crate) fn uses_durable_nonce(b64_tx: &str) -> bool {
     // Check that the program invoked is the System Program (all zeros)
     let program_key = msg.account_keys.get(first_ix.program_id_index as usize);
     let is_system_program =
-        matches!(program_key, Some(pk) if *pk == x402::solana_types::Pubkey::SYSTEM_PROGRAM);
+        matches!(program_key, Some(pk) if *pk == solvela_x402::solana_types::Pubkey::SYSTEM_PROGRAM);
 
     // AdvanceNonceAccount discriminator: 4 as little-endian u32
     let is_advance_nonce = first_ix.data.len() >= 4 && first_ix.data[..4] == [4, 0, 0, 0];
@@ -142,7 +142,7 @@ pub(crate) fn fire_escrow_claim(
                 let pool = pool.clone();
                 let agent = agent_b58.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = x402::escrow::claim_queue::enqueue_claim(
+                    if let Err(e) = solvela_x402::escrow::claim_queue::enqueue_claim(
                         &pool,
                         &sid,
                         &agent,
@@ -223,22 +223,22 @@ mod tests {
     #[test]
     fn test_decode_payment_from_header_valid_base64() {
         use base64::Engine;
-        let payload = x402::types::PaymentPayload {
+        let payload = solvela_x402::types::PaymentPayload {
             x402_version: 2,
-            resource: x402::types::Resource {
+            resource: solvela_x402::types::Resource {
                 url: "/v1/chat/completions".to_string(),
                 method: "POST".to_string(),
             },
-            accepted: x402::types::PaymentAccept {
+            accepted: solvela_x402::types::PaymentAccept {
                 scheme: "exact".to_string(),
-                network: x402::types::SOLANA_NETWORK.to_string(),
+                network: solvela_x402::types::SOLANA_NETWORK.to_string(),
                 amount: "2625".to_string(),
-                asset: x402::types::USDC_MINT.to_string(),
+                asset: solvela_x402::types::USDC_MINT.to_string(),
                 pay_to: "TestWallet".to_string(),
                 max_timeout_seconds: 300,
                 escrow_program_id: None,
             },
-            payload: x402::types::PayloadData::Direct(x402::types::SolanaPayload {
+            payload: solvela_x402::types::PayloadData::Direct(solvela_x402::types::SolanaPayload {
                 transaction: "dGVzdA==".to_string(),
             }),
         };
@@ -254,22 +254,22 @@ mod tests {
 
     #[test]
     fn test_decode_payment_from_header_raw_json() {
-        let payload = x402::types::PaymentPayload {
+        let payload = solvela_x402::types::PaymentPayload {
             x402_version: 2,
-            resource: x402::types::Resource {
+            resource: solvela_x402::types::Resource {
                 url: "/v1/chat/completions".to_string(),
                 method: "POST".to_string(),
             },
-            accepted: x402::types::PaymentAccept {
+            accepted: solvela_x402::types::PaymentAccept {
                 scheme: "exact".to_string(),
-                network: x402::types::SOLANA_NETWORK.to_string(),
+                network: solvela_x402::types::SOLANA_NETWORK.to_string(),
                 amount: "2625".to_string(),
-                asset: x402::types::USDC_MINT.to_string(),
+                asset: solvela_x402::types::USDC_MINT.to_string(),
                 pay_to: "TestWallet".to_string(),
                 max_timeout_seconds: 300,
                 escrow_program_id: None,
             },
-            payload: x402::types::PayloadData::Direct(x402::types::SolanaPayload {
+            payload: solvela_x402::types::PayloadData::Direct(solvela_x402::types::SolanaPayload {
                 transaction: "dGVzdA==".to_string(),
             }),
         };
@@ -300,22 +300,22 @@ mod tests {
     #[test]
     fn test_extract_payment_info_valid_header_direct_undecodable_tx() {
         use base64::Engine;
-        let payload = x402::types::PaymentPayload {
+        let payload = solvela_x402::types::PaymentPayload {
             x402_version: 2,
-            resource: x402::types::Resource {
+            resource: solvela_x402::types::Resource {
                 url: "/v1/chat/completions".to_string(),
                 method: "POST".to_string(),
             },
-            accepted: x402::types::PaymentAccept {
+            accepted: solvela_x402::types::PaymentAccept {
                 scheme: "exact".to_string(),
-                network: x402::types::SOLANA_NETWORK.to_string(),
+                network: solvela_x402::types::SOLANA_NETWORK.to_string(),
                 amount: "2625".to_string(),
-                asset: x402::types::USDC_MINT.to_string(),
+                asset: solvela_x402::types::USDC_MINT.to_string(),
                 pay_to: "MyWallet123".to_string(),
                 max_timeout_seconds: 300,
                 escrow_program_id: None,
             },
-            payload: x402::types::PayloadData::Direct(x402::types::SolanaPayload {
+            payload: solvela_x402::types::PayloadData::Direct(solvela_x402::types::SolanaPayload {
                 // "dGVzdHR4" decodes to "testtx" -- not a valid Solana tx,
                 // so payer extraction falls back to "unknown".
                 transaction: "dGVzdHR4".to_string(),
@@ -332,22 +332,22 @@ mod tests {
     #[test]
     fn test_extract_payment_info_escrow_uses_agent_pubkey() {
         use base64::Engine;
-        let payload = x402::types::PaymentPayload {
+        let payload = solvela_x402::types::PaymentPayload {
             x402_version: 2,
-            resource: x402::types::Resource {
+            resource: solvela_x402::types::Resource {
                 url: "/v1/chat/completions".to_string(),
                 method: "POST".to_string(),
             },
-            accepted: x402::types::PaymentAccept {
+            accepted: solvela_x402::types::PaymentAccept {
                 scheme: "escrow".to_string(),
-                network: x402::types::SOLANA_NETWORK.to_string(),
+                network: solvela_x402::types::SOLANA_NETWORK.to_string(),
                 amount: "2625".to_string(),
-                asset: x402::types::USDC_MINT.to_string(),
+                asset: solvela_x402::types::USDC_MINT.to_string(),
                 pay_to: "RecipientWallet".to_string(),
                 max_timeout_seconds: 300,
                 escrow_program_id: None,
             },
-            payload: x402::types::PayloadData::Escrow(x402::types::EscrowPayload {
+            payload: solvela_x402::types::PayloadData::Escrow(solvela_x402::types::EscrowPayload {
                 deposit_tx: "dGVzdA==".to_string(),
                 service_id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
                 agent_pubkey: "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz".to_string(),
@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_uses_durable_nonce_returns_false_for_standard_tx() {
-        use x402::solana_types::Pubkey;
+        use solvela_x402::solana_types::Pubkey;
 
         let keys = vec![Pubkey::SYSTEM_PROGRAM, Pubkey::TOKEN_PROGRAM_ID];
         let msg_bytes = build_legacy_message_for_nonce_test(&keys, &[(1, &[0], &[3, 0x0C, 0x01])]);
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn test_uses_durable_nonce_returns_true_for_nonce_tx() {
-        use x402::solana_types::Pubkey;
+        use solvela_x402::solana_types::Pubkey;
 
         let nonce_account = Pubkey([1u8; 32]);
         let keys = vec![
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_uses_durable_nonce_returns_false_when_nonce_not_first() {
-        use x402::solana_types::Pubkey;
+        use solvela_x402::solana_types::Pubkey;
 
         let nonce_account = Pubkey([1u8; 32]);
         let keys = vec![
@@ -506,7 +506,7 @@ mod tests {
 
     /// Helper to build a minimal legacy message for nonce detection tests.
     fn build_legacy_message_for_nonce_test(
-        account_keys: &[x402::solana_types::Pubkey],
+        account_keys: &[solvela_x402::solana_types::Pubkey],
         instructions: &[(u8, &[u8], &[u8])],
     ) -> Vec<u8> {
         let mut msg = vec![

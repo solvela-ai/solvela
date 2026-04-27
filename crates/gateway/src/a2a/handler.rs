@@ -120,31 +120,31 @@ async fn handle_new_request(
     })?;
 
     // Build PaymentRequired (same structure as chat route)
-    let mut accepts = vec![x402::types::PaymentAccept {
+    let mut accepts = vec![solvela_x402::types::PaymentAccept {
         scheme: "exact".to_string(),
-        network: x402::types::SOLANA_NETWORK.to_string(),
+        network: solvela_x402::types::SOLANA_NETWORK.to_string(),
         amount: atomic_amount.clone(),
-        asset: x402::types::USDC_MINT.to_string(),
+        asset: solvela_x402::types::USDC_MINT.to_string(),
         pay_to: state.config.solana.recipient_wallet.clone(),
-        max_timeout_seconds: x402::types::MAX_TIMEOUT_SECONDS,
+        max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
         escrow_program_id: None,
     }];
 
     if state.escrow_claimer.is_some() {
-        accepts.push(x402::types::PaymentAccept {
+        accepts.push(solvela_x402::types::PaymentAccept {
             scheme: "escrow".to_string(),
-            network: x402::types::SOLANA_NETWORK.to_string(),
+            network: solvela_x402::types::SOLANA_NETWORK.to_string(),
             amount: atomic_amount,
-            asset: x402::types::USDC_MINT.to_string(),
+            asset: solvela_x402::types::USDC_MINT.to_string(),
             pay_to: state.config.solana.recipient_wallet.clone(),
-            max_timeout_seconds: x402::types::MAX_TIMEOUT_SECONDS,
+            max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
             escrow_program_id: state.config.solana.escrow_program_id.clone(),
         });
     }
 
-    let payment_required = x402::types::PaymentRequired {
-        x402_version: x402::types::X402_VERSION,
-        resource: x402::types::Resource {
+    let payment_required = solvela_x402::types::PaymentRequired {
+        x402_version: solvela_x402::types::X402_VERSION,
+        resource: solvela_x402::types::Resource {
             url: "/v1/chat/completions".to_string(),
             method: "POST".to_string(),
         },
@@ -275,7 +275,7 @@ async fn handle_payment_submitted(
             data: None,
         })?;
 
-    let payload: x402::types::PaymentPayload = serde_json::from_value(payload_value.clone())
+    let payload: solvela_x402::types::PaymentPayload = serde_json::from_value(payload_value.clone())
         .map_err(|e| JsonRpcErrorData {
             code: ERR_INVALID_PARAMS,
             message: format!("Invalid payment payload: {e}"),
@@ -292,8 +292,8 @@ async fn handle_payment_submitted(
     } else {
         // Replay check
         let tx_raw = match &payload.payload {
-            x402::types::PayloadData::Direct(p) => &p.transaction,
-            x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
+            solvela_x402::types::PayloadData::Direct(p) => &p.transaction,
+            solvela_x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
         };
 
         let replay_detected = if let Some(cache) = &state.cache {
@@ -517,7 +517,7 @@ mod tests {
     use crate::services::ServiceRegistry;
     use crate::usage::UsageTracker;
     use solvela_router::models::ModelRegistry;
-    use x402::facilitator::Facilitator;
+    use solvela_x402::facilitator::Facilitator;
 
     fn test_state() -> Arc<AppState> {
         Arc::new(AppState {

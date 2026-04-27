@@ -7,7 +7,7 @@
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use x402::types::{SOLANA_NETWORK, USDC_MINT, X402_VERSION};
+use solvela_x402::types::{SOLANA_NETWORK, USDC_MINT, X402_VERSION};
 
 /// A supported payment kind (scheme + network combination).
 #[derive(Debug, Clone, Serialize, Deserialize)]

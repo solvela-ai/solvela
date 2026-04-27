@@ -5,7 +5,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 
-use x402::types::{
+use solvela_x402::types::{
     EscrowPayload, PayloadData, PaymentAccept, PaymentPayload, Resource, SolanaPayload,
     X402_VERSION,
 };

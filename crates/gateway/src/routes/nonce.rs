@@ -84,7 +84,7 @@ mod tests {
     // crates/gateway/tests/integration.rs (see test_nonce_endpoint_* tests).
 
     use super::*;
-    use x402::nonce_pool::{NonceEntry, NoncePool};
+    use solvela_x402::nonce_pool::{NonceEntry, NoncePool};
 
     fn make_pool_with_entry(nonce_account: &str, authority: &str) -> Arc<NoncePool> {
         Arc::new(

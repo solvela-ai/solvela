@@ -27,8 +27,8 @@ use solvela_protocol::{
     Usage,
 };
 use solvela_router::models::ModelRegistry;
-use x402::traits::{Error as X402Error, PaymentVerifier};
-use x402::types::{
+use solvela_x402::traits::{Error as X402Error, PaymentVerifier};
+use solvela_x402::types::{
     EscrowPayload, PayloadData, PaymentAccept, PaymentPayload, Resource, SettlementResult,
     SolanaPayload, VerificationResult, SOLANA_NETWORK, USDC_MINT,
 };
@@ -226,7 +226,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
 
     // Use the always-pass mock verifier so tests exercise the full request path
-    let facilitator = x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
 
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
@@ -371,7 +371,7 @@ fn test_app_with_mock_provider() -> axum::Router {
 fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
-    let facilitator = x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
 
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
@@ -410,7 +410,7 @@ fn test_app_with_mock_provider_and_escrow() -> axum::Router {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
 
-    let facilitator = x402::facilitator::Facilitator::new(vec![
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![
         Arc::new(AlwaysPassVerifier),
         Arc::new(AlwaysPassEscrowVerifier),
     ]);
@@ -429,10 +429,10 @@ fn test_app_with_mock_provider_and_escrow() -> axum::Router {
         bs58::encode(&kp).into_string()
     };
     let test_fee_payer_pool = Arc::new(
-        x402::fee_payer::FeePayerPool::from_keys(&[test_keypair]).expect("test pool must load"),
+        solvela_x402::fee_payer::FeePayerPool::from_keys(&[test_keypair]).expect("test pool must load"),
     );
 
-    let escrow_claimer = x402::escrow::EscrowClaimer::new(
+    let escrow_claimer = solvela_x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
         test_fee_payer_pool.clone(),
         "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
@@ -473,7 +473,7 @@ fn test_app_with_escrow() -> axum::Router {
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
 
     // Include both exact and escrow verifiers
-    let facilitator = x402::facilitator::Facilitator::new(vec![
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![
         Arc::new(AlwaysPassVerifier),
         Arc::new(AlwaysPassEscrowVerifier),
     ]);
@@ -494,10 +494,10 @@ fn test_app_with_escrow() -> axum::Router {
         bs58::encode(&kp).into_string()
     };
     let test_fee_payer_pool = Arc::new(
-        x402::fee_payer::FeePayerPool::from_keys(&[test_keypair]).expect("test pool must load"),
+        solvela_x402::fee_payer::FeePayerPool::from_keys(&[test_keypair]).expect("test pool must load"),
     );
 
-    let escrow_claimer = x402::escrow::EscrowClaimer::new(
+    let escrow_claimer = solvela_x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
         test_fee_payer_pool.clone(),
         "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
@@ -1515,7 +1515,7 @@ async fn test_escrow_scheme_dispatches_to_escrow_verifier() {
     let exact_verifier = Arc::new(AlwaysPassVerifier);
     let escrow_verifier = Arc::new(AlwaysPassEscrowVerifier);
 
-    let facilitator = x402::facilitator::Facilitator::new(vec![exact_verifier, escrow_verifier]);
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![exact_verifier, escrow_verifier]);
 
     // Build an escrow payload
     let payload = PaymentPayload {
@@ -1780,11 +1780,11 @@ async fn test_chat_pii_detected_but_allowed() {
 
 /// Build a test app with a nonce pool configured (no RPC — pool only).
 fn test_app_with_nonce_pool() -> axum::Router {
-    use x402::nonce_pool::{NonceEntry, NoncePool};
+    use solvela_x402::nonce_pool::{NonceEntry, NoncePool};
 
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
-    let facilitator = x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
 
     // Create a pool with a well-known test pubkey (system program = 32 zero bytes in base58)
     let pool = NoncePool::from_entries(vec![NonceEntry {
@@ -3309,7 +3309,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
 
-    let facilitator = x402::facilitator::Facilitator::new(vec![
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![
         Arc::new(AlwaysPassVerifier),
         Arc::new(AlwaysPassEscrowVerifier),
     ]);
@@ -3328,10 +3328,10 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         bs58::encode(&kp).into_string()
     };
     let test_fee_payer_pool = Arc::new(
-        x402::fee_payer::FeePayerPool::from_keys(&[test_keypair]).expect("test pool must load"),
+        solvela_x402::fee_payer::FeePayerPool::from_keys(&[test_keypair]).expect("test pool must load"),
     );
 
-    let escrow_claimer = x402::escrow::EscrowClaimer::new(
+    let escrow_claimer = solvela_x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
         test_fee_payer_pool.clone(),
         "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
@@ -3342,7 +3342,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
     .expect("test claimer must be valid");
 
     // Pre-populate metrics with some values
-    let metrics = Arc::new(x402::escrow::EscrowMetrics::new());
+    let metrics = Arc::new(solvela_x402::escrow::EscrowMetrics::new());
     metrics
         .claims_submitted
         .store(42, std::sync::atomic::Ordering::Relaxed);
@@ -3479,7 +3479,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
 
-    let facilitator = x402::facilitator::Facilitator::new(vec![
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![
         Arc::new(AlwaysPassVerifier),
         Arc::new(AlwaysPassEscrowVerifier),
     ]);
@@ -3498,10 +3498,10 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         bs58::encode(&kp).into_string()
     };
     let test_fee_payer_pool = Arc::new(
-        x402::fee_payer::FeePayerPool::from_keys(&[test_keypair]).expect("test pool must load"),
+        solvela_x402::fee_payer::FeePayerPool::from_keys(&[test_keypair]).expect("test pool must load"),
     );
 
-    let escrow_claimer = x402::escrow::EscrowClaimer::new(
+    let escrow_claimer = solvela_x402::escrow::EscrowClaimer::new(
         "https://api.devnet.solana.com".to_string(),
         test_fee_payer_pool.clone(),
         "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
@@ -3512,7 +3512,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
     .expect("test claimer must be valid");
 
     // Start with zero metrics
-    let metrics = Arc::new(x402::escrow::EscrowMetrics::new());
+    let metrics = Arc::new(solvela_x402::escrow::EscrowMetrics::new());
 
     let state = Arc::new(AppState {
         config,
@@ -3735,7 +3735,7 @@ async fn test_scheme_payload_mismatch_escrow_with_direct_returns_400() {
 async fn test_escrow_health_status_down_without_claimer() {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
-    let facilitator = x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
 
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
@@ -4862,7 +4862,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
     // Build a custom app with admin_token = None
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
-    let facilitator = x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
 
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();

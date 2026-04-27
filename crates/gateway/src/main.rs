@@ -160,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
         Ok("production") | Ok("prod")
     );
 
-    let solana_verifier = match x402::solana::SolanaVerifier::new(
+    let solana_verifier = match solvela_x402::solana::SolanaVerifier::new(
         &app_config.solana.rpc_url,
         &app_config.solana.recipient_wallet,
         &app_config.solana.usdc_mint,
@@ -193,7 +193,7 @@ async fn main() -> anyhow::Result<()> {
                 "failed to initialize Solana verifier, using devnet defaults. \
                  THIS IS UNSAFE FOR PRODUCTION — set SOLVELA_ENV=production to enforce."
             );
-            x402::solana::SolanaVerifier::new(
+            solvela_x402::solana::SolanaVerifier::new(
                 "https://api.devnet.solana.com",
                 "11111111111111111111111111111111",
                 "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
@@ -204,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Build verifiers list — always include the direct SolanaVerifier
-    let mut verifiers: Vec<Arc<dyn x402::traits::PaymentVerifier>> =
+    let mut verifiers: Vec<Arc<dyn solvela_x402::traits::PaymentVerifier>> =
         vec![Arc::new(solana_verifier)];
 
     // ── Fee payer pool (hot wallet rotation) ──────────────────────────────────
@@ -217,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
         let merged_keys = app_config.solana.all_fee_payer_keys();
         if merged_keys.is_empty() {
             // Try loading directly from env vars as a fallback
-            match x402::fee_payer::FeePayerPool::from_env() {
+            match solvela_x402::fee_payer::FeePayerPool::from_env() {
                 Ok(pool) => {
                     info!(
                         wallets = pool.len(),
@@ -231,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         } else {
-            match x402::fee_payer::FeePayerPool::from_keys(&merged_keys) {
+            match solvela_x402::fee_payer::FeePayerPool::from_keys(&merged_keys) {
                 Ok(pool) => {
                     info!(
                         wallets = pool.len(),
@@ -254,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
     // to using a recent blockhash in that case.
     // Constructed before EscrowClaimer because the claimer now uses the pool.
     let nonce_pool = {
-        let pool = x402::nonce_pool::NoncePool::from_env();
+        let pool = solvela_x402::nonce_pool::NoncePool::from_env();
         if pool.is_empty() {
             info!("nonce pool empty — clients will use recent blockhash (set SOLVELA_SOLANA__NONCE_ACCOUNT to enable)");
             None
@@ -270,7 +270,7 @@ async fn main() -> anyhow::Result<()> {
     let escrow_claimer = if let (Some(prog_id), Some(ref pool)) =
         (&app_config.solana.escrow_program_id, &fee_payer_pool)
     {
-        let escrow_verifier = x402::escrow::EscrowVerifier {
+        let escrow_verifier = solvela_x402::escrow::EscrowVerifier {
             rpc_url: app_config.solana.rpc_url.clone(),
             recipient_wallet: app_config.solana.recipient_wallet.clone(),
             usdc_mint: app_config.solana.usdc_mint.clone(),
@@ -279,7 +279,7 @@ async fn main() -> anyhow::Result<()> {
         };
         verifiers.push(Arc::new(escrow_verifier));
 
-        match x402::escrow::EscrowClaimer::new(
+        match solvela_x402::escrow::EscrowClaimer::new(
             app_config.solana.rpc_url.clone(),
             Arc::clone(pool),
             prog_id,
@@ -305,7 +305,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let facilitator = x402::facilitator::Facilitator::new(verifiers);
+    let facilitator = solvela_x402::facilitator::Facilitator::new(verifiers);
 
     // ── PostgreSQL connection (optional — gracefully degrades to noop) ──────────
     //
@@ -414,9 +414,9 @@ async fn main() -> anyhow::Result<()> {
     //
     // Created here so both the claim processor and the AppState can share
     // the same Arc.  `None` when escrow is not configured or no DB.
-    let escrow_metrics: Option<Arc<x402::escrow::EscrowMetrics>> =
+    let escrow_metrics: Option<Arc<solvela_x402::escrow::EscrowMetrics>> =
         if escrow_claimer.is_some() && db_pool.is_some() {
-            Some(Arc::new(x402::escrow::EscrowMetrics::new()))
+            Some(Arc::new(solvela_x402::escrow::EscrowMetrics::new()))
         } else {
             None
         };
@@ -540,7 +540,7 @@ async fn main() -> anyhow::Result<()> {
     // background claim processor that polls the escrow_claim_queue table.
     if let (Some(ref pool), Some(ref claimer)) = (&state.db_pool, &state.escrow_claimer) {
         let claim_shutdown_rx = shutdown_rx.clone();
-        let _handle = x402::escrow::claim_processor::start_claim_processor(
+        let _handle = solvela_x402::escrow::claim_processor::start_claim_processor(
             pool.clone(),
             Arc::clone(claimer),
             std::time::Duration::from_secs(10),

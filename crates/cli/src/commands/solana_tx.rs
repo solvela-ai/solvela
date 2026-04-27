@@ -23,7 +23,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use x402::solana_types::{derive_ata, Pubkey};
+use solvela_x402::solana_types::{derive_ata, Pubkey};
 
 /// USDC mint on Solana mainnet-beta.
 const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -294,7 +294,7 @@ pub async fn fetch_current_slot(rpc_url: &str, client: &reqwest::Client) -> Resu
 
 /// Build and sign an escrow deposit transaction.
 ///
-/// Wraps `x402::escrow::deposit::build_deposit_tx` with blockhash fetching.
+/// Wraps `solvela_x402::escrow::deposit::build_deposit_tx` with blockhash fetching.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_escrow_deposit(
     payer_keypair_b58: &str,
@@ -307,7 +307,7 @@ pub async fn build_escrow_deposit(
     client: &reqwest::Client,
 ) -> Result<String> {
     let recent_blockhash = fetch_blockhash(rpc_url, client).await?;
-    x402::escrow::deposit::build_deposit_tx(&x402::escrow::deposit::DepositParams {
+    solvela_x402::escrow::deposit::build_deposit_tx(&solvela_x402::escrow::deposit::DepositParams {
         agent_keypair_b58: payer_keypair_b58.to_string(),
         provider_wallet_b58: provider_wallet.to_string(),
         usdc_mint_b58: USDC_MINT.to_string(),
@@ -453,12 +453,12 @@ mod tests {
     fn test_x402_escrow_pda_exports_accessible() {
         // Verify that x402 escrow PDA helpers are publicly accessible
         let program_id =
-            x402::escrow::pda::decode_bs58_pubkey("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU")
+            solvela_x402::escrow::pda::decode_bs58_pubkey("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU")
                 .unwrap();
         let agent = [1u8; 32];
         let service_id = [2u8; 32];
         let result =
-            x402::escrow::pda::find_program_address(&[b"escrow", &agent, &service_id], &program_id);
+            solvela_x402::escrow::pda::find_program_address(&[b"escrow", &agent, &service_id], &program_id);
         assert!(result.is_some());
     }
 

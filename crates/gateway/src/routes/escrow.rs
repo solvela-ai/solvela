@@ -63,7 +63,7 @@ pub async fn escrow_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let config = EscrowConfig {
         escrow_program_id,
         current_slot,
-        network: x402::types::SOLANA_NETWORK.to_string(),
+        network: solvela_x402::types::SOLANA_NETWORK.to_string(),
         usdc_mint: state.config.solana.usdc_mint.clone(),
         provider_wallet: state.config.solana.recipient_wallet.clone(),
     };

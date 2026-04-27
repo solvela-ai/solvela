@@ -296,7 +296,7 @@ supports_vision = true
         let model_registry =
             ModelRegistry::from_toml(TEST_MODELS_TOML).expect("test models toml must be valid");
         let service_registry = ServiceRegistry::empty();
-        let facilitator = x402::facilitator::Facilitator::new(vec![]);
+        let facilitator = solvela_x402::facilitator::Facilitator::new(vec![]);
 
         let state = Arc::new(AppState {
             config: crate::config::AppConfig::default(),
@@ -461,7 +461,7 @@ mod tests {
             .unwrap(),
             service_registry: tokio::sync::RwLock::new(crate::services::ServiceRegistry::empty()),
             providers: crate::providers::ProviderRegistry::from_env(reqwest::Client::new()),
-            facilitator: x402::facilitator::Facilitator::new(vec![]),
+            facilitator: solvela_x402::facilitator::Facilitator::new(vec![]),
             usage: crate::usage::UsageTracker::noop(),
             cache: None,
             provider_health: crate::providers::health::ProviderHealthTracker::new(
@@ -504,7 +504,7 @@ mod tests {
             .unwrap(),
             service_registry: tokio::sync::RwLock::new(crate::services::ServiceRegistry::empty()),
             providers: crate::providers::ProviderRegistry::from_env(reqwest::Client::new()),
-            facilitator: x402::facilitator::Facilitator::new(vec![]),
+            facilitator: solvela_x402::facilitator::Facilitator::new(vec![]),
             usage: crate::usage::UsageTracker::noop(),
             cache: None,
             provider_health: crate::providers::health::ProviderHealthTracker::new(
@@ -550,7 +550,7 @@ mod tests {
             .unwrap(),
             service_registry: tokio::sync::RwLock::new(crate::services::ServiceRegistry::empty()),
             providers: crate::providers::ProviderRegistry::from_env(reqwest::Client::new()),
-            facilitator: x402::facilitator::Facilitator::new(vec![]),
+            facilitator: solvela_x402::facilitator::Facilitator::new(vec![]),
             usage: crate::usage::UsageTracker::noop(),
             cache: None,
             provider_health: crate::providers::health::ProviderHealthTracker::new(

@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use x402::types::PaymentRequired;
+use solvela_x402::types::PaymentRequired;
 
 use super::metrics::{MetricsCollector, RequestOutcome};
 use super::payment::PaymentStrategy;
@@ -272,7 +272,7 @@ mod tests {
             &self,
             _rpc_url: &str,
             _request_body: &serde_json::Value,
-            _accepts: &[x402::types::PaymentAccept],
+            _accepts: &[solvela_x402::types::PaymentAccept],
         ) -> anyhow::Result<Option<String>> {
             Ok(Some("stub-payment-header".to_string()))
         }

@@ -83,7 +83,7 @@ mod tests {
     use crate::usage::UsageTracker;
     use crate::AppState;
     use solvela_router::models::ModelRegistry;
-    use x402::facilitator::Facilitator;
+    use solvela_x402::facilitator::Facilitator;
 
     fn test_app() -> axum::Router {
         let state = Arc::new(AppState {

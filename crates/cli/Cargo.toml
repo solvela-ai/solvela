@@ -8,7 +8,7 @@ name = "solvela"
 path = "src/main.rs"
 
 [dependencies]
-x402 = { workspace = true }
+solvela-x402 = { workspace = true }
 solvela-router = { workspace = true }
 
 clap = { workspace = true }

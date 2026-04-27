@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use sha2::{Digest, Sha256};
-use x402::types::{PaymentAccept, PaymentPayload, PaymentRequired, Resource, SolanaPayload};
+use solvela_x402::types::{PaymentAccept, PaymentPayload, PaymentRequired, Resource, SolanaPayload};
 
 use crate::commands::wallet::load_wallet;
 
@@ -172,13 +172,13 @@ pub async fn run(
             let agent_pubkey_b58 = bs58::encode(agent_pubkey.as_bytes()).into_string();
 
             PaymentPayload {
-                x402_version: x402::types::X402_VERSION,
+                x402_version: solvela_x402::types::X402_VERSION,
                 resource: Resource {
                     url: "/v1/chat/completions".to_string(),
                     method: "POST".to_string(),
                 },
                 accepted: accepted.clone(),
-                payload: x402::types::PayloadData::Escrow(x402::types::EscrowPayload {
+                payload: solvela_x402::types::PayloadData::Escrow(solvela_x402::types::EscrowPayload {
                     deposit_tx,
                     service_id: BASE64.encode(service_id),
                     agent_pubkey: agent_pubkey_b58,
@@ -201,13 +201,13 @@ pub async fn run(
             .context("failed to build Solana payment transaction")?;
 
             PaymentPayload {
-                x402_version: x402::types::X402_VERSION,
+                x402_version: solvela_x402::types::X402_VERSION,
                 resource: Resource {
                     url: "/v1/chat/completions".to_string(),
                     method: "POST".to_string(),
                 },
                 accepted,
-                payload: x402::types::PayloadData::Direct(SolanaPayload {
+                payload: solvela_x402::types::PayloadData::Direct(SolanaPayload {
                     transaction: signed_tx,
                 }),
             }

@@ -225,7 +225,7 @@ mod tests {
         let model_registry = ModelRegistry::from_toml(super::test_helpers::TEST_MODELS_TOML)
             .expect("test models toml must be valid");
         let service_registry = ServiceRegistry::empty();
-        let facilitator = x402::facilitator::Facilitator::new(vec![]);
+        let facilitator = solvela_x402::facilitator::Facilitator::new(vec![]);
 
         let state = Arc::new(crate::AppState {
             config: crate::config::AppConfig::default(),

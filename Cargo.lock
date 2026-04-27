@@ -863,6 +863,7 @@ dependencies = [
  "sha2",
  "solvela-protocol",
  "solvela-router",
+ "solvela-x402",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
@@ -874,7 +875,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "x402",
 ]
 
 [[package]]
@@ -2437,13 +2437,13 @@ dependencies = [
  "serde_json",
  "sha2",
  "solvela-router",
+ "solvela-x402",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "url",
  "wiremock",
- "x402",
 ]
 
 [[package]]
@@ -2465,6 +2465,28 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "solvela-x402"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bs58",
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "metrics",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "solvela-protocol",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -3774,28 +3796,6 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
-
-[[package]]
-name = "x402"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bs58",
- "curve25519-dalek",
- "ed25519-dalek",
- "metrics",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "solvela-protocol",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "zeroize",
-]
 
 [[package]]
 name = "yoke"

@@ -201,32 +201,32 @@ pub async fn chat_completions(
             ))
         })?;
 
-        let mut accepts = vec![x402::types::PaymentAccept {
+        let mut accepts = vec![solvela_x402::types::PaymentAccept {
             scheme: "exact".to_string(),
-            network: x402::types::SOLANA_NETWORK.to_string(),
+            network: solvela_x402::types::SOLANA_NETWORK.to_string(),
             amount: atomic_amount.clone(),
-            asset: x402::types::USDC_MINT.to_string(),
+            asset: solvela_x402::types::USDC_MINT.to_string(),
             pay_to: state.config.solana.recipient_wallet.clone(),
-            max_timeout_seconds: x402::types::MAX_TIMEOUT_SECONDS,
+            max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
             escrow_program_id: None,
         }];
 
         // Offer escrow scheme if configured
         if state.escrow_claimer.is_some() {
-            accepts.push(x402::types::PaymentAccept {
+            accepts.push(solvela_x402::types::PaymentAccept {
                 scheme: "escrow".to_string(),
-                network: x402::types::SOLANA_NETWORK.to_string(),
+                network: solvela_x402::types::SOLANA_NETWORK.to_string(),
                 amount: atomic_amount,
-                asset: x402::types::USDC_MINT.to_string(),
+                asset: solvela_x402::types::USDC_MINT.to_string(),
                 pay_to: state.config.solana.recipient_wallet.clone(),
-                max_timeout_seconds: x402::types::MAX_TIMEOUT_SECONDS,
+                max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
                 escrow_program_id: state.config.solana.escrow_program_id.clone(),
             });
         }
 
-        let payment_required = x402::types::PaymentRequired {
-            x402_version: x402::types::X402_VERSION,
-            resource: x402::types::Resource {
+        let payment_required = solvela_x402::types::PaymentRequired {
+            x402_version: solvela_x402::types::X402_VERSION,
+            resource: solvela_x402::types::Resource {
                 url: "/v1/chat/completions".to_string(),
                 method: "POST".to_string(),
             },
@@ -281,30 +281,30 @@ pub async fn chat_completions(
             if !payload
                 .accepted
                 .network
-                .eq_ignore_ascii_case(x402::types::SOLANA_NETWORK)
+                .eq_ignore_ascii_case(solvela_x402::types::SOLANA_NETWORK)
             {
                 warn!(
                     network = %payload.accepted.network,
-                    expected = %x402::types::SOLANA_NETWORK,
+                    expected = %solvela_x402::types::SOLANA_NETWORK,
                     "payment network mismatch"
                 );
                 return Err(GatewayError::BadRequest(format!(
                     "payment network must be '{}', got '{}'",
-                    x402::types::SOLANA_NETWORK,
+                    solvela_x402::types::SOLANA_NETWORK,
                     payload.accepted.network
                 )));
             }
 
             // Verify asset is USDC-SPL mint
-            if payload.accepted.asset != x402::types::USDC_MINT {
+            if payload.accepted.asset != solvela_x402::types::USDC_MINT {
                 warn!(
                     asset = %payload.accepted.asset,
-                    expected = %x402::types::USDC_MINT,
+                    expected = %solvela_x402::types::USDC_MINT,
                     "payment asset mismatch"
                 );
                 return Err(GatewayError::BadRequest(format!(
                     "payment asset must be USDC mint '{}', got '{}'",
-                    x402::types::USDC_MINT,
+                    solvela_x402::types::USDC_MINT,
                     payload.accepted.asset
                 )));
             }
@@ -364,12 +364,12 @@ pub async fn chat_completions(
 
             // --- M6: Validate scheme matches PayloadData variant ---
             match (payload.accepted.scheme.as_str(), &payload.payload) {
-                ("exact", x402::types::PayloadData::Escrow(_)) => {
+                ("exact", solvela_x402::types::PayloadData::Escrow(_)) => {
                     return Err(GatewayError::BadRequest(
                         "scheme is 'exact' but payload contains escrow data".to_string(),
                     ));
                 }
-                ("escrow", x402::types::PayloadData::Direct(_)) => {
+                ("escrow", solvela_x402::types::PayloadData::Direct(_)) => {
                     return Err(GatewayError::BadRequest(
                         "scheme is 'escrow' but payload contains direct transfer data".to_string(),
                     ));
@@ -379,15 +379,15 @@ pub async fn chat_completions(
 
             // Track scheme and escrow info
             payment_scheme = payload.accepted.scheme.clone();
-            if let x402::types::PayloadData::Escrow(ref ep) = payload.payload {
+            if let solvela_x402::types::PayloadData::Escrow(ref ep) = payload.payload {
                 escrow_service_id = Some(ep.service_id.clone());
                 escrow_agent_pubkey = Some(ep.agent_pubkey.clone());
             }
 
             // --- C2: Mandatory replay attack prevention ---
             let tx_raw = match &payload.payload {
-                x402::types::PayloadData::Direct(p) => &p.transaction,
-                x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
+                solvela_x402::types::PayloadData::Direct(p) => &p.transaction,
+                solvela_x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
             };
 
             // Detect durable nonce to set appropriate replay TTL.
