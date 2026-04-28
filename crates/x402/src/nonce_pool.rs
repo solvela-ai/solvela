@@ -3,9 +3,11 @@
 //! Durable nonces allow transactions to be pre-signed and submitted without blockhash expiry.
 //! The pool maps each fee payer wallet to its paired nonce account.
 //!
-//! Env var convention:
-//! - `RCR_SOLANA__NONCE_ACCOUNT` — primary nonce account pubkey (paired with primary fee payer)
-//! - `RCR_SOLANA__NONCE_ACCOUNT_2` through `RCR_SOLANA__NONCE_ACCOUNT_8`
+//! Env var convention (canonical names; legacy `RCR_*` accepted as fallback):
+//! - `SOLVELA_SOLANA__NONCE_ACCOUNT` — primary nonce account pubkey (paired with primary fee payer)
+//! - `SOLVELA_SOLANA__NONCE_ACCOUNT_2` through `SOLVELA_SOLANA__NONCE_ACCOUNT_8`
+//! - `SOLVELA_SOLANA__NONCE_AUTHORITY` — authority pubkey for primary nonce account
+//! - `SOLVELA_SOLANA__NONCE_AUTHORITY_2` through `SOLVELA_SOLANA__NONCE_AUTHORITY_8`
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -42,6 +44,14 @@ pub enum NoncePoolError {
     ParseError(String),
 }
 
+/// Try `solvela_name` first; fall back to `rcr_name` for backwards compatibility.
+/// Returns `None` only when neither variable is set.
+fn read_env_var(solvela_name: &str, rcr_name: &str) -> Option<String> {
+    std::env::var(solvela_name)
+        .or_else(|_| std::env::var(rcr_name))
+        .ok()
+}
+
 impl NoncePool {
     /// Create a pool from a list of nonce entries, validating each pubkey.
     pub fn from_entries(entries: Vec<NonceEntry>) -> Result<Self, NoncePoolError> {
@@ -58,26 +68,24 @@ impl NoncePool {
 
     /// Load nonce accounts from environment variables.
     ///
-    /// Reads:
-    /// - `RCR_SOLANA__NONCE_ACCOUNT` + `RCR_SOLANA__FEE_PAYER_KEY` (primary, index 0 authority
-    ///   is derived from the key, but we only need the pubkey — stored separately from the pool
-    ///   concept, so we read the authority pubkey from `RCR_SOLANA__NONCE_AUTHORITY` env var or
-    ///   fall back to a placeholder)
+    /// Reads (canonical `SOLVELA_*` names; legacy `RCR_*` accepted as fallback):
+    /// - `SOLVELA_SOLANA__NONCE_ACCOUNT` — primary nonce account pubkey (index 0)
+    /// - `SOLVELA_SOLANA__NONCE_AUTHORITY` — authority pubkey for the primary nonce account
     ///
-    /// Actually: the authority pubkey is the fee payer's pubkey. Since `FeePayerPool` derives
+    /// The authority pubkey is the fee payer's pubkey. Since `FeePayerPool` derives
     /// the pubkey from bytes 32..64 of the keypair, and we want to avoid re-deriving it here,
-    /// the operator must supply both `RCR_SOLANA__NONCE_ACCOUNT` and
-    /// `RCR_SOLANA__NONCE_AUTHORITY` (the fee payer's base58 pubkey).
+    /// the operator must supply both `SOLVELA_SOLANA__NONCE_ACCOUNT` and
+    /// `SOLVELA_SOLANA__NONCE_AUTHORITY` (the fee payer's base58 pubkey).
     ///
     /// Returns an **empty** pool (not an error) if no nonce accounts are configured.
     /// This is intentional — nonce accounts require manual on-chain setup.
     pub fn from_env() -> Self {
         let mut entries = Vec::new();
 
-        // Primary nonce account (index 0)
-        if let (Ok(account), Ok(authority)) = (
-            std::env::var("RCR_SOLANA__NONCE_ACCOUNT"),
-            std::env::var("RCR_SOLANA__NONCE_AUTHORITY"),
+        // Primary nonce account (index 0) — try SOLVELA_* first, fall back to legacy RCR_*
+        if let (Some(account), Some(authority)) = (
+            read_env_var("SOLVELA_SOLANA__NONCE_ACCOUNT", "RCR_SOLANA__NONCE_ACCOUNT"),
+            read_env_var("SOLVELA_SOLANA__NONCE_AUTHORITY", "RCR_SOLANA__NONCE_AUTHORITY"),
         ) {
             let account = account.trim().to_string();
             let authority = authority.trim().to_string();
@@ -93,13 +101,18 @@ impl NoncePool {
             }
         }
 
-        // Additional nonce accounts (indices 1..7)
+        // Additional nonce accounts (indices 1..7) — try SOLVELA_* first, fall back to legacy RCR_*
         for i in 2..=MAX_NONCE_ACCOUNTS {
-            let account_var = format!("RCR_SOLANA__NONCE_ACCOUNT_{i}");
-            let authority_var = format!("RCR_SOLANA__NONCE_AUTHORITY_{i}");
-            if let (Ok(account), Ok(authority)) =
-                (std::env::var(&account_var), std::env::var(&authority_var))
-            {
+            if let (Some(account), Some(authority)) = (
+                read_env_var(
+                    &format!("SOLVELA_SOLANA__NONCE_ACCOUNT_{i}"),
+                    &format!("RCR_SOLANA__NONCE_ACCOUNT_{i}"),
+                ),
+                read_env_var(
+                    &format!("SOLVELA_SOLANA__NONCE_AUTHORITY_{i}"),
+                    &format!("RCR_SOLANA__NONCE_AUTHORITY_{i}"),
+                ),
+            ) {
                 let account = account.trim().to_string();
                 let authority = authority.trim().to_string();
                 if !account.is_empty()
@@ -351,7 +364,12 @@ mod tests {
         // Ensure env vars are NOT set (they shouldn't be in CI)
         // We unset them to be safe.
         // SAFETY: tests run in a single-threaded context for env var manipulation.
-        let _guard = EnvGuard::clear(&["RCR_SOLANA__NONCE_ACCOUNT", "RCR_SOLANA__NONCE_AUTHORITY"]);
+        let _guard = EnvGuard::clear(&[
+            "SOLVELA_SOLANA__NONCE_ACCOUNT",
+            "SOLVELA_SOLANA__NONCE_AUTHORITY",
+            "RCR_SOLANA__NONCE_ACCOUNT",
+            "RCR_SOLANA__NONCE_AUTHORITY",
+        ]);
 
         let pool = NoncePool::from_env();
         assert!(

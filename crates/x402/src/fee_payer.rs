@@ -2,8 +2,11 @@
 //! and automatic failover with cooldown.
 //!
 //! Keys are loaded from environment variables:
-//! - `RCR_SOLANA__FEE_PAYER_KEY` (primary, index 0)
-//! - `RCR_SOLANA__FEE_PAYER_KEY_2` .. `RCR_SOLANA__FEE_PAYER_KEY_8`
+//! - `SOLVELA_SOLANA__FEE_PAYER_KEY` (primary, index 0)
+//! - `SOLVELA_SOLANA__FEE_PAYER_KEY_2` .. `SOLVELA_SOLANA__FEE_PAYER_KEY_8`
+//!
+//! Legacy `RCR_SOLANA__FEE_PAYER_KEY[_N]` names are accepted as a fallback for
+//! backwards compatibility; `SOLVELA_*` is always tried first.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -87,6 +90,14 @@ pub enum FeePayerError {
     SigningFailed(String),
 }
 
+/// Try `solvela_name` first; fall back to `rcr_name` for backwards compatibility.
+/// Returns `None` only when neither variable is set.
+fn read_env_var(solvela_name: &str, rcr_name: &str) -> Option<String> {
+    std::env::var(solvela_name)
+        .or_else(|_| std::env::var(rcr_name))
+        .ok()
+}
+
 impl FeePayerPool {
     /// Load from a slice of base58-encoded 64-byte keypair strings.
     pub fn from_keys(keys: &[String]) -> Result<Self, FeePayerError> {
@@ -136,25 +147,27 @@ impl FeePayerPool {
         })
     }
 
-    /// Load from environment variables following the `RCR_SOLANA__FEE_PAYER_KEY[_N]` convention.
+    /// Load from environment variables following the `SOLVELA_SOLANA__FEE_PAYER_KEY[_N]` convention.
     ///
-    /// Reads:
-    /// - `RCR_SOLANA__FEE_PAYER_KEY` (index 0)
-    /// - `RCR_SOLANA__FEE_PAYER_KEY_2` through `RCR_SOLANA__FEE_PAYER_KEY_8`
+    /// Reads (canonical names; legacy `RCR_*` accepted as fallback):
+    /// - `SOLVELA_SOLANA__FEE_PAYER_KEY` (index 0)
+    /// - `SOLVELA_SOLANA__FEE_PAYER_KEY_2` through `SOLVELA_SOLANA__FEE_PAYER_KEY_8`
     pub fn from_env() -> Result<Self, FeePayerError> {
         let mut keys = Vec::new();
 
-        // Primary key (index 0)
-        if let Ok(k) = std::env::var("RCR_SOLANA__FEE_PAYER_KEY") {
+        // Primary key (index 0) — try SOLVELA_* first, fall back to legacy RCR_*
+        if let Some(k) = read_env_var("SOLVELA_SOLANA__FEE_PAYER_KEY", "RCR_SOLANA__FEE_PAYER_KEY") {
             if !k.is_empty() {
                 keys.push(k);
             }
         }
 
-        // Additional keys (index 1..7)
+        // Additional keys (index 1..7) — try SOLVELA_* first, fall back to legacy RCR_*
         for i in 2..=MAX_KEYS {
-            let var_name = format!("RCR_SOLANA__FEE_PAYER_KEY_{i}");
-            if let Ok(k) = std::env::var(&var_name) {
+            if let Some(k) = read_env_var(
+                &format!("SOLVELA_SOLANA__FEE_PAYER_KEY_{i}"),
+                &format!("RCR_SOLANA__FEE_PAYER_KEY_{i}"),
+            ) {
                 if !k.is_empty() {
                     keys.push(k);
                 }
