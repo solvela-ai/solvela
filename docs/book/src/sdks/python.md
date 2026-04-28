@@ -40,7 +40,7 @@ The client reads from environment variables by default:
 | Variable | Description |
 |----------|-------------|
 | `SOLANA_WALLET_KEY` | Base58 wallet private key for signing payments |
-| `RCR_API_URL` | Gateway URL (default: `http://localhost:8402`) |
+| `SOLVELA_API_URL` | Gateway URL (default: `http://localhost:8402`) |
 | `SOLANA_RPC_URL` | Solana RPC endpoint for transaction submission |
 
 Or configure explicitly:

@@ -6,7 +6,7 @@ port = 8402
 
 [solana]
 rpc_url = "https://api.devnet.solana.com"
-recipient_wallet = ""  # Set via RCR_SOLANA_RECIPIENT_WALLET env var
+recipient_wallet = ""  # Set via SOLVELA_SOLANA_RECIPIENT_WALLET env var (RCR_SOLANA_RECIPIENT_WALLET accepted as deprecated fallback)
 usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 # Balance monitor — checks fee-payer wallet SOL balances periodically.

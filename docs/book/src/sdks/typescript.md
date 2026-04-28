@@ -23,7 +23,7 @@ console.log(reply);
 
 ```typescript
 const client = new LLMClient({
-  apiUrl: 'http://localhost:8402',        // or RCR_API_URL env var
+  apiUrl: 'http://localhost:8402',        // or SOLVELA_API_URL env var
   sessionBudget: 1.0,                     // max USDC per session
   timeout: 60000,                         // request timeout in ms
 });
@@ -33,7 +33,7 @@ Environment variables:
 
 | Variable | Description |
 |----------|-------------|
-| `RCR_API_URL` | Gateway URL (default: `https://api.solvela.ai`) |
+| `SOLVELA_API_URL` | Gateway URL (default: `https://api.solvela.ai`) |
 | `SOLANA_WALLET_KEY` | Base58 wallet private key |
 | `SOLANA_RPC_URL` | Solana RPC endpoint |
 

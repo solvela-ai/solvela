@@ -8,21 +8,21 @@ Solvela is configured through environment variables and TOML config files. Envir
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RCR_SERVER_HOST` | `0.0.0.0` | Host to bind to |
-| `RCR_SERVER_PORT` | `8402` | Port to listen on |
-| `RCR_ENV` | `development` | Environment mode. Set to `production` to disable localhost CORS origins |
+| `SOLVELA_SERVER_HOST` | `0.0.0.0` | Host to bind to |
+| `SOLVELA_SERVER_PORT` | `8402` | Port to listen on |
+| `SOLVELA_ENV` | `development` | Environment mode. Set to `production` to disable localhost CORS origins |
 | `RUST_LOG` | -- | Log level filter. Recommended: `gateway=info,tower_http=info` |
 
 ### Solana
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RCR_SOLANA_RPC_URL` | `https://api.devnet.solana.com` | Solana RPC endpoint |
-| `RCR_SOLANA_RECIPIENT_WALLET` | -- | Gateway's USDC recipient wallet (base58 pubkey) |
-| `RCR_SOLANA_FEE_PAYER_KEY` | -- | Primary hot wallet private key (base58) for claim tx fees |
-| `RCR_SOLANA_ESCROW_PROGRAM_ID` | -- | Escrow program ID (base58). Enables escrow payment mode |
+| `SOLVELA_SOLANA_RPC_URL` | `https://api.devnet.solana.com` | Solana RPC endpoint |
+| `SOLVELA_SOLANA_RECIPIENT_WALLET` | -- | Gateway's USDC recipient wallet (base58 pubkey) |
+| `SOLVELA_SOLANA_FEE_PAYER_KEY` | -- | Primary hot wallet private key (base58) for claim tx fees |
+| `SOLVELA_SOLANA_ESCROW_PROGRAM_ID` | -- | Escrow program ID (base58). Enables escrow payment mode |
 
-Additional fee payer keys for rotation are loaded from `RCR_SOLANA__FEE_PAYER_KEY_2` through `_8`.
+Additional fee payer keys for rotation are loaded from `SOLVELA_SOLANA__FEE_PAYER_KEY_2` through `_8`.
 
 ### LLM Providers
 
@@ -47,21 +47,21 @@ At least one key is required. Providers without a key fall back to the stub `Fal
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RCR_ADMIN_TOKEN` | -- | Bearer token for admin endpoints (`/metrics`, `/v1/escrow/health`, `/v1/services/register`) |
-| `RCR_CORS_ORIGINS` | -- | Comma-separated allowed CORS origins for browser clients |
-| `RCR_SESSION_SECRET` | (generated) | HMAC secret for session token signing. Auto-generated if not set |
+| `SOLVELA_ADMIN_TOKEN` | -- | Bearer token for admin endpoints (`/metrics`, `/v1/escrow/health`, `/v1/services/register`) |
+| `SOLVELA_CORS_ORIGINS` | -- | Comma-separated allowed CORS origins for browser clients |
+| `SOLVELA_SESSION_SECRET` | (generated) | HMAC secret for session token signing. Auto-generated if not set |
 
 ### Service Health
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RCR_SERVICE_HEALTH_INTERVAL_SECS` | `60` | Interval between service health probe cycles |
+| `SOLVELA_SERVICE_HEALTH_INTERVAL_SECS` | `60` | Interval between service health probe cycles |
 
 ## Config Files
 
 ### `config/default.toml`
 
-Server host/port and Solana RPC defaults. These are overridden by environment variables with the `RCR_` prefix.
+Server host/port and Solana RPC defaults. These are overridden by environment variables with the `SOLVELA_` prefix.
 
 ### `config/models.toml`
 

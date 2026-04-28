@@ -125,7 +125,7 @@ The agent deposits USDC into a trustless Anchor escrow PDA. After the LLM respon
 - **Pros**: agent only pays for actual usage; trustless (on-chain escrow)
 - **Cons**: requires escrow program deployment; two transactions instead of one
 
-Escrow is only offered when `RCR_SOLANA_ESCROW_PROGRAM_ID` and `RCR_SOLANA_FEE_PAYER_KEY` are configured.
+Escrow is only offered when `SOLVELA_SOLANA_ESCROW_PROGRAM_ID` and `SOLVELA_SOLANA_FEE_PAYER_KEY` are configured.
 
 See [Escrow System](./escrow.md) for details.
 

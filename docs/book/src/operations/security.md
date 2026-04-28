@@ -67,7 +67,7 @@ When the rate limit is exceeded, the gateway returns **429 Too Many Requests** w
 
 ## Admin Endpoints
 
-The following endpoints require `Authorization: Bearer <RCR_ADMIN_TOKEN>`:
+The following endpoints require `Authorization: Bearer <SOLVELA_ADMIN_TOKEN>`:
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -77,14 +77,14 @@ The following endpoints require `Authorization: Bearer <RCR_ADMIN_TOKEN>`:
 
 Token comparison uses constant-time equality (`subtle::ConstantTimeEq` equivalent) to prevent timing attacks.
 
-If `RCR_ADMIN_TOKEN` is not set, admin endpoints return 403.
+If `SOLVELA_ADMIN_TOKEN` is not set, admin endpoints return 403.
 
 ## CORS
 
 CORS is configured restrictively:
 
-- **Development** (`RCR_ENV != "production"`): allows `localhost:3000`, `localhost:8080`, `127.0.0.1:3000`
-- **Production** (`RCR_ENV=production`): only origins listed in `RCR_CORS_ORIGINS`
+- **Development** (`SOLVELA_ENV != "production"`): allows `localhost:3000`, `localhost:8080`, `127.0.0.1:3000`
+- **Production** (`SOLVELA_ENV=production`): only origins listed in `SOLVELA_CORS_ORIGINS`
 - **Allowed methods**: GET, POST, OPTIONS only
 - **Allowed headers**: `Content-Type`, `Authorization`, `PAYMENT-SIGNATURE`, `X-Request-Id`, `X-RCR-Debug`, `X-Session-Id`
 
@@ -103,8 +103,8 @@ SDK and agent clients are unaffected by CORS since they do not run in browsers.
 
 Fee payer keys support rotation:
 
-- Primary key: `RCR_SOLANA_FEE_PAYER_KEY`
-- Additional keys: `RCR_SOLANA__FEE_PAYER_KEY_2` through `_8`
+- Primary key: `SOLVELA_SOLANA_FEE_PAYER_KEY`
+- Additional keys: `SOLVELA_SOLANA__FEE_PAYER_KEY_2` through `_8`
 - The `FeePayerPool` rotates across healthy keys automatically
 - Failed keys enter a 60-second cooldown before reuse
 

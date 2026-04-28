@@ -83,7 +83,7 @@ pub struct AppState {
     /// `None` when the recorder failed to install (metrics unavailable).
     pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
     /// When `true`, skip payment verification for chat requests (dev mode only).
-    /// Always `false` in production — set via `RCR_DEV_BYPASS_PAYMENT=true`.
+    /// Always `false` in production — set via `SOLVELA_DEV_BYPASS_PAYMENT=true` (RCR_DEV_BYPASS_PAYMENT accepted as deprecated fallback).
     pub dev_bypass_payment: bool,
 }
 

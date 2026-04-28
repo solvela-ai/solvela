@@ -66,7 +66,7 @@ Registers a new external service. Requires admin authentication.
 ```bash
 curl -X POST http://localhost:8402/v1/services/register \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <RCR_ADMIN_TOKEN>" \
+  -H "Authorization: Bearer <SOLVELA_ADMIN_TOKEN>" \
   -d '{
     "id": "translation-api",
     "name": "Translation Service",
@@ -133,7 +133,7 @@ curl -X POST http://localhost:8402/v1/services/web-search/proxy \
 
 The gateway runs a background health checker that:
 
-- Probes all external services every 60 seconds (configurable via `RCR_SERVICE_HEALTH_INTERVAL_SECS`)
+- Probes all external services every 60 seconds (configurable via `SOLVELA_SERVICE_HEALTH_INTERVAL_SECS`)
 - Sends concurrent `HEAD` requests to each service endpoint
 - Considers 2xx, 402, and 405 responses as "healthy" (402 means the service is up but requires payment; 405 means the server is running)
 - Updates the `healthy` field in the service registry

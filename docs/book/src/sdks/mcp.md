@@ -37,7 +37,7 @@ Add to your MCP config (typically `~/.claude/mcp.json` or project-level `.claude
       "command": "node",
       "args": ["/path/to/sdks/mcp/dist/index.js"],
       "env": {
-        "RCR_API_URL": "http://localhost:8402",
+        "SOLVELA_API_URL": "http://localhost:8402",
         "SOLANA_WALLET_KEY": "your-base58-private-key",
         "SOLANA_RPC_URL": "https://api.devnet.solana.com"
       }
@@ -50,7 +50,7 @@ Add to your MCP config (typically `~/.claude/mcp.json` or project-level `.claude
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `RCR_API_URL` | Yes | Gateway URL |
+| `SOLVELA_API_URL` | Yes | Gateway URL |
 | `SOLANA_WALLET_KEY` | Yes | Base58 wallet private key for payments |
 | `SOLANA_RPC_URL` | No | Solana RPC endpoint |
 

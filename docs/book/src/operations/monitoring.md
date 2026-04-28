@@ -13,7 +13,7 @@ scrape_configs:
   - job_name: 'solvela'
     scrape_interval: 15s
     scheme: https
-    bearer_token: '<RCR_ADMIN_TOKEN>'
+    bearer_token: '<SOLVELA_ADMIN_TOKEN>'
     static_configs:
       - targets: ['solvela-gateway.fly.dev']
     metrics_path: '/metrics'
@@ -25,7 +25,7 @@ For local development:
 scrape_configs:
   - job_name: 'solvela-local'
     scrape_interval: 5s
-    bearer_token: '<RCR_ADMIN_TOKEN>'
+    bearer_token: '<SOLVELA_ADMIN_TOKEN>'
     static_configs:
       - targets: ['localhost:8402']
 ```

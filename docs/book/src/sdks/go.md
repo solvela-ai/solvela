@@ -56,7 +56,7 @@ Environment variables:
 
 | Variable | Description |
 |----------|-------------|
-| `SOLVELA_API_URL` | Gateway URL (`RCR_API_URL` still accepted for backward compat) |
+| `SOLVELA_API_URL` | Gateway URL (`SOLVELA_API_URL` still accepted for backward compat) |
 | `SOLANA_WALLET_KEY` | Base58 wallet private key |
 | `SOLANA_RPC_URL` | Solana RPC endpoint |
 

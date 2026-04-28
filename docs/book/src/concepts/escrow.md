@@ -93,9 +93,9 @@ The gateway runs a background claim processor that:
 Multiple hot wallets can be configured for fee payer rotation:
 
 ```bash
-RCR_SOLANA_FEE_PAYER_KEY=<primary-base58-key>
-RCR_SOLANA__FEE_PAYER_KEY_2=<second-key>
-RCR_SOLANA__FEE_PAYER_KEY_3=<third-key>
+SOLVELA_SOLANA_FEE_PAYER_KEY=<primary-base58-key>
+SOLVELA_SOLANA__FEE_PAYER_KEY_2=<second-key>
+SOLVELA_SOLANA__FEE_PAYER_KEY_3=<third-key>
 ```
 
 The `FeePayerPool` tracks health per key:
@@ -136,7 +136,7 @@ Returns claim processor metrics:
 }
 ```
 
-Requires the `Authorization: Bearer <RCR_ADMIN_TOKEN>` header.
+Requires the `Authorization: Bearer <SOLVELA_ADMIN_TOKEN>` header.
 
 ## Building the Escrow Program
 

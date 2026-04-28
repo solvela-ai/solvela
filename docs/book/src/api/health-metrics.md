@@ -22,11 +22,11 @@ No authentication required. Used by load balancers, health probes, and the `rcr 
 
 `GET /metrics`
 
-Returns Prometheus text exposition format. Admin-gated via `RCR_ADMIN_TOKEN`.
+Returns Prometheus text exposition format. Admin-gated via `SOLVELA_ADMIN_TOKEN`.
 
 ```bash
 curl -s http://localhost:8402/metrics \
-  -H "Authorization: Bearer <RCR_ADMIN_TOKEN>"
+  -H "Authorization: Bearer <SOLVELA_ADMIN_TOKEN>"
 ```
 
 ```
@@ -94,7 +94,7 @@ Admin-gated. Returns claim processor operational metrics.
 
 ```bash
 curl -s http://localhost:8402/v1/escrow/health \
-  -H "Authorization: Bearer <RCR_ADMIN_TOKEN>" | jq
+  -H "Authorization: Bearer <SOLVELA_ADMIN_TOKEN>" | jq
 ```
 
 ```json
@@ -133,6 +133,6 @@ curl -s http://localhost:8402/v1/nonce | jq
 
 ## Admin Authentication
 
-The `/metrics` and `/v1/escrow/health` endpoints require the `Authorization: Bearer <token>` header where `<token>` matches the `RCR_ADMIN_TOKEN` environment variable. Token comparison uses constant-time equality to prevent timing attacks.
+The `/metrics` and `/v1/escrow/health` endpoints require the `Authorization: Bearer <token>` header where `<token>` matches the `SOLVELA_ADMIN_TOKEN` environment variable. Token comparison uses constant-time equality to prevent timing attacks.
 
-If `RCR_ADMIN_TOKEN` is not set, admin endpoints return 403.
+If `SOLVELA_ADMIN_TOKEN` is not set, admin endpoints return 403.
