@@ -245,11 +245,10 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             HeaderValue::from_static("default-src 'none'"),
         ))
         .layer({
-            // Only add HSTS in production to avoid issues with local dev (HTTP)
-            let is_prod = matches!(
-                std::env::var("RCR_ENV").as_deref(),
-                Ok("production") | Ok("prod")
-            );
+            // Only add HSTS in production to avoid issues with local dev (HTTP).
+            // SOLVELA_ENV is canonical; RCR_ENV is accepted as a deprecated fallback.
+            let env_value = std::env::var("SOLVELA_ENV").or_else(|_| std::env::var("RCR_ENV"));
+            let is_prod = matches!(env_value.as_deref(), Ok("production") | Ok("prod"));
             SetResponseHeaderLayer::if_not_present(
                 HeaderName::from_static("strict-transport-security"),
                 if is_prod {
@@ -277,18 +276,21 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
 
 /// Build a restrictive CORS policy.
 ///
-/// Allows the OpenClaw dashboard, localhost dev origins, and any origin
-/// explicitly listed in the `RCR_CORS_ORIGINS` environment variable
-/// (comma-separated). Falls back to denying all cross-origin browser requests
-/// if no origins are configured — SDK/agent clients are unaffected since they
-/// don't use CORS.
+/// Allows the dashboard, localhost dev origins, and any origin explicitly
+/// listed in the `SOLVELA_CORS_ORIGINS` environment variable (comma-separated;
+/// `RCR_CORS_ORIGINS` is accepted as a deprecated fallback). Falls back to
+/// denying all cross-origin browser requests if no origins are configured —
+/// SDK/agent clients are unaffected since they don't use CORS.
 fn build_cors() -> CorsLayer {
     // Collect allowed origins: env var overrides + dev-only localhost origins
     let mut origins: Vec<HeaderValue> = Vec::new();
 
-    // Only allow localhost origins in non-production environments
-    let is_dev =
-        std::env::var("RCR_ENV").unwrap_or_else(|_| "development".to_string()) != "production";
+    // Only allow localhost origins in non-production environments.
+    // SOLVELA_ENV is canonical; RCR_ENV is accepted as a deprecated fallback.
+    let env_value = std::env::var("SOLVELA_ENV")
+        .or_else(|_| std::env::var("RCR_ENV"))
+        .unwrap_or_else(|_| "development".to_string());
+    let is_dev = env_value != "production";
     if is_dev {
         for dev_origin in &[
             "http://localhost:3000",

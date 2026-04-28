@@ -51,11 +51,14 @@ impl IntoResponse for GatewayError {
             GatewayError::InvalidPayment(msg) => {
                 (StatusCode::PAYMENT_REQUIRED, "invalid_payment", msg.clone())
             }
-            GatewayError::SettlementFailed(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "settlement_failed",
-                msg.clone(),
-            ),
+            GatewayError::SettlementFailed(msg) => {
+                tracing::error!(error = %msg, "payment settlement failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "settlement_failed",
+                    "Payment settlement failed".to_string(),
+                )
+            }
             GatewayError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg.clone()),
             GatewayError::RateLimited => (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -145,10 +148,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_settlement_failed_returns_500() {
-        let (status, json) =
-            error_response(GatewayError::SettlementFailed("tx failed".to_string())).await;
+        let (status, json) = error_response(GatewayError::SettlementFailed(
+            "send failed: rpc URL https://internal.example/abc".to_string(),
+        ))
+        .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(json["error"]["type"], "settlement_failed");
+        // Must NOT leak raw error details (RPC URLs, tx context) to clients
+        assert_eq!(json["error"]["message"], "Payment settlement failed");
     }
 
     #[tokio::test]
