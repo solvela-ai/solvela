@@ -85,7 +85,10 @@ impl NoncePool {
         // Primary nonce account (index 0) — try SOLVELA_* first, fall back to legacy RCR_*
         if let (Some(account), Some(authority)) = (
             read_env_var("SOLVELA_SOLANA__NONCE_ACCOUNT", "RCR_SOLANA__NONCE_ACCOUNT"),
-            read_env_var("SOLVELA_SOLANA__NONCE_AUTHORITY", "RCR_SOLANA__NONCE_AUTHORITY"),
+            read_env_var(
+                "SOLVELA_SOLANA__NONCE_AUTHORITY",
+                "RCR_SOLANA__NONCE_AUTHORITY",
+            ),
         ) {
             let account = account.trim().to_string();
             let authority = authority.trim().to_string();

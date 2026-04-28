@@ -156,7 +156,8 @@ impl FeePayerPool {
         let mut keys = Vec::new();
 
         // Primary key (index 0) — try SOLVELA_* first, fall back to legacy RCR_*
-        if let Some(k) = read_env_var("SOLVELA_SOLANA__FEE_PAYER_KEY", "RCR_SOLANA__FEE_PAYER_KEY") {
+        if let Some(k) = read_env_var("SOLVELA_SOLANA__FEE_PAYER_KEY", "RCR_SOLANA__FEE_PAYER_KEY")
+        {
             if !k.is_empty() {
                 keys.push(k);
             }
