@@ -17,7 +17,7 @@ export const siteConfig = {
   },
 
   links: {
-    github: 'https://github.com/sky64/Solvela',
+    github: 'https://github.com/solvela-ai/solvela',
     discord: '',
     twitter: '',
     support: '',
@@ -27,7 +27,7 @@ export const siteConfig = {
     companyName: 'Sky64',
     links: [
       { label: 'Solvela', href: 'https://solvela.ai' },
-      { label: 'GitHub', href: 'https://github.com/sky64/Solvela' },
+      { label: 'GitHub', href: 'https://github.com/solvela-ai/solvela' },
     ],
   },
 }

@@ -2,7 +2,7 @@
 // Kept compile-time; no live API reads on the marketing page.
 
 export const VERSION = 'v0.5.0'
-export const GITHUB_URL = 'https://github.com/sky64/Solvela'
+export const GITHUB_URL = 'https://github.com/solvela-ai/solvela'
 export const DOCS_URL = 'https://docs.solvela.ai'
 export const APP_URL = 'https://app.solvela.ai'
 export const QUICKSTART_URL = 'https://docs.solvela.ai/docs/quickstart'

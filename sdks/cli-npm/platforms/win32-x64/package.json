@@ -10,7 +10,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/sky64/Solvela.git",
+    "url": "https://github.com/solvela-ai/solvela.git",
     "directory": "sdks/cli-npm/platforms/win32-x64"
   },
   "license": "MIT"

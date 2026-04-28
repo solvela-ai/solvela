@@ -96,7 +96,7 @@ The installer never writes `SOLANA_WALLET_KEY` to disk. Store it in `~/.solvela/
 ### Build and Run
 
 ```bash
-git clone https://github.com/sky64/Solvela.git
+git clone https://github.com/solvela-ai/solvela.git
 cd Solvela
 cargo build
 ```

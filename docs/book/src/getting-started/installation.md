@@ -18,7 +18,7 @@ Optional:
 ## Clone and Build
 
 ```bash
-git clone https://github.com/sky64/Solvela.git
+git clone https://github.com/solvela-ai/solvela.git
 cd Solvela
 cargo build
 ```

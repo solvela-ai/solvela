@@ -60,7 +60,7 @@ function main() {
         "Supported platforms:",
         ...SUPPORTED.map((s) => `  ${s}`),
         "",
-        "To install from source: cargo install --git https://github.com/sky64/Solvela solvela-cli",
+        "To install from source: cargo install --git https://github.com/solvela-ai/solvela solvela-cli",
         "",
       ].join("\n")
     );
