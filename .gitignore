@@ -17,9 +17,8 @@
 *.swo
 *~
 
-# Environment
-.env
-.env.*
+# Environment — all .env*, .envrc, etc., except the example
+.env*
 !.env.example
 
 # OS

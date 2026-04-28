@@ -1,0 +1,36 @@
+# Accepted false positives from gitleaks scan (2026-04-28).
+# Format: `commit:file:rule:line`. Run `gitleaks git --report-format=json --report-path=...`
+# to refresh; review every new fingerprint before adding.
+#
+# Triage notes:
+# - `agent_pubkey:` — Solana public keys (44-char base58). Public by design.
+# - `SENTINEL_KEY` — base58 test fixture in sdks/ai-sdk-provider tests.
+# - `let key = "solvela_k_abc..."` — explicit test fixture in orgs/queries.rs.
+# - `Authorization: Bearer ci-test-token` / `your_key_here` — placeholders.
+# - `X-API-Key: sk_live_abc123` — placeholder example in api-design skill doc.
+
+# SENTINEL_KEY fixture — sdks/ai-sdk-provider/tests/unit/errors.test.ts
+7df9ce31e38516b4a438fdc4dc939607cb570850:sdks/ai-sdk-provider/tests/unit/errors.test.ts:generic-api-key:36
+
+# Docs curl example with `your_key_here` placeholder
+ad935ad5e9eb5b189dac5cc45f2df611aa522c49:dashboard/content/docs/api/authentication.mdx:curl-auth-header:56
+
+# Test fixture in orgs/queries.rs (`solvela_k_abc123testkey`)
+7f7de54fe430a0edc34e58fb9c6f2d3564ebfe51:crates/gateway/src/orgs/queries.rs:generic-api-key:397
+fb14143b16367b3bb403a20c58e2959362634cb9:crates/gateway/src/orgs/queries.rs:generic-api-key:397
+9d4842f8c92486724bd228d9ff1521812ee1f00f:crates/gateway/src/orgs/queries.rs:generic-api-key:391
+
+# Solana public keys in test/example contexts (agent_pubkey)
+ddab954e4f0dfa4c6332e7e479a988c29ee29d6b:crates/gateway/src/payment_util.rs:generic-api-key:67
+ddab954e4f0dfa4c6332e7e479a988c29ee29d6b:crates/gateway/src/routes/chat/payment.rs:generic-api-key:315
+6755ad163df321bbbe48110297b3522fc9181ac6:crates/gateway/src/routes/chat.rs:generic-api-key:1514
+6755ad163df321bbbe48110297b3522fc9181ac6:crates/gateway/src/routes/proxy.rs:generic-api-key:541
+39653302c00c322d29a81e06424131500624b001:crates/protocol/src/payment.rs:generic-api-key:186
+73796c342ffbf72be714a9102a4462dbb3a7905b:crates/x402-solana/src/types.rs:generic-api-key:250
+1cddf44df9a4a1a406524c9c4ecbf34ff8043c79:crates/x402/src/types.rs:generic-api-key:243
+
+# CI placeholder admin token (`ci-test-token`)
+8726f42784fa5a9cc8b3d20b6b4be21d6cf63372:.github/workflows/ci.yml:curl-auth-header:181
+
+# api-design skill doc — placeholder X-API-Key example
+828a3187f88bb5187564d9cbcabe05c8dbf1d75b:.claude/skills/api-design/SKILL.md:generic-api-key:306
