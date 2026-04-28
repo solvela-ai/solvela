@@ -5,17 +5,20 @@
  *   LLM_ROUTER_API_URL     — Solvela gateway base URL
  *   LLM_ROUTER_WALLET_KEY  — Base58 Solana private key for x402 payments
  */
-export interface RcrConfig {
+export interface SolvelaConfig {
   /** Solvela gateway base URL (no trailing slash). */
   gatewayUrl: string;
   /** Base58-encoded Solana private key for signing x402 payments. */
   walletKey: string;
   /**
    * Default model to route requests to.
-   * "auto" lets the RCR smart router pick the cheapest capable model.
+   * "auto" lets the Solvela smart router pick the cheapest capable model.
    */
   defaultModel: string;
 }
+
+/** @deprecated Use {@link SolvelaConfig} instead. Will be removed by 2026-08-01. */
+export type RcrConfig = SolvelaConfig;
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -28,7 +31,7 @@ export class ConfigError extends Error {
  * Loads and validates plugin configuration from environment variables.
  * Throws ConfigError if required vars are missing.
  */
-export function loadConfig(overrides: Partial<RcrConfig> = {}): RcrConfig {
+export function loadConfig(overrides: Partial<SolvelaConfig> = {}): SolvelaConfig {
   const gatewayUrl = (
     overrides.gatewayUrl ||
     process.env.LLM_ROUTER_API_URL ||

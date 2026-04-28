@@ -9,7 +9,7 @@
  * plugin has zero runtime dependencies.
  */
 
-import type { RcrConfig } from './config.js';
+import type { SolvelaConfig } from './config.js';
 
 // ── Types (inlined from SDK) ──────────────────────────────────────────────────
 
@@ -274,7 +274,7 @@ async function fetchWithTimeout(
  */
 export async function routeRequest(
   request: ChatRequest,
-  config: RcrConfig,
+  config: SolvelaConfig,
 ): Promise<ChatResponse> {
   const body = {
     model: request.model ?? config.defaultModel,
@@ -335,7 +335,7 @@ export async function routeRequest(
  */
 export async function routeStreamingRequest(
   request: ChatRequest,
-  config: RcrConfig,
+  config: SolvelaConfig,
 ): Promise<Response> {
   const body = {
     model: request.model ?? config.defaultModel,

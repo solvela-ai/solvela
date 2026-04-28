@@ -5,17 +5,19 @@
  *   LLM_ROUTER_API_URL     — Solvela gateway base URL
  *   LLM_ROUTER_WALLET_KEY  — Base58 Solana private key for x402 payments
  */
-interface RcrConfig {
+interface SolvelaConfig {
     /** Solvela gateway base URL (no trailing slash). */
     gatewayUrl: string;
     /** Base58-encoded Solana private key for signing x402 payments. */
     walletKey: string;
     /**
      * Default model to route requests to.
-     * "auto" lets the RCR smart router pick the cheapest capable model.
+     * "auto" lets the Solvela smart router pick the cheapest capable model.
      */
     defaultModel: string;
 }
+/** @deprecated Use {@link SolvelaConfig} instead. Will be removed by 2026-08-01. */
+type RcrConfig = SolvelaConfig;
 declare class ConfigError extends Error {
     constructor(message: string);
 }
@@ -119,18 +121,18 @@ interface OpenClawPlugin {
     interceptStream: (request: ChatRequest) => Promise<Response | null>;
 }
 /**
- * Create the RcrClient OpenClaw plugin.
+ * Create the SolvelaClient OpenClaw plugin.
  *
  * @param overrides - Optional config overrides (useful for testing).
  */
-declare function createPlugin(overrides?: Partial<RcrConfig>): OpenClawPlugin;
+declare function createPlugin(overrides?: Partial<SolvelaConfig>): OpenClawPlugin;
 /**
  * High-level router client with a clean async API.
  * Useful when importing the plugin as a library rather than via OpenClaw.
  */
-declare class RcrClient {
+declare class SolvelaClient {
     private readonly config;
-    constructor(overrides?: Partial<RcrConfig>);
+    constructor(overrides?: Partial<SolvelaConfig>);
     /**
      * Send a non-streaming chat completion through Solvela.
      *
@@ -153,12 +155,17 @@ declare class RcrClient {
         top_p?: number;
     }): Promise<Response>;
     /** The resolved configuration (gateway URL, default model). */
-    getConfig(): Readonly<RcrConfig>;
+    getConfig(): Readonly<SolvelaConfig>;
 }
 /**
- * Create an RCR client using environment variables.
- * Shorthand for `new RcrClient()`.
+ * @deprecated Use {@link SolvelaClient} instead. Will be removed by 2026-08-01.
  */
-declare function createRouter(overrides?: Partial<RcrConfig>): RcrClient;
+declare const RcrClient: new (...args: any[]) => SolvelaClient;
+type RcrClient = SolvelaClient;
+/**
+ * Create a Solvela router client using environment variables.
+ * Shorthand for `new SolvelaClient()`.
+ */
+declare function createRouter(overrides?: Partial<SolvelaConfig>): SolvelaClient;
 
-export { type ChatMessage, type ChatRequest, type ChatResponse, ConfigError, type OpenClawPlugin, PaymentError, RcrClient, type RcrConfig, RouterError, createPlugin, createRouter, createPlugin as default };
+export { type ChatMessage, type ChatRequest, type ChatResponse, ConfigError, type OpenClawPlugin, PaymentError, RcrClient, type RcrConfig, RouterError, SolvelaClient, type SolvelaConfig, createPlugin, createRouter, createPlugin as default };

@@ -159,7 +159,7 @@ describe('ConfigError', () => {
   });
 });
 
-describe('RcrClient — non-streaming', () => {
+describe('SolvelaClient — non-streaming', () => {
   it('returns a chat response on 200', async () => {
     mock.setMode('ok');
     const router = createRouter({

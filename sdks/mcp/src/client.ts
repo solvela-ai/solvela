@@ -121,10 +121,16 @@ export class GatewayClient {
   private sessionStateLoaded = false;
 
   constructor(opts: GatewayClientOptions = {}) {
+    if (!opts.apiUrl && !process.env['SOLVELA_API_URL'] && process.env['RCR_API_URL']) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[solvela-mcp] RCR_API_URL is deprecated; set SOLVELA_API_URL instead. RCR_API_URL will be removed by 2026-08-01.',
+      );
+    }
     this.apiUrl = (
       opts.apiUrl ??
       process.env['SOLVELA_API_URL'] ??
-      process.env['RCR_API_URL'] ?? // compat — silently accepted
+      process.env['RCR_API_URL'] ?? // backward-compat fallback (warning emitted above)
       'https://api.solvela.ai'
     ).replace(/\/$/, '');
     this.sessionBudget = opts.sessionBudget;

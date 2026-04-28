@@ -263,7 +263,7 @@ function createPlugin(overrides = {}) {
     }
   };
 }
-var RcrClient = class {
+var SolvelaClient = class {
   config;
   constructor(overrides = {}) {
     this.config = loadConfig(overrides);
@@ -296,8 +296,9 @@ var RcrClient = class {
     return this.config;
   }
 };
+var RcrClient = SolvelaClient;
 function createRouter(overrides = {}) {
-  return new RcrClient(overrides);
+  return new SolvelaClient(overrides);
 }
 var index_default = createPlugin;
 export {
@@ -305,6 +306,7 @@ export {
   PaymentError,
   RcrClient,
   RouterError,
+  SolvelaClient,
   createPlugin,
   createRouter,
   index_default as default

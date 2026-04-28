@@ -23,7 +23,7 @@
  *   console.log(response.choices[0].message.content);
  */
 
-import { loadConfig, type RcrConfig } from './config.js';
+import { loadConfig, type SolvelaConfig } from './config.js';
 import {
   routeRequest,
   routeStreamingRequest,
@@ -32,6 +32,8 @@ import {
   type ChatResponse,
 } from './router.js';
 
+export type { SolvelaConfig } from './config.js';
+/** @deprecated Use {@link SolvelaConfig} instead. Will be removed by 2026-08-01. */
 export type { RcrConfig } from './config.js';
 export { ConfigError } from './config.js';
 export type { ChatMessage, ChatRequest, ChatResponse } from './router.js';
@@ -90,11 +92,11 @@ export interface OpenClawPlugin {
 }
 
 /**
- * Create the RcrClient OpenClaw plugin.
+ * Create the SolvelaClient OpenClaw plugin.
  *
  * @param overrides - Optional config overrides (useful for testing).
  */
-export function createPlugin(overrides: Partial<RcrConfig> = {}): OpenClawPlugin {
+export function createPlugin(overrides: Partial<SolvelaConfig> = {}): OpenClawPlugin {
   const config = loadConfig(overrides);
 
   return {
@@ -120,10 +122,10 @@ export function createPlugin(overrides: Partial<RcrConfig> = {}): OpenClawPlugin
  * High-level router client with a clean async API.
  * Useful when importing the plugin as a library rather than via OpenClaw.
  */
-export class RcrClient {
-  private readonly config: RcrConfig;
+export class SolvelaClient {
+  private readonly config: SolvelaConfig;
 
-  constructor(overrides: Partial<RcrConfig> = {}) {
+  constructor(overrides: Partial<SolvelaConfig> = {}) {
     this.config = loadConfig(overrides);
   }
 
@@ -161,17 +163,24 @@ export class RcrClient {
   }
 
   /** The resolved configuration (gateway URL, default model). */
-  getConfig(): Readonly<RcrConfig> {
+  getConfig(): Readonly<SolvelaConfig> {
     return this.config;
   }
 }
 
 /**
- * Create an RCR client using environment variables.
- * Shorthand for `new RcrClient()`.
+ * @deprecated Use {@link SolvelaClient} instead. Will be removed by 2026-08-01.
  */
-export function createRouter(overrides: Partial<RcrConfig> = {}): RcrClient {
-  return new RcrClient(overrides);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const RcrClient: new (...args: any[]) => SolvelaClient = SolvelaClient;
+export type RcrClient = SolvelaClient;
+
+/**
+ * Create a Solvela router client using environment variables.
+ * Shorthand for `new SolvelaClient()`.
+ */
+export function createRouter(overrides: Partial<SolvelaConfig> = {}): SolvelaClient {
+  return new SolvelaClient(overrides);
 }
 
 // ── Default export (OpenClaw plugin entry point) ──────────────────────────────
