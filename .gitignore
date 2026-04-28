@@ -1,80 +1,65 @@
+
+!.env.example
 # Build artifacts (universal — overrides specific entries below)
-**/node_modules/
-**/dist/
-**/build/
-**/.venv/
+# Claude Code / OMC local state
+# Claude Code symlinked skills (from skills-pool)
+# Dashboard (Next.js)
+# Dashboard local build artifacts
+# Docker volumes
+# Environment — all .env*, .envrc, etc., except the example
+# Go SDK
+# IDE
+# Internal planning notes kept on disk only (never tracked)
+# Keys / secrets
+# MCP server
+# OS
+# Python
+# Rust
+# TypeScript SDK
+# WSL Zone.Identifier metadata
+# Worktrees
+**/*.rs.bk
+**/.omc/
 **/.pytest_cache/
 **/.ruff_cache/
-*.tgz
-
-# Internal planning notes kept on disk only (never tracked)
-.local-plans/
-
-# Rust
-/target/
-**/*.rs.bk
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# Environment — all .env*, .envrc, etc., except the example
-.env*
-!.env.example
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Keys / secrets
+**/.venv/
+**/build/
+**/dist/
+**/node_modules/
+*.egg-info/
 *.key
 *.pem
-wallet.json
-
-# Worktrees
-.worktrees/
-
-# Docker volumes
-docker-data/
-
-# Python
-__pycache__/
 *.pyc
-*.egg-info/
-.ruff_cache/
-
-# TypeScript SDK
-
-# MCP server
-sdks/mcp/node_modules/
-sdks/mcp/dist/
-
-# Go SDK
-
-# Dashboard (Next.js)
-dashboard/node_modules/
-dashboard/.next/
-dashboard/out/
-
-# Claude Code symlinked skills (from skills-pool)
+*.swo
+*.swp
+*.tgz
+*:Zone.Identifier
+*~
+.DS_Store
+.claude/
 .claude/skills/memory-safety-patterns
 .claude/skills/rust-async-patterns
 .claude/skills/rust-pro
 .claude/skills/rust-router
 .claude/skills/systems-programming-rust-project
-.vercel
+.env*
 .env*.local
-
-# Claude Code / OMC local state
-.claude/
+.idea/
+.local-plans/
 .omc/
-**/.omc/
-
-# Dashboard local build artifacts
+.ruff_cache/
+.vercel
+.vscode/
+.worktrees/
+/target/
+GEMINI.md
+Thumbs.db
+__pycache__/
+dashboard/.next/
 dashboard/.source/
-
-# WSL Zone.Identifier metadata
-*:Zone.Identifier
+dashboard/node_modules/
+dashboard/out/
+docker-data/
+sdks/mcp/dist/
+sdks/mcp/node_modules/
+wallet.json

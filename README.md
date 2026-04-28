@@ -4,7 +4,7 @@ Solana-native AI agent payment gateway. No API keys, no accounts -- just wallets
 
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-F97316?style=flat&logo=rust&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-F97316?style=flat)
-![Tests](https://img.shields.io/badge/tests-402%2B_passing-F97316?style=flat)
+[![CI](https://github.com/solvela-ai/solvela/actions/workflows/ci.yml/badge.svg)](https://github.com/solvela-ai/solvela/actions/workflows/ci.yml)
 ![Solana](https://img.shields.io/badge/solana-mainnet-F97316?style=flat&logo=solana&logoColor=white)
 
 AI agents pay for LLM API calls with USDC-SPL on Solana via the [x402 protocol](https://www.x402.org/). The gateway verifies payments on-chain, routes requests through a 15-dimension smart scorer, and proxies to the optimal provider. All settlement happens in USDC on Solana -- no custodial accounts, no subscription tiers, no invoices.
@@ -40,7 +40,7 @@ flowchart LR
 
 ### Smart Routing
 
-15-dimension rule-based scorer classifies requests into complexity tiers (Simple, Medium, Complex, Reasoning) and maps them to optimal models. Sub-microsecond latency, zero external calls. Routing profiles: `eco`, `auto`, `premium`, `free`. Aliases: `fast`, `cheap`, `smart`, `best`, `reason`, `code`, `creative`, `analyze`.
+15-dimension rule-based scorer classifies requests into complexity tiers (Simple, Medium, Complex, Reasoning) and maps them to optimal models. microsecond-scale, zero external calls per scoring decision. Routing profiles: `eco`, `auto`, `premium`, `free`. Aliases: `fast`, `cheap`, `smart`, `best`, `reason`, `code`, `creative`, `analyze`.
 
 ### x402 Payments
 

@@ -10,7 +10,7 @@ A `.well-known/security.txt` is served from `api.solvela.ai`.
 
 The gateway (`api.solvela.ai`) and dashboard (`solvela.ai`, `app.solvela.ai`, `docs.solvela.ai`) run on a clean dependency tree (`cargo audit` and `npm audit` both pass at HEAD).
 
-The escrow program is deployed to Solana mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`. Upgrade authority is retained at `B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A` (single-sig). Migration to a Squads multisig is on the go-live playbook.
+The escrow program is deployed to Solana mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`. Upgrade authority is retained at `B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A` (single-sig). Migration to a multisig upgrade authority is planned.
 
 ## Known transitive advisories — accepted with reason
 
