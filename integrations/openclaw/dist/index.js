@@ -18,7 +18,7 @@ function loadConfig(overrides = {}) {
   const defaultModel = overrides.defaultModel || "auto";
   if (!gatewayUrl) {
     throw new ConfigError(
-      "LLM_ROUTER_API_URL is required. Set it to your RustyClawRouter gateway URL."
+      "LLM_ROUTER_API_URL is required. Set it to your Solvela gateway URL."
     );
   }
   if (!walletKey) {
@@ -250,9 +250,9 @@ function normalizeMessages(messages) {
 function createPlugin(overrides = {}) {
   const config = loadConfig(overrides);
   return {
-    name: "@rustyclaw/rcr",
+    name: "@solvela/router",
     version: "0.1.0",
-    description: "RustyClawRouter \u2014 Solana-native LLM routing with x402 USDC payments",
+    description: "Solvela \u2014 Solana-native LLM routing with x402 USDC payments",
     async intercept(request) {
       const normalized = { ...request, messages: normalizeMessages(request.messages) };
       return routeRequest(normalized, config);
@@ -269,7 +269,7 @@ var RcrClient = class {
     this.config = loadConfig(overrides);
   }
   /**
-   * Send a non-streaming chat completion through RustyClawRouter.
+   * Send a non-streaming chat completion through Solvela.
    *
    * @param messages     - Conversation messages
    * @param model        - Model ID (defaults to config.defaultModel, i.e. "auto")
@@ -282,7 +282,7 @@ var RcrClient = class {
     );
   }
   /**
-   * Send a streaming chat completion through RustyClawRouter.
+   * Send a streaming chat completion through Solvela.
    * Returns the raw SSE Response — iterate with a ReadableStream reader.
    */
   async chatStream(messages, model, options = {}) {

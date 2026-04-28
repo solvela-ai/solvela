@@ -1,4 +1,4 @@
-package rcr
+package solvela
 
 import (
 	"crypto/rand"

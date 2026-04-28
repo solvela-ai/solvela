@@ -56,7 +56,7 @@ Proxy any x402-enabled external service through the gateway. Admin-controlled re
 
 ### Prometheus Monitoring
 
-15 production metrics behind an admin-gated `/metrics` endpoint. Request counters, duration histograms, payment status, provider latency, cache hit rates, escrow claim tracking, and fee payer balance gauges. All metrics prefixed with `rcr_`.
+15 production metrics behind an admin-gated `/metrics` endpoint. Request counters, duration histograms, payment status, provider latency, cache hit rates, escrow claim tracking, and fee payer balance gauges. All metrics prefixed with `solvela_`.
 
 ### SDKs
 
@@ -334,7 +334,7 @@ Both PostgreSQL and Redis are optional. The gateway degrades gracefully when eit
 
 ## Configuration
 
-Environment variables use the `RCR_` prefix. Provider API keys follow the standard `<PROVIDER>_API_KEY` convention.
+Environment variables use the `SOLVELA_` prefix. Provider API keys follow the standard `<PROVIDER>_API_KEY` convention.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -343,15 +343,17 @@ Environment variables use the `RCR_` prefix. Provider API keys follow the standa
 | `GOOGLE_API_KEY` | | Google/Gemini API key |
 | `XAI_API_KEY` | | xAI/Grok API key |
 | `DEEPSEEK_API_KEY` | | DeepSeek API key |
-| `RCR_SOLANA_RPC_URL` | Yes | Solana RPC endpoint |
-| `RCR_SOLANA_RECIPIENT_WALLET` | Yes | USDC payment destination (base58) |
-| `RCR_SOLANA_FEE_PAYER_KEY` | For escrow | Hot wallet key for claim transactions |
-| `RCR_SOLANA_ESCROW_PROGRAM_ID` | For escrow | Anchor escrow program ID |
-| `RCR_SERVER_PORT` | No | Gateway port (default: `8402`) |
-| `RCR_ADMIN_TOKEN` | No | Admin auth for `/metrics` and `/v1/escrow/health` |
+| `SOLVELA_SOLANA_RPC_URL` | Yes | Solana RPC endpoint |
+| `SOLVELA_SOLANA_RECIPIENT_WALLET` | Yes | USDC payment destination (base58) |
+| `SOLVELA_SOLANA_FEE_PAYER_KEY` | For escrow | Hot wallet key for claim transactions |
+| `SOLVELA_SOLANA_ESCROW_PROGRAM_ID` | For escrow | Anchor escrow program ID |
+| `SOLVELA_SERVER_PORT` | No | Gateway port (default: `8402`) |
+| `SOLVELA_ADMIN_TOKEN` | No | Admin auth for `/metrics` and `/v1/escrow/health` |
 | `DATABASE_URL` | No | PostgreSQL connection string |
 | `REDIS_URL` | No | Redis connection string |
-| `RCR_CORS_ORIGINS` | No | Comma-separated allowed CORS origins |
+| `SOLVELA_CORS_ORIGINS` | No | Comma-separated allowed CORS origins |
+
+> **Legacy:** the gateway also accepts the same vars under the old `RCR_*` prefix with a deprecation warning. Use `SOLVELA_*` for new deployments.
 
 See [`.env.example`](.env.example) for the full reference. Configuration files live in `config/`:
 

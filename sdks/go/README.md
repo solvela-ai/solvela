@@ -22,12 +22,12 @@ import (
 	"fmt"
 	"log"
 
-	rcr "github.com/solvela-ai/solvela-go"
+	solvela "github.com/solvela-ai/solvela-go"
 )
 
 func main() {
-	client, err := rcr.NewClient(
-		rcr.WithAPIURL("http://localhost:8402"),
+	client, err := solvela.NewClient(
+		solvela.WithAPIURL("http://localhost:8402"),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -47,11 +47,11 @@ func main() {
 Use `ChatCompletion` for the full OpenAI-compatible response object:
 
 ```go
-resp, err := client.ChatCompletion(context.Background(), rcr.ChatRequest{
+resp, err := client.ChatCompletion(context.Background(), solvela.ChatRequest{
 	Model: "anthropic/claude-sonnet-4",
-	Messages: []rcr.ChatMessage{
-		{Role: rcr.RoleSystem, Content: "You are a helpful assistant."},
-		{Role: rcr.RoleUser, Content: "Explain Solana in one paragraph."},
+	Messages: []solvela.ChatMessage{
+		{Role: solvela.RoleSystem, Content: "You are a helpful assistant."},
+		{Role: solvela.RoleUser, Content: "Explain Solana in one paragraph."},
 	},
 })
 if err != nil {
@@ -81,14 +81,14 @@ fmt.Println(resp.Choices[0].Message.Content)
 ## Session Budget Tracking
 
 ```go
-client, _ := rcr.NewClient(
-	rcr.WithAPIURL("http://localhost:8402"),
-	rcr.WithSessionBudget(0.50), // Max $0.50 USDC per session
+client, _ := solvela.NewClient(
+	solvela.WithAPIURL("http://localhost:8402"),
+	solvela.WithSessionBudget(0.50), // Max $0.50 USDC per session
 )
 
 reply, err := client.Chat(context.Background(), "openai/gpt-4o", "Hello!")
 if err != nil {
-	var be *rcr.BudgetExceededError
+	var be *solvela.BudgetExceededError
 	if errors.As(err, &be) {
 		fmt.Printf("Budget: $%.4f, Spent: $%.4f, Cost: $%.4f\n",
 			be.Budget, be.Spent, be.Cost)
@@ -113,9 +113,9 @@ import "errors"
 
 reply, err := client.Chat(ctx, "openai/gpt-4o", "Hello")
 if err != nil {
-	var pe *rcr.PaymentError
-	var be *rcr.BudgetExceededError
-	var ae *rcr.APIError
+	var pe *solvela.PaymentError
+	var be *solvela.BudgetExceededError
+	var ae *solvela.APIError
 
 	switch {
 	case errors.As(err, &pe):

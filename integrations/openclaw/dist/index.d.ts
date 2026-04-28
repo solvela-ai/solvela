@@ -1,12 +1,12 @@
 /**
- * Configuration for the @rustyclaw/rcr OpenClaw plugin.
+ * Configuration for the @solvela/router OpenClaw plugin.
  *
  * Reads from the same env vars already present on all tenant VPSes:
- *   LLM_ROUTER_API_URL     — RustyClawRouter gateway base URL
+ *   LLM_ROUTER_API_URL     — Solvela gateway base URL
  *   LLM_ROUTER_WALLET_KEY  — Base58 Solana private key for x402 payments
  */
 interface RcrConfig {
-    /** RustyClawRouter gateway base URL (no trailing slash). */
+    /** Solvela gateway base URL (no trailing slash). */
     gatewayUrl: string;
     /** Base58-encoded Solana private key for signing x402 payments. */
     walletKey: string;
@@ -21,13 +21,13 @@ declare class ConfigError extends Error {
 }
 
 /**
- * Core routing logic for @rustyclaw/rcr.
+ * Core routing logic for @solvela/router.
  *
- * Forwards OpenClaw chat requests to RustyClawRouter, handling the full
+ * Forwards OpenClaw chat requests to Solvela, handling the full
  * x402 payment flow: initial request → 402 response → sign payment → retry.
  * Supports both streaming (SSE) and non-streaming responses.
  *
- * Payment logic is inlined from the RustyClawRouter TypeScript SDK so this
+ * Payment logic is inlined from the Solvela TypeScript SDK so this
  * plugin has zero runtime dependencies.
  */
 
@@ -70,16 +70,16 @@ declare class RouterError extends Error {
 }
 
 /**
- * @rustyclaw/rcr — OpenClaw plugin
+ * @solvela/router — OpenClaw plugin
  *
  * Routes OpenClaw LLM requests
- * through RustyClawRouter with Solana-native x402 USDC micropayments.
+ * through Solvela with Solana-native x402 USDC micropayments.
  *
  * Installation (on tenant VPS):
- *   openclaw plugins install @rustyclaw/rcr
+ *   openclaw plugins install @solvela/router
  *
  * Required env vars (already present on all Telsi tenant VPSes):
- *   LLM_ROUTER_API_URL     — RustyClawRouter gateway base URL
+ *   LLM_ROUTER_API_URL     — Solvela gateway base URL
  *   LLM_ROUTER_WALLET_KEY  — Base58 Solana private key for x402 payments
  *
  * Optional env vars:
@@ -87,7 +87,7 @@ declare class RouterError extends Error {
  *                            (required when @solana/web3.js is installed)
  *
  * Usage as a standalone client:
- *   import { createRouter } from '@rustyclaw/rcr';
+ *   import { createRouter } from '@solvela/router';
  *
  *   const router = createRouter();
  *   const response = await router.chat([{ role: 'user', content: 'Hello!' }]);
@@ -99,7 +99,7 @@ declare class RouterError extends Error {
  *
  * OpenClaw loads plugins via this default export and calls `intercept` for
  * every outbound LLM request. Returning a response short-circuits the default
- * provider, routing the call through RustyClawRouter instead.
+ * provider, routing the call through Solvela instead.
  */
 interface OpenClawPlugin {
     name: string;
@@ -132,7 +132,7 @@ declare class RcrClient {
     private readonly config;
     constructor(overrides?: Partial<RcrConfig>);
     /**
-     * Send a non-streaming chat completion through RustyClawRouter.
+     * Send a non-streaming chat completion through Solvela.
      *
      * @param messages     - Conversation messages
      * @param model        - Model ID (defaults to config.defaultModel, i.e. "auto")
@@ -144,7 +144,7 @@ declare class RcrClient {
         top_p?: number;
     }): Promise<ChatResponse>;
     /**
-     * Send a streaming chat completion through RustyClawRouter.
+     * Send a streaming chat completion through Solvela.
      * Returns the raw SSE Response — iterate with a ReadableStream reader.
      */
     chatStream(messages: ChatMessage[], model?: string, options?: {

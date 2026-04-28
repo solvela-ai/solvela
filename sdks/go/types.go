@@ -1,4 +1,4 @@
-package rcr
+package solvela
 
 // Role represents a chat message role.
 type Role string

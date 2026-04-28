@@ -86,13 +86,13 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: rcr
-          POSTGRES_PASSWORD: rcr
-          POSTGRES_DB: rcr_test
+          POSTGRES_USER: solvela
+          POSTGRES_PASSWORD: solvela
+          POSTGRES_DB: solvela_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U rcr"
+          --health-cmd "pg_isready -U solvela"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
@@ -121,10 +121,10 @@ jobs:
 
       - name: Start gateway
         run: |
-          DATABASE_URL="postgres://rcr:rcr@localhost:5432/rcr_test" \
+          DATABASE_URL="postgres://solvela:solvela@localhost:5432/solvela_test" \
           REDIS_URL="redis://localhost:6379" \
-          RCR_DEV_BYPASS_PAYMENT=true \
-          RCR_ADMIN_TOKEN=ci-test-token \
+          SOLVELA_DEV_BYPASS_PAYMENT=true \
+          SOLVELA_ADMIN_TOKEN=ci-test-token \
           RUST_LOG=gateway=info \
           ./target/release/solvela-gateway &
           echo "GATEWAY_PID=$!" >> "$GITHUB_ENV"
@@ -180,22 +180,22 @@ jobs:
               [ "$status" = "402" ] || [ "$status" = "500" ] || [ "$status" = "200" ]
             ' "$BASE"
 
-          # 4. GET /metrics with admin token → 200, body contains "rcr_requests_total"
+          # 4. GET /metrics with admin token → 200, body contains "solvela_requests_total"
           check "GET /metrics with admin token returns metrics" \
             bash -c '
               body=$(curl -sf "$0/metrics" -H "Authorization: Bearer ci-test-token")
               echo "$body" | grep -q "solvela_requests_total"
             ' "$BASE"
 
-          # 5. POST /v1/chat/completions with X-RCR-Debug: true → x-rcr-request-id header present
-          check "X-RCR-Debug returns x-rcr-request-id header" \
+          # 5. POST /v1/chat/completions with X-Solvela-Debug: true → x-solvela-request-id header present
+          check "X-Solvela-Debug returns x-solvela-request-id header" \
             bash -c '
               headers=$(curl -sD - -o /dev/null \
                 -X POST "$0/v1/chat/completions" \
                 -H "Content-Type: application/json" \
-                -H "X-RCR-Debug: true" \
+                -H "X-Solvela-Debug: true" \
                 -d "{\"model\":\"openai-gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
-              echo "$headers" | grep -qi "x-rcr-request-id"
+              echo "$headers" | grep -qi "x-solvela-request-id"
             ' "$BASE"
 
           # 6. POST with X-Request-Id → echoed back

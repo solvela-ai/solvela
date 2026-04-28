@@ -1,4 +1,4 @@
-package rcr
+package solvela
 
 const (
 	DefaultAPIURL    = "https://api.solvela.ai"
