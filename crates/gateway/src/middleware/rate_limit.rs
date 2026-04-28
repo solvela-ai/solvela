@@ -224,7 +224,7 @@ fn extract_client_id(request: &Request) -> String {
     // 1. Wallet address from verified payment — strongest identity signal
     if let Some(payment_info) = request
         .extensions()
-        .get::<super::solvela_x402::PaymentInfo>()
+        .get::<super::x402::PaymentInfo>()
     {
         return payment_info.payload.accepted.pay_to.clone();
     }
