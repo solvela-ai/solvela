@@ -1,7 +1,7 @@
 //! GET /metrics — Prometheus metrics endpoint.
 //!
 //! Returns Prometheus text exposition format. Gated behind the admin token
-//! stored in `AppState.admin_token` (read from `RCR_ADMIN_TOKEN` at startup).
+//! stored in `AppState.admin_token` (read from `SOLVELA_ADMIN_TOKEN` at startup).
 //! Returns 404 when the admin token is not configured (hides the endpoint
 //! entirely). Returns 503 when the Prometheus recorder failed to install.
 

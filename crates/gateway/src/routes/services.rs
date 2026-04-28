@@ -99,11 +99,11 @@ pub struct RegisterServiceRequest {
 
 /// POST /v1/services/register — register a new external service at runtime.
 ///
-/// Protected by `RCR_ADMIN_TOKEN` env var. Returns:
+/// Protected by `SOLVELA_ADMIN_TOKEN` env var. Returns:
 /// - 201 Created with the full `ServiceEntry` on success
 /// - 400 Bad Request for validation errors
 /// - 401 Unauthorized if token is wrong or missing
-/// - 404 Not Found if `RCR_ADMIN_TOKEN` is not set
+/// - 404 Not Found if `SOLVELA_ADMIN_TOKEN` is not set
 /// - 409 Conflict if the service ID already exists
 pub async fn register_service(
     State(state): State<Arc<AppState>>,

@@ -140,7 +140,7 @@ pub struct EscrowClaimStats {
 /// Returns:
 /// - 200 with escrow health when escrow is configured and caller is authorized
 /// - 401 when the `Authorization: Bearer <token>` header is missing or invalid
-/// - 404 when escrow is not configured **or** no `RCR_ADMIN_TOKEN` is set
+/// - 404 when escrow is not configured **or** no `SOLVELA_ADMIN_TOKEN` is set
 ///
 /// Status is "ok" when everything is healthy, "degraded" when the claim
 /// processor is not running or fee payer pool is missing, and "down" when
