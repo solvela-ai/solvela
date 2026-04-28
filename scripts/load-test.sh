@@ -23,7 +23,7 @@ HEALTH_ENDPOINT="${GATEWAY_URL}/health"
 MODELS_ENDPOINT="${GATEWAY_URL}/v1/models"
 
 # Detect dev bypass mode
-DEV_BYPASS="${RCR_DEV_BYPASS_PAYMENT:-false}"
+DEV_BYPASS="${SOLVELA_DEV_BYPASS_PAYMENT:-${RCR_DEV_BYPASS_PAYMENT:-false}}"
 
 # ANSI colors
 GREEN='\033[0;32m'
@@ -146,7 +146,7 @@ pass "Gateway is running at ${GATEWAY_URL}"
 
 if [[ "$DEV_BYPASS" == "true" ]]; then
     echo ""
-    echo -e "  ${YELLOW}NOTE${RESET} RCR_DEV_BYPASS_PAYMENT=true detected — payment bypass is ON"
+    echo -e "  ${YELLOW}NOTE${RESET} SOLVELA_DEV_BYPASS_PAYMENT=true detected — payment bypass is ON"
     echo -e "  ${YELLOW}NOTE${RESET} Chat requests may return 200 (provider configured) or 500 (no provider)"
     echo -e "  ${YELLOW}NOTE${RESET} instead of the normal 402. All three are treated as valid."
 fi

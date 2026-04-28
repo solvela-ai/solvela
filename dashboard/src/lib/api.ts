@@ -1,3 +1,4 @@
+import { getApiKey } from "@/lib/auth";
 import type {
   HealthResponse,
   PricingResponse,
@@ -14,7 +15,7 @@ const GATEWAY_URL =
 
 function getAuthHeaders(): HeadersInit {
   if (typeof window !== "undefined") {
-    const apiKey = localStorage.getItem("rcr_api_key");
+    const apiKey = getApiKey();
     if (apiKey) return { Authorization: `Bearer ${apiKey}` };
   }
   const adminKey = process.env.GATEWAY_ADMIN_KEY;

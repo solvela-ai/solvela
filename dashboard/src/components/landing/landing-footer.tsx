@@ -58,7 +58,7 @@ export function LandingFooter() {
           />
 
           <FooterColumn
-            title="sky64"
+            title="solvela"
             links={[
               { label: 'github', href: GITHUB_URL },
               { label: 'status', href: `${APP_URL}/overview` },
@@ -69,7 +69,7 @@ export function LandingFooter() {
 
         <div className="mt-12 flex flex-col gap-3 border-t border-border/60 pt-6 font-mono text-[10px] uppercase tracking-[0.18em] text-text-faint md:flex-row md:items-center md:justify-between">
           <span>
-            © 2026 Sky64 · escrow pda · {ESCROW_PROGRAM_ID}…
+            © 2026 Solvela · escrow pda · {ESCROW_PROGRAM_ID}…
           </span>
           <span className="text-[var(--accent-salmon)]">
             built in rust · settled on solana · priced in usdc

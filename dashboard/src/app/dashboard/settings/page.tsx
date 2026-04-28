@@ -205,7 +205,7 @@ export default function SettingsPage() {
             <div className="space-y-3">
               <div className="flex items-center gap-1.5 text-xs text-text-tertiary font-mono mb-1">
                 <Key size={11} />
-                <span>rcr_k_... key grants access to /orgs and audit endpoints</span>
+                <span>solvela_k_... key grants access to /orgs and audit endpoints</span>
               </div>
 
               {currentApiKey ? (
@@ -236,7 +236,7 @@ export default function SettingsPage() {
                   value={apiKeyInput}
                   onChange={(e) => setApiKeyInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleSaveApiKey()}
-                  placeholder="rcr_k_..."
+                  placeholder="solvela_k_..."
                   className="flex-1 rounded border border-border px-3 py-2 text-sm text-text-primary placeholder-text-tertiary bg-bg-inset focus:border-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-salmon)] transition-colors font-mono"
                 />
                 <button
