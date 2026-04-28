@@ -24,7 +24,7 @@ export const siteConfig = {
   },
 
   footer: {
-    companyName: 'Sky64',
+    companyName: 'Solvela',
     links: [
       { label: 'Solvela', href: 'https://solvela.ai' },
       { label: 'GitHub', href: 'https://github.com/solvela-ai/solvela' },
