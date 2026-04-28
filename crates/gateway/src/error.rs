@@ -41,7 +41,12 @@ impl IntoResponse for GatewayError {
                 (StatusCode::NOT_FOUND, "model_not_found", msg.clone())
             }
             GatewayError::ProviderError(msg) => {
-                (StatusCode::BAD_GATEWAY, "provider_error", msg.clone())
+                tracing::error!(error = %msg, "provider error");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "provider_error",
+                    "Upstream provider error".to_string(),
+                )
             }
             GatewayError::PaymentRequired => (
                 StatusCode::PAYMENT_REQUIRED,
@@ -121,7 +126,9 @@ mod tests {
             error_response(GatewayError::ProviderError("upstream timeout".to_string())).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(json["error"]["type"], "provider_error");
-        assert!(json["error"]["message"]
+        // Must NOT leak raw provider error details (URLs, timeouts, stack info) to clients
+        assert_eq!(json["error"]["message"], "Upstream provider error");
+        assert!(!json["error"]["message"]
             .as_str()
             .unwrap()
             .contains("upstream timeout"));
