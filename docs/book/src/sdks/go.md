@@ -18,13 +18,13 @@ import (
     "fmt"
     "log"
 
-    rcr "github.com/solvela-ai/solvela-go"
+    solvela "github.com/solvela-ai/solvela-go"
 )
 
 func main() {
-    client, err := rcr.NewClient(
-        rcr.WithAPIURL("http://localhost:8402"),
-        rcr.WithPrivateKey("your-base58-private-key"),
+    client, err := solvela.NewClient(
+        solvela.WithAPIURL("http://localhost:8402"),
+        solvela.WithPrivateKey("your-base58-private-key"),
     )
     if err != nil {
         log.Fatal(err)
@@ -43,12 +43,12 @@ func main() {
 The client uses the functional options pattern:
 
 ```go
-client, err := rcr.NewClient(
-    rcr.WithAPIURL("http://localhost:8402"),
-    rcr.WithPrivateKey("base58-private-key"),
-    rcr.WithSessionBudget(1.0),              // max USDC per session
-    rcr.WithTimeout(60 * time.Second),       // request timeout
-    rcr.WithHTTPClient(customHTTPClient),     // custom http.Client
+client, err := solvela.NewClient(
+    solvela.WithAPIURL("http://localhost:8402"),
+    solvela.WithPrivateKey("base58-private-key"),
+    solvela.WithSessionBudget(1.0),              // max USDC per session
+    solvela.WithTimeout(60 * time.Second),       // request timeout
+    solvela.WithHTTPClient(customHTTPClient),     // custom http.Client
 )
 ```
 
@@ -56,7 +56,7 @@ Environment variables:
 
 | Variable | Description |
 |----------|-------------|
-| `RCR_API_URL` | Gateway URL |
+| `SOLVELA_API_URL` | Gateway URL (`RCR_API_URL` still accepted for backward compat) |
 | `SOLANA_WALLET_KEY` | Base58 wallet private key |
 | `SOLANA_RPC_URL` | Solana RPC endpoint |
 
@@ -65,9 +65,9 @@ Environment variables:
 ```go
 ctx := context.Background()
 
-response, err := client.ChatCompletion(ctx, rcr.ChatRequest{
+response, err := client.ChatCompletion(ctx, solvela.ChatRequest{
     Model: "anthropic/claude-sonnet-4.6",
-    Messages: []rcr.ChatMessage{
+    Messages: []solvela.ChatMessage{
         {Role: "system", Content: "You are a Go expert."},
         {Role: "user", Content: "Explain interfaces."},
     },
@@ -85,9 +85,9 @@ fmt.Printf("Tokens: %d\n", response.Usage.TotalTokens)
 ## Streaming
 
 ```go
-stream, err := client.ChatStream(ctx, rcr.ChatRequest{
+stream, err := client.ChatStream(ctx, solvela.ChatRequest{
     Model: "openai/gpt-4o",
-    Messages: []rcr.ChatMessage{
+    Messages: []solvela.ChatMessage{
         {Role: "user", Content: "Write a haiku about blockchains"},
     },
 })
@@ -120,9 +120,9 @@ reply, _ = client.Chat(ctx, "premium", "Deep analysis") // best
 ```go
 reply, err := client.Chat(ctx, "openai/gpt-4o", "Hello")
 if err != nil {
-    var budgetErr *rcr.BudgetExceededError
-    var paymentErr *rcr.PaymentError
-    var providerErr *rcr.ProviderError
+    var budgetErr *solvela.BudgetExceededError
+    var paymentErr *solvela.PaymentError
+    var providerErr *solvela.ProviderError
 
     switch {
     case errors.As(err, &budgetErr):
@@ -156,10 +156,10 @@ for _, model := range models {
 ## Session Budget
 
 ```go
-client, _ := rcr.NewClient(
-    rcr.WithAPIURL("http://localhost:8402"),
-    rcr.WithPrivateKey("your-key"),
-    rcr.WithSessionBudget(0.50),
+client, _ := solvela.NewClient(
+    solvela.WithAPIURL("http://localhost:8402"),
+    solvela.WithPrivateKey("your-key"),
+    solvela.WithSessionBudget(0.50),
 )
 
 reply, err := client.Chat(ctx, "openai/gpt-4o", "Hello")

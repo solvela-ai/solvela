@@ -15,10 +15,10 @@
 | 500 Internal Server Error on chat | Provider returned unexpected response | Check `RUST_LOG=gateway=debug` for details |
 | "unknown model" error | Model ID not in registry | Use `GET /v1/models` to list valid model IDs |
 | Escrow claim failures | Fee payer SOL balance too low | Fund fee payer wallets; check `GET /v1/escrow/health` |
-| Metrics endpoint returns 403 | `RCR_ADMIN_TOKEN` not set or wrong token | Set `RCR_ADMIN_TOKEN` and use `Authorization: Bearer <token>` |
+| Metrics endpoint returns 403 | `SOLVELA_ADMIN_TOKEN` not set or wrong token | Set `SOLVELA_ADMIN_TOKEN` (or `RCR_ADMIN_TOKEN` for backward compat) and use `Authorization: Bearer <token>` |
 | Wallet stats returns 503 | PostgreSQL not configured | Set `DATABASE_URL` in `.env` |
-| CORS errors in browser | Origin not in allowlist | Add your domain to `RCR_CORS_ORIGINS` |
-| Slow responses (>10s) | Provider latency or network issues | Check `rcr_provider_request_duration_seconds` metric; try a different provider |
+| CORS errors in browser | Origin not in allowlist | Add your domain to `SOLVELA_CORS_ORIGINS` (or `RCR_CORS_ORIGINS` for backward compat) |
+| Slow responses (>10s) | Provider latency or network issues | Check `solvela_provider_request_duration_seconds` metric; try a different provider |
 | "circuit breaker open" in escrow health | >50% claim failures in 5-minute window | Wait 1 minute for auto-reset; check fee payer balance and RPC connectivity |
 
 ## Debug Headers
