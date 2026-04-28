@@ -2,12 +2,12 @@
 
 Go SDK for Solvela -- AI agent payments with USDC on Solana via the x402 protocol.
 
-Module path: `github.com/solvela/sdk-go`
+Module path: `github.com/solvela-ai/solvela-go`
 
 ## Installation
 
 ```bash
-go get github.com/solvela/sdk-go
+go get github.com/solvela-ai/solvela-go
 ```
 
 Requires Go 1.21 or later.
@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"log"
 
-	rcr "github.com/solvela/sdk-go"
+	rcr "github.com/solvela-ai/solvela-go"
 )
 
 func main() {

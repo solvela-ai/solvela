@@ -245,7 +245,7 @@ const response = await client.chat('openai/gpt-4o', 'Hello!');
 ### Go
 
 ```bash
-go get github.com/solvela/sdk-go
+go get github.com/solvela-ai/solvela-go
 ```
 
 ```go
@@ -375,7 +375,7 @@ programs/
 sdks/
   python/           pip install solvela
   typescript/       npm install @solvela/sdk
-  go/               go get github.com/solvela/sdk-go
+  go/               go get github.com/solvela-ai/solvela-go
   mcp/              Claude Code MCP server
 config/
   models.toml       Model registry + pricing

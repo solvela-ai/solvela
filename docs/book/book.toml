@@ -11,7 +11,7 @@ build-dir = "../../target/book"
 [output.html]
 default-theme = "coal"
 preferred-dark-theme = "coal"
-git-repository-url = "https://github.com/kennethdixon/Solvela"
+git-repository-url = "https://github.com/solvela-ai/solvela"
 
 [preprocessor.mermaid]
 command = "mdbook-mermaid"

@@ -1,4 +1,4 @@
-module github.com/solvela/sdk-go
+module github.com/solvela-ai/solvela-go
 
 go 1.21
 

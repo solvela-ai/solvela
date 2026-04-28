@@ -4,7 +4,7 @@
 # python
 
 ## Purpose
-Python SDK for Solvela. Ships two import names during the Solvela → Solvela rebrand: `solvela` (canonical, keep current) and `rustyclawrouter` (legacy compatibility shim — avoid adding new code there).
+Python SDK for Solvela. Single canonical package: `solvela`.
 
 ## Key Files
 | File | Description |
@@ -16,14 +16,12 @@ Python SDK for Solvela. Ships two import names during the Solvela → Solvela re
 | Directory | Purpose |
 |-----------|---------|
 | `solvela/` | Canonical package — Client, Wallet, x402, config, types (see `solvela/AGENTS.md`) |
-| `rustyclawrouter/` | Legacy compat shim — re-exports `solvela` under the old name (see `rustyclawrouter/AGENTS.md`) |
 | `tests/` | pytest suite (see `tests/AGENTS.md`) |
 | `.pytest_cache/` | pytest cache (not checked in) |
 
 ## For AI Agents
 
 ### Working In This Directory
-- Add all new code to `solvela/`. `rustyclawrouter/` is compatibility-only — shallow re-exports.
 - Keep dependencies minimal — `httpx` or `requests` for HTTP, `solana`/`solders` for signing, `pydantic` optional.
 - Support Python 3.10+ (check `pyproject.toml` for the pinned minimum).
 - Never accept private keys as a file path parameter in the public API — take bytes or a base58 string explicitly.

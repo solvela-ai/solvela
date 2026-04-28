@@ -67,7 +67,7 @@ reply = solvela.chat.completions.create(
     id: 'go',
     label: 'go',
     lang: 'go',
-    install: 'go get github.com/solvela/sdk-go',
+    install: 'go get github.com/solvela-ai/solvela-go',
     status: 'live',
     code: `client := solvela.New(solvela.WithKeypair(wallet))
 
