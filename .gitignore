@@ -1,6 +1,10 @@
 # Build artifacts (universal — overrides specific entries below)
 **/node_modules/
 **/dist/
+**/build/
+**/.venv/
+**/.pytest_cache/
+**/.ruff_cache/
 *.tgz
 
 # Internal planning notes kept on disk only (never tracked)
@@ -40,21 +44,15 @@ docker-data/
 __pycache__/
 *.pyc
 *.egg-info/
-sdks/python/dist/
-sdks/python/build/
-sdks/python/.venv/
 .ruff_cache/
 
 # TypeScript SDK
-sdks/typescript/node_modules/
-sdks/typescript/dist/
 
 # MCP server
 sdks/mcp/node_modules/
 sdks/mcp/dist/
 
 # Go SDK
-sdks/go/vendor/
 
 # Dashboard (Next.js)
 dashboard/node_modules/
@@ -69,7 +67,6 @@ dashboard/out/
 .claude/skills/systems-programming-rust-project
 .vercel
 .env*.local
-sdks/python/.omc/
 
 # Claude Code / OMC local state
 .claude/

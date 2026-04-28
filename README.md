@@ -307,11 +307,13 @@ cargo test -p gateway test_health_endpoint -- --exact
 # Escrow program (standalone, not in workspace)
 cargo test --manifest-path programs/escrow/Cargo.toml
 
-# SDK tests
-cd sdks/python && python -m pytest
-cd sdks/typescript && npm test
-cd sdks/go && go test ./...
+# SDK tests (mcp + ai-sdk-provider + openclaw-provider live in this repo)
 cd sdks/mcp && npm test
+
+# Standalone SDK repos:
+#   Python:     https://github.com/solvela-ai/solvela-python
+#   TypeScript: https://github.com/solvela-ai/solvela-ts
+#   Go:         https://github.com/solvela-ai/solvela-go
 ```
 
 ### Lint

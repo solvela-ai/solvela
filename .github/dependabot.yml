@@ -104,23 +104,14 @@ updates:
     open-pull-requests-limit: 5
 
   - package-ecosystem: npm
-    directory: /sdks/typescript
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-
-  - package-ecosystem: npm
     directory: /sdks/cli-npm
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
 
-  # ── Go SDK ──────────────────────────────────────────────────────────────
-  - package-ecosystem: gomod
-    directory: /sdks/go
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+  # Note: Go and TypeScript SDKs live in standalone repos
+  # (github.com/solvela-ai/solvela-go, github.com/solvela-ai/solvela-ts)
+  # and have their own dependabot configs there.
 
   # ── GitHub Actions (workflow file pins) ─────────────────────────────────
   - package-ecosystem: github-actions

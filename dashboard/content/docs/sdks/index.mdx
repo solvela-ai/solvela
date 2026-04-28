@@ -18,12 +18,13 @@ Official SDKs are available for four languages plus an MCP server. All SDKs hand
 
 ## Source code
 
-All SDKs live in the monorepo under `sdks/`:
+The first-party language SDKs each live in their own repository; adapter SDKs live in this monorepo under `sdks/`:
 
-- `sdks/typescript/` — TypeScript/Node.js SDK
-- `sdks/python/solvela/` — Python SDK (sync + async)
-- `sdks/go/` — Go SDK
-- `sdks/mcp/` — MCP server
+- TypeScript/Node.js SDK — [`solvela-ai/solvela-ts`](https://github.com/solvela-ai/solvela-ts)
+- Python SDK (sync + async) — [`solvela-ai/solvela-python`](https://github.com/solvela-ai/solvela-python)
+- Go SDK — [`solvela-ai/solvela-go`](https://github.com/solvela-ai/solvela-go)
+- `sdks/mcp/` — MCP server (this repo)
+- `sdks/ai-sdk-provider/`, `sdks/openclaw-provider/`, `sdks/cli-npm/` — Vercel AI SDK provider, OpenClaw provider, and npm CLI shim (this repo)
 
 <CardGroup>
   <Card title="TypeScript" description="npm install @solvela/sdk — Node.js and browser compatible" href="/docs/sdks/typescript" />
