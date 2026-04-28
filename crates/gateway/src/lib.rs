@@ -292,7 +292,7 @@ fn build_cors() -> CorsLayer {
     let env_value = std::env::var("SOLVELA_ENV")
         .or_else(|_| std::env::var("RCR_ENV"))
         .unwrap_or_else(|_| "development".to_string());
-    let is_dev = env_value != "production";
+    let is_dev = env_value != "production" && env_value != "prod";
     if is_dev {
         for dev_origin in &[
             "http://localhost:3000",
