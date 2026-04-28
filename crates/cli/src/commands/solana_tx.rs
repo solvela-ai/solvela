@@ -452,13 +452,16 @@ mod tests {
     #[test]
     fn test_x402_escrow_pda_exports_accessible() {
         // Verify that x402 escrow PDA helpers are publicly accessible
-        let program_id =
-            solvela_x402::escrow::pda::decode_bs58_pubkey("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU")
-                .unwrap();
+        let program_id = solvela_x402::escrow::pda::decode_bs58_pubkey(
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
+        )
+        .unwrap();
         let agent = [1u8; 32];
         let service_id = [2u8; 32];
-        let result =
-            solvela_x402::escrow::pda::find_program_address(&[b"escrow", &agent, &service_id], &program_id);
+        let result = solvela_x402::escrow::pda::find_program_address(
+            &[b"escrow", &agent, &service_id],
+            &program_id,
+        );
         assert!(result.is_some());
     }
 

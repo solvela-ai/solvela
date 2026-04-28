@@ -227,22 +227,23 @@ pub async fn run(
         use std::io::Write;
         std::io::stdout().flush().ok();
 
-        let refund_tx =
-            match solvela_x402::escrow::refund::build_refund_tx(&solvela_x402::escrow::refund::RefundParams {
+        let refund_tx = match solvela_x402::escrow::refund::build_refund_tx(
+            &solvela_x402::escrow::refund::RefundParams {
                 agent_keypair_b58: private_key_b58.to_string(),
                 escrow_pda_b58: pda_b58.clone(),
                 usdc_mint_b58: USDC_MINT.to_string(),
                 escrow_program_id_b58: program_id_str.clone(),
                 service_id: esc.service_id,
                 recent_blockhash,
-            }) {
-                Ok(tx) => tx,
-                Err(e) => {
-                    println!("build failed: {e}");
-                    failure += 1;
-                    continue;
-                }
-            };
+            },
+        ) {
+            Ok(tx) => tx,
+            Err(e) => {
+                println!("build failed: {e}");
+                failure += 1;
+                continue;
+            }
+        };
 
         match submit_refund_tx(&rpc_url, &refund_tx, &client).await {
             Ok(sig) => {
@@ -556,11 +557,13 @@ mod tests {
 
     /// Build the PDA b58 string for an agent + service_id combination.
     fn derived_pda_b58(agent: &[u8; 32], service_id: &[u8; 32]) -> String {
-        let program_id =
-            solvela_x402::escrow::pda::decode_bs58_pubkey(ESCROW_PROGRAM_ID).expect("valid program id");
-        let (pda, _bump) =
-            solvela_x402::escrow::pda::find_program_address(&[b"escrow", agent, service_id], &program_id)
-                .expect("valid PDA");
+        let program_id = solvela_x402::escrow::pda::decode_bs58_pubkey(ESCROW_PROGRAM_ID)
+            .expect("valid program id");
+        let (pda, _bump) = solvela_x402::escrow::pda::find_program_address(
+            &[b"escrow", agent, service_id],
+            &program_id,
+        )
+        .expect("valid PDA");
         bs58::encode(pda).into_string()
     }
 

@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use sha2::{Digest, Sha256};
-use solvela_x402::types::{PaymentAccept, PaymentPayload, PaymentRequired, Resource, SolanaPayload};
+use solvela_x402::types::{
+    PaymentAccept, PaymentPayload, PaymentRequired, Resource, SolanaPayload,
+};
 
 use crate::commands::wallet::load_wallet;
 
@@ -178,11 +180,13 @@ pub async fn run(
                     method: "POST".to_string(),
                 },
                 accepted: accepted.clone(),
-                payload: solvela_x402::types::PayloadData::Escrow(solvela_x402::types::EscrowPayload {
-                    deposit_tx,
-                    service_id: BASE64.encode(service_id),
-                    agent_pubkey: agent_pubkey_b58,
-                }),
+                payload: solvela_x402::types::PayloadData::Escrow(
+                    solvela_x402::types::EscrowPayload {
+                        deposit_tx,
+                        service_id: BASE64.encode(service_id),
+                        agent_pubkey: agent_pubkey_b58,
+                    },
+                ),
             }
         }
         _ => {

@@ -112,7 +112,9 @@ pub fn decode_payment_header(header: &str) -> Result<PaymentPayload, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use solvela_x402::types::{PayloadData, PaymentAccept, PaymentPayload, Resource, SolanaPayload};
+    use solvela_x402::types::{
+        PayloadData, PaymentAccept, PaymentPayload, Resource, SolanaPayload,
+    };
 
     /// Build a valid test PaymentPayload.
     fn sample_payload() -> PaymentPayload {

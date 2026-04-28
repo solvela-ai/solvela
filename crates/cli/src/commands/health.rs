@@ -47,8 +47,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/health"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"status": "ok"})),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "ok"})),
             )
             .mount(&mock)
             .await;

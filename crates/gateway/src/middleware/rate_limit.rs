@@ -222,7 +222,10 @@ pub async fn rate_limit(request: Request, next: Next) -> Response {
 /// `X-Forwarded-For` at the proxy layer — do not rely on client-supplied headers.
 fn extract_client_id(request: &Request) -> String {
     // 1. Wallet address from verified payment — strongest identity signal
-    if let Some(payment_info) = request.extensions().get::<super::solvela_x402::PaymentInfo>() {
+    if let Some(payment_info) = request
+        .extensions()
+        .get::<super::solvela_x402::PaymentInfo>()
+    {
         return payment_info.payload.accepted.pay_to.clone();
     }
 

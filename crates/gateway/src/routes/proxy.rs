@@ -21,7 +21,7 @@ use solvela_x402::types::{
 };
 
 use crate::error::GatewayError;
-use crate::middleware::solvela_x402::decode_payment_header;
+use crate::middleware::x402::decode_payment_header;
 use crate::payment_util::extract_payer_wallet;
 use crate::security;
 use crate::usage::SpendLogEntry;

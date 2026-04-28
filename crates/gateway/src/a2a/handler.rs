@@ -275,8 +275,8 @@ async fn handle_payment_submitted(
             data: None,
         })?;
 
-    let payload: solvela_x402::types::PaymentPayload = serde_json::from_value(payload_value.clone())
-        .map_err(|e| JsonRpcErrorData {
+    let payload: solvela_x402::types::PaymentPayload =
+        serde_json::from_value(payload_value.clone()).map_err(|e| JsonRpcErrorData {
             code: ERR_INVALID_PARAMS,
             message: format!("Invalid payment payload: {e}"),
             data: None,

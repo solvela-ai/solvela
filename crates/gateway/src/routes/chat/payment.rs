@@ -10,7 +10,7 @@ use tracing::warn;
 
 use solvela_x402::solana_types::VersionedTransaction;
 
-use crate::middleware::solvela_x402::decode_payment_header;
+use crate::middleware::x402::decode_payment_header;
 use crate::payment_util::extract_payer_wallet;
 use crate::AppState;
 
@@ -20,7 +20,9 @@ use crate::AppState;
 /// compatibility with raw string headers used in tests (e.g., "fake-payment-for-testing").
 ///
 /// Delegates to the shared `decode_payment_header` in the x402 middleware.
-pub(crate) fn decode_payment_from_header(header: &str) -> Option<solvela_x402::types::PaymentPayload> {
+pub(crate) fn decode_payment_from_header(
+    header: &str,
+) -> Option<solvela_x402::types::PaymentPayload> {
     decode_payment_header(header).ok()
 }
 
@@ -74,8 +76,7 @@ pub(crate) fn uses_durable_nonce(b64_tx: &str) -> bool {
 
     // Check that the program invoked is the System Program (all zeros)
     let program_key = msg.account_keys.get(first_ix.program_id_index as usize);
-    let is_system_program =
-        matches!(program_key, Some(pk) if *pk == solvela_x402::solana_types::Pubkey::SYSTEM_PROGRAM);
+    let is_system_program = matches!(program_key, Some(pk) if *pk == solvela_x402::solana_types::Pubkey::SYSTEM_PROGRAM);
 
     // AdvanceNonceAccount discriminator: 4 as little-endian u32
     let is_advance_nonce = first_ix.data.len() >= 4 && first_ix.data[..4] == [4, 0, 0, 0];
