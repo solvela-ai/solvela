@@ -56,7 +56,7 @@ The `model` field accepts:
 | `PAYMENT-SIGNATURE` | No | Signed payment payload. Omit to get a 402 price quote. |
 | `X-Request-Id` | No | Client-provided request ID (UUID format). Server generates one if absent. |
 | `X-Session-Id` | No | Session identifier for spend tracking. Max 128 chars, `[a-zA-Z0-9\-_]` only. |
-| `X-RCR-Debug` | No | Set to `true` to receive debug response headers. |
+| `X-Solvela-Debug` | No | Set to `true` to receive debug response headers. (`X-RCR-Debug` accepted as deprecated alias.) |
 
 ## Response (JSON)
 
@@ -144,18 +144,20 @@ When `PAYMENT-SIGNATURE` is absent:
 
 ## Debug Headers
 
-When `X-RCR-Debug: true` is sent, the response includes additional headers:
+When `X-Solvela-Debug: true` is sent, the response includes additional headers (each canonical `X-Solvela-*` header is also emitted as a deprecated `X-RCR-*` alias for backward compatibility):
 
 | Header | Description |
 |--------|-------------|
-| `X-RCR-Request-Id` | Unique request identifier (always present, not gated by debug) |
-| `X-RCR-Model-Requested` | The model string from the request |
-| `X-RCR-Model-Resolved` | The actual model used after resolution |
-| `X-RCR-Route-Profile` | Routing profile used (if smart-routed) |
-| `X-RCR-Route-Tier` | Complexity tier (if smart-routed) |
-| `X-RCR-Route-Score` | Raw scorer output (if smart-routed) |
-| `X-RCR-Provider` | Provider that handled the request |
-| `X-RCR-Cache-Status` | `hit`, `miss`, or `skip` |
-| `X-RCR-Payment-Status` | `verified`, `cached`, `free`, `none`, or `failed` |
-| `X-RCR-Token-Estimate` | Estimated token count |
-| `X-RCR-Duration-Ms` | Request processing time in milliseconds |
+| `X-Solvela-Request-Id` | Unique request identifier (always present, not gated by debug) |
+| `X-Solvela-Model` | The actual model used after resolution |
+| `X-Solvela-Profile` | Routing profile used (if smart-routed) |
+| `X-Solvela-Tier` | Complexity tier (if smart-routed) |
+| `X-Solvela-Score` | Raw scorer output (if smart-routed) |
+| `X-Solvela-Provider` | Provider that handled the request |
+| `X-Solvela-Cache` | `hit`, `miss`, or `skip` |
+| `X-Solvela-Payment-Status` | `verified`, `cached`, `free`, `none`, or `failed` |
+| `X-Solvela-Token-Estimate-In` | Estimated input token count |
+| `X-Solvela-Token-Estimate-Out` | Estimated max output token count |
+| `X-Solvela-Latency-Ms` | Request processing time in milliseconds |
+| `X-Solvela-Session` | Session identifier (echoed back when `X-Session-Id` is sent) |
+| `X-Solvela-Fallback` | Set when a free-tier fallback fired |
