@@ -2,6 +2,11 @@
 
 All notable changes to Solvela (formerly Solvela), in reverse chronological order.
 
+## 2026-04-27 — v0.1.1 Patch Release
+
+- **Fixed `solvela models` showing `?` for every price**: CLI was reading `pricing.input_cost_per_million` / `pricing.output_cost_per_million` but the gateway returns `pricing.input_per_million` / `pricing.output_per_million`. Prices now render correctly (e.g. `$0.42`). Test mock updated to match the real production response shape.
+- **Fixed `solvela health` printing `Version: unknown`**: Gateway `/health` returns only `{"status":"ok"}` — no version field. Removed the `Version:` line from health output rather than printing a misleading "unknown".
+
 ## 2026-04-11 — Solvela Rebrand
 
 - **Rebranded from Solvela to Solvela**: All crate names, CLI binary, env var prefixes, HTTP headers, SDK packages, infrastructure config, documentation, and dashboard UI updated. RustyClaw.ai remains the separate trading terminal product.

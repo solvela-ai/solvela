@@ -14,11 +14,11 @@ pub async fn list(api_url: &str) -> Result<()> {
         for model in data {
             let id = model["id"].as_str().unwrap_or("?");
             let provider = model["provider"].as_str().unwrap_or("?");
-            let input = model["pricing"]["input_cost_per_million"]
+            let input = model["pricing"]["input_per_million"]
                 .as_f64()
                 .map(|v| format!("${:.2}", v))
                 .unwrap_or_else(|| "?".to_string());
-            let output = model["pricing"]["output_cost_per_million"]
+            let output = model["pricing"]["output_per_million"]
                 .as_f64()
                 .map(|v| format!("${:.2}", v))
                 .unwrap_or_else(|| "?".to_string());
@@ -58,21 +58,44 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/v1/models"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
                 "data": [
                     {
-                        "id": "openai/gpt-4o",
+                        "id": "openai/gpt-4.1-mini",
+                        "object": "model",
                         "provider": "openai",
+                        "display_name": "GPT-4.1 Mini",
+                        "context_window": 1047576,
                         "pricing": {
-                            "input_cost_per_million": 2.50,
-                            "output_cost_per_million": 10.00
+                            "input_per_million": 0.42,
+                            "output_per_million": 1.68,
+                            "currency": "USDC",
+                            "fee_percent": 5
+                        },
+                        "capabilities": {
+                            "streaming": true,
+                            "tools": true,
+                            "vision": true,
+                            "reasoning": false
                         }
                     },
                     {
                         "id": "anthropic/claude-sonnet-4-20250514",
+                        "object": "model",
                         "provider": "anthropic",
+                        "display_name": "Claude Sonnet 4",
+                        "context_window": 200000,
                         "pricing": {
-                            "input_cost_per_million": 3.00,
-                            "output_cost_per_million": 15.00
+                            "input_per_million": 3.15,
+                            "output_per_million": 15.75,
+                            "currency": "USDC",
+                            "fee_percent": 5
+                        },
+                        "capabilities": {
+                            "streaming": true,
+                            "tools": true,
+                            "vision": true,
+                            "reasoning": false
                         }
                     }
                 ]
