@@ -22,7 +22,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Start the background service health checker.
 ///
 /// Spawns a `tokio::spawn` loop that runs every `interval` seconds (default 60,
-/// configurable via `RCR_SERVICE_HEALTH_INTERVAL_SECS`). For each external,
+/// configurable via `SOLVELA_SERVICE_HEALTH_INTERVAL_SECS`). For each external,
 /// x402-enabled service, sends a HEAD request and marks it healthy or unhealthy
 /// in the `ServiceRegistry`.
 ///
@@ -31,7 +31,8 @@ pub fn start_service_health_checker(
     state: Arc<AppState>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
-    let interval_secs: u64 = std::env::var("RCR_SERVICE_HEALTH_INTERVAL_SECS")
+    let interval_secs: u64 = std::env::var("SOLVELA_SERVICE_HEALTH_INTERVAL_SECS")
+        .or_else(|_| std::env::var("RCR_SERVICE_HEALTH_INTERVAL_SECS"))
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_HEALTH_INTERVAL_SECS);

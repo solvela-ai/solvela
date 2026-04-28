@@ -125,13 +125,15 @@ pub fn handle_panic(_err: Box<dyn std::any::Any + Send + 'static>) -> axum::resp
 /// cleanup tasks (see `main.rs`).
 pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
     // Configurable request timeout (default 120s)
-    let timeout_secs: u64 = std::env::var("RCR_REQUEST_TIMEOUT_SECS")
+    let timeout_secs: u64 = std::env::var("SOLVELA_REQUEST_TIMEOUT_SECS")
+        .or_else(|_| std::env::var("RCR_REQUEST_TIMEOUT_SECS"))
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(120);
 
     // Configurable max concurrent in-flight requests (default 256)
-    let max_concurrent: usize = std::env::var("RCR_MAX_CONCURRENT_REQUESTS")
+    let max_concurrent: usize = std::env::var("SOLVELA_MAX_CONCURRENT_REQUESTS")
+        .or_else(|_| std::env::var("RCR_MAX_CONCURRENT_REQUESTS"))
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(256);
