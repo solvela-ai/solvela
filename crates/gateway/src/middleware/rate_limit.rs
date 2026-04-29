@@ -210,20 +210,36 @@ pub async fn rate_limit(request: Request, next: Next) -> Response {
 /// Extract a client identifier from the request.
 ///
 /// Priority order (most to least trustworthy):
-/// 1. Wallet address from the decoded PaymentInfo extension — cryptographically
-///    bound to the payment; cannot be spoofed without a valid signed transaction.
+/// 1. **Payer wallet** extracted from the signed transaction inside `PaymentInfo` —
+///    derived from the on-chain signer (escrow `agent_pubkey` or the first
+///    account key of a direct-transfer transaction). Cannot be spoofed without
+///    a valid signed transaction.
 /// 2. Peer socket address injected by Tower — reflects the actual TCP connection,
 ///    not a header, so cannot be forged by the client.
 /// 3. `"unknown"` fallback — never `X-Forwarded-For`, which is trivially spoofed
 ///    and must not be used for security-sensitive client identification.
 ///
+/// **GHSA-6ggq-cvwx-4f67 fix**: This used to key on `payment_info.payload.accepted.pay_to`,
+/// which is a *client-supplied* field set to the gateway's own recipient wallet. An
+/// attacker could vary `pay_to` per request to escape into a fresh per-client bucket
+/// and bypass rate limiting from a single IP. The payer wallet is derived from the
+/// signed transaction itself and is therefore bound to the cryptographic identity
+/// of the request author.
+///
 /// Note: If this gateway is deployed behind a trusted reverse proxy and IP-based
 /// rate limiting is required, configure the proxy to strip and re-inject
 /// `X-Forwarded-For` at the proxy layer — do not rely on client-supplied headers.
 fn extract_client_id(request: &Request) -> String {
-    // 1. Wallet address from verified payment — strongest identity signal
+    // 1. Payer wallet derived from the signed transaction — strongest identity signal
     if let Some(payment_info) = request.extensions().get::<super::x402::PaymentInfo>() {
-        return payment_info.payload.accepted.pay_to.clone();
+        let payer = crate::payment_util::extract_payer_wallet(&payment_info.payload);
+        // `extract_payer_wallet` returns "unknown" when the transaction can't be
+        // decoded; treat that the same as any other unidentified client by falling
+        // through to ConnectInfo / unknown bucket. Otherwise the literal "unknown"
+        // string would itself become a shared bucket.
+        if payer != "unknown" {
+            return payer;
+        }
     }
 
     // 2. Actual TCP peer address from Tower's ConnectInfo extension

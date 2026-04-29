@@ -257,12 +257,22 @@ pub async fn chat_completions(
         Some(payload) => {
             // --- H2: Validate all `accepted` fields ---
 
+            // GHSA-cgqx-mg48-949v: error responses must not echo attacker-controlled
+            // payment fields (reflected-injection vector) or expose server-internal
+            // values like the recipient wallet. The full mismatch is logged at warn!
+            // server-side; the client receives a fixed category string. The accepted
+            // payment schemes returned with a 402 already tell the client what the
+            // correct values are.
+
             // Verify the resource URL matches this endpoint
             if payload.resource.url != "/v1/chat/completions" {
-                return Err(GatewayError::InvalidPayment(format!(
-                    "payment resource '{}' does not match this endpoint",
-                    payload.resource.url
-                )));
+                warn!(
+                    resource_url = %payload.resource.url,
+                    "payment resource URL mismatch"
+                );
+                return Err(GatewayError::InvalidPayment(
+                    "Payment resource does not match this endpoint.".to_string(),
+                ));
             }
 
             // Verify the resource method is POST
@@ -271,10 +281,9 @@ pub async fn chat_completions(
                     method = %payload.resource.method,
                     "payment resource method mismatch"
                 );
-                return Err(GatewayError::BadRequest(format!(
-                    "payment resource method must be POST, got '{}'",
-                    payload.resource.method
-                )));
+                return Err(GatewayError::BadRequest(
+                    "Payment resource method must be POST.".to_string(),
+                ));
             }
 
             // Verify network is Solana
@@ -288,11 +297,10 @@ pub async fn chat_completions(
                     expected = %solvela_x402::types::SOLANA_NETWORK,
                     "payment network mismatch"
                 );
-                return Err(GatewayError::BadRequest(format!(
-                    "payment network must be '{}', got '{}'",
-                    solvela_x402::types::SOLANA_NETWORK,
-                    payload.accepted.network
-                )));
+                return Err(GatewayError::BadRequest(
+                    "Payment network is unsupported. Use the network advertised in the 402 response."
+                        .to_string(),
+                ));
             }
 
             // Verify asset is USDC-SPL mint
@@ -302,11 +310,10 @@ pub async fn chat_completions(
                     expected = %solvela_x402::types::USDC_MINT,
                     "payment asset mismatch"
                 );
-                return Err(GatewayError::BadRequest(format!(
-                    "payment asset must be USDC mint '{}', got '{}'",
-                    solvela_x402::types::USDC_MINT,
-                    payload.accepted.asset
-                )));
+                return Err(GatewayError::BadRequest(
+                    "Payment asset is unsupported. Use the asset advertised in the 402 response."
+                        .to_string(),
+                ));
             }
 
             // Verify pay_to matches the gateway's recipient wallet
@@ -316,10 +323,10 @@ pub async fn chat_completions(
                     expected = %state.config.solana.recipient_wallet,
                     "payment pay_to mismatch"
                 );
-                return Err(GatewayError::BadRequest(format!(
-                    "payment pay_to must be '{}', got '{}'",
-                    state.config.solana.recipient_wallet, payload.accepted.pay_to
-                )));
+                return Err(GatewayError::BadRequest(
+                    "Payment recipient does not match. Use the pay_to advertised in the 402 response."
+                        .to_string(),
+                ));
             }
 
             // --- C1: Recompute expected cost and validate client amount ---
@@ -344,10 +351,13 @@ pub async fn chat_completions(
                     )
                 })?;
             client_amount = payload.accepted.amount.parse().map_err(|_| {
-                GatewayError::BadRequest(format!(
-                    "invalid payment amount '{}': must be a valid integer",
-                    payload.accepted.amount
-                ))
+                warn!(
+                    amount = %payload.accepted.amount,
+                    "client supplied non-integer payment amount"
+                );
+                GatewayError::BadRequest(
+                    "Payment amount must be a valid integer (atomic USDC units).".to_string(),
+                )
             })?;
 
             if client_amount < expected_amount {
@@ -401,7 +411,13 @@ pub async fn chat_completions(
                     .is_err()
             } else {
                 // No Redis — fall back to in-memory LRU replay set with TTL
-                let mut replay_set = state.replay_set.lock().expect("replay_set mutex poisoned");
+                // GHSA-wc9q-wc6q-gwmq: recover from poisoned lock instead of panicking,
+                // which would propagate a poisoned state to every subsequent payment request.
+                // Same pattern as crates/x402/src/fee_payer.rs and a2a/handler.rs.
+                let mut replay_set = state
+                    .replay_set
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let now = Instant::now();
                 let found = match replay_set.get(tx_raw) {
                     Some(&inserted_at)
@@ -465,11 +481,15 @@ pub async fn chat_completions(
                     );
                 }
                 Err(e) => {
+                    // GHSA-cgqx-mg48-949v: do not echo the verifier error to clients;
+                    // it can carry the internal RPC URL, raw RPC error JSON, and other
+                    // server-internal context. Full detail is in the warn! line above.
                     counter!("solvela_payments_total", "status" => "failed").increment(1);
                     warn!(error = %e, "payment verification failed");
-                    return Err(GatewayError::InvalidPayment(format!(
-                        "payment verification failed: {e}"
-                    )));
+                    return Err(GatewayError::InvalidPayment(
+                        "Payment verification failed. Check your transaction and retry."
+                            .to_string(),
+                    ));
                 }
             }
         }

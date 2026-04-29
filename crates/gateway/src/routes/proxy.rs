@@ -290,11 +290,12 @@ pub async fn proxy_service(
             );
         }
         Err(e) => {
+            // GHSA-cgqx-mg48-949v: do not echo the verifier error to clients.
             counter!("solvela_payments_total", "status" => "failed").increment(1);
             warn!(error = %e, service_id = %service_id, "proxy payment verification failed");
-            return Err(GatewayError::InvalidPayment(format!(
-                "payment verification failed: {e}"
-            )));
+            return Err(GatewayError::InvalidPayment(
+                "Payment verification failed. Check your transaction and retry.".to_string(),
+            ));
         }
     }
 
