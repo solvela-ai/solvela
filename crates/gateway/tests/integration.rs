@@ -1092,8 +1092,60 @@ async fn test_response_has_rate_limit_headers() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    // The rate limiter is configured with default 60 req/min.
-    // After one request, x-ratelimit-remaining should be present.
+    // GHSA-6ggq-cvwx-4f67: rate-limit is keyed on the *payer wallet* extracted
+    // from the signed transaction (not on the client-supplied `pay_to`). This
+    // test fixture uses a mock byte string for `transaction` that doesn't decode
+    // as a real VersionedTransaction, so `extract_payer_wallet` returns "unknown"
+    // and the request falls through to the unknown-clients bucket. That bucket
+    // is intentionally smaller (`unknown_max_requests = 10`) so unidentified
+    // traffic shares one stricter bucket. After 1 request: 9 remaining.
+    //
+    // The behavior with a properly signed tx (per-client 60-bucket → 59 remaining)
+    // is covered by `test_response_has_rate_limit_headers_with_escrow_payer` below.
+    let remaining = response
+        .headers()
+        .get("x-ratelimit-remaining")
+        .expect("should have x-ratelimit-remaining header");
+    let remaining_val: u32 = remaining.to_str().unwrap().parse().unwrap();
+    assert_eq!(
+        remaining_val, 9,
+        "fake-tx falls through to unknown-bucket (max=10); 9 remaining after 1 request"
+    );
+}
+
+/// Companion to `test_response_has_rate_limit_headers` — verifies the per-client
+/// 60-bucket path using an escrow payment whose `agent_pubkey` is a valid
+/// pubkey-shaped string (not a base64 tx that has to deserialize). This exercises
+/// the GHSA-6ggq-cvwx-4f67 fix end-to-end: when the payer wallet *can* be
+/// extracted, the request gets a per-client 60-bucket rather than the shared
+/// unknown-clients fallback.
+#[tokio::test]
+async fn test_response_has_rate_limit_headers_with_escrow_payer() {
+    let app = test_app_with_mock_provider();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_escrow_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
     let remaining = response
         .headers()
         .get("x-ratelimit-remaining")
@@ -1101,7 +1153,7 @@ async fn test_response_has_rate_limit_headers() {
     let remaining_val: u32 = remaining.to_str().unwrap().parse().unwrap();
     assert_eq!(
         remaining_val, 59,
-        "should have 59 remaining after 1 request"
+        "escrow agent_pubkey identifies the payer; per-client bucket (max=60), 59 remaining"
     );
 }
 
