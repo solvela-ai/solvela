@@ -49,10 +49,10 @@ export function RequestsBar({ data }: RequestsBarProps) {
             fontFamily: "JetBrains Mono",
             color: "#DEDCD1",
           }}
-          formatter={(v: number | undefined) => [
-            v != null ? v.toLocaleString() : "—",
-            "Requests",
-          ]}
+          formatter={(value) => {
+            const v = typeof value === "number" ? value : undefined;
+            return [v != null ? v.toLocaleString() : "—", "Requests"];
+          }}
         />
         <Bar dataKey="requests" fill={BAR_COLOR} radius={[2, 2, 0, 0]} />
       </BarChart>

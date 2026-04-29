@@ -61,10 +61,10 @@ export function ModelPie({ data }: ModelPieProps) {
               fontFamily: "JetBrains Mono",
               color: "#DEDCD1",
             }}
-            formatter={(v: number | undefined) => [
-              v != null ? `${v}%` : "—",
-              "Share",
-            ]}
+            formatter={(value) => {
+              const v = typeof value === "number" ? value : undefined;
+              return [v != null ? `${v}%` : "—", "Share"];
+            }}
           />
         </PieChart>
       </ResponsiveContainer>
