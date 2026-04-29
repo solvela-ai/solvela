@@ -321,21 +321,27 @@ async fn handle_payment_submitted(
             .facilitator
             .verify_and_settle(&payload)
             .await
-            .map_err(|e| JsonRpcErrorData {
-                code: ERR_PAYMENT_FAILED,
-                message: format!("Payment verification failed: {e}"),
-                data: None,
+            .map_err(|e| {
+                // GHSA-cgqx-mg48-949v: do not echo the verifier error to clients.
+                tracing::warn!(error = %e, "A2A payment verification failed");
+                JsonRpcErrorData {
+                    code: ERR_PAYMENT_FAILED,
+                    message: "Payment verification failed. Check your transaction and retry."
+                        .to_string(),
+                    data: None,
+                }
             })?;
 
         if !settlement.success {
+            // Settlement detail (tx_signature, RPC error) is logged by the facilitator;
+            // do not surface it to the client.
+            tracing::warn!(
+                error = ?settlement.error,
+                "A2A payment settlement returned success=false"
+            );
             return Err(JsonRpcErrorData {
                 code: ERR_PAYMENT_FAILED,
-                message: format!(
-                    "Payment settlement failed: {}",
-                    settlement
-                        .error
-                        .unwrap_or_else(|| "unknown error".to_string())
-                ),
+                message: "Payment settlement failed. Transaction was not confirmed.".to_string(),
                 data: None,
             });
         }
