@@ -57,10 +57,10 @@ export function SpendChart({ data }: SpendChartProps) {
             fontFamily: "JetBrains Mono",
             color: "#DEDCD1",
           }}
-          formatter={(v: number | undefined) => [
-            v != null ? `$${v.toFixed(2)} USDC` : "—",
-            "Spend",
-          ]}
+          formatter={(value) => {
+            const v = typeof value === "number" ? value : undefined;
+            return [v != null ? `$${v.toFixed(2)} USDC` : "—", "Spend"];
+          }}
         />
         <Area
           type="monotone"
