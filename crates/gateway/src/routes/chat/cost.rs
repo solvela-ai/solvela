@@ -39,18 +39,35 @@ pub(crate) fn compute_actual_atomic_cost(
     total_atomic as u64
 }
 
+/// Upper bound for the `total` USDC cost that `estimated_atomic_cost` will accept.
+///
+/// Multiplying by 1_000_000 (to convert USDC → atomic units) must not overflow
+/// u64 (max ~1.84 × 10¹⁹).  We cap at u64::MAX / 1_000_000 ≈ $18.4 trillion,
+/// which is far beyond any realistic LLM request cost.
+///
+/// TODO(GHSA-86cr-h3rx-vj6j): remove this guard once cost.rs and usage.rs are
+/// fully migrated to integer atomic-USDC arithmetic so f64 is never used for
+/// financial values.
+const ESTIMATED_COST_MAX_USDC: f64 = (u64::MAX / 1_000_000) as f64;
+
 /// Estimate cost in atomic USDC units using the model registry's cost breakdown.
 ///
 /// Used as a fallback when actual token usage is unavailable (e.g., streaming).
-/// Returns `None` when the estimate cannot be computed (model not found, parse
-/// failure, etc.) so callers can distinguish "failed to compute" from "genuinely
-/// zero cost".
+///
+/// Returns `Err` (not `Ok(0)`) when the estimate cannot be computed so that
+/// callers fail-closed: treating a failed estimate as zero cost would bypass
+/// budget enforcement and under-claim from escrow.
+///
+/// Range checks applied to the parsed f64 before casting to u64:
+/// - Non-finite (NaN, ±∞): indicates a corrupt model registry entry.
+/// - Negative: cost cannot be negative; a negative cast wraps to a huge u64.
+/// - Overflow (> u64::MAX / 1_000_000): the ×1e6 multiplier would exceed u64.
 pub(crate) fn estimated_atomic_cost(
     registry: &solvela_router::models::ModelRegistry,
     model: &str,
     req: &ChatRequest,
-) -> Option<u64> {
-    match registry
+) -> Result<u64, String> {
+    let f = registry
         .estimate_cost(
             model,
             estimate_input_tokens(req),
@@ -60,13 +77,32 @@ pub(crate) fn estimated_atomic_cost(
             c.total
                 .parse::<f64>()
                 .map_err(|e| solvela_router::models::ModelRegistryError::ParseError(e.to_string()))
-        }) {
-        Ok(f) => Some((f * 1_000_000.0) as u64),
-        Err(e) => {
+        })
+        .map_err(|e| {
             warn!(error = %e, model, "failed to estimate atomic cost for escrow claim");
-            None
-        }
+            e.to_string()
+        })?;
+
+    if !f.is_finite() {
+        return Err(format!(
+            "cost estimate for model '{model}' is non-finite ({f}); \
+             refusing to cast NaN/∞ to u64"
+        ));
     }
+    if f < 0.0 {
+        return Err(format!(
+            "cost estimate for model '{model}' is negative ({f}); \
+             negative USDC amounts are invalid"
+        ));
+    }
+    if f > ESTIMATED_COST_MAX_USDC {
+        return Err(format!(
+            "cost estimate for model '{model}' ({f} USDC) exceeds u64 range \
+             after ×1_000_000 conversion; possible overflow in model pricing config"
+        ));
+    }
+
+    Ok((f * 1_000_000.0) as u64)
 }
 
 /// Convert a USDC decimal string to atomic units (6 decimals).
@@ -354,5 +390,106 @@ mod tests {
     fn test_usdc_atomic_unchecked_defaults_to_zero_on_malformed() {
         assert_eq!(usdc_atomic_amount(""), "0");
         assert_eq!(usdc_atomic_amount("not-a-number"), "0");
+    }
+
+    // =========================================================================
+    // estimated_atomic_cost — GHSA-86cr-h3rx-vj6j input-validation guards
+    // =========================================================================
+
+    /// Build a minimal `ModelRegistry` with a single model whose cost fields
+    /// are set to `cost_per_million` USDC, for use in estimated_atomic_cost tests.
+    fn registry_with_cost(cost_per_million: f64) -> solvela_router::models::ModelRegistry {
+        let toml = format!(
+            r#"
+[models.test-model]
+provider = "test"
+model_id = "test-model"
+display_name = "Test"
+input_cost_per_million = {cost_per_million}
+output_cost_per_million = {cost_per_million}
+context_window = 4096
+supports_streaming = false
+supports_tools = false
+supports_vision = false
+"#
+        );
+        solvela_router::models::ModelRegistry::from_toml(&toml).expect("valid test registry TOML")
+        // safe: known-good template
+    }
+
+    fn simple_req() -> ChatRequest {
+        make_request("test-model", vec![user_msg("hello")])
+    }
+
+    #[test]
+    fn test_estimated_atomic_cost_valid_small_amount() {
+        let reg = registry_with_cost(1.0); // $1 per million tokens
+        let result = estimated_atomic_cost(&reg, "test-model", &simple_req());
+        assert!(result.is_ok(), "valid cost should succeed, got: {result:?}");
+        assert!(result.unwrap() > 0, "valid cost should be positive");
+    }
+
+    #[test]
+    fn test_estimated_atomic_cost_rejects_nan() {
+        let reg = registry_with_cost(f64::NAN);
+        let result = estimated_atomic_cost(&reg, "test-model", &simple_req());
+        // NaN cost_per_million propagates to a NaN total; estimated_atomic_cost
+        // must reject it rather than silently cast NaN→0.
+        match result {
+            Err(e) => assert!(
+                e.contains("non-finite") || e.contains("NaN") || e.contains("failed"),
+                "error should mention non-finite or NaN, got: {e}"
+            ),
+            Ok(v) => panic!("NaN cost must not produce Ok({v})"),
+        }
+    }
+
+    #[test]
+    fn test_estimated_atomic_cost_rejects_positive_infinity() {
+        let reg = registry_with_cost(f64::INFINITY);
+        let result = estimated_atomic_cost(&reg, "test-model", &simple_req());
+        match result {
+            Err(e) => assert!(
+                e.contains("non-finite") || e.contains("inf") || e.contains("failed"),
+                "error should mention non-finite or infinity, got: {e}"
+            ),
+            Ok(v) => panic!("INFINITY cost must not produce Ok({v})"),
+        }
+    }
+
+    #[test]
+    fn test_estimated_atomic_cost_rejects_negative_infinity() {
+        let reg = registry_with_cost(f64::NEG_INFINITY);
+        let result = estimated_atomic_cost(&reg, "test-model", &simple_req());
+        match result {
+            Err(_) => {} // expected — non-finite or negative check
+            Ok(v) => panic!("-INFINITY cost must not produce Ok({v})"),
+        }
+    }
+
+    #[test]
+    fn test_estimated_atomic_cost_rejects_overflow() {
+        // u64::MAX / 1_000_000 ≈ 1.844e13; anything larger overflows on ×1e6
+        let huge_cost = (u64::MAX / 1_000_000) as f64 * 2.0;
+        let reg = registry_with_cost(huge_cost);
+        let result = estimated_atomic_cost(&reg, "test-model", &simple_req());
+        match result {
+            Err(e) => assert!(
+                e.contains("overflow") || e.contains("range") || e.contains("failed"),
+                "error should mention overflow, got: {e}"
+            ),
+            Ok(v) => panic!("overflowing cost must not produce Ok({v})"),
+        }
+    }
+
+    #[test]
+    fn test_estimated_atomic_cost_unknown_model_returns_err() {
+        let reg = registry_with_cost(1.0);
+        let req = make_request("unknown-model", vec![user_msg("hello")]);
+        let result = estimated_atomic_cost(&reg, "unknown-model", &req);
+        assert!(
+            result.is_err(),
+            "unknown model must return Err, got: {result:?}"
+        );
     }
 }

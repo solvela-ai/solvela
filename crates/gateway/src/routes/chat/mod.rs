@@ -598,8 +598,9 @@ pub async fn chat_completions(
             } else {
                 Some(
                     estimated_atomic_cost(&state.model_registry, &req.model, &req)
-                        .unwrap_or_else(|| {
+                        .unwrap_or_else(|e| {
                             warn!(
+                                error = %e,
                                 model = %req.model,
                                 "cost estimation failed for streaming request — using minimum claim amount (1 atomic unit)"
                             );
