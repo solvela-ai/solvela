@@ -254,7 +254,24 @@ pub async fn proxy_service(
             .await
             .is_err()
     } else {
-        let mut replay_set = state.replay_set.lock().expect("replay_set mutex poisoned");
+        // GHSA-fq3f-c8p7-873f: durable-nonce transactions carry a 24-hour replay window.
+        // The in-memory LRU cannot cover that window, so deny rather than accept with
+        // degraded protection.
+        if is_durable_nonce {
+            // Log only the signature prefix, not the full base64 tx (attacker-
+            // controlled, would pollute log pipelines).
+            warn!(
+                tx_prefix = &tx_raw[..tx_raw.len().min(88)],
+                "durable-nonce proxy payment rejected: Redis unavailable (GHSA-fq3f-c8p7-873f)"
+            );
+            return Err(GatewayError::InvalidPayment(
+                "Payment service is temporarily degraded; please retry shortly.".to_string(),
+            ));
+        }
+        let mut replay_set = state
+            .replay_set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if replay_set.get(tx_raw).is_some() {
             true
         } else {
@@ -562,5 +579,168 @@ mod tests {
         assert_eq!(extract_signer_from_base64_tx("not-base64!!!"), None);
         assert_eq!(extract_signer_from_base64_tx(""), None);
         assert_eq!(extract_signer_from_base64_tx("AAAA"), None);
+    }
+
+    // =========================================================================
+    // GHSA-fq3f-c8p7-873f: durable-nonce replay guard
+    // =========================================================================
+
+    /// Build a minimal base64-encoded Solana transaction whose first instruction
+    /// is AdvanceNonceAccount (discriminator = [4, 0, 0, 0]) so that
+    /// `uses_durable_nonce` returns `true`.
+    fn make_durable_nonce_tx_b64() -> String {
+        use base64::Engine;
+        // Legacy message layout:
+        //   header [req_sigs=1, ro_signed=0, ro_unsigned=1]
+        //   compact-u16 num_accounts = 3
+        //   key[0] = system program ([0;32])
+        //   key[1] = nonce account ([1;32])
+        //   key[2] = system program ([0;32])   ← used as program_id
+        //   recent_blockhash [0;32]
+        //   compact-u16 num_instructions = 1
+        //   ix: program_id_index=2, accounts=[1,0], data=[4,0,0,0]
+        let mut msg: Vec<u8> = vec![1u8, 0u8, 1u8, 3u8];
+        msg.extend_from_slice(&[0u8; 32]); // system program
+        msg.extend_from_slice(&[1u8; 32]); // nonce account
+        msg.extend_from_slice(&[0u8; 32]); // system program again (as program_id)
+        msg.extend_from_slice(&[0u8; 32]); // recent blockhash
+        msg.push(1u8); // 1 instruction
+        msg.push(2u8); // program_id_index = 2
+        msg.push(2u8); // 2 accounts
+        msg.extend_from_slice(&[1u8, 0u8]); // account indices
+        msg.push(4u8); // data len = 4
+        msg.extend_from_slice(&[4u8, 0u8, 0u8, 0u8]); // AdvanceNonceAccount
+
+        let mut tx_data = vec![0x01u8]; // 1 signature
+        tx_data.extend_from_slice(&[0xAAu8; 64]); // placeholder signature
+        tx_data.extend_from_slice(&msg);
+        base64::engine::general_purpose::STANDARD.encode(&tx_data)
+    }
+
+    #[tokio::test]
+    async fn test_durable_nonce_payment_denied_when_redis_down() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use base64::Engine;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        use tower::ServiceExt;
+
+        use crate::config::AppConfig;
+        use crate::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
+        use crate::providers::ProviderRegistry;
+        use crate::routes::escrow::new_slot_cache;
+        use crate::services::{ServiceEntry, ServiceRegistry};
+        use crate::usage::UsageTracker;
+        use solvela_router::models::ModelRegistry;
+        use solvela_x402::facilitator::Facilitator;
+
+        let durable_nonce_b64 = make_durable_nonce_tx_b64();
+        assert!(
+            crate::routes::chat::uses_durable_nonce(&durable_nonce_b64),
+            "test fixture must be detected as a durable-nonce transaction"
+        );
+
+        // Build a PaymentPayload that passes all pre-replay validation.
+        // price=0.01 USDC → expected_atomic = 10_000 * 105/100 = 10_500
+        let pp = solvela_x402::types::PaymentPayload {
+            x402_version: 2,
+            resource: solvela_x402::types::Resource {
+                url: "/v1/services/test-svc/proxy".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: solvela_x402::types::PaymentAccept {
+                scheme: "exact".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "10500".to_string(),
+                asset: USDC_MINT.to_string(),
+                // AppConfig::default().solana.recipient_wallet is an empty string
+                pay_to: String::new(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: solvela_x402::types::PayloadData::Direct(solvela_x402::types::SolanaPayload {
+                transaction: durable_nonce_b64,
+            }),
+        };
+        let header_value = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&pp).expect("serialize")); // safe: known-good struct
+
+        // Register a test service so the registry lookup succeeds.
+        let mut reg = ServiceRegistry::empty();
+        reg.register(ServiceEntry {
+            id: "test-svc".to_string(),
+            name: "Test Service".to_string(),
+            category: "test".to_string(),
+            endpoint: "https://test.example.com/api".to_string(),
+            x402_enabled: true,
+            internal: false,
+            description: None,
+            pricing_label: "per-request".to_string(),
+            chains: vec!["solana".to_string()],
+            source: "api".to_string(),
+            healthy: None,
+            price_per_request_usdc: Some(0.01),
+        })
+        .expect("valid test service entry"); // safe: known-good test data
+
+        let state = Arc::new(crate::AppState {
+            config: AppConfig::default(),
+            model_registry: ModelRegistry::from_toml(
+                "[models.placeholder]\nprovider=\"t\"\nmodel_id=\"t\"\ndisplay_name=\"T\"\ninput_cost_per_million=1.0\noutput_cost_per_million=1.0\ncontext_window=4096\nsupports_streaming=false\nsupports_tools=false\nsupports_vision=false",
+            )
+            .expect("valid placeholder model TOML"), // safe: known-good test data
+            service_registry: RwLock::new(reg),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator: Facilitator::new(vec![]),
+            usage: UsageTracker::noop(),
+            cache: None, // no Redis — triggers the LRU fallback path
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: crate::AppState::new_replay_set(),
+            slot_cache: new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            prometheus_handle: None,
+            dev_bypass_payment: false,
+        });
+
+        let app = axum::Router::new()
+            .route(
+                "/v1/services/{service_id}/proxy",
+                axum::routing::post(proxy_service),
+            )
+            .with_state(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/services/test-svc/proxy")
+            .header("payment-signature", &header_value)
+            .body(Body::empty())
+            .expect("valid test request"); // safe: known-good test data
+
+        let response = app.oneshot(request).await.expect("handler must not panic");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYMENT_REQUIRED,
+            "durable-nonce payment must be denied (402) when Redis is unavailable"
+        );
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), 65_536)
+            .await
+            .expect("read response body"); // safe: small test response
+        let body: serde_json::Value =
+            serde_json::from_slice(&body_bytes).expect("valid JSON error body"); // safe: gateway always returns JSON
+        let message = body["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            message.contains("temporarily degraded"),
+            "error message must indicate service degradation, got: {message}"
+        );
     }
 }

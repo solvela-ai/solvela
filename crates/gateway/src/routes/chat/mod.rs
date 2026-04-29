@@ -410,7 +410,28 @@ pub async fn chat_completions(
                     .await
                     .is_err()
             } else {
-                // No Redis — fall back to in-memory LRU replay set with TTL
+                // No Redis — fall back to in-memory LRU replay set with TTL.
+                //
+                // GHSA-fq3f-c8p7-873f: durable-nonce transactions carry a 24-hour replay
+                // window. The 10 k-entry LRU cannot reliably cover that window, so we deny
+                // the request rather than accept it with degraded replay protection.
+                // Regular (recent-blockhash) transactions have a ~90s window and are safe
+                // to accept under LRU fallback.
+                if is_durable_nonce {
+                    // Log only the signature prefix, not the full base64 tx — the
+                    // full payload is attacker-controlled and would pollute log
+                    // pipelines with arbitrary bytes (Datadog/Loki indexing cost,
+                    // log-injection surface).
+                    warn!(
+                        tx_prefix = &tx_raw[..tx_raw.len().min(88)],
+                        "durable-nonce payment rejected: Redis unavailable (GHSA-fq3f-c8p7-873f)"
+                    );
+                    return Err(GatewayError::InvalidPayment(
+                        "Payment service is temporarily degraded; please retry shortly."
+                            .to_string(),
+                    ));
+                }
+
                 // GHSA-wc9q-wc6q-gwmq: recover from poisoned lock instead of panicking,
                 // which would propagate a poisoned state to every subsequent payment request.
                 // Same pattern as crates/x402/src/fee_payer.rs and a2a/handler.rs.
