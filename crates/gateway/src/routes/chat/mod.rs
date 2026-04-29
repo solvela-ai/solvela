@@ -540,6 +540,22 @@ pub async fn chat_completions(
         .parse::<f64>()
         .map_err(|_| GatewayError::Internal("failed to parse estimated cost as f64".to_string()))?;
 
+    // GHSA-86cr-h3rx-vj6j: budget-enforcement guard. A corrupted model registry
+    // entry can produce NaN or ±Infinity in the cost total. NaN parses back to
+    // f64::NAN successfully, then every comparison in `check_budget` against
+    // wallet limits is `false` — silently bypassing the budget gate. Reject
+    // non-finite or negative values here, fail-closed, before the gate runs.
+    if !estimated_cost.is_finite() || estimated_cost < 0.0 {
+        warn!(
+            estimated_cost,
+            model = %req.model,
+            "model registry produced a non-finite or negative cost; refusing"
+        );
+        return Err(GatewayError::Internal(
+            "estimated cost is not a valid finite non-negative number".to_string(),
+        ));
+    }
+
     if let Err(e) = state
         .usage
         .check_budget(&wallet_address, estimated_cost)
@@ -598,8 +614,9 @@ pub async fn chat_completions(
             } else {
                 Some(
                     estimated_atomic_cost(&state.model_registry, &req.model, &req)
-                        .unwrap_or_else(|| {
+                        .unwrap_or_else(|e| {
                             warn!(
+                                error = %e,
                                 model = %req.model,
                                 "cost estimation failed for streaming request — using minimum claim amount (1 atomic unit)"
                             );

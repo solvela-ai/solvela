@@ -9,6 +9,12 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 /// Default daily limit when no per-wallet budget row exists.
+///
+/// TODO(GHSA-86cr-h3rx-vj6j): migrate budget limits and spend counters from f64
+/// USDC to integer atomic units (u64, 6 decimal places) throughout this module
+/// and the Redis INCRBYFLOAT paths below.  This is the broader refactor deferred
+/// from the GHSA-86cr-h3rx-vj6j advisory; the immediate input-validation fix for
+/// `estimated_atomic_cost` is in `routes/chat/cost.rs`.
 const DEFAULT_DAILY_LIMIT_USDC: f64 = 100.0;
 
 /// TTL for cached wallet budget config in Redis (seconds).
