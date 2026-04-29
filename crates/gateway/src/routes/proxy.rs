@@ -710,7 +710,7 @@ mod tests {
 
         let app = axum::Router::new()
             .route(
-                "/v1/services/:service_id/proxy",
+                "/v1/services/{service_id}/proxy",
                 axum::routing::post(proxy_service),
             )
             .with_state(state);
