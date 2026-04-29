@@ -296,9 +296,29 @@ async fn handle_payment_submitted(
             solvela_x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
         };
 
+        let is_durable_nonce = crate::routes::chat::uses_durable_nonce(tx_raw);
+
         let replay_detected = if let Some(cache) = &state.cache {
-            cache.check_and_record_tx(tx_raw, false).await.is_err()
+            cache
+                .check_and_record_tx(tx_raw, is_durable_nonce)
+                .await
+                .is_err()
         } else {
+            // GHSA-fq3f-c8p7-873f: durable-nonce transactions carry a 24-hour replay window.
+            // The in-memory LRU cannot cover that window, so deny rather than accept with
+            // degraded protection.
+            if is_durable_nonce {
+                tracing::warn!(
+                    tx = %tx_raw,
+                    "durable-nonce A2A payment rejected: Redis unavailable (GHSA-fq3f-c8p7-873f)"
+                );
+                return Err(JsonRpcErrorData {
+                    code: ERR_PAYMENT_FAILED,
+                    message: "Payment service is temporarily degraded; please retry shortly."
+                        .to_string(),
+                    data: None,
+                });
+            }
             // In-memory replay check via std::sync::Mutex + LRU
             let mut set = state
                 .replay_set
