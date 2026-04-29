@@ -396,17 +396,44 @@ mod tests {
     // estimated_atomic_cost — GHSA-86cr-h3rx-vj6j input-validation guards
     // =========================================================================
 
+    /// Format an `f64` as a TOML float literal.
+    ///
+    /// TOML 1.0 spec accepts only lowercase `nan`, `inf`, `+inf`, `-inf` for
+    /// special floats; Rust's `Display` impl prints `NaN` and `inf`. We map
+    /// non-finite values to their TOML-compatible spellings so the registry
+    /// loader can round-trip `f64::NAN` / `f64::INFINITY` for these tests.
+    fn format_f64_for_toml(v: f64) -> String {
+        if v.is_nan() {
+            "nan".to_string()
+        } else if v.is_infinite() {
+            if v.is_sign_positive() {
+                "inf".to_string()
+            } else {
+                "-inf".to_string()
+            }
+        } else if v.abs() < 1e15 {
+            // Finite values in moderate range: emit with one decimal so TOML
+            // always parses as float (bare `1` would deserialize as integer).
+            format!("{v:.1}")
+        } else {
+            // Scientific notation handles very large/small magnitudes (e.g. 1e18
+            // for the overflow test) without precision loss.
+            format!("{v:e}")
+        }
+    }
+
     /// Build a minimal `ModelRegistry` with a single model whose cost fields
     /// are set to `cost_per_million` USDC, for use in estimated_atomic_cost tests.
     fn registry_with_cost(cost_per_million: f64) -> solvela_router::models::ModelRegistry {
+        let cost_str = format_f64_for_toml(cost_per_million);
         let toml = format!(
             r#"
 [models.test-model]
 provider = "test"
 model_id = "test-model"
 display_name = "Test"
-input_cost_per_million = {cost_per_million}
-output_cost_per_million = {cost_per_million}
+input_cost_per_million = {cost_str}
+output_cost_per_million = {cost_str}
 context_window = 4096
 supports_streaming = false
 supports_tools = false
@@ -469,14 +496,18 @@ supports_vision = false
 
     #[test]
     fn test_estimated_atomic_cost_rejects_overflow() {
-        // u64::MAX / 1_000_000 ≈ 1.844e13; anything larger overflows on ×1e6
-        let huge_cost = (u64::MAX / 1_000_000) as f64 * 2.0;
+        // ESTIMATED_COST_MAX_USDC = u64::MAX / 1e6 ≈ 1.844e13 USDC. The estimate
+        // is (input/1e6 + output/1e6) * cost_per_million * PLATFORM_FEE_MULTIPLIER,
+        // which for simple_req() (~1 input token, 1000 output tokens) reduces to
+        // roughly cost_per_million * 1.05e-3. Use 1e18 so the resulting total
+        // (~1.05e15 USDC) exceeds the cap but stays finite.
+        let huge_cost = 1.0e18_f64;
         let reg = registry_with_cost(huge_cost);
         let result = estimated_atomic_cost(&reg, "test-model", &simple_req());
         match result {
             Err(e) => assert!(
-                e.contains("overflow") || e.contains("range") || e.contains("failed"),
-                "error should mention overflow, got: {e}"
+                e.contains("overflow") || e.contains("range") || e.contains("exceeds"),
+                "error should mention overflow/range, got: {e}"
             ),
             Ok(v) => panic!("overflowing cost must not produce Ok({v})"),
         }
