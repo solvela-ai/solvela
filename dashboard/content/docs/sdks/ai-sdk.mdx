@@ -152,7 +152,7 @@ const solvela = createSolvelaProvider({
 | `baseURL` | string | `https://api.solvela.ai/v1` | Gateway endpoint. Resolves from `SOLVELA_API_URL` env var if not set. |
 | `wallet` | `SolvelaWalletAdapter` | — | REQUIRED. Adapter implementation for signing. |
 | `apiKey` | string | undefined | Optional scope token forwarded as `Authorization` header. Not a signing key. |
-| `headers` | Record<string, string> | `{}` | Static headers merged into every request. PAYMENT-SIGNATURE is filtered. |
+| `headers` | `Record<string, string>` | `{}` | Static headers merged into every request. PAYMENT-SIGNATURE is filtered. |
 | `sessionBudget` | bigint | undefined | USDC atomic units cap. Throws `SolvelaBudgetExceededError` when exceeded. |
 | `supportsStructuredOutputs` | boolean | false | Enable schema validation via `responseFormat`. |
 | `maxBodyBytes` | `number` | `1000000` | Cap on request body size (bytes) before signing. Oversized bodies throw `SolvelaPaymentError`. |
