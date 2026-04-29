@@ -418,8 +418,12 @@ pub async fn chat_completions(
                 // Regular (recent-blockhash) transactions have a ~90s window and are safe
                 // to accept under LRU fallback.
                 if is_durable_nonce {
+                    // Log only the signature prefix, not the full base64 tx — the
+                    // full payload is attacker-controlled and would pollute log
+                    // pipelines with arbitrary bytes (Datadog/Loki indexing cost,
+                    // log-injection surface).
                     warn!(
-                        tx = %tx_raw,
+                        tx_prefix = &tx_raw[..tx_raw.len().min(88)],
                         "durable-nonce payment rejected: Redis unavailable (GHSA-fq3f-c8p7-873f)"
                     );
                     return Err(GatewayError::InvalidPayment(

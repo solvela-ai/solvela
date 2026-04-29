@@ -308,8 +308,9 @@ async fn handle_payment_submitted(
             // The in-memory LRU cannot cover that window, so deny rather than accept with
             // degraded protection.
             if is_durable_nonce {
+                // Log only the signature prefix, not the full base64 tx.
                 tracing::warn!(
-                    tx = %tx_raw,
+                    tx_prefix = &tx_raw[..tx_raw.len().min(88)],
                     "durable-nonce A2A payment rejected: Redis unavailable (GHSA-fq3f-c8p7-873f)"
                 );
                 return Err(JsonRpcErrorData {
