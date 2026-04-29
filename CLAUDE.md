@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Solvela is a Solana-native AI agent payment gateway built in Rust (Axum). AI agents pay for LLM API calls with USDC-SPL on Solana via the x402 protocol. No API keys, no accounts, just wallets.
 
-Read `.claude/plan/solvela.md` for the full implementation plan. See `HANDOFF.md` for current project status and what's been completed. See `CHANGELOG.md` for chronological history.
+Read `.claude/plan/solvela.md` for the full implementation plan. See `STATUS.md` for live shipping status and `CHANGELOG.md` for chronological history. (`HANDOFF.md` was retired pre-launch; the public-facing trio is `STATUS.md` + `CHANGELOG.md` + `SECURITY.md`.)
 
 ## Build & Test Commands
 

@@ -2,6 +2,40 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-04-29 — Security audit + hardening
+
+End-to-end security audit across the gateway and all four SDK repos (`solvela-python`, `solvela-ts`, `solvela-go`, `solvela-client`). 5 GitHub Security Advisories drafted on `solvela-ai/solvela`, 8 hardening issues filed publicly, and 4 SDK security-fix PRs landed.
+
+### Gateway (PR [#74](https://github.com/solvela-ai/solvela/pull/74) — merged)
+
+- **GHSA-wc9q-wc6q-gwmq (HIGH)** — `replay_set` mutex panic-poison no longer takes down `/v1/chat/completions`. Recovered via `PoisonError::into_inner()`.
+- **GHSA-6ggq-cvwx-4f67 (HIGH)** — Rate-limit key switched from client-supplied `pay_to` to the payer wallet derived from the signed transaction. An attacker can no longer escape into a fresh per-client bucket by varying `pay_to`.
+- **GHSA-cgqx-mg48-949v (HIGH)** — `GatewayError::InvalidPayment` and related variants no longer echo attacker-controlled payment fields or raw verifier errors. The internal Solana RPC URL and the recipient wallet stay server-side.
+
+Two CRITICAL/HIGH advisories deferred to a follow-up PR (durable-nonce replay [GHSA-fq3f-c8p7-873f], f64 budget bypass [GHSA-86cr-h3rx-vj6j]).
+
+### SDK security release — Python v0.1.0, TypeScript v0.2.0, Go v0.1.0, Client (Rust) v0.2.0
+
+Cross-SDK fixes (applied uniformly to all 4):
+
+- **Default `gateway_url` flipped to `https://api.solvela.ai`**. Plaintext `http://` is rejected for non-loopback hosts.
+- **`network` and `asset` validation** added to the 402 handshake. A malicious or MITM'd gateway can no longer redirect payments to a different SPL token or non-mainnet network.
+- **`max_payment_amount` defaults to 10 USDC** (`10_000_000` atomic). Wallet-drain protection is now opt-out.
+
+Per-SDK highlights:
+
+- **Python**: BIP39 mnemonic no longer echoed in `WalletError` (CRITICAL — exfil risk via Sentry/`logging.exception`); `chat_stream` now honors the signer via a non-streaming 402 pre-flight; RPC blockhash error path no longer leaks raw response body; `solders` upper-bound pinned.
+- **TypeScript**: `parseAtomicAmount` rejects `NaN`/`Infinity`/`<=0` before any cap check; `Wallet.signTransaction()` replaces public `getKeypair()`; SSE chunks `try/catch` instead of crashing the generator; gateway error strings sanitized for log injection; `npm audit` added to CI.
+- **Go**: `NewClient` now returns `(*SolvelaClient, error)` so config validation can fail closed; `Wallet.Sign(msg)` replaces public `PrivateKey()`; `ChatStream` runs the 402 handshake; `DeriveSessionIDWithSalt` mixes per-client `crypto/rand` salt; `FetchModels` body capped via `io.LimitReader`.
+- **Client (Rust)**: `Wallet` stores `Zeroizing<[u8; 64]>` for real zero-on-drop (the previous `Drop` impl zeroed a stack copy); `ahash` replaces `DefaultHasher` for cache keys; `BudgetExceeded` error tracks cumulative spend across retries; new CI workflow runs fmt + clippy + test + `cargo audit`.
+
+### Repository hardening
+
+- **Branch protection on `main`** — 1 PR approval, 4 required CI checks (Rust fmt/clippy/test, Smoke test, Security audit, Docker build), branches must be up-to-date, force-push/delete blocked.
+- **Hourly deploy-staleness check** (`.github/workflows/deploy-staleness-check.yml`) — opens a tracking issue if production sha lags `main` by more than 1 hour. Closes the gap that caused a 10-day silent stall.
+- **`www.solvela.ai`** added as a 308 redirect to the apex on Vercel.
+- **GitHub Releases** — first releases tagged on the main repo (`v0.1.1`, `solvela-x402-v0.1.2`) and on all four SDK repos.
+
 ## 2026-04-27 — v0.1.1 Patch Release
 
 - **Fixed `solvela models` showing `?` for every price**: CLI was reading `pricing.input_cost_per_million` / `pricing.output_cost_per_million` but the gateway returns `pricing.input_per_million` / `pricing.output_per_million`. Prices now render correctly (e.g. `$0.42`). Test mock updated to match the real production response shape.
