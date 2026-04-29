@@ -1,0 +1,155 @@
+name: Deploy staleness check
+
+# Detect when production (Vercel) lags main. We had a 10-day silent stall when
+# the Vercel→GitHub link broke and push-to-deploy stopped firing; this catches
+# the same class of issue automatically.
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: deploy-staleness-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: main
+
+      - name: Compare deployed sha vs main HEAD
+        id: check
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ vars.VERCEL_TEAM_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+          STALE_AFTER_SECONDS: '3600'
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${VERCEL_TOKEN}" || -z "${VERCEL_TEAM_ID}" || -z "${VERCEL_PROJECT_ID}" ]]; then
+            echo "::error::Required secrets/vars missing (VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID)"
+            exit 1
+          fi
+
+          DEP_JSON=$(curl -sfS \
+            "https://api.vercel.com/v6/deployments?projectId=${VERCEL_PROJECT_ID}&teamId=${VERCEL_TEAM_ID}&target=production&state=READY&limit=1" \
+            -H "Authorization: Bearer ${VERCEL_TOKEN}")
+
+          DEPLOYED_SHA=$(echo "$DEP_JSON" | jq -r '.deployments[0].meta.githubCommitSha // empty')
+          DEPLOYED_URL=$(echo "$DEP_JSON" | jq -r '.deployments[0].url // empty')
+
+          if [[ -z "$DEPLOYED_SHA" ]]; then
+            echo "::error::No READY production deployment found on Vercel"
+            exit 1
+          fi
+
+          MAIN_SHA=$(git rev-parse HEAD)
+          MAIN_COMMIT_TS=$(git log -1 --format=%ct HEAD)
+          NOW_TS=$(date +%s)
+          MAIN_AGE_S=$(( NOW_TS - MAIN_COMMIT_TS ))
+
+          {
+            echo "deployed_sha=${DEPLOYED_SHA}"
+            echo "deployed_short=${DEPLOYED_SHA:0:8}"
+            echo "deployed_url=${DEPLOYED_URL}"
+            echo "main_sha=${MAIN_SHA}"
+            echo "main_short=${MAIN_SHA:0:8}"
+            echo "main_age_s=${MAIN_AGE_S}"
+            echo "main_age_min=$(( MAIN_AGE_S / 60 ))"
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$DEPLOYED_SHA" != "$MAIN_SHA" && "$MAIN_AGE_S" -gt "$STALE_AFTER_SECONDS" ]]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::production lagging main: deployed=${DEPLOYED_SHA:0:8} main=${MAIN_SHA:0:8} main_age=$(( MAIN_AGE_S / 60 ))min"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            echo "fresh: deployed=${DEPLOYED_SHA:0:8} main=${MAIN_SHA:0:8} main_age=$(( MAIN_AGE_S / 60 ))min"
+          fi
+
+      - name: Open or update tracking issue
+        if: steps.check.outputs.stale == 'true'
+        uses: actions/github-script@v7
+        env:
+          DEPLOYED_SHORT: ${{ steps.check.outputs.deployed_short }}
+          DEPLOYED_SHA: ${{ steps.check.outputs.deployed_sha }}
+          MAIN_SHORT: ${{ steps.check.outputs.main_short }}
+          MAIN_SHA: ${{ steps.check.outputs.main_sha }}
+          MAIN_AGE_MIN: ${{ steps.check.outputs.main_age_min }}
+        with:
+          script: |
+            const {
+              DEPLOYED_SHORT, DEPLOYED_SHA, MAIN_SHORT, MAIN_SHA, MAIN_AGE_MIN,
+            } = process.env
+
+            const title = 'Deploy staleness: production lagging main'
+            const body = [
+              `Production deployment is **${MAIN_AGE_MIN} min behind** \`main\`.`,
+              ``,
+              `| | sha | |`,
+              `|---|---|---|`,
+              `| **Deployed** | \`${DEPLOYED_SHORT}\` | [commit](https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${DEPLOYED_SHA}) |`,
+              `| **main HEAD** | \`${MAIN_SHORT}\` | [commit](https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${MAIN_SHA}) |`,
+              ``,
+              `### Likely cause`,
+              `Vercel auto-deploy from \`main\` is not firing. Most common reason: the GitHub→Vercel integration is disconnected or the webhook is broken.`,
+              ``,
+              `### Recovery`,
+              `1. Check the Vercel project Settings → Git tab; relink GitHub if needed.`,
+              `2. Push an empty commit: \`git commit --allow-empty -m "chore: retrigger deploy" && git push\`.`,
+              `3. Or trigger a fresh production deploy from the Vercel UI on the latest \`main\` sha.`,
+              ``,
+              `_This issue is created and updated automatically by [\`deploy-staleness-check.yml\`](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/.github/workflows/deploy-staleness-check.yml). It will be closed manually after recovery; future stalls comment here instead of opening duplicates._`,
+            ].join('\n')
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'deploy-staleness',
+              state: 'open',
+            })
+
+            if (issues.length === 0) {
+              const labels = ['deploy-staleness', 'ops']
+              for (const name of labels) {
+                try {
+                  await github.rest.issues.getLabel({ owner: context.repo.owner, repo: context.repo.repo, name })
+                } catch (e) {
+                  if (e.status === 404) {
+                    await github.rest.issues.createLabel({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      name,
+                      color: name === 'deploy-staleness' ? 'd93f0b' : 'fbca04',
+                      description: name === 'deploy-staleness'
+                        ? 'Production deploy is lagging main'
+                        : 'Operational / infrastructure',
+                    })
+                  } else { throw e }
+                }
+              }
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels,
+              })
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues[0].number,
+                body: `Still stale at ${new Date().toISOString()}: deployed \`${DEPLOYED_SHORT}\`, main \`${MAIN_SHORT}\` (${MAIN_AGE_MIN} min old).`,
+              })
+            }
