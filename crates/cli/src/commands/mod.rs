@@ -1,6 +1,8 @@
 pub mod chat;
+pub mod chat_repl;
 pub mod doctor;
 pub mod health;
+pub mod init;
 pub mod loadtest;
 pub mod mcp;
 pub mod models;
