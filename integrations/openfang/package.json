@@ -1,0 +1,30 @@
+{
+  "name": "@solvela/openfang-router",
+  "version": "0.1.0",
+  "description": "Solvela router plugin for OpenFang — pay LLM calls in USDC via x402",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/solvela-ai/solvela.git",
+    "directory": "integrations/openfang"
+  },
+  "bugs": "https://github.com/solvela-ai/solvela/issues",
+  "homepage": "https://github.com/solvela-ai/solvela/tree/main/integrations/openfang#readme",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --external @solana/web3.js --external @solana/spl-token --external bs58",
+    "test": "node --import tsx --test tests/router.test.ts",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@solana/web3.js": "^1.87.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0"
+  },
+  "openfang": {
+    "extensions": ["dist/index.js"]
+  }
+}
