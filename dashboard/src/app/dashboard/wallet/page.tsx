@@ -1,4 +1,4 @@
-import { Copy, ExternalLink, ArrowUpRight, AlertTriangle } from "lucide-react";
+import { Copy, ExternalLink, ArrowUpRight, AlertTriangle, Settings2 } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { StatusDot } from "@/components/ui/status-dot";
 import { TerminalCard } from "@/components/ui/terminal-card";
@@ -6,11 +6,15 @@ import { WALLET_TXS, DASHBOARD_STATS } from "@/lib/mock-data";
 import { fetchAdminStats, fetchEscrowConfig } from "@/lib/api";
 import { formatUSDC, formatNumber } from "@/lib/utils";
 
+const WALLET_SETUP_DOCS_URL = "/docs/quickstart#configure-recipient-wallet";
+
 export default async function WalletPage() {
-  const RECIPIENT_WALLET =
+  const recipientWallet =
     process.env.SOLVELA_SOLANA_RECIPIENT_WALLET ??
     process.env.RCR_SOLANA_RECIPIENT_WALLET ??
-    "Configure SOLVELA_SOLANA_RECIPIENT_WALLET in .env";
+    null;
+  const isConfigured = Boolean(recipientWallet && recipientWallet.length > 20);
+
   const [statsResponse, escrowConfig] = await Promise.all([
     fetchAdminStats(30),
     fetchEscrowConfig(),
@@ -30,11 +34,10 @@ export default async function WalletPage() {
       }))
     : null;
 
-  const addr = RECIPIENT_WALLET;
-  const isConfigured = addr.length > 20 && !addr.startsWith("Configure");
+  const addr = recipientWallet ?? "";
   const short = isConfigured
     ? `${addr.slice(0, 8)}...${addr.slice(-8)}`
-    : addr;
+    : "";
 
   return (
     <div className="flex flex-col h-full">
@@ -49,38 +52,67 @@ export default async function WalletPage() {
           </div>
         )}
 
-        {/* Balance */}
-        <TerminalCard title="Recipient wallet" meta={<StatusDot status="ok" label="Connected" />}>
-            <p className="metric-xl">
-              {formatUSDC(totalSpend, 2)}
-            </p>
-            <p className="mt-1.5 text-xs text-text-tertiary font-mono">
-              USDC on Solana mainnet · last 30 days
-            </p>
-            <div className="mt-4 flex items-center gap-2">
-              <code className="rounded border border-border bg-bg-inset px-3 py-1.5 text-xs font-mono text-text-secondary">
-                {short}
-              </code>
-              <button
-                type="button"
-                className="flex h-10 w-10 items-center justify-center rounded border border-border text-text-tertiary hover:text-text-primary hover:bg-bg-surface transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-salmon)]"
-                title="Copy address"
-                aria-label="Copy address"
-              >
-                <Copy size={12} />
-              </button>
+        {/* Balance / setup */}
+        {isConfigured ? (
+          <TerminalCard title="Recipient wallet" meta={<StatusDot status="ok" label="Connected" />}>
+              <p className="metric-xl">
+                {formatUSDC(totalSpend, 2)}
+              </p>
+              <p className="mt-1.5 text-xs text-text-tertiary font-mono">
+                USDC on Solana mainnet · last 30 days
+              </p>
+              <div className="mt-4 flex items-center gap-2">
+                <code className="rounded border border-border bg-bg-inset px-3 py-1.5 text-xs font-mono text-text-secondary">
+                  {short}
+                </code>
+                <button
+                  type="button"
+                  className="flex h-10 w-10 items-center justify-center rounded border border-border text-text-tertiary hover:text-text-primary hover:bg-bg-surface transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-salmon)]"
+                  title="Copy address"
+                  aria-label="Copy address"
+                >
+                  <Copy size={12} />
+                </button>
+                <a
+                  href={`https://solscan.io/account/${addr}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex h-10 w-10 items-center justify-center rounded border border-border text-text-tertiary hover:text-text-primary hover:bg-bg-surface transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-salmon)]"
+                  title="View on Solscan"
+                  aria-label="View on Solscan"
+                >
+                  <ExternalLink size={12} />
+                </a>
+              </div>
+          </TerminalCard>
+        ) : (
+          <TerminalCard
+            title="Recipient wallet"
+            meta={<StatusDot status="degraded" label="Not configured" />}
+          >
+            <div className="flex flex-col items-start gap-4 py-2">
+              <div className="flex h-10 w-10 items-center justify-center rounded border border-border text-text-tertiary">
+                <Settings2 size={16} aria-hidden />
+              </div>
+              <div className="space-y-1.5">
+                <p className="text-sm font-medium text-text-primary">
+                  Configuration needed
+                </p>
+                <p className="max-w-prose text-xs text-text-tertiary font-mono leading-relaxed">
+                  No Solana recipient wallet is set on this deployment.
+                  Configure <code className="rounded border border-border bg-bg-inset px-1 py-0.5 text-text-secondary">SOLVELA_SOLANA_RECIPIENT_WALLET</code> in
+                  the gateway environment to start accepting USDC payments and unlock balance, transactions, and escrow views on this page.
+                </p>
+              </div>
               <a
-                href={`https://solscan.io/account/${addr}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex h-10 w-10 items-center justify-center rounded border border-border text-text-tertiary hover:text-text-primary hover:bg-bg-surface transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-salmon)]"
-                title="View on Solscan"
-                aria-label="View on Solscan"
+                href={WALLET_SETUP_DOCS_URL}
+                className="inline-flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs font-mono text-text-primary hover:bg-bg-surface transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--accent-salmon)]"
               >
-                <ExternalLink size={12} />
+                Wallet setup guide <ExternalLink size={12} />
               </a>
             </div>
-        </TerminalCard>
+          </TerminalCard>
+        )}
 
         {/* Escrow config */}
         {escrowConfig && (
@@ -134,14 +166,16 @@ export default async function WalletPage() {
           <TerminalCard
             title="wallet.deposits"
             meta={
-              <a
-                href={`https://solscan.io/account/${addr}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 text-text-tertiary hover:text-text-primary transition-colors text-xxs"
-              >
-                View all <ExternalLink size={10} />
-              </a>
+              isConfigured ? (
+                <a
+                  href={`https://solscan.io/account/${addr}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1 text-text-tertiary hover:text-text-primary transition-colors text-xxs"
+                >
+                  View all <ExternalLink size={10} />
+                </a>
+              ) : null
             }
             bare
             className="overflow-hidden"
