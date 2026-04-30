@@ -332,10 +332,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_upstream_unavailable_returns_500_with_request_id() {
-        let (status, json) = error_response(GatewayError::UpstreamUnavailable(
-            "req-abc-123".to_string(),
-        ))
-        .await;
+        let (status, json) =
+            error_response(GatewayError::UpstreamUnavailable("req-abc-123".to_string())).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(json["error"]["type"], "upstream_error");
         assert_eq!(json["error"]["code"], "upstream_unavailable");

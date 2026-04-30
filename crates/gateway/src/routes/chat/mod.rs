@@ -69,9 +69,8 @@ pub async fn chat_completions(
     // Parse the JSON body. We accept the raw `Bytes` (rather than the typical
     // `Json` extractor) so we can compute a canonical SHA-256 hash for the
     // request-deduplication cache before deserialization.
-    let mut req: ChatRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
-        GatewayError::BadRequest(format!("invalid JSON request body: {e}"))
-    })?;
+    let mut req: ChatRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|e| GatewayError::BadRequest(format!("invalid JSON request body: {e}")))?;
 
     // ── Step 1.5: Idempotency dedup ───────────────────────────────────────
     //
@@ -118,7 +117,9 @@ pub async fn chat_completions(
                 .header(HeaderName::from_static("x-solvela-dedup"), "hit")
                 .header(HeaderName::from_static("x-rcr-dedup"), "hit")
                 .body(axum::body::Body::from(entry.body))
-                .map_err(|e| GatewayError::Internal(format!("failed to build dedup response: {e}")))?;
+                .map_err(|e| {
+                    GatewayError::Internal(format!("failed to build dedup response: {e}"))
+                })?;
             // The middleware-set request-id headers will be applied by the
             // outer layer; nothing else to do here.
             let _ = resp.headers_mut(); // no-op, retained for clarity
@@ -873,11 +874,7 @@ pub async fn chat_completions(
 /// On any I/O failure the original response cannot be reconstructed, so we
 /// log the failure and surface a generic 500 response. Callers must check
 /// `response.status().is_success()` before calling this.
-async fn persist_dedup_response(
-    state: &Arc<AppState>,
-    hash: &str,
-    response: Response,
-) -> Response {
+async fn persist_dedup_response(state: &Arc<AppState>, hash: &str, response: Response) -> Response {
     let (parts, body) = response.into_parts();
     let bytes = match axum::body::to_bytes(body, usize::MAX).await {
         Ok(b) => b,

@@ -291,8 +291,10 @@ supports_vision = false
     }
 
     #[tokio::test]
-    async fn test_health_no_providers_returns_error_status() {
-        // ProviderRegistry::from_env() with no API keys → empty providers
+    async fn test_health_demo_only_returns_ok_status() {
+        // ProviderRegistry::from_env() with no real API keys auto-registers
+        // the demo provider (see providers/mod.rs). The gateway is healthy
+        // in this state — it can serve $0 echo responses out of the box.
         let state = test_state();
         let app = test_router(state);
 
@@ -306,13 +308,12 @@ supports_vision = false
             .await
             .unwrap();
 
-        // HTTP status is always 200
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        // No providers configured in test env → "error"
-        assert_eq!(json["status"], "error");
+        // Demo auto-registers when no real providers configured → "ok".
+        assert_eq!(json["status"], "ok");
     }
 }

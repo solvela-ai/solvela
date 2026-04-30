@@ -233,7 +233,8 @@ async fn test_chat_prompt_injection_blocked() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["type"], "bad_request");
+    // Anthropic/OpenAI-format error envelope (provider error normalization).
+    assert_eq!(json["error"]["type"], "invalid_request_error");
     assert!(json["error"]["message"]
         .as_str()
         .unwrap()

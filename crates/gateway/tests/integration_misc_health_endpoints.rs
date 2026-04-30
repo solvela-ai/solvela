@@ -71,9 +71,9 @@ async fn test_health_endpoint() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    // Test app has no provider API keys → "error" status (zero providers configured).
+    // Demo provider auto-registers when no real providers configured → "ok".
     // HTTP status is always 200 (Fly.io health checks need 2xx).
-    assert_eq!(json["status"], "error");
+    assert_eq!(json["status"], "ok");
     // Unauthenticated requests do not include version or checks (security hardening)
     assert!(
         json.get("version").is_none() || json["version"].is_null(),
@@ -111,15 +111,15 @@ async fn test_health_returns_version() {
     assert!(!version.is_empty(), "version must not be empty");
 }
 
-/// 14.3: GET /health returns `"error"` when no providers are configured.
+/// 14.3: GET /health returns `"ok"` when only the demo provider is configured.
 ///
-/// The test app has `db_pool: None` and no API keys set, so the provider
-/// registry is empty. The health endpoint status logic returns `"error"`
-/// when zero providers are configured (regardless of DB/Redis state).
-/// HTTP status is always 200 (Fly.io health checks need 2xx).
-/// Authenticated with admin token to verify detailed checks.
+/// The test app has `db_pool: None` and no API keys set, so the demo provider
+/// auto-registers (see providers/mod.rs). The gateway is healthy in this state
+/// — it can serve $0 echo responses out of the box. HTTP status is always 200
+/// (Fly.io health checks need 2xx). Authenticated with admin token to verify
+/// detailed checks.
 #[tokio::test]
-async fn test_health_returns_error_without_providers() {
+async fn test_health_demo_only_returns_ok() {
     let app = test_app();
 
     let response = app
@@ -139,8 +139,8 @@ async fn test_health_returns_error_without_providers() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    // No providers configured in test env → "error"
-    assert_eq!(json["status"], "error");
+    // Demo auto-registers with no real providers → "ok".
+    assert_eq!(json["status"], "ok");
 
     // DB and Redis are not configured (not errored), so checks reflect that
     assert_eq!(json["checks"]["database"], "not_configured");

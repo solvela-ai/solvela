@@ -110,16 +110,37 @@ fn canonicalize_value(value: &mut Value) {
     }
 }
 
-/// Serialize a JSON value with sorted keys at every object level.
+/// Recursively sort all object keys in a JSON value in place.
 ///
-/// `serde_json::Value::Object` uses a `BTreeMap` underneath, so iteration is
-/// already sorted — we just round-trip through `to_vec` to get a stable
-/// byte representation.
+/// The `preserve_order` feature of `serde_json` is enabled transitively via
+/// the `cli` crate, so `Map` preserves insertion order. To get a deterministic
+/// canonical form we must explicitly re-order keys.
+fn sort_keys_recursive(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> =
+                map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            map.clear();
+            for (k, mut v) in entries {
+                sort_keys_recursive(&mut v);
+                map.insert(k, v);
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                sort_keys_recursive(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Serialize a JSON value with sorted keys at every object level.
 fn sorted_serialize(value: &Value) -> Vec<u8> {
-    // Build a fresh value with all maps converted to BTreeMap-backed objects.
-    // serde_json's `Map` is BTreeMap when the `preserve_order` feature is OFF,
-    // which is the default — so `to_vec` already produces sorted output.
-    serde_json::to_vec(value).unwrap_or_default()
+    let mut sorted = value.clone();
+    sort_keys_recursive(&mut sorted);
+    serde_json::to_vec(&sorted).unwrap_or_default()
 }
 
 /// Compute the canonical SHA-256 hash for a request body.
@@ -167,9 +188,7 @@ impl InMemoryDedupStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match guard.get(hash) {
-            Some((entry, inserted_at)) if inserted_at.elapsed() < DEDUP_TTL => {
-                Some(entry.clone())
-            }
+            Some((entry, inserted_at)) if inserted_at.elapsed() < DEDUP_TTL => Some(entry.clone()),
             Some(_) => {
                 guard.pop(hash);
                 None
@@ -198,10 +217,7 @@ impl Default for InMemoryDedupStore {
 /// Returns `None` on miss, decode failure, or any Redis error. Errors are
 /// logged at `debug!` rather than `warn!` because dedup is best-effort —
 /// a miss just means the request runs normally.
-pub async fn redis_get(
-    cache: &super::ResponseCache,
-    hash: &str,
-) -> Option<CachedResponse> {
+pub async fn redis_get(cache: &super::ResponseCache, hash: &str) -> Option<CachedResponse> {
     let key = format!("rcr:dedup:{hash}");
     match cache.get_raw(&key).await {
         Ok(Some(s)) => decode_cached(&s),
@@ -216,11 +232,7 @@ pub async fn redis_get(
 /// Store a response in Redis under the canonical hash.
 ///
 /// Fire-and-forget semantics: errors are logged at `debug!` and swallowed.
-pub async fn redis_put(
-    cache: &super::ResponseCache,
-    hash: &str,
-    entry: &CachedResponse,
-) {
+pub async fn redis_put(cache: &super::ResponseCache, hash: &str, entry: &CachedResponse) {
     let key = format!("rcr:dedup:{hash}");
     let encoded = encode_cached(entry);
     if let Err(e) = cache.set_raw(&key, &encoded, DEDUP_TTL).await {
@@ -307,7 +319,8 @@ mod tests {
 
     #[test]
     fn canonical_hash_strips_timestamp_in_messages() {
-        let body_a = br#"{"model":"x","messages":[{"role":"user","content":"[2026-04-30 14:30] hello"}]}"#;
+        let body_a =
+            br#"{"model":"x","messages":[{"role":"user","content":"[2026-04-30 14:30] hello"}]}"#;
         let body_b = br#"{"model":"x","messages":[{"role":"user","content":"[2026-04-30 15:45 UTC] hello"}]}"#;
         let body_c = br#"{"model":"x","messages":[{"role":"user","content":"hello"}]}"#;
         let h_a = canonical_hash(body_a);

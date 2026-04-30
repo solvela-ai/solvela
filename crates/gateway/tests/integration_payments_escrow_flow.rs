@@ -244,7 +244,7 @@ async fn test_scheme_payload_mismatch_exact_with_escrow_returns_400() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["type"], "bad_request");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
     assert!(
         json["error"]["message"].as_str().unwrap().contains("exact")
             && json["error"]["message"]
@@ -289,7 +289,7 @@ async fn test_scheme_payload_mismatch_escrow_with_direct_returns_400() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["type"], "bad_request");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
     assert!(
         json["error"]["message"]
             .as_str()
