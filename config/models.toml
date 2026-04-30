@@ -1,5 +1,24 @@
 # Model Registry — Solvela
 # Prices are provider cost per million tokens. The 5% platform fee is applied automatically.
+#
+# ── Routing profiles ──────────────────────────────────────────────────────────
+# Five profiles map (Tier → model ID) — see `crates/router/src/profiles.rs`:
+#
+#   eco      — cheapest capable model per tier
+#   auto     — balanced cost/quality (default)
+#   premium  — best quality regardless of cost
+#   free     — open-source / free-tier models only
+#   agentic  — tool-fidelity-first; activated automatically when the request
+#              carries a non-empty `tools` array, or explicitly via
+#              `model: "agentic"` / `model: "blockrun/auto"`.
+#              Mapping (all entries below have `supports_tools = true`):
+#                Simple    → openai/gpt-4o-mini
+#                Medium    → openai/gpt-4.1
+#                Complex   → anthropic/claude-sonnet-4-20250514
+#                Reasoning → anthropic/claude-opus-4-20250514
+#              Prior art: ClawRouter `src/router/rules.ts` `agenticTask`
+#              dimension; Franklin `src/router/index.ts:174-284` AGENTIC
+#              keyword scoring.
 
 # --- OpenAI ---
 
@@ -299,3 +318,23 @@ context_window = 131072
 supports_streaming = true
 supports_tools = true
 reasoning = true
+
+# --- Solvela Demo (zero-config "first 5 minutes" path) ---
+#
+# The demo provider returns a canned echo response with zero token usage so
+# cost computation is always $0. Activated when SOLVELA_DEMO_MODE=true OR
+# when no real provider API keys are configured at startup.
+#
+# Use this for getting started locally — clone the repo, `cargo run`, and
+# the gateway can serve `/v1/chat/completions` against `model: "demo"`
+# without any provider keys in `.env`.
+[models.solvela-demo]
+provider = "solvela"
+model_id = "demo"
+display_name = "Solvela Demo (Echo)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 4096
+supports_streaming = true
+supports_tools = false
+supports_vision = false

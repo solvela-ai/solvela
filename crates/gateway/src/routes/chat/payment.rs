@@ -2,6 +2,15 @@
 //!
 //! Functions for decoding payment headers, extracting payer wallets,
 //! detecting durable nonce transactions, and firing escrow claims.
+//!
+//! ── Trust-tag wrapping ────────────────────────────────────────────────────
+//! Service-marketplace receipts that get reflected back into a chat context
+//! must be wrapped with `crate::util::trust_tag::wrap_untrusted` before they
+//! reach the LLM. Receipts are external-service output and should not be
+//! treated as instructions. The current implementation does not reflect
+//! receipts into chat context — callers that add this in the future should
+//! pull from `crate::util::trust_tag` to keep the wrapping format consistent
+//! with the A2A handler. Pattern from Franklin `src/mcp/client.ts:184-187`.
 
 use std::sync::Arc;
 

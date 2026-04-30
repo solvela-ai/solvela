@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod deepseek;
+pub mod demo;
 pub mod fallback;
 pub mod google;
 pub mod health;
@@ -169,6 +170,29 @@ impl ProviderRegistry {
                     Arc::new(deepseek::DeepSeekProvider::new(client, key)),
                 );
             }
+        }
+
+        // ── Demo provider activation ────────────────────────────────────────
+        //
+        // Register the zero-config demo provider when either:
+        //   1. `SOLVELA_DEMO_MODE=true` is explicitly set, OR
+        //   2. No real providers were registered above (first-run UX).
+        //
+        // The demo provider serves canned echo responses with zero token
+        // usage so the cost path is well-defined and free. See
+        // `providers/demo.rs` for activation/usage docs.
+        let demo_forced = matches!(
+            std::env::var("SOLVELA_DEMO_MODE")
+                .or_else(|_| std::env::var("RCR_DEMO_MODE"))
+                .ok()
+                .as_deref(),
+            Some("1") | Some("true") | Some("yes") | Some("on")
+        );
+        if demo_forced || providers.is_empty() {
+            providers.insert(
+                demo::DEMO_PROVIDER_NAME.to_string(),
+                Arc::new(demo::DemoProvider::new()),
+            );
         }
 
         Self { providers }

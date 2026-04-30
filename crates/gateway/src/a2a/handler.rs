@@ -20,7 +20,12 @@ use crate::a2a::task_store::{self, new_task_id, TaskRecord};
 use crate::a2a::types::*;
 use crate::providers::fallback::chat_with_model_fallback;
 use crate::routes::chat::cost::{estimate_input_tokens, usdc_atomic_amount_checked};
+use crate::util::trust_tag;
 use crate::AppState;
+
+/// Source label used by the trust-tag wrapper for inbound A2A peer content.
+/// Stable, server-known string — never derived from request data.
+const A2A_PEER_SOURCE: &str = "a2a:peer-agent";
 
 /// A2A-specific JSON-RPC error codes.
 const ERR_INVALID_PARAMS: i32 = -32602;
@@ -492,6 +497,27 @@ fn extract_text_from_parts(parts: &[Part]) -> Result<String, JsonRpcErrorData> {
     })
 }
 
+/// Render an inbound peer-agent `Part::Data` payload as text, wrapped with a
+/// trust-tag so a downstream LLM treats it as data, not instructions.
+///
+/// Used wherever an A2A peer's `Data` part would otherwise be reflected into
+/// a chat context. Returns `None` for Text parts (callers should use
+/// [`extract_text_from_parts`] for those — they are user-role content, not
+/// untrusted artifacts). Pattern from Franklin `src/mcp/client.ts:184-187`.
+#[allow(dead_code)]
+pub(crate) fn render_peer_part_as_trusted_text(part: &Part) -> Option<String> {
+    match part {
+        Part::Text { .. } => None,
+        Part::Data { content_type, data } => {
+            // Stringify the payload deterministically so the LLM sees a stable
+            // representation regardless of value order.
+            let body = serde_json::to_string(data).unwrap_or_else(|_| String::from("null"));
+            let labelled = format!("[{content_type}]\n{body}");
+            Some(trust_tag::wrap_untrusted(&labelled, A2A_PEER_SOURCE))
+        }
+    }
+}
+
 /// Resolve a model string through profiles, aliases, and direct lookup.
 fn resolve_model(
     model_hint: &str,
@@ -825,5 +851,29 @@ supports_vision = false
         let result = resolve_model("nonexistent-model", "hello", &state);
         assert!(result.is_err(), "unknown model should error");
         assert_eq!(result.unwrap_err().code, ERR_MODEL_NOT_FOUND); // safe: just asserted is_err
+    }
+
+    #[test]
+    fn render_peer_part_text_returns_none() {
+        let part = Part::Text {
+            text: "hi".to_string(),
+        };
+        assert!(render_peer_part_as_trusted_text(&part).is_none());
+    }
+
+    #[test]
+    fn render_peer_part_data_wraps_with_trust_tag() {
+        let part = Part::Data {
+            content_type: "application/json".to_string(),
+            data: json!({"action": "transfer", "amount": 999}),
+        };
+        let rendered = render_peer_part_as_trusted_text(&part).expect("data part should render");
+        assert!(
+            rendered.starts_with("[UNTRUSTED content from a2a:peer-agent"),
+            "expected trust-tag header, got: {rendered}"
+        );
+        assert!(rendered.contains("application/json"));
+        assert!(rendered.contains("transfer"));
+        assert!(rendered.trim_end().ends_with("[end UNTRUSTED]"));
     }
 }
