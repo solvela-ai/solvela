@@ -62,6 +62,17 @@ The Fumadocs source is the one users actually read. The mdBook source is shadow 
 - **"mdBook is more durable / readable as raw markdown."** True, but durable raw markdown is what `dashboard/content/docs/*.mdx` already is -- Fumadocs MDX renders cleanly on GitHub. The "Rust-shop standard" argument doesn't outweigh "this one is actually live."
 - **"What if we want a doc site decoupled from the Next.js app?"** The decoupling already happens via subdomain (`docs.solvela.ai`). The Next.js app is the rendering engine, not the URL. Swapping engines later is a small, well-scoped migration; running two engines today is not.
 
+## Status
+
+**Migration executed: 2026-04-30**
+
+- Content audit completed: 21 mdBook pages reviewed
+- 4 operations pages ported to Fumadocs (`deployment.mdx`, `monitoring.mdx`, `security.mdx`, `troubleshooting.mdx`)
+- 17 pages dropped (duplicates/stale content already in Fumadocs or not needed)
+- `docs/book/` directory removed via `git rm -r`
+- References in `docs/AGENTS.md` updated
+- No CI/CD workflows referenced mdBook — no workflow changes needed
+
 ## Decision Owner
 
 User (kd@sky64.io). This file captures the recommendation; the cleanup PR should not land until the user signs off.

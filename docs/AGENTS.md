@@ -12,7 +12,7 @@ _(no loose files — see subdirectories)_
 ## Subdirectories
 | Directory | Purpose |
 |-----------|---------|
-| `book/` | mdBook-style handbook (getting-started, concepts, API, SDKs, operations) (see `book/AGENTS.md`) |
+| `decisions/` | Decision memos and architectural records (see `decisions/`) |
 | `plans/` | Implementation plans — one markdown file per initiative (see `plans/AGENTS.md`) |
 | `product/` | Product strategy, use cases, FAQ, regulatory position (see `product/AGENTS.md`) |
 | `research/` | Research notes and external investigations (see `research/AGENTS.md`) |
@@ -27,7 +27,7 @@ _(no loose files — see subdirectories)_
 - Filenames use the `YYYY-MM-DD-slug.md` convention in `plans/`, `load-tests/`, `research/`, and `superpowers/plans/`.
 
 ### Testing Requirements
-No automated tests — reviews are the quality gate. Some docs may render via mdBook (`docs/book/`).
+No automated tests — reviews are the quality gate.
 
 ### Common Patterns
 - Dated filenames for plans/research; undated for evergreen reference material (product FAQ, how-it-works).
@@ -39,6 +39,6 @@ No automated tests — reviews are the quality gate. Some docs may render via md
 - Cross-references to source modules and public docs.
 
 ### External
-_(none for Markdown; mdBook for `book/`)_
+_(none for Markdown)__
 
 <!-- MANUAL: -->
