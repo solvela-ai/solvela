@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 solvela-protocol = { workspace = true }
-solvela-x402 = { workspace = true, features = ["postgres"] }
+solvela-x402 = { workspace = true, features = ["solana", "postgres"] }
 solvela-router = { workspace = true }
 
 # Web

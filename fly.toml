@@ -4,6 +4,12 @@ primary_region = "ord"
 [build]
   dockerfile = "Dockerfile"
 
+# Release command runs once before any new machine starts serving traffic.
+# Migrations live here so a broken schema fails the deploy instead of crashing
+# every running instance mid-flight (see CLAUDE.md rule #15).
+[deploy]
+  release_command = "/app/solvela-gateway migrate"
+
 [env]
   PORT = "8402"
   RUST_LOG = "gateway=info,tower_http=info"
