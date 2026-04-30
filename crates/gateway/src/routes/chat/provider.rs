@@ -19,6 +19,7 @@ use solvela_protocol::ChatRequest;
 
 use crate::providers::fallback;
 use crate::providers::heartbeat::{HeartbeatConfig, HeartbeatItem, HeartbeatStream};
+use crate::providers::stream_caps::{CappedSizedStream, StreamCapConfig};
 use crate::routes::debug_headers::{attach_debug_headers, CacheStatus, PaymentStatus};
 use crate::AppState;
 
@@ -249,21 +250,50 @@ async fn execute_streaming_call(
             // Wrap with adaptive heartbeat
             let heartbeat_stream = HeartbeatStream::new(result.data, HeartbeatConfig::default());
 
-            // S3 FIX: Generic error message instead of raw provider errors
-            let sse_stream = heartbeat_stream.map(|item| match item {
+            // S3 FIX: Generic error message instead of raw provider errors.
+            // Error envelope mirrors the OpenAI format
+            //   { "error": { "type", "code", "message" } }
+            // so SDK clients can detect failures with a single shape regardless
+            // of which upstream provider produced the error. Provider-specific
+            // detail stays in the structured log, never on the wire.
+            //
+            // Each item is paired with its serialized byte length so the
+            // downstream `CappedSizedStream` can enforce the `SOLVELA_STREAM_MAX_BYTES`
+            // cumulative-body cap accurately.
+            let model_for_err = ctx.req.model.clone();
+            let sse_stream = heartbeat_stream.map(move |item| match item {
                 HeartbeatItem::Chunk(Ok(chunk)) => {
                     let json = serde_json::to_string(&chunk).unwrap_or_default();
-                    Ok::<_, Infallible>(sse::Event::default().data(json))
+                    let bytes = json.len();
+                    (
+                        bytes,
+                        Ok::<_, Infallible>(sse::Event::default().data(json)),
+                    )
                 }
                 HeartbeatItem::Chunk(Err(e)) => {
                     tracing::error!(error = %e, "stream chunk error (details redacted from client)");
-                    Ok(sse::Event::default()
-                        .data("{\"error\": \"stream processing error\"}"))
+                    let envelope = serde_json::json!({
+                        "error": {
+                            "type": "upstream_error",
+                            "code": "stream_error",
+                            "message": format!("[{}] stream processing error", model_for_err),
+                        }
+                    });
+                    let body = envelope.to_string();
+                    let bytes = body.len();
+                    (bytes, Ok(sse::Event::default().data(body)))
                 }
-                HeartbeatItem::KeepAlive => Ok(sse::Event::default().comment("keep-alive")),
+                HeartbeatItem::KeepAlive => {
+                    // Keep-alive comments don't count against the byte cap —
+                    // they're framing overhead, not LLM output.
+                    (0, Ok(sse::Event::default().comment("keep-alive")))
+                }
             });
 
-            let mut resp = sse::Sse::new(sse_stream).into_response();
+            // Hard caps: 5-minute wallclock + 5 MiB cumulative body (env-tunable).
+            let capped = CappedSizedStream::new(sse_stream, StreamCapConfig::from_env());
+
+            let mut resp = sse::Sse::new(capped).into_response();
 
             // Add fallback header if served by a different model
             if result.was_fallback {

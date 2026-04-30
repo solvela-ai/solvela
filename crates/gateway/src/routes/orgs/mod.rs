@@ -319,6 +319,7 @@ supports_vision = true
             admin_token: admin_token.map(String::from),
             prometheus_handle: None,
             dev_bypass_payment: false,
+            dedup_store: crate::cache::request_dedup::InMemoryDedupStore::new(),
         });
 
         Router::new()
@@ -479,6 +480,7 @@ mod tests {
             admin_token: Some("admin-secret".to_string()),
             prometheus_handle: None,
             dev_bypass_payment: false,
+            dedup_store: crate::cache::request_dedup::InMemoryDedupStore::new(),
         };
 
         let mut headers = HeaderMap::new();
@@ -522,6 +524,7 @@ mod tests {
             admin_token: Some("admin-secret".to_string()),
             prometheus_handle: None,
             dev_bypass_payment: false,
+            dedup_store: crate::cache::request_dedup::InMemoryDedupStore::new(),
         };
 
         let org_id = uuid::Uuid::new_v4();
@@ -568,6 +571,7 @@ mod tests {
             admin_token: Some("admin-secret".to_string()),
             prometheus_handle: None,
             dev_bypass_payment: false,
+            dedup_store: crate::cache::request_dedup::InMemoryDedupStore::new(),
         };
 
         let headers = HeaderMap::new();

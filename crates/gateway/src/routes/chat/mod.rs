@@ -14,10 +14,10 @@ mod response;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, HeaderName, HeaderValue};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
-use axum::Json;
 use metrics::{counter, histogram};
 use tracing::{info, warn};
 
@@ -53,17 +53,79 @@ const MAX_TOKENS_LIMIT: u32 = 128_000;
 ///
 /// Flow:
 /// 1. Parse request, resolve model (aliases, smart routing)
-/// 2. Check for PAYMENT-SIGNATURE header
-/// 3. If missing -> return 402 Payment Required with cost breakdown
-/// 4. If present -> verify payment via Facilitator -> proxy to provider -> return response
-/// 5. Support both JSON and SSE streaming responses
+/// 2. Idempotency dedup — short-circuit on identical canonical body within 30 s
+/// 3. Check for PAYMENT-SIGNATURE header
+/// 4. If missing -> return 402 Payment Required with cost breakdown
+/// 5. If present -> verify payment via Facilitator -> proxy to provider -> return response
+/// 6. Support both JSON and SSE streaming responses
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(mut req): Json<ChatRequest>,
+    body_bytes: Bytes,
 ) -> Result<Response, GatewayError> {
     let request_start = Instant::now();
     let debug_enabled = is_debug_enabled(&headers);
+
+    // Parse the JSON body. We accept the raw `Bytes` (rather than the typical
+    // `Json` extractor) so we can compute a canonical SHA-256 hash for the
+    // request-deduplication cache before deserialization.
+    let mut req: ChatRequest = serde_json::from_slice(&body_bytes).map_err(|e| {
+        GatewayError::BadRequest(format!("invalid JSON request body: {e}"))
+    })?;
+
+    // ── Step 1.5: Idempotency dedup ───────────────────────────────────────
+    //
+    // If the same canonical request body arrives twice within the dedup TTL
+    // we serve the cached response instead of recomputing cost / requiring a
+    // new payment. This prevents the double-charge race when an agent times
+    // out and retries with a fresh timestamp prefix in a system message.
+    //
+    // Streaming requests are NOT cached — the cached representation can't
+    // be replayed as an SSE stream, and the cap of 30s makes a streaming
+    // retry an unusual case.
+    let dedup_disabled = crate::cache::request_dedup::is_disabled();
+    if dedup_disabled {
+        crate::cache::request_dedup::warn_disabled_once();
+    }
+
+    let dedup_hash = if !dedup_disabled && !req.stream {
+        Some(crate::cache::request_dedup::canonical_hash(&body_bytes))
+    } else {
+        None
+    };
+
+    if let Some(ref hash) = dedup_hash {
+        // Try Redis first, then in-memory fallback.
+        let cached: Option<crate::cache::request_dedup::CachedResponse> =
+            if let Some(cache) = &state.cache {
+                crate::cache::request_dedup::redis_get(cache, hash).await
+            } else {
+                None
+            }
+            .or_else(|| state.dedup_store.get(hash));
+
+        if let Some(entry) = cached {
+            counter!("solvela_dedup_total", "result" => "hit").increment(1);
+            info!(
+                hash = %hash,
+                status = entry.status,
+                bytes = entry.body.len(),
+                "request dedup cache hit — replaying cached response"
+            );
+            let mut resp = Response::builder()
+                .status(StatusCode::from_u16(entry.status).unwrap_or(StatusCode::OK))
+                .header(header::CONTENT_TYPE, &entry.content_type)
+                .header(HeaderName::from_static("x-solvela-dedup"), "hit")
+                .header(HeaderName::from_static("x-rcr-dedup"), "hit")
+                .body(axum::body::Body::from(entry.body))
+                .map_err(|e| GatewayError::Internal(format!("failed to build dedup response: {e}")))?;
+            // The middleware-set request-id headers will be applied by the
+            // outer layer; nothing else to do here.
+            let _ = resp.headers_mut(); // no-op, retained for clarity
+            return Ok(resp);
+        }
+        counter!("solvela_dedup_total", "result" => "miss").increment(1);
+    }
 
     // Validate message count before any processing
     if req.messages.len() > MAX_MESSAGES {
@@ -166,25 +228,44 @@ pub async fn chat_completions(
             payment_status: PaymentStatus::DevBypass,
         };
 
-        return provider::execute_provider_call(&ctx)
+        let result = provider::execute_provider_call(&ctx)
             .await
             .map(|r| r.response)
             .map_err(|e| match e {
                 ProviderCallError::AllProvidersFailed { model, error, .. } => {
-                    GatewayError::Internal(format!(
-                        "all providers failed for model '{}' (dev bypass): {}",
-                        model, error
-                    ))
+                    let rid = request_id
+                        .clone()
+                        .unwrap_or_else(crate::error::fresh_request_id);
+                    tracing::error!(
+                        request_id = %rid,
+                        model = %model,
+                        error = %error,
+                        "all providers failed (dev bypass)"
+                    );
+                    GatewayError::UpstreamUnavailable(rid)
                 }
                 ProviderCallError::Internal(msg) => GatewayError::Internal(msg),
             });
+
+        return match result {
+            Ok(mut resp) => {
+                if let Some(ref hash) = dedup_hash {
+                    if resp.status().is_success() && !req.stream {
+                        resp = persist_dedup_response(&state, hash, resp).await;
+                    }
+                }
+                Ok(resp)
+            }
+            Err(e) => Err(e),
+        };
     }
 
     if payment_header.is_none() {
-        // Return 402 with pricing info
-        counter!("solvela_payments_total", "status" => "none").increment(1);
-        info!(model = %req.model, "no payment signature, returning 402");
-
+        // Compute cost up front so we can short-circuit zero-cost models
+        // before issuing a 402 challenge. README marks `gpt-oss-120b` as Free
+        // (input/output cost = 0), and a zero-cost model should never demand
+        // payment. The dev-bypass branch above already skips payment; this
+        // branch mirrors that flow when the resolved cost is zero.
         let cost = state
             .model_registry
             .estimate_cost(
@@ -200,6 +281,67 @@ pub async fn chat_completions(
                 req.model, e
             ))
         })?;
+
+        // Free-tier short-circuit: if the resolved atomic cost is zero,
+        // skip payment verification and proxy to the provider directly.
+        // Use atomic-integer comparison rather than parsing `cost.total` as
+        // f64 (avoids epsilon issues; "0" is the canonical zero string).
+        let atomic_zero = atomic_amount == "0";
+        if atomic_zero {
+            info!(
+                model = %req.model,
+                "zero-cost model — skipping payment verification"
+            );
+            counter!("solvela_payments_total", "status" => "free").increment(1);
+
+            let ctx = ProviderCallContext {
+                state: &state,
+                req: &req,
+                model_info,
+                headers: &headers,
+                debug_enabled,
+                request_start,
+                routing_tier: &routing_tier,
+                routing_score,
+                routing_profile: &routing_profile,
+                session_id: &session_id,
+                payment_status: PaymentStatus::Free,
+            };
+
+            let result = provider::execute_provider_call(&ctx)
+                .await
+                .map(|r| r.response)
+                .map_err(|e| match e {
+                    ProviderCallError::AllProvidersFailed { model, .. } => {
+                        let rid = request_id
+                            .clone()
+                            .unwrap_or_else(crate::error::fresh_request_id);
+                        tracing::error!(
+                            request_id = %rid,
+                            model = %model,
+                            "all providers failed for free-tier model"
+                        );
+                        GatewayError::UpstreamUnavailable(rid)
+                    }
+                    ProviderCallError::Internal(msg) => GatewayError::Internal(msg),
+                });
+
+            return match result {
+                Ok(mut resp) => {
+                    if let Some(ref hash) = dedup_hash {
+                        if resp.status().is_success() && !req.stream {
+                            resp = persist_dedup_response(&state, hash, resp).await;
+                        }
+                    }
+                    Ok(resp)
+                }
+                Err(e) => Err(e),
+            };
+        }
+
+        // Non-zero cost — return 402 with pricing info
+        counter!("solvela_payments_total", "status" => "none").increment(1);
+        info!(model = %req.model, "no payment signature, returning 402");
 
         let mut accepts = vec![solvela_x402::types::PaymentAccept {
             scheme: "exact".to_string(),
@@ -675,31 +817,96 @@ pub async fn chat_completions(
                 }
             }
 
+            // Persist the response in the dedup cache so retries within the
+            // TTL replay this exact response instead of re-executing. Only
+            // cache non-streaming successful responses with a 2xx status.
+            if let Some(ref hash) = dedup_hash {
+                if response.status().is_success() && !req.stream {
+                    response = persist_dedup_response(&state, hash, response).await;
+                }
+            }
+
             Ok(response)
         }
         Err(ProviderCallError::AllProvidersFailed {
             model, provider, ..
         }) => {
             // SECURITY: A paid request reached the stub path — all providers failed.
-            warn!(
+            // Verbose context goes to the structured log; the public response
+            // body returns a generic message plus a correlation id so support
+            // can find the matching log line without leaking internal detail.
+            let rid = request_id
+                .clone()
+                .unwrap_or_else(crate::error::fresh_request_id);
+            tracing::error!(
+                request_id = %rid,
                 provider = %provider,
                 model = %model,
                 wallet = %wallet_address,
-                "paid request failed: no provider available — returning error instead of stub"
+                tx_signature = ?tx_signature,
+                "paid request failed: no provider available — all upstream providers exhausted"
             );
             counter!("solvela_paid_stub_rejections_total").increment(1);
 
-            Err(GatewayError::Internal(format!(
-                "all providers failed for model '{}'. Your payment was submitted but no response \
-                 could be generated. Contact the gateway operator or retry. \
-                 Provider: {}, tx: {}",
-                model,
-                provider,
-                tx_signature.as_deref().unwrap_or("unknown")
-            )))
+            Err(GatewayError::UpstreamUnavailable(rid))
         }
         Err(ProviderCallError::Internal(msg)) => Err(GatewayError::Internal(msg)),
     }
+}
+
+/// Buffer the response body, store it in the dedup cache (Redis or in-memory),
+/// and return a fresh `Response` reconstituted from those bytes.
+///
+/// On any I/O failure the original response cannot be reconstructed, so we
+/// log the failure and surface a generic 500 response. Callers must check
+/// `response.status().is_success()` before calling this.
+async fn persist_dedup_response(
+    state: &Arc<AppState>,
+    hash: &str,
+    response: Response,
+) -> Response {
+    let (parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "failed to buffer response body for dedup cache");
+            // Reconstruct a minimal error response — original body is gone.
+            return Response::from_parts(
+                parts,
+                axum::body::Body::from(
+                    serde_json::json!({
+                        "error": {
+                            "type": "upstream_error",
+                            "code": "internal_error",
+                            "message": "failed to buffer response body"
+                        }
+                    })
+                    .to_string(),
+                ),
+            );
+        }
+    };
+
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+
+    let entry = crate::cache::request_dedup::CachedResponse {
+        body: bytes.to_vec(),
+        content_type,
+        status: parts.status.as_u16(),
+    };
+
+    // Store in Redis (fire-and-forget) and the in-memory fallback.
+    if let Some(cache) = &state.cache {
+        crate::cache::request_dedup::redis_put(cache, hash, &entry).await;
+    }
+    state.dedup_store.put(hash.to_string(), entry);
+
+    Response::from_parts(parts, axum::body::Body::from(bytes))
 }
 
 /// Resolve model ID from aliases, smart routing profiles, or direct model IDs.

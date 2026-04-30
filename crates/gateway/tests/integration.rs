@@ -205,6 +205,15 @@ context_window = 200000
 supports_streaming = true
 supports_tools = true
 supports_vision = true
+
+[models.openai-gpt-oss-120b]
+provider = "openai"
+model_id = "gpt-oss-120b"
+display_name = "GPT-OSS 120B (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 128000
+supports_streaming = true
 "#;
 
 /// Build a test app with the test model config (no real provider API keys).
@@ -253,6 +262,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     let router = build_router(
         Arc::clone(&state),
@@ -399,6 +409,7 @@ fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     let router = build_router(
         Arc::clone(&state),
@@ -466,6 +477,7 @@ fn test_app_with_mock_provider_and_escrow() -> axum::Router {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -532,6 +544,7 @@ fn test_app_with_escrow() -> axum::Router {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -649,7 +662,7 @@ async fn test_models_endpoint() {
     assert_eq!(json["object"], "list");
 
     let data = json["data"].as_array().unwrap();
-    assert_eq!(data.len(), 3);
+    assert_eq!(data.len(), 4);
 
     // Check that pricing includes the 5% fee
     let gpt4o = data.iter().find(|m| m["id"] == "openai/gpt-4o").unwrap();
@@ -1834,6 +1847,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -3398,6 +3412,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -3557,6 +3572,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
 
     // Simulate claim processing by incrementing metrics atomically
@@ -3786,6 +3802,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
 
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
@@ -4912,6 +4929,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         admin_token: None, // <-- no admin token configured
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     let app = build_router(
         Arc::clone(&state),
@@ -5170,4 +5188,244 @@ async fn test_a2a_message_send_no_text_returns_error() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json["error"].is_object(), "should return JSON-RPC error");
+}
+
+// ---------------------------------------------------------------------------
+// Fix 1: Zero-cost model short-circuits the 402 challenge
+// ---------------------------------------------------------------------------
+
+/// A free-tier model (input/output cost = 0) must NOT return 402 when the
+/// caller omits the `payment-signature` header. Instead, the gateway should
+/// proxy directly to the provider and return the response.
+#[tokio::test]
+async fn test_chat_free_tier_model_skips_402_without_payment() {
+    let app = test_app_with_mock_provider();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-oss-120b",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Must NOT be 402. The free-tier branch proxies straight to the provider.
+    assert_ne!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "zero-cost model must not return 402"
+    );
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["object"], "chat.completion");
+}
+
+/// A paid model with no payment header must still return 402 — the
+/// short-circuit only applies to zero-cost models.
+#[tokio::test]
+async fn test_chat_paid_model_still_returns_402_without_payment() {
+    let app = test_app_with_mock_provider();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+}
+
+// ---------------------------------------------------------------------------
+// Fix 4: Request deduplication via canonical SHA-256
+// ---------------------------------------------------------------------------
+
+/// Two identical paid requests sent within the dedup TTL should produce two
+/// successful 200 responses, but the second one should be served from the
+/// dedup cache (header `x-solvela-dedup: hit`).
+#[tokio::test]
+async fn test_dedup_replays_cached_response_on_identical_body() {
+    let app = test_app_with_mock_provider();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "[2026-04-30 14:30] Hello!"}],
+    });
+
+    // First request — cache miss, executes normally, populates dedup cache.
+    let r1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), StatusCode::OK);
+    assert!(
+        r1.headers().get("x-solvela-dedup").is_none(),
+        "first request must NOT carry a dedup hit header"
+    );
+
+    // Second request — same canonical body but with a different timestamp
+    // prefix and a different payment header (would normally re-charge).
+    // Dedup cache should serve the cached response with `x-solvela-dedup: hit`.
+    let body_with_diff_timestamp = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "[2026-04-30 15:45 UTC] Hello!"}],
+    });
+
+    let r2 = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(
+                    serde_json::to_vec(&body_with_diff_timestamp).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), StatusCode::OK);
+    assert_eq!(
+        r2.headers()
+            .get("x-solvela-dedup")
+            .and_then(|v| v.to_str().ok()),
+        Some("hit"),
+        "second request with same canonical body must be served from dedup cache"
+    );
+}
+
+/// When `SOLVELA_DEDUP_DISABLED=true` is set, dedup must be bypassed entirely.
+/// We can't reliably toggle env vars per-test in Rust without locking, so this
+/// test exercises the bypass branch directly via the helper.
+#[test]
+fn test_dedup_disabled_env_bypasses_cache() {
+    let prior = std::env::var("SOLVELA_DEDUP_DISABLED").ok();
+    std::env::set_var("SOLVELA_DEDUP_DISABLED", "true");
+    assert!(gateway::cache::request_dedup::is_disabled());
+    std::env::set_var("SOLVELA_DEDUP_DISABLED", "false");
+    assert!(!gateway::cache::request_dedup::is_disabled());
+    match prior {
+        Some(v) => std::env::set_var("SOLVELA_DEDUP_DISABLED", v),
+        None => std::env::remove_var("SOLVELA_DEDUP_DISABLED"),
+    }
+}
+
+/// Different request bodies must produce different canonical hashes.
+#[test]
+fn test_dedup_canonical_hash_differs_for_different_bodies() {
+    let body_a = br#"{"model":"x","messages":[{"role":"user","content":"hello"}]}"#;
+    let body_b = br#"{"model":"x","messages":[{"role":"user","content":"goodbye"}]}"#;
+    assert_ne!(
+        gateway::cache::request_dedup::canonical_hash(body_a),
+        gateway::cache::request_dedup::canonical_hash(body_b),
+    );
+}
+
+/// Same body with different leading timestamps must hash equally.
+#[test]
+fn test_dedup_canonical_hash_strips_timestamps() {
+    let body_a = br#"{"model":"x","messages":[{"role":"user","content":"[2026-04-30 14:30] hi"}]}"#;
+    let body_b = br#"{"model":"x","messages":[{"role":"user","content":"[2026-04-30 15:45 UTC] hi"}]}"#;
+    let body_c = br#"{"model":"x","messages":[{"role":"user","content":"hi"}]}"#;
+    let h_a = gateway::cache::request_dedup::canonical_hash(body_a);
+    let h_b = gateway::cache::request_dedup::canonical_hash(body_b);
+    let h_c = gateway::cache::request_dedup::canonical_hash(body_c);
+    assert_eq!(h_a, h_b);
+    assert_eq!(h_a, h_c);
+}
+
+// ---------------------------------------------------------------------------
+// Fix 2 / Fix 3: error envelope shape
+// ---------------------------------------------------------------------------
+
+/// When all providers fail on a paid request, the response must:
+/// - return HTTP 500
+/// - contain `error.type = "upstream_error"`
+/// - contain a `request_id` correlation field
+/// - NOT leak model name or tx signature
+#[tokio::test]
+async fn test_chat_all_providers_fail_returns_sanitized_500() {
+    // Use test_app() — no providers registered, so paid requests fall through
+    // to the "all providers failed" branch.
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["error"]["type"], "upstream_error");
+    assert_eq!(json["error"]["code"], "upstream_unavailable");
+    assert_eq!(json["error"]["message"], "upstream provider unavailable");
+    assert!(
+        json["error"]["request_id"].is_string(),
+        "request_id correlation field must be present"
+    );
+    let body_str = json.to_string();
+    assert!(
+        !body_str.contains("gpt-4o"),
+        "must not leak model name in body: {body_str}"
+    );
+    assert!(
+        !body_str.contains("MockSettledTxSig"),
+        "must not leak tx signature in body: {body_str}"
+    );
 }

@@ -85,6 +85,10 @@ pub struct AppState {
     /// When `true`, skip payment verification for chat requests (dev mode only).
     /// Always `false` in production — set via `SOLVELA_DEV_BYPASS_PAYMENT=true` (RCR_DEV_BYPASS_PAYMENT accepted as deprecated fallback).
     pub dev_bypass_payment: bool,
+    /// In-memory request-deduplication store used as a fallback when Redis is
+    /// not configured. Bounded LRU with a 30-second TTL. See
+    /// [`crate::cache::request_dedup`] for the canonicalization rules.
+    pub dedup_store: cache::request_dedup::InMemoryDedupStore,
 }
 
 impl AppState {

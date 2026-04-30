@@ -708,6 +708,7 @@ mod tests {
             admin_token: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
+            dedup_store: crate::cache::request_dedup::InMemoryDedupStore::new(),
         });
 
         let app = axum::Router::new()

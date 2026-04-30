@@ -115,6 +115,7 @@ supports_vision = false
             admin_token: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
+            dedup_store: crate::cache::request_dedup::InMemoryDedupStore::new(),
         })
     }
 

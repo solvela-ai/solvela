@@ -160,6 +160,7 @@ supports_vision = false
             admin_token: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
+            dedup_store: crate::cache::request_dedup::InMemoryDedupStore::new(),
         })
     }
 
@@ -231,6 +232,7 @@ supports_vision = false
             admin_token: Some("test-admin-token".to_string()),
             prometheus_handle: None,
             dev_bypass_payment: false,
+            dedup_store: crate::cache::request_dedup::InMemoryDedupStore::new(),
         })
     }
 

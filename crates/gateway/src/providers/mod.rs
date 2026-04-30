@@ -5,6 +5,7 @@ pub mod google;
 pub mod health;
 pub mod heartbeat;
 pub mod openai;
+pub mod stream_caps;
 pub mod xai;
 
 use std::collections::HashMap;

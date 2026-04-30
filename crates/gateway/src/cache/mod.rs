@@ -3,6 +3,12 @@
 //! Tier 1: Exact match — SHA256(model + messages + temperature) → Redis
 //! TTL: 10min default, configurable per model.
 //! Expected hit rate: 15–30%.
+//!
+//! Submodules:
+//! - [`request_dedup`] — Idempotency cache keyed by canonical SHA-256 of the
+//!   request body. Prevents double-charging on client retries.
+
+pub mod request_dedup;
 
 use std::num::NonZeroUsize;
 use std::sync::Mutex;

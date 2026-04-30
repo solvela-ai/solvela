@@ -505,6 +505,7 @@ async fn main() -> anyhow::Result<()> {
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         prometheus_handle,
         dev_bypass_payment,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
 
     // ── Shutdown signal for background tasks ────────────────────────────────

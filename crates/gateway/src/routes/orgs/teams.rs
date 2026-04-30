@@ -426,6 +426,7 @@ mod tests {
             admin_token: None, // no admin token — forces API key auth path
             prometheus_handle: None,
             dev_bypass_payment: false,
+            dedup_store: crate::cache::request_dedup::InMemoryDedupStore::new(),
         });
 
         let ctx = OrgContext {

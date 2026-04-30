@@ -52,6 +52,8 @@ base64 = { workspace = true }
 bs58 = { workspace = true }
 futures = { workspace = true }
 pin-project-lite = "0.2"
+regex = "1"
+once_cell = "1"
 
 # URL parsing / validation
 url = { workspace = true }
