@@ -7,6 +7,11 @@ use solvela_x402::types::{
 
 use crate::commands::wallet::load_wallet;
 
+/// Re-export of the interactive REPL entrypoint so callers can use
+/// `crate::commands::chat::run_interactive(...)` regardless of where the
+/// implementation lives.
+pub use crate::commands::chat_repl::run as run_interactive;
+
 /// Select the preferred payment scheme from the accepts list.
 ///
 /// If `override_scheme` is `Some`, the scheme with that name must be present in

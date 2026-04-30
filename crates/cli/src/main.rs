@@ -33,7 +33,8 @@ enum Commands {
     Models,
     /// Quick chat with auto-routing
     Chat {
-        /// The prompt to send
+        /// The prompt to send (omit when using --interactive)
+        #[arg(default_value = "")]
         prompt: String,
         /// Model or routing profile (auto, eco, premium, free)
         #[arg(short, long, default_value = "auto")]
@@ -44,6 +45,9 @@ enum Commands {
         /// Force a specific payment scheme: "exact" or "escrow" (default: prefer escrow)
         #[arg(long)]
         scheme: Option<String>,
+        /// Open an interactive REPL session
+        #[arg(short, long)]
+        interactive: bool,
     },
     /// Usage statistics
     Stats {
@@ -53,12 +57,24 @@ enum Commands {
     },
     /// Health check
     Health,
-    /// AI-powered diagnostics
+    /// Self-diagnostic checks for the Solvela CLI and gateway.
     Doctor,
     /// Load test the gateway with configurable concurrency and payment modes
     Loadtest(commands::loadtest::LoadTestArgs),
     /// MCP host config installer — install/uninstall Solvela MCP server in Claude Code, Cursor, etc.
     Mcp(commands::mcp::McpArgs),
+    /// Bootstrap a new Solvela project (.env + wallet)
+    Init {
+        /// Configure for Solana devnet (default) — demo mode auto-activates.
+        #[arg(long, conflicts_with = "mainnet")]
+        devnet: bool,
+        /// Configure for Solana mainnet — no airdrop, fund wallet manually.
+        #[arg(long, conflicts_with = "devnet")]
+        mainnet: bool,
+        /// Overwrite an existing .env without prompting.
+        #[arg(short, long)]
+        force: bool,
+    },
     /// Recover stranded escrow deposits (refund expired PDAs)
     Recover {
         /// Submit refund transactions (default is dry-run list)
@@ -81,6 +97,12 @@ enum WalletAction {
     Status,
     /// Export private key (base58)
     Export,
+    /// Request a SOL airdrop on devnet/testnet (refuses mainnet)
+    Airdrop {
+        /// Amount of SOL to request
+        #[arg(long, default_value_t = 1.0)]
+        amount: f64,
+    },
 }
 
 #[tokio::main]
@@ -92,6 +114,7 @@ async fn main() -> Result<()> {
             WalletAction::Init => commands::wallet::init().await?,
             WalletAction::Status => commands::wallet::status(&cli.api_url).await?,
             WalletAction::Export => commands::wallet::export()?,
+            WalletAction::Airdrop { amount } => commands::wallet::airdrop(amount).await?,
         },
         Commands::Models => commands::models::list(&cli.api_url).await?,
         Commands::Chat {
@@ -99,7 +122,19 @@ async fn main() -> Result<()> {
             model,
             yes,
             scheme,
-        } => commands::chat::run(&cli.api_url, &model, &prompt, yes, scheme.as_deref()).await?,
+            interactive,
+        } => {
+            if interactive {
+                commands::chat::run_interactive(&cli.api_url, &model, scheme.as_deref()).await?
+            } else {
+                if prompt.trim().is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "missing prompt — pass a prompt argument or use --interactive"
+                    ));
+                }
+                commands::chat::run(&cli.api_url, &model, &prompt, yes, scheme.as_deref()).await?
+            }
+        }
         Commands::Stats { days } => commands::stats::show(&cli.api_url, days).await?,
         Commands::Health => commands::health::check(&cli.api_url).await?,
         Commands::Doctor => commands::doctor::run(&cli.api_url).await?,
@@ -108,6 +143,18 @@ async fn main() -> Result<()> {
             commands::mcp::McpAction::Install(a) => commands::mcp::run_install(a).await?,
             commands::mcp::McpAction::Uninstall(a) => commands::mcp::run_uninstall(a).await?,
         },
+        Commands::Init {
+            devnet: _,
+            mainnet,
+            force,
+        } => {
+            let mode = if mainnet {
+                commands::init::InitMode::Mainnet
+            } else {
+                commands::init::InitMode::Devnet
+            };
+            commands::init::run(mode, force).await?
+        }
         Commands::Recover {
             execute,
             yes,
