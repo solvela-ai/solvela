@@ -55,6 +55,33 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // ── Subcommand dispatch ────────────────────────────────────────────────
+    //
+    // `solvela-gateway migrate` runs migrations only and exits — used by Fly.io
+    // `release_command` so a botched migration never starts traffic against a
+    // half-applied schema. Any other arg, or no arg, falls through to the
+    // normal boot path.
+    if let Some(arg) = std::env::args().nth(1) {
+        match arg.as_str() {
+            "migrate" => return run_migrate_command().await,
+            "--help" | "-h" | "help" => {
+                println!(
+                    "solvela-gateway — Solvela Solana x402 payment gateway\n\
+                     \n\
+                     USAGE:\n  \
+                       solvela-gateway              Start the HTTP server (default)\n  \
+                       solvela-gateway migrate      Run database migrations and exit\n  \
+                       solvela-gateway --help       Show this message\n"
+                );
+                return Ok(());
+            }
+            other => {
+                eprintln!("error: unknown subcommand `{other}`. Try `solvela-gateway --help`.");
+                std::process::exit(2);
+            }
+        }
+    }
+
     // Load configuration: TOML file as base, then env var overrides
     let mut app_config = match std::fs::read_to_string("config/default.toml") {
         Ok(toml_str) => toml::from_str::<config::AppConfig>(&toml_str).unwrap_or_else(|e| {
@@ -692,6 +719,39 @@ async fn main() -> anyhow::Result<()> {
 async fn run_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     sqlx::migrate!("../../migrations").run(pool).await?;
     info!("database migrations applied");
+    Ok(())
+}
+
+/// Run migrations as a one-shot subcommand (`solvela-gateway migrate`).
+///
+/// Used as the Fly.io `release_command` so a deploy with a broken migration
+/// fails *before* any new instance starts serving traffic. Connects to the
+/// database from `DATABASE_URL`, applies pending migrations via
+/// `run_migrations`, and exits 0 on success / non-zero on any failure.
+///
+/// `DATABASE_URL` is required for this subcommand — graceful no-op only
+/// applies to the long-running server path (see CLAUDE.md rule #15).
+async fn run_migrate_command() -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let url = std::env::var("DATABASE_URL")
+        .context("DATABASE_URL must be set for `solvela-gateway migrate`")?;
+
+    info!(
+        url = %redact_connection_url(&url),
+        "running database migrations"
+    );
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .connect(&url)
+        .await
+        .context("failed to connect to PostgreSQL")?;
+
+    run_migrations(&pool).await?;
+    pool.close().await;
+    info!("migrations complete — exiting");
     Ok(())
 }
 
