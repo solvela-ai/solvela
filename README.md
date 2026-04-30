@@ -136,6 +136,35 @@ curl -X POST http://localhost:8402/v1/chat/completions \
 
 ---
 
+## Try It Without Paying (Dev Mode)
+
+Want to exercise the chat path without funding a Solana wallet? The gateway supports a payment-bypass switch for local development.
+
+Set `SOLVELA_DEV_BYPASS_PAYMENT=true` in your environment. While that flag is on, `/v1/chat/completions` skips x402 verification entirely and forwards the request straight to the upstream provider, so you can test prompts, streaming, and provider integrations without any USDC. The bypass is gated on `SOLVELA_ENV` -- it is **ignored entirely when `SOLVELA_ENV=production`** -- but you should still treat it as a local-only convenience, not a deploy-time toggle.
+
+```bash
+# Start the gateway with payment bypass enabled (local dev only)
+SOLVELA_ENV=development \
+SOLVELA_DEV_BYPASS_PAYMENT=true \
+RUST_LOG=info cargo run -p gateway
+
+# In another shell — no PAYMENT-SIGNATURE header needed
+curl -X POST http://localhost:8402/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "Hello from dev mode"}]
+      }'
+```
+
+> **Warning:** Never set `SOLVELA_DEV_BYPASS_PAYMENT=true` in production. It disables payment verification for **all** callers, not just you, and turns the gateway into a free open proxy in front of paid LLM providers. The `.env.example` ships with the variable commented out and a default of `false` -- keep it that way for any deployed environment.
+
+### Production-safe alternative: zero-cost models
+
+For users who want a free experience without disabling payments globally, the gateway treats any model whose computed `cost.total == 0` (provider cost + 5% platform fee both zero) as a free path: those requests skip the 402 challenge and serve the response directly. This is the recommended way to expose a free tier in production -- mark the relevant models in `config/models.toml` with zero pricing instead of flipping the bypass flag. The free-tier model wiring is shipping in a parallel change; this README will be updated with the exact list once it lands.
+
+---
+
 ## Payment Flow
 
 ```mermaid
@@ -265,7 +294,7 @@ response, _ := client.Chat(ctx, "openai/gpt-4o", "Hello!")
 
 ## CLI
 
-The `rcr` CLI provides wallet management, model discovery, chat, and diagnostics.
+The `solvela` CLI provides wallet management, model discovery, chat, and diagnostics.
 
 ```bash
 cargo install --path crates/cli
@@ -412,7 +441,7 @@ fly status -a solvela-gateway
 curl https://solvela-gateway.fly.dev/health
 ```
 
-See `HANDOFF.md` for full deployment status and blockers.
+See [`STATUS.md`](./STATUS.md) for live deployment status and known follow-ups.
 
 ## License
 
