@@ -9,6 +9,7 @@ mod api_keys;
 mod audit;
 mod budget;
 mod crud;
+mod projects;
 mod teams;
 
 pub use analytics::*;
@@ -16,6 +17,7 @@ pub use api_keys::*;
 pub use audit::*;
 pub use budget::*;
 pub use crud::*;
+pub use projects::{create_project, delete_project, get_project, list_projects, update_project};
 pub use teams::*;
 
 use std::sync::Arc;
@@ -347,6 +349,14 @@ supports_vision = true
             )
             .route("/v1/orgs/{id}/teams/{tid}/stats", get(get_team_stats))
             .route("/v1/orgs/{id}/stats", get(get_org_stats))
+            .route(
+                "/v1/orgs/{id}/projects",
+                post(create_project).get(list_projects),
+            )
+            .route(
+                "/v1/orgs/{id}/projects/{pid}",
+                get(get_project).put(update_project).delete(delete_project),
+            )
             .with_state(state)
     }
 }

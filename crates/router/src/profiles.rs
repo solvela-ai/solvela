@@ -37,6 +37,15 @@ pub enum Profile {
     Premium,
     /// Free-tier only models.
     Free,
+    /// Tool-use-optimized — prefers models with strong tool/function-calling
+    /// fidelity over raw reasoning depth. Activated implicitly when the
+    /// inbound `ChatRequest` carries a non-empty `tools` array, or
+    /// explicitly via `model: "agentic"` / `model: "blockrun/auto"`.
+    ///
+    /// Prior art:
+    /// - ClawRouter `src/router/rules.ts` — `agenticTask` dimension scoring
+    /// - Franklin `src/router/index.ts:174-284` — AGENTIC keyword scoring
+    Agentic,
 }
 
 impl Profile {
@@ -47,6 +56,9 @@ impl Profile {
             "auto" | "balanced" | "default" => Some(Profile::Auto),
             "premium" | "best" | "quality" => Some(Profile::Premium),
             "free" | "oss" | "open" => Some(Profile::Free),
+            // Agentic — explicit aliases. The `blockrun/auto` form is kept
+            // for cross-compat with ClawRouter's profile naming.
+            "agentic" | "tools" | "tool-use" | "blockrun/auto" => Some(Profile::Agentic),
             _ => None,
         }
     }
@@ -81,6 +93,17 @@ pub fn resolve_model(profile: Profile, tier: Tier) -> &'static str {
         (Profile::Free, Tier::Medium) => "openai/gpt-oss-120b",
         (Profile::Free, Tier::Complex) => "openai/gpt-oss-120b",
         (Profile::Free, Tier::Reasoning) => "openai/gpt-oss-120b",
+
+        // AGENTIC: prefer models with strong tool-calling fidelity over
+        // raw reasoning depth. Prior art:
+        // - ClawRouter `src/router/rules.ts` `agenticTask` dimension
+        // - Franklin `src/router/index.ts:174-284` AGENTIC keyword scoring
+        // The picks below all have `supports_tools = true` in
+        // `config/models.toml` and are well-tested for tool/function calls.
+        (Profile::Agentic, Tier::Simple) => "openai/gpt-4o-mini",
+        (Profile::Agentic, Tier::Medium) => "openai/gpt-4.1",
+        (Profile::Agentic, Tier::Complex) => "anthropic/claude-sonnet-4-20250514",
+        (Profile::Agentic, Tier::Reasoning) => "anthropic/claude-opus-4-20250514",
     }
 }
 
@@ -97,6 +120,7 @@ pub fn resolve_alias(alias: &str) -> Option<&'static str> {
         "deepseek" | "ds" => Some("deepseek/deepseek-chat"),
         "deepseek-r" | "reasoner" => Some("deepseek/deepseek-reasoner"),
         "free" | "oss" => Some("openai/gpt-oss-120b"),
+        "demo" | "echo" => Some("solvela/demo"),
         "o3-mini" | "o3mini" => Some("openai/o3-mini"),
         "o4-mini" | "o4mini" => Some("openai/o4-mini"),
         "gpt4.1" | "gpt-4.1" | "gpt41" => Some("openai/gpt-4.1"),
@@ -158,5 +182,53 @@ mod tests {
             Some("anthropic/claude-sonnet-4-20250514")
         );
         assert_eq!(resolve_alias("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_agentic_profile_recognized_aliases() {
+        assert_eq!(Profile::from_alias("agentic"), Some(Profile::Agentic));
+        assert_eq!(Profile::from_alias("AGENTIC"), Some(Profile::Agentic));
+        assert_eq!(Profile::from_alias("tools"), Some(Profile::Agentic));
+        assert_eq!(Profile::from_alias("tool-use"), Some(Profile::Agentic));
+        assert_eq!(Profile::from_alias("blockrun/auto"), Some(Profile::Agentic));
+    }
+
+    #[test]
+    fn test_agentic_profile_resolves_to_tool_capable_models() {
+        // Every tier in the agentic profile should resolve to a model that
+        // appears in `config/models.toml` with `supports_tools = true`.
+        // We don't load the registry here (router crate is independent) —
+        // these IDs are checked by the gateway's integration tests which
+        // load the real TOML.
+        assert_eq!(
+            resolve_model(Profile::Agentic, Tier::Simple),
+            "openai/gpt-4o-mini"
+        );
+        assert_eq!(
+            resolve_model(Profile::Agentic, Tier::Medium),
+            "openai/gpt-4.1"
+        );
+        assert_eq!(
+            resolve_model(Profile::Agentic, Tier::Complex),
+            "anthropic/claude-sonnet-4-20250514"
+        );
+        assert_eq!(
+            resolve_model(Profile::Agentic, Tier::Reasoning),
+            "anthropic/claude-opus-4-20250514"
+        );
+    }
+
+    #[test]
+    fn test_agentic_profile_differs_from_auto() {
+        // Agentic and Auto must produce different selections at every tier
+        // (otherwise the agentic profile is just a synonym for auto).
+        for tier in [Tier::Simple, Tier::Medium, Tier::Complex, Tier::Reasoning] {
+            let auto = resolve_model(Profile::Auto, tier);
+            let agentic = resolve_model(Profile::Agentic, tier);
+            assert_ne!(
+                auto, agentic,
+                "agentic and auto should pick different models at tier {tier:?}"
+            );
+        }
     }
 }

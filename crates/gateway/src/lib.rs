@@ -19,6 +19,7 @@ pub mod service_health;
 pub mod services;
 pub mod session;
 pub mod usage;
+pub mod util;
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -212,6 +213,16 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             get(routes::orgs::get_team_stats),
         )
         .route("/v1/orgs/{id}/stats", get(routes::orgs::get_org_stats))
+        .route(
+            "/v1/orgs/{id}/projects",
+            post(routes::orgs::create_project).get(routes::orgs::list_projects),
+        )
+        .route(
+            "/v1/orgs/{id}/projects/{pid}",
+            get(routes::orgs::get_project)
+                .put(routes::orgs::update_project)
+                .delete(routes::orgs::delete_project),
+        )
         .route("/.well-known/agent.json", get(a2a::agent_card::agent_card))
         .route("/a2a", post(a2a::jsonrpc::a2a_endpoint))
         .route("/metrics", get(routes::metrics::get_metrics))

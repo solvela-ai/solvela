@@ -200,6 +200,19 @@ pub async fn chat_completions(
         }
     }
 
+    // Step 2c: Sanitize tool-use schemas. Some models (notably OpenAI's o3
+    // family) reject array-typed parameters that lack an `items` field, so
+    // we walk every forwarded tool's parameters and inject a permissive
+    // `items: {}` wherever one is missing. Pattern from Franklin
+    // `src/mcp/client.ts:53-80`.
+    if let Some(tools) = req.tools.as_mut() {
+        for tool in tools.iter_mut() {
+            if let Some(params) = tool.function.parameters.as_mut() {
+                crate::util::schema_sanitize::sanitize_array_items(params);
+            }
+        }
+    }
+
     // Step 3: Check for payment
     let payment_header = headers
         .get("payment-signature")
@@ -916,9 +929,45 @@ fn resolve_model_with_debug(
     req: &ChatRequest,
     state: &AppState,
 ) -> Result<(String, String, String, f64), GatewayError> {
-    // Check for profile-based routing (e.g., "auto", "eco", "premium")
+    // Demo-provider short-circuit: when the requested model is the demo
+    // model itself, OR when `auto` is requested and the demo is the only
+    // registered provider, route directly to the demo. This lets a fresh
+    // clone of the repo answer requests without any provider API keys.
+    // See `providers/demo.rs` for activation rules.
+    if crate::providers::demo::is_demo_model(&req.model)
+        || (req.model.eq_ignore_ascii_case("auto") && demo_only_providers(state))
+    {
+        return Ok((
+            crate::providers::demo::DEMO_MODEL_ID.to_string(),
+            "demo".to_string(),
+            "N/A".to_string(),
+            0.0,
+        ));
+    }
+
+    // Implicit agentic profile: when the inbound request carries a non-empty
+    // `tools` array AND the caller didn't pin a specific model, route
+    // through the agentic profile so we pick a tool-fidelity-strong model.
+    // Prior art: ClawRouter's `agenticTask` dimension and Franklin's
+    // AGENTIC keyword scoring (`src/router/index.ts:174-284`).
+    let has_tools = req.tools.as_ref().is_some_and(|tools| !tools.is_empty());
+    let is_profile_alias = Profile::from_alias(&req.model).is_some();
+    if has_tools && is_profile_alias {
+        // Override the requested profile with `agentic` whenever tools are
+        // present. Explicit `model: "agentic"` callers also land here.
+        let result = scorer::classify(&req.messages, true);
+        let model_id = profiles::resolve_model(profiles::Profile::Agentic, result.tier);
+        return Ok((
+            model_id.to_string(),
+            "agentic".to_string(),
+            format!("{:?}", result.tier),
+            result.score,
+        ));
+    }
+
+    // Check for profile-based routing (e.g., "auto", "eco", "premium", "agentic")
     if let Some(profile) = Profile::from_alias(&req.model) {
-        let result = scorer::classify(&req.messages, false);
+        let result = scorer::classify(&req.messages, has_tools);
         let model_id = profiles::resolve_model(profile, result.tier);
         return Ok((
             model_id.to_string(),
@@ -949,6 +998,12 @@ fn resolve_model_with_debug(
     }
 
     Err(GatewayError::ModelNotFound(req.model.clone()))
+}
+
+/// `true` when the only registered provider is the demo provider.
+fn demo_only_providers(state: &AppState) -> bool {
+    let configured = state.providers.configured_providers();
+    configured.len() == 1 && configured[0] == crate::providers::demo::DEMO_PROVIDER_NAME
 }
 
 #[cfg(test)]

@@ -136,6 +136,15 @@ The scorer in `crates/router/src/scorer.rs` classifies requests across 15 weight
 
 Provider API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`. Gateway config uses `SOLVELA_` prefix (legacy `RCR_` accepted with deprecation warning). Solana keys: `SOLVELA_SOLANA_RPC_URL`, `SOLVELA_SOLANA_RECIPIENT_WALLET`, `SOLVELA_SOLANA_FEE_PAYER_KEY`. Optional: `DATABASE_URL`, `REDIS_URL`. See `.env.example` for full list.
 
+## Demo Provider ("first 5 minutes" path)
+
+Solvela ships with a built-in `demo` provider (`crates/gateway/src/providers/demo.rs`) that returns a canned echo of the user's prompt with zero token usage so cost is always $0. It activates automatically when **either**:
+
+- `SOLVELA_DEMO_MODE=true` is set (also accepts `1`, `yes`, `on`), **or**
+- No real provider API keys are configured at startup (`from_env` registers no real providers).
+
+Use the model ID `demo` (alias) or `solvela/demo` (canonical) — both resolve to the demo provider. When the demo provider is the only one registered, `model: "auto"` also lands on it via the standard model fallback chain. This makes `cargo run -p gateway && curl /v1/chat/completions` work on a fresh clone with no `.env`.
+
 ## Code Conventions
 
 ### Rust Conventions

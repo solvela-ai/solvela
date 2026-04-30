@@ -14,13 +14,19 @@ use crate::a2a::types::{AP2_EXTENSION_URI, X402_EXTENSION_URI};
 use crate::AppState;
 
 /// `GET /.well-known/agent.json` — Return the A2A AgentCard.
+///
+/// Tool/skill schemas embedded here are passed through
+/// `crate::util::schema_sanitize::sanitize_array_items` before serialization
+/// so that strict downstream consumers (e.g., OpenAI o3-family models that
+/// reject array-typed schemas without `items`) accept the card without
+/// rewriting it. Pattern from Franklin `src/mcp/client.ts:53-80`.
 pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut schemes = vec!["exact"];
     if state.escrow_claimer.is_some() {
         schemes.push("escrow");
     }
 
-    Json(json!({
+    let mut card = json!({
         "name": "Solvela",
         "description": "Solana-native AI agent payment gateway — pay for LLM API calls with USDC-SPL via x402",
         "url": format!("http://{}:{}", state.config.server.host, state.config.server.port),
@@ -56,7 +62,15 @@ pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "outputModes": ["text"]
             }
         ]
-    }))
+    });
+
+    // Walk the rendered card and ensure any embedded tool/skill schemas
+    // satisfy the "every array has `items`" invariant. The current static
+    // body contains no array-typed schemas, so this is defensive — when
+    // skills grow tool parameter schemas they'll be sanitized automatically.
+    crate::util::schema_sanitize::sanitize_array_items(&mut card);
+
+    Json(card)
 }
 
 #[cfg(test)]
