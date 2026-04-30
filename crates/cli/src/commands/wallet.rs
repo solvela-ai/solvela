@@ -4,8 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 
-/// Default Solana RPC URL when no env var is set.
-const DEFAULT_RPC_URL: &str = "https://api.devnet.solana.com";
+use crate::commands::util::resolve_rpc_url as shared_resolve_rpc_url;
 
 /// Lamports per SOL.
 const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
@@ -171,23 +170,26 @@ pub(crate) fn load_wallet() -> Result<serde_json::Value> {
 // Airdrop (devnet/testnet only)
 // ---------------------------------------------------------------------------
 
-/// Refuse if the configured RPC URL targets mainnet (no airdrop on mainnet).
+/// Refuse airdrop unless the RPC URL is a known-safe environment.
+///
+/// A substring-block on "mainnet" is insufficient — third-party mainnet
+/// endpoints (e.g. `rpc.ankr.com/solana`) would bypass it.  Instead we
+/// maintain an explicit allow-list of safe-environment indicators and reject
+/// anything that does not match.
 fn assert_not_mainnet(rpc_url: &str) -> Result<()> {
-    if rpc_url.to_ascii_lowercase().contains("mainnet") {
+    let lower = rpc_url.to_ascii_lowercase();
+    let is_safe = lower.contains("devnet")
+        || lower.contains("testnet")
+        || lower.contains("localhost")
+        || lower.contains("127.0.0.1")
+        || lower.contains("0.0.0.0");
+    if !is_safe {
         return Err(anyhow!(
-            "refusing to request airdrop on mainnet RPC ({rpc_url}). \
-             Airdrops are devnet/testnet only — fund this wallet manually instead."
+            "refusing to request airdrop on an unrecognized RPC ({rpc_url}). \
+             Only devnet/testnet/localhost endpoints are allowed."
         ));
     }
     Ok(())
-}
-
-/// Resolve the configured Solana RPC URL from env, falling back to default.
-fn resolve_rpc_url() -> String {
-    std::env::var("SOLVELA_SOLANA_RPC_URL")
-        .or_else(|_| std::env::var("SOLANA_RPC_URL"))
-        .or_else(|_| std::env::var("RCR_SOLANA_RPC_URL"))
-        .unwrap_or_else(|_| DEFAULT_RPC_URL.to_string())
 }
 
 /// JSON-RPC `requestAirdrop` — returns the transaction signature.
@@ -317,7 +319,7 @@ pub async fn airdrop(amount_sol: f64) -> Result<()> {
         .as_str()
         .context("wallet missing address field")?;
 
-    let rpc_url = resolve_rpc_url();
+    let rpc_url = shared_resolve_rpc_url();
     assert_not_mainnet(&rpc_url)?;
 
     let lamports = sol_to_lamports(amount_sol)?;
@@ -550,18 +552,7 @@ mod tests {
 
     // --- Airdrop tests ---
 
-    #[test]
-    fn test_assert_not_mainnet_rejects_mainnet() {
-        let result = assert_not_mainnet("https://api.mainnet-beta.solana.com");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("mainnet"));
-    }
-
-    #[test]
-    fn test_assert_not_mainnet_rejects_capitalised() {
-        let result = assert_not_mainnet("https://Mainnet-Beta.SOLANA.com");
-        assert!(result.is_err());
-    }
+    // --- assert_not_mainnet allow-list tests ---
 
     #[test]
     fn test_assert_not_mainnet_allows_devnet() {
@@ -576,6 +567,51 @@ mod tests {
     #[test]
     fn test_assert_not_mainnet_allows_localhost() {
         assert!(assert_not_mainnet("http://localhost:8899").is_ok());
+    }
+
+    #[test]
+    fn test_assert_not_mainnet_allows_127_0_0_1() {
+        assert!(assert_not_mainnet("http://127.0.0.1:8899").is_ok());
+    }
+
+    #[test]
+    fn test_assert_not_mainnet_rejects_mainnet_beta() {
+        let result = assert_not_mainnet("https://api.mainnet-beta.solana.com");
+        assert!(result.is_err(), "mainnet-beta should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unrecognized RPC"),
+            "error message should mention unrecognized RPC, got: {err}"
+        );
+    }
+
+    /// HIGH-1: third-party mainnet endpoints must be blocked even though the
+    /// URL does not contain the word "mainnet".
+    #[test]
+    fn test_assert_not_mainnet_rejects_ankr_mainnet() {
+        let result = assert_not_mainnet("https://rpc.ankr.com/solana");
+        assert!(
+            result.is_err(),
+            "rpc.ankr.com/solana (mainnet) should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_assert_not_mainnet_rejects_1rpc() {
+        let result = assert_not_mainnet("https://1rpc.io/sol");
+        assert!(result.is_err(), "1rpc.io/sol should be rejected");
+    }
+
+    #[test]
+    fn test_assert_not_mainnet_rejects_empty_string() {
+        let result = assert_not_mainnet("");
+        assert!(result.is_err(), "empty string should be rejected");
+    }
+
+    /// A URL that contains "devnet" as a subdomain should still be allowed.
+    #[test]
+    fn test_assert_not_mainnet_allows_devnet_subdomain() {
+        assert!(assert_not_mainnet("https://devnet.something.io/solana").is_ok());
     }
 
     #[test]

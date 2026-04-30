@@ -16,6 +16,7 @@
 //! `stream: false`).
 
 use std::io::Write;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use rustyline::error::ReadlineError;
@@ -89,13 +90,16 @@ fn print_help() {
 /// Falls back to the existing payment flow in [`chat`] when the gateway
 /// requires payment (402). The interactive REPL does not currently prompt for
 /// per-turn confirmation — it inherits `--yes` semantics implicitly.
+///
+/// The `client` is built once in [`run`] with connect and overall timeouts so
+/// that a stalled gateway cannot hang the REPL indefinitely.
 async fn send_turn(
+    client: &reqwest::Client,
     api_url: &str,
     model: &str,
     history: &[ChatMessage],
     scheme: Option<&str>,
 ) -> Result<TurnReply> {
-    let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": model,
         "messages": history,
@@ -157,6 +161,13 @@ fn parse_turn_reply(json: &serde_json::Value) -> TurnReply {
 
 /// Public entrypoint for `solvela chat --interactive`.
 pub async fn run(api_url: &str, initial_model: &str, scheme: Option<&str>) -> Result<()> {
+    // Build once: a stalled gateway must not hang the REPL forever.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
+
     let mut model = initial_model.to_string();
     let mut history: Vec<ChatMessage> = Vec::new();
 
@@ -200,7 +211,7 @@ pub async fn run(api_url: &str, initial_model: &str, scheme: Option<&str>) -> Re
                     role: "user".to_string(),
                     content: user_input,
                 });
-                match send_turn(api_url, &model, &history, scheme).await {
+                match send_turn(&client, api_url, &model, &history, scheme).await {
                     Ok(reply) => {
                         println!("{}", reply.content);
                         if let (Some(m), Some(c)) = (&reply.model, &reply.cost) {

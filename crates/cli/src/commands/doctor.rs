@@ -4,14 +4,12 @@
 //! [`Status`] helpers (these are exercised in unit tests). Network calls are
 //! kept as thin wrappers so the classification logic stays test-friendly.
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use solvela_x402::solana_types::{derive_ata, Pubkey};
 
-/// Default Solana RPC URL when no env var is set.
-const DEFAULT_RPC_URL: &str = "https://api.devnet.solana.com";
+use crate::commands::util::{resolve_rpc_url, wallet_file_path};
 
 /// USDC-SPL mint address (mainnet-beta).
 const USDC_MINT_MAINNET: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -185,21 +183,6 @@ async fn fetch_usdc_balance(
     Ok(amount)
 }
 
-/// Best-effort wallet path resolver — mirrors `wallet::wallet_file()`.
-fn wallet_file_path() -> String {
-    std::env::var("HOME")
-        .map(|h| format!("{h}/.solvela/wallet.json"))
-        .unwrap_or_else(|_| ".solvela/wallet.json".to_string())
-}
-
-/// Resolve the configured Solana RPC URL from env, falling back to default.
-fn resolve_rpc_url() -> String {
-    std::env::var("SOLVELA_SOLANA_RPC_URL")
-        .or_else(|_| std::env::var("SOLANA_RPC_URL"))
-        .or_else(|_| std::env::var("RCR_SOLANA_RPC_URL"))
-        .unwrap_or_else(|_| DEFAULT_RPC_URL.to_string())
-}
-
 /// Pick the USDC mint based on whether the RPC URL targets devnet.
 fn usdc_mint_for_rpc(rpc_url: &str) -> &'static str {
     if rpc_url.contains("devnet") {
@@ -237,12 +220,18 @@ pub async fn run(api_url: &str) -> Result<()> {
 
     // 2. Wallet file
     let wallet_path = wallet_file_path();
-    if Path::new(&wallet_path).exists() {
-        print_check(Status::Ok, &format!("Wallet present at {wallet_path}"));
+    if wallet_path.exists() {
+        print_check(
+            Status::Ok,
+            &format!("Wallet present at {}", wallet_path.display()),
+        );
     } else {
         print_check(
             Status::Warn,
-            &format!("No wallet at {wallet_path} — run `solvela wallet init`"),
+            &format!(
+                "No wallet at {} — run `solvela wallet init`",
+                wallet_path.display()
+            ),
         );
     }
 
@@ -308,7 +297,7 @@ pub async fn run(api_url: &str) -> Result<()> {
     }
 
     // 7. Wallet USDC-SPL balance (only if wallet file is loadable)
-    if Path::new(&wallet_path).exists() {
+    if wallet_path.exists() {
         match crate::commands::wallet::load_wallet() {
             Ok(wallet) => {
                 let address = wallet["address"].as_str().unwrap_or("");

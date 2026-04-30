@@ -9,4 +9,5 @@ pub mod models;
 pub mod recover;
 pub(crate) mod solana_tx;
 pub mod stats;
+pub mod util;
 pub mod wallet;
