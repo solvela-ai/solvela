@@ -255,6 +255,7 @@ pub fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     let router = build_router(
         Arc::clone(&state),
@@ -401,6 +402,7 @@ pub fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) 
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     let router = build_router(
         Arc::clone(&state),
@@ -468,6 +470,7 @@ pub fn test_app_with_mock_provider_and_escrow() -> axum::Router {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -534,6 +537,7 @@ pub fn test_app_with_escrow() -> axum::Router {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }

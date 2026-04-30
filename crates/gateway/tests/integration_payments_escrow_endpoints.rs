@@ -127,6 +127,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -443,6 +444,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
 
     // Simulate claim processing by incrementing metrics atomically
@@ -517,6 +519,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
 
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));

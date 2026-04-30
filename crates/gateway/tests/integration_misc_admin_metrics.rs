@@ -365,6 +365,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         admin_token: None, // <-- no admin token configured
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     let app = build_router(
         Arc::clone(&state),

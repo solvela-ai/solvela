@@ -90,6 +90,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        dedup_store: gateway::cache::request_dedup::InMemoryDedupStore::new(),
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
