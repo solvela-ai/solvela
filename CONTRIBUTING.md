@@ -2,6 +2,14 @@
 
 Thanks for your interest. This file covers the basics for getting a change merged.
 
+## Contributor License Agreement
+
+By submitting a pull request to this repository, you agree that your contributions are licensed under the MIT License. You also grant Solvela maintainers a perpetual, irrevocable, worldwide license to relicense your contribution under any future license adopted by the project.
+
+This is necessary to preserve the project's ability to evolve its licensing terms (e.g., adopt additional licenses or dual-licensing arrangements in the future without requiring consent from past contributors).
+
+This is a lightweight inbound-license agreement embedded in this file — there is no separate CLA tool or signature flow. Opening a PR indicates your agreement.
+
 ## Reporting issues
 
 - **Security vulnerabilities** — see [`SECURITY.md`](./SECURITY.md). Email `security@solvela.ai`. Do not open public issues for security reports.
@@ -58,4 +66,4 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full architecture overview, build matrix,
 
 ## License
 
-By contributing you agree your contribution is licensed under [MIT](./LICENSE).
+By contributing you agree your contribution is licensed under the MIT License. See the [Contributor License Agreement](#contributor-license-agreement) section above for full terms.
