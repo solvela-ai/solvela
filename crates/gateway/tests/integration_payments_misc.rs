@@ -206,7 +206,7 @@ async fn test_chat_wrong_resource_url_rejected() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["type"], "invalid_payment");
+    assert_eq!(json["error"]["type"], "payment_required"); // code stayed the same ("invalid_payment"); type changed by error envelope normalization
     assert!(json["error"]["message"]
         .as_str()
         .unwrap()

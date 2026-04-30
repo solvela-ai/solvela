@@ -230,7 +230,7 @@ async fn test_proxy_returns_404_for_unknown_service() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["type"], "model_not_found");
+    assert_eq!(json["error"]["type"], "invalid_request_error"); // code stayed the same ("model_not_found"); type changed by error envelope normalization
     assert!(json["error"]["message"]
         .as_str()
         .unwrap()
@@ -257,7 +257,7 @@ async fn test_proxy_returns_400_for_internal_service() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["type"], "bad_request");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
     assert!(json["error"]["message"]
         .as_str()
         .unwrap()
@@ -284,7 +284,7 @@ async fn test_proxy_returns_400_for_non_x402_service() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["type"], "bad_request");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
     assert!(json["error"]["message"].as_str().unwrap().contains("x402"));
 }
 

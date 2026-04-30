@@ -155,7 +155,7 @@ async fn test_chat_paid_no_provider_returns_500() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["type"], "internal_error");
+    assert_eq!(json["error"]["type"], "upstream_error"); // code stayed the same ("internal_error"); type changed by error envelope normalization
 }
 
 #[tokio::test]
@@ -185,7 +185,7 @@ async fn test_malformed_payment_header_returns_402() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["type"], "invalid_payment");
+    assert_eq!(json["error"]["type"], "payment_required"); // code stayed the same ("invalid_payment"); type changed by error envelope normalization
     assert!(json["error"]["message"]
         .as_str()
         .unwrap()
