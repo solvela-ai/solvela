@@ -39,7 +39,7 @@ fn generate_service_id(request_body: &[u8]) -> Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     hasher.update(request_body);
     let mut nonce = [0u8; 8];
-    getrandom::getrandom(&mut nonce).context("getrandom failed to generate nonce")?;
+    getrandom::fill(&mut nonce).context("getrandom failed to generate nonce")?;
     hasher.update(nonce);
     let hash = hasher.finalize();
     let mut id = [0u8; 32];

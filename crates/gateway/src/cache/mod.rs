@@ -110,7 +110,7 @@ impl ResponseCache {
             hasher.update(temp.to_le_bytes());
         }
         let hash = hasher.finalize();
-        format!("rcr:cache:{:x}", hash)
+        format!("rcr:cache:{}", hex::encode(hash))
     }
 
     /// Try to get a cached response.
