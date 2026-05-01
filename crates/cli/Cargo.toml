@@ -36,7 +36,7 @@ tempfile = "3"
 url = { workspace = true }
 getrandom = { version = "0.2", features = ["std"] }
 hdrhistogram = "7"
-secrecy = "0.8"
+secrecy = "0.10"
 
 [dev-dependencies]
 wiremock = "0.6"
