@@ -31,7 +31,7 @@ pub async fn init() -> Result<()> {
     // for signature verification. The 32-byte secret scalar is the private key;
     // the corresponding 32-byte verifying key is the Solana public key.
     let mut seed = [0u8; 32];
-    getrandom::getrandom(&mut seed).context("failed to generate random seed")?;
+    getrandom::fill(&mut seed).context("failed to generate random seed")?;
 
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
     let verifying_key = signing_key.verifying_key();

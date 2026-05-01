@@ -35,7 +35,7 @@ fn select_tier(weights: &TierWeights) -> &'static str {
 /// Generate a single random byte via `getrandom`.
 fn rand_u8() -> u8 {
     let mut buf = [0u8; 1];
-    getrandom::getrandom(&mut buf).unwrap_or_default();
+    getrandom::fill(&mut buf).unwrap_or_default();
     buf[0]
 }
 
