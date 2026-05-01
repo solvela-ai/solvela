@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn test_exact_payment_debug_redacts_keypair() {
         let strategy = ExactPaymentStrategy::new(
-            SecretString::new("super-secret-keypair".to_string()),
+            SecretString::from("super-secret-keypair"),
             reqwest::Client::new(),
         );
         let debug_output = format!("{:?}", strategy);
@@ -342,14 +342,14 @@ mod tests {
     #[test]
     fn test_exact_payment_name() {
         let strategy =
-            ExactPaymentStrategy::new(SecretString::new("key".to_string()), reqwest::Client::new());
+            ExactPaymentStrategy::new(SecretString::from("key"), reqwest::Client::new());
         assert_eq!(strategy.name(), "exact");
     }
 
     #[tokio::test]
     async fn test_exact_payment_no_exact_scheme_returns_error() {
         let strategy =
-            ExactPaymentStrategy::new(SecretString::new("key".to_string()), reqwest::Client::new());
+            ExactPaymentStrategy::new(SecretString::from("key"), reqwest::Client::new());
         // Provide only an escrow accept — no exact scheme available.
         let accepts = vec![PaymentAccept {
             scheme: "escrow".to_string(),
@@ -404,7 +404,7 @@ mod tests {
         let keypair_b58 = bs58::encode(&full_key).into_string();
 
         let strategy =
-            ExactPaymentStrategy::new(SecretString::new(keypair_b58), reqwest::Client::new());
+            ExactPaymentStrategy::new(SecretString::new(keypair_b58.into_boxed_str()), reqwest::Client::new());
 
         let accepts = vec![PaymentAccept {
             scheme: "exact".to_string(),
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn test_escrow_payment_name() {
         let strategy = EscrowPaymentStrategy::new(
-            SecretString::new("key".to_string()),
+            SecretString::from("key"),
             reqwest::Client::new(),
             "http://localhost:8899".to_string(),
         );
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn test_escrow_payment_debug_redacts_keypair() {
         let strategy = EscrowPaymentStrategy::new(
-            SecretString::new("super-secret-escrow-key".to_string()),
+            SecretString::from("super-secret-escrow-key"),
             reqwest::Client::new(),
             "http://localhost:8899".to_string(),
         );
@@ -499,7 +499,7 @@ mod tests {
     #[tokio::test]
     async fn test_escrow_payment_no_escrow_scheme_returns_error() {
         let strategy = EscrowPaymentStrategy::new(
-            SecretString::new("key".to_string()),
+            SecretString::from("key"),
             reqwest::Client::new(),
             "http://localhost:8899".to_string(),
         );
@@ -528,7 +528,7 @@ mod tests {
     #[tokio::test]
     async fn test_escrow_payment_missing_program_id_returns_error() {
         let strategy = EscrowPaymentStrategy::new(
-            SecretString::new("key".to_string()),
+            SecretString::from("key"),
             reqwest::Client::new(),
             "http://localhost:8899".to_string(),
         );
@@ -629,7 +629,7 @@ mod tests {
         let keypair_b58 = make_test_keypair_b58();
 
         let strategy = EscrowPaymentStrategy::new(
-            SecretString::new(keypair_b58.clone()),
+            SecretString::new(keypair_b58.clone().into_boxed_str()),
             reqwest::Client::new(),
             mock_rpc.uri(),
         );

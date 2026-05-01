@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
