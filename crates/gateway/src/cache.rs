@@ -3,6 +3,18 @@
 //! Tier 1: Exact match — SHA256(model + messages + temperature) → Redis
 //! TTL: 10min default, configurable per model.
 //! Expected hit rate: 15–30%.
+//!
+//! # Cache key design
+//! Cache keys are keyed on `SHA-256(model ‖ serialised_messages ‖ temperature)` —
+//! deliberately **wallet-agnostic**. A response cached for wallet A will be returned
+//! to wallet B if the prompt is identical. Both wallets pay the gateway's 402 fee
+//! (payment verification runs before the cache check), but the upstream LLM is only
+//! charged once. This is an intentional design trade-off: prompt deduplication lowers
+//! upstream costs and improves margin. The trade-off is that wallet B receives wallet
+//! A's response without the gateway incurring a new upstream cost.
+//!
+//! If per-wallet response isolation is ever required, the cache key must include the
+//! payer wallet address.
 
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
