@@ -488,29 +488,30 @@ impl UsageTracker {
 // Redis + DB helper functions for budget enforcement
 // ---------------------------------------------------------------------------
 
-/// Increment a Redis key by `amount` and set its TTL. Fire-and-forget style
-/// (logs warnings on failure, never panics).
+/// Increment a Redis key by `amount` and set its TTL atomically.
+///
+/// Both commands are sent in a single pipelined round-trip via `MULTI/EXEC`,
+/// so a process crash between the two commands can never leave a spend key
+/// without a TTL (which would otherwise permanently block future requests).
 async fn incr_and_expire(
     conn: &mut redis::aio::MultiplexedConnection,
     key: &str,
     amount: f64,
     ttl_secs: u64,
 ) {
-    if let Err(e) = redis::cmd("INCRBYFLOAT")
+    let result: Result<(), redis::RedisError> = redis::pipe()
+        .atomic()
+        .cmd("INCRBYFLOAT")
         .arg(key)
         .arg(amount)
-        .query_async::<()>(conn)
-        .await
-    {
-        warn!(error = %e, key = %key, "failed to INCRBYFLOAT in Redis");
-    }
-    if let Err(e) = redis::cmd("EXPIRE")
+        .cmd("EXPIRE")
         .arg(key)
         .arg(ttl_secs)
-        .query_async::<()>(conn)
-        .await
-    {
-        warn!(error = %e, key = %key, "failed to set TTL in Redis");
+        .query_async(conn)
+        .await;
+
+    if let Err(e) = result {
+        warn!(error = %e, key = %key, "failed to atomically INCRBYFLOAT+EXPIRE in Redis");
     }
 }
 
