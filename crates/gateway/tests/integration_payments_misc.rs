@@ -16,6 +16,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+#[allow(unused_imports)]
 use base64::Engine;
 #[allow(unused_imports)]
 use futures::stream;
