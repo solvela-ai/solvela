@@ -247,20 +247,17 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             HeaderValue::from_static("default-src 'none'"),
         ))
         .layer({
-            // Only add HSTS in production to avoid issues with local dev (HTTP).
+            // Only add HSTS in production — omit the layer entirely in non-prod
+            // environments so the header is never emitted (not even as an empty value).
             // SOLVELA_ENV is canonical; RCR_ENV is accepted as a deprecated fallback.
             let env_value = std::env::var("SOLVELA_ENV").or_else(|_| std::env::var("RCR_ENV"));
             let is_prod = matches!(env_value.as_deref(), Ok("production") | Ok("prod"));
-            SetResponseHeaderLayer::if_not_present(
-                HeaderName::from_static("strict-transport-security"),
-                if is_prod {
-                    HeaderValue::from_static("max-age=31536000; includeSubDomains")
-                } else {
-                    // Empty value — Tower's if_not_present still sets the header,
-                    // so we skip via a no-op value that browsers ignore.
-                    HeaderValue::from_static("")
-                },
-            )
+            tower::util::option_layer(is_prod.then(|| {
+                SetResponseHeaderLayer::if_not_present(
+                    HeaderName::from_static("strict-transport-security"),
+                    HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+                )
+            }))
         })
         // Request ID
         .layer(RequestIdLayer)

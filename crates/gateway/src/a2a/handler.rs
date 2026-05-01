@@ -320,13 +320,37 @@ async fn handle_payment_submitted(
                     data: None,
                 });
             }
-            // In-memory replay check via std::sync::Mutex + LRU
+            // In-memory replay check via std::sync::Mutex + LRU with TTL.
+            //
+            // GHSA-wc9q-wc6q-gwmq: recover from poisoned lock instead of panicking.
             let mut set = state
                 .replay_set
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            set.put(tx_raw.to_string(), std::time::Instant::now())
-                .is_some()
+            let now = std::time::Instant::now();
+            let found = match set.get(tx_raw) {
+                Some(&inserted_at)
+                    if now.duration_since(inserted_at) < crate::AppState::REPLAY_TTL =>
+                {
+                    true
+                }
+                Some(_) => {
+                    // Entry expired — remove and treat as not found
+                    set.pop(tx_raw);
+                    false
+                }
+                None => false,
+            };
+            if found {
+                true
+            } else {
+                set.put(tx_raw.to_string(), now);
+                warn!(
+                    tx = %tx_raw,
+                    "A2A payment accepted under degraded in-memory replay protection (no Redis)"
+                );
+                false
+            }
         };
 
         if replay_detected {
