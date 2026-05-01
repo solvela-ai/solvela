@@ -14,6 +14,16 @@ use tracing::{info, warn};
 
 use solvela_protocol::{ChatRequest, ChatResponse};
 
+/// Redis key prefix for response cache entries.
+///
+/// Centralised here so a rename never requires hunting down inline literals.
+/// Replacing the legacy `rcr:` prefix completes the Solvela rebrand in the
+/// Redis keyspace; existing `rcr:` keys will expire naturally — no dual-write.
+const CACHE_KEY_PREFIX: &str = "solvela:cache:";
+
+/// Redis key prefix for transaction replay-protection entries.
+const REPLAY_KEY_PREFIX: &str = "solvela:txn:";
+
 /// Cache configuration.
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
@@ -104,7 +114,7 @@ impl ResponseCache {
             hasher.update(temp.to_le_bytes());
         }
         let hash = hasher.finalize();
-        format!("rcr:cache:{}", hex::encode(hash))
+        format!("{}{}", CACHE_KEY_PREFIX, hex::encode(hash))
     }
 
     /// Try to get a cached response.
@@ -212,7 +222,7 @@ impl ResponseCache {
             120
         };
 
-        let key = format!("rcr:txn:{}", tx_signature);
+        let key = format!("{}{}", REPLAY_KEY_PREFIX, tx_signature);
 
         match self.client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
@@ -404,7 +414,7 @@ mod tests {
         let key1 = ResponseCache::cache_key(&req);
         let key2 = ResponseCache::cache_key(&req);
         assert_eq!(key1, key2);
-        assert!(key1.starts_with("rcr:cache:"));
+        assert!(key1.starts_with("solvela:cache:"));
     }
 
     #[test]
