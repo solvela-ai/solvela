@@ -42,6 +42,7 @@ export function getMDXComponents(): MDXComponents {
     // Custom components
     Card,
     CardGroup,
+    Cards: CardGroup, // fumadocs convention alias
     Info,
     Tip,
     Warning,

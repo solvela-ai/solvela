@@ -1,0 +1,241 @@
+---
+title: EIP-712 USDC Domain Hardcoding
+description: When Solvela ships EVM support, clients MUST hardcode the USDC EIP-712 domain per chain — never trust the 402 response's extra fields
+---
+
+> **Status: specification only.** Solvela is Solana-first today; this page locks down a constraint that **must** be honored when EVM support lands. The hardcoded table belongs in `crates/x402/src/eip712_domains.rs` (suggested filename) and **every** client SDK must mirror it. Track follow-up at the bottom.
+
+## What it is
+
+When Solvela accepts payment on an EVM chain (Base, Ethereum, Polygon, etc.), the 402 `PaymentRequired` response will describe the payment in [EIP-712](https://eips.ethereum.org/EIPS/eip-712) typed-data form so the client can produce a structured signature against USDC's `transferWithAuthorization` (EIP-3009) entry point.
+
+Every EIP-712 signature is bound to a `domain` separator: `{ name, version, chainId, verifyingContract }`. The signature is only valid against a contract whose `DOMAIN_SEPARATOR` matches the `(name, version, chainId, verifyingContract)` tuple the signer used.
+
+**The constraint:** the `name` and `version` fields MUST be hardcoded by the client per `(chainId, verifyingContract)` pair. Clients **must not** read these fields from the 402 response's `extra` block.
+
+## Why it matters — the domain confusion attack
+
+If a client trusts whatever `name` and `version` the 402 response contains, a malicious or compromised facilitator can return:
+
+```json
+{
+  "scheme": "exact",
+  "extra": {
+    "name": "Attacker Coin",
+    "version": "1",
+    "chainId": 8453,
+    "verifyingContract": "0xATTACKER..."
+  }
+}
+```
+
+The client signs an EIP-712 typed-data message against `Attacker Coin / version 1 / 8453 / 0xATTACKER...` — which is a **valid signature** against the attacker's contract, just not the real USDC contract. The attacker can now drain whatever balance the user holds in the attacker's deployed token (a phishing-grade outcome) or, more subtly, can re-bind the signature to land on the USDC contract if the on-chain `DOMAIN_SEPARATOR` happens to match — which is the exact failure mode EIP-712 is designed to prevent, but only if the domain is enforced client-side.
+
+The fix is the most boring and robust possible: the client **only ever** signs against a hardcoded `(name, version)` for each known `(chainId, verifyingContract)` pair. Anything not in the table is rejected.
+
+This pattern is codified in BlockRunAI/blockrun-llm-ts at `src/x402.ts:92`:
+
+> *USDC domain is fixed - NEVER use extra values from payment requirements. The USDC contract on Base uses exactly 'USD Coin' version '2'*
+
+Solvela mirrors that exact discipline.
+
+## The hardcoded table
+
+These values are taken from the deployed USDC contracts' on-chain `name()`, `version()`, and `DOMAIN_SEPARATOR()` functions. They do not change without a contract upgrade — and Circle's USDC contracts have not changed `name`/`version` in years.
+
+### Verified
+
+| Network        | chainId | verifyingContract (USDC)                     | name       | version |
+|----------------|---------|----------------------------------------------|------------|---------|
+| Base mainnet   | 8453    | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `USD Coin` | `2`     |
+| Base Sepolia   | 84532   | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | `USDC`     | `2`     |
+| Polygon mainnet| 137     | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` | `USD Coin` | `2`     |
+
+Note that **Base Sepolia uses `name = "USDC"`** while Base mainnet uses `name = "USD Coin"`. This is a real divergence — Circle deployed the testnet USDC with a shorter name. This is exactly the kind of subtle gotcha that makes hardcoding necessary; a "common-sense" client that defaults to `"USD Coin"` will silently fail signature verification on Sepolia.
+
+### TODO — verify before adding
+
+The following USDC deployments need to be verified against on-chain `name()` / `version()` reads before being added to the production table. Do NOT add them speculatively — a wrong row in this table is an exploitable bug.
+
+| Network            | chainId | Suspected verifyingContract                  | Status                  |
+|--------------------|---------|----------------------------------------------|-------------------------|
+| Ethereum mainnet   | 1       | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | TODO: verify name/version |
+| Arbitrum One       | 42161   | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` | TODO: verify name/version |
+| Optimism mainnet   | 10      | `0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85` | TODO: verify name/version |
+| Avalanche C-Chain  | 43114   | `0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E` | TODO: verify name/version |
+
+To verify a row, run against an archive node:
+
+```typescript
+import { createPublicClient, http } from "viem";
+
+const client = createPublicClient({ transport: http(RPC_URL) });
+const erc20Abi = [
+  { name: "name",    type: "function", inputs: [], outputs: [{ type: "string" }], stateMutability: "view" },
+  { name: "version", type: "function", inputs: [], outputs: [{ type: "string" }], stateMutability: "view" },
+];
+const name    = await client.readContract({ address: VERIFY_ADDR, abi: erc20Abi, functionName: "name" });
+const version = await client.readContract({ address: VERIFY_ADDR, abi: erc20Abi, functionName: "version" });
+console.log({ name, version });
+```
+
+The on-chain values are the source of truth. Anything else is a guess.
+
+## Library guidance — how to enforce
+
+### TypeScript / viem
+
+```typescript
+import { verifyTypedData } from "viem";
+import { USDC_DOMAINS } from "./eip712-domains"; // your hardcoded table
+
+function buildDomain(chainId: number, verifyingContract: `0x${string}`) {
+  const key = `${chainId}:${verifyingContract.toLowerCase()}`;
+  const known = USDC_DOMAINS[key];
+  if (!known) {
+    throw new Error(`Refusing to sign: unknown USDC contract ${verifyingContract} on chain ${chainId}`);
+  }
+  return {
+    name: known.name,        // hardcoded
+    version: known.version,  // hardcoded
+    chainId,
+    verifyingContract,
+  };
+}
+
+// When parsing a 402 response, IGNORE params.extra.name / params.extra.version
+const domain = buildDomain(params.extra.chainId, params.extra.verifyingContract);
+```
+
+### Python / eth-account
+
+```python
+from eth_account.messages import encode_typed_data
+
+USDC_DOMAINS = {
+    (8453,  "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"): {"name": "USD Coin", "version": "2"},
+    (84532, "0x036cbd53842c5426634e7929541ec2318f3dcf7e"): {"name": "USDC",     "version": "2"},
+    (137,   "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"): {"name": "USD Coin", "version": "2"},
+}
+
+def build_domain(chain_id: int, verifying_contract: str) -> dict:
+    key = (chain_id, verifying_contract.lower())
+    known = USDC_DOMAINS.get(key)
+    if known is None:
+        raise ValueError(f"Refusing to sign: unknown USDC contract {verifying_contract} on chain {chain_id}")
+    return {
+        "name": known["name"],          # hardcoded
+        "version": known["version"],    # hardcoded
+        "chainId": chain_id,
+        "verifyingContract": verifying_contract,
+    }
+```
+
+### Rust / alloy or ethers-rs
+
+```rust
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+#[derive(Clone, Copy)]
+pub struct UsdcDomain {
+    pub name: &'static str,
+    pub version: &'static str,
+}
+
+fn usdc_domains() -> &'static HashMap<(u64, [u8; 20]), UsdcDomain> {
+    static TABLE: OnceLock<HashMap<(u64, [u8; 20]), UsdcDomain>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut m = HashMap::new();
+        m.insert(
+            (8453, hex_to_addr("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")),
+            UsdcDomain { name: "USD Coin", version: "2" },
+        );
+        // ... etc
+        m
+    })
+}
+
+pub fn build_domain(chain_id: u64, verifying_contract: [u8; 20]) -> Option<UsdcDomain> {
+    usdc_domains().get(&(chain_id, verifying_contract)).copied()
+}
+```
+
+The signing path then refuses to proceed when `build_domain` returns `None`. The client never falls back to "trust the 402 response" — there is no fallback path.
+
+## Codifying in Solvela
+
+When EVM support lands, this table becomes a `const` in `crates/x402`:
+
+**File:** `crates/x402/src/eip712_domains.rs` (suggested)
+
+```rust
+//! Hardcoded EIP-712 USDC domain table per (chain_id, contract).
+//!
+//! Clients MUST NOT trust facilitator-supplied `extra.name` / `extra.version`
+//! fields — see docs/concepts/eip712-usdc-domain.mdx for the threat model.
+//!
+//! Lesson cited in code: BlockRunAI/blockrun-llm-ts src/x402.ts:92.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsdcDomain {
+    pub name: &'static str,
+    pub version: &'static str,
+}
+
+pub const USDC_DOMAINS: &[((u64, [u8; 20]), UsdcDomain)] = &[
+    // Base mainnet — chainId 8453, USDC 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+    ((8453, hex!("833589fcd6edb6e08f4c7c32d4f71b54bda02913")),
+     UsdcDomain { name: "USD Coin", version: "2" }),
+
+    // Base Sepolia — chainId 84532, USDC 0x036CbD53842c5426634e7929541eC2318f3dCF7e
+    ((84532, hex!("036cbd53842c5426634e7929541ec2318f3dcf7e")),
+     UsdcDomain { name: "USDC", version: "2" }),
+
+    // Polygon mainnet — chainId 137, USDC 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359
+    ((137, hex!("3c499c542cef5e3811e1192ce70d8cc03d5c3359")),
+     UsdcDomain { name: "USD Coin", version: "2" }),
+];
+
+pub fn lookup(chain_id: u64, verifying_contract: &[u8; 20]) -> Option<UsdcDomain> {
+    USDC_DOMAINS.iter()
+        .find(|((cid, addr), _)| *cid == chain_id && addr == verifying_contract)
+        .map(|(_, d)| *d)
+}
+```
+
+The gateway uses this when constructing 402 responses (so the `extra` field, while still informational, is locked to the canonical values). **Every** Solvela SDK MUST mirror this table — the gateway cannot enforce client-side hardening. SDK CI should include a parity test against the canonical table to catch drift.
+
+## Solana note
+
+This page does not apply to Solana. Solana SPL `transfer_checked` instructions don't sign EIP-712 typed-data — they sign raw transaction bytes against the cluster's recent blockhash. There is no `domain` separator, no `name`/`version` field for an attacker to coerce, and therefore no domain-confusion attack vector. The Solana payment path stays as it is today.
+
+## Relationship to ERC-20 Permit (EIP-2612)
+
+Some readers will know EIP-2612 `permit` signatures, which use a similar EIP-712 domain. The same hardcoding rule applies there too — a `permit` signature against a wrong `(name, version)` tuple lands on a different contract.
+
+Solvela uses **EIP-3009 `transferWithAuthorization`** rather than EIP-2612 `permit`, because:
+
+- EIP-3009 has explicit `validAfter` / `validBefore` windows (better latency control, supports pre-auth, see [Payment Pre-Auth Cache](./payment-pre-auth.mdx)).
+- EIP-3009 supports gasless transfers via a relayer (Solvela can act as the fee payer).
+- Circle's USDC contracts implement both, but EIP-3009 is the recommended path for off-chain authorization.
+
+The hardcoded `(name, version)` table is the same in both cases — USDC's domain is independent of which entry point is used.
+
+## Implementation TODO
+
+When EVM support lands:
+
+1. **Create** `crates/x402/src/eip712_domains.rs` with the table above (verified rows only).
+2. **Verify** each `TODO` row against an on-chain `name()` / `version()` read. Add only after verification.
+3. **Wire** the lookup into the EVM `PaymentVerifier` impl in `crates/x402/src/evm.rs` (suggested) — refuse to construct or accept payments for `(chainId, contract)` pairs not in the table.
+4. **SDK parity:** ship the same table (string-coded) in `sdks/typescript`, `sdks/python`, `sdks/go`, `sdks/mcp`. Add a CI check that parses the Rust table at lint time and compares against each SDK's copy.
+5. **402 response:** the `extra` block continues to include `name` / `version` for informational/debug use. Clients **MUST IGNORE** these and use the hardcoded table. Document this prominently in the SDK READMEs.
+6. **Tests:**
+   - Domain lookup hit (Base mainnet) → returns `("USD Coin", "2")`.
+   - Domain lookup hit (Base Sepolia) → returns `("USDC", "2")` — verifies the divergence is caught.
+   - Domain lookup miss (unknown chain) → returns `None`, client refuses to sign.
+   - Adversarial 402 with mismatched `extra.name` → SDK ignores the `extra` and signs against the hardcoded value.
+7. **Documentation:** SDK READMEs should include a "Why we ignore the 402 `extra.name` field" section pointing here.
+
+Until EVM lands, this page documents an intent. The goal of writing it now is to make the constraint impossible to forget once implementation begins.
