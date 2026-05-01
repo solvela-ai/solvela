@@ -1,4 +1,4 @@
-import { Copy, ExternalLink, ArrowUpRight, AlertTriangle } from "lucide-react";
+import { Copy, ExternalLink, ArrowUpRight, AlertTriangle, Settings2 } from "lucide-react";
 import { Topbar } from "@/components/layout/topbar";
 import { StatusDot } from "@/components/ui/status-dot";
 import { TerminalCard } from "@/components/ui/terminal-card";
@@ -6,11 +6,15 @@ import { WALLET_TXS, DASHBOARD_STATS } from "@/lib/mock-data";
 import { fetchAdminStats, fetchEscrowConfig } from "@/lib/api";
 import { formatUSDC, formatNumber } from "@/lib/utils";
 
+const WALLET_SETUP_DOCS_URL = "/docs/quickstart#configure-recipient-wallet";
+
 export default async function WalletPage() {
-  const RECIPIENT_WALLET =
+  const recipientWallet =
     process.env.SOLVELA_SOLANA_RECIPIENT_WALLET ??
     process.env.RCR_SOLANA_RECIPIENT_WALLET ??
-    "Configure SOLVELA_SOLANA_RECIPIENT_WALLET in .env";
+    null;
+  const isConfigured = Boolean(recipientWallet && recipientWallet.length > 20);
+
   const [statsResponse, escrowConfig] = await Promise.all([
     fetchAdminStats(30),
     fetchEscrowConfig(),
@@ -30,11 +34,10 @@ export default async function WalletPage() {
       }))
     : null;
 
-  const addr = RECIPIENT_WALLET;
-  const isConfigured = addr.length > 20 && !addr.startsWith("Configure");
+  const addr = recipientWallet ?? "";
   const short = isConfigured
     ? `${addr.slice(0, 8)}...${addr.slice(-8)}`
-    : addr;
+    : "";
 
   return (
     <div className="flex flex-col h-full">
