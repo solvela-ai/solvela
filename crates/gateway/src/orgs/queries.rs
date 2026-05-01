@@ -1,5 +1,4 @@
 use chrono::Utc;
-use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -14,8 +13,7 @@ const KEY_PREFIX_LEN: usize = 14;
 
 /// Generate a new API key: "solvela_k_" + 32 random hex chars.
 pub fn generate_api_key() -> String {
-    let mut rng = rand::rng();
-    let bytes: [u8; 16] = rng.random();
+    let bytes: [u8; 16] = rand::random();
     format!("solvela_k_{}", hex::encode(bytes))
 }
 
