@@ -185,7 +185,7 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
                 .timeout(Duration::from_secs(10))
                 .build()?;
             Arc::new(ExactPaymentStrategy::new(
-                SecretString::new(keypair_b58),
+                SecretString::new(keypair_b58.into_boxed_str()),
                 rpc_client,
             ))
         }
@@ -200,7 +200,7 @@ pub async fn run(api_url: &str, args: LoadTestArgs) -> Result<()> {
                 .timeout(Duration::from_secs(10))
                 .build()?;
             Arc::new(EscrowPaymentStrategy::new(
-                SecretString::new(keypair_b58),
+                SecretString::new(keypair_b58.into_boxed_str()),
                 rpc_client,
                 rpc_url.clone(),
             ))
