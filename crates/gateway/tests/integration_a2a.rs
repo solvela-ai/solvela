@@ -3,6 +3,8 @@
 //! Split from the original `tests/integration.rs`.
 //! Shared helpers live in `tests/common/mod.rs`.
 
+#![allow(unused_imports)]
+
 #[path = "common/mod.rs"]
 mod common;
 
