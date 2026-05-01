@@ -1,5 +1,7 @@
 //! Integration tests for `POST /v1/router/analyze`.
 
+#![allow(unused_imports)]
+
 #[path = "common/mod.rs"]
 mod common;
 
