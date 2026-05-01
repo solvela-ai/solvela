@@ -34,7 +34,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tempfile = "3"
 url = { workspace = true }
-getrandom = { version = "0.2", features = ["std"] }
+getrandom = { version = "0.4", features = ["std"] }
 hdrhistogram = "7"
 secrecy = "0.8"
 
