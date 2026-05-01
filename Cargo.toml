@@ -47,7 +47,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = "0.18"
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
