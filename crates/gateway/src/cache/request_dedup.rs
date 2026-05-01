@@ -165,7 +165,7 @@ pub fn canonical_hash(body_bytes: &[u8]) -> String {
     }
 
     let digest = hasher.finalize();
-    format!("{digest:x}")
+    hex::encode(digest)
 }
 
 /// In-memory LRU fallback used when Redis is not configured.
