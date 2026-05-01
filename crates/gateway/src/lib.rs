@@ -145,6 +145,7 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
 
     Router::new()
         .route("/v1/chat/completions", post(routes::chat::chat_completions))
+        .route("/v1/router/analyze", post(routes::router::analyze))
         .route(
             "/v1/images/generations",
             post(routes::images::image_generations),
