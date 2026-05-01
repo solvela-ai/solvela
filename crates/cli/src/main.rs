@@ -75,6 +75,15 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Live ratatui dashboard for spend, models, payments, and health
+    Watch {
+        /// Gateway URL (overrides --api-url)
+        #[arg(long)]
+        gateway: Option<String>,
+        /// Poll interval in seconds (clamped to >=1)
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+    },
     /// Recover stranded escrow deposits (refund expired PDAs)
     Recover {
         /// Submit refund transactions (default is dry-run list)
@@ -154,6 +163,10 @@ async fn main() -> Result<()> {
                 commands::init::InitMode::Devnet
             };
             commands::init::run(mode, force).await?
+        }
+        Commands::Watch { gateway, interval } => {
+            let url = gateway.unwrap_or_else(|| cli.api_url.clone());
+            commands::watch::run(url, interval).await?
         }
         Commands::Recover {
             execute,
