@@ -341,15 +341,13 @@ mod tests {
 
     #[test]
     fn test_exact_payment_name() {
-        let strategy =
-            ExactPaymentStrategy::new(SecretString::from("key"), reqwest::Client::new());
+        let strategy = ExactPaymentStrategy::new(SecretString::from("key"), reqwest::Client::new());
         assert_eq!(strategy.name(), "exact");
     }
 
     #[tokio::test]
     async fn test_exact_payment_no_exact_scheme_returns_error() {
-        let strategy =
-            ExactPaymentStrategy::new(SecretString::from("key"), reqwest::Client::new());
+        let strategy = ExactPaymentStrategy::new(SecretString::from("key"), reqwest::Client::new());
         // Provide only an escrow accept — no exact scheme available.
         let accepts = vec![PaymentAccept {
             scheme: "escrow".to_string(),
@@ -403,8 +401,10 @@ mod tests {
         full_key[32..].copy_from_slice(verifying_key.as_bytes());
         let keypair_b58 = bs58::encode(&full_key).into_string();
 
-        let strategy =
-            ExactPaymentStrategy::new(SecretString::new(keypair_b58.into_boxed_str()), reqwest::Client::new());
+        let strategy = ExactPaymentStrategy::new(
+            SecretString::new(keypair_b58.into_boxed_str()),
+            reqwest::Client::new(),
+        );
 
         let accepts = vec![PaymentAccept {
             scheme: "exact".to_string(),
