@@ -419,7 +419,8 @@ impl PaymentVerifier for SolanaVerifier {
                 "detected durable nonce transaction — skipping blockhash recency check"
             );
 
-            // If a nonce pool is configured, verify the nonce account is registered
+            // If a nonce pool is configured, verify the nonce account is registered.
+            // If not configured, warn operators and accept any client-supplied nonce account.
             if let Some(pool) = &self.nonce_pool {
                 let nonce_account_b58 = nonce_account.to_string();
                 let is_known = pool
@@ -430,6 +431,12 @@ impl PaymentVerifier for SolanaVerifier {
                         "nonce account {nonce_account_b58} is not registered in the gateway nonce pool"
                     )));
                 }
+            } else {
+                tracing::warn!(
+                    nonce_account = %nonce_account,
+                    "nonce_pool not configured — skipping nonce-account validation; \
+                     any client-supplied nonce account is accepted"
+                );
             }
 
             // Simulate WITHOUT replacing the blockhash (nonce tx must keep its nonce value)
