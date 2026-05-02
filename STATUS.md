@@ -2,7 +2,7 @@
 
 > Live shipping status. See [`CHANGELOG.md`](./CHANGELOG.md) for history, [`SECURITY.md`](./SECURITY.md) for disclosure.
 
-_Last refreshed: 2026-04-29 — security audit + hardening pass._
+_Last refreshed: 2026-05-01 — security audit + hardening pass._
 
 ## Shipped
 
@@ -35,6 +35,6 @@ _Last refreshed: 2026-04-29 — security audit + hardening pass._
 
 ## Known follow-ups
 
-- **2 deferred security advisories** — durable-nonce replay (GHSA-fq3f-c8p7-873f), f64 budget bypass (GHSA-86cr-h3rx-vj6j). A scheduled agent opens draft PRs for both 2026-04-29 14:00 UTC.
+- **5 security advisories patched** — GHSA-wc9q-wc6q-gwmq, GHSA-86cr-h3rx-vj6j, GHSA-cgqx-mg48-949v, GHSA-6ggq-cvwx-4f67, GHSA-fq3f-c8p7-873f all fixed in `main` (commits `1e5925e`, `1cd1502`). Advisory records pending publication.
 - **Registry uploads for SDKs** (PyPI, npm, crates.io) — pending operator credentials.
 - **Vercel API token rotation** and **GitHub org 2FA enforcement** — operator-side actions still pending.
