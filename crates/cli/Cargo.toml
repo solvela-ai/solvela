@@ -2,7 +2,7 @@
 name = "solvela-cli"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 repository.workspace = true
 description = "Command-line interface for the Solvela LLM payment gateway — wallet, chat, models, escrow, MCP, load testing"
 authors = ["Solvela Contributors"]
