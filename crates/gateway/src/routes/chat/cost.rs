@@ -110,8 +110,10 @@ pub(crate) fn estimated_atomic_cost(
 /// Uses integer arithmetic to avoid f64 precision loss on financial amounts.
 /// Splits on the decimal point and pads/truncates the fractional part to 6 digits.
 ///
-/// Returns an error if the input is empty or contains non-numeric characters,
-/// preventing silent fallback to 0 on malformed financial amounts.
+/// Returns an error if the input is empty, contains non-numeric characters, or
+/// would overflow `u64` after multiplication by 1_000_000. This prevents silent
+/// fallback to 0 (rejects malformed input) and silent wraparound to a tiny
+/// positive number (rejects whole-USDC values above ~$18.4 trillion).
 pub(crate) fn usdc_atomic_amount_checked(decimal_str: &str) -> Result<String, String> {
     let s = decimal_str.trim();
     if s.is_empty() {
@@ -135,7 +137,19 @@ pub(crate) fn usdc_atomic_amount_checked(decimal_str: &str) -> Result<String, St
         .parse()
         .map_err(|e| format!("invalid USDC fractional part '{}': {}", frac_6, e))?;
 
-    let atomic = integer * 1_000_000 + fractional;
+    // Use checked arithmetic: `integer * 1_000_000` wraps for any whole-USDC
+    // value above `u64::MAX / 1e6` ≈ 1.84e13 USDC, silently turning very large
+    // amounts into very small ones — fail-closed instead.
+    let atomic = integer
+        .checked_mul(1_000_000)
+        .and_then(|scaled| scaled.checked_add(fractional))
+        .ok_or_else(|| {
+            format!(
+                "USDC amount '{decimal_str}' overflows u64 atomic units \
+                 (max ≈ {} USDC)",
+                u64::MAX / 1_000_000
+            )
+        })?;
     Ok(atomic.to_string())
 }
 
@@ -390,6 +404,61 @@ mod tests {
     fn test_usdc_atomic_unchecked_defaults_to_zero_on_malformed() {
         assert_eq!(usdc_atomic_amount(""), "0");
         assert_eq!(usdc_atomic_amount("not-a-number"), "0");
+    }
+
+    #[test]
+    fn test_usdc_atomic_checked_rejects_overflow_in_integer_part() {
+        // u64::MAX / 1_000_000 ≈ 1.844e13. Anything above must reject so the
+        // ×1_000_000 multiplication cannot wrap to a small positive number.
+        let just_over_cap = (u64::MAX / 1_000_000) + 1;
+        let amount = format!("{just_over_cap}");
+        let result = usdc_atomic_amount_checked(&amount);
+        assert!(
+            result.is_err(),
+            "amount above u64/1e6 must overflow-reject, got: {result:?}"
+        );
+        assert!(
+            result.unwrap_err().contains("overflow"),
+            "error must mention overflow"
+        );
+    }
+
+    #[test]
+    fn test_usdc_atomic_checked_rejects_u64_max() {
+        let amount = format!("{}", u64::MAX);
+        let result = usdc_atomic_amount_checked(&amount);
+        assert!(
+            result.is_err(),
+            "u64::MAX integer part must overflow-reject, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_usdc_atomic_checked_accepts_at_overflow_boundary() {
+        // The largest integer that does NOT overflow when ×1_000_000 must
+        // still succeed — boundary check ensures we didn't off-by-one the cap.
+        let max_safe_integer = u64::MAX / 1_000_000;
+        let amount = format!("{max_safe_integer}");
+        let result = usdc_atomic_amount_checked(&amount);
+        assert!(
+            result.is_ok(),
+            "amount at u64/1e6 boundary must still succeed, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_usdc_atomic_checked_rejects_overflow_via_fractional_add() {
+        // Construct a value where `integer * 1_000_000` is exactly u64::MAX
+        // minus a small remainder, then add a fractional part that pushes it
+        // past u64::MAX. Using max_safe_integer with all-9s fractional triggers
+        // the `checked_add` failure path specifically.
+        let max_safe_integer = u64::MAX / 1_000_000;
+        let amount = format!("{max_safe_integer}.999999");
+        let result = usdc_atomic_amount_checked(&amount);
+        assert!(
+            result.is_err(),
+            "fractional addition that overflows u64 must reject, got: {result:?}"
+        );
     }
 
     // =========================================================================

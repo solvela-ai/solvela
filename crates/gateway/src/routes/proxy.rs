@@ -67,28 +67,46 @@ fn validate_price_usdc(price_usdc: f64) -> Result<(), String> {
     Ok(())
 }
 
-/// Compute the provider-only cost in atomic USDC units (no platform fee).
+/// All three atomic-USDC components of a paid service request, derived from a
+/// single `price_per_request_usdc` value.
 ///
-/// Returns `Err` (not `Ok(0)`) on NaN/Inf/negative/overflow input so that the
-/// caller fails-closed: a malformed registry entry must reject the request,
-/// not serve it for free. See `validate_price_usdc` for the rationale.
-fn compute_provider_atomic(price_usdc: f64) -> Result<u64, String> {
-    validate_price_usdc(price_usdc)?;
-    Ok((price_usdc * 1_000_000.0).round() as u64)
+/// Centralising the breakdown in one struct (instead of recomputing each field
+/// inline at the call site) prevents drift if the platform-fee percentage ever
+/// changes — the call site only knows about `total_atomic`, `provider_atomic`,
+/// and `fee_atomic` as derived values, never as independent expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ServiceCost {
+    /// Amount the upstream provider receives, in atomic USDC (6 decimals).
+    provider_atomic: u64,
+    /// Platform fee on top of the provider amount, in atomic USDC.
+    fee_atomic: u64,
+    /// Total amount the client must pay, in atomic USDC. Always equals
+    /// `provider_atomic + fee_atomic`.
+    total_atomic: u64,
 }
 
-/// Compute the total cost in atomic USDC units for a service request.
+/// Compute the full atomic-USDC cost breakdown for a service request.
 ///
 /// Uses integer arithmetic to avoid floating-point precision loss on financial
-/// amounts. The price is converted to atomic units (6 decimals) first, then
-/// the 5% platform fee is applied using integer math.
+/// amounts: the `price_usdc` is converted to atomic units (6 decimals) once via
+/// the only `f64 → u64` cast in the path, then the 5% platform fee is applied
+/// in pure integer math.
 ///
-/// Returns `Err` on NaN/Inf/negative/overflow input — see `validate_price_usdc`.
-fn compute_service_cost_atomic(price_usdc: f64) -> Result<u64, String> {
-    let provider_atomic = compute_provider_atomic(price_usdc)?;
+/// Returns `Err` (not `Ok` with zeros) on NaN/Inf/negative/overflow input so the
+/// caller fails-closed — a corrupt registry entry must reject the request, not
+/// serve it for free. See `validate_price_usdc` for the rationale.
+fn compute_service_cost(price_usdc: f64) -> Result<ServiceCost, String> {
+    validate_price_usdc(price_usdc)?;
+    let provider_atomic = (price_usdc * 1_000_000.0).round() as u64;
     // 5% platform fee: total = provider * 105 / 100. `saturating_mul` is
     // belt-and-braces — `validate_price_usdc` already capped the magnitude.
-    Ok(provider_atomic.saturating_mul(105) / 100)
+    let total_atomic = provider_atomic.saturating_mul(105) / 100;
+    let fee_atomic = total_atomic.saturating_sub(provider_atomic);
+    Ok(ServiceCost {
+        provider_atomic,
+        fee_atomic,
+        total_atomic,
+    })
 }
 
 /// POST /v1/services/{service_id}/proxy — proxy a paid request to an external service.
@@ -148,24 +166,21 @@ pub async fn proxy_service(
         ))
     })?;
 
-    // Compute cost once using integer arithmetic — used for both 402 response
-    // and payment validation to guarantee identical results.
+    // Compute the full cost breakdown once using integer arithmetic — used for
+    // both the 402 response and the payment validation, so they cannot drift.
     //
-    // Both helpers reject NaN/Inf/negative/overflow `price_usdc` values so a
-    // corrupt registry entry surfaces as a 500, not as a free request.
-    let expected_atomic = compute_service_cost_atomic(price_usdc).map_err(|e| {
+    // `compute_service_cost` rejects NaN/Inf/negative/overflow `price_usdc` so
+    // a corrupt registry entry surfaces as a 500, not as a free request.
+    let ServiceCost {
+        provider_atomic,
+        fee_atomic,
+        total_atomic: expected_atomic,
+    } = compute_service_cost(price_usdc).map_err(|e| {
         warn!(service_id = %service_id, error = %e, "invalid service pricing");
         GatewayError::Internal(format!(
             "service '{service_id}' has invalid price_per_request_usdc"
         ))
     })?;
-    let provider_atomic = compute_provider_atomic(price_usdc).map_err(|e| {
-        warn!(service_id = %service_id, error = %e, "invalid service pricing");
-        GatewayError::Internal(format!(
-            "service '{service_id}' has invalid price_per_request_usdc"
-        ))
-    })?;
-    let fee_atomic = expected_atomic.saturating_sub(provider_atomic);
 
     // Step 3: Check for payment header.
     // Non-ASCII bytes in header value must produce 400, not a silent 402.
@@ -579,42 +594,62 @@ mod tests {
     use super::*;
     use crate::payment_util::extract_signer_from_base64_tx;
 
-    #[test]
-    fn test_compute_service_cost_atomic_basic() {
-        // 0.01 USDC = 10_000 atomic; with 5% fee = 10_500
-        assert_eq!(compute_service_cost_atomic(0.01).unwrap(), 10_500);
+    /// Convenience: total atomic cost only — most existing tests only care
+    /// about the total, not the full breakdown.
+    fn total_atomic(price_usdc: f64) -> Result<u64, String> {
+        compute_service_cost(price_usdc).map(|c| c.total_atomic)
     }
 
     #[test]
-    fn test_compute_service_cost_atomic_small() {
-        // 0.001 USDC = 1_000 atomic; with 5% fee = 1_050
-        assert_eq!(compute_service_cost_atomic(0.001).unwrap(), 1_050);
+    fn test_compute_service_cost_basic() {
+        // 0.01 USDC = 10_000 atomic; with 5% fee = 10_500 total, fee = 500
+        let cost = compute_service_cost(0.01).unwrap();
+        assert_eq!(cost.provider_atomic, 10_000);
+        assert_eq!(cost.fee_atomic, 500);
+        assert_eq!(cost.total_atomic, 10_500);
     }
 
     #[test]
-    fn test_compute_service_cost_atomic_zero() {
-        assert_eq!(compute_service_cost_atomic(0.0).unwrap(), 0);
+    fn test_compute_service_cost_breakdown_sums_to_total() {
+        // The invariant the call site relies on for the 402 response: the
+        // displayed provider + fee always reconstruct the total.
+        for price in [0.0, 0.001, 0.01, 0.0042, 1.0, 12.345, 1_000.0] {
+            let cost = compute_service_cost(price).unwrap();
+            assert_eq!(
+                cost.provider_atomic + cost.fee_atomic,
+                cost.total_atomic,
+                "breakdown invariant broken for price={price}"
+            );
+        }
     }
 
     #[test]
-    fn test_compute_service_cost_atomic_large() {
-        // 1.0 USDC = 1_000_000 atomic; with 5% fee = 1_050_000
-        assert_eq!(compute_service_cost_atomic(1.0).unwrap(), 1_050_000);
+    fn test_compute_service_cost_small() {
+        assert_eq!(total_atomic(0.001).unwrap(), 1_050);
     }
 
     #[test]
-    fn test_compute_service_cost_atomic_consistency() {
+    fn test_compute_service_cost_zero() {
+        assert_eq!(total_atomic(0.0).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_compute_service_cost_large() {
+        assert_eq!(total_atomic(1.0).unwrap(), 1_050_000);
+    }
+
+    #[test]
+    fn test_compute_service_cost_consistency() {
         let price = 0.002625;
-        let result1 = compute_service_cost_atomic(price).unwrap();
-        let result2 = compute_service_cost_atomic(price).unwrap();
+        let result1 = compute_service_cost(price).unwrap();
+        let result2 = compute_service_cost(price).unwrap();
         assert_eq!(result1, result2);
     }
 
     #[test]
     fn test_compute_service_cost_uses_round_not_truncate() {
         // 0.0000015 USDC = 1.5 atomic -> rounds to 2 -> 2 * 105/100 = 2
-        let cost = compute_service_cost_atomic(0.0000015).unwrap();
-        assert_eq!(cost, 2);
+        assert_eq!(total_atomic(0.0000015).unwrap(), 2);
     }
 
     // =========================================================================
@@ -627,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_compute_service_cost_rejects_nan() {
-        let result = compute_service_cost_atomic(f64::NAN);
+        let result = compute_service_cost(f64::NAN);
         assert!(result.is_err(), "NaN price must be rejected");
         let err = result.unwrap_err();
         assert!(
@@ -638,7 +673,7 @@ mod tests {
 
     #[test]
     fn test_compute_service_cost_rejects_positive_infinity() {
-        let result = compute_service_cost_atomic(f64::INFINITY);
+        let result = compute_service_cost(f64::INFINITY);
         assert!(result.is_err(), "+inf price must be rejected");
         let err = result.unwrap_err();
         assert!(
@@ -649,13 +684,13 @@ mod tests {
 
     #[test]
     fn test_compute_service_cost_rejects_negative_infinity() {
-        let result = compute_service_cost_atomic(f64::NEG_INFINITY);
+        let result = compute_service_cost(f64::NEG_INFINITY);
         assert!(result.is_err(), "-inf price must be rejected");
     }
 
     #[test]
     fn test_compute_service_cost_rejects_negative() {
-        let result = compute_service_cost_atomic(-0.001);
+        let result = compute_service_cost(-0.001);
         assert!(result.is_err(), "negative price must be rejected");
         let err = result.unwrap_err();
         assert!(
@@ -668,27 +703,13 @@ mod tests {
     fn test_compute_service_cost_rejects_overflow() {
         // PRICE_USDC_MAX ≈ 1.84e13. Anything above must reject so the
         // ×1_000_000 multiplication cannot overflow u64.
-        let result = compute_service_cost_atomic(1.0e18_f64);
+        let result = compute_service_cost(1.0e18_f64);
         assert!(result.is_err(), "overflowing price must be rejected");
         let err = result.unwrap_err();
         assert!(
             err.contains("exceeds u64 range") || err.contains("overflow"),
             "error must mention overflow/range, got: {err}"
         );
-    }
-
-    #[test]
-    fn test_compute_provider_atomic_matches_direct_math() {
-        // Sanity: provider_atomic on a valid price equals the manual cast.
-        assert_eq!(compute_provider_atomic(0.01).unwrap(), 10_000);
-        assert_eq!(compute_provider_atomic(1.0).unwrap(), 1_000_000);
-    }
-
-    #[test]
-    fn test_compute_provider_atomic_rejects_invalid() {
-        assert!(compute_provider_atomic(f64::NAN).is_err());
-        assert!(compute_provider_atomic(f64::INFINITY).is_err());
-        assert!(compute_provider_atomic(-1.0).is_err());
     }
 
     #[test]

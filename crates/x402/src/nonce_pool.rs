@@ -23,14 +23,25 @@ pub struct NonceEntry {
     pub authority: String,
 }
 
+/// HTTP request timeout for nonce-account RPC fetches.
+///
+/// 10 s mirrors the previous per-call value but is now defined once instead of
+/// being re-baked into a fresh `reqwest::Client` on every call.
+const RPC_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Pool of durable nonce accounts with round-robin rotation.
 ///
 /// Clients fetch a nonce entry and embed the nonce value in their pre-signed
 /// payment transaction instead of a recent blockhash.
+///
+/// `http_client` is shared across all `fetch_nonce_value` calls so connection
+/// reuse, TLS sessions, and DNS caching are not torn down between RPC calls.
+/// Mirror the pattern used by `EscrowVerifier`.
 #[derive(Debug)]
 pub struct NoncePool {
     entries: Vec<NonceEntry>,
     counter: AtomicUsize,
+    http_client: reqwest::Client,
 }
 
 /// Errors from `NoncePool` construction or nonce fetching.
@@ -53,6 +64,18 @@ fn read_env_var(solvela_name: &str, rcr_name: &str) -> Option<String> {
 }
 
 impl NoncePool {
+    /// Build the shared HTTP client used for nonce RPC fetches.
+    ///
+    /// Falls back to `reqwest::Client::new()` if the builder fails — this can
+    /// only happen if the underlying TLS backend cannot initialise, in which
+    /// case downstream RPC calls will fail anyway.
+    fn build_http_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(RPC_HTTP_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    }
+
     /// Create a pool from a list of nonce entries, validating each pubkey.
     pub fn from_entries(entries: Vec<NonceEntry>) -> Result<Self, NoncePoolError> {
         for entry in &entries {
@@ -63,6 +86,7 @@ impl NoncePool {
         Ok(Self {
             entries,
             counter: AtomicUsize::new(0),
+            http_client: Self::build_http_client(),
         })
     }
 
@@ -134,6 +158,7 @@ impl NoncePool {
         Self {
             entries,
             counter: AtomicUsize::new(0),
+            http_client: Self::build_http_client(),
         }
     }
 
@@ -182,10 +207,6 @@ impl NoncePool {
         // it briefly avoids hammering the RPC on high-traffic deployments.  A simple
         // `tokio::sync::Mutex<HashMap<String, (String, Instant)>>` on AppState suffices.
         // Also add per-endpoint rate limiting at the gateway layer to prevent DoS.
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| NoncePoolError::RpcError(format!("failed to build HTTP client: {e}")))?;
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -197,7 +218,10 @@ impl NoncePool {
             ]
         });
 
-        let response = client
+        // Reuse the pool-wide `http_client` so connection pooling, TLS sessions,
+        // and DNS caching survive across nonce fetches.
+        let response = self
+            .http_client
             .post(rpc_url)
             .json(&body)
             .send()
