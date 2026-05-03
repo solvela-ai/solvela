@@ -5,7 +5,7 @@
 //! endpoint, and returns the response.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -30,16 +30,65 @@ use crate::AppState;
 /// Upstream request timeout for external service proxying.
 const PROXY_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Upper bound for `price_per_request_usdc` that the integer cost path will accept.
+///
+/// Multiplying by 1_000_000 (USDC → atomic units) must not overflow `u64`.
+/// We cap at `u64::MAX / 1_000_000` ≈ $18.4 trillion per request, which is far
+/// beyond any realistic external-service price.
+const PRICE_USDC_MAX: f64 = (u64::MAX / 1_000_000) as f64;
+
+/// Validate a `price_per_request_usdc` value before it is cast to `u64`.
+///
+/// A naked `as u64` cast is fail-open for adversarial values:
+/// - `NaN as u64` → 0 (service served for free)
+/// - `f64::INFINITY as u64` → `u64::MAX` (panics on later arithmetic)
+/// - negative `as u64` → giant positive number (also serves for free after `% 105 / 100`
+///   because the price would be parsed but the comparison against `client_amount`
+///   could overflow or under-charge).
+fn validate_price_usdc(price_usdc: f64) -> Result<(), String> {
+    if !price_usdc.is_finite() {
+        return Err(format!(
+            "price_per_request_usdc is non-finite ({price_usdc}); \
+             refusing to cast NaN/∞ to u64"
+        ));
+    }
+    if price_usdc < 0.0 {
+        return Err(format!(
+            "price_per_request_usdc is negative ({price_usdc}); \
+             negative USDC amounts are invalid"
+        ));
+    }
+    if price_usdc > PRICE_USDC_MAX {
+        return Err(format!(
+            "price_per_request_usdc ({price_usdc}) exceeds u64 range \
+             after ×1_000_000 conversion"
+        ));
+    }
+    Ok(())
+}
+
+/// Compute the provider-only cost in atomic USDC units (no platform fee).
+///
+/// Returns `Err` (not `Ok(0)`) on NaN/Inf/negative/overflow input so that the
+/// caller fails-closed: a malformed registry entry must reject the request,
+/// not serve it for free. See `validate_price_usdc` for the rationale.
+fn compute_provider_atomic(price_usdc: f64) -> Result<u64, String> {
+    validate_price_usdc(price_usdc)?;
+    Ok((price_usdc * 1_000_000.0).round() as u64)
+}
+
 /// Compute the total cost in atomic USDC units for a service request.
 ///
 /// Uses integer arithmetic to avoid floating-point precision loss on financial
 /// amounts. The price is converted to atomic units (6 decimals) first, then
 /// the 5% platform fee is applied using integer math.
-fn compute_service_cost_atomic(price_usdc: f64) -> u64 {
-    // Convert to atomic units first (the only f64->int conversion)
-    let provider_atomic = (price_usdc * 1_000_000.0).round() as u64;
-    // 5% platform fee: total = provider * 105 / 100
-    provider_atomic * 105 / 100
+///
+/// Returns `Err` on NaN/Inf/negative/overflow input — see `validate_price_usdc`.
+fn compute_service_cost_atomic(price_usdc: f64) -> Result<u64, String> {
+    let provider_atomic = compute_provider_atomic(price_usdc)?;
+    // 5% platform fee: total = provider * 105 / 100. `saturating_mul` is
+    // belt-and-braces — `validate_price_usdc` already capped the magnitude.
+    Ok(provider_atomic.saturating_mul(105) / 100)
 }
 
 /// POST /v1/services/{service_id}/proxy — proxy a paid request to an external service.
@@ -101,9 +150,22 @@ pub async fn proxy_service(
 
     // Compute cost once using integer arithmetic — used for both 402 response
     // and payment validation to guarantee identical results.
-    let expected_atomic = compute_service_cost_atomic(price_usdc);
-    let provider_atomic = (price_usdc * 1_000_000.0).round() as u64;
-    let fee_atomic = expected_atomic - provider_atomic;
+    //
+    // Both helpers reject NaN/Inf/negative/overflow `price_usdc` values so a
+    // corrupt registry entry surfaces as a 500, not as a free request.
+    let expected_atomic = compute_service_cost_atomic(price_usdc).map_err(|e| {
+        warn!(service_id = %service_id, error = %e, "invalid service pricing");
+        GatewayError::Internal(format!(
+            "service '{service_id}' has invalid price_per_request_usdc"
+        ))
+    })?;
+    let provider_atomic = compute_provider_atomic(price_usdc).map_err(|e| {
+        warn!(service_id = %service_id, error = %e, "invalid service pricing");
+        GatewayError::Internal(format!(
+            "service '{service_id}' has invalid price_per_request_usdc"
+        ))
+    })?;
+    let fee_atomic = expected_atomic.saturating_sub(provider_atomic);
 
     // Step 3: Check for payment header.
     // Non-ASCII bytes in header value must produce 400, not a silent 402.
@@ -268,14 +330,30 @@ pub async fn proxy_service(
                 "Payment service is temporarily degraded; please retry shortly.".to_string(),
             ));
         }
+        // GHSA-wc9q-wc6q-gwmq: recover from a poisoned lock so a single panic
+        // in another payment request does not turn this Mutex into a tarpit
+        // for every subsequent request.
         let mut replay_set = state
             .replay_set
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if replay_set.get(tx_raw).is_some() {
+        let now = Instant::now();
+        let found = match replay_set.get(tx_raw) {
+            Some(&inserted_at) if now.duration_since(inserted_at) < crate::AppState::REPLAY_TTL => {
+                true
+            }
+            Some(_) => {
+                // Entry expired — evict so its LRU slot can be reclaimed,
+                // then treat as not seen.
+                replay_set.pop(tx_raw);
+                false
+            }
+            None => false,
+        };
+        if found {
             true
         } else {
-            replay_set.put(tx_raw.to_string(), std::time::Instant::now());
+            replay_set.put(tx_raw.to_string(), now);
             warn!(
                 tx = %tx_raw,
                 "payment accepted under degraded in-memory replay protection (no Redis)"
@@ -294,8 +372,24 @@ pub async fn proxy_service(
         ));
     }
 
-    // Verify and settle via Facilitator
+    // Verify and settle via Facilitator — hard enforcement.
+    // The chat handler (`routes::chat`) explicitly rejects `Ok(settlement)` whose
+    // `success` flag is `false` (e.g. RPC confirmation timed out). We mirror that
+    // here so an unconfirmed transaction cannot be forwarded to the upstream
+    // service as a paid request.
     match state.facilitator.verify_and_settle(&payload).await {
+        Ok(settlement) if !settlement.success => {
+            counter!("solvela_payments_total", "status" => "failed").increment(1);
+            warn!(
+                tx_signature = %settlement.tx_signature.as_deref().unwrap_or("unknown"),
+                error = ?settlement.error,
+                service_id = %service_id,
+                "proxy payment settlement failed: transaction not confirmed"
+            );
+            return Err(GatewayError::InvalidPayment(
+                "Payment transaction could not be confirmed. Please retry.".to_string(),
+            ));
+        }
         Ok(settlement) => {
             counter!("solvela_payments_total", "status" => "verified").increment(1);
             histogram!("solvela_payment_amount_usdc").record(client_amount as f64 / 1_000_000.0);
@@ -486,39 +580,113 @@ mod tests {
     #[test]
     fn test_compute_service_cost_atomic_basic() {
         // 0.01 USDC = 10_000 atomic; with 5% fee = 10_500
-        assert_eq!(compute_service_cost_atomic(0.01), 10_500);
+        assert_eq!(compute_service_cost_atomic(0.01).unwrap(), 10_500);
     }
 
     #[test]
     fn test_compute_service_cost_atomic_small() {
         // 0.001 USDC = 1_000 atomic; with 5% fee = 1_050
-        assert_eq!(compute_service_cost_atomic(0.001), 1_050);
+        assert_eq!(compute_service_cost_atomic(0.001).unwrap(), 1_050);
     }
 
     #[test]
     fn test_compute_service_cost_atomic_zero() {
-        assert_eq!(compute_service_cost_atomic(0.0), 0);
+        assert_eq!(compute_service_cost_atomic(0.0).unwrap(), 0);
     }
 
     #[test]
     fn test_compute_service_cost_atomic_large() {
         // 1.0 USDC = 1_000_000 atomic; with 5% fee = 1_050_000
-        assert_eq!(compute_service_cost_atomic(1.0), 1_050_000);
+        assert_eq!(compute_service_cost_atomic(1.0).unwrap(), 1_050_000);
     }
 
     #[test]
     fn test_compute_service_cost_atomic_consistency() {
         let price = 0.002625;
-        let result1 = compute_service_cost_atomic(price);
-        let result2 = compute_service_cost_atomic(price);
+        let result1 = compute_service_cost_atomic(price).unwrap();
+        let result2 = compute_service_cost_atomic(price).unwrap();
         assert_eq!(result1, result2);
     }
 
     #[test]
     fn test_compute_service_cost_uses_round_not_truncate() {
         // 0.0000015 USDC = 1.5 atomic -> rounds to 2 -> 2 * 105/100 = 2
-        let cost = compute_service_cost_atomic(0.0000015);
+        let cost = compute_service_cost_atomic(0.0000015).unwrap();
         assert_eq!(cost, 2);
+    }
+
+    // =========================================================================
+    // HIGH-2: NaN/Inf/negative/overflow guards on price_per_request_usdc
+    //
+    // Without these guards, a corrupt `services.toml` entry with `price = nan`
+    // makes `(price * 1e6).round() as u64` return 0, and the proxy serves the
+    // upstream request for free.
+    // =========================================================================
+
+    #[test]
+    fn test_compute_service_cost_rejects_nan() {
+        let result = compute_service_cost_atomic(f64::NAN);
+        assert!(result.is_err(), "NaN price must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("non-finite"),
+            "error must mention non-finite, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_compute_service_cost_rejects_positive_infinity() {
+        let result = compute_service_cost_atomic(f64::INFINITY);
+        assert!(result.is_err(), "+inf price must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("non-finite"),
+            "error must mention non-finite, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_compute_service_cost_rejects_negative_infinity() {
+        let result = compute_service_cost_atomic(f64::NEG_INFINITY);
+        assert!(result.is_err(), "-inf price must be rejected");
+    }
+
+    #[test]
+    fn test_compute_service_cost_rejects_negative() {
+        let result = compute_service_cost_atomic(-0.001);
+        assert!(result.is_err(), "negative price must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("negative"),
+            "error must mention negative, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_compute_service_cost_rejects_overflow() {
+        // PRICE_USDC_MAX ≈ 1.84e13. Anything above must reject so the
+        // ×1_000_000 multiplication cannot overflow u64.
+        let result = compute_service_cost_atomic(1.0e18_f64);
+        assert!(result.is_err(), "overflowing price must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("exceeds u64 range") || err.contains("overflow"),
+            "error must mention overflow/range, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_compute_provider_atomic_matches_direct_math() {
+        // Sanity: provider_atomic on a valid price equals the manual cast.
+        assert_eq!(compute_provider_atomic(0.01).unwrap(), 10_000);
+        assert_eq!(compute_provider_atomic(1.0).unwrap(), 1_000_000);
+    }
+
+    #[test]
+    fn test_compute_provider_atomic_rejects_invalid() {
+        assert!(compute_provider_atomic(f64::NAN).is_err());
+        assert!(compute_provider_atomic(f64::INFINITY).is_err());
+        assert!(compute_provider_atomic(-1.0).is_err());
     }
 
     #[test]
