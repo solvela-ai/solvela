@@ -1,0 +1,67 @@
+name: DCO
+
+# Enforces the Developer Certificate of Origin sign-off on every commit in a PR.
+# CONTRIBUTING.md requires `Signed-off-by:` lines (use `git commit -s`); this
+# workflow makes that requirement enforceable as a required status check.
+#
+# An acquirer's IP / OSS-license diligence will check that every commit in
+# project history is provably contributed under the project license. The DCO
+# is the lightest-weight mechanism for that — no separate CLA, no DocuSign,
+# just a sign-off line per commit.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dco-check:
+    name: Verify DCO sign-off on every commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR commits
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Verify Signed-off-by trailer
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          missing=0
+          # iterate every commit unique to this PR
+          while read -r sha; do
+            author_email="$(git log -1 --format='%ae' "$sha")"
+            author_name="$(git log -1 --format='%an' "$sha")"
+            sob_lines="$(git log -1 --format='%B' "$sha" | grep -E '^Signed-off-by: ' || true)"
+            if [ -z "$sob_lines" ]; then
+              echo "::error::Commit $sha by $author_name <$author_email> is missing a Signed-off-by trailer."
+              echo "  Re-author with: git commit --amend -s    (or rebase with -S to sign all)"
+              missing=$((missing + 1))
+              continue
+            fi
+            # Require at least one sign-off matching the author email (case-insensitive)
+            if ! echo "$sob_lines" | grep -iqF "<$author_email>"; then
+              echo "::error::Commit $sha author <$author_email> does not appear in any Signed-off-by trailer."
+              echo "  Found trailers:"
+              echo "$sob_lines" | sed 's/^/    /'
+              missing=$((missing + 1))
+            fi
+          done < <(git rev-list "$BASE_SHA..$HEAD_SHA")
+
+          if [ "$missing" -gt 0 ]; then
+            echo
+            echo "DCO check failed for $missing commit(s)."
+            echo "Solvela requires every commit to carry a Signed-off-by line per the"
+            echo "Developer Certificate of Origin (https://developercertificate.org/)."
+            echo "See CONTRIBUTING.md for instructions."
+            exit 1
+          fi
+          echo "DCO check passed for all PR commits."

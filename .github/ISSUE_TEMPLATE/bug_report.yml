@@ -1,0 +1,79 @@
+name: Bug report
+description: Report something that's broken in Solvela. Reproducible bugs only.
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. A few ground rules so this stays useful:
+
+        - **Reproducible bugs only.** If you can't repro it on your machine,
+          open a Discussion instead.
+        - **Security issues** go to `security@solvela.ai` per `SECURITY.md`,
+          not here.
+        - **Feature requests** go to Discussions, not here.
+        - The maintainer is one person — please respect their time by filling
+          this out completely. Issues without a clear repro are closed.
+
+  - type: input
+    id: version
+    attributes:
+      label: Solvela version / commit
+      description: |
+        Output of `solvela --version`, the gateway's `/health` response, or
+        the commit SHA you're running.
+      placeholder: e.g. solvela-cli 0.2.0 / commit a1b2c3d
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - gateway (HTTP server)
+        - x402 crate (payment verification)
+        - router crate (smart routing / scorer)
+        - protocol crate (wire types)
+        - cli (solvela-cli)
+        - escrow program (on-chain Anchor)
+        - SDK (Python / TS / Go / Rust / MCP / AI SDK provider)
+        - dashboard / docs site
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: |
+        Exact commands, requests, or steps. Include the failing transaction
+        signature if this is an on-chain or payment bug.
+      placeholder: |
+        1. ...
+        2. ...
+        3. expected ___, got ___
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / output
+      description: |
+        Redact provider API keys and `SOLANA_WALLET_KEY`. The maintainer will
+        ignore reports that include leaked secrets.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Rust version, deploy target (local / Fly.io / other)
+      placeholder: |
+        macOS 14.5 / Rust 1.85 / local docker-compose
+    validations:
+      required: false

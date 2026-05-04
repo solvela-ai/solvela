@@ -1,0 +1,38 @@
+# Limit issue creation to the templates below. Anything else routes to
+# Discussions / sponsorship / commercial inquiry, which is the right path for
+# "please add feature X" / "please support my custom integration" — those are
+# not bugs and they shouldn't be in the bug tracker.
+blank_issues_enabled: false
+
+contact_links:
+  - name: Question, idea, or feature request
+    url: https://github.com/solvela-ai/solvela/discussions
+    about: |
+      Discuss in GitHub Discussions instead of opening an issue. The maintainer is
+      one person; please don't open issues for questions or wishlist items.
+
+  - name: Security vulnerability
+    url: https://github.com/solvela-ai/solvela/blob/main/SECURITY.md
+    about: |
+      Do NOT open a public issue for a security report. Email security@solvela.ai
+      per SECURITY.md.
+
+  - name: Sponsor the project
+    url: https://github.com/sponsors/solvela-ai
+    about: |
+      Solvela is maintained by one person. Sponsorship covers the Fly.io / Vercel
+      / Upstash / Solana RPC bills that keep the gateway online for non-paying
+      users under the BSL Additional Use Grant.
+
+  - name: Commercial license / SLA / on-prem deployment
+    url: https://docs.solvela.ai/enterprise/commercial-license
+    about: |
+      If you're hosting the gateway as a managed service to third parties, your
+      annual revenue derived from the gateway exceeds USD $1M, or you need a
+      support SLA — see the commercial license page or email kd@sky64.io.
+
+  - name: Become a sponsor of a specific feature
+    url: https://github.com/solvela-ai/solvela/discussions/categories/sponsored-features
+    about: |
+      Want a specific feature prioritized? You can fund it directly. Open a
+      Sponsored Features discussion describing the feature and the budget.
