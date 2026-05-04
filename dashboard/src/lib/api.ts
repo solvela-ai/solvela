@@ -157,6 +157,65 @@ export async function fetchAdminStats(
   }
 }
 
+// ─── Public metrics (aggregate-safe slice of admin stats) ───────────────────
+//
+// Used by the unauthenticated `/metrics` page. Reads admin stats server-side
+// and returns ONLY aggregate fields — no per-wallet identifiers, no per-key
+// breakdown, no top-wallets ranking. Safe to render to anonymous visitors.
+
+export interface PublicMetricsResponse {
+  period_days: number;
+  total_requests: number;
+  total_cost_usdc: string;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  unique_wallets: number;
+  cache_hit_rate: number | null;
+  active_models: number;
+  top_models: { model: string; provider: string; requests: number }[];
+  by_day: { date: string; requests: number; spend: number }[];
+}
+
+/**
+ * Fetch aggregate metrics safe for public display.
+ * Server-side only. Falls back to null if the gateway is unreachable
+ * or `GATEWAY_ADMIN_KEY` is unset — the metrics page renders a static
+ * "live data unavailable" panel in that case rather than failing.
+ *
+ * Importantly: this function strips wallet identifiers and any other
+ * fields that could deanonymize users.
+ */
+export async function fetchPublicMetrics(
+  days: number = 30,
+): Promise<PublicMetricsResponse | null> {
+  const stats = await fetchAdminStats(days);
+  if (!stats) return null;
+
+  // Top 5 models by request count — model identity is public and harmless;
+  // we still drop the cost field per model to avoid exposing fee leakage.
+  const topModels = [...stats.by_model]
+    .sort((a, b) => b.requests - a.requests)
+    .slice(0, 5)
+    .map((m) => ({ model: m.model, provider: m.provider, requests: m.requests }));
+
+  return {
+    period_days: stats.period_days,
+    total_requests: stats.summary.total_requests,
+    total_cost_usdc: stats.summary.total_cost_usdc,
+    total_input_tokens: stats.summary.total_input_tokens,
+    total_output_tokens: stats.summary.total_output_tokens,
+    unique_wallets: stats.summary.unique_wallets,
+    cache_hit_rate: stats.summary.cache_hit_rate,
+    active_models: stats.by_model.length,
+    top_models: topModels,
+    by_day: stats.by_day.map((d) => ({
+      date: d.date,
+      requests: d.requests,
+      spend: d.spend,
+    })),
+  };
+}
+
 /**
  * Fetch the services marketplace list. Public endpoint, no auth needed.
  * Returns null on failure.

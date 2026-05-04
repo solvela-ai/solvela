@@ -39,6 +39,19 @@ export function proxy(request: NextRequest) {
     return NextResponse.rewrite(url)
   }
 
+  // metrics.solvela.ai → /metrics
+  // Public, unauthenticated evidence page for grant evaluators / acquirers.
+  // Single-page surface — only the root rewrites; everything else 404s
+  // intentionally to keep the surface tight.
+  if (host === 'metrics.solvela.ai') {
+    if (pathname === '/metrics') {
+      return NextResponse.next()
+    }
+    const url = request.nextUrl.clone()
+    url.pathname = '/metrics'
+    return NextResponse.rewrite(url)
+  }
+
   // solvela.ai and all other hosts — pass through
   return NextResponse.next()
 }
