@@ -1,11 +1,42 @@
+Business Source License 1.1
 
-Licensor:             Solvela Contributors
-  Licensed Work:        Solvela                                                                                               
-                        The Licensed Work is (c) 2026 Solvela Contributors                                                    
-  Additional Use Grant: You may use the Licensed Work for non-production purposes
-                        (including development, testing, and evaluation) free of charge.                                      
-  Change Date:          2030-05-02                                                                                            
-  Change License:       MIT    
+Parameters
+
+  Licensor:             Solvela Contributors
+  Licensed Work:        Solvela Gateway
+                        The Licensed Work is (c) 2026 Solvela Contributors.
+                        This License applies to the gateway component only
+                        (the `gateway` crate and the `solvela-gateway` binary).
+                        Other components of the Solvela project are licensed
+                        separately; see the LICENSING section in README.md.
+  Additional Use Grant: You may use the Licensed Work in production free of
+                        charge, provided that all of the following conditions
+                        are met:
+
+                          (a) You do not offer the Licensed Work, or any
+                              derivative of it, as a hosted, managed, or
+                              software-as-a-service offering to third parties.
+                              Operating the Licensed Work for your own internal
+                              or first-party use is not an offering to third
+                              parties.
+
+                          (b) Your gross annual revenue, in the aggregate
+                              across all entities under common control,
+                              attributable to or derived from the Licensed
+                              Work does not exceed one million United States
+                              dollars (USD $1,000,000).
+
+                          (c) You do not remove or obscure any licensing,
+                              copyright, or attribution notices contained in
+                              the Licensed Work.
+
+                        If your use does not satisfy all of (a), (b), and (c),
+                        you must obtain a commercial license from the Licensor.
+
+  Change Date:          2030-05-02
+
+  Change License:       MIT License
+                        (https://opensource.org/license/mit)
 
 License text copyright © 2024 MariaDB plc, All Rights Reserved. “Business Source License” is a trademark of MariaDB plc.
 
