@@ -1,0 +1,13 @@
+# Hint file for GitHub's licensee gem (https://github.com/licensee/licensee).
+#
+# The Solvela monorepo is governed by Business Source License 1.1 at the root.
+# Per-component licensing is documented in README.md (LICENSING section):
+#   - gateway crate / solvela-gateway binary: BUSL-1.1 (this LICENSE)
+#   - protocol, x402, router, cli crates:     Apache-2.0 (LICENSE-APACHE)
+#   - SDK repos (solvela-python/-ts/-go):     MIT (separate repos)
+#
+# This file exists because our LICENSE includes an expanded Additional Use
+# Grant (SaaS restriction + $1M revenue cap), which can cause licensee's
+# similarity matcher to fall back to "NOASSERTION". The SPDX header at the
+# top of LICENSE plus this hint should make detection deterministic.
+expose: BUSL-1.1
