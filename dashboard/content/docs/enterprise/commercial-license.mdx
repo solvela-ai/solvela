@@ -1,0 +1,70 @@
+---
+title: Commercial License
+description: When you need a commercial license for the Solvela Gateway, what it covers, and how to get one.
+---
+
+<div className="eyebrow">Enterprise</div>
+
+# Commercial License
+
+The **Solvela Gateway** (the `gateway` crate and the `solvela-gateway` binary) is licensed under the [Business Source License 1.1](https://github.com/solvela-ai/solvela/blob/main/LICENSE). Most users do not need a commercial license — but some do. This page explains exactly which.
+
+> Everything *except* the gateway binary is permissively MIT-licensed. The protocol, x402, router, and CLI crates, the on-chain escrow program, and every SDK (`@solvela/sdk`, the Python SDK, the Go SDK, the MCP server, the AI SDK provider, the OpenClaw provider) are all MIT. Build on those without contacting us. See the [licensing table](https://github.com/solvela-ai/solvela#licensing) for the per-component split.
+
+## You do *not* need a commercial license if…
+
+- You're calling the hosted gateway at `api.solvela.ai`. There's nothing to license — you're a user, you pay per request in USDC.
+- You're self-hosting the gateway *internally* (employees, internal automation, your own product's first-party traffic) and your gross annual revenue derived from or attributable to the gateway is under USD $1,000,000.
+- You're forking the gateway for non-production purposes — research, demo, internal eval, education, dev environments.
+- You're embedding any of the libraries (`solvela-protocol`, `solvela-x402`, `solvela-router`, `solvela-cli`) or any SDK. Those are MIT. Standard notice obligations apply, no payment.
+
+## You **do** need a commercial license if…
+
+- You offer the gateway, or a derivative of it, as a **hosted, managed, or software-as-a-service offering to third parties**. (Building a competing managed gateway service from this code is the textbook BSL trigger.)
+- Your gross annual revenue derived from or attributable to the gateway exceeds **USD $1,000,000**.
+- You want to remove or modify the BSL terms before the [Change Date](https://github.com/solvela-ai/solvela/blob/main/LICENSE) (2030-05-02 for v0.2.x, after which the gateway becomes MIT automatically).
+
+## What a commercial license includes
+
+A standard commercial license is a perpetual, non-exclusive grant to use the gateway in production, including hosted/managed-service use, with:
+
+- The right to modify and deploy without the BSL Additional Use Grant restrictions
+- An indemnification carve-out from the BSL "AS IS" terms
+- An express patent non-assertion covenant from the Licensor in respect of the Licensed Work (the underlying MIT license does not include a patent grant; this clause closes that gap for commercial licensees)
+- Attribution and notice requirements (you keep the LICENSE file)
+- Optional: support SLA tiers, security advisory advance notice, on-premise / air-gapped deployment rights
+
+What it **does not** include:
+
+- Trademark rights to the name "Solvela" or the Solvela mark — you must rename your fork. See the [trademark policy](https://github.com/solvela-ai/solvela#trademark).
+- Custodial / fiat conversion features. Solvela is non-custodial by design and we will not license a derivative that converts USDC to fiat without an MSB analysis. See [`docs/product/regulatory-position.md`](https://github.com/solvela-ai/solvela/blob/main/docs/product/regulatory-position.md).
+
+## Pricing
+
+Pricing depends on deployment scale and support level. As a starting reference:
+
+| Tier | Annual price | Best for |
+|---|---|---|
+| **Indie** | $4,800 / year | Small teams that crossed the $1M revenue threshold or need to remove the no-SaaS clause for a single product |
+| **Growth** | $24,000 / year | Companies running the gateway as part of a paid product offering |
+| **Platform** | Custom | You're hosting the gateway as a managed service or building a competing offering on it |
+| **Source** | Custom | Acquihire / source-buyout / exclusive-license interest. Contact directly. |
+
+All tiers include security advisories, named contact for issues, and a perpetual fallback to the current Change License (MIT) on the Change Date even if you discontinue the commercial license.
+
+## How to get one
+
+Email **kd@sky64.io** with:
+
+1. Your company / project name and URL
+2. How you intend to use the gateway (internal? hosted-service? embedded in product?)
+3. Approximate scale (RPS, monthly USDC volume, region)
+4. Which tier you're interested in — or describe the deal you actually want
+
+Most commercial licenses close in under two weeks once scope is clear. We use a one-page agreement; we don't require an MSA unless you do.
+
+## A note on philosophy
+
+The BSL exists because the maintainer can't personally support every production user. The non-SaaS clause exists because a single AWS-scale re-host of this code at zero attribution would end the project's ability to fund itself. Outside those two cases, **we want you to use it freely** — that's why the Additional Use Grant is generous (internal first-party use is free, sub-$1M-revenue is free, non-production is free) and why everything except the gateway binary is permissively licensed.
+
+If your situation falls in a gray area, **just email us**. We'd rather give a free written confirmation than block someone who would have been a happy contributor.

@@ -1,0 +1,72 @@
+---
+title: Sponsorship
+description: How sponsorship funds the public Solvela gateway, what it covers, and how it differs from a commercial license.
+---
+
+<div className="eyebrow">Enterprise</div>
+
+# Sponsorship
+
+Solvela is maintained by a small team. The hosted gateway at `api.solvela.ai` is **free to use** under the [Business Source License 1.1](https://github.com/solvela-ai/solvela/blob/main/LICENSE) Additional Use Grant for any organization below USD&nbsp;$1M in attributable annual revenue, and free at any scale for first-party self-hosted deployments. Sponsorship covers the bills that make "free" possible.
+
+> **Sponsorship is not a commercial license.** If you're hosting the gateway as a managed service for third parties, or your annual revenue from the gateway exceeds $1M, you need a [commercial license](./commercial-license) instead. Sponsorship is optional, ungated, and grants no exception to the BSL.
+
+## Where the money goes
+
+Every dollar of sponsorship maps to a real recurring line item, not a salary. In rough order of cost:
+
+| Line item | What it covers |
+|---|---|
+| **Solana RPC** | Helius / Triton paid tier when free-tier limits are exceeded. Largest variable cost; scales with verified payments. |
+| **Gateway hosting** | Fly.io app + autoscale headroom for the `api.solvela.ai` endpoint. |
+| **Cache + queue** | Upstash Redis for x402 nonce store, idempotency keys, rate limits. |
+| **Frontend + docs** | Vercel Pro tier for `solvela.ai` / `docs.solvela.ai` / `app.solvela.ai`. |
+| **Security** | Quarterly `cargo-audit` / `cargo-deny` review; one external review per release of the Anchor escrow program. |
+| **Domains, certs, monitoring** | Registrar fees, BetterUptime, Sentry hobby tier, log retention. |
+
+If sponsorship ever exceeds these line items, the surplus funds an external security audit of the gateway and escrow program. We will not pay maintainer salaries from sponsorship — that's what commercial licenses and the optional [acquihire path](https://github.com/solvela-ai/solvela/blob/main/docs/exit-readiness.md) are for. Sponsorship is for the lights.
+
+## Tiers
+
+| Tier | Monthly | What it covers | Perks |
+|---|---|---|---|
+| **Supporter** | $10 | A week of Solana RPC quota under the public free-tier ceiling. | Listed in `BACKERS.md`; sponsor badge. |
+| **Operator** | $50 | A month of Fly.io dyno + Upstash Redis + Vercel hobby tier. | Listed in `BACKERS.md` and README; priority triage on issues you open; quarterly office-hours invitation. |
+| **Infrastructure** | $250 | A month of paid-tier RPC + monitoring + spare capacity for traffic bursts. | All Operator perks; logo on the homepage sponsors strip; direct Slack/Discord with the maintainer. |
+| **Underwriter** | $1,000 | Audit prep, contributor honoraria, and the kind of headroom that keeps the lights on without rent-seeking from users. | All Infrastructure perks; quarterly roadmap call; pre-publication notice on security advisories. |
+
+Custom tiers (annual prepay, multi-tier sponsorship, in-kind RPC credits) are welcome — email **kd@sky64.io**.
+
+## Sponsorship versus commercial license
+
+Use this table to figure out which one applies to you.
+
+| Your situation | What you actually want |
+|---|---|
+| Calling `api.solvela.ai` or self-hosting under $1M revenue | **Optional sponsorship** — keeps the public gateway online. No license action required. |
+| Hosting the gateway as a managed service for third parties | **[Commercial license](./commercial-license)** — BSL no-SaaS clause is triggered. |
+| Annual revenue from the gateway exceeds $1M | **[Commercial license](./commercial-license)** — BSL revenue cap is triggered. |
+| Embedding any non-gateway crate (`solvela-protocol`, `solvela-x402`, `solvela-router`, `solvela-cli`) or any SDK | **Nothing** — MIT. Keep the standard notices. |
+| You want to do all three | Commercial license covers it; optional additional sponsorship is welcome but not required. |
+
+## How to sponsor
+
+- **GitHub Sponsors** — [github.com/sponsors/solvela-ai](https://github.com/sponsors/solvela-ai). Recurring billing, corporate-card-friendly, receipts handled by GitHub.
+- **Polar.sh** — [polar.sh/solvela-ai](https://polar.sh/solvela-ai). One-time payments, crypto, alternative billing.
+- **In-kind sponsorship** (RPC credits, infra credits, security audit time) — email **kd@sky64.io** with what you'd like to contribute.
+
+## Transparency
+
+We publish quarterly:
+
+- Aggregate sponsorship received (rounded to $100)
+- Aggregate infra spend by line item
+- A line-item delta against the previous quarter
+
+This lives at [`solvela.ai/metrics`](https://solvela.ai/metrics) under the `infra.spend` panel once the first quarter of sponsorship clears. We do not publish individual sponsor amounts unless the sponsor requests it.
+
+## A note on philosophy
+
+The maintainer of Solvela cannot personally support every production user. The Business Source License exists so that a single AWS-scale re-host of this code at zero attribution doesn't end the project's ability to fund itself. Sponsorship exists so that everyone *below* that threshold — hobbyists, indie devs, small AI startups, researchers — has a free, working gateway to point at while the project is small.
+
+If you're using Solvela in production and getting value from the hosted gateway, sponsorship at any tier is the most direct way to make sure it stays online. If you can't sponsor, that's fine; build something cool with it and we'll consider the project a success.
