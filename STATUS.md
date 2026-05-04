@@ -2,13 +2,14 @@
 
 > Live shipping status. See [`CHANGELOG.md`](./CHANGELOG.md) for history, [`SECURITY.md`](./SECURITY.md) for disclosure.
 
-_Last refreshed: 2026-04-29 — security audit + hardening pass._
+_Last refreshed: 2026-05-04 — relicensed server core to BUSL-1.1._
 
 ## Shipped
 
 - **Gateway** — Axum HTTP server with chat completions, image generation, A2A protocol, model registry, escrow endpoints, enterprise org/team/audit/budget endpoints, Prometheus metrics. 5 LLM providers (OpenAI, Anthropic, Google, xAI, DeepSeek).
-- **Protocol** — `solvela-protocol`, `solvela-x402`, `solvela-router`, `solvela-cli` published to crates.io as v0.1.1 (MIT). `cargo install solvela-cli` works.
+- **Protocol** — `solvela-protocol`, `solvela-x402`, `solvela-router` published to crates.io as v0.1.1. `solvela-cli` published (MIT). `cargo install solvela-cli` works.
 - **Escrow program** — Anchor / USDC-SPL trustless escrow. Deployed to Solana mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`.
+- **License** — Server core (`gateway`, `x402`, `router`, `protocol`, `escrow`) relicensed to BUSL-1.1 (change date 2030-05-02 → MIT). CLI and SDKs remain MIT.
 - **SDKs** — Python, TypeScript, Go, and a wallet-client (Rust) SDK in separate repos: `solvela-python` (v0.1.0), `solvela-ts` (v0.2.0), `solvela-go` (v0.1.0), `solvela-client` (v0.2.0). Tagged + GitHub Released 2026-04-29 as the security-hardening release; Go is live via the module proxy, PyPI/npm/crates.io uploads pending operator credentials.
 - **Dashboard + Docs** — Next.js app serving `solvela.ai`, `app.solvela.ai`, `docs.solvela.ai` via subdomain middleware. `www.solvela.ai` 308-redirects to apex.
 
@@ -35,6 +36,5 @@ _Last refreshed: 2026-04-29 — security audit + hardening pass._
 
 ## Known follow-ups
 
-- **2 deferred security advisories** — durable-nonce replay (GHSA-fq3f-c8p7-873f), f64 budget bypass (GHSA-86cr-h3rx-vj6j). A scheduled agent opens draft PRs for both 2026-04-29 14:00 UTC.
 - **Registry uploads for SDKs** (PyPI, npm, crates.io) — pending operator credentials.
 - **Vercel API token rotation** and **GitHub org 2FA enforcement** — operator-side actions still pending.
