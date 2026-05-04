@@ -9,9 +9,12 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
-license = "MIT"
+# Note: each crate declares its own `license = "..."` explicitly. The gateway is
+# BUSL-1.1 (commercial use restricted, see ../LICENSE). The protocol, x402, router,
+# and cli crates are MIT (../LICENSE-MIT) so the rest of the ecosystem can reuse
+# them freely. SDKs (sdks/*) are also MIT (../LICENSE-MIT).
 repository = "https://github.com/solvela-ai/solvela"
 
 [workspace.dependencies]
@@ -77,6 +80,6 @@ dotenvy = "0.15"
 # Path + version dual-spec: `path` lets local dev resolve to the in-tree code;
 # `version` is required by crates.io at publish time so consumers get the
 # published artifact when they pull from the registry.
-solvela-x402 = { path = "crates/x402", version = "0.1" }           # renamed from `x402` — that name is taken on crates.io
-solvela-router = { path = "crates/router", version = "0.1" }
-solvela-protocol = { path = "crates/protocol", version = "0.1" }
+solvela-x402 = { path = "crates/x402", version = "0.2" }           # renamed from `x402` — that name is taken on crates.io
+solvela-router = { path = "crates/router", version = "0.2" }
+solvela-protocol = { path = "crates/protocol", version = "0.2" }

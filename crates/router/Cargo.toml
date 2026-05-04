@@ -2,7 +2,7 @@
 name = "solvela-router"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 repository.workspace = true
 description = "15-dimension request scorer + routing profiles + model registry for the Solvela LLM payment gateway"
 authors = ["Solvela Contributors"]

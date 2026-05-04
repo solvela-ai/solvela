@@ -11,6 +11,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Anchor escrow program for Solvela USDC-SPL payments"
 license = "MIT"
+repository = "https://github.com/solvela-ai/solvela"
+authors = ["Solvela Contributors"]
 
 # This crate is NOT a member of the workspace root. Anchor programs require
 # their own Cargo.lock (managed by `anchor build`) and pin dependency versions

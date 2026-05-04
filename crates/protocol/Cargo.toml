@@ -1,9 +1,9 @@
 [package]
 name = "solvela-protocol"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Shared wire-format types for the Solvela ecosystem (x402 payment protocol + OpenAI-compatible chat types)"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/solvela-ai/solvela"
 authors = ["Solvela Contributors"]
 homepage = "https://solvela.ai"

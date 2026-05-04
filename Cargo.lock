@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2603,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "solvela-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2631,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "solvela-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "solvela-router"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2652,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "solvela-x402"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

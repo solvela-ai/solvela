@@ -3,7 +3,9 @@
 Solana-native AI agent payment gateway. No API keys, no accounts -- just wallets.
 
 ![Rust](https://img.shields.io/badge/rust-1.85%2B-F97316?style=flat&logo=rust&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT-F97316?style=flat)
+![Gateway License](https://img.shields.io/badge/gateway-BUSL--1.1-F97316?style=flat)
+![Libraries License](https://img.shields.io/badge/libraries-MIT-F97316?style=flat)
+![SDKs License](https://img.shields.io/badge/sdks-MIT-F97316?style=flat)
 [![CI](https://github.com/solvela-ai/solvela/actions/workflows/ci.yml/badge.svg)](https://github.com/solvela-ai/solvela/actions/workflows/ci.yml)
 ![Solana](https://img.shields.io/badge/solana-mainnet-F97316?style=flat&logo=solana&logoColor=white)
 
@@ -414,6 +416,32 @@ curl https://solvela-gateway.fly.dev/health
 
 See `HANDOFF.md` for full deployment status and blockers.
 
-## License
+## Licensing
 
-MIT
+Solvela uses a **per-component license split**. Pick the license of the piece you're integrating, not "the project's license" — there is no single one.
+
+| Component | License | Why |
+|---|---|---|
+| **Gateway** (`crates/gateway`, `solvela-gateway` binary) | [BUSL-1.1](./LICENSE) → MIT on 2030-05-02 | The hosted product. Free for non-production, internal first-party production, and small commercial use (under $1M annual revenue derived from the Licensed Work). Re-hosting it as a managed service to third parties requires a commercial license. Becomes MIT four years after each release. |
+| **Protocol crate** (`solvela-protocol`) | [MIT](./LICENSE-MIT) | Wire-format types. Reuse encouraged. |
+| **x402 crate** (`solvela-x402`) | [MIT](./LICENSE-MIT) | Reference x402 implementation for Solana. Reuse encouraged. |
+| **Router crate** (`solvela-router`) | [MIT](./LICENSE-MIT) | Routing primitives and 15-dim scorer. |
+| **CLI crate** (`solvela-cli`) | [MIT](./LICENSE-MIT) | End-user tooling. |
+| **Escrow program** (`programs/escrow`) | [MIT](./LICENSE-MIT) | On-chain Anchor program. Permissive license signals broad reuse. |
+| **SDKs** (`sdks/*`) | [MIT](./LICENSE-MIT) | Client libraries. Trivial license = maximum adoption. |
+| **Dashboard / docs site** (`dashboard/`) | [MIT](./LICENSE-MIT) | Front-end. |
+
+### Quick reference
+
+- **You're a developer using Solvela's hosted gateway at `api.solvela.ai`** → no license obligations on you, just use it.
+- **You're self-hosting the gateway internally for your own product** → free under the Additional Use Grant if your gross annual revenue attributable to the gateway is under USD $1M.
+- **You're building a competing managed gateway service from this code** → you need a commercial license. Contact `kd@sky64.io`.
+- **You're embedding the SDK or building on top of the protocol/router crates** → standard MIT obligations apply (preserve the copyright notice, no warranty). No payment to Solvela required.
+
+### Trademark
+
+"Solvela" and the Solvela logo are trademarks of the Solvela Contributors. The licenses above grant code rights only — they do not grant trademark rights. If you fork the gateway and run it yourself, please rename it.
+
+### Contributing
+
+By contributing you agree your contribution is licensed under the license of the component you're modifying (see the table above). All commits must be signed off (`git commit -s`) per the [Developer Certificate of Origin](https://developercertificate.org/). See [CONTRIBUTING.md](./CONTRIBUTING.md).

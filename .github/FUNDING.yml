@@ -1,0 +1,13 @@
+# Sponsorship channels for Solvela.
+#
+# Solvela is maintained by a tiny team. Sponsorship covers Fly.io / Vercel /
+# Upstash / Solana RPC bills and lets us keep the gateway online for
+# non-paying users under the BSL Additional Use Grant.
+#
+# Looking for a *commercial* license (you're hosting the gateway as a managed
+# service for third parties, or your annual revenue from the Licensed Work
+# exceeds USD $1M)? Email kd@sky64.io — see /docs/enterprise/commercial-license.
+github: [solvela-ai]
+custom:
+  - "https://solvela.ai/sponsor"
+  - "https://polar.sh/solvela-ai"
