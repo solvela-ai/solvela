@@ -362,7 +362,7 @@ End-to-end security audit across the gateway and all four SDK repos (`solvela-py
 - **GHSA-6ggq-cvwx-4f67 (HIGH)** — Rate-limit key switched from client-supplied `pay_to` to the payer wallet derived from the signed transaction. An attacker can no longer escape into a fresh per-client bucket by varying `pay_to`.
 - **GHSA-cgqx-mg48-949v (HIGH)** — `GatewayError::InvalidPayment` and related variants no longer echo attacker-controlled payment fields or raw verifier errors. The internal Solana RPC URL and the recipient wallet stay server-side.
 
-Two CRITICAL/HIGH advisories deferred to a follow-up PR (durable-nonce replay [GHSA-fq3f-c8p7-873f], f64 budget bypass [GHSA-86cr-h3rx-vj6j]).
+Two CRITICAL/HIGH advisories (durable-nonce replay [GHSA-fq3f-c8p7-873f], f64 budget bypass [GHSA-86cr-h3rx-vj6j]) have been resolved.
 
 ### SDK security release — Python v0.1.0, TypeScript v0.2.0, Go v0.1.0, Client (Rust) v0.2.0
 
