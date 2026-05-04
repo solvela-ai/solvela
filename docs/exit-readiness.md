@@ -81,6 +81,8 @@ Things we keep current so an inbound deal doesn't take six months to close on ou
 - [ ] Quarterly infra-spend disclosure on `/metrics` (depends on first quarter of sponsorship clearing)
 - [ ] All operator credentials catalogued in a single sealed location for transfer (1Password vault or equivalent)
 - [ ] One-page deal summary (this document, kept current) ready to share
+- [x] Demo video production kit ready (script, shot list, pre-record checklist, b-roll guide) at [`docs/demo/`](./demo/)
+- [ ] 90-second demo video recorded, uploaded to YouTube (unlisted), embedded in `README.md`, and attached to a `demo-v1` GitHub release
 
 ## 6. Realistic acquirer shortlist
 
