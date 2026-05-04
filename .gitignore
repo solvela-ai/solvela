@@ -1,5 +1,6 @@
 
 !.env.example
+# Brand concept exploration (Gemini PNGs — superseded by brand/avatars/)
 # Build artifacts (universal — overrides specific entries below)
 # Claude Code / OMC local state
 # Claude Code symlinked skills (from skills-pool)
@@ -55,6 +56,7 @@
 GEMINI.md
 Thumbs.db
 __pycache__/
+assets/
 dashboard/.next/
 dashboard/.source/
 dashboard/node_modules/
