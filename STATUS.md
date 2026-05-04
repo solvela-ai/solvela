@@ -35,6 +35,5 @@ _Last refreshed: 2026-04-29 — security audit + hardening pass._
 
 ## Known follow-ups
 
-- **2 deferred security advisories** — durable-nonce replay (GHSA-fq3f-c8p7-873f), f64 budget bypass (GHSA-86cr-h3rx-vj6j). A scheduled agent opens draft PRs for both 2026-04-29 14:00 UTC.
 - **Registry uploads for SDKs** (PyPI, npm, crates.io) — pending operator credentials.
 - **Vercel API token rotation** and **GitHub org 2FA enforcement** — operator-side actions still pending.
