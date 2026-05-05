@@ -67,9 +67,8 @@ impl ModelRegistry {
                     provider: entry.provider,
                     model_id: entry.model_id,
                     display_name: entry.display_name,
-                    input_cost_per_million: entry.input_cost_per_million * PLATFORM_FEE_MULTIPLIER,
-                    output_cost_per_million: entry.output_cost_per_million
-                        * PLATFORM_FEE_MULTIPLIER,
+                    input_cost_per_million: entry.input_cost_per_million,
+                    output_cost_per_million: entry.output_cost_per_million,
                     context_window: entry.context_window,
                     supports_streaming: entry.supports_streaming,
                     supports_tools: entry.supports_tools,
@@ -115,8 +114,8 @@ impl ModelRegistry {
 
         let input_cost = (input_tokens as f64 / 1_000_000.0) * model.input_cost_per_million;
         let output_cost = (output_tokens as f64 / 1_000_000.0) * model.output_cost_per_million;
-        let total_with_fee = input_cost + output_cost;
-        let provider_cost = total_with_fee / PLATFORM_FEE_MULTIPLIER;
+        let provider_cost = input_cost + output_cost;
+        let total_with_fee = provider_cost * PLATFORM_FEE_MULTIPLIER;
         let platform_fee = total_with_fee - provider_cost;
 
         Ok(CostBreakdown {
@@ -165,16 +164,47 @@ supports_streaming = true
     }
 
     #[test]
-    fn test_pricing_includes_fee() {
+    fn test_registry_stores_raw_provider_rates() {
+        // ModelRegistry stores raw provider rates as-loaded from TOML.
+        // The 5% platform fee is applied at the boundary by estimate_cost
+        // and compute_actual_atomic_cost — never baked into ModelInfo.
         let registry = ModelRegistry::from_toml(TEST_TOML).unwrap();
         let model = registry.get("openai/gpt-4o").unwrap();
-
-        // Provider charges $2.50/M input — with 5% fee user pays $2.625/M
-        let expected = 2.50 * PLATFORM_FEE_MULTIPLIER;
         assert!(
-            (model.input_cost_per_million - expected).abs() < 0.001,
+            (model.input_cost_per_million - 2.50).abs() < 0.001,
             "got {}",
             model.input_cost_per_million
+        );
+        assert!(
+            (model.output_cost_per_million - 10.00).abs() < 0.001,
+            "got {}",
+            model.output_cost_per_million
+        );
+    }
+
+    #[test]
+    fn test_estimate_cost_applies_exactly_one_5_percent_fee() {
+        // Pin the effective fee at exactly 5% (not 10.25%). This is the
+        // regression test for the double-application bug fixed in Option A.
+        let registry = ModelRegistry::from_toml(TEST_TOML).unwrap();
+        // 1M input tokens @ $2.50/M = $2.50 provider; 0 output tokens.
+        let cost = registry
+            .estimate_cost("openai/gpt-4o", 1_000_000, 0)
+            .unwrap();
+        let provider: f64 = cost.provider_cost.parse().unwrap();
+        let fee: f64 = cost.platform_fee.parse().unwrap();
+        let total: f64 = cost.total.parse().unwrap();
+        assert!(
+            (provider - 2.50).abs() < 1e-6,
+            "provider_cost should be 2.50, got {provider}"
+        );
+        assert!(
+            (fee - 0.125).abs() < 1e-6,
+            "platform_fee should be 0.125 (5% of 2.50), got {fee}"
+        );
+        assert!(
+            (total - 2.625).abs() < 1e-6,
+            "total should be 2.625 (2.50 * 1.05), got {total}"
         );
     }
 
