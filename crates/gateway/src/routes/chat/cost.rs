@@ -323,6 +323,39 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_actual_atomic_cost_applies_single_fee_via_registry() {
+        // Regression: prevents double-application of the 5% platform fee.
+        // Exercises the production wiring TOML → ModelRegistry → compute_actual_atomic_cost.
+        // A hand-crafted ModelInfo cannot catch a registry-side bake-in; this test must.
+        let toml = r#"
+[models.test-model]
+provider = "test"
+model_id = "test-model"
+display_name = "Test"
+input_cost_per_million = 1.00
+output_cost_per_million = 1.00
+context_window = 4096
+supports_streaming = false
+supports_tools = false
+supports_vision = false
+"#;
+        let registry = solvela_router::models::ModelRegistry::from_toml(toml)
+            .expect("valid test registry TOML");
+        let model_info = registry
+            .get("test/test-model")
+            .expect("model registered under canonical id");
+
+        // 1M input tokens @ $1.00/M = $1.00 provider cost = 1_000_000 atomic.
+        // Single 5% fee → 1_050_000. A double-applied fee would yield 1_102_500.
+        let atomic = compute_actual_atomic_cost(1_000_000, 0, model_info);
+        assert_eq!(
+            atomic, 1_050_000,
+            "expected exactly 1.05x provider cost (single 5% fee); got {atomic}. \
+             1_102_500 here means the fee is being applied twice."
+        );
+    }
+
+    #[test]
     fn test_compute_actual_atomic_cost_includes_5_percent_fee() {
         let model_info = ModelInfo {
             id: "test/model".to_string(),
