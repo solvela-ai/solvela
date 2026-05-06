@@ -68,7 +68,7 @@ anyhow = "1"
 
 # Security
 zeroize = { version = "1", features = ["derive"] }
-lru = "0.17"
+lru = "0.18"
 
 # URL parsing
 url = "2"
