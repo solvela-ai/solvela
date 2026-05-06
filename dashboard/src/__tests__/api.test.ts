@@ -9,6 +9,7 @@ import {
   fetchEscrowConfig,
   fetchEscrowHealth,
 } from "@/lib/api";
+import type { AdminStatsResponse } from "@/types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -335,8 +336,9 @@ describe("fetchPublicMetrics", () => {
 
   // Realistic fixture mirroring the AdminStatsResponse shape, including the
   // PII-bearing `top_wallets` field and the per-model `cost_usdc` field that
-  // must be stripped before public exposure.
-  const sensitiveStatsPayload = {
+  // must be stripped before public exposure. Typed against AdminStatsResponse
+  // so that any drift in the upstream contract surfaces here at compile time.
+  const sensitiveStatsPayload: AdminStatsResponse = {
     period_days: 30,
     summary: {
       total_requests: 1247,
@@ -516,7 +518,12 @@ describe("fetchPublicMetrics", () => {
     process.env.GATEWAY_ADMIN_KEY = "test-secret-key";
     // Inject a hypothetical future field upstream — we want to be sure that
     // only the explicitly-allowlisted fields make it to the public response.
-    const withRogueField = {
+    // Annotated against AdminStatsResponse so the literal `internal_revenue_usdc`
+    // property triggers TS's excess-property check (TS2353). The directive below
+    // is what makes the test compile; if AdminStatsResponse ever grows a field
+    // called `internal_revenue_usdc`, this directive turns into a TS2578 (unused)
+    // — a useful canary that the test's premise no longer holds.
+    const withRogueField: AdminStatsResponse = {
       ...sensitiveStatsPayload,
       // @ts-expect-error — intentionally injecting an unknown field
       internal_revenue_usdc: "999.99",
