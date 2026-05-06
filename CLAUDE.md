@@ -211,19 +211,22 @@ use crate::config::AppConfig;               // 4. Crate-internal modules
 
 These skills contain patterns, checklists, and constraints specific to this project's domains. Invoke them via the `Skill` tool BEFORE writing or modifying code in the matching areas.
 
+> Skills below resolve to plugins installed at user scope — the `everything-claude-code` (ECC) plugin and the `helius` plugin. `security-review` is intentionally unprefixed because it resolves as a top-level Claude Code skill, not from a plugin. Project-local skill overrides were removed (2026-05-06) to stop shadowing the maintained plugin versions. Two domains (Solvela's x402/escrow specifics and 5%-fee fintech math) have no upstream equivalent and are marked TODO; author project skills at `.claude/skills/<name>/SKILL.md` when the plugin coverage isn't enough.
+
 | Skill | Invoke when touching | Key files |
 |---|---|---|
-| `solana-dev` | Solana, Anchor, SPL token, x402 protocol, escrow, fee payer, nonce, PDA, on-chain verification | `crates/x402/`, `programs/escrow/`, `solana.rs`, `fee_payer.rs`, `nonce_pool.rs`, `facilitator.rs` |
+| `helius:build` + `helius:svm` | Solana, SPL token, on-chain verification, fee payer, nonce, PDA basics | `crates/x402/`, `solana.rs`, `fee_payer.rs`, `nonce_pool.rs`, `facilitator.rs` |
+| _(no upstream skill — TODO: author `solvela-x402`)_ | Anchor program work, escrow PDAs, LiteSVM testing, x402-specific protocol details | `programs/escrow/`, `crates/x402/` |
 | `security-review` | Payment verification, crypto, API key handling, CORS, rate limiting, header decoding, secret redaction | `middleware/x402.rs`, `middleware/rate_limit.rs`, `config.rs` (redaction), `solana.rs` |
-| `domain-fintech` | USDC calculations, atomic amounts, cost breakdowns, pricing, 5% fee logic, budget checks | `routes/chat/cost.rs`, `models.rs` (pricing), `usage.rs` (budgets) |
-| `database-migrations` | Schema changes, new columns, indexes, PostgreSQL queries | `migrations/`, `usage.rs`, `wallet_budgets` |
-| `postgres-patterns` | Query optimization, sqlx usage, connection pooling | `usage.rs`, `main.rs` (pool setup) |
-| `domain-web` | Axum routes, middleware, Tower layers, SSE streaming, CORS, request/response handling | `routes/`, `middleware/`, `providers/`, `lib.rs` (`build_router`) |
-| `m07-concurrency` | Async patterns, tokio::spawn, fire-and-forget, background tasks, Arc sharing | `usage.rs`, `cache.rs`, `balance_monitor.rs`, `escrow/claimer.rs`, `main.rs` |
-| `api-design` | Adding/changing HTTP endpoints, 402 response shape, OpenAI compatibility, query params | `routes/chat.rs`, `routes/services.rs`, `routes/models.rs`, x402 types |
-| `tdd-workflow` | Any new feature or bugfix — write tests first | All crates |
-| `docker-patterns` | Container config, compose services, multi-stage builds | `Dockerfile`, `docker-compose.yml` |
-| `deployment-patterns` | Deploy config, CI/CD, infrastructure | `Dockerfile`, `fly.toml` |
+| _(no upstream skill — TODO: author `solvela-fintech`)_ | USDC atomic-amount math, cost breakdowns, 5% fee logic, budget checks — see "Key Architectural Rules" #5 | `routes/chat/cost.rs`, `models.rs` (pricing), `usage.rs` (budgets) |
+| `everything-claude-code:database-migrations` | Schema changes, new columns, indexes, PostgreSQL queries | `migrations/`, `usage.rs`, `wallet_budgets` |
+| `everything-claude-code:postgres-patterns` | Query optimization, sqlx usage, connection pooling | `usage.rs`, `main.rs` (pool setup) |
+| `everything-claude-code:backend-patterns` | Axum routes, middleware, Tower layers, SSE streaming, CORS, request/response handling | `routes/`, `middleware/`, `providers/`, `lib.rs` (`build_router`) |
+| `everything-claude-code:rust-patterns` | Async patterns, tokio::spawn, fire-and-forget, background tasks, Arc sharing | `usage.rs`, `cache.rs`, `balance_monitor.rs`, `escrow/claimer.rs`, `main.rs` |
+| `everything-claude-code:api-design` | Adding/changing HTTP endpoints, 402 response shape, OpenAI compatibility, query params | `routes/chat.rs`, `routes/services.rs`, `routes/models.rs`, x402 types |
+| `everything-claude-code:tdd-workflow` + `everything-claude-code:rust-test` | Any new feature or bugfix — write tests first | All crates |
+| `everything-claude-code:docker-patterns` | Container config, compose services, multi-stage builds | `Dockerfile`, `docker-compose.yml` |
+| `everything-claude-code:deployment-patterns` | Deploy config, CI/CD, infrastructure | `Dockerfile`, `fly.toml` |
 
 ## Deployment
 
