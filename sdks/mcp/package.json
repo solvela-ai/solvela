@@ -19,7 +19,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@solvela/signer-core": "file:../signer-core",
-    "@solvela/sdk": "^0.2.0",
     "@solana/web3.js": "^1.87.0",
     "@solana/spl-token": "^0.4.0",
     "async-mutex": "^0.5.0",

@@ -8,10 +8,16 @@
  */
 
 import { Mutex } from 'async-mutex';
-import { createPaymentHeader, SigningError } from '@solvela/sdk/x402';
-import type { PaymentRequired, PaymentAccept } from '@solvela/sdk/types';
+import {
+  createPaymentHeader,
+  SigningError,
+  parse402,
+  filterAccepts,
+  isStubHeader,
+  sanitizeGatewayError,
+} from '@solvela/signer-core';
+import type { PaymentRequired, PaymentAccept } from '@solvela/signer-core';
 import type { SessionStore, SessionState } from './session.js';
-import { parse402, filterAccepts, isStubHeader, sanitizeGatewayError } from '@solvela/signer-core';
 
 export type { PaymentRequired, PaymentAccept };
 
@@ -93,7 +99,7 @@ export interface GatewayClientOptions {
  * Lightweight gateway client used by the MCP server.
  *
  * Tracks session spend and exposes spend summary for the `spending` tool.
- * Uses createPaymentHeader from @solvela/sdk for real on-chain USDC signing.
+ * Uses createPaymentHeader from @solvela/signer-core for on-chain USDC signing.
  */
 export class GatewayClient {
   readonly apiUrl: string;

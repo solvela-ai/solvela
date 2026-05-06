@@ -2,7 +2,7 @@
   "name": "@solvela/signer-core",
   "version": "0.1.0",
   "private": true,
-  "description": "Shared x402 parsing, scheme filtering, stub-header guards, and error sanitization",
+  "description": "Shared x402 protocol library: signing, parsing, scheme filtering, stub-header guards, and error sanitization",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,10 +14,14 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --import tsx/esm --test tests/parse-402.test.ts tests/scheme-filter.test.ts tests/stub-guard.test.ts tests/redact.test.ts",
+    "test": "node --import tsx/esm --test tests/parse-402.test.ts tests/scheme-filter.test.ts tests/stub-guard.test.ts tests/redact.test.ts tests/sign.test.ts",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@solana/spl-token": "^0.4.0",
+    "@solana/web3.js": "^1.87.0",
+    "bs58": "^5.0.0"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
