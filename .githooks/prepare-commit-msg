@@ -1,0 +1,29 @@
+#!/bin/sh
+# Auto-inject a Signed-off-by trailer matching the commit author.
+#
+# Runs BEFORE commit-msg, so commits drafted via `git commit -m "…"`
+# from a HEREDOC pick up the trailer automatically (the `commit.signoff`
+# / `format.signOff` config flags don't reliably cover all git
+# invocation paths). The companion `.githooks/commit-msg` hook then
+# enforces the result.
+#
+# Idempotent: if a matching trailer is already present, this is a
+# no-op. Runs on every commit source (message, template, merge,
+# squash, amend) so DCO sign-off is uniform across the project.
+
+msg_file="$1"
+
+ident=$(git var GIT_AUTHOR_IDENT)
+author_name=$(printf '%s' "$ident" | sed 's/ <.*//')
+author_email=$(printf '%s' "$ident" | sed 's/^[^<]*<\([^>]*\)>.*/\1/')
+expected="Signed-off-by: ${author_name} <${author_email}>"
+
+# Skip if the trailer is already present (handles `git commit -s`,
+# manual signoff, and re-runs after an amend).
+if git interpret-trailers --parse "$msg_file" 2>/dev/null | grep -qxF "$expected"; then
+    exit 0
+fi
+
+git interpret-trailers --in-place \
+    --trailer "Signed-off-by: ${author_name} <${author_email}>" \
+    "$msg_file"

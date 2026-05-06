@@ -1,0 +1,54 @@
+#!/bin/sh
+# Enforce DCO sign-off on every commit.
+#
+# This mirrors the GitHub-side "Verify DCO sign-off" check so failures
+# show up at commit time (locally) instead of at PR-merge time. To
+# enable this hook in a fresh clone, run once:
+#
+#   git config core.hooksPath .githooks
+#
+# The companion `.githooks/prepare-commit-msg` hook auto-injects the
+# trailer on every commit, and this hook catches the cases where the
+# trailer is missing or doesn't match the commit author (typo'd email,
+# copy-pasted from another author, etc.).
+#
+# Bypass with `git commit --no-verify` for emergencies (e.g. mechanical
+# reverts where DCO is contested) — the GitHub check will still fire.
+
+msg_file="$1"
+
+# Build the expected trailer from the commit author identity. We use
+# `git var GIT_AUTHOR_IDENT` rather than reading user.name/user.email
+# directly so amends and `--author=...` overrides resolve correctly.
+ident=$(git var GIT_AUTHOR_IDENT)
+author_name=$(printf '%s' "$ident" | sed 's/ <.*//')
+author_email=$(printf '%s' "$ident" | sed 's/^[^<]*<\([^>]*\)>.*/\1/')
+expected="Signed-off-by: ${author_name} <${author_email}>"
+
+# Use `git interpret-trailers --parse` to extract trailers in their
+# normalized form, then check the expected trailer is present. This is
+# more robust than a raw grep against the raw message body.
+if git interpret-trailers --parse "$msg_file" 2>/dev/null | grep -qxF "$expected"; then
+    exit 0
+fi
+
+cat >&2 <<EOF
+ERROR: Commit message is missing or has a mismatched DCO sign-off trailer.
+
+Expected: $expected
+
+Fix any one of:
+  • Re-run with:            git commit -s
+  • Amend the last commit:  git commit --amend -s --no-edit
+  • Bypass once (rare):     git commit --no-verify
+
+The companion .githooks/prepare-commit-msg hook auto-injects this
+trailer on every commit. If you're seeing this error, check that
+\`git config core.hooksPath\` is set to \`.githooks\` — without that,
+prepare-commit-msg never runs.
+
+This project requires the Developer Certificate of Origin (DCO) on every
+commit. See https://developercertificate.org/ for the certificate text.
+EOF
+
+exit 1
