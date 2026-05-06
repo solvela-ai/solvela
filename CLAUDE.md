@@ -63,6 +63,30 @@ RUST_LOG=info cargo run -p gateway  # listens on :8402
 
 Migrations in `migrations/` are applied automatically by `docker compose up` and on gateway startup via `run_migrations()` (idempotent).
 
+## Local Setup (one-time per clone)
+
+```bash
+# Activate the tracked git hooks (auto-signoff + DCO enforcement).
+git config core.hooksPath .githooks
+```
+
+Two hooks live in `.githooks/`:
+
+- **`prepare-commit-msg`** auto-injects a `Signed-off-by: <name> <email>`
+  trailer matching the configured `user.name`/`user.email` on every
+  commit (idempotent — skips if already present). Runs before the
+  message reaches commit-msg, so messages drafted via `git commit -m`
+  from a HEREDOC pick up the trailer automatically. The `format.signOff`
+  / `commit.signoff` config flags do not reliably cover all git
+  invocation paths, so this hook is the source of truth.
+- **`commit-msg`** enforces that the trailer is present and matches the
+  author identity, mirroring the GitHub-side DCO check. Catches the
+  rare case where the trailer was stripped or rewritten between
+  prepare-commit-msg and the actual commit.
+
+Bypass once with `git commit --no-verify` for emergencies; the
+GitHub-side DCO check will still fire on push.
+
 ## Architecture
 
 ### Workspace Crates (`crates/`)
