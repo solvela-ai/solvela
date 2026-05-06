@@ -9,8 +9,14 @@ use crate::state::Escrow;
 ///
 /// The provider specifies `actual_amount` (≤ deposited amount). The gateway:
 ///   1. Transfers `actual_amount` from vault → provider ATA
-///   2. Transfers remainder (deposit − actual) from vault → agent ATA (refund)
+///   2. Transfers the remaining vault balance → agent ATA (refund)
 ///   3. Closes the vault and escrow accounts (rent returned to agent)
+///
+/// The refund leg uses the vault's actual balance rather than the deposited
+/// amount so any inbound transfer to the vault between deposit and claim
+/// (an attacker can predict the vault address and send dust to grief the
+/// `close_account` CPI) is drained out alongside the deposit. Without this,
+/// any non-zero vault balance at close time would revert the entire claim.
 pub fn claim(ctx: Context<Claim>, actual_amount: u64) -> Result<()> {
     require!(
         actual_amount <= ctx.accounts.escrow.amount,
@@ -39,8 +45,10 @@ pub fn claim(ctx: Context<Claim>, actual_amount: u64) -> Result<()> {
     );
     token::transfer(cpi_transfer, actual_amount)?;
 
-    // Refund remainder → agent ATA
-    let refund = escrow.amount - actual_amount;
+    // Refund the rest of the vault → agent ATA. Using vault.amount (not
+    // escrow.amount) drains any donations alongside the legitimate balance,
+    // so close_account always sees a zero-balance vault.
+    let refund = ctx.accounts.vault.amount - actual_amount;
     if refund > 0 {
         let cpi_refund = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),

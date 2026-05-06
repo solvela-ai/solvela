@@ -191,6 +191,86 @@ fn test_multiple_escrows_same_agent() {
     assert_eq!(read_token_balance(&ctx.svm, &vault_b), Some(amount_b));
 }
 
+// ─── Regression Tests ──────────────────────────────────────────────────────
+
+/// Regression for the vault-donation DoS in `claim`.
+///
+/// Before the fix, `claim` transferred exactly `escrow.amount` out of the
+/// vault and then called `close_account`, which fails on any non-zero
+/// balance. The vault address is derivable from `(agent, service_id)` and
+/// anyone can transfer SPL tokens into it, so an attacker could observe a
+/// deposit on-chain and send dust to the vault to make every subsequent
+/// `claim` revert until the agent refunded after expiry.
+///
+/// After the fix, the refund leg drains the entire vault balance
+/// (`vault.amount - actual_amount`) rather than just `escrow.amount -
+/// actual_amount`, so `close_account` always sees a zero-balance vault and
+/// the donation is forwarded to the agent as a small windfall.
+#[test]
+fn test_claim_succeeds_after_vault_donation() {
+    use solana_sdk::signature::Keypair;
+    use spl_token::instruction as spl_ix;
+
+    let mut ctx = setup();
+    let service_id = [42u8; 32];
+    let amount = 1_000_000u64;
+    let donation = 1u64;
+
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+    let (escrow_pda, bump) = deposit_helper(&mut ctx, &service_id, amount, 500);
+    let vault_ata = find_vault_ata(&escrow_pda, &ctx.usdc_mint);
+
+    // Attacker pre-funds the vault with a single microUSDC via SPL transfer.
+    let attacker = Keypair::new();
+    ctx.svm.airdrop(&attacker.pubkey(), 10_000_000_000).unwrap();
+    let attacker_ata = inject_ata(&mut ctx.svm, &attacker.pubkey(), &ctx.usdc_mint, donation);
+    let donate_ix = spl_ix::transfer(
+        &spl_token::ID,
+        &attacker_ata,
+        &vault_ata,
+        &attacker.pubkey(),
+        &[],
+        donation,
+    )
+    .unwrap();
+    send_tx(&mut ctx.svm, &[donate_ix], &attacker, &[&attacker])
+        .expect("attacker donation should succeed");
+    assert_eq!(
+        read_token_balance(&ctx.svm, &vault_ata),
+        Some(amount + donation),
+        "vault now holds the deposit plus the attacker's donation",
+    );
+
+    // Provider claims the full deposited amount. Pre-fix this reverts on
+    // close_account because the vault still holds `donation` after the two
+    // transfers; post-fix the refund leg drains the donation alongside the
+    // legitimate refund and the vault closes cleanly.
+    let claim_ix = build_claim_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        &service_id,
+        bump,
+        amount,
+    );
+    send_tx(&mut ctx.svm, &[claim_ix], &ctx.provider, &[&ctx.provider])
+        .expect("claim must succeed even when vault has been donated to");
+
+    let provider_ata = get_associated_token_address(&ctx.provider.pubkey(), &ctx.usdc_mint);
+    assert_eq!(read_token_balance(&ctx.svm, &provider_ata), Some(amount));
+
+    let agent_ata = get_associated_token_address(&ctx.agent.pubkey(), &ctx.usdc_mint);
+    assert_eq!(
+        read_token_balance(&ctx.svm, &agent_ata),
+        Some(donation),
+        "agent receives the attacker's donation as a windfall via the refund leg",
+    );
+
+    assert!(!account_exists(&ctx.svm, &vault_ata), "vault should be closed");
+    assert!(!account_exists(&ctx.svm, &escrow_pda), "escrow should be closed");
+}
+
 // ─── Error Case Tests ──────────────────────────────────────────────────────
 
 #[test]
