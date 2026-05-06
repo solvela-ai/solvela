@@ -37,7 +37,7 @@ import { getTools } from './tools.js';
 import { createSessionStore } from './session.js';
 import { createPaymentHeader } from '@solvela/sdk/x402';
 import type { PaymentRequired, PaymentAccept } from '@solvela/sdk/types';
-import { PublicKey } from '@solana/web3.js';
+import { Connection, PublicKey } from '@solana/web3.js';
 
 // ---------------------------------------------------------------------------
 // Bootstrap client from environment
@@ -432,9 +432,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             );
           }
 
-          // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const solanaWeb3 = require('@solana/web3.js');
-          const { Connection } = solanaWeb3;
+          // Connection is imported statically at the top of the file; require()
+          // here was a runtime ReferenceError under ESM ("type": "module"). The
+          // existing tests pass through a callback seam (runEscrowDeposit) that
+          // bypasses this branch, which is why CI never caught it.
           const connection = new Connection(rpcUrl, 'confirmed');
 
           // Fetch blockhash BEFORE broadcast so lastValidBlockHeight is available for confirmTransaction.
