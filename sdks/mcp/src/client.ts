@@ -267,7 +267,7 @@ export class GatewayClient {
         let paymentHeader: string;
         try {
           paymentHeader = await createPaymentHeader(filteredPaymentInfo, url, privateKey, bodyStr);
-        } catch (err) {
+        } catch (err: unknown) {
           // HF2: Refund the reserved budget — signer never succeeded.
           await this.budgetMutex.runExclusive(async () => {
             const before = this.sessionSpentMicro;
@@ -284,7 +284,15 @@ export class GatewayClient {
           if (err instanceof SigningError) {
             // SigningError.message is safe — the SDK constructs it without including key material.
             // Do NOT propagate err.cause: it may contain raw byte arrays from web3.js / bs58.
-            throw new Error(`Payment signing failed: ${err.message}`);
+            //
+            // The `instanceof` above is the runtime gate. The `as Error` cast is purely for
+            // TS: until the workspace dep `@solvela/sdk/x402` resolves cleanly, SigningError
+            // imports as `any`, so `instanceof SigningError` doesn't narrow `err` from
+            // `unknown` to anything readable. Casting to `Error` (always resolved from
+            // lib.d.ts, structural parent of SigningError) gives us `.message` access without
+            // weakening the runtime check.
+            const sErr = err as Error;
+            throw new Error(`Payment signing failed: ${sErr.message}`);
           }
           throw new Error(
             `Unexpected error during payment signing: ${err instanceof Error ? err.message : String(err)}`,
