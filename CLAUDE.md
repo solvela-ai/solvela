@@ -37,8 +37,12 @@ cargo test -p gateway --lib               # unit tests only
 cargo test -p x402 -- --nocapture         # show stdout/tracing output
 
 # Escrow program (standalone — NOT in workspace)
+# Default: runs only unit tests in tests/unit.rs (no on-chain artifact required).
 cargo test --manifest-path programs/escrow/Cargo.toml
-# If OpenSSL issues on Linux:
+# Full suite (LiteSVM integration tests in tests/integration.rs) — requires
+# `anchor build` to have produced target/deploy/solvela_escrow.so first.
+anchor build && cargo test --manifest-path programs/escrow/Cargo.toml --features sbf
+# If OpenSSL issues on Linux (prepend to either command above):
 OPENSSL_NO_PKG_CONFIG=1 OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl cargo test --manifest-path programs/escrow/Cargo.toml
 
 # Lint (must pass before committing)

@@ -29,6 +29,12 @@ no-idl = []
 no-log-ix-name = []
 cpi = ["no-entrypoint"]
 default = []
+# Enables the LiteSVM integration tests in tests/integration.rs and
+# tests/helpers.rs. Requires `anchor build` to have produced
+# target/deploy/solvela_escrow.so first; without this feature the
+# integration test files compile to empty crates so `cargo test` works
+# from a fresh checkout (unit tests in tests/unit.rs always run).
+sbf = []
 
 [dependencies]
 anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
@@ -41,7 +47,7 @@ anchor-lang = { version = "0.31.1" }
 litesvm = "0.6.1"
 solana-sdk = "2.2"
 spl-token = "7"
-spl-associated-token-account = "8"
+spl-associated-token-account = "6"
 
 [profile.release]
 overflow-checks = true
