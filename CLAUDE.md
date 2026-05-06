@@ -135,7 +135,7 @@ The scorer in `crates/router/src/scorer.rs` classifies requests across 15 weight
 
 ## Environment Variables
 
-Provider API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`. Gateway config uses `SOLVELA_` prefix (legacy `RCR_` accepted with deprecation warning). Solana keys: `SOLVELA_SOLANA_RPC_URL`, `SOLVELA_SOLANA_RECIPIENT_WALLET`, `SOLVELA_SOLANA_FEE_PAYER_KEY`. Optional: `DATABASE_URL`, `REDIS_URL`. See `.env.example` for full list.
+Provider API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`. Gateway config uses `SOLVELA_` prefix (legacy `RCR_` accepted with deprecation warning). Nested fields use double-underscore as the Fly.io-style separator (see `crates/gateway/src/main.rs:69`). Solana keys: `SOLVELA_SOLANA__RPC_URL`, `SOLVELA_SOLANA__RECIPIENT_WALLET`, `SOLVELA_SOLANA__FEE_PAYER_KEY`, `SOLVELA_SOLANA__USDC_MINT`, `SOLVELA_SOLANA__ESCROW_PROGRAM_ID`. The legacy single-underscore form (e.g. `SOLVELA_SOLANA_RPC_URL`, as used in `.env.example` and runtime error messages) is also accepted via fallback. Optional: `DATABASE_URL`, `REDIS_URL`. See `.env.example` for full list.
 
 ## Code Conventions
 
