@@ -380,9 +380,12 @@ programs/
   escrow/           Anchor escrow program (deposit/claim/refund, PDA vault)
 sdks/
   python/           pip install solvela
-  typescript/       npm install @solvela/sdk
   go/               go get github.com/solvela-ai/solvela-go
   mcp/              Claude Code MCP server
+  signer-core/      Shared x402 parser + payment-signer primitives
+  ai-sdk-provider/  Vercel AI SDK provider for Solvela
+  openclaw-provider/ OpenClaw plugin (Solvela as first-class LLM provider)
+# TypeScript SDK lives at github.com/solvela-ai/solvela-ts (npm: @solvela/sdk)
 config/
   models.toml       Model registry + pricing
   default.toml      Gateway configuration

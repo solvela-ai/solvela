@@ -229,7 +229,7 @@ When EVM support lands:
 1. **Create** `crates/x402/src/eip712_domains.rs` with the table above (verified rows only).
 2. **Verify** each `TODO` row against an on-chain `name()` / `version()` read. Add only after verification.
 3. **Wire** the lookup into the EVM `PaymentVerifier` impl in `crates/x402/src/evm.rs` (suggested) — refuse to construct or accept payments for `(chainId, contract)` pairs not in the table.
-4. **SDK parity:** ship the same table (string-coded) in `sdks/typescript`, `sdks/python`, `sdks/go`, `sdks/mcp`. Add a CI check that parses the Rust table at lint time and compares against each SDK's copy.
+4. **SDK parity:** ship the same table (string-coded) in the standalone `solvela-ts`, `solvela-python`, `solvela-go` repos and the in-monorepo `sdks/mcp`. Add a CI check that parses the Rust table at lint time and compares against each SDK's copy.
 5. **402 response:** the `extra` block continues to include `name` / `version` for informational/debug use. Clients **MUST IGNORE** these and use the hardcoded table. Document this prominently in the SDK READMEs.
 6. **Tests:**
    - Domain lookup hit (Base mainnet) → returns `("USD Coin", "2")`.

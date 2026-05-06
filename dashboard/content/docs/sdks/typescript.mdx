@@ -3,6 +3,8 @@ title: TypeScript SDK
 description: TypeScript/Node.js client for Solvela with automatic x402 payment handling
 ---
 
+The Solvela TypeScript SDK has moved to its own repository:
+[**github.com/solvela-ai/solvela-ts**](https://github.com/solvela-ai/solvela-ts).
 
 ## Installation
 
@@ -10,129 +12,17 @@ description: TypeScript/Node.js client for Solvela with automatic x402 payment h
 npm install @solvela/sdk
 ```
 
-## Quick start
+## Documentation
 
-```typescript
-import { LLMClient } from '@solvela/sdk';
+For the complete API reference, type definitions, examples, and changelog, see:
 
-const client = new LLMClient({
-  apiUrl: 'https://api.solvela.ai',
-  // private key is read from SOLANA_PRIVATE_KEY env var,
-  // or pass it as privateKey option
-});
+- **Source:** [github.com/solvela-ai/solvela-ts](https://github.com/solvela-ai/solvela-ts)
+- **npm package:** [@solvela/sdk](https://www.npmjs.com/package/@solvela/sdk)
 
-const reply = await client.chat('auto', 'What is Solana?');
-console.log(reply);
-```
+## What changed
 
-## Constructor options
-
-```typescript
-const client = new LLMClient({
-  apiUrl: 'https://api.solvela.ai', // default: https://api.solvela.ai
-  sessionBudget: 0.10,   // stop if session spend exceeds $0.10 USDC
-  timeout: 60000,        // request timeout in ms (default: 60000)
-});
-```
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `apiUrl` | string | Gateway base URL. Defaults to `https://api.solvela.ai` or `RCR_API_URL` env var. |
-| `sessionBudget` | number | Optional USDC budget cap. Throws `BudgetExceededError` when exceeded. |
-| `timeout` | number | HTTP timeout in milliseconds. Default: 60000. |
-
-## Methods
-
-### `chat(model, prompt)`
-
-Simple one-shot chat. Returns the assistant's reply text.
-
-```typescript
-const text = await client.chat('openai/gpt-4o', 'Explain proof of history.');
-```
-
-### `chatCompletion(request)`
-
-Full OpenAI-compatible request. Returns the complete response object.
-
-```typescript
-const response = await client.chatCompletion({
-  model: 'auto',
-  messages: [
-    { role: 'system', content: 'You are a blockchain expert.' },
-    { role: 'user', content: 'What is a validator?' },
-  ],
-  maxTokens: 500,
-  temperature: 0.7,
-  stream: false,
-});
-console.log(response.choices[0].message.content);
-```
-
-### `smartChat(prompt, profile?)`
-
-Routes the prompt through the smart router using the specified profile.
-
-```typescript
-const response = await client.smartChat('Prove quicksort complexity', 'premium');
-```
-
-### `listModels()`
-
-Returns all available models with pricing.
-
-```typescript
-const models = await client.listModels();
-```
-
-### `health()`
-
-Gateway health check.
-
-```typescript
-const status = await client.health();
-```
-
-### `getSessionSpent()`
-
-Returns total USDC spent in this client session.
-
-```typescript
-console.log('Spent:', client.getSessionSpent(), 'USDC');
-```
-
-### `getRemainingBudget()`
-
-Returns remaining USDC budget, or `undefined` if no budget was set.
-
-## Payment flow
-
-The SDK handles x402 automatically:
-
-1. Sends the request without payment
-2. If `402` is returned, parses the `PaymentRequired` body
-3. Checks session budget (throws `BudgetExceededError` if exceeded)
-4. Builds and signs a Solana USDC-SPL transaction
-5. Retries the request with the `payment-signature` header
-
-## Error handling
-
-```typescript
-import { LLMClient, PaymentError, BudgetExceededError } from '@solvela/sdk';
-
-try {
-  const reply = await client.chat('auto', 'Hello');
-} catch (e) {
-  if (e instanceof BudgetExceededError) {
-    console.error('Budget exceeded:', e.message);
-  } else if (e instanceof PaymentError) {
-    console.error('Payment failed:', e.message);
-  } else {
-    throw e;
-  }
-}
-```
-
-<Note>
-  Source code: [`solvela-ai/solvela-ts`](https://github.com/solvela-ai/solvela-ts).
-</Note>
+The TypeScript SDK was previously vendored under `sdks/typescript/` in the
+solvela monorepo. That snapshot was retired in favor of a canonical standalone
+repository so SDK fixes (signer hardening, x402 protocol updates, ergonomics)
+ship in lockstep with the npm release. Existing imports of `@solvela/sdk`
+continue to work — only the source location changed.
