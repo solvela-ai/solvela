@@ -1,3 +1,5 @@
+#![cfg(feature = "sbf")]
+
 mod helpers;
 
 use helpers::*;

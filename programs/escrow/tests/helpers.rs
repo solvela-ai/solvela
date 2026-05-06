@@ -1,3 +1,4 @@
+#![cfg(feature = "sbf")]
 #![allow(dead_code)]
 
 use anchor_lang::solana_program::hash::hash;
