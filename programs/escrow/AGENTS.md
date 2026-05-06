@@ -32,8 +32,16 @@ Trustless USDC-SPL escrow. Agents deposit USDC into a PDA keyed by `(agent, serv
 
 ### Testing Requirements
 ```bash
+# Default: unit tests only (tests/unit.rs) — runs from a fresh checkout, no .so needed.
 cargo test --manifest-path programs/escrow/Cargo.toml
-# If Linux pkg-config picks up wrong OpenSSL:
+
+# Full suite — LiteSVM integration tests in tests/integration.rs are gated
+# behind the `sbf` feature because they include_bytes! the compiled program
+# from target/deploy/solvela_escrow.so. Run `anchor build` first.
+anchor build
+cargo test --manifest-path programs/escrow/Cargo.toml --features sbf
+
+# If Linux pkg-config picks up wrong OpenSSL (prepend to either command):
 OPENSSL_NO_PKG_CONFIG=1 OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUDE_DIR=/usr/include/openssl cargo test --manifest-path programs/escrow/Cargo.toml
 ```
 Prefer LiteSVM for fast deterministic tests; use Surfpool/mainnet-fork only when you need real-account behaviour.
