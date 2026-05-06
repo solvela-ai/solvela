@@ -38,7 +38,7 @@ sbf = []
 
 [dependencies]
 anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
-anchor-spl = { version = "0.31.1", features = ["associated_token", "token"] }
+anchor-spl = { version = "1.0.2", features = ["associated_token", "token"] }
 
 [dev-dependencies]
 anchor-lang = { version = "0.31.1" }
