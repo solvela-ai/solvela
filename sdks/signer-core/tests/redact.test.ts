@@ -89,13 +89,16 @@ describe('sanitizeGatewayError', () => {
   });
 
   it('slices to maxLen (default 500) before redacting', () => {
-    const long = 'a'.repeat(1000);
+    // Spaces pass through both redactors untouched, so we can assert the
+    // post-slice length directly. (A long run of base58-alphabet chars
+    // would be redacted into shorter `[REDACTED]` markers.)
+    const long = ' '.repeat(1000);
     const result = sanitizeGatewayError(long);
     assert.equal(result.length, 500);
   });
 
   it('respects custom maxLen', () => {
-    const long = 'a'.repeat(1000);
+    const long = ' '.repeat(1000);
     const result = sanitizeGatewayError(long, 100);
     assert.equal(result.length, 100);
   });
@@ -107,5 +110,41 @@ describe('sanitizeGatewayError', () => {
 
   it('handles empty string', () => {
     assert.equal(sanitizeGatewayError(''), '');
+  });
+
+  // ── redactor composition: the file's own redactHex + redactBase58 must
+  //    apply to gateway error bodies, not just payment-signature fragments.
+  //    Regression for the bug where wallet addresses and key-shaped hex
+  //    leaked through error messages despite the helpers existing in the
+  //    same module.
+
+  it('redacts wallet addresses (base58) embedded in error bodies', () => {
+    const text = `upstream rejected tx for wallet ${BASE58_44}: insufficient balance`;
+    const result = sanitizeGatewayError(text);
+    assert.equal(
+      result,
+      'upstream rejected tx for wallet [REDACTED]: insufficient balance',
+    );
+  });
+
+  it('redacts private-key-shaped hex fragments in error bodies', () => {
+    const text = `signing failed: leaked key ${HEX_64} mid-message`;
+    const result = sanitizeGatewayError(text);
+    assert.equal(result, 'signing failed: leaked key [REDACTED] mid-message');
+  });
+
+  it('redacts both base58 and hex in the same error body', () => {
+    const text = `wallet ${BASE58_44} signed tx ${HEX_64} but it was rejected`;
+    const result = sanitizeGatewayError(text);
+    assert.equal(
+      result,
+      'wallet [REDACTED] signed tx [REDACTED] but it was rejected',
+    );
+  });
+
+  it('still strips payment-signature alongside hex/base58 redaction', () => {
+    const text = `error: payment-signatureXYZ123 wallet ${BASE58_44} rejected`;
+    const result = sanitizeGatewayError(text);
+    assert.equal(result, 'error: [redacted] wallet [REDACTED] rejected');
   });
 });
