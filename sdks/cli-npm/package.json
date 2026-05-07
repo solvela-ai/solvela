@@ -6,6 +6,10 @@
   "bin": {
     "solvela": "bin/solvela.js"
   },
+  "scripts": {
+    "publish:prepare": "node scripts/set-private.js false",
+    "publish:cleanup": "node scripts/set-private.js true"
+  },
   "optionalDependencies": {
     "@solvela/cli-linux-x64": "1.0.0-draft",
     "@solvela/cli-win32-x64": "1.0.0-draft",

@@ -7,6 +7,7 @@
 "use strict";
 
 const { execFileSync } = require("child_process");
+const fs = require("fs");
 const path = require("path");
 
 // Map Node's process.platform + process.arch to our package naming convention.
@@ -43,7 +44,18 @@ function getBinaryPath(platformPkg) {
     const pkgRoot = path.dirname(
       require.resolve(path.join(platformPkg, "package.json"))
     );
-    return path.join(pkgRoot, "bin", binaryName);
+    const binPath = path.join(pkgRoot, "bin", binaryName);
+    // require.resolve only proves package.json exists — it says nothing about
+    // whether the binary itself was extracted. Two real states leave the bin
+    // missing while package.json is present:
+    //   1. Dev state after `git clone`: platforms/<plat>/bin/ contains only
+    //      .gitkeep until verify-release.sh (or a release build) runs.
+    //   2. Corrupt/interrupted `npm install`: package.json is on disk but the
+    //      bin/ payload was never extracted.
+    // Without this check, execFileSync would throw a generic ENOENT and skip
+    // the actionable "Try: npm install" guidance below.
+    if (!fs.existsSync(binPath)) return null;
+    return binPath;
   } catch (_) {
     return null;
   }
