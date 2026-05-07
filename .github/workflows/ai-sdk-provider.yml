@@ -209,4 +209,12 @@ jobs:
         working-directory: sdks/signer-core
         run: npm ci && npm run build
       - run: npm ci
-      - run: npm audit --production --audit-level=high
+      # Audit-level critical (not high) because @solana/spl-token transitively
+      # pulls bigint-buffer, which has a known high-severity CVE
+      # (GHSA-3gc7-fjrx-p6mg) with no upstream fix. Affects the entire Solana
+      # ecosystem. Dependabot security alerts cover the high-severity gap on
+      # the repo level; this job catches CRITICAL regressions in CI.
+      # Mirrors openclaw-provider.yml; signer-core's bs58/web3.js/spl-token
+      # hard-deps reach this audit via signer-core's node_modules after
+      # `npm ci` here builds it as a file: dep above.
+      - run: npm audit --production --audit-level=critical
