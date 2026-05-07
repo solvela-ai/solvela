@@ -1,11 +1,12 @@
 /**
- * Tests for isStubHeader — stub payment header detection.
+ * Tests for isStubHeader / isStubTransaction — stub payment header
+ * and transaction detection.
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isStubHeader } from '../src/stub-guard.ts';
+import { isStubHeader, isStubTransaction } from '../src/stub-guard.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -81,5 +82,37 @@ describe('isStubHeader', () => {
       const header = Buffer.from('null').toString('base64');
       assert.equal(isStubHeader(header), false);
     });
+  });
+});
+
+describe('isStubTransaction', () => {
+  it('returns true for STUB_BASE64_TX', () => {
+    assert.equal(isStubTransaction('STUB_BASE64_TX'), true);
+  });
+
+  it('returns true for STUB_ESCROW_DEPOSIT_TX', () => {
+    assert.equal(isStubTransaction('STUB_ESCROW_DEPOSIT_TX'), true);
+  });
+
+  it('returns true for any STUB_-prefixed string', () => {
+    assert.equal(isStubTransaction('STUB_FUTURE_MARKER'), true);
+  });
+
+  it('returns false for a real-looking base64 transaction', () => {
+    assert.equal(isStubTransaction('AQABAtPVl4cMz9c='), false);
+  });
+
+  it('returns false for empty string', () => {
+    assert.equal(isStubTransaction(''), false);
+  });
+
+  it('returns false for STUB without trailing underscore', () => {
+    // Defensive: only the documented marker convention triggers.
+    assert.equal(isStubTransaction('STUB'), false);
+    assert.equal(isStubTransaction('STUBABC'), false);
+  });
+
+  it('case-sensitive — lowercase stub_ does not match', () => {
+    assert.equal(isStubTransaction('stub_base64_tx'), false);
   });
 });

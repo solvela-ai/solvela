@@ -13,7 +13,8 @@
  *   - SigningError: thrown by createPaymentHeader on signing failure
  *   - parse402: accepts both envelope and direct shapes, throws on malformed
  *   - filterAccepts: scheme-based filtering with mode support
- *   - isStubHeader: detects stub payment headers
+ *   - isStubHeader: detects stub payment headers (envelope-level)
+ *   - isStubTransaction: detects stub markers in an extracted tx string
  *   - sanitizeGatewayError: slices + redacts gateway error bodies
  *   - redactBase58, redactHex: byte-pattern redactors
  */
@@ -22,5 +23,5 @@ export type { PaymentRequired, PaymentAccept, CostBreakdown } from './types.js';
 export { createPaymentHeader, decodePaymentHeader, SigningError } from './sign.js';
 export { parse402 } from './parse-402.js';
 export { filterAccepts } from './scheme-filter.js';
-export { isStubHeader } from './stub-guard.js';
+export { isStubHeader, isStubTransaction } from './stub-guard.js';
 export { sanitizeGatewayError, redactBase58, redactHex } from './redact.js';
