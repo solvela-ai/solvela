@@ -17,7 +17,7 @@
   "keywords": ["mcp", "solana", "usdc", "x402", "llm", "ai-agent"],
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@solvela/signer-core": "file:../signer-core",
     "@solana/web3.js": "^1.87.0",
     "@solana/spl-token": "^0.4.0",
