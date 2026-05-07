@@ -128,7 +128,14 @@ function getSessionBudget(): number | undefined {
 
 /**
  * Fetch a PaymentRequired payload from the gateway by making a probe request
- * to /v1/chat/completions without a payment header.
+ * to the resource URL the caller intends to sign.
+ *
+ * Critical: the probe URL must match the URL the caller will sign and call
+ * with the payment header. If the probe hits /v1/chat/completions but the
+ * signed resourceUrl is /v1/embeddings, the gateway computes embeddings cost
+ * on the real call, sees a signature for the chat-completions cost, and
+ * rejects — or worse, accepts a mismatched cost. Default falls back to
+ * /v1/chat/completions only when no resourceUrl is supplied.
  *
  * The gateway returns 402 with the cost breakdown and accepted payment schemes.
  * This is the same first-leg of the MCP server's 402-retry-loop; here we do
@@ -140,8 +147,9 @@ function getSessionBudget(): number | undefined {
 async function fetchPaymentRequired(
   apiUrl: string,
   body: string,
+  resourceUrl?: string,
 ): Promise<PaymentRequired> {
-  const url = `${apiUrl}/v1/chat/completions`;
+  const url = resourceUrl ?? `${apiUrl}/v1/chat/completions`;
 
   const timeoutMs = (() => {
     const raw = process.env['SOLVELA_PROBE_TIMEOUT_MS'];
@@ -408,7 +416,10 @@ export default function register(api: OpenClawApi, opts: RegisterOptions = {}): 
         let paymentHeader: string;
         let cost: number;
         try {
-          const paymentInfo = await fetchPaymentRequired(apiUrl, requestBody);
+          // Probe at the same URL we'll sign and call. Avoids cost-mismatch
+          // when the wrapped stream targets a non-chat-completions route
+          // (e.g. /v1/embeddings) and the gateway prices it differently.
+          const paymentInfo = await fetchPaymentRequired(apiUrl, requestBody, resourceUrl);
           // Number() (not parseFloat) so trailing garbage like "0.001SOL"
           // produces NaN — surfaces immediately at the validation in
           // signer.buildHeader rather than silently reserving against

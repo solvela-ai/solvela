@@ -9,7 +9,9 @@
  *
  * Security invariants:
  *   - SOLANA_WALLET_KEY is read from env per-call, never stored on the module
- *   - err.cause is never stringified into user-visible error messages
+ *   - SigningError exposes only `message` — signer-core's class has no `cause`
+ *     field; the underlying web3.js/spl-token/bs58 error is discarded entirely
+ *     at the throw site in @solvela/signer-core/src/sign.ts
  *   - Stub headers (STUB_BASE64_TX, STUB_ESCROW_DEPOSIT_TX) are rejected before
  *     injecting into the outbound request
  *   - SOLANA_WALLET_KEY absence is detected before any budget reservation (HF-P3-L2)
