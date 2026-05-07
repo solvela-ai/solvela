@@ -276,7 +276,7 @@ impl ResponseCache {
                         let mut cache = self
                             .fallback_replay_set
                             .lock()
-                            .expect("fallback replay set mutex poisoned");
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
                         if cache.get(tx_signature).is_some() {
                             Err(CacheError::Replay)
@@ -303,7 +303,7 @@ impl ResponseCache {
                 let mut cache = self
                     .fallback_replay_set
                     .lock()
-                    .expect("fallback replay set mutex poisoned");
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
 
                 if cache.get(tx_signature).is_some() {
                     // Already seen — replay detected
