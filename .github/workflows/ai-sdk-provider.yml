@@ -27,7 +27,7 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
-      - name: Build signer-core dist/ (file: dep — npm doesn't auto-build)
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
         working-directory: sdks/signer-core
         run: npm ci && npm run build
       - run: npm ci
@@ -47,7 +47,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
-      - name: Build signer-core dist/ (file: dep — npm doesn't auto-build)
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
         working-directory: sdks/signer-core
         run: npm ci && npm run build
       - run: npm ci
@@ -63,7 +63,7 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
-      - name: Build signer-core dist/ (file: dep — npm doesn't auto-build)
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
         working-directory: sdks/signer-core
         run: npm ci && npm run build
       - run: npm ci
@@ -80,7 +80,7 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
-      - name: Build signer-core dist/ (file: dep — npm doesn't auto-build)
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
         working-directory: sdks/signer-core
         run: npm ci && npm run build
       - run: npm ci
@@ -101,7 +101,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
-      - name: Build signer-core dist/ (file: dep — npm doesn't auto-build)
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
         working-directory: sdks/signer-core
         run: npm ci && npm run build
       - run: npm ci
@@ -122,7 +122,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
-      - name: Build signer-core dist/ (file: dep — npm doesn't auto-build)
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
         working-directory: sdks/signer-core
         run: npm ci && npm run build
       - run: npm ci
@@ -139,7 +139,7 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
-      - name: Build signer-core dist/ (file: dep — npm doesn't auto-build)
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
         working-directory: sdks/signer-core
         run: npm ci && npm run build
       - run: npm ci
@@ -157,7 +157,7 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
-      - name: Build signer-core dist/ (file: dep — npm doesn't auto-build)
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
         working-directory: sdks/signer-core
         run: npm ci && npm run build
       - run: npm ci
@@ -193,7 +193,7 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
-      - name: Build signer-core dist/ (file: dep — npm doesn't auto-build)
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
         working-directory: sdks/signer-core
         run: npm ci && npm run build
       - run: npm ci
