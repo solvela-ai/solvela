@@ -89,13 +89,15 @@ describe('sanitizeGatewayError', () => {
   });
 
   it('slices to maxLen (default 500) before redacting', () => {
-    const long = 'a'.repeat(1000);
+    // Use spaces so neither the hex nor base58 redactor matches —
+    // we're asserting the slice happens at maxLen, not the redaction.
+    const long = ' '.repeat(1000);
     const result = sanitizeGatewayError(long);
     assert.equal(result.length, 500);
   });
 
   it('respects custom maxLen', () => {
-    const long = 'a'.repeat(1000);
+    const long = ' '.repeat(1000);
     const result = sanitizeGatewayError(long, 100);
     assert.equal(result.length, 100);
   });
@@ -107,5 +109,39 @@ describe('sanitizeGatewayError', () => {
 
   it('handles empty string', () => {
     assert.equal(sanitizeGatewayError(''), '');
+  });
+
+  it('redacts long hex sequences (e.g. hex-encoded keys / tx signatures)', () => {
+    // 64 hex chars — minimum match for redactHex.
+    const hex = 'a'.repeat(64);
+    const text = `signing failed for key ${hex}: invalid`;
+    const result = sanitizeGatewayError(text);
+    assert.equal(result, 'signing failed for key [REDACTED]: invalid');
+  });
+
+  it('redacts base58 wallet-address-shaped substrings', () => {
+    // 44-char base58 (typical Solana pubkey length).
+    const wallet = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    const text = `payee ${wallet} rejected the deposit`;
+    const result = sanitizeGatewayError(text);
+    assert.equal(result, 'payee [REDACTED] rejected the deposit');
+  });
+
+  it('redacts hex first, then base58 — order matters for correctness', () => {
+    // 64+ hex string is also valid base58 (hex alphabet ⊂ base58 alphabet).
+    // If base58 ran first, it would mask the hex with [REDACTED] before the
+    // hex pass saw it — same visual outcome but the documented-invariant
+    // order is hex → base58.
+    const hex = 'abcdef1234567890'.repeat(4); // 64 chars, all hex
+    const text = `key=${hex}`;
+    const result = sanitizeGatewayError(text);
+    assert.equal(result, 'key=[REDACTED]');
+  });
+
+  it('still redacts payment-signature alongside hex/base58', () => {
+    const wallet = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    const text = `error: payment-signatureXYZ from ${wallet} was rejected`;
+    const result = sanitizeGatewayError(text);
+    assert.equal(result, 'error: [redacted] from [REDACTED] was rejected');
   });
 });

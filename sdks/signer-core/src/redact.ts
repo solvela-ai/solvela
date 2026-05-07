@@ -29,12 +29,24 @@ export function redactBase58(s: string): string {
 /**
  * Sanitize a gateway error body string for safe inclusion in error messages.
  *
- * Slices to maxLen characters then redacts payment-signature header fragments.
+ * Pipeline (in order):
+ *   1. Slice to `maxLen` characters.
+ *   2. Redact `payment-signature[…]` header fragments.
+ *   3. Redact 64+ hex sequences (e.g. hex-encoded keys / tx signatures).
+ *   4. Redact 44–88 base58 sequences (Solana wallet addresses, base58 tx
+ *      signatures). MUST run after the hex pass — the hex alphabet is a
+ *      subset of base58, so running base58 first would mask hex keys with
+ *      the same `[REDACTED]` token before the hex check sees them.
+ *
+ * Without steps 3 + 4 the function still leaked wallet addresses, full
+ * tx signatures, and hex private-key fragments into downstream error
+ * surfaces (mcp client.ts, openclaw-provider index.ts).
  *
  * @param text - Raw gateway response body text.
  * @param maxLen - Maximum length to slice to before redaction (default: 500).
  * @returns Sanitized string safe for error messages.
  */
 export function sanitizeGatewayError(text: string, maxLen = 500): string {
-  return text.slice(0, maxLen).replace(/payment-signature[^\s,}"]+/gi, '[redacted]');
+  const sliced = text.slice(0, maxLen).replace(/payment-signature[^\s,}"]+/gi, '[redacted]');
+  return redactBase58(redactHex(sliced));
 }
