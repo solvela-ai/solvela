@@ -1,0 +1,138 @@
+name: mcp
+
+on:
+  push:
+    paths:
+      - 'sdks/mcp/**'
+      - 'sdks/signer-core/**'
+      - '.github/workflows/mcp.yml'
+  pull_request:
+    paths:
+      - 'sdks/mcp/**'
+      - 'sdks/signer-core/**'
+      - '.github/workflows/mcp.yml'
+
+defaults:
+  run:
+    working-directory: sdks/mcp
+
+jobs:
+  install:
+    name: Install (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Node 22 has --experimental-strip-types enabled by default, which
+        # mcp's `node --test tests/*.ts` runner relies on. Don't drop below
+        # 22 without converting tests to compiled .js or adding a TS loader.
+        node: ['22']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: sdks/mcp/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
+      - run: npm ci
+
+  build:
+    name: Build (also typechecks)
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sdks/mcp/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
+      - run: npm ci
+      # `npm run build` is `tsc` — it both typechecks and emits dist/. No
+      # separate typecheck job needed.
+      - run: npm run build
+
+  test:
+    name: Tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    needs: install
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: sdks/mcp/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
+      - run: npm ci
+      - run: npm test
+
+  guard-install-scripts:
+    name: Guard install scripts
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sdks/mcp/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
+      - run: npm ci
+      - name: Fail if any dependency has postinstall/preinstall/prepublish
+        run: |
+          SCRIPTS=$(npm ls --all --json 2>/dev/null | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          def check(node, path=''):
+              scripts = node.get('scripts', {})
+              bad = [s for s in ['postinstall','preinstall','prepublish'] if s in scripts]
+              if bad:
+                  print(f'{path}: {bad}')
+              for name, child in node.get('dependencies', {}).items():
+                  check(child, name)
+          check(data)
+          ")
+          if [ -n "$SCRIPTS" ]; then
+            echo "ERROR: unexpected install scripts found:"
+            echo "$SCRIPTS"
+            exit 1
+          fi
+          echo "OK: no unexpected install scripts"
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sdks/mcp/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
+      - run: npm ci
+      # Audit-level critical (not high) because @solana/spl-token transitively
+      # pulls bigint-buffer, which has a known high-severity CVE
+      # (GHSA-3gc7-fjrx-p6mg) with no upstream fix. Affects the entire Solana
+      # ecosystem. Dependabot security alerts cover the high-severity gap on
+      # the repo level; this job catches CRITICAL regressions in CI.
+      # Mirrors openclaw-provider.yml and ai-sdk-provider.yml.
+      - run: npm audit --production --audit-level=critical
