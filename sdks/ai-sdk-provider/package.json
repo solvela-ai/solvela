@@ -84,7 +84,15 @@
     {
       "path": "./dist/index.js",
       "limit": "50 kB",
-      "gzip": true
+      "gzip": true,
+      "ignore": [
+        "node:crypto",
+        "node:util",
+        "node:buffer",
+        "node:stream",
+        "node:events",
+        "node:url"
+      ]
     }
   ]
 }
