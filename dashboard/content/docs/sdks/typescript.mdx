@@ -3,26 +3,30 @@ title: TypeScript SDK
 description: TypeScript/Node.js client for Solvela with automatic x402 payment handling
 ---
 
-The Solvela TypeScript SDK has moved to its own repository:
+The Solvela TypeScript SDK lives in its own repository:
 [**github.com/solvela-ai/solvela-ts**](https://github.com/solvela-ai/solvela-ts).
 
-## Installation
+## Status
 
-```bash
-npm install @solvela/sdk
-```
+The currently-published `@solvela/sdk@0.2.x` on npm is **not yet wire-compatible
+with the production gateway at `api.solvela.ai`**. The `PaymentPayload` envelope
+it emits does not match the shape the gateway deserializes. Track the standalone
+repo for a future release that aligns with the gateway wire format before using
+it for production payments.
+
+If you're building inside this monorepo and need x402 signing today, depend on
+[`@solvela/signer-core`](https://github.com/solvela-ai/solvela/tree/main/sdks/signer-core)
+directly — that's what `sdks/mcp/`, `sdks/openclaw-provider/`, and
+`sdks/ai-sdk-provider/` use to talk to the gateway.
 
 ## Documentation
 
-For the complete API reference, type definitions, examples, and changelog, see:
-
 - **Source:** [github.com/solvela-ai/solvela-ts](https://github.com/solvela-ai/solvela-ts)
-- **npm package:** [@solvela/sdk](https://www.npmjs.com/package/@solvela/sdk)
+- **npm package:** [@solvela/sdk](https://www.npmjs.com/package/@solvela/sdk) (pre-1.0; see status above)
 
 ## What changed
 
 The TypeScript SDK was previously vendored under `sdks/typescript/` in the
 solvela monorepo. That snapshot was retired in favor of a canonical standalone
 repository so SDK fixes (signer hardening, x402 protocol updates, ergonomics)
-ship in lockstep with the npm release. Existing imports of `@solvela/sdk`
-continue to work — only the source location changed.
+can ship in lockstep with the npm release.
