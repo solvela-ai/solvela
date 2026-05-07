@@ -39,7 +39,11 @@ jobs:
     needs: docs-key-leak-check
     strategy:
       matrix:
-        node: ['18', '20']
+        # Node 18 dropped: vitest 4.x and other dev tooling import
+        # `node:util.styleText`, which was added in Node 20.12. Runtime
+        # code (sign.ts) only needs Node 14+; engines.node in package.json
+        # remains permissive for consumers.
+        node: ['20']
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -93,7 +97,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['18', '20']
+        # Node 18 dropped: vitest 4.x and other dev tooling import
+        # `node:util.styleText`, which was added in Node 20.12. Runtime
+        # code (sign.ts) only needs Node 14+; engines.node in package.json
+        # remains permissive for consumers.
+        node: ['20']
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -114,7 +122,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['18', '20']
+        # Node 18 dropped: vitest 4.x and other dev tooling import
+        # `node:util.styleText`, which was added in Node 20.12. Runtime
+        # code (sign.ts) only needs Node 14+; engines.node in package.json
+        # remains permissive for consumers.
+        node: ['20']
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
