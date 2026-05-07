@@ -1,7 +1,7 @@
 /**
  * Solvela x402 signer adapter for the OpenClaw Provider Plugin.
  *
- * Wraps createPaymentHeader from @solvela/sdk with:
+ * Wraps createPaymentHeader from @solvela/signer-core with:
  *   - Budget mutex for safe concurrent session-spend tracking
  *   - Stub-header guard (HF3 pattern from Phase 1)
  *   - SigningError wrapping — private key bytes never appear in thrown messages
@@ -9,16 +9,22 @@
  *
  * Security invariants:
  *   - SOLANA_WALLET_KEY is read from env per-call, never stored on the module
- *   - err.cause is never stringified into user-visible error messages
+ *   - SigningError exposes only `message` — signer-core's class has no `cause`
+ *     field; the underlying web3.js/spl-token/bs58 error is discarded entirely
+ *     at the throw site in @solvela/signer-core/src/sign.ts
  *   - Stub headers (STUB_BASE64_TX, STUB_ESCROW_DEPOSIT_TX) are rejected before
  *     injecting into the outbound request
  *   - SOLANA_WALLET_KEY absence is detected before any budget reservation (HF-P3-L2)
  */
 
 import { Mutex } from 'async-mutex';
-import { createPaymentHeader, SigningError } from '@solvela/sdk/x402';
-import type { PaymentRequired } from '@solvela/sdk/types';
-import { filterAccepts as coreFilterAccepts, isStubHeader } from '@solvela/signer-core';
+import {
+  createPaymentHeader,
+  filterAccepts as coreFilterAccepts,
+  isStubHeader,
+  SigningError,
+} from '@solvela/signer-core';
+import type { PaymentRequired } from '@solvela/signer-core';
 
 export type { SigningError };
 
@@ -100,8 +106,11 @@ export class SolvelaSigner {
       );
     }
 
-    // Step 2 — validate cost is a finite, non-negative number (HF-P3-M9)
-    const cost = parseFloat(paymentInfo.cost_breakdown?.total ?? 'NaN');
+    // Step 2 — validate cost is a finite, non-negative number (HF-P3-M9).
+    // Number() (not parseFloat) so trailing garbage like "0.001SOL" produces
+    // NaN and fails the isFinite check below, instead of silently parsing
+    // to 0.001 and reserving against an unvalidated value.
+    const cost = Number(paymentInfo.cost_breakdown?.total ?? 'NaN');
     if (!Number.isFinite(cost) || cost < 0) {
       throw new Error(`Gateway 402 has invalid cost: ${paymentInfo.cost_breakdown?.total}`);
     }
@@ -133,10 +142,12 @@ export class SolvelaSigner {
         privateKey,
         requestBody,
       );
-    } catch (err) {
+    } catch (err: unknown) {
       // Refund the reserved budget — signer never succeeded
       await this.refundBudget(cost);
-      // HF1 pattern: never propagate err.cause — may contain raw key bytes
+      // HF1 pattern: surface only err.message — signer-core's SigningError
+      // has no `cause` field, so there is no underlying error object to
+      // accidentally serialize. Anything beyond `.message` is unsafe.
       if (err instanceof SigningError) {
         throw new Error(`Payment signing failed: ${err.message}`);
       }
@@ -174,16 +185,21 @@ export class SolvelaSigner {
   /**
    * Refund cost from session budget (used when inner() throws after signing).
    *
-   * Clamps to zero and emits a WARN if the refund amount exceeds what was
-   * spent — that indicates a race-condition bug in budget accounting (HF-P3-H2).
+   * Clamps to zero and emits a WARN whenever `before < cost` — covers two
+   * race patterns: (1) clamping when the recorded spend underflows the
+   * refund (rare partial accounting), and (2) double-refund where two paths
+   * fire for one reservation, leaving `before === 0` after the first refund
+   * and the second silently no-ops via Math.max. The earlier `before > 0`
+   * guard suppressed exactly the case the warning was meant to catch
+   * (HF-P3-H2).
    */
   async refundBudget(cost: number): Promise<void> {
     await this.budgetMutex.runExclusive(async () => {
       const before = this.sessionSpent;
-      if (before > 0 && before < cost) {
+      if (before < cost) {
         process.stderr.write(
           `[solvela-openclaw] WARN: budget refund clamped (before=${before}, refund=${cost}). ` +
-            'Possible race condition in budget accounting — please report.\n',
+            'Possible race condition or double-refund in budget accounting — please report.\n',
         );
       }
       this.sessionSpent = Math.max(0, this.sessionSpent - cost);
