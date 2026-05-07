@@ -88,6 +88,26 @@ function validatePaymentRequired(inner: unknown, context: string): PaymentRequir
     );
   }
 
+  // Validate each accepts[] element has the minimum shape downstream code
+  // assumes (an object with a string `scheme`). Without this, accepts: [null]
+  // or accepts: [{}] would parse cleanly here and then crash in
+  // `scheme-filter.ts` when `a.scheme === 'escrow'` derefs the bad element.
+  // A real schema (zod/valibot) would do this and more — tracked as a
+  // follow-up; this surgical loop closes the immediate bug class.
+  for (let i = 0; i < obj.accepts.length; i++) {
+    const a = obj.accepts[i];
+    if (a === null || typeof a !== 'object' || Array.isArray(a)) {
+      throw new Error(
+        `Gateway 402 accepts[${i}] is not a JSON object ${context}: ${JSON.stringify(a)}`,
+      );
+    }
+    if (typeof (a as { scheme?: unknown }).scheme !== 'string') {
+      throw new Error(
+        `Gateway 402 accepts[${i}] missing or invalid 'scheme' field ${context} (expected string)`,
+      );
+    }
+  }
+
   // Validate cost_breakdown.total parses to a finite non-negative number.
   //
   // We use Number() (not parseFloat) so trailing garbage like "1.5USDC" or

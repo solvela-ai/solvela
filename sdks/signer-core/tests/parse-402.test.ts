@@ -116,6 +116,42 @@ describe('parse402', () => {
       );
     });
 
+    // Per-element validation: without this, accepts: [null] / [{}] would
+    // parse cleanly and then crash downstream in scheme-filter.ts when
+    // a.scheme is dereferenced on a non-object.
+    it('throws on accepts element that is not a JSON object', () => {
+      for (const bad of [null, 'exact', 42, true, []]) {
+        const body = { ...validDirectBody, accepts: [bad] };
+        assert.throws(
+          () => parse402(JSON.stringify(body)),
+          /accepts\[0\] is not a JSON object/,
+          `expected ${JSON.stringify(bad)} to be rejected`,
+        );
+      }
+    });
+
+    it('throws on accepts element missing or non-string scheme field', () => {
+      for (const bad of [{}, { scheme: 42 }, { scheme: null }, { network: 'solana' }]) {
+        const body = { ...validDirectBody, accepts: [bad] };
+        assert.throws(
+          () => parse402(JSON.stringify(body)),
+          /accepts\[0\] missing or invalid 'scheme' field/,
+          `expected ${JSON.stringify(bad)} to be rejected`,
+        );
+      }
+    });
+
+    it('reports the index of the first invalid accepts element', () => {
+      const body = {
+        ...validDirectBody,
+        accepts: [validDirectBody.accepts[0], null, validDirectBody.accepts[0]],
+      };
+      assert.throws(
+        () => parse402(JSON.stringify(body)),
+        /accepts\[1\] is not a JSON object/,
+      );
+    });
+
     it('throws on non-finite cost_breakdown.total', () => {
       const body = {
         ...validDirectBody,
