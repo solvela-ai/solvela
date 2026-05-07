@@ -35,7 +35,7 @@ import {
 import { GatewayClient, type ChatMessage } from './client.js';
 import { getTools } from './tools.js';
 import { createSessionStore } from './session.js';
-import { createPaymentHeader, decodePaymentHeader } from '@solvela/signer-core';
+import { createPaymentHeader, decodePaymentHeader, isStubTransaction } from '@solvela/signer-core';
 import type { PaymentRequired, PaymentAccept } from '@solvela/signer-core';
 import { Connection, PublicKey } from '@solana/web3.js';
 
@@ -425,7 +425,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const agentPubkey = decoded?.payload?.agent_pubkey;
           const serviceIdB64 = decoded?.payload?.service_id;
 
-          if (!depositTxB64 || depositTxB64.startsWith('STUB_')) {
+          if (!depositTxB64 || isStubTransaction(depositTxB64)) {
             throw new Error(
               'Escrow deposit tx is a stub — ensure SOLANA_WALLET_KEY is set and valid.',
             );
