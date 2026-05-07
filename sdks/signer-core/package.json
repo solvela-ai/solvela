@@ -14,18 +14,17 @@
   },
   "scripts": {
     "build": "tsc",
-    "prepare": "tsc",
     "test": "node --import tsx/esm --test tests/parse-402.test.ts tests/scheme-filter.test.ts tests/stub-guard.test.ts tests/redact.test.ts tests/sign.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@solana/spl-token": "^0.4.0",
     "@solana/web3.js": "^1.87.0",
-    "@types/node": "^22.0.0",
-    "bs58": "^5.0.0",
-    "typescript": "^5.6.0"
+    "bs58": "^5.0.0"
   },
   "devDependencies": {
-    "tsx": "^4.19.0"
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
   }
 }
