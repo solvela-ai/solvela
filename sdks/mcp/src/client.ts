@@ -233,7 +233,17 @@ export class GatewayClient {
       // HF5: parse402 throws instead of returning null.
       const paymentInfo = parse402(await resp.text());
 
-      const cost = parseFloat(paymentInfo.cost_breakdown.total);
+      // Defense-in-depth: parse402 also validates this field, but using Number()
+      // (vs parseFloat) here means trailing-garbage like "0.001SOL" is rejected
+      // even if the upstream validator regresses or a third party generates the
+      // body. The check matters because `cost` drives both a budget mutation
+      // and a signed transaction below.
+      const cost = Number(paymentInfo.cost_breakdown.total);
+      if (!Number.isFinite(cost) || cost < 0) {
+        throw new Error(
+          `Gateway returned invalid total cost: ${paymentInfo.cost_breakdown.total}`,
+        );
+      }
 
       // T1-H: Atomic budget reservation — both check and increment must be in the same
       // critical section to prevent two parallel calls from both passing the budget check.
@@ -263,10 +273,12 @@ export class GatewayClient {
         });
       } else {
         // Filter accepts by signing mode before handing off to the SDK signer.
-        const filteredAccepts = filterAccepts(
-          paymentInfo.accepts,
-          this.signingMode as 'auto' | 'escrow' | 'direct',
-        );
+        // Bind to a typed local so TS verifies the narrowing produced by the
+        // `signingMode === 'off'` check above — replaces the previous `as` cast
+        // that silently masked the 'off' branch and would have lied if the
+        // if-ladder above were ever refactored.
+        const mode: 'auto' | 'escrow' | 'direct' = this.signingMode;
+        const filteredAccepts = filterAccepts(paymentInfo.accepts, mode);
         const filteredPaymentInfo = { ...paymentInfo, accepts: filteredAccepts };
         const privateKey = process.env['SOLANA_WALLET_KEY'];
 
@@ -277,10 +289,13 @@ export class GatewayClient {
           // HF2: Refund the reserved budget — signer never succeeded.
           await this.budgetMutex.runExclusive(async () => {
             const before = this.sessionSpentMicro;
-            if (before > 0 && before < costMicro) {
-              // Math.max(0, ...) would clamp — indicates a race condition in budget accounting.
+            // Warn whenever Math.max(0, ...) below would clamp. Dropping the
+            // prior `before > 0` guard means `before === 0` also surfaces a
+            // warning — that case implies a parallel refund already zeroed the
+            // counter (double-refund / race), which silently no-op'd before.
+            if (before < costMicro) {
               process.stderr.write(
-                `[solvela-mcp] WARN: budget refund clamped to 0 (before=${before}, costMicro=${costMicro}) — possible race condition\n`,
+                `[solvela-mcp] WARN: budget refund clamped (before=${before}, costMicro=${costMicro}). Possible double-refund or race.\n`,
               );
             }
             this.sessionSpentMicro = Math.max(0, this.sessionSpentMicro - costMicro);
@@ -442,10 +457,14 @@ export class GatewayClient {
       // Phase 3-refund: reservation never landed on-chain; roll back.
       await this.budgetMutex.runExclusive(async () => {
         const before = this.escrowDepositsSessionMicro;
-        if (before > 0 && before < amountMicro) {
+        // Warn whenever Math.max(0, ...) below would clamp. Dropping the prior
+        // `before > 0` guard means `before === 0` also surfaces a warning —
+        // that case implies a parallel refund already zeroed the counter
+        // (double-refund / race), which silently no-op'd before.
+        if (before < amountMicro) {
           process.stderr.write(
             `[solvela-mcp] WARN: escrow refund clamped (before=$${(before / 1_000_000).toFixed(6)}, refund=$${amount.toFixed(6)}). ` +
-            `Possible race condition.\n`,
+            `Possible double-refund or race.\n`,
           );
         }
         this.escrowDepositsSessionMicro = Math.max(0, this.escrowDepositsSessionMicro - amountMicro);

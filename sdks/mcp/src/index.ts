@@ -57,7 +57,9 @@ const signingMode = rawSigningMode as 'auto' | 'escrow' | 'direct' | 'off';
 const budgetStr = process.env['SOLVELA_SESSION_BUDGET'] ?? process.env['RCR_SESSION_BUDGET']; // compat
 let sessionBudget: number | undefined;
 if (budgetStr !== undefined) {
-  const parsed = parseFloat(budgetStr);
+  // Number() (vs parseFloat) rejects trailing-garbage like "5USD" — parseFloat
+  // would silently coerce to 5, bypassing the positive-number guard below.
+  const parsed = Number(budgetStr);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     process.stderr.write(
       `[solvela-mcp] Fatal: SOLVELA_SESSION_BUDGET='${budgetStr}' is not a positive number.\n`,
@@ -101,7 +103,8 @@ const escrowRecipientWallet = process.env['SOLVELA_RECIPIENT_WALLET'] ?? '';
 const maxEscrowDepositStr = process.env['SOLVELA_MAX_ESCROW_DEPOSIT'];
 let maxEscrowDeposit = 5.0;
 if (maxEscrowDepositStr !== undefined) {
-  const parsed = parseFloat(maxEscrowDepositStr);
+  // Number() rejects trailing-garbage like "5USD" — see SOLVELA_SESSION_BUDGET above.
+  const parsed = Number(maxEscrowDepositStr);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     process.stderr.write(
       `[solvela-mcp] Fatal: SOLVELA_MAX_ESCROW_DEPOSIT='${maxEscrowDepositStr}' is not a positive number.\n`,
@@ -115,7 +118,8 @@ if (maxEscrowDepositStr !== undefined) {
 const maxEscrowSessionStr = process.env['SOLVELA_MAX_ESCROW_SESSION'];
 let maxEscrowSession = 20.0;
 if (maxEscrowSessionStr !== undefined) {
-  const parsed = parseFloat(maxEscrowSessionStr);
+  // Number() rejects trailing-garbage like "20USD" — see SOLVELA_SESSION_BUDGET above.
+  const parsed = Number(maxEscrowSessionStr);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     process.stderr.write(
       `[solvela-mcp] Fatal: SOLVELA_MAX_ESCROW_SESSION='${maxEscrowSessionStr}' is not a positive number.\n`,
