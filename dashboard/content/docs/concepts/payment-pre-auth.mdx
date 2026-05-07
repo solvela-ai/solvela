@@ -261,7 +261,7 @@ When this spec is implemented:
 1. **Slot:** `crates/gateway/src/middleware/x402.rs` — add a `PreAuthLayer` that runs *before* the existing `x402` middleware. On hit, sets `Extension<VerifiedPayment>` so the rest of the chain treats the request as paid. On miss or invalid receipt, removes the pre-auth headers and lets the request fall through to the normal 402 path.
 2. **Receipt signing:** new module `crates/gateway/src/preauth.rs` — HMAC-SHA256 signer with rotating secrets. Reuse `ring::hmac` (already a transitive dep).
 3. **Per-chain gate:** explicit `if matches!(chain, Chain::Solana) { return reject_preauth(); }` in the `PreAuthLayer`. Inline comment citing this page and ClawRouter's prior art.
-4. **Client SDK changes:** `sdks/typescript`, `sdks/python`, `sdks/go`, `sdks/mcp` — receipt cache + opt-in header set. Solana code paths remain unchanged.
+4. **Client SDK changes:** the standalone `solvela-ts`, `solvela-python`, `solvela-go` repos and the in-monorepo `sdks/mcp` — receipt cache + opt-in header set. Solana code paths remain unchanged.
 5. **Tests:**
    - Receipt round-trip (sign / verify / scope match)
    - Expired receipt → fall-through to 402

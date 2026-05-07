@@ -35,9 +35,9 @@ import {
 import { GatewayClient, type ChatMessage } from './client.js';
 import { getTools } from './tools.js';
 import { createSessionStore } from './session.js';
-import { createPaymentHeader } from '@solvela/sdk/x402';
-import type { PaymentRequired, PaymentAccept } from '@solvela/sdk/types';
-import { PublicKey } from '@solana/web3.js';
+import { createPaymentHeader, decodePaymentHeader } from '@solvela/signer-core';
+import type { PaymentRequired, PaymentAccept } from '@solvela/signer-core';
+import { Connection, PublicKey } from '@solana/web3.js';
 
 // ---------------------------------------------------------------------------
 // Bootstrap client from environment
@@ -416,8 +416,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             payload?: { deposit_tx?: string; service_id?: string; agent_pubkey?: string };
           };
           try {
-            const json = Buffer.from(paymentHeader, 'base64').toString('utf-8');
-            decoded = JSON.parse(json) as typeof decoded;
+            decoded = decodePaymentHeader(paymentHeader) as typeof decoded;
           } catch (err) {
             throw new Error(`Failed to decode payment header: ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -428,13 +427,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           if (!depositTxB64 || depositTxB64.startsWith('STUB_')) {
             throw new Error(
-              'Escrow deposit tx is a stub — ensure @solana/web3.js is installed and SOLANA_WALLET_KEY is valid.',
+              'Escrow deposit tx is a stub — ensure SOLANA_WALLET_KEY is set and valid.',
             );
           }
 
-          // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const solanaWeb3 = require('@solana/web3.js');
-          const { Connection } = solanaWeb3;
           const connection = new Connection(rpcUrl, 'confirmed');
 
           // Fetch blockhash BEFORE broadcast so lastValidBlockHeight is available for confirmTransaction.

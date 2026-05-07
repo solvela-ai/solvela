@@ -26,7 +26,6 @@
 # SDK Guides
 
 - [Python](./sdks/python.md)
-- [TypeScript](./sdks/typescript.md)
 - [Go](./sdks/go.md)
 - [MCP Server](./sdks/mcp.md)
 
