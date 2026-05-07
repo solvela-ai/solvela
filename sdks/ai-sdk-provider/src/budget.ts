@@ -29,6 +29,14 @@ export class BudgetState {
   private available: bigint | undefined;
   /** Per-request reservations keyed by the per-invocation requestId. */
   private readonly reserved: Map<string, bigint> = new Map();
+  /**
+   * Running total of all entries in `reserved`, maintained synchronously
+   * by reserve / finalize / release. Reads (the hot path) stay O(1).
+   * Walking the map on every check was O(n) in outstanding reservations
+   * — fine at low concurrency, quadratic on throughput at the high-fan-out
+   * agent workloads this provider targets.
+   */
+  private totalReserved: bigint = 0n;
 
   constructor(total: bigint | undefined) {
     this.available = total;
@@ -47,7 +55,7 @@ export class BudgetState {
    */
   get remaining(): bigint | undefined {
     if (this.available === undefined) return undefined;
-    return this.available - this.sumReserved();
+    return this.available - this.totalReserved;
   }
 
   /**
@@ -69,7 +77,7 @@ export class BudgetState {
         requestBodyValues: undefined,
       });
     }
-    const remaining = this.available - this.sumReserved();
+    const remaining = this.available - this.totalReserved;
     if (remaining < cost) {
       throw new SolvelaBudgetExceededError({
         message:
@@ -80,6 +88,7 @@ export class BudgetState {
       });
     }
     this.reserved.set(requestId, cost);
+    this.totalReserved += cost;
   }
 
   /**
@@ -90,6 +99,7 @@ export class BudgetState {
     const cost = this.reserved.get(requestId);
     if (cost === undefined) return;
     this.reserved.delete(requestId);
+    this.totalReserved -= cost;
     if (this.available !== undefined) {
       this.available -= cost;
     }
@@ -100,14 +110,9 @@ export class BudgetState {
    * absent (idempotent).
    */
   release(requestId: string): void {
+    const cost = this.reserved.get(requestId);
+    if (cost === undefined) return;
     this.reserved.delete(requestId);
-  }
-
-  private sumReserved(): bigint {
-    let sum = 0n;
-    for (const v of this.reserved.values()) {
-      sum += v;
-    }
-    return sum;
+    this.totalReserved -= cost;
   }
 }
