@@ -54,8 +54,8 @@ import type {
   CatalogContext,
   DynamicModelContext,
 } from './openclaw-types.js';
-import type { PaymentRequired } from '@solvela/sdk/types';
 import { parse402, sanitizeGatewayError } from '@solvela/signer-core';
+import type { PaymentRequired } from '@solvela/signer-core';
 
 export { SOLVELA_MODELS } from './models.generated.js';
 export { ROUTING_PROFILES } from './registry.js';
@@ -409,7 +409,11 @@ export default function register(api: OpenClawApi, opts: RegisterOptions = {}): 
         let cost: number;
         try {
           const paymentInfo = await fetchPaymentRequired(apiUrl, requestBody);
-          cost = parseFloat(paymentInfo.cost_breakdown?.total ?? 'NaN');
+          // Number() (not parseFloat) so trailing garbage like "0.001SOL"
+          // produces NaN — surfaces immediately at the validation in
+          // signer.buildHeader rather than silently reserving against
+          // an unvalidated value.
+          cost = Number(paymentInfo.cost_breakdown?.total ?? 'NaN');
           paymentHeader = await signer.buildHeader(paymentInfo, resourceUrl, requestBody);
         } catch (err) {
           if (err instanceof GatewayAcceptedWithoutPayment) {

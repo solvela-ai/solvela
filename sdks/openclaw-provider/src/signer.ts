@@ -1,7 +1,7 @@
 /**
  * Solvela x402 signer adapter for the OpenClaw Provider Plugin.
  *
- * Wraps createPaymentHeader from @solvela/sdk with:
+ * Wraps createPaymentHeader from @solvela/signer-core with:
  *   - Budget mutex for safe concurrent session-spend tracking
  *   - Stub-header guard (HF3 pattern from Phase 1)
  *   - SigningError wrapping — private key bytes never appear in thrown messages
@@ -16,9 +16,13 @@
  */
 
 import { Mutex } from 'async-mutex';
-import { createPaymentHeader, SigningError } from '@solvela/sdk/x402';
-import type { PaymentRequired } from '@solvela/sdk/types';
-import { filterAccepts as coreFilterAccepts, isStubHeader } from '@solvela/signer-core';
+import {
+  createPaymentHeader,
+  filterAccepts as coreFilterAccepts,
+  isStubHeader,
+  SigningError,
+} from '@solvela/signer-core';
+import type { PaymentRequired } from '@solvela/signer-core';
 
 export type { SigningError };
 
@@ -100,8 +104,11 @@ export class SolvelaSigner {
       );
     }
 
-    // Step 2 — validate cost is a finite, non-negative number (HF-P3-M9)
-    const cost = parseFloat(paymentInfo.cost_breakdown?.total ?? 'NaN');
+    // Step 2 — validate cost is a finite, non-negative number (HF-P3-M9).
+    // Number() (not parseFloat) so trailing garbage like "0.001SOL" produces
+    // NaN and fails the isFinite check below, instead of silently parsing
+    // to 0.001 and reserving against an unvalidated value.
+    const cost = Number(paymentInfo.cost_breakdown?.total ?? 'NaN');
     if (!Number.isFinite(cost) || cost < 0) {
       throw new Error(`Gateway 402 has invalid cost: ${paymentInfo.cost_breakdown?.total}`);
     }
