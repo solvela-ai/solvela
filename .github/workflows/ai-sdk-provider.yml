@@ -4,9 +4,13 @@ on:
   push:
     paths:
       - 'sdks/ai-sdk-provider/**'
+      - 'sdks/signer-core/**'
+      - '.github/workflows/ai-sdk-provider.yml'
   pull_request:
     paths:
       - 'sdks/ai-sdk-provider/**'
+      - 'sdks/signer-core/**'
+      - '.github/workflows/ai-sdk-provider.yml'
 
 defaults:
   run:
