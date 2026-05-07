@@ -22,8 +22,12 @@ use spl_token::{
 /// Program ID — must match declare_id!() in lib.rs
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
 
-/// Mainnet USDC mint — must match USDC_MINT in lib.rs
-pub const USDC_MINT: Pubkey = solana_sdk::pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+/// USDC mint the program is currently built for. Re-exported from the
+/// program crate so tests automatically follow whichever variant the
+/// `mainnet` feature selects (mainnet `EPjFW…` with `--features mainnet`,
+/// devnet `4zMM…` otherwise). Eliminates the previous "must match lib.rs"
+/// duplication that would silently desync on a feature-gate change.
+pub const USDC_MINT: Pubkey = solvela_escrow::USDC_MINT;
 
 /// Compiled program bytes
 const PROGRAM_SO: &[u8] = include_bytes!("../target/deploy/solvela_escrow.so");
@@ -114,10 +118,7 @@ pub fn inject_ata(svm: &mut LiteSVM, owner: &Pubkey, mint: &Pubkey, amount: u64)
 }
 
 pub fn find_escrow_pda(program_id: &Pubkey, agent: &Pubkey, service_id: &[u8; 32]) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
-        &[b"escrow", agent.as_ref(), service_id],
-        program_id,
-    )
+    Pubkey::find_program_address(&[b"escrow", agent.as_ref(), service_id], program_id)
 }
 
 pub fn find_vault_ata(escrow_pda: &Pubkey, mint: &Pubkey) -> Pubkey {
@@ -153,12 +154,12 @@ pub fn build_deposit_ix(
     Instruction {
         program_id: *program_id,
         accounts: vec![
-            AccountMeta::new(*agent, true),           // agent (signer, mut)
+            AccountMeta::new(*agent, true),              // agent (signer, mut)
             AccountMeta::new_readonly(*provider, false), // provider (unchecked)
-            AccountMeta::new_readonly(*mint, false),   // mint
-            AccountMeta::new(escrow_pda, false),       // escrow (PDA, init)
-            AccountMeta::new(agent_ata, false),        // agent_token_account
-            AccountMeta::new(vault_ata, false),        // vault (init_if_needed)
+            AccountMeta::new_readonly(*mint, false),     // mint
+            AccountMeta::new(escrow_pda, false),         // escrow (PDA, init)
+            AccountMeta::new(agent_ata, false),          // agent_token_account
+            AccountMeta::new(vault_ata, false),          // vault (init_if_needed)
             AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
             AccountMeta::new_readonly(spl_associated_token_account::ID, false),
             AccountMeta::new_readonly(system_program::ID, false),
@@ -188,13 +189,13 @@ pub fn build_claim_ix(
     Instruction {
         program_id: *program_id,
         accounts: vec![
-            AccountMeta::new(escrow_pda, false),       // escrow (PDA, mut, close=agent)
-            AccountMeta::new(*agent, false),            // agent (SystemAccount, mut)
-            AccountMeta::new(*provider, true),          // provider (signer, mut)
-            AccountMeta::new_readonly(*mint, false),    // mint
-            AccountMeta::new(vault_ata, false),         // vault (mut)
-            AccountMeta::new(provider_ata, false),      // provider_token_account (init_if_needed)
-            AccountMeta::new(agent_ata, false),         // agent_token_account (mut)
+            AccountMeta::new(escrow_pda, false), // escrow (PDA, mut, close=agent)
+            AccountMeta::new(*agent, false),     // agent (SystemAccount, mut)
+            AccountMeta::new(*provider, true),   // provider (signer, mut)
+            AccountMeta::new_readonly(*mint, false), // mint
+            AccountMeta::new(vault_ata, false),  // vault (mut)
+            AccountMeta::new(provider_ata, false), // provider_token_account (init_if_needed)
+            AccountMeta::new(agent_ata, false),  // agent_token_account (mut)
             AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
             AccountMeta::new_readonly(spl_associated_token_account::ID, false),
             AccountMeta::new_readonly(system_program::ID, false),
@@ -220,11 +221,11 @@ pub fn build_refund_ix(
     Instruction {
         program_id: *program_id,
         accounts: vec![
-            AccountMeta::new(escrow_pda, false),       // escrow (PDA, mut, close=agent)
-            AccountMeta::new(*agent, true),             // agent (signer, mut)
-            AccountMeta::new_readonly(*mint, false),    // mint
-            AccountMeta::new(vault_ata, false),         // vault (mut)
-            AccountMeta::new(agent_ata, false),         // agent_token_account (mut)
+            AccountMeta::new(escrow_pda, false), // escrow (PDA, mut, close=agent)
+            AccountMeta::new(*agent, true),      // agent (signer, mut)
+            AccountMeta::new_readonly(*mint, false), // mint
+            AccountMeta::new(vault_ata, false),  // vault (mut)
+            AccountMeta::new(agent_ata, false),  // agent_token_account (mut)
             AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
             AccountMeta::new_readonly(spl_associated_token_account::ID, false),
             AccountMeta::new_readonly(system_program::ID, false),

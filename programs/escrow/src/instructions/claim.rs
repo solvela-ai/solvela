@@ -17,6 +17,15 @@ pub fn claim(ctx: Context<Claim>, actual_amount: u64) -> Result<()> {
         EscrowError::ClaimExceedsDeposit
     );
     require!(actual_amount > 0, EscrowError::ZeroAmount);
+    // Critical: gate the claim window on `slot < expiry_slot`. Without this,
+    // claim and refund are simultaneously valid once `slot >= expiry_slot`,
+    // and an adversarial provider can race the agent at the boundary. The
+    // entire deterministic-deadline guarantee for the agent depends on this
+    // line. See refund.rs for the matching `slot >= expiry_slot` guard.
+    require!(
+        Clock::get()?.slot < ctx.accounts.escrow.expiry_slot,
+        EscrowError::EscrowExpired,
+    );
 
     let escrow = &ctx.accounts.escrow;
     let seeds: &[&[u8]] = &[
@@ -39,8 +48,14 @@ pub fn claim(ctx: Context<Claim>, actual_amount: u64) -> Result<()> {
     );
     token::transfer(cpi_transfer, actual_amount)?;
 
-    // Refund remainder → agent ATA
-    let refund = escrow.amount - actual_amount;
+    // Refund remainder → agent ATA. The `actual_amount <= escrow.amount`
+    // guard above already prevents underflow, but `checked_sub` makes the
+    // invariant explicit at the call site (and survives a future refactor
+    // that moves or removes the guard).
+    let refund = escrow
+        .amount
+        .checked_sub(actual_amount)
+        .ok_or(EscrowError::ClaimExceedsDeposit)?;
     if refund > 0 {
         let cpi_refund = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
@@ -69,6 +84,7 @@ pub fn claim(ctx: Context<Claim>, actual_amount: u64) -> Result<()> {
     emit!(ClaimEvent {
         agent: escrow.agent,
         provider: escrow.provider,
+        deposited: escrow.amount,
         claimed: actual_amount,
         refunded: refund,
         service_id: escrow.service_id,
@@ -92,8 +108,13 @@ pub struct Claim<'info> {
 
     /// Agent wallet — receives vault rent refund and any token remainder.
     /// Validated via `escrow.agent` address stored on-chain.
+    /// CHECK: `address = escrow.agent` is the only constraint that matters.
+    /// Using `UncheckedAccount` (vs `SystemAccount`) keeps the door open for
+    /// PDA- or program-owned agents (e.g. a future "agent vault" routing
+    /// through CPI). The address constraint above is equivalent in safety
+    /// — it pins the key to whatever was stored at deposit time.
     #[account(mut, address = escrow.agent)]
-    pub agent: SystemAccount<'info>,
+    pub agent: UncheckedAccount<'info>,
 
     /// Provider wallet — must match `escrow.provider`; pays for ATA init.
     #[account(mut)]
@@ -119,9 +140,14 @@ pub struct Claim<'info> {
     )]
     pub provider_token_account: Account<'info, TokenAccount>,
 
-    /// Agent's ATA — receives the refund remainder.
+    /// Agent's ATA — receives the refund remainder. `init_if_needed` so a
+    /// claim still succeeds when the agent has closed their ATA between
+    /// deposit and claim (a normal post-deposit cleanup move that reclaims
+    /// rent). Provider pays for recreation since they're already the
+    /// transaction signer with funds.
     #[account(
-        mut,
+        init_if_needed,
+        payer = provider,
         associated_token::mint = mint,
         associated_token::authority = agent,
     )]
@@ -136,6 +162,9 @@ pub struct Claim<'info> {
 pub struct ClaimEvent {
     pub agent: Pubkey,
     pub provider: Pubkey,
+    /// Original deposit amount. Surfaced so downstream indexers can tell a
+    /// partial claim from a full one without recomputing `claimed + refunded`.
+    pub deposited: u64,
     pub claimed: u64,
     pub refunded: u64,
     pub service_id: [u8; 32],

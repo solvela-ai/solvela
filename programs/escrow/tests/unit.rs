@@ -10,8 +10,8 @@
 #[cfg(test)]
 mod tests {
     use anchor_lang::Space;
-    use solvela_escrow::state::Escrow;
     use solana_sdk::pubkey::Pubkey;
+    use solvela_escrow::state::Escrow;
 
     // Expected space: 8 (discriminator) + InitSpace
     // Escrow fields:
@@ -106,5 +106,31 @@ mod tests {
             expiry_slot: 0,
             bump: 0,
         };
+    }
+
+    #[test]
+    fn test_claim_event_includes_deposited() {
+        // Compile-time sentinel for the `deposited` field on ClaimEvent —
+        // added in this PR so downstream indexers can tell partial vs full
+        // claims without reconstructing `claimed + refunded`. If this test
+        // fails to compile, the field was renamed or removed and any
+        // indexer/UI that reads it will silently break.
+        let _e = solvela_escrow::instructions::ClaimEvent {
+            agent: Pubkey::default(),
+            provider: Pubkey::default(),
+            deposited: 100,
+            claimed: 60,
+            refunded: 40,
+            service_id: [0u8; 32],
+        };
+    }
+
+    #[test]
+    fn test_max_escrow_slots_is_sane() {
+        // ~1 day at 400ms/slot. Doc-checked sanity bound — if someone bumps
+        // it beyond a few days, that's a separate decision (would interact
+        // with the agent's deadline guarantee).
+        assert!(solvela_escrow::MAX_ESCROW_SLOTS >= 100_000);
+        assert!(solvela_escrow::MAX_ESCROW_SLOTS <= 1_000_000);
     }
 }
