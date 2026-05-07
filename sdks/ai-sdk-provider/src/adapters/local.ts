@@ -115,7 +115,11 @@ function makeAbortError(): Error {
  */
 async function loadSolvelaSdk(): Promise<SolvelaSdkModule> {
   try {
-    const mod = (await import('@solvela/sdk' as string)) as unknown as Record<
+    // @ts-expect-error — optional peer dependency; not resolvable when the
+    // peer isn't installed (the whole point of this dynamic-import branch).
+    // If the peer ever becomes resolvable, this directive will fail and
+    // signal that the suppression can be removed. See PEER_INSTALL_MESSAGE.
+    const mod = (await import('@solvela/sdk')) as unknown as Record<
       string,
       unknown
     >;
@@ -145,7 +149,9 @@ async function loadSolvelaSdk(): Promise<SolvelaSdkModule> {
  */
 async function loadBs58(): Promise<Bs58Module> {
   try {
-    const mod = (await import('bs58' as string)) as unknown as Record<
+    // @ts-expect-error — optional peer dependency; not resolvable when the
+    // peer isn't installed. See PEER_INSTALL_MESSAGE.
+    const mod = (await import('bs58')) as unknown as Record<
       string,
       unknown
     >;
@@ -189,9 +195,14 @@ async function loadBs58(): Promise<Bs58Module> {
  *   constructor already scrubs base58/hex from the cause message.
  *
  * The `Keypair` reference is captured in a closure — the private key never
- * surfaces in adapter-side error surfaces. The `bs58`-encoded secret key is
- * a short-lived string passed directly into `createPaymentHeader` and GC'd
- * after the call returns.
+ * surfaces in adapter-side error surfaces. The `bs58`-encoded secret key
+ * cannot be securely zeroed in JavaScript: it is an immutable string in V8's
+ * heap until the runtime schedules a major GC, which under load may be
+ * many requests later. Heap dumps captured for any other reason will
+ * contain the encoded private key. **This adapter is for development and
+ * testing only — do not run it in any process that handles production
+ * funds.** A future SDK boundary that accepts `Uint8Array` directly would
+ * permit `secretKey.fill(0)` post-call; tracked as a follow-up.
  *
  * @example
  * ```typescript
@@ -233,8 +244,10 @@ export function createLocalWalletAdapter(
       const [sdk, bs58] = await Promise.all([loadSolvelaSdk(), loadBs58()]);
 
       // Encode the 64-byte secret key as base58 for the existing SDK API.
-      // The short-lived string is passed directly into createPaymentHeader
-      // and eligible for GC after the call returns.
+      // NOTE: privateKeyB58 cannot be securely zeroed in JavaScript — strings
+      // are immutable in the V8 heap until GC. This is dev/test-only code
+      // (see module banner); production signers must use a wallet boundary
+      // that does not materialize the secret in JS string memory.
       const privateKeyB58 = bs58.encode(keypair.secretKey);
 
       // Let createPaymentHeader errors propagate unchanged. The fetch-wrapper

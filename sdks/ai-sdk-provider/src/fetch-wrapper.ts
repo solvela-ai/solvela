@@ -311,8 +311,8 @@ export function createSolvelaFetch(
         statusCode: resp.status,
       });
     }
-    const parsed = parseGateway402(parsedBody);
-    const selected = selectAccept(parsed);
+    const parsed = parseGateway402(parsedBody, resolvedUrl);
+    const selected = selectAccept(parsed, resolvedUrl);
 
     // (f) Body type + size check (T2-C). `createOpenAICompatible` always
     // serialises to a JSON string; anything else is out-of-scope in v1.
@@ -415,12 +415,24 @@ export function createSolvelaFetch(
     if (retryResp.status === 402) {
       budget.release(requestId);
       logger?.({ event: 'release', attempt: fetchCount, requestId });
+      // Surface the gateway's reason for the second 402 so callers can
+      // tell apart "expired payment", "wrong amount", "wrong recipient",
+      // etc. without needing to capture network logs. The error
+      // constructor sanitizes responseBody / responseHeaders (redactBase58
+      // + redactHex on strings, stripPaymentSignature on headers) so no
+      // signature material can leak through this path.
+      const retryBody = await safeReadText(retryResp);
+      const retryHeadersRecord = stripPaymentSignature(
+        headersToRecord(retryResp.headers),
+      );
       // Do not loop. Surface a single payment error.
       throw new SolvelaPaymentError({
         message: 'Payment rejected after retry',
         url: resolvedUrl,
         requestBodyValues: undefined,
         statusCode: retryResp.status,
+        responseHeaders: retryHeadersRecord,
+        responseBody: retryBody,
       });
     }
 

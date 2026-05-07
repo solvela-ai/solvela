@@ -89,11 +89,15 @@ function isNumberField(obj: Record<string, unknown>, key: string): boolean {
  * Drops every field not in the plan-level allowlist (T2-G).
  * Throws if required fields are missing or mistyped.
  */
-function applyAcceptAllowlist(raw: unknown, index: number): SolvelaPaymentAccept {
+function applyAcceptAllowlist(
+  raw: unknown,
+  index: number,
+  url: string,
+): SolvelaPaymentAccept {
   if (!isObject(raw)) {
     throw new SolvelaPaymentError({
       message: `[solvela] 402 envelope: accepts[${index}] is not an object`,
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
@@ -113,7 +117,7 @@ function applyAcceptAllowlist(raw: unknown, index: number): SolvelaPaymentAccept
     if (!present) {
       throw new SolvelaPaymentError({
         message: `[solvela] 402 envelope: accepts[${index}].${key} missing or wrong type`,
-        url: '',
+        url,
         requestBodyValues: undefined,
       });
     }
@@ -135,11 +139,14 @@ function applyAcceptAllowlist(raw: unknown, index: number): SolvelaPaymentAccept
  * Extract an allowlisted `SolvelaPaymentCostBreakdown`.
  * Every field mirrors `wallet-adapter.ts`'s declared shape.
  */
-function applyCostBreakdownAllowlist(raw: unknown): SolvelaPaymentCostBreakdown {
+function applyCostBreakdownAllowlist(
+  raw: unknown,
+  url: string,
+): SolvelaPaymentCostBreakdown {
   if (!isObject(raw)) {
     throw new SolvelaPaymentError({
       message: '[solvela] 402 envelope: cost_breakdown is not an object',
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
@@ -149,7 +156,7 @@ function applyCostBreakdownAllowlist(raw: unknown): SolvelaPaymentCostBreakdown 
     if (!isStringField(raw, key)) {
       throw new SolvelaPaymentError({
         message: `[solvela] 402 envelope: cost_breakdown.${key} missing or wrong type`,
-        url: '',
+        url,
         requestBodyValues: undefined,
       });
     }
@@ -157,7 +164,7 @@ function applyCostBreakdownAllowlist(raw: unknown): SolvelaPaymentCostBreakdown 
   if (!isNumberField(raw, 'fee_percent')) {
     throw new SolvelaPaymentError({
       message: '[solvela] 402 envelope: cost_breakdown.fee_percent missing or wrong type',
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
@@ -174,18 +181,21 @@ function applyCostBreakdownAllowlist(raw: unknown): SolvelaPaymentCostBreakdown 
 /**
  * Extract an allowlisted `resource` object: `{ url: string, method: string }`.
  */
-function applyResourceAllowlist(raw: unknown): { url: string; method: string } {
+function applyResourceAllowlist(
+  raw: unknown,
+  url: string,
+): { url: string; method: string } {
   if (!isObject(raw)) {
     throw new SolvelaPaymentError({
       message: '[solvela] 402 envelope: resource is not an object',
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
   if (!isStringField(raw, 'url') || !isStringField(raw, 'method')) {
     throw new SolvelaPaymentError({
       message: '[solvela] 402 envelope: resource.url/method missing or wrong type',
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
@@ -203,14 +213,21 @@ function applyResourceAllowlist(raw: unknown): { url: string; method: string } {
  *   { error: { type: "invalid_payment", message: "<JSON PaymentRequired>" } }
  *
  * @param body - Raw JSON-parsed body from the 402 response.
+ * @param url  - The request URL, used to populate `SolvelaPaymentError.url`
+ *               on any thrown errors. Defaults to `''` for callers that
+ *               don't have a URL (legacy / tests); the fetch-wrapper passes
+ *               the resolved URL.
  * @returns Allowlisted `ParsedPaymentRequired`.
  * @throws SolvelaPaymentError if the envelope is unrecognized or malformed.
  */
-export function parseGateway402(body: unknown): ParsedPaymentRequired {
+export function parseGateway402(
+  body: unknown,
+  url: string = '',
+): ParsedPaymentRequired {
   if (!isObject(body)) {
     throw new SolvelaPaymentError({
       message: '[solvela] 402 envelope: body is not a JSON object',
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
@@ -219,7 +236,7 @@ export function parseGateway402(body: unknown): ParsedPaymentRequired {
   if (!isObject(errorField)) {
     throw new SolvelaPaymentError({
       message: '[solvela] 402 envelope: missing `error` object',
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
@@ -229,14 +246,14 @@ export function parseGateway402(body: unknown): ParsedPaymentRequired {
   if (typeof type !== 'string' || typeof messageJson !== 'string') {
     throw new SolvelaPaymentError({
       message: '[solvela] 402 envelope: `error.type` or `error.message` missing or wrong type',
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
   if (type !== 'invalid_payment') {
     throw new SolvelaPaymentError({
       message: `[solvela] 402 envelope: unsupported error.type "${type}"; expected "invalid_payment"`,
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
@@ -248,7 +265,7 @@ export function parseGateway402(body: unknown): ParsedPaymentRequired {
   } catch {
     throw new SolvelaPaymentError({
       message: '[solvela] 402 envelope: `error.message` is not valid JSON',
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
@@ -256,7 +273,7 @@ export function parseGateway402(body: unknown): ParsedPaymentRequired {
   if (!isObject(inner)) {
     throw new SolvelaPaymentError({
       message: '[solvela] 402 envelope: inner PaymentRequired is not an object',
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
@@ -265,30 +282,30 @@ export function parseGateway402(body: unknown): ParsedPaymentRequired {
   if (!isNumberField(inner, 'x402_version')) {
     throw new SolvelaPaymentError({
       message: '[solvela] 402 envelope: `x402_version` missing or wrong type',
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
   if (!Array.isArray(inner['accepts'])) {
     throw new SolvelaPaymentError({
       message: '[solvela] 402 envelope: `accepts` is not an array',
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
   if (!isStringField(inner, 'error')) {
     throw new SolvelaPaymentError({
       message: '[solvela] 402 envelope: inner `error` missing or wrong type',
-      url: '',
+      url,
       requestBodyValues: undefined,
     });
   }
 
   const accepts = (inner['accepts'] as unknown[]).map((entry, i) =>
-    applyAcceptAllowlist(entry, i),
+    applyAcceptAllowlist(entry, i, url),
   );
-  const cost_breakdown = applyCostBreakdownAllowlist(inner['cost_breakdown']);
-  const resource = applyResourceAllowlist(inner['resource']);
+  const cost_breakdown = applyCostBreakdownAllowlist(inner['cost_breakdown'], url);
+  const resource = applyResourceAllowlist(inner['resource'], url);
 
   return {
     x402_version: inner['x402_version'] as number,
@@ -308,10 +325,15 @@ export function parseGateway402(body: unknown): ParsedPaymentRequired {
  *   first `accepts[]` entry with `scheme === 'exact'` AND `asset === USDC`.
  *
  * @param parsed - Result of `parseGateway402`.
+ * @param url    - Request URL for `SolvelaPaymentError.url` on thrown errors.
+ *                 Defaults to `''` for callers without URL context.
  * @returns The matching entry plus its `amount` as a `bigint`.
  * @throws SolvelaPaymentError if no entry matches.
  */
-export function selectAccept(parsed: ParsedPaymentRequired): SelectedAccept {
+export function selectAccept(
+  parsed: ParsedPaymentRequired,
+  url: string = '',
+): SelectedAccept {
   for (const accept of parsed.accepts) {
     if (accept.scheme === REQUIRED_SCHEME && accept.asset === USDC_MINT_MAINNET) {
       // Parse amount → bigint. Amount is USDC atomic units as a decimal string.
@@ -321,14 +343,14 @@ export function selectAccept(parsed: ParsedPaymentRequired): SelectedAccept {
       } catch {
         throw new SolvelaPaymentError({
           message: `[solvela] 402 envelope: selected accept.amount "${accept.amount}" is not a valid integer`,
-          url: '',
+          url,
           requestBodyValues: undefined,
         });
       }
       if (cost < 0n) {
         throw new SolvelaPaymentError({
           message: '[solvela] 402 envelope: selected accept.amount is negative',
-          url: '',
+          url,
           requestBodyValues: undefined,
         });
       }
@@ -339,7 +361,7 @@ export function selectAccept(parsed: ParsedPaymentRequired): SelectedAccept {
   throw new SolvelaPaymentError({
     message:
       'no supported payment scheme in accepts[]: v1 requires scheme=exact + asset=USDC',
-    url: '',
+    url,
     requestBodyValues: undefined,
   });
 }
