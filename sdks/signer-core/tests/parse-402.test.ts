@@ -138,6 +138,43 @@ describe('parse402', () => {
       );
     });
 
+    // Number() is stricter than parseFloat for trailing garbage:
+    //   parseFloat("1.5USDC") → 1.5  (silently strips the suffix — bug)
+    //   Number("1.5USDC")    → NaN   (correctly rejects)
+    it('throws on cost_breakdown.total with trailing currency suffix', () => {
+      for (const total of ['1.5USDC', '0.001SOL', '0.5 USDC', '1.5,']) {
+        const body = {
+          ...validDirectBody,
+          cost_breakdown: { ...validDirectBody.cost_breakdown, total },
+        };
+        assert.throws(
+          () => parse402(JSON.stringify(body)),
+          /invalid cost_breakdown\.total/,
+          `expected "${total}" to be rejected`,
+        );
+      }
+    });
+
+    // Number() coerces empty strings, null, booleans, and arrays to 0 / 1
+    // (unlike parseFloat which yields NaN). Without the typeof+length guard
+    // around the Number() call, those would silently pass the `total < 0`
+    // check. Numeric-typed totals are also rejected — the wire format keeps
+    // USDC amounts as strings to avoid float precision drift.
+    it('throws on cost_breakdown.total that is empty or non-string', () => {
+      const malformed: unknown[] = ['', null, true, false, [], 0.001];
+      for (const total of malformed) {
+        const body = {
+          ...validDirectBody,
+          cost_breakdown: { ...validDirectBody.cost_breakdown, total },
+        };
+        assert.throws(
+          () => parse402(JSON.stringify(body)),
+          /invalid cost_breakdown\.total/,
+          `expected ${JSON.stringify(total)} to be rejected`,
+        );
+      }
+    });
+
     it('throws on non-object body (array)', () => {
       assert.throws(
         () => parse402('[]'),

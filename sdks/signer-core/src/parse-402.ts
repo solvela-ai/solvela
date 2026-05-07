@@ -88,11 +88,24 @@ function validatePaymentRequired(inner: unknown, context: string): PaymentRequir
     );
   }
 
-  // Validate cost_breakdown.total is a finite positive number
-  const total = parseFloat(obj.cost_breakdown?.total);
+  // Validate cost_breakdown.total parses to a finite non-negative number.
+  //
+  // We use Number() (not parseFloat) so trailing garbage like "1.5USDC" or
+  // "0.001SOL" is rejected — parseFloat would happily return 1.5 / 0.001 and
+  // silently strip the suffix. The typeof guard is needed because Number()
+  // coerces several non-string values to 0 (Number("") === Number(null) ===
+  // Number([]) === 0, Number(true) === 1), which would otherwise pass the
+  // `total < 0` check. The x402 wire format requires `total` to be a string
+  // (decimal USDC kept as text to avoid float precision drift), so anything
+  // else is malformed by definition.
+  const totalRaw = obj.cost_breakdown?.total;
+  const total =
+    typeof totalRaw === 'string' && totalRaw.length > 0
+      ? Number(totalRaw)
+      : NaN;
   if (!Number.isFinite(total) || total < 0) {
     throw new Error(
-      `Gateway 402 has invalid cost_breakdown.total ${context}: ${obj.cost_breakdown?.total}`,
+      `Gateway 402 has invalid cost_breakdown.total ${context}: ${totalRaw}`,
     );
   }
 
