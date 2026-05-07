@@ -142,10 +142,12 @@ export class SolvelaSigner {
         privateKey,
         requestBody,
       );
-    } catch (err) {
+    } catch (err: unknown) {
       // Refund the reserved budget — signer never succeeded
       await this.refundBudget(cost);
-      // HF1 pattern: never propagate err.cause — may contain raw key bytes
+      // HF1 pattern: surface only err.message — signer-core's SigningError
+      // has no `cause` field, so there is no underlying error object to
+      // accidentally serialize. Anything beyond `.message` is unsafe.
       if (err instanceof SigningError) {
         throw new Error(`Payment signing failed: ${err.message}`);
       }
@@ -183,16 +185,21 @@ export class SolvelaSigner {
   /**
    * Refund cost from session budget (used when inner() throws after signing).
    *
-   * Clamps to zero and emits a WARN if the refund amount exceeds what was
-   * spent — that indicates a race-condition bug in budget accounting (HF-P3-H2).
+   * Clamps to zero and emits a WARN whenever `before < cost` — covers two
+   * race patterns: (1) clamping when the recorded spend underflows the
+   * refund (rare partial accounting), and (2) double-refund where two paths
+   * fire for one reservation, leaving `before === 0` after the first refund
+   * and the second silently no-ops via Math.max. The earlier `before > 0`
+   * guard suppressed exactly the case the warning was meant to catch
+   * (HF-P3-H2).
    */
   async refundBudget(cost: number): Promise<void> {
     await this.budgetMutex.runExclusive(async () => {
       const before = this.sessionSpent;
-      if (before > 0 && before < cost) {
+      if (before < cost) {
         process.stderr.write(
           `[solvela-openclaw] WARN: budget refund clamped (before=${before}, refund=${cost}). ` +
-            'Possible race condition in budget accounting — please report.\n',
+            'Possible race condition or double-refund in budget accounting — please report.\n',
         );
       }
       this.sessionSpent = Math.max(0, this.sessionSpent - cost);
