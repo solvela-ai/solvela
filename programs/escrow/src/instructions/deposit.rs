@@ -4,7 +4,7 @@ use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 use crate::errors::EscrowError;
 use crate::state::Escrow;
-use crate::USDC_MINT;
+use crate::{MAX_ESCROW_SLOTS, USDC_MINT};
 
 /// Deposit USDC into the PDA vault, locking funds for a specific service request.
 ///
@@ -19,7 +19,32 @@ pub fn deposit(
     expiry_slot: u64,
 ) -> Result<()> {
     require!(amount > 0, EscrowError::ZeroAmount);
-    require!(expiry_slot > Clock::get()?.slot, EscrowError::InvalidExpiry);
+
+    let now = Clock::get()?.slot;
+    require!(expiry_slot > now, EscrowError::InvalidExpiry);
+    // Cap the deposit-to-expiry gap so a buggy or adversarial client can't
+    // pass `expiry_slot = u64::MAX` and lock the agent out of refund forever.
+    // saturating_sub guards against the (already-rejected) `expiry_slot <= now`
+    // case in case of refactor; the `>` check above means subtraction is safe.
+    require!(
+        expiry_slot.saturating_sub(now) <= MAX_ESCROW_SLOTS,
+        EscrowError::ExpiryTooFar,
+    );
+
+    // Provider field is `UncheckedAccount` (no on-chain owner constraint), so
+    // the only on-chain protection a misconfigured client gets is this guard:
+    // a zero-key or self-key provider can never legitimately claim, which
+    // (combined with the expiry guard on claim) would brick the funds. Reject
+    // both at deposit time.
+    let provider_key = ctx.accounts.provider.key();
+    require!(
+        provider_key != Pubkey::default(),
+        EscrowError::InvalidProvider,
+    );
+    require!(
+        provider_key != ctx.accounts.agent.key(),
+        EscrowError::InvalidProvider,
+    );
 
     let escrow = &mut ctx.accounts.escrow;
     escrow.agent = ctx.accounts.agent.key();
@@ -51,7 +76,10 @@ pub fn deposit(
 }
 
 #[derive(Accounts)]
-#[instruction(amount: u64, service_id: [u8; 32])]
+// `amount` is unused in any account constraint — only `service_id` is bound
+// (PDA seeds). Renamed to `_amount` to silence the unused-instruction-arg
+// noise without changing the IX serialization (positional, not by name).
+#[instruction(_amount: u64, service_id: [u8; 32])]
 pub struct Deposit<'info> {
     /// Agent wallet — pays for the transaction and provides the funds.
     #[account(mut)]

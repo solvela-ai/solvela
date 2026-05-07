@@ -29,6 +29,12 @@ no-idl = []
 no-log-ix-name = []
 cpi = ["no-entrypoint"]
 default = []
+# Selects the mainnet USDC mint (EPjFW…) at compile time. Without this,
+# the program targets the devnet USDC mint (4zMM…). The deployed bytecode
+# at the program ID in lib.rs MUST be built with `--features mainnet` —
+# default builds (e.g. `cargo check --lib`, local-validator tests) target
+# devnet so the same source compiles for both environments without edits.
+mainnet = []
 # Enables the LiteSVM integration tests in tests/integration.rs and
 # tests/helpers.rs. Requires `anchor build` to have produced
 # target/deploy/solvela_escrow.so first; without this feature the

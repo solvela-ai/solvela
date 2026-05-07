@@ -37,8 +37,22 @@ pub mod state;
 
 use instructions::*;
 
-/// Mainnet USDC-SPL mint address. The escrow only accepts this mint.
+/// USDC-SPL mint address the escrow accepts. Feature-gated so the same
+/// program can be built for mainnet, devnet, or local test validators
+/// without source edits. The deployed mainnet bytecode at the program ID
+/// below MUST be built with `--features mainnet`; default builds (e.g.
+/// `cargo check --lib`, `anchor test` against a local validator) target
+/// the devnet USDC mint.
+#[cfg(feature = "mainnet")]
 pub const USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+#[cfg(not(feature = "mainnet"))]
+pub const USDC_MINT: Pubkey = pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+
+/// Maximum allowed gap between current slot and `expiry_slot` at deposit
+/// time. ~1 day at 400ms/slot — generous for any realistic API request
+/// (typical x402 calls resolve in seconds; this only constrains pathological
+/// clients that would otherwise lock funds for years).
+pub const MAX_ESCROW_SLOTS: u64 = 216_000;
 
 declare_id!("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
 

@@ -22,4 +22,23 @@ pub enum EscrowError {
     /// Escrow expiry slot must be in the future.
     #[msg("Expiry slot must be in the future")]
     InvalidExpiry,
+
+    // New variants appended below preserve wire codes for the variants above.
+    // Anchor encodes the error code as the discriminant (declaration order),
+    // so anything inserted earlier would shift the indexed values for clients.
+    /// Escrow has expired; claim is no longer permitted.
+    #[msg("Escrow has expired; claim no longer permitted")]
+    EscrowExpired,
+
+    /// Expiry slot is further in the future than the program permits.
+    #[msg("Expiry slot exceeds the maximum allowed window")]
+    ExpiryTooFar,
+
+    /// Provider key is invalid (zero key, or equal to the agent).
+    #[msg("Provider must be a non-default key distinct from the agent")]
+    InvalidProvider,
+
+    /// Vault held zero tokens at refund time.
+    #[msg("Vault is empty; nothing to refund")]
+    EmptyVault,
 }

@@ -3,11 +3,7 @@
 mod helpers;
 
 use helpers::*;
-use solana_sdk::{
-    instruction::AccountMeta,
-    program_pack::Pack,
-    signer::Signer,
-};
+use solana_sdk::{instruction::AccountMeta, program_pack::Pack, signer::Signer};
 use spl_associated_token_account::get_associated_token_address;
 
 // ─── Happy Path Tests ──────────────────────────────────────────────────────
@@ -25,7 +21,10 @@ fn test_deposit_creates_escrow() {
     let (escrow_pda, _bump) = deposit_helper(&mut ctx, &service_id, amount, expiry_slot);
 
     // Verify escrow PDA exists
-    assert!(account_exists(&ctx.svm, &escrow_pda), "escrow PDA should exist");
+    assert!(
+        account_exists(&ctx.svm, &escrow_pda),
+        "escrow PDA should exist"
+    );
 
     // Verify vault holds the tokens
     let vault = find_vault_ata(&escrow_pda, &ctx.usdc_mint);
@@ -71,11 +70,18 @@ fn test_claim_full_amount() {
     assert_eq!(read_token_balance(&ctx.svm, &provider_ata), Some(amount));
 
     // Escrow PDA closed
-    assert!(!account_exists(&ctx.svm, &escrow_pda), "escrow should be closed");
+    assert!(
+        !account_exists(&ctx.svm, &escrow_pda),
+        "escrow should be closed"
+    );
 
     // Agent ATA unchanged (no refund)
     let agent_ata = get_associated_token_address(&ctx.agent.pubkey(), &ctx.usdc_mint);
-    assert_eq!(read_token_balance(&ctx.svm, &agent_ata), Some(0), "agent should have no refund");
+    assert_eq!(
+        read_token_balance(&ctx.svm, &agent_ata),
+        Some(0),
+        "agent should have no refund"
+    );
 
     // Vault closed
     let vault = find_vault_ata(&escrow_pda, &ctx.usdc_mint);
@@ -90,7 +96,12 @@ fn test_claim_partial_with_refund() {
     let claim_amount = 600_000u64;
     let refund_amount = deposit_amount - claim_amount;
 
-    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, deposit_amount);
+    inject_ata(
+        &mut ctx.svm,
+        &ctx.agent.pubkey(),
+        &ctx.usdc_mint,
+        deposit_amount,
+    );
     let (escrow_pda, bump) = deposit_helper(&mut ctx, &service_id, deposit_amount, 500);
 
     let ix = build_claim_ix(
@@ -102,18 +113,28 @@ fn test_claim_partial_with_refund() {
         bump,
         claim_amount,
     );
-    send_tx(&mut ctx.svm, &[ix], &ctx.provider, &[&ctx.provider]).expect("partial claim should succeed");
+    send_tx(&mut ctx.svm, &[ix], &ctx.provider, &[&ctx.provider])
+        .expect("partial claim should succeed");
 
     // Provider got claim amount
     let provider_ata = get_associated_token_address(&ctx.provider.pubkey(), &ctx.usdc_mint);
-    assert_eq!(read_token_balance(&ctx.svm, &provider_ata), Some(claim_amount));
+    assert_eq!(
+        read_token_balance(&ctx.svm, &provider_ata),
+        Some(claim_amount)
+    );
 
     // Agent got refund
     let agent_ata = get_associated_token_address(&ctx.agent.pubkey(), &ctx.usdc_mint);
-    assert_eq!(read_token_balance(&ctx.svm, &agent_ata), Some(refund_amount));
+    assert_eq!(
+        read_token_balance(&ctx.svm, &agent_ata),
+        Some(refund_amount)
+    );
 
     // Escrow closed
-    assert!(!account_exists(&ctx.svm, &escrow_pda), "escrow should be closed");
+    assert!(
+        !account_exists(&ctx.svm, &escrow_pda),
+        "escrow should be closed"
+    );
 
     // Vault closed
     let vault = find_vault_ata(&escrow_pda, &ctx.usdc_mint);
@@ -147,7 +168,10 @@ fn test_refund_after_expiry() {
     assert_eq!(read_token_balance(&ctx.svm, &agent_ata), Some(amount));
 
     // Escrow closed
-    assert!(!account_exists(&ctx.svm, &escrow_pda), "escrow should be closed");
+    assert!(
+        !account_exists(&ctx.svm, &escrow_pda),
+        "escrow should be closed"
+    );
 
     // Vault closed
     let vault = find_vault_ata(&escrow_pda, &ctx.usdc_mint);
@@ -163,7 +187,12 @@ fn test_multiple_escrows_same_agent() {
     let amount_b = 2_000_000u64;
 
     // Fund agent with enough for both deposits
-    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount_a + amount_b);
+    inject_ata(
+        &mut ctx.svm,
+        &ctx.agent.pubkey(),
+        &ctx.usdc_mint,
+        amount_a + amount_b,
+    );
 
     // Two separate deposits
     let (_escrow_a, bump_a) = deposit_helper(&mut ctx, &service_id_a, amount_a, 500);
@@ -183,10 +212,16 @@ fn test_multiple_escrows_same_agent() {
 
     // Escrow A closed
     let (pda_a, _) = find_escrow_pda(&ctx.program_id, &ctx.agent.pubkey(), &service_id_a);
-    assert!(!account_exists(&ctx.svm, &pda_a), "escrow A should be closed");
+    assert!(
+        !account_exists(&ctx.svm, &pda_a),
+        "escrow A should be closed"
+    );
 
     // Escrow B still exists with funds
-    assert!(account_exists(&ctx.svm, &escrow_b), "escrow B should still exist");
+    assert!(
+        account_exists(&ctx.svm, &escrow_b),
+        "escrow B should still exist"
+    );
     let vault_b = find_vault_ata(&escrow_b, &ctx.usdc_mint);
     assert_eq!(read_token_balance(&ctx.svm, &vault_b), Some(amount_b));
 }
@@ -283,7 +318,9 @@ fn test_claim_wrong_provider_fails() {
     let mut ctx = setup();
     let service_id = [24u8; 32];
     let wrong_provider = solana_sdk::signature::Keypair::new();
-    ctx.svm.airdrop(&wrong_provider.pubkey(), 10_000_000_000).unwrap();
+    ctx.svm
+        .airdrop(&wrong_provider.pubkey(), 10_000_000_000)
+        .unwrap();
 
     inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, 1_000_000);
     let (_escrow, _bump) = deposit_helper(&mut ctx, &service_id, 1_000_000, 500);
@@ -343,7 +380,9 @@ fn test_refund_wrong_agent_fails() {
     let mut ctx = setup();
     let service_id = [26u8; 32];
     let wrong_agent = solana_sdk::signature::Keypair::new();
-    ctx.svm.airdrop(&wrong_agent.pubkey(), 10_000_000_000).unwrap();
+    ctx.svm
+        .airdrop(&wrong_agent.pubkey(), 10_000_000_000)
+        .unwrap();
 
     inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, 1_000_000);
     let (_escrow, _bump) = deposit_helper(&mut ctx, &service_id, 1_000_000, 100);
@@ -419,7 +458,9 @@ fn test_deposit_wrong_mint_fails() {
         .set_account(
             fake_mint,
             solana_sdk::account::Account {
-                lamports: ctx.svm.minimum_balance_for_rent_exemption(spl_token::state::Mint::LEN),
+                lamports: ctx
+                    .svm
+                    .minimum_balance_for_rent_exemption(spl_token::state::Mint::LEN),
                 data: mint_data,
                 owner: spl_token::ID,
                 executable: false,
@@ -443,4 +484,224 @@ fn test_deposit_wrong_mint_fails() {
     );
     let result = send_tx(&mut ctx.svm, &[ix], &ctx.agent, &[&ctx.agent]);
     assert!(result.is_err(), "deposit with wrong mint should fail");
+}
+
+// ─── Hardening regressions (post-review) ──────────────────────────────────
+//
+// These tests cover the failure modes flagged by the 2026-05-07 review:
+//   - claim must be gated on slot < expiry_slot (race with refund)
+//   - refund must survive a closed agent ATA (init_if_needed)
+//   - claim's refund leg must do the same
+//   - deposit must reject self-provider and excessive expiry
+
+#[test]
+fn test_claim_after_expiry_fails() {
+    let mut ctx = setup();
+    let service_id = [40u8; 32];
+    let amount = 1_000_000u64;
+    let expiry_slot = 100u64;
+
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+    let (_pda, bump) = deposit_helper(&mut ctx, &service_id, amount, expiry_slot);
+
+    // Warp to the expiry boundary itself — claim must be rejected here, not
+    // just after. The guard is `slot < expiry_slot` (strict inequality).
+    warp_and_refresh(&mut ctx.svm, expiry_slot);
+
+    let ix = build_claim_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        &service_id,
+        bump,
+        amount,
+    );
+    let result = send_tx(&mut ctx.svm, &[ix], &ctx.provider, &[&ctx.provider]);
+    assert!(
+        result.is_err(),
+        "claim at expiry boundary must fail (EscrowExpired)"
+    );
+
+    // And a slot beyond expiry, to be belt-and-braces.
+    warp_and_refresh(&mut ctx.svm, expiry_slot + 100);
+    let ix2 = build_claim_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        &service_id,
+        bump,
+        amount,
+    );
+    let result2 = send_tx(&mut ctx.svm, &[ix2], &ctx.provider, &[&ctx.provider]);
+    assert!(
+        result2.is_err(),
+        "claim past expiry must fail (EscrowExpired)"
+    );
+}
+
+#[test]
+fn test_refund_after_agent_ata_closed_succeeds() {
+    let mut ctx = setup();
+    let service_id = [41u8; 32];
+    let amount = 1_000_000u64;
+    let expiry_slot = 100u64;
+
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+    let (_pda, bump) = deposit_helper(&mut ctx, &service_id, amount, expiry_slot);
+
+    // Close the agent's ATA between deposit and refund — normal post-deposit
+    // cleanup move that reclaims rent. Pre-fix this would brick the funds in
+    // the vault PDA forever; with init_if_needed the refund instruction
+    // recreates the ATA and refunds normally.
+    let agent_ata = get_associated_token_address(&ctx.agent.pubkey(), &ctx.usdc_mint);
+    let close_ix = spl_token::instruction::close_account(
+        &spl_token::ID,
+        &agent_ata,
+        &ctx.agent.pubkey(),
+        &ctx.agent.pubkey(),
+        &[],
+    )
+    .expect("build close_account ix");
+    send_tx(&mut ctx.svm, &[close_ix], &ctx.agent, &[&ctx.agent])
+        .expect("close empty agent ATA should succeed");
+    assert!(
+        !account_exists(&ctx.svm, &agent_ata),
+        "agent ATA should be closed before refund"
+    );
+
+    // Warp to expiry and refund.
+    warp_and_refresh(&mut ctx.svm, expiry_slot + 1);
+    let ix = build_refund_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.usdc_mint,
+        &service_id,
+        bump,
+    );
+    send_tx(&mut ctx.svm, &[ix], &ctx.agent, &[&ctx.agent])
+        .expect("refund should succeed even after agent ATA was closed");
+
+    // ATA should be re-created and hold the refunded amount.
+    assert_eq!(
+        read_token_balance(&ctx.svm, &agent_ata),
+        Some(amount),
+        "agent ATA should be re-created with the full refund"
+    );
+}
+
+#[test]
+fn test_claim_after_agent_ata_closed_succeeds() {
+    let mut ctx = setup();
+    let service_id = [42u8; 32];
+    let deposit_amount = 1_000_000u64;
+    let claim_amount = 600_000u64; // partial — exercises the refund leg
+
+    inject_ata(
+        &mut ctx.svm,
+        &ctx.agent.pubkey(),
+        &ctx.usdc_mint,
+        deposit_amount,
+    );
+    let (_pda, bump) = deposit_helper(&mut ctx, &service_id, deposit_amount, 500);
+
+    // Close the agent's ATA after deposit. Pre-fix this would brick the
+    // claim's refund leg (and therefore the entire claim) on a partial
+    // claim. With init_if_needed the provider pays for the recreation.
+    let agent_ata = get_associated_token_address(&ctx.agent.pubkey(), &ctx.usdc_mint);
+    let close_ix = spl_token::instruction::close_account(
+        &spl_token::ID,
+        &agent_ata,
+        &ctx.agent.pubkey(),
+        &ctx.agent.pubkey(),
+        &[],
+    )
+    .expect("build close_account ix");
+    send_tx(&mut ctx.svm, &[close_ix], &ctx.agent, &[&ctx.agent])
+        .expect("close empty agent ATA should succeed");
+    assert!(
+        !account_exists(&ctx.svm, &agent_ata),
+        "agent ATA should be closed before claim"
+    );
+
+    let ix = build_claim_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        &service_id,
+        bump,
+        claim_amount,
+    );
+    send_tx(&mut ctx.svm, &[ix], &ctx.provider, &[&ctx.provider])
+        .expect("claim should succeed even after agent ATA was closed");
+
+    // Provider received their portion; agent ATA was re-created with the
+    // refund (deposit_amount - claim_amount).
+    let provider_ata = get_associated_token_address(&ctx.provider.pubkey(), &ctx.usdc_mint);
+    assert_eq!(
+        read_token_balance(&ctx.svm, &provider_ata),
+        Some(claim_amount),
+        "provider should receive the claim amount"
+    );
+    assert_eq!(
+        read_token_balance(&ctx.svm, &agent_ata),
+        Some(deposit_amount - claim_amount),
+        "agent ATA should be re-created with the refund remainder"
+    );
+}
+
+#[test]
+fn test_deposit_with_self_provider_rejected() {
+    let mut ctx = setup();
+    let service_id = [43u8; 32];
+    let amount = 1_000_000u64;
+
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+
+    // Build a deposit IX where provider == agent. Pre-fix this would create
+    // an escrow that only the agent (acting as provider) could claim, which
+    // combined with the no-claim-expiry-guard bug would brick refund.
+    let ix = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.agent.pubkey(), // provider == agent
+        &ctx.usdc_mint,
+        amount,
+        &service_id,
+        500,
+    );
+    let result = send_tx(&mut ctx.svm, &[ix], &ctx.agent, &[&ctx.agent]);
+    assert!(
+        result.is_err(),
+        "deposit with provider == agent must fail (InvalidProvider)"
+    );
+}
+
+#[test]
+fn test_deposit_with_excessive_expiry_rejected() {
+    let mut ctx = setup();
+    let service_id = [44u8; 32];
+    let amount = 1_000_000u64;
+
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+
+    // MAX_ESCROW_SLOTS in lib.rs is 216_000. Anything beyond `now + that`
+    // must be rejected so a buggy/adversarial client can't lock funds for
+    // years (and combined with the no-expiry-claim-guard bug, exploit it).
+    let ix = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        amount,
+        &service_id,
+        u64::MAX, // adversarial maximum
+    );
+    let result = send_tx(&mut ctx.svm, &[ix], &ctx.agent, &[&ctx.agent]);
+    assert!(
+        result.is_err(),
+        "deposit with excessive expiry_slot must fail (ExpiryTooFar)"
+    );
 }
