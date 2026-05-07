@@ -4,9 +4,13 @@ on:
   push:
     paths:
       - 'sdks/ai-sdk-provider/**'
+      - 'sdks/signer-core/**'
+      - '.github/workflows/ai-sdk-provider.yml'
   pull_request:
     paths:
       - 'sdks/ai-sdk-provider/**'
+      - 'sdks/signer-core/**'
+      - '.github/workflows/ai-sdk-provider.yml'
 
 defaults:
   run:
@@ -23,6 +27,9 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
       - run: npm ci
       - run: npm run check:docs
 
@@ -32,7 +39,11 @@ jobs:
     needs: docs-key-leak-check
     strategy:
       matrix:
-        node: ['18', '20']
+        # Node 18 dropped: vitest 4.x and other dev tooling import
+        # `node:util.styleText`, which was added in Node 20.12. Runtime
+        # code (sign.ts) only needs Node 14+; engines.node in package.json
+        # remains permissive for consumers.
+        node: ['20']
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -40,6 +51,9 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
       - run: npm ci
 
   typecheck:
@@ -53,6 +67,9 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
       - run: npm ci
       - run: npm run typecheck
 
@@ -67,6 +84,9 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
       - run: npm ci
       - run: npm run lint
 
@@ -77,7 +97,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['18', '20']
+        # Node 18 dropped: vitest 4.x and other dev tooling import
+        # `node:util.styleText`, which was added in Node 20.12. Runtime
+        # code (sign.ts) only needs Node 14+; engines.node in package.json
+        # remains permissive for consumers.
+        node: ['20']
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -85,6 +109,9 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
       - run: npm ci
       - run: npm run test:unit
 
@@ -95,7 +122,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['18', '20']
+        # Node 18 dropped: vitest 4.x and other dev tooling import
+        # `node:util.styleText`, which was added in Node 20.12. Runtime
+        # code (sign.ts) only needs Node 14+; engines.node in package.json
+        # remains permissive for consumers.
+        node: ['20']
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -103,6 +134,9 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
       - run: npm ci
       - run: npm run test:integration
 
@@ -117,6 +151,9 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
       - run: npm ci
       - run: npm run build
       - run: npm run size
@@ -132,6 +169,9 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
       - run: npm ci
       - name: Fail if any dependency has postinstall/preinstall/prepublish
         run: |
@@ -165,5 +205,8 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
       - run: npm ci
       - run: npm audit --production --audit-level=high
