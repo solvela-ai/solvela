@@ -1,6 +1,6 @@
 {
   "name": "@solvela/ai-sdk-provider",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Vercel AI SDK provider for Solvela — AI agent payments with USDC on Solana",
   "type": "module",
   "license": "MIT",
@@ -42,28 +42,21 @@
   "dependencies": {
     "@ai-sdk/openai-compatible": "2.0.41",
     "@ai-sdk/provider-utils": "^4.0.0",
-    "@solvela/signer-core": "file:../signer-core"
+    "@solvela/signer-core": "file:../signer-core",
+    "bs58": "^5.0.0"
   },
   "peerDependencies": {
     "@ai-sdk/provider": "^3.0.0",
     "@solana/spl-token": "^0.4.0",
     "@solana/web3.js": "^1.87.0",
-    "@solvela/sdk": "^0.2.0",
     "ai": "^6.0.0",
-    "bs58": "^5.0.0",
     "zod": "^3.25.76 || ^4.1.8"
   },
   "peerDependenciesMeta": {
-    "@solvela/sdk": {
-      "optional": true
-    },
     "@solana/spl-token": {
       "optional": true
     },
     "@solana/web3.js": {
-      "optional": true
-    },
-    "bs58": {
       "optional": true
     }
   },
