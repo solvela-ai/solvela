@@ -346,7 +346,7 @@ async fn handle_payment_submitted(
             } else {
                 set.put(tx_raw.to_string(), now);
                 warn!(
-                    tx = %tx_raw,
+                    tx_prefix = &tx_raw[..tx_raw.len().min(88)],
                     "A2A payment accepted under degraded in-memory replay protection (no Redis)"
                 );
                 false
