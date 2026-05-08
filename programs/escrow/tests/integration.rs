@@ -3,7 +3,7 @@
 mod helpers;
 
 use helpers::*;
-use solana_sdk::{instruction::AccountMeta, program_pack::Pack, signer::Signer};
+use solana_sdk::{instruction::AccountMeta, program_pack::Pack, pubkey::Pubkey, signer::Signer};
 use spl_associated_token_account::get_associated_token_address;
 
 // ─── Happy Path Tests ──────────────────────────────────────────────────────
@@ -676,6 +676,36 @@ fn test_deposit_with_self_provider_rejected() {
     assert!(
         result.is_err(),
         "deposit with provider == agent must fail (InvalidProvider)"
+    );
+}
+
+#[test]
+fn test_deposit_with_default_provider_rejected() {
+    // Companion to test_deposit_with_self_provider_rejected. The
+    // `InvalidProvider` guard in deposit also rejects `provider ==
+    // Pubkey::default()` (the all-zero key), to prevent escrows from
+    // being created against an unowned/burn key. Without this case
+    // covered, a regression that accidentally narrowed the guard to
+    // only the `provider == agent` check would slip through.
+    let mut ctx = setup();
+    let service_id = [56u8; 32];
+    let amount = 1_000_000u64;
+
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+
+    let ix = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &Pubkey::default(), // provider == zero key
+        &ctx.usdc_mint,
+        amount,
+        &service_id,
+        500,
+    );
+    let result = send_tx(&mut ctx.svm, &[ix], &ctx.agent, &[&ctx.agent]);
+    assert!(
+        result.is_err(),
+        "deposit with provider == Pubkey::default() must fail (InvalidProvider)"
     );
 }
 
