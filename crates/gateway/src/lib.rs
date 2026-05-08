@@ -66,10 +66,13 @@ pub struct AppState {
     pub db_pool: Option<sqlx::PgPool>,
     /// HMAC secret for signing/verifying session tokens.
     pub session_secret: Vec<u8>,
-    /// In-memory replay protection fallback used when Redis (`cache`) is absent.
-    /// LRU-bounded to 10,000 entries with 120-second TTL so stale signatures
-    /// are treated as expired and the oldest entries are evicted first.
-    pub replay_set: Mutex<LruCache<String, std::time::Instant>>,
+    /// In-memory replay protection fallback used when Redis (`cache`) is
+    /// absent. Backed by **three independent** per-path LRU buckets
+    /// (`/v1/chat/completions`, `/v1/services/{id}/proxy`, `/a2a`) so a
+    /// burst on one path cannot evict another path's replay entries.
+    /// Each bucket is bounded to 10,000 entries with the same 120-second
+    /// TTL as before. See [`ReplaySet`] / [`ReplayPath`].
+    pub replay_set: ReplaySet,
     /// Shared HTTP client for outbound requests (e.g., Solana RPC slot fetch).
     pub http_client: reqwest::Client,
     /// Cached Solana slot for the `/v1/escrow/config` endpoint (5s TTL).
@@ -88,17 +91,79 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Default capacity for the in-memory replay protection LRU cache.
-    const REPLAY_SET_CAPACITY: usize = 10_000;
-
     /// TTL for in-memory replay entries (120 seconds matches Solana blockhash lifetime).
     pub const REPLAY_TTL: std::time::Duration = std::time::Duration::from_secs(120);
 
-    /// Create a new in-memory replay LRU cache with the default capacity.
-    pub fn new_replay_set() -> Mutex<LruCache<String, std::time::Instant>> {
-        Mutex::new(LruCache::new(
-            NonZeroUsize::new(Self::REPLAY_SET_CAPACITY).expect("nonzero"),
-        ))
+    /// Create a new in-memory replay set (per-path bucketed LRU cache).
+    ///
+    /// Returns a [`ReplaySet`] with three independent 10,000-entry LRU
+    /// buckets — one per route group. Construction sites continue to
+    /// call this helper unchanged; lookup sites navigate via
+    /// [`ReplaySet::for_path`].
+    pub fn new_replay_set() -> ReplaySet {
+        ReplaySet::new()
+    }
+}
+
+/// Per-path bucket selector for the in-memory replay LRU.
+///
+/// Each variant maps to one route group whose payment payloads should
+/// not affect another group's replay-cache eviction order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayPath {
+    /// `POST /v1/chat/completions`
+    Chat,
+    /// `POST /v1/services/{service_id}/proxy`
+    Proxy,
+    /// `POST /a2a` (`message/send` flow)
+    A2a,
+}
+
+/// In-memory replay protection fallback used when Redis is absent.
+///
+/// Holds three independent LRUs keyed by [`ReplayPath`] so eviction in
+/// one path's bucket does not affect the others. Per-bucket capacity
+/// matches the previous shared capacity (10K) — total memory is 3× the
+/// prior single-LRU footprint, but the absolute size is small (≈6 MB
+/// worst case for ~200-byte entries).
+pub struct ReplaySet {
+    chat: Mutex<LruCache<String, std::time::Instant>>,
+    proxy: Mutex<LruCache<String, std::time::Instant>>,
+    a2a: Mutex<LruCache<String, std::time::Instant>>,
+}
+
+impl ReplaySet {
+    /// Default capacity for each per-path bucket.
+    const PER_PATH_CAPACITY: usize = 10_000;
+
+    pub fn new() -> Self {
+        let bucket = || {
+            Mutex::new(LruCache::new(
+                NonZeroUsize::new(Self::PER_PATH_CAPACITY).expect("nonzero"),
+            ))
+        };
+        Self {
+            chat: bucket(),
+            proxy: bucket(),
+            a2a: bucket(),
+        }
+    }
+
+    /// Select the LRU bucket for `path`. Callers lock the returned
+    /// `Mutex` to access the underlying cache directly — preserving
+    /// the existing ad-hoc TTL handling at each call site.
+    pub fn for_path(&self, path: ReplayPath) -> &Mutex<LruCache<String, std::time::Instant>> {
+        match path {
+            ReplayPath::Chat => &self.chat,
+            ReplayPath::Proxy => &self.proxy,
+            ReplayPath::A2a => &self.a2a,
+        }
+    }
+}
+
+impl Default for ReplaySet {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -446,4 +511,101 @@ fn build_cors() -> CorsLayer {
                 .parse()
                 .expect("'x-session-id' is a valid header name"),
         ])
+}
+
+#[cfg(test)]
+mod replay_set_tests {
+    use super::{ReplayPath, ReplaySet};
+
+    #[test]
+    fn for_path_returns_distinct_buckets() {
+        // Three buckets, three distinct memory addresses — the wrapper
+        // hands out independent Mutex pointers per path.
+        let rs = ReplaySet::new();
+        let chat = rs.for_path(ReplayPath::Chat) as *const _;
+        let proxy = rs.for_path(ReplayPath::Proxy) as *const _;
+        let a2a = rs.for_path(ReplayPath::A2a) as *const _;
+        assert_ne!(chat, proxy, "chat and proxy buckets must differ");
+        assert_ne!(chat, a2a, "chat and a2a buckets must differ");
+        assert_ne!(proxy, a2a, "proxy and a2a buckets must differ");
+    }
+
+    #[test]
+    fn entries_are_isolated_across_paths() {
+        // The same tx_raw inserted into one path's bucket must NOT be
+        // visible in another path's bucket — the eviction-isolation
+        // property the M1 fix is about.
+        let rs = ReplaySet::new();
+        let tx = "FAKE_TX_BASE64".to_string();
+        let now = std::time::Instant::now();
+
+        rs.for_path(ReplayPath::Chat)
+            .lock()
+            .expect("fresh mutex must lock")
+            .put(tx.clone(), now);
+
+        // Chat sees it
+        assert!(
+            rs.for_path(ReplayPath::Chat)
+                .lock()
+                .expect("fresh mutex must lock")
+                .get(&tx)
+                .is_some(),
+            "chat bucket must hold the entry it just inserted"
+        );
+
+        // Proxy and A2a do NOT see it
+        assert!(
+            rs.for_path(ReplayPath::Proxy)
+                .lock()
+                .expect("fresh mutex must lock")
+                .get(&tx)
+                .is_none(),
+            "proxy bucket must not see chat's entry"
+        );
+        assert!(
+            rs.for_path(ReplayPath::A2a)
+                .lock()
+                .expect("fresh mutex must lock")
+                .get(&tx)
+                .is_none(),
+            "a2a bucket must not see chat's entry"
+        );
+    }
+
+    #[test]
+    fn burst_on_one_path_does_not_evict_others() {
+        // The eviction-isolation regression sentinel. Fill chat's bucket
+        // beyond capacity; proxy's bucket must still hold its single
+        // entry.
+        let rs = ReplaySet::new();
+        let proxy_tx = "PROXY_ONLY_TX".to_string();
+        let now = std::time::Instant::now();
+
+        rs.for_path(ReplayPath::Proxy)
+            .lock()
+            .expect("fresh mutex must lock")
+            .put(proxy_tx.clone(), now);
+
+        // Push enough fillers into chat to exceed PER_PATH_CAPACITY.
+        // Even with the chat bucket fully evicting its own contents,
+        // proxy's bucket is untouched.
+        let mut chat = rs
+            .for_path(ReplayPath::Chat)
+            .lock()
+            .expect("fresh mutex must lock");
+        for i in 0..(ReplaySet::PER_PATH_CAPACITY + 100) {
+            chat.put(format!("chat_filler_{i}"), now);
+        }
+        drop(chat); // release lock before checking proxy
+
+        assert!(
+            rs.for_path(ReplayPath::Proxy)
+                .lock()
+                .expect("fresh mutex must lock")
+                .get(&proxy_tx)
+                .is_some(),
+            "proxy entry must survive a chat-bucket capacity overflow"
+        );
+    }
 }

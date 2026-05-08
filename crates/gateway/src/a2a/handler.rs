@@ -325,6 +325,7 @@ async fn handle_payment_submitted(
             // GHSA-wc9q-wc6q-gwmq: recover from poisoned lock instead of panicking.
             let mut set = state
                 .replay_set
+                .for_path(crate::ReplayPath::A2a)
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let now = std::time::Instant::now();

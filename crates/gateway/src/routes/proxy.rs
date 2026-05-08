@@ -350,6 +350,7 @@ pub async fn proxy_service(
         // for every subsequent request.
         let mut replay_set = state
             .replay_set
+            .for_path(crate::ReplayPath::Proxy)
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
