@@ -10,7 +10,7 @@ A `.well-known/security.txt` is served from `api.solvela.ai`.
 
 The gateway (`api.solvela.ai`) and dashboard (`solvela.ai`, `app.solvela.ai`, `docs.solvela.ai`) run on a clean dependency tree (`cargo audit` and `npm audit` both pass at HEAD).
 
-The escrow program is deployed to Solana mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`. Upgrade authority is retained at `B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A` (single-sig). Migration to a multisig upgrade authority is planned.
+The escrow program is deployed to Solana mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`. Upgrade authority is held at `EDM9pao5miQdJYfzCtZii9cVn5ZHTBJq84Y9yyqZbsr4` (single-sig, stored offline). Authority was migrated on 2026-05-08 from the gateway's hot-wallet keypair (`B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A`) so a runtime compromise of the gateway can no longer escalate to upgrade rights over the deployed program. Migration to a Squads multisig (or hardware-wallet-backed authority) is the next planned step.
 
 ## Known transitive advisories — accepted with reason
 
@@ -76,3 +76,11 @@ Internal review of `programs/escrow/` surfaced two latent settlement-path footgu
 **Exposure:** None observed. `getProgramAccounts` against the program ID returned zero accounts at the time of redeployment — the deployed bytecode had handled no real customer escrows since launch, so neither footgun had any opportunity to fire. The findings are documented here under the disclosure-transparency principle, not because of any incident.
 
 **Source:** PR [#160](https://github.com/solvela-ai/solvela/pull/160) (8 source changes + 7 new tests). Redeploy ceremony tracked and closed in issue [#161](https://github.com/solvela-ai/solvela/issues/161). Bytecode hash `2293edfce3a0e7b1b0332bc32d9f7a9e58105a2a3f825ee05d8a4f7fbf57bf26`. Six secondary hardening items (USDC mint feature gate, provider self-key rejection, `expiry_slot` ceiling, `agent` constraint relaxation for PDA agents, `ClaimEvent.deposited` field, `vault > 0` refund guard, `checked_sub` for refund math) shipped alongside.
+
+### 2026-05-08 — Upgrade-authority / fee-payer key separation
+
+Subsequent operational hardening on the same day. The single keypair `B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A` was serving as **both** the gateway's fee-payer hot wallet (decryptable from the Fly.io secret store on every gateway boot) **and** the program's upgrade authority. A runtime compromise of the gateway would therefore have escalated directly to upgrade rights over the deployed program — an attacker could have replaced the bytecode with a version that drains the next deposit, transferred the upgrade authority away, etc.
+
+**Fix:** generated a new offline single-sig keypair (`EDM9pao5miQdJYfzCtZii9cVn5ZHTBJq84Y9yyqZbsr4`), seed phrase backed up out of band, and ran `solana program set-upgrade-authority` to transfer authority off the hot-wallet keypair. The fee-payer key remains `B7reP7rzz…` (no operational change to the gateway), but it no longer carries any upgrade power.
+
+**What's still imperfect (tracked):** the new authority key is single-sig and stored on disk. The next planned step is migration to a [Squads](https://app.squads.so) multisig — the standard for Solana protocol upgrade authorities (Jupiter, Drift, Marinade, Phoenix, Pyth, etc.). Likely path: 1-of-1 Squads now (free, ~5 min), upgraded to 2-of-N with a hardware-wallet co-signer when budget and operational complexity allow.
