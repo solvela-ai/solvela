@@ -2,6 +2,31 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-08 — Escrow program hardening
+
+Pre-launch security review of `programs/escrow/` surfaced two latent settlement-path footguns. Both fixed in source ([PR #160](https://github.com/solvela-ai/solvela/pull/160)) and the bytecode redeployed to mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU` on slot 418438627 (tx `2Rp69yKfyxeeawrFRPZbLma9NytxEXSz8PeWPdNYzWm4e3Fr2xihP3T23PiwDB9xYbnUwN8kmsnrgBKjP2dbBbuE`). `getProgramAccounts` returned zero accounts at the time of redeployment — both flaws were latent and unexploited.
+
+### Findings (proactively patched)
+
+- **Claim-vs-refund race at the expiry boundary** — once `slot >= expiry_slot`, both `claim` and `refund` were simultaneously valid. An adversarial provider could race the agent at the deadline and capture the deposit. New guard requires `Clock::slot < expiry_slot` for `claim`.
+- **Refund deadlock when the agent's USDC ATA had been closed** — agents who closed their ATA after deposit (a normal post-deposit move that reclaims rent) would find both `refund` and `claim`'s refund leg failing. The funds would have been permanently stuck in the vault PDA. Both instructions now use `init_if_needed` so the agent's ATA is recreated on the fly when needed.
+
+### Secondary hardening (same PR)
+
+- `USDC_MINT` feature-gated (`mainnet` selects `EPjFW…`, default selects devnet). Same source compiles for any cluster without code edits.
+- `deposit` rejects `provider == agent` and `provider == Pubkey::default()` (catches misconfigured client calls before funds are locked).
+- `expiry_slot` capped at `now + MAX_ESCROW_SLOTS` (~1 day at 400ms/slot).
+- `claim`'s `agent` constraint switched from `SystemAccount` → `UncheckedAccount` (unblocks PDA-/program-owned agents in the future).
+- `ClaimEvent` gains a `deposited` field for indexer disambiguation.
+- `refund` rejects `vault_amount == 0`; `claim` uses `checked_sub` for the refund computation.
+- 7 new tests added (5 integration covering claim-after-expiry, ATA-closed recovery, self-provider rejection, excessive-expiry rejection; 2 unit covering the new event field and the slot ceiling).
+
+### Verification
+
+- `cargo build-sbf -- --features mainnet` produced bytecode hash `2293edfce3a0e7b1b0332bc32d9f7a9e58105a2a3f825ee05d8a4f7fbf57bf26`, matching the on-chain dump truncated to source size.
+- 27/27 tests pass (8 unit + 19 integration) with `--features sbf,mainnet`.
+- Tracking issues #161 (redeploy ceremony — completed), #162 (dedicated escrow CI workflow — open), #155/#156 (anchor 0.31→1.0 migration — open).
+
 ## 2026-04-29 — Security audit + hardening
 
 End-to-end security audit across the gateway and all four SDK repos (`solvela-python`, `solvela-ts`, `solvela-go`, `solvela-client`). 5 GitHub Security Advisories drafted on `solvela-ai/solvela`, 8 hardening issues filed publicly, and 4 SDK security-fix PRs landed.

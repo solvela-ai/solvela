@@ -37,9 +37,9 @@ The escrow program is built against the Solana 1.18 / Anchor 0.30 toolchain (mat
 | `rustls-pemfile` 1.0.4 | RUSTSEC-2025-0134 | Solana 1.x transitive. |
 | `ansi_term`, `atty`, `derivative`, `paste` | various unmaintained | All Solana 1.x build-time transitives. |
 
-**Risk evaluation:** The deployed program bytecode is fixed at deploy time and is not affected by these advisories. The advisories matter only on a future *redeploy*, which is gated on Anchor upgrade-authority approval anyway.
+**Risk evaluation:** The deployed program bytecode is fixed at deploy time and is not affected by these advisories at runtime — the vulnerable code paths live in build-time transitives, not in the on-chain bytecode. The 2026-05-08 redeploy (slot 418438627) used the same Anchor 0.31.1 / Solana 1.x toolchain, so the transitive-advisory profile is unchanged.
 
-**Resolution path:** Solana 2.x / Anchor 0.31 migration. Tracked in `docs/plans/` with no current target date — the program is stable on mainnet and a redeploy is not currently planned.
+**Resolution path:** Solana 2.x / `@solana/kit` migration is the next planned escrow redeploy. Tracking issues [#155](https://github.com/solvela-ai/solvela/issues/155) and [#156](https://github.com/solvela-ai/solvela/issues/156); no fixed target date — the deployed program is stable on mainnet and the migration will be coordinated with the broader ecosystem move.
 
 ### npm (Solana web3.js 1.x ecosystem — `sdks/mcp`, `sdks/openclaw-provider`, `integrations/openclaw`)
 
@@ -59,3 +59,20 @@ The escrow program is built against the Solana 1.18 / Anchor 0.30 toolchain (mat
 - `cargo audit` and `npm audit` run on every PR via GitHub Actions
 - Dependabot opens PRs for non-major bumps; major bumps reviewed manually
 - Quarterly review of accepted-and-documented transitive advisories
+
+## Pre-launch security reviews
+
+Solvela's posture is to surface and patch latent flaws before they harm users, rather than wait for an external incident to drive remediation. Reviews surface findings, findings get tracked, fixes ship through normal PR flow, and the result is documented here for transparency.
+
+### 2026-05-08 — Escrow program code review
+
+Internal review of `programs/escrow/` surfaced two latent settlement-path footguns. Both were patched proactively and the bytecode redeployed to mainnet on the same day.
+
+| Footgun | What could have happened | Fix |
+|---|---|---|
+| **Claim-vs-refund race at expiry boundary** | Once `slot >= expiry_slot`, both `claim` and `refund` were simultaneously valid. An adversarial provider could race the agent at the deadline and capture the deposit. | New guard requires `Clock::slot < expiry_slot` for `claim`. |
+| **Refund deadlock on closed agent ATA** | An agent who closed their USDC ATA after deposit (a normal post-deposit move that reclaims rent) would find both `refund` and `claim`'s refund leg failing. The funds would have been permanently stuck in the vault PDA. | Both instructions now use `init_if_needed` so the agent's ATA is recreated on the fly when needed. |
+
+**Exposure:** None observed. `getProgramAccounts` against the program ID returned zero accounts at the time of redeployment — the deployed bytecode had handled no real customer escrows since launch, so neither footgun had any opportunity to fire. The findings are documented here under the disclosure-transparency principle, not because of any incident.
+
+**Source:** PR [#160](https://github.com/solvela-ai/solvela/pull/160) (8 source changes + 7 new tests). Redeploy ceremony tracked and closed in issue [#161](https://github.com/solvela-ai/solvela/issues/161). Bytecode hash `2293edfce3a0e7b1b0332bc32d9f7a9e58105a2a3f825ee05d8a4f7fbf57bf26`. Six secondary hardening items (USDC mint feature gate, provider self-key rejection, `expiry_slot` ceiling, `agent` constraint relaxation for PDA agents, `ClaimEvent.deposited` field, `vault > 0` refund guard, `checked_sub` for refund math) shipped alongside.
