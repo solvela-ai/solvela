@@ -367,6 +367,21 @@ async fn handle_payment_submitted(
             });
         }
 
+        // SECURITY: validate the submitted `payload.accepted` against the
+        // PaymentRequired we stored when the task was created.
+        //
+        // Without this gate, the facilitator's `verify_payment` checks the
+        // on-chain transaction against `payload.accepted.amount` (the
+        // CLIENT-SUPPLIED amount), not the gateway-quoted amount. An agent
+        // could submit `payload.accepted.amount = "1"` while the original
+        // 402 quoted "1000000" — the facilitator confirms the tx pays "1",
+        // accepts it, and the gateway grants service worth $1.00 for $0.000001.
+        //
+        // Runs after the replay check (so a re-submitted bad payment short-
+        // circuits at replay) and before verify_and_settle (so the facilitator
+        // never sees a payload that doesn't match an offered accept).
+        validate_submitted_against_offer(task_id, &payload.accepted, &record.payment_required)?;
+
         // Verify via facilitator
         let settlement = state
             .facilitator
@@ -511,6 +526,105 @@ async fn handle_payment_submitted(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Verify that the submitted `PaymentAccept` matches one of the offers
+/// in the original `PaymentRequired` and that the submitted atomic
+/// amount is at least the quoted atomic amount.
+///
+/// `original_pr_value` is the `serde_json::Value` form of
+/// `solvela_x402::types::PaymentRequired` stored on the task at
+/// creation time. Parsing failures fail-closed — without the
+/// expected amount we cannot verify the client isn't underpaying.
+///
+/// The match key is `(scheme, network, asset, pay_to)` — an offered
+/// accept with these four fields equal to the submitted accept's is
+/// the one the client picked. The amount is the security-relevant
+/// difference and is checked separately as integers.
+fn validate_submitted_against_offer(
+    task_id: &str,
+    submitted: &solvela_x402::types::PaymentAccept,
+    original_pr_value: &serde_json::Value,
+) -> Result<(), JsonRpcErrorData> {
+    let original_pr: solvela_x402::types::PaymentRequired =
+        serde_json::from_value(original_pr_value.clone()).map_err(|e| {
+            tracing::error!(
+                task_id,
+                error = %e,
+                "stored payment_required failed to parse — denying"
+            );
+            JsonRpcErrorData {
+                code: ERR_PAYMENT_FAILED,
+                message: "Internal: stored payment record is malformed".to_string(),
+                data: None,
+            }
+        })?;
+
+    let matching_offer = original_pr.accepts.iter().find(|a| {
+        a.scheme == submitted.scheme
+            && a.network == submitted.network
+            && a.asset == submitted.asset
+            && a.pay_to == submitted.pay_to
+    });
+
+    let offer = matching_offer.ok_or_else(|| {
+        tracing::warn!(
+            task_id,
+            submitted_scheme = %submitted.scheme,
+            submitted_pay_to = %submitted.pay_to,
+            "A2A payment does not match any offered accept — denying"
+        );
+        JsonRpcErrorData {
+            code: ERR_PAYMENT_FAILED,
+            message: "Submitted payment does not match any offered payment option".to_string(),
+            data: None,
+        }
+    })?;
+
+    // Compare amounts as integers to avoid string-format gotchas (e.g. leading
+    // zeros, whitespace) that an attacker might exploit. We require the
+    // submitted amount to be at least the quoted amount — overpayment is a
+    // UX/integrity matter, not a security one, and doesn't grant extra service.
+    let expected_atomic: u128 = offer.amount.parse().map_err(|_| {
+        tracing::error!(
+            task_id,
+            offer_amount = %offer.amount,
+            "stored offer amount is not a valid integer — denying"
+        );
+        JsonRpcErrorData {
+            code: ERR_PAYMENT_FAILED,
+            message: "Internal: stored payment amount is malformed".to_string(),
+            data: None,
+        }
+    })?;
+    let submitted_atomic: u128 = submitted.amount.parse().map_err(|_| {
+        tracing::warn!(
+            task_id,
+            submitted_amount = %submitted.amount,
+            "submitted payment amount is not a valid integer — denying"
+        );
+        JsonRpcErrorData {
+            code: ERR_INVALID_PARAMS,
+            message: "Submitted payment amount is not a valid integer".to_string(),
+            data: None,
+        }
+    })?;
+
+    if submitted_atomic < expected_atomic {
+        tracing::warn!(
+            task_id,
+            expected_atomic = %expected_atomic,
+            submitted_atomic = %submitted_atomic,
+            "A2A payment amount below quoted — denying"
+        );
+        return Err(JsonRpcErrorData {
+            code: ERR_PAYMENT_FAILED,
+            message: "Submitted payment amount is less than the quoted amount".to_string(),
+            data: None,
+        });
+    }
+
+    Ok(())
+}
 
 /// Extract the first text content from message parts.
 fn extract_text_from_parts(parts: &[Part]) -> Result<String, JsonRpcErrorData> {
@@ -1243,5 +1357,127 @@ supports_vision = false
             resolved.starts_with("openai/"),
             "gpt5 must map to the openai canonical id, got {resolved}"
         );
+    }
+
+    // ── M2 — A2A submitted-amount validation ──────────────────────────────
+
+    fn make_offer(scheme: &str, amount: &str, pay_to: &str) -> solvela_x402::types::PaymentAccept {
+        solvela_x402::types::PaymentAccept {
+            scheme: scheme.to_string(),
+            network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp".to_string(),
+            amount: amount.to_string(),
+            asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            pay_to: pay_to.to_string(),
+            max_timeout_seconds: 300,
+            escrow_program_id: None,
+        }
+    }
+
+    fn make_pr(accepts: Vec<solvela_x402::types::PaymentAccept>) -> serde_json::Value {
+        let pr = solvela_x402::types::PaymentRequired {
+            x402_version: 2,
+            resource: solvela_x402::types::Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepts,
+            cost_breakdown: solvela_x402::types::CostBreakdown {
+                provider_cost: "0.001000".to_string(),
+                platform_fee: "0.000050".to_string(),
+                total: "0.001050".to_string(),
+                currency: "USDC".to_string(),
+                fee_percent: 5,
+            },
+            error: "Payment required".to_string(),
+        };
+        serde_json::to_value(&pr).expect("serialize")
+    }
+
+    #[test]
+    fn test_validate_submitted_amount_equal_passes() {
+        let offer = make_offer("exact", "1000000", "RECIPIENT11111");
+        let pr = make_pr(vec![offer.clone()]);
+        let result = validate_submitted_against_offer("t1", &offer, &pr);
+        assert!(result.is_ok(), "exact match must pass");
+    }
+
+    #[test]
+    fn test_validate_submitted_amount_overpaid_passes() {
+        // Overpayment is allowed — it's a UX matter, not a security one.
+        let offer = make_offer("exact", "1000000", "RECIPIENT11111");
+        let mut submitted = offer.clone();
+        submitted.amount = "2000000".to_string();
+        let pr = make_pr(vec![offer]);
+        let result = validate_submitted_against_offer("t1", &submitted, &pr);
+        assert!(result.is_ok(), "overpayment must pass");
+    }
+
+    #[test]
+    fn test_validate_submitted_amount_underpaid_rejected() {
+        // The core security gate: a client submitting LESS than quoted
+        // must be rejected, even if the on-chain tx will confirm.
+        let offer = make_offer("exact", "1000000", "RECIPIENT11111");
+        let mut submitted = offer.clone();
+        submitted.amount = "1".to_string(); // attempting to pay 0.000001 USDC instead of 1.0
+        let pr = make_pr(vec![offer]);
+        let result = validate_submitted_against_offer("t1", &submitted, &pr);
+        let err = result.expect_err("underpaid must reject");
+        assert_eq!(err.code, ERR_PAYMENT_FAILED);
+        assert!(err.message.contains("less than the quoted"));
+    }
+
+    #[test]
+    fn test_validate_submitted_amount_wrong_pay_to_rejected() {
+        // Client submits the right amount but to a different recipient than
+        // any offered accept — must reject (no matching offer to compare against).
+        let offer = make_offer("exact", "1000000", "RECIPIENT11111");
+        let mut submitted = offer.clone();
+        submitted.pay_to = "ATTACKER22222".to_string();
+        let pr = make_pr(vec![offer]);
+        let result = validate_submitted_against_offer("t1", &submitted, &pr);
+        let err = result.expect_err("mismatched pay_to must reject");
+        assert_eq!(err.code, ERR_PAYMENT_FAILED);
+        assert!(err.message.contains("does not match any offered"));
+    }
+
+    #[test]
+    fn test_validate_submitted_amount_picks_correct_offer_among_multiple() {
+        // When the gateway offers both `exact` ($1) and `escrow` ($0.5),
+        // a client paying via escrow must satisfy the escrow amount, not
+        // the exact amount.
+        let exact_offer = make_offer("exact", "1000000", "RECIPIENT11111");
+        let escrow_offer = make_offer("escrow", "500000", "RECIPIENT11111");
+        let pr = make_pr(vec![exact_offer.clone(), escrow_offer.clone()]);
+
+        // Submitting via escrow at $0.5 — passes (matches the escrow offer).
+        let result = validate_submitted_against_offer("t1", &escrow_offer, &pr);
+        assert!(result.is_ok(), "escrow exact match must pass");
+
+        // Submitting via escrow at $0.49 — rejects.
+        let mut underpaid_escrow = escrow_offer.clone();
+        underpaid_escrow.amount = "499999".to_string();
+        let result = validate_submitted_against_offer("t1", &underpaid_escrow, &pr);
+        assert!(result.is_err(), "escrow underpayment must reject");
+    }
+
+    #[test]
+    fn test_validate_submitted_amount_non_numeric_rejected() {
+        let offer = make_offer("exact", "1000000", "RECIPIENT11111");
+        let mut submitted = offer.clone();
+        submitted.amount = "1e6".to_string(); // scientific notation — not an atomic-unit string
+        let pr = make_pr(vec![offer]);
+        let result = validate_submitted_against_offer("t1", &submitted, &pr);
+        let err = result.expect_err("non-integer amount must reject");
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+    }
+
+    #[test]
+    fn test_validate_submitted_amount_corrupt_record_fails_closed() {
+        let offer = make_offer("exact", "1000000", "RECIPIENT11111");
+        let corrupt = serde_json::json!({"not": "a payment_required"});
+        let result = validate_submitted_against_offer("t1", &offer, &corrupt);
+        let err = result.expect_err("corrupt stored record must reject");
+        // Without the expected amount we cannot verify — must be ERR_PAYMENT_FAILED, not pass.
+        assert_eq!(err.code, ERR_PAYMENT_FAILED);
     }
 }
