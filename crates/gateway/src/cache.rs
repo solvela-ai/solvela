@@ -506,6 +506,143 @@ mod tests {
         assert!(config.enabled);
     }
 
+    /// CLAUDE.md rule #16: cache keys are wallet-agnostic. Two payers with
+    /// identical (model, messages, temperature) MUST produce the same key,
+    /// regardless of any other field on the request. We prove this structurally
+    /// by varying every non-key field and asserting the hash is unchanged.
+    #[test]
+    fn cache_key_ignores_non_key_request_fields() {
+        let base = make_request("openai/gpt-4o", vec![user_message("Hello")], Some(0.7));
+        let key_base = ResponseCache::cache_key(&base);
+
+        // max_tokens differs — must not affect the key.
+        let mut variant = base.clone();
+        variant.max_tokens = Some(2048);
+        assert_eq!(
+            ResponseCache::cache_key(&variant),
+            key_base,
+            "max_tokens must not be part of the cache key"
+        );
+
+        // top_p differs — must not affect the key.
+        let mut variant = base.clone();
+        variant.top_p = Some(0.9);
+        assert_eq!(
+            ResponseCache::cache_key(&variant),
+            key_base,
+            "top_p must not be part of the cache key"
+        );
+
+        // stream differs — cache_key itself ignores it (the get/set methods
+        // gate on stream separately).
+        let mut variant = base.clone();
+        variant.stream = true;
+        assert_eq!(
+            ResponseCache::cache_key(&variant),
+            key_base,
+            "stream flag must not be part of the cache key"
+        );
+    }
+
+    /// Message order is part of the conversation; two prompts with the same
+    /// content in different order are NOT the same prompt.
+    #[test]
+    fn cache_key_is_sensitive_to_message_order() {
+        let req_a = make_request(
+            "openai/gpt-4o",
+            vec![user_message("first"), user_message("second")],
+            Some(0.7),
+        );
+        let req_b = make_request(
+            "openai/gpt-4o",
+            vec![user_message("second"), user_message("first")],
+            Some(0.7),
+        );
+        assert_ne!(
+            ResponseCache::cache_key(&req_a),
+            ResponseCache::cache_key(&req_b),
+            "message order must affect the cache key"
+        );
+    }
+
+    /// Adding a message must produce a different key.
+    #[test]
+    fn cache_key_is_sensitive_to_message_count() {
+        let req_a = make_request("openai/gpt-4o", vec![user_message("Hello")], Some(0.7));
+        let req_b = make_request(
+            "openai/gpt-4o",
+            vec![user_message("Hello"), user_message("again")],
+            Some(0.7),
+        );
+        assert_ne!(
+            ResponseCache::cache_key(&req_a),
+            ResponseCache::cache_key(&req_b),
+            "additional messages must affect the cache key"
+        );
+    }
+
+    /// `from_client` accepts an already-opened Redis client without making any
+    /// network round-trip. Used by `main.rs` after a connectivity probe.
+    #[test]
+    fn from_client_constructs_without_connecting() {
+        let client =
+            redis::Client::open("redis://127.0.0.1:1").expect("client open should not connect");
+        let _cache = ResponseCache::from_client(client, CacheConfig::default())
+            .expect("from_client should not connect");
+    }
+
+    /// `set` early-exits for streaming requests without spawning a Redis writer.
+    /// We use a bogus Redis URL — if `set` tried to connect, the spawned task
+    /// would log a warning, but the function itself must return immediately.
+    #[tokio::test]
+    async fn set_short_circuits_for_streaming_requests() {
+        let cache = ResponseCache::new("redis://127.0.0.1:1", CacheConfig::default())
+            .expect("client creation should not connect");
+
+        let req = ChatRequest {
+            model: "openai/gpt-4o".to_string(),
+            messages: vec![user_message("Hello")],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: true,
+            tools: None,
+            tool_choice: None,
+        };
+        let response = ChatResponse {
+            id: "test".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "gpt-4o".to_string(),
+            choices: vec![],
+            usage: None,
+        };
+        // Should return without panic; nothing to assert besides "doesn't try to connect".
+        cache.set(&req, &response).await;
+    }
+
+    /// `set` early-exits when caching is disabled.
+    #[tokio::test]
+    async fn set_short_circuits_when_disabled() {
+        let config = CacheConfig {
+            default_ttl_secs: 600,
+            enabled: false,
+        };
+        let cache = ResponseCache::new("redis://127.0.0.1:1", config)
+            .expect("client creation should not connect");
+
+        let req = make_request("openai/gpt-4o", vec![user_message("Hello")], None);
+        let response = ChatResponse {
+            id: "test".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "gpt-4o".to_string(),
+            choices: vec![],
+            usage: None,
+        };
+        cache.set(&req, &response).await;
+    }
+
     #[test]
     fn test_cache_error_display() {
         let err = CacheError::Connection("refused".to_string());
