@@ -41,7 +41,7 @@ import {
 } from '@solana/spl-token';
 import bs58 from 'bs58';
 
-import type { PaymentAccept, PaymentRequired } from './types.js';
+import type { PaymentAccept, PaymentExpectations, PaymentRequired } from './types.js';
 
 const X402_VERSION = 2;
 
@@ -83,14 +83,27 @@ export class SigningError extends Error {
  * `SOLANA_RPC_URL` must be set when `privateKey` is supplied — both real-
  * signing paths fetch a recent blockhash from RPC.
  *
+ * **Security — pass `expected`.** The 402 response is supplied by the
+ * remote server and may be attacker-controlled (phishing gateway, MITM,
+ * compromised DNS). `expected.recipient`, `expected.maxAmount`, and
+ * `expected.escrowProgramId` are checked against the chosen accept BEFORE
+ * any private-key bytes are touched. Callers that omit `expected` will
+ * sign whatever recipient / amount / program ID the server returned; this
+ * is preserved for backward compatibility but is not safe for production
+ * agents and SHOULD NOT be relied upon for new code.
+ *
+ * Validation runs in stub mode too — failing closed at protocol-shape time
+ * surfaces phishing attempts even on dev/test runs that don't sign.
+ *
  * @throws Error              on empty `accepts` array
- * @throws SigningError       on any signing/RPC failure (real-signing mode)
+ * @throws SigningError       on validation mismatch or any signing/RPC failure
  */
 export async function createPaymentHeader(
   paymentInfo: PaymentRequired,
   resourceUrl: string,
   privateKey?: string,
   requestBody?: string,
+  expected?: PaymentExpectations,
 ): Promise<string> {
   if (!paymentInfo.accepts || paymentInfo.accepts.length === 0) {
     throw new Error('No payment accept options in 402 response');
@@ -101,6 +114,15 @@ export async function createPaymentHeader(
     (a) => a.scheme === 'escrow' && a.escrow_program_id,
   );
   const accept = escrowAccept ?? paymentInfo.accepts[0];
+
+  // Validate the chosen accept against caller expectations BEFORE we spend
+  // any time fetching a blockhash, deriving ATAs, or decoding key bytes.
+  // Stub-mode runs this too — the validation is about protocol shape, not
+  // signing, and a dev-mode failure is the cheapest way to spot a phishing
+  // gateway during integration.
+  if (expected) {
+    validateAccept(accept, expected);
+  }
 
   let payload: Record<string, unknown>;
 
@@ -126,6 +148,50 @@ export async function createPaymentHeader(
   }
 
   return Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64');
+}
+
+/**
+ * Validate a chosen `PaymentAccept` against caller expectations.
+ *
+ * Throws `SigningError` (not `Error`) so callers' existing
+ * `instanceof SigningError` branches keep working. Error messages are
+ * deliberately specific about which field failed to make phishing
+ * attempts visible in logs without leaking the agent's expected values
+ * — both expected and actual are short, public identifiers.
+ */
+function validateAccept(accept: PaymentAccept, expected: PaymentExpectations): void {
+  if (expected.recipient !== undefined && accept.pay_to !== expected.recipient) {
+    throw new SigningError(
+      `Payment recipient mismatch: server requested pay_to=${accept.pay_to} ` +
+        `but caller expected ${expected.recipient}. Refusing to sign.`,
+    );
+  }
+
+  if (expected.maxAmount !== undefined) {
+    const max = typeof expected.maxAmount === 'bigint'
+      ? expected.maxAmount
+      : parsePositiveAmount(String(expected.maxAmount), 'expected maxAmount');
+    // accept.amount has not been parsed yet — do it here so the error
+    // surfaces as "amount cap exceeded" rather than a downstream
+    // "Payment amount must be ..." from the signing path.
+    const requested = parsePositiveAmount(accept.amount, 'Payment');
+    if (requested > max) {
+      throw new SigningError(
+        `Payment amount cap exceeded: server requested ${accept.amount} atomic units ` +
+          `but caller authorized at most ${max.toString()}. Refusing to sign.`,
+      );
+    }
+  }
+
+  if (expected.escrowProgramId !== undefined && accept.scheme === 'escrow') {
+    if (accept.escrow_program_id !== expected.escrowProgramId) {
+      throw new SigningError(
+        `Escrow program mismatch: server requested escrow_program_id=` +
+          `${accept.escrow_program_id ?? '(unset)'} but caller expected ` +
+          `${expected.escrowProgramId}. Refusing to sign.`,
+      );
+    }
+  }
 }
 
 /**

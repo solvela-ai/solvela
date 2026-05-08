@@ -199,6 +199,131 @@ describe('SigningError', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Caller-side validation (PaymentExpectations)
+// ---------------------------------------------------------------------------
+
+describe('createPaymentHeader (expected validation)', () => {
+  const EXPECTED_RECIPIENT = 'RCRgateway111111111111111111111111111111111';
+  const EXPECTED_ESCROW_PROG = 'RCRescrow1111111111111111111111111111111111';
+
+  it('passes when expected.recipient matches accept.pay_to (direct)', async () => {
+    // Stub mode + matching expectation → header builds normally.
+    const header = await createPaymentHeader(
+      directPaymentRequired,
+      RESOURCE_URL,
+      undefined,
+      undefined,
+      { recipient: EXPECTED_RECIPIENT },
+    );
+    assert.match(header, /^[A-Za-z0-9+/=]+$/);
+  });
+
+  it('throws SigningError when expected.recipient differs from accept.pay_to', async () => {
+    await assert.rejects(
+      () =>
+        createPaymentHeader(directPaymentRequired, RESOURCE_URL, undefined, undefined, {
+          recipient: 'AttackerWallet1111111111111111111111111111',
+        }),
+      (err: unknown) =>
+        err instanceof SigningError &&
+        /Payment recipient mismatch/.test(err.message) &&
+        // Phishing-detection: the ACTUAL pay_to from the response is in the message.
+        err.message.includes(EXPECTED_RECIPIENT),
+    );
+  });
+
+  it('throws SigningError when accept.amount exceeds expected.maxAmount (bigint)', async () => {
+    // directPaymentRequired.amount === '2625'. Cap at 2624 → reject.
+    await assert.rejects(
+      () =>
+        createPaymentHeader(directPaymentRequired, RESOURCE_URL, undefined, undefined, {
+          maxAmount: 2624n,
+        }),
+      (err: unknown) =>
+        err instanceof SigningError &&
+        /Payment amount cap exceeded/.test(err.message) &&
+        err.message.includes('2625'),
+    );
+  });
+
+  it('accepts string maxAmount equivalent to bigint', async () => {
+    // String form must behave identically to bigint form.
+    const header = await createPaymentHeader(
+      directPaymentRequired,
+      RESOURCE_URL,
+      undefined,
+      undefined,
+      { maxAmount: '2625' }, // exactly equal — must NOT throw
+    );
+    assert.match(header, /^[A-Za-z0-9+/=]+$/);
+  });
+
+  it('rejects non-integer maxAmount string with a useful message', async () => {
+    await assert.rejects(
+      () =>
+        createPaymentHeader(directPaymentRequired, RESOURCE_URL, undefined, undefined, {
+          maxAmount: '1.5',
+        }),
+      (err: unknown) =>
+        err instanceof SigningError &&
+        /expected maxAmount/.test(err.message),
+    );
+  });
+
+  it('throws SigningError when escrowProgramId differs (escrow scheme)', async () => {
+    await assert.rejects(
+      () =>
+        createPaymentHeader(escrowPaymentRequired, RESOURCE_URL, undefined, '{}', {
+          recipient: EXPECTED_RECIPIENT,
+          escrowProgramId: 'AttackerEscrowProg11111111111111111111111111',
+        }),
+      (err: unknown) =>
+        err instanceof SigningError &&
+        /Escrow program mismatch/.test(err.message) &&
+        err.message.includes(EXPECTED_ESCROW_PROG),
+    );
+  });
+
+  it('escrowProgramId mismatch is ignored on direct (non-escrow) accepts', async () => {
+    // The direct path doesn't use escrow_program_id; mismatching values
+    // here MUST NOT block the signing path — only escrow scheme is gated.
+    const header = await createPaymentHeader(
+      directPaymentRequired,
+      RESOURCE_URL,
+      undefined,
+      undefined,
+      {
+        recipient: EXPECTED_RECIPIENT,
+        escrowProgramId: 'IgnoredOnDirectScheme1111111111111111111111',
+      },
+    );
+    assert.match(header, /^[A-Za-z0-9+/=]+$/);
+  });
+
+  it('omitting expected preserves prior unchecked behavior (backward compat)', async () => {
+    // Existing 4-arg callers must keep working unchanged. This test is
+    // load-bearing for downstream packages that have not yet adopted
+    // PaymentExpectations.
+    const header = await createPaymentHeader(directPaymentRequired, RESOURCE_URL);
+    const decoded = decodePaymentHeader(header) as Record<string, unknown>;
+    assert.deepEqual(decoded.accepted, directPaymentRequired.accepts[0]);
+  });
+
+  it('validation runs in stub mode (no privateKey)', async () => {
+    // Stub mode signing is opt-in for protocol shape testing — but the
+    // validation still fires so phishing attempts surface during dev/CI
+    // runs that don't have a Solana RPC available.
+    await assert.rejects(
+      () =>
+        createPaymentHeader(directPaymentRequired, RESOURCE_URL, undefined, undefined, {
+          recipient: 'WrongRecipient11111111111111111111111111111',
+        }),
+      SigningError,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Wire format compat with crates/protocol/src/payment.rs
 // ---------------------------------------------------------------------------
 

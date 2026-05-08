@@ -7,8 +7,10 @@
  * wire-format compatibility with the production gateway.
  *
  * Public API surface:
- *   - Types: PaymentRequired, PaymentAccept, CostBreakdown
- *   - createPaymentHeader: build a base64 PAYMENT-SIGNATURE header (real or stub)
+ *   - Types: PaymentRequired, PaymentAccept, CostBreakdown, PaymentExpectations
+ *   - createPaymentHeader: build a base64 PAYMENT-SIGNATURE header (real or stub).
+ *       Callers SHOULD pass `PaymentExpectations` so a phishing 402 response
+ *       can't redirect funds — see jsdoc in sign.ts.
  *   - decodePaymentHeader: round-trip helper for tests/debug
  *   - SigningError: thrown by createPaymentHeader on signing failure
  *   - parse402: accepts both envelope and direct shapes, throws on malformed
@@ -19,7 +21,12 @@
  *   - redactBase58, redactHex: byte-pattern redactors
  */
 
-export type { PaymentRequired, PaymentAccept, CostBreakdown } from './types.js';
+export type {
+  PaymentRequired,
+  PaymentAccept,
+  CostBreakdown,
+  PaymentExpectations,
+} from './types.js';
 export { createPaymentHeader, decodePaymentHeader, SigningError } from './sign.js';
 export { parse402 } from './parse-402.js';
 export { filterAccepts } from './scheme-filter.js';
