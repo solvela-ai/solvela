@@ -662,6 +662,11 @@ pub async fn chat_completions(
                             tx_signature: tx_signature.clone(),
                             request_id: request_id.clone(),
                             session_id: session_id.clone(),
+                            // Settle the reservation made in `check_budget`
+                            // above — log_spend writes `cost - estimated_cost`
+                            // to the Redis counters so the final value is
+                            // `prior + actual`.
+                            estimated_cost_usdc: Some(estimated_cost),
                         });
                     }
                     Err(e) => {

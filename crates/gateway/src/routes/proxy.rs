@@ -550,6 +550,11 @@ pub async fn proxy_service(
         tx_signature,
         request_id: request_id.clone(),
         session_id: None,
+        // Proxy route does not call `check_budget` (no per-service budget
+        // gate currently runs here — separate from H2/H3 scope), so no
+        // reservation exists to settle. `None` selects the legacy path
+        // where the full `cost_usdc` is written to the Redis counter.
+        estimated_cost_usdc: None,
     });
 
     // Handle upstream response based on status
