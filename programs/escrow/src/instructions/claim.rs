@@ -26,6 +26,19 @@ pub fn claim(ctx: Context<Claim>, actual_amount: u64) -> Result<()> {
         Clock::get()?.slot < ctx.accounts.escrow.expiry_slot,
         EscrowError::EscrowExpired,
     );
+    // Defense-in-depth: forbid `provider_token_account == agent_token_account`.
+    // Anchor's account de-dup catches duplicate ACCOUNT-LIST entries, not two
+    // distinct entries that resolve to the same Pubkey. Today the collision
+    // is only reachable if `provider == agent`, which `deposit` already
+    // rejects via `InvalidProvider`. This guard removes the cross-instruction
+    // dependency: if the deposit-side check is ever loosened, the two
+    // `init_if_needed` transfers below would otherwise double-credit the same
+    // ATA and let the provider drain `actual_amount + refund == escrow.amount`
+    // regardless of `actual_amount`.
+    require!(
+        ctx.accounts.provider_token_account.key() != ctx.accounts.agent_token_account.key(),
+        EscrowError::DuplicateClaimAccounts,
+    );
 
     let escrow = &ctx.accounts.escrow;
     let seeds: &[&[u8]] = &[

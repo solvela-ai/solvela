@@ -46,4 +46,13 @@ pub enum EscrowError {
     /// must have a realistic chance to propagate before refund opens.
     #[msg("Expiry slot is too close to now; insufficient claim buffer")]
     ExpiryTooSoon,
+
+    /// `provider_token_account` and `agent_token_account` resolve to the
+    /// same address. Currently unreachable — `deposit` rejects
+    /// `provider == agent` via `InvalidProvider`, so the two ATAs (each
+    /// derived from a distinct authority) cannot collide. Defense-in-depth
+    /// guard so a future change to the deposit-side check, or a different
+    /// deposit code path, doesn't silently re-enable a double-credit drain.
+    #[msg("Provider and agent token accounts must differ")]
+    DuplicateClaimAccounts,
 }
