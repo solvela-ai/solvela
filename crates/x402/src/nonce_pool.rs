@@ -55,12 +55,18 @@ pub enum NoncePoolError {
     ParseError(String),
 }
 
-/// Try `solvela_name` first; fall back to `rcr_name` for backwards compatibility.
-/// Returns `None` only when neither variable is set.
-fn read_env_var(solvela_name: &str, rcr_name: &str) -> Option<String> {
-    std::env::var(solvela_name)
-        .or_else(|_| std::env::var(rcr_name))
-        .ok()
+/// Try `solvela_name` first; fall back to `rcr_name` for backwards
+/// compatibility. Returns `None` only when neither variable is set.
+///
+/// Reader is injected so tests can avoid mutating the process env — that
+/// is not thread-safe and Rust nightly is moving toward marking
+/// `std::env::set_var` as `unsafe`.
+fn read_env_with<F: Fn(&str) -> Option<String>>(
+    solvela_name: &str,
+    rcr_name: &str,
+    read: F,
+) -> Option<String> {
+    read(solvela_name).or_else(|| read(rcr_name))
 }
 
 impl NoncePool {
@@ -104,54 +110,55 @@ impl NoncePool {
     /// Returns an **empty** pool (not an error) if no nonce accounts are configured.
     /// This is intentional — nonce accounts require manual on-chain setup.
     pub fn from_env() -> Self {
-        let mut entries = Vec::new();
+        Self::from_env_reader(|name| std::env::var(name).ok())
+    }
 
-        // Primary nonce account (index 0) — try SOLVELA_* first, fall back to legacy RCR_*
-        if let (Some(account), Some(authority)) = (
-            read_env_var("SOLVELA_SOLANA__NONCE_ACCOUNT", "RCR_SOLANA__NONCE_ACCOUNT"),
-            read_env_var(
-                "SOLVELA_SOLANA__NONCE_AUTHORITY",
-                "RCR_SOLANA__NONCE_AUTHORITY",
-            ),
-        ) {
+    /// `from_env` with the env reader injected — used by tests to avoid
+    /// mutating the process env (which is not thread-safe; nightly Rust
+    /// is moving toward marking `std::env::set_var` as `unsafe`).
+    fn from_env_reader<F: Fn(&str) -> Option<String>>(read: F) -> Self {
+        let mut entries = Vec::new();
+        let collect_entry = |solvela_account: &str,
+                             rcr_account: &str,
+                             solvela_authority: &str,
+                             rcr_authority: &str|
+         -> Option<NonceEntry> {
+            let account = read_env_with(solvela_account, rcr_account, &read)?;
+            let authority = read_env_with(solvela_authority, rcr_authority, &read)?;
             let account = account.trim().to_string();
             let authority = authority.trim().to_string();
-            if !account.is_empty()
-                && !authority.is_empty()
-                && validate_base58_pubkey(&account).is_ok()
-                && validate_base58_pubkey(&authority).is_ok()
+            if account.is_empty()
+                || authority.is_empty()
+                || validate_base58_pubkey(&account).is_err()
+                || validate_base58_pubkey(&authority).is_err()
             {
-                entries.push(NonceEntry {
-                    nonce_account: account,
-                    authority,
-                });
+                return None;
             }
+            Some(NonceEntry {
+                nonce_account: account,
+                authority,
+            })
+        };
+
+        // Primary nonce account (index 0)
+        if let Some(entry) = collect_entry(
+            "SOLVELA_SOLANA__NONCE_ACCOUNT",
+            "RCR_SOLANA__NONCE_ACCOUNT",
+            "SOLVELA_SOLANA__NONCE_AUTHORITY",
+            "RCR_SOLANA__NONCE_AUTHORITY",
+        ) {
+            entries.push(entry);
         }
 
-        // Additional nonce accounts (indices 1..7) — try SOLVELA_* first, fall back to legacy RCR_*
+        // Additional nonce accounts (indices 1..MAX_NONCE_ACCOUNTS)
         for i in 2..=MAX_NONCE_ACCOUNTS {
-            if let (Some(account), Some(authority)) = (
-                read_env_var(
-                    &format!("SOLVELA_SOLANA__NONCE_ACCOUNT_{i}"),
-                    &format!("RCR_SOLANA__NONCE_ACCOUNT_{i}"),
-                ),
-                read_env_var(
-                    &format!("SOLVELA_SOLANA__NONCE_AUTHORITY_{i}"),
-                    &format!("RCR_SOLANA__NONCE_AUTHORITY_{i}"),
-                ),
+            if let Some(entry) = collect_entry(
+                &format!("SOLVELA_SOLANA__NONCE_ACCOUNT_{i}"),
+                &format!("RCR_SOLANA__NONCE_ACCOUNT_{i}"),
+                &format!("SOLVELA_SOLANA__NONCE_AUTHORITY_{i}"),
+                &format!("RCR_SOLANA__NONCE_AUTHORITY_{i}"),
             ) {
-                let account = account.trim().to_string();
-                let authority = authority.trim().to_string();
-                if !account.is_empty()
-                    && !authority.is_empty()
-                    && validate_base58_pubkey(&account).is_ok()
-                    && validate_base58_pubkey(&authority).is_ok()
-                {
-                    entries.push(NonceEntry {
-                        nonce_account: account,
-                        authority,
-                    });
-                }
+                entries.push(entry);
             }
         }
 
@@ -250,18 +257,41 @@ impl NoncePool {
         let data = base64_decode(data_b64)
             .map_err(|e| NoncePoolError::ParseError(format!("base64 decode failed: {e}")))?;
 
-        // Nonce hash is at bytes 40..72
-        if data.len() < 72 {
-            return Err(NoncePoolError::ParseError(format!(
-                "nonce account data too short: {} bytes (need ≥ 72)",
-                data.len()
-            )));
-        }
-
-        let nonce_bytes = &data[40..72];
-        let nonce_value = bs58::encode(nonce_bytes).into_string();
-        Ok(nonce_value)
+        parse_nonce_account_data(&data, entry)
     }
+}
+
+/// Parse a Solana Nonce account's raw data and return the current nonce
+/// hash, after verifying the on-chain authority matches the pool entry.
+///
+/// Solana Nonce account layout (80 bytes):
+/// `version(0..4) + state(4..8) + authority(8..40) + nonce_hash(40..72)
+/// + fee_calculator(72..80)`.
+///
+/// M8 — verifies that bytes 8..40 (on-chain authority) match
+/// `entry.authority`. A mismatch usually means the operator misconfigured
+/// the pool (wrong authority pubkey for the given nonce account) —
+/// proceeding would just produce opaque AdvanceNonceAccount signature
+/// failures later. Surfacing the misconfiguration here makes it
+/// debuggable.
+fn parse_nonce_account_data(data: &[u8], entry: &NonceEntry) -> Result<String, NoncePoolError> {
+    if data.len() < 72 {
+        return Err(NoncePoolError::ParseError(format!(
+            "nonce account data too short: {} bytes (need ≥ 72)",
+            data.len()
+        )));
+    }
+
+    let onchain_authority = bs58::encode(&data[8..40]).into_string();
+    if onchain_authority != entry.authority {
+        return Err(NoncePoolError::ParseError(format!(
+            "nonce account authority mismatch for {}: pool entry says {}, on-chain says {}",
+            entry.nonce_account, entry.authority, onchain_authority
+        )));
+    }
+
+    let nonce_bytes = &data[40..72];
+    Ok(bs58::encode(nonce_bytes).into_string())
 }
 
 /// Validate that `s` is a valid base58-encoded 32-byte pubkey.
@@ -388,24 +418,62 @@ mod tests {
 
     #[test]
     fn test_from_env_empty() {
-        // Ensure env vars are NOT set (they shouldn't be in CI)
-        // We unset them to be safe.
-        // SAFETY: tests run in a single-threaded context for env var manipulation.
-        let _guard = EnvGuard::clear(&[
-            "SOLVELA_SOLANA__NONCE_ACCOUNT",
-            "SOLVELA_SOLANA__NONCE_AUTHORITY",
-            "RCR_SOLANA__NONCE_ACCOUNT",
-            "RCR_SOLANA__NONCE_AUTHORITY",
-        ]);
-
-        let pool = NoncePool::from_env();
+        // Use the testable variant with a synthetic reader that returns
+        // None for every var name. No process-env mutation required, so
+        // this test is parallel-safe.
+        let pool = NoncePool::from_env_reader(|_| None);
         assert!(
             pool.is_empty(),
-            "from_env() with no env vars must return empty pool"
+            "from_env_reader with no values must return empty pool"
         );
         assert!(
             pool.next().is_none(),
-            "next() on from_env empty pool must return None"
+            "next() on empty pool must return None"
+        );
+    }
+
+    #[test]
+    fn test_from_env_reader_picks_up_primary_entry() {
+        let read = |name: &str| -> Option<String> {
+            match name {
+                "SOLVELA_SOLANA__NONCE_ACCOUNT" => Some(VALID_PUBKEY_1.to_string()),
+                "SOLVELA_SOLANA__NONCE_AUTHORITY" => Some(VALID_PUBKEY_2.to_string()),
+                _ => None,
+            }
+        };
+        let pool = NoncePool::from_env_reader(read);
+        assert_eq!(pool.len(), 1);
+        let entry = pool.next().expect("primary entry");
+        assert_eq!(entry.nonce_account, VALID_PUBKEY_1);
+        assert_eq!(entry.authority, VALID_PUBKEY_2);
+    }
+
+    #[test]
+    fn test_from_env_reader_falls_back_to_legacy_rcr_names() {
+        let read = |name: &str| -> Option<String> {
+            match name {
+                "RCR_SOLANA__NONCE_ACCOUNT" => Some(VALID_PUBKEY_1.to_string()),
+                "RCR_SOLANA__NONCE_AUTHORITY" => Some(VALID_PUBKEY_2.to_string()),
+                _ => None, // SOLVELA_* names not set
+            }
+        };
+        let pool = NoncePool::from_env_reader(read);
+        assert_eq!(pool.len(), 1, "legacy RCR_* names must still work");
+    }
+
+    #[test]
+    fn test_from_env_reader_skips_invalid_pubkeys() {
+        let read = |name: &str| -> Option<String> {
+            match name {
+                "SOLVELA_SOLANA__NONCE_ACCOUNT" => Some("garbage".to_string()),
+                "SOLVELA_SOLANA__NONCE_AUTHORITY" => Some(VALID_PUBKEY_2.to_string()),
+                _ => None,
+            }
+        };
+        let pool = NoncePool::from_env_reader(read);
+        assert!(
+            pool.is_empty(),
+            "invalid nonce_account pubkey must skip the entry, not error"
         );
     }
 
@@ -457,39 +525,66 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Helper: simple env-var cleanup guard for tests
+    // parse_nonce_account_data: layout, authority check (M8)
     // -----------------------------------------------------------------------
 
-    struct EnvGuard {
-        vars: Vec<(String, Option<String>)>,
+    /// Build a synthetic 80-byte nonce account payload with the given
+    /// authority bytes (32 bytes) and nonce hash bytes (32 bytes).
+    fn synth_nonce_data(authority: &[u8; 32], nonce: &[u8; 32]) -> Vec<u8> {
+        let mut data = vec![0u8; 80];
+        // 0..4: state version (zeros for test)
+        // 4..8: state internal (zeros for test)
+        data[8..40].copy_from_slice(authority);
+        data[40..72].copy_from_slice(nonce);
+        // 72..80: fee calculator (zeros for test)
+        data
     }
 
-    impl EnvGuard {
-        fn clear(names: &[&str]) -> Self {
-            let vars = names
-                .iter()
-                .map(|&name| {
-                    let prev = std::env::var(name).ok();
-                    // SAFETY: test isolation — each test that uses this guard
-                    // must not run in parallel with tests that read the same vars.
-                    // Cargo runs tests in parallel by default; use `--test-threads=1`
-                    // if flakiness occurs, or prefix vars with a unique UUID.
-                    std::env::remove_var(name);
-                    (name.to_string(), prev)
-                })
-                .collect();
-            Self { vars }
-        }
+    #[test]
+    fn parse_nonce_account_data_returns_nonce_when_authority_matches() {
+        let authority_bytes = bs58::decode(VALID_PUBKEY_2)
+            .into_vec()
+            .expect("decode authority");
+        let mut auth = [0u8; 32];
+        auth.copy_from_slice(&authority_bytes);
+        let nonce = [7u8; 32];
+        let data = synth_nonce_data(&auth, &nonce);
+
+        let entry = make_entry(VALID_PUBKEY_1, VALID_PUBKEY_2);
+        let value = parse_nonce_account_data(&data, &entry).expect("must parse");
+        assert_eq!(value, bs58::encode(&nonce).into_string());
     }
 
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (name, prev) in &self.vars {
-                match prev {
-                    Some(val) => std::env::set_var(name, val),
-                    None => std::env::remove_var(name),
-                }
-            }
-        }
+    #[test]
+    fn parse_nonce_account_data_rejects_authority_mismatch() {
+        let wrong_auth = [9u8; 32];
+        let nonce = [7u8; 32];
+        let data = synth_nonce_data(&wrong_auth, &nonce);
+
+        // Pool entry says authority is VALID_PUBKEY_2, but on-chain is [9; 32]
+        let entry = make_entry(VALID_PUBKEY_1, VALID_PUBKEY_2);
+        let err = parse_nonce_account_data(&data, &entry).expect_err("must reject");
+        let msg = match err {
+            NoncePoolError::ParseError(m) => m,
+            other => panic!("expected ParseError, got {other:?}"),
+        };
+        assert!(
+            msg.contains("authority mismatch"),
+            "error must mention authority mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_nonce_account_data_rejects_truncated_data() {
+        let entry = make_entry(VALID_PUBKEY_1, VALID_PUBKEY_2);
+        let err = parse_nonce_account_data(&[0u8; 40], &entry).expect_err("too short");
+        let msg = match err {
+            NoncePoolError::ParseError(m) => m,
+            other => panic!("expected ParseError, got {other:?}"),
+        };
+        assert!(
+            msg.contains("too short"),
+            "expected truncation error: {msg}"
+        );
     }
 }
