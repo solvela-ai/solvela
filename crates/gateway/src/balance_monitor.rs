@@ -93,17 +93,23 @@ pub struct BalanceMonitor {
 
 impl BalanceMonitor {
     /// Create a new monitor for the given wallet pubkeys.
-    pub fn new(config: MonitorConfig, wallet_pubkeys: Vec<String>) -> Self {
+    ///
+    /// Returns `Err(reqwest::Error)` if the HTTP client fails to build —
+    /// previously we silently fell back to `Client::default()` (no
+    /// timeout), which under unusual TLS-init conditions could leave
+    /// `fetch_balance` hanging indefinitely and block graceful shutdown.
+    /// Failing startup is the correct response: no balance monitoring is
+    /// better than a stuck-forever monitoring task.
+    pub fn new(config: MonitorConfig, wallet_pubkeys: Vec<String>) -> Result<Self, reqwest::Error> {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap_or_default();
+            .build()?;
 
-        Self {
+        Ok(Self {
             config,
             wallet_pubkeys,
             http_client,
-        }
+        })
     }
 
     /// Returns the number of wallets being monitored.
@@ -315,7 +321,7 @@ mod tests {
             check_interval_secs: 300,
             rpc_url: "https://api.devnet.solana.com".to_string(),
         };
-        BalanceMonitor::new(config, vec![])
+        BalanceMonitor::new(config, vec![]).expect("test client builds")
     }
 
     #[test]
