@@ -792,6 +792,73 @@ fn test_deposit_with_default_provider_rejected() {
 }
 
 #[test]
+fn test_deposit_expiry_too_soon_fails() {
+    // H2 regression. The previous lower bound on `expiry_slot` was just
+    // `> now`, which let an adversarial agent set `expiry = now + 1`,
+    // receive the LLM response, and refund before the gateway's claim
+    // tx could confirm. The new `MIN_EXPIRY_BUFFER = 50` floor (and the
+    // matching off-chain verifier check in `crates/x402/src/escrow/verifier.rs`)
+    // closes this. Submit a deposit with `expiry = now + 1` — must fail
+    // with ExpiryTooSoon (not InvalidExpiry, which only fires on
+    // expiry <= now).
+    let mut ctx = setup();
+    let service_id = [49u8; 32];
+    let amount = 1_000_000u64;
+
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+
+    let now = ctx.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
+    let ix = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        amount,
+        &service_id,
+        now + 1, // passes `> now` but fails `>= now + MIN_EXPIRY_BUFFER`
+    );
+    let result = send_tx(&mut ctx.svm, &[ix], &ctx.agent, &[&ctx.agent]);
+    assert!(
+        result.is_err(),
+        "deposit with expiry_slot = now + 1 must fail (ExpiryTooSoon)"
+    );
+
+    // Also exercise the exact boundary: `now + (MIN_EXPIRY_BUFFER - 1)`
+    // must fail; `now + MIN_EXPIRY_BUFFER` must succeed.
+    let service_id_just_under = [50u8; 32];
+    let now_a = ctx.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+    let ix_under = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        amount,
+        &service_id_just_under,
+        now_a + solvela_escrow::MIN_EXPIRY_BUFFER - 1,
+    );
+    assert!(
+        send_tx(&mut ctx.svm, &[ix_under], &ctx.agent, &[&ctx.agent]).is_err(),
+        "deposit one slot below MIN_EXPIRY_BUFFER must fail"
+    );
+
+    let service_id_at_min = [51u8; 32];
+    let now_b = ctx.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+    let ix_min = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        amount,
+        &service_id_at_min,
+        now_b + solvela_escrow::MIN_EXPIRY_BUFFER,
+    );
+    send_tx(&mut ctx.svm, &[ix_min], &ctx.agent, &[&ctx.agent])
+        .expect("deposit at exactly MIN_EXPIRY_BUFFER must succeed");
+}
+
+#[test]
 fn test_deposit_max_escrow_slots_boundary() {
     // M4: exact-boundary regression for the ExpiryTooFar guard. The
     // `<=` comparison in deposit.rs means `expiry - now == MAX_ESCROW_SLOTS`
