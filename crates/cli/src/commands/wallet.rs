@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
+use zeroize::Zeroizing;
 
 /// Typed wallet contents with the private key wrapped in `SecretString`.
 ///
@@ -49,17 +50,25 @@ pub async fn init() -> Result<()> {
     // Generate a real ed25519 keypair using the same library the gateway uses
     // for signature verification. The 32-byte secret scalar is the private key;
     // the corresponding 32-byte verifying key is the Solana public key.
-    let mut seed = [0u8; 32];
-    getrandom::fill(&mut seed).context("failed to generate random seed")?;
+    //
+    // `Zeroizing<[u8; 32]>` and `Zeroizing<[u8; 64]>` scrub the byte arrays
+    // when the function returns, so a process memory dump (crash, /proc/pid/mem
+    // scan from a sibling process with ptrace, or a core file written to
+    // disk) doesn't yield the raw secret. The base58 String we emit to disk
+    // is also derived from these bytes, but it's brief — `serde_json::json!`
+    // consumes `private_key_b58` immediately and the in-memory buffer is
+    // only live for microseconds.
+    let mut seed = Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut *seed).context("failed to generate random seed")?;
 
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
     let verifying_key = signing_key.verifying_key();
 
     // Solana wallet convention: private key = seed || pubkey bytes (64 bytes total), base58-encoded
-    let mut full_key = [0u8; 64];
-    full_key[..32].copy_from_slice(&seed);
+    let mut full_key = Zeroizing::new([0u8; 64]);
+    full_key[..32].copy_from_slice(&*seed);
     full_key[32..].copy_from_slice(verifying_key.as_bytes());
-    let private_key_b58 = bs58::encode(&full_key).into_string();
+    let private_key_b58 = bs58::encode(&*full_key).into_string();
     let address = bs58::encode(verifying_key.as_bytes()).into_string();
 
     let wallet_data = serde_json::json!({

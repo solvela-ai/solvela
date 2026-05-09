@@ -10,6 +10,7 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use secrecy::ExposeSecret;
+use zeroize::Zeroizing;
 
 use crate::commands::wallet::load_wallet;
 
@@ -84,18 +85,25 @@ pub async fn run(
     let wallet = load_wallet()?;
     let private_key_b58: &str = wallet.private_key.expose_secret();
 
-    let key_bytes = bs58::decode(private_key_b58)
-        .into_vec()
-        .context("failed to decode private key from base58")?;
+    // `Zeroizing` scrubs the byte buffers when the function returns so a
+    // process memory dump (crash, /proc/pid/mem scan from a sibling with
+    // ptrace, or a core file) doesn't yield the raw secret. The
+    // `signing_key` value lives until the end of `run` — refunds use it
+    // to sign tx; ed25519_dalek::SigningKey already implements Drop +
+    // Zeroize internally.
+    let key_bytes = Zeroizing::new(
+        bs58::decode(private_key_b58)
+            .into_vec()
+            .context("failed to decode private key from base58")?,
+    );
     if key_bytes.len() != 64 {
         return Err(anyhow!(
             "private key must be 64 bytes (seed || pubkey), got {}",
             key_bytes.len()
         ));
     }
-    let seed: [u8; 32] = key_bytes[..32]
-        .try_into()
-        .map_err(|_| anyhow!("failed to slice seed from keypair bytes"))?;
+    let mut seed = Zeroizing::new([0u8; 32]);
+    seed.copy_from_slice(&key_bytes[..32]);
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
     let agent_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
     let agent_pubkey_b58 = bs58::encode(agent_pubkey).into_string();
