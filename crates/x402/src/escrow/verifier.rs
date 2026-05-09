@@ -264,6 +264,21 @@ impl PaymentVerifier for EscrowVerifier {
             ));
         }
 
+        // Position 1: provider (must equal the gateway's recipient_wallet).
+        // The on-chain program stores `escrow.provider = ctx.accounts.provider.key()`,
+        // and `claim` requires `has_one = provider`. If we accept a deposit whose
+        // provider is not us, verification passes but the claim later fails with
+        // ConstraintHasOne — gateway eats the LLM cost with no recoverable revenue.
+        let recipient_bytes = decode_bs58_pubkey(&self.recipient_wallet)
+            .map_err(|e| Error::InvalidTransaction(format!("recipient_wallet config: {e}")))?;
+        let ix_provider = get_key(1)?;
+        if ix_provider != recipient_bytes {
+            return Err(Error::WrongRecipient {
+                expected: self.recipient_wallet.clone(),
+                actual: bs58::encode(&ix_provider).into_string(),
+            });
+        }
+
         // Position 2: mint (must be the configured USDC mint)
         let usdc_mint_bytes = decode_bs58_pubkey(&self.usdc_mint)
             .map_err(|e| Error::InvalidTransaction(format!("usdc_mint config: {e}")))?;
@@ -693,6 +708,74 @@ mod tests {
                 assert_eq!(actual, 1000);
             }
             other => panic!("expected InsufficientPayment, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_escrow_verifier_rejects_wrong_provider() {
+        use crate::escrow::deposit::{build_deposit_tx, DepositParams};
+        use base64::Engine;
+
+        // Tx encodes provider = attacker wallet, but verifier expects gateway wallet.
+        // Without the provider check, this passes verification, the gateway serves
+        // the LLM response, then the on-chain claim fails ConstraintHasOne and the
+        // revenue is unrecoverable. Regression guard for that path.
+        let attacker_provider = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+        let seed = [42u8; 32];
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let verifying_key = signing_key.verifying_key();
+        let mut full = [0u8; 64];
+        full[..32].copy_from_slice(&seed);
+        full[32..].copy_from_slice(verifying_key.as_bytes());
+        let agent_keypair_b58 = bs58::encode(&full).into_string();
+        let agent_pubkey_b58 = bs58::encode(verifying_key.as_bytes()).into_string();
+
+        let service_id = [7u8; 32];
+        let params = DepositParams {
+            agent_keypair_b58,
+            provider_wallet_b58: attacker_provider.to_string(),
+            usdc_mint_b58: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            escrow_program_id_b58: "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string(),
+            amount: 5000,
+            service_id,
+            expiry_slot: 999_999_999,
+            recent_blockhash: [0u8; 32],
+        };
+        let deposit_tx_b64 = build_deposit_tx(&params).expect("tx build");
+        let service_id_b64 = base64::engine::general_purpose::STANDARD.encode(service_id);
+
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "escrow".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "5000".to_string(),
+                asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                pay_to: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
+            },
+            payload: PayloadData::Escrow(EscrowPayload {
+                deposit_tx: deposit_tx_b64,
+                service_id: service_id_b64,
+                agent_pubkey: agent_pubkey_b58,
+            }),
+        };
+
+        // Verifier configured with the canonical gateway provider — must reject.
+        let result = make_verifier().verify_payment(&payload).await;
+        assert!(result.is_err(), "expected error for wrong provider");
+        match result.unwrap_err() {
+            Error::WrongRecipient { expected, actual } => {
+                assert_eq!(expected, "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM");
+                assert_eq!(actual, attacker_provider);
+            }
+            other => panic!("expected WrongRecipient, got: {other}"),
         }
     }
 
