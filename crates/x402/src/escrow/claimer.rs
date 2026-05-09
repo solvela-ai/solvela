@@ -202,7 +202,27 @@ fn is_insufficient_sol_error(error: &Error) -> bool {
     msg.contains("insufficient lamports")
         || msg.contains("insufficient funds")
         || msg.contains("insufficient sol")
-        || msg.contains("0x1") // InsufficientFunds error code
+        || contains_hex_code(&msg, "0x1") // InsufficientFunds program error code
+}
+
+/// Check whether `msg` contains the hex code `code` as a whole token —
+/// i.e. not followed by another hex digit. Prevents false positives where
+/// `"0x1"` would otherwise match `"0x10"`, `"0x100"`, `"0x1f"`, etc.
+fn contains_hex_code(msg: &str, code: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(rel) = msg[search_from..].find(code) {
+        let abs = search_from + rel;
+        let end = abs + code.len();
+        let next_is_hex = msg[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_hexdigit());
+        if !next_is_hex {
+            return true;
+        }
+        search_from = end;
+    }
+    false
 }
 
 /// Submit a claim and return the transaction signature.
@@ -749,6 +769,38 @@ mod tests {
             "Transaction simulation failed".to_string()
         )));
         assert!(!is_insufficient_sol_error(&Error::Rpc("0x2".to_string())));
+    }
+
+    /// Regression: bare substring match on `"0x1"` previously misclassified
+    /// any longer hex code starting with that prefix as InsufficientFunds,
+    /// which would have spuriously drained the fee-payer pool when a
+    /// program returned an unrelated error like `0x10` or `0x1f`.
+    #[test]
+    fn is_insufficient_sol_error_does_not_match_longer_hex_codes() {
+        for code in ["0x10", "0x11", "0x1a", "0x1f", "0x100", "0x1000"] {
+            assert!(
+                !is_insufficient_sol_error(&Error::Rpc(format!("Custom: {code}"))),
+                "code {code} must NOT trigger InsufficientFunds match"
+            );
+        }
+    }
+
+    /// And the genuine `0x1` matches in its various surrounding contexts.
+    #[test]
+    fn is_insufficient_sol_error_still_matches_real_0x1_payloads() {
+        let payloads = [
+            "Custom: 0x1",
+            "Custom: 0x1)",
+            "custom program error: 0x1",
+            "Error processing Instruction 0: custom program error: 0x1",
+            "0x1, somewhere",
+        ];
+        for p in payloads {
+            assert!(
+                is_insufficient_sol_error(&Error::Rpc(p.to_string())),
+                "payload {p:?} must trigger InsufficientFunds match"
+            );
+        }
     }
 
     /// claim_async with a fee-payer pool that has been drained (all wallets
