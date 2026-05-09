@@ -284,8 +284,14 @@ async fn process_pending_claims(
     }
 
     for entry in &pending {
-        // Skip claims that have exceeded max attempts (mark as failed)
-        if entry.attempts >= MAX_CLAIM_ATTEMPTS {
+        // Skip claims that have exceeded max attempts (mark as failed).
+        // `entry.attempts` is post-increment from `fetch_pending_claims`, so
+        // `> MAX_CLAIM_ATTEMPTS` here preserves the "up to MAX attempts"
+        // semantic — the MAX-th attempt is still made on the claim path
+        // below, after which `mark_attempt_failed` flips status to 'failed'.
+        // Rows can only land here with `attempts > MAX` via stale recovery
+        // of an `in_progress` row that crashed mid-attempt.
+        if entry.attempts > MAX_CLAIM_ATTEMPTS {
             let error_msg = format!("exceeded maximum retry attempts ({MAX_CLAIM_ATTEMPTS})");
             warn!(
                 claim_id = %entry.id,
@@ -310,15 +316,9 @@ async fn process_pending_claims(
             continue;
         }
 
-        // Mark in-progress before attempting
-        if let Err(e) = claim_queue::mark_in_progress(pool, &entry.id).await {
-            warn!(
-                claim_id = %entry.id,
-                error = %e,
-                "failed to mark claim in_progress, skipping"
-            );
-            continue;
-        }
+        // Note: `fetch_pending_claims` already marked this row in_progress and
+        // incremented `attempts` atomically, so `entry.attempts` is the
+        // post-increment value (no separate `mark_in_progress` call needed).
 
         // Decode agent pubkey from base58
         let agent_bytes = match decode_bs58_pubkey(&entry.agent_pubkey) {
@@ -326,13 +326,17 @@ async fn process_pending_claims(
             Err(e) => {
                 let error_msg = format!("invalid agent pubkey: {e}");
                 warn!(claim_id = %entry.id, error = %error_msg, "skipping claim");
-                let _ = claim_queue::mark_attempt_failed(
-                    pool,
-                    &entry.id,
-                    &error_msg,
-                    entry.attempts + 1,
-                )
-                .await;
+                if let Err(db_err) =
+                    claim_queue::mark_attempt_failed(pool, &entry.id, &error_msg, entry.attempts)
+                        .await
+                {
+                    warn!(
+                        claim_id = %entry.id,
+                        error = %db_err,
+                        "failed to record bs58-invalid claim failure — \
+                         row may stay in_progress until 5-minute stale recovery"
+                    );
+                }
                 circuit_breaker.record_failure();
                 counter!("solvela_escrow_claims_total", "result" => "failure").increment(1);
                 if let Some(m) = metrics {
@@ -370,17 +374,13 @@ async fn process_pending_claims(
                 warn!(
                     claim_id = %entry.id,
                     error = %error_msg,
-                    attempt = entry.attempts + 1,
+                    attempt = entry.attempts,
                     max_attempts = MAX_CLAIM_ATTEMPTS,
                     "escrow claim attempt failed"
                 );
-                if let Err(db_err) = claim_queue::mark_attempt_failed(
-                    pool,
-                    &entry.id,
-                    &error_msg,
-                    entry.attempts + 1,
-                )
-                .await
+                if let Err(db_err) =
+                    claim_queue::mark_attempt_failed(pool, &entry.id, &error_msg, entry.attempts)
+                        .await
                 {
                     warn!(
                         claim_id = %entry.id,
@@ -392,8 +392,8 @@ async fn process_pending_claims(
                 counter!("solvela_escrow_claims_total", "result" => "failure").increment(1);
                 if let Some(m) = metrics {
                     // If this claim has exceeded max attempts, count as permanently failed.
-                    // Otherwise, it's a retry.
-                    if entry.attempts + 1 >= MAX_CLAIM_ATTEMPTS {
+                    // Otherwise, it's a retry. `entry.attempts` is post-increment.
+                    if entry.attempts >= MAX_CLAIM_ATTEMPTS {
                         m.claims_failed.fetch_add(1, Ordering::Relaxed);
                     } else {
                         m.claims_retried.fetch_add(1, Ordering::Relaxed);
@@ -689,8 +689,9 @@ mod tests {
             .await
             .expect("enqueue");
         // Force attempts = MAX while keeping status='pending' so fetch_pending_claims
-        // picks the row up. (mark_in_progress would flip status to 'in_progress' and
-        // the recent updated_at would exclude it from the next poll.)
+        // picks the row up. fetch atomically increments attempts to MAX+1 and marks
+        // it in_progress, then the entry-guard (`attempts > MAX`) fires and the row
+        // is marked permanently failed.
         sqlx::query("UPDATE escrow_claim_queue SET attempts = $1 WHERE id = $2::uuid")
             .bind(MAX_CLAIM_ATTEMPTS)
             .bind(&id)
@@ -738,10 +739,10 @@ mod tests {
         .await
         .expect("read");
 
-        // After mark_in_progress(+1) + mark_attempt_failed(invalid bs58),
+        // After fetch_pending_claims (atomic +1) + mark_attempt_failed(invalid bs58),
         // status returns to pending (under MAX) and error_message is set.
         assert_eq!(status, "pending");
-        assert_eq!(attempts, 1, "mark_in_progress must have incremented");
+        assert_eq!(attempts, 1, "fetch_pending_claims must have incremented");
         let msg = error_message.expect("error_message must be set");
         assert!(msg.contains("invalid agent pubkey"), "msg: {msg}");
 
@@ -774,7 +775,7 @@ mod tests {
         .await
         .expect("read");
 
-        // mark_in_progress (+1) → submission Err → mark_attempt_failed → pending again.
+        // fetch_pending_claims (atomic +1) → submission Err → mark_attempt_failed → pending again.
         assert_eq!(status, "pending");
         assert_eq!(attempts, 1);
         let msg = error_message.expect("error_message must be set");
@@ -794,15 +795,17 @@ mod tests {
     async fn process_pending_claims_counts_failure_when_attempts_at_max_after_increment(
         pool: PgPool,
     ) {
-        // After mark_in_progress, attempts becomes MAX_CLAIM_ATTEMPTS exactly.
-        // The submission errors, mark_attempt_failed marks the row failed,
+        // After fetch_pending_claims's atomic +1, attempts becomes MAX_CLAIM_ATTEMPTS
+        // exactly. The submission errors, mark_attempt_failed marks the row failed,
         // and metrics must increment claims_failed (not claims_retried).
         let id = claim_queue::enqueue_claim(&pool, &[1u8; 32], VALID_AGENT_B58, 1_000, None)
             .await
             .expect("enqueue");
-        // Force attempts = MAX-1 while keeping status='pending' so the row passes
-        // the entry guard (entry.attempts < MAX_CLAIM_ATTEMPTS) and the
-        // post-increment value (entry.attempts + 1) hits MAX exactly.
+        // Force attempts = MAX-1 while keeping status='pending'. fetch_pending_claims
+        // atomically increments to MAX, the entry guard (`attempts > MAX`) misses,
+        // the claim is attempted, and on Err the row hits MAX exactly so
+        // mark_attempt_failed flips status to 'failed' and metric routing
+        // (`attempts >= MAX`) counts it as a permanent failure.
         sqlx::query("UPDATE escrow_claim_queue SET attempts = $1 WHERE id = $2::uuid")
             .bind(MAX_CLAIM_ATTEMPTS - 1)
             .bind(&id)

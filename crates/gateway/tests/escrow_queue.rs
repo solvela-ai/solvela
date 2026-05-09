@@ -230,8 +230,11 @@ async fn fetch_pending_claims_returns_pending_rows_in_creation_order(pool: PgPoo
     assert_eq!(claim_a.agent_pubkey, AGENT_A);
     assert_eq!(claim_a.claim_amount, 100);
     assert_eq!(claim_a.deposited_amount, None);
-    assert_eq!(claim_a.status, ClaimStatus::Pending);
-    assert_eq!(claim_a.attempts, 0);
+    // fetch_pending_claims atomically marks rows in_progress and increments
+    // attempts (FOR UPDATE SKIP LOCKED), so post-fetch status is InProgress
+    // and attempts is 1, not the pre-fetch (Pending, 0) values.
+    assert_eq!(claim_a.status, ClaimStatus::InProgress);
+    assert_eq!(claim_a.attempts, 1);
     assert_eq!(&claim_a.service_id[..], &SERVICE_ID_A[..]);
 
     let claim_b = &claims[1];
@@ -271,6 +274,50 @@ async fn fetch_pending_claims_skips_completed_and_failed(pool: PgPool) {
         .expect("fetch_pending_claims");
     assert_eq!(claims.len(), 1, "completed claim must be excluded");
     assert_eq!(claims[0].id, id_pending);
+}
+
+/// Regression: two concurrent `fetch_pending_claims` calls must each return a
+/// disjoint subset of rows (no duplicates), via PostgreSQL row-level
+/// `FOR UPDATE SKIP LOCKED`. Without that lock, both calls would observe the
+/// same rows and the second worker would re-run a claim the first is
+/// already processing, double-submitting on-chain.
+#[sqlx::test(migrations = "../../migrations")]
+async fn fetch_pending_claims_skip_locked_avoids_double_claim(pool: PgPool) {
+    // Enqueue 4 distinct rows.
+    let mut ids = Vec::with_capacity(4);
+    for n in 0..4u8 {
+        let mut sid = [0u8; 32];
+        sid[0] = n + 1;
+        let id = enqueue_claim(&pool, &sid, AGENT_A, 100, None)
+            .await
+            .expect("enqueue");
+        ids.push(id);
+    }
+
+    // Two concurrent fetchers, each asking for up to 4 rows.
+    let p1 = pool.clone();
+    let p2 = pool.clone();
+    let (a, b) = tokio::join!(
+        async move { fetch_pending_claims(&p1, 4).await.expect("fetch 1") },
+        async move { fetch_pending_claims(&p2, 4).await.expect("fetch 2") },
+    );
+
+    // Combined, the two fetches should cover all 4 rows with no overlap.
+    let total = a.len() + b.len();
+    assert_eq!(
+        total, 4,
+        "all 4 rows should be claimed exactly once across the two fetches"
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    for c in a.iter().chain(b.iter()) {
+        assert!(
+            seen.insert(c.id.clone()),
+            "row {} returned twice — SKIP LOCKED is not preventing double-claim",
+            c.id
+        );
+    }
+    assert_eq!(seen.len(), 4, "every enqueued row must appear exactly once");
 }
 
 #[sqlx::test(migrations = "../../migrations")]
