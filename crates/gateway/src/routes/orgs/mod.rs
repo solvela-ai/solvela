@@ -123,6 +123,18 @@ pub(crate) enum AuthContext {
     OrgKey(OrgContext),
 }
 
+impl AuthContext {
+    /// Resolve the audit-actor fields from the auth context. Returns
+    /// `(actor_api_key, actor_admin)` where exactly one is meaningfully
+    /// populated for any given audit entry.
+    pub(crate) fn audit_actor(&self) -> (Option<Uuid>, bool) {
+        match self {
+            AuthContext::OrgKey(ctx) => (Some(ctx.api_key_id), false),
+            AuthContext::Admin => (None, true),
+        }
+    }
+}
+
 /// Authenticate the request: accept either admin token or org API key.
 /// Returns `Err(Response)` with 401 if neither is present.
 #[allow(clippy::result_large_err)]

@@ -11,6 +11,13 @@ pub struct AuditEntry {
     pub org_id: Option<Uuid>,
     pub actor_wallet: Option<String>,
     pub actor_api_key: Option<Uuid>,
+    /// `true` when the entry was authenticated via the global admin token
+    /// (`SOLVELA_ADMIN_TOKEN`). Without this flag, admin-token operations
+    /// landed in the audit log with `actor_wallet = NULL, actor_api_key =
+    /// NULL` — indistinguishable from a system-initiated event. The
+    /// migration `009_audit_actor_admin.sql` adds the corresponding DB
+    /// column with `DEFAULT FALSE` so existing rows default to FALSE.
+    pub actor_admin: bool,
     pub action: String,
     pub resource_type: String,
     pub resource_id: Option<String>,
@@ -27,12 +34,13 @@ pub fn log_audit(pool: &PgPool, entry: AuditEntry) {
     tokio::spawn(async move {
         let result = sqlx::query(
             r#"INSERT INTO audit_logs
-               (org_id, actor_wallet, actor_api_key, action, resource_type, resource_id, details, ip_address)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+               (org_id, actor_wallet, actor_api_key, actor_admin, action, resource_type, resource_id, details, ip_address)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
         )
         .bind(entry.org_id)
         .bind(&entry.actor_wallet)
         .bind(entry.actor_api_key)
+        .bind(entry.actor_admin)
         .bind(&entry.action)
         .bind(&entry.resource_type)
         .bind(&entry.resource_id)
@@ -61,6 +69,7 @@ mod tests {
             org_id: Some(Uuid::new_v4()),
             actor_wallet: None,
             actor_api_key: None,
+            actor_admin: false,
             action: "org.created".to_string(),
             resource_type: "organization".to_string(),
             resource_id: Some(Uuid::new_v4().to_string()),
@@ -79,6 +88,7 @@ mod tests {
             org_id: None,
             actor_wallet: Some("wallet123".to_string()),
             actor_api_key: None,
+            actor_admin: false,
             action: "api_key.revoked".to_string(),
             resource_type: "api_key".to_string(),
             resource_id: None,
