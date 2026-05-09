@@ -141,13 +141,14 @@ fn to_gemini_request(req: &ChatRequest) -> GeminiRequest {
     let contents: Vec<GeminiContent> = req
         .messages
         .iter()
-        .filter(|m| m.role != Role::System && m.role != Role::Developer)
+        .filter(|m| m.role != Role::System && m.role != Role::Developer && m.role != Role::Unknown)
         .map(|m| GeminiContent {
             role: Some(match m.role {
                 Role::User => "user".to_string(),
                 Role::Assistant => "model".to_string(),
                 Role::System | Role::Developer => "user".to_string(), // filtered above, but safe fallback
                 Role::Tool => "user".to_string(), // Gemini uses "user" for tool results
+                Role::Unknown => "user".to_string(), // filtered above; safe fallback for forward-compat
             }),
             parts: vec![GeminiPart {
                 text: m.content.clone(),

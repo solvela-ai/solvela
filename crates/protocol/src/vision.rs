@@ -1,3 +1,21 @@
+//! Multimodal content wire-format types.
+//!
+//! **Status: defined but unreachable.** `ChatMessage::content` is currently
+//! `String`, so a multipart payload from a client never lands as a
+//! `Vec<ContentPart>` — the request would fail to deserialize against
+//! `ChatRequest` before reaching any provider adapter. None of the
+//! provider adapters (OpenAI / Anthropic / Google / xAI / DeepSeek)
+//! consume `ContentPart` either; image inputs are dropped on the floor
+//! today.
+//!
+//! Wiring this up requires a coordinated change: introduce a
+//! `MessageContent` enum (`String(String) | Parts(Vec<ContentPart>)`) on
+//! `ChatMessage`, then update each provider adapter's request
+//! translation. That's a separate PR worth its own review (multimodal
+//! cost accounting, image-bytes counting for usage reporting, model
+//! capability gating in `models.toml`). Tracking it here so the next
+//! reviewer doesn't assume vision works.
+
 use serde::{Deserialize, Serialize};
 
 /// An image URL with optional detail level.
@@ -9,6 +27,8 @@ pub struct ImageUrl {
 }
 
 /// A single part of multi-modal content (text or image).
+///
+/// Currently unreachable — see the module-level doc comment.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {

@@ -3,6 +3,15 @@ use serde::{Deserialize, Serialize};
 use crate::tools::{ToolCall, ToolDefinition};
 
 /// Role of a message participant.
+///
+/// `Unknown` is a forward-compat catch-all on the **deserialize** side: a
+/// provider response that carries a role string we haven't enumerated
+/// (e.g., a future OpenAI-introduced variant) lands as `Role::Unknown`
+/// instead of failing the whole message parse and surfacing a 500.
+/// `#[serde(other)]` only affects deserialization; serialization of
+/// `Role::Unknown` produces the literal `"unknown"` string. Provider
+/// adapters should not emit `Unknown` to upstream APIs — translate it
+/// to a sensible default (typically `"user"`) before serializing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -11,6 +20,8 @@ pub enum Role {
     Assistant,
     Tool,
     Developer,
+    #[serde(other)]
+    Unknown,
 }
 
 /// A single message in a chat conversation.
@@ -51,6 +62,27 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+}
+
+impl Usage {
+    /// Construct a `Usage` from prompt and completion counts, computing
+    /// `total_tokens = prompt_tokens.saturating_add(completion_tokens)`.
+    ///
+    /// Provider adapters should prefer this constructor over building the
+    /// struct directly: a plain `prompt + completion` panics in debug
+    /// builds on overflow and silently wraps in release. Even though
+    /// today's models stay well below `u32::MAX` (Claude 3.5's 200K
+    /// context + 8K output is ~0.005% of `u32::MAX`), keeping the
+    /// arithmetic saturating means the gateway billing path
+    /// (`cap_usage_to_request_limits` in `routes/chat/cost.rs`) never
+    /// reads a wrapped value.
+    pub fn new(prompt_tokens: u32, completion_tokens: u32) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens.saturating_add(completion_tokens),
+        }
+    }
 }
 
 /// A single choice in a chat completion response.
