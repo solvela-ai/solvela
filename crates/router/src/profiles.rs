@@ -90,7 +90,12 @@ pub fn resolve_alias(alias: &str) -> Option<&'static str> {
         "gpt5" | "gpt-5" => Some("openai/gpt-5.2"),
         "sonnet" | "claude-sonnet" => Some("anthropic/claude-sonnet-4-20250514"),
         "opus" | "claude-opus" => Some("anthropic/claude-opus-4-20250514"),
-        "haiku" | "claude-haiku" => Some("anthropic/claude-3-5-haiku-20241022"),
+        // The canonical key here MUST match one registered by `from_toml`
+        // — see the cross-check test below. Previously this pointed at
+        // `claude-3-5-haiku-20241022`, which has never been in
+        // `config/models.toml`, so every request using the `haiku`
+        // shorthand returned a 500 (registry lookup miss).
+        "haiku" | "claude-haiku" => Some("anthropic/claude-haiku-4-5-20251001"),
         "gemini" | "gemini-pro" => Some("google/gemini-3.1-pro"),
         "flash" | "gemini-flash" => Some("google/gemini-2.5-flash"),
         "grok" | "grok-fast" => Some("xai/grok-4-fast-reasoning"),
@@ -157,6 +162,72 @@ mod tests {
             resolve_alias("sonnet"),
             Some("anthropic/claude-sonnet-4-20250514")
         );
+        // R1 regression: this used to point at the unregistered
+        // `claude-3-5-haiku-20241022`. The canonical key MUST match a
+        // model registered in `config/models.toml`.
+        assert_eq!(
+            resolve_alias("haiku"),
+            Some("anthropic/claude-haiku-4-5-20251001")
+        );
         assert_eq!(resolve_alias("nonexistent"), None);
+    }
+
+    /// R1 regression guard: every public alias and every profile-tier
+    /// target MUST resolve to a model registered in
+    /// `config/models.toml`. The previous `haiku` alias quietly broke
+    /// this invariant; this test makes the same class of bug a
+    /// compile-then-test failure for any future drift.
+    ///
+    /// The test loads the *production* `models.toml` from the repo root
+    /// (relative to this crate) so it stays in sync as the registry is
+    /// edited.
+    #[test]
+    fn every_alias_and_profile_tier_resolves_to_a_registered_model() {
+        let toml_str = include_str!("../../../config/models.toml");
+        let registry = crate::models::ModelRegistry::from_toml(toml_str)
+            .expect("config/models.toml must parse");
+
+        // Every alias the public `resolve_alias` exposes.
+        let aliases = [
+            "gpt5",
+            "sonnet",
+            "opus",
+            "haiku",
+            "gemini",
+            "flash",
+            "grok",
+            "deepseek",
+            "deepseek-r",
+            "free",
+            "o3-mini",
+            "o4-mini",
+            "gpt4.1",
+            "gpt4.1-mini",
+            "gpt4.1-nano",
+            "sonnet4.5",
+            "grok3",
+            "grok3-mini",
+        ];
+        for alias in aliases {
+            let canonical = resolve_alias(alias)
+                .unwrap_or_else(|| panic!("alias {alias:?} returned None — should resolve"));
+            assert!(
+                registry.get(canonical).is_some(),
+                "alias {alias:?} -> {canonical:?} is not in models.toml — \
+                 the alias either has a typo, references a removed model, \
+                 or was added before the corresponding model entry."
+            );
+        }
+
+        // Every (profile, tier) combination.
+        for profile in [Profile::Eco, Profile::Auto, Profile::Premium, Profile::Free] {
+            for tier in [Tier::Simple, Tier::Medium, Tier::Complex, Tier::Reasoning] {
+                let canonical = resolve_model(profile, tier);
+                assert!(
+                    registry.get(canonical).is_some(),
+                    "profile {profile:?} tier {tier:?} -> {canonical:?} is not in models.toml"
+                );
+            }
+        }
     }
 }
