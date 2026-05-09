@@ -32,8 +32,8 @@ use crate::usage::SpendLogEntry;
 use crate::AppState;
 
 use cost::{
-    compute_actual_atomic_cost, estimate_input_tokens, estimated_atomic_cost,
-    usdc_atomic_amount_checked,
+    cap_usage_to_request_limits, compute_actual_atomic_cost, estimate_input_tokens,
+    estimated_atomic_cost, usdc_atomic_amount_checked,
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
@@ -587,6 +587,15 @@ pub async fn chat_completions(
             usage,
             actual_provider,
         }) => {
+            // Cap provider-reported token counts to what the gateway has
+            // actually priced for (req.max_tokens, model context window).
+            // Without this, a misbehaving / compromised provider could
+            // inflate completion_tokens to over-bill the agent, or deflate
+            // prompt_tokens to under-bill the gateway. Both flow into the
+            // escrow claim and spend log below.
+            let usage = usage
+                .as_ref()
+                .map(|u| cap_usage_to_request_limits(u, &req, model_info));
             // Post-response: usage logging, session token, and escrow claims (paid path only)
 
             // Attach session token for paid non-streaming requests
@@ -606,11 +615,12 @@ pub async fn chat_completions(
             // Compute escrow claim amount: prefer actual usage, fall back to estimate
             // E2 FIX: Use minimum 1 atomic unit for streaming when estimation fails
             let claim_atomic = if let Some(ref u) = usage {
-                Some(compute_actual_atomic_cost(
-                    u.prompt_tokens,
-                    u.completion_tokens,
-                    model_info,
-                ))
+                // `compute_actual_atomic_cost` returns `None` when the model
+                // registry pricing is non-finite/negative or the result would
+                // overflow u64. In those cases we skip the claim rather than
+                // firing for a garbage amount; the warn! inside the function
+                // surfaces the corrupt registry entry to operators.
+                compute_actual_atomic_cost(u.prompt_tokens, u.completion_tokens, model_info)
             } else {
                 Some(
                     estimated_atomic_cost(&state.model_registry, &req.model, &req)
