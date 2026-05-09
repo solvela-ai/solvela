@@ -95,6 +95,14 @@ pub async fn enqueue_claim(
 
 /// Mark a claim as in-progress (being submitted). Increments the attempt
 /// counter and records the timestamp.
+///
+/// As of the H1 fix, the main processor loop no longer calls this — rows
+/// are atomically claimed by `fetch_pending_claims`. Kept public for tests
+/// and any explicit-transition needs.
+///
+/// Relies on the `trg_escrow_claim_queue_updated_at` trigger (migration 008)
+/// to maintain `updated_at`; the stale-`in_progress` recovery in
+/// `fetch_pending_claims` depends on that trigger being present.
 pub async fn mark_in_progress(pool: &sqlx::PgPool, id: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE escrow_claim_queue
@@ -108,6 +116,9 @@ pub async fn mark_in_progress(pool: &sqlx::PgPool, id: &str) -> Result<(), sqlx:
 }
 
 /// Mark a claim as completed with the on-chain transaction signature.
+///
+/// `updated_at` is maintained by the `trg_escrow_claim_queue_updated_at`
+/// trigger (migration 008), not by this query.
 pub async fn mark_completed(
     pool: &sqlx::PgPool,
     id: &str,
@@ -160,10 +171,19 @@ pub async fn mark_attempt_failed(
     Ok(())
 }
 
-/// Fetch pending claims ordered by creation time (oldest first).
+/// Atomically claim and mark up to `limit` pending rows as `in_progress`.
 ///
-/// Also recovers stale `in_progress` claims that have been stuck for more
-/// than 5 minutes (likely abandoned due to a crash or SIGTERM).
+/// Uses `FOR UPDATE SKIP LOCKED` so concurrent workers (multiple gateway
+/// instances, or a crash-restart racing the previous loop) cannot pick up
+/// the same row. Also recovers stale `in_progress` rows that have been
+/// stuck for more than 5 minutes (abandoned by a crash or SIGTERM); the
+/// 5-minute boundary uses `updated_at`, maintained by the
+/// `trg_escrow_claim_queue_updated_at` trigger from migration 008.
+///
+/// Returned rows are already marked `in_progress` with `attempts`
+/// post-incremented — callers must NOT call `mark_in_progress` again on
+/// them. Treat `entry.attempts` as the post-increment value when deciding
+/// retry vs permanent-failure routing.
 pub async fn fetch_pending_claims(
     pool: &sqlx::PgPool,
     limit: i64,
@@ -182,13 +202,23 @@ pub async fn fetch_pending_claims(
             Option<String>,
         ),
     >(
-        "SELECT id::text, service_id, agent_pubkey, claim_amount, deposited_amount,
-                status, attempts, tx_signature, error_message
-         FROM escrow_claim_queue
-         WHERE (status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= NOW()))
-            OR (status = 'in_progress' AND updated_at < NOW() - INTERVAL '5 minutes')
-         ORDER BY created_at ASC
-         LIMIT $1",
+        "WITH locked AS (
+             SELECT id
+             FROM escrow_claim_queue
+             WHERE (status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= NOW()))
+                OR (status = 'in_progress' AND updated_at < NOW() - INTERVAL '5 minutes')
+             ORDER BY created_at ASC
+             LIMIT $1
+             FOR UPDATE SKIP LOCKED
+         )
+         UPDATE escrow_claim_queue q
+         SET status = 'in_progress',
+             attempts = q.attempts + 1,
+             last_attempt_at = NOW()
+         FROM locked
+         WHERE q.id = locked.id
+         RETURNING q.id::text, q.service_id, q.agent_pubkey, q.claim_amount, q.deposited_amount,
+                   q.status, q.attempts, q.tx_signature, q.error_message",
     )
     .bind(limit)
     .fetch_all(pool)
