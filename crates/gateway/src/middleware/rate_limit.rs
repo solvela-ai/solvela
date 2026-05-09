@@ -78,24 +78,22 @@ impl RateLimiter {
     /// When `client_id` is `"unknown"`, applies the stricter
     /// `unknown_max_requests` limit instead of the normal `max_requests`.
     pub async fn check(&self, client_id: &str) -> Result<u32, ()> {
-        let mut entries = self.entries.lock().await;
-
-        // Emergency cleanup: if the map has grown too large, evict expired
-        // entries — but only if at least 60 seconds have passed since the last
-        // emergency cleanup to prevent cleanup storms under sustained load.
-        if entries.len() > 100_000 {
-            let mut last = self.last_emergency_cleanup.lock().await;
-            let should_cleanup = last.is_none_or(|t| t.elapsed() >= Duration::from_secs(60));
-            if should_cleanup {
-                *last = Some(Instant::now());
-                drop(last);
-                let now = Instant::now();
-                entries.retain(|_, entry| {
-                    now.duration_since(entry.window_start) < self.config.window * 2
-                });
-            }
+        // Decide whether emergency cleanup is needed under a SHORT lock
+        // on `entries`. Previously this function held `entries` for its
+        // entire body — including across the nested
+        // `last_emergency_cleanup.lock().await` and the O(N) `retain` —
+        // so under DDoS (the exact moment `len > 100k` triggers) every
+        // other request blocked on `entries` for the full duration. The
+        // cleanup is now out-of-band and takes locks one at a time.
+        let needs_cleanup = {
+            let entries = self.entries.lock().await;
+            entries.len() > 100_000
+        };
+        if needs_cleanup {
+            self.maybe_emergency_cleanup().await;
         }
 
+        let mut entries = self.entries.lock().await;
         let now = Instant::now();
 
         let entry = entries
@@ -128,6 +126,30 @@ impl RateLimiter {
 
     /// Periodically clean up expired entries to prevent memory leaks.
     pub async fn cleanup(&self) {
+        let mut entries = self.entries.lock().await;
+        let now = Instant::now();
+        entries.retain(|_, entry| now.duration_since(entry.window_start) < self.config.window * 2);
+    }
+
+    /// Emergency cleanup path used when `entries.len() > 100_000`.
+    ///
+    /// Acquires `last_emergency_cleanup` first (cheap; deflects redundant
+    /// callers when the gate fired in the last 60s), drops it, then
+    /// re-acquires `entries` only for the retain. Each lock is held for
+    /// a single short critical section — never across an `.await` for
+    /// another lock — so the hot path's brief `entries` read at the top
+    /// of `check()` doesn't queue behind the cleanup.
+    async fn maybe_emergency_cleanup(&self) {
+        // Cleanup-gate check + claim under its own short lock.
+        {
+            let mut last = self.last_emergency_cleanup.lock().await;
+            if last.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+                return; // Recent cleanup; skip.
+            }
+            *last = Some(Instant::now());
+        }
+
+        // Now perform the retain under a fresh `entries` lock.
         let mut entries = self.entries.lock().await;
         let now = Instant::now();
         entries.retain(|_, entry| now.duration_since(entry.window_start) < self.config.window * 2);
