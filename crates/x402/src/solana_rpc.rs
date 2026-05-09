@@ -73,17 +73,24 @@ pub fn is_already_processed_error(err: &Error) -> bool {
         || s.contains("-32002")
 }
 
-/// Poll `getSignatureStatuses` until the transaction reaches `processed`,
-/// `confirmed`, or `finalized` status, or until the budget expires.
+/// Poll `getSignatureStatuses` until the transaction reaches `confirmed` or
+/// `finalized` status, or until the budget expires.
 ///
-/// Uses exponential backoff (500ms → 4s cap) matching `SolanaVerifier`'s
-/// existing pattern. Treats transient RPC errors as retryable (does NOT abort
-/// the polling loop on network blips).
+/// `processed` is intentionally NOT accepted: it means the tx has been
+/// observed by a single validator but is not yet in a quorum-voted bank
+/// and can still be rolled back. Accepting `processed` for payment
+/// settlement risks returning success to the gateway before the on-chain
+/// transfer is durable. `confirmed` (2/3 stake voted) is the minimum that
+/// won't roll back under normal cluster operation.
+///
+/// Uses exponential backoff (500ms → 4s cap). Treats transient RPC errors
+/// as retryable (does NOT abort the polling loop on network blips).
 ///
 /// Returns:
-/// - `Ok(())` if confirmed/processed/finalized
+/// - `Ok(())` if confirmed/finalized
 /// - `Err(Error::SettlementFailed)` if the tx landed with an error
-/// - `Err(Error::SettlementFailed("timeout"))` if not confirmed within budget
+/// - `Err(Error::SettlementFailed("not confirmed within ..."))` if not
+///   confirmed within budget
 pub async fn poll_for_confirmation(
     client: &Client,
     rpc_url: &str,
@@ -164,7 +171,7 @@ pub async fn poll_for_confirmation(
 
         if let Some(confirmation) = status.get("confirmationStatus").and_then(|s| s.as_str()) {
             match confirmation {
-                "processed" | "confirmed" | "finalized" => {
+                "confirmed" | "finalized" => {
                     info!(
                         signature = signature_b58,
                         status = confirmation,
@@ -172,6 +179,10 @@ pub async fn poll_for_confirmation(
                         "transaction confirmed"
                     );
                     return Ok(());
+                }
+                "processed" => {
+                    // Tx is in a leader's bank but not yet quorum-voted —
+                    // keep polling until it reaches `confirmed`.
                 }
                 other => {
                     warn!(
