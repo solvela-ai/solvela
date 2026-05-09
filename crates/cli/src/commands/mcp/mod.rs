@@ -299,16 +299,13 @@ pub async fn run_install(args: InstallArgs) -> Result<()> {
         Some(w)
     } else {
         match load_wallet() {
-            Ok(wallet) => match wallet["address"].as_str() {
-                Some(addr) => Some(validate_wallet(addr).map_err(|e| {
-                    anyhow::anyhow!(
-                        "wallet.json contains an invalid address: {}. \
-                         Re-run 'solvela wallet init' or pass --wallet=<pubkey> explicitly.",
-                        e
-                    )
-                })?),
-                None => None,
-            },
+            Ok(wallet) => Some(validate_wallet(&wallet.address).map_err(|e| {
+                anyhow::anyhow!(
+                    "wallet.json contains an invalid address: {}. \
+                     Re-run 'solvela wallet init' or pass --wallet=<pubkey> explicitly.",
+                    e
+                )
+            })?),
             Err(_) => {
                 eprintln!(
                     "Note: no wallet found at ~/.solvela/wallet.json. \

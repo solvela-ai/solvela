@@ -37,6 +37,7 @@ url = { workspace = true }
 getrandom = { version = "0.4", features = ["std"] }
 hdrhistogram = "7"
 secrecy = "0.10"
+zeroize = { workspace = true }
 
 [dev-dependencies]
 wiremock = "0.6"

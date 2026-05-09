@@ -2,6 +2,26 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use secrecy::{ExposeSecret, SecretString};
+use zeroize::Zeroizing;
+
+/// Typed wallet contents with the private key wrapped in `SecretString`.
+///
+/// Replaces the previous raw `serde_json::Value` return from `load_wallet()`
+/// to (a) enforce field presence at parse time rather than panic-prone
+/// `wallet["..."].as_str().unwrap()` chains scattered across callers, and
+/// (b) ensure any caller that `{:?}`-formats the wallet in an error chain
+/// or trace doesn't dump the private key. `SecretString` provides
+/// `Debug` that redacts the inner string; the derived `Debug` on this
+/// struct inherits the redaction.
+///
+/// `created_at` from the on-disk JSON is intentionally not threaded through
+/// — no caller reads it and dropping it keeps the in-memory surface tight.
+#[derive(Debug)]
+pub struct WalletData {
+    pub address: String,
+    pub private_key: SecretString,
+}
 
 fn wallet_dir() -> PathBuf {
     home_dir().join(".solvela")
@@ -30,17 +50,25 @@ pub async fn init() -> Result<()> {
     // Generate a real ed25519 keypair using the same library the gateway uses
     // for signature verification. The 32-byte secret scalar is the private key;
     // the corresponding 32-byte verifying key is the Solana public key.
-    let mut seed = [0u8; 32];
-    getrandom::fill(&mut seed).context("failed to generate random seed")?;
+    //
+    // `Zeroizing<[u8; 32]>` and `Zeroizing<[u8; 64]>` scrub the byte arrays
+    // when the function returns, so a process memory dump (crash, /proc/pid/mem
+    // scan from a sibling process with ptrace, or a core file written to
+    // disk) doesn't yield the raw secret. The base58 String we emit to disk
+    // is also derived from these bytes, but it's brief — `serde_json::json!`
+    // consumes `private_key_b58` immediately and the in-memory buffer is
+    // only live for microseconds.
+    let mut seed = Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut *seed).context("failed to generate random seed")?;
 
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
     let verifying_key = signing_key.verifying_key();
 
     // Solana wallet convention: private key = seed || pubkey bytes (64 bytes total), base58-encoded
-    let mut full_key = [0u8; 64];
-    full_key[..32].copy_from_slice(&seed);
+    let mut full_key = Zeroizing::new([0u8; 64]);
+    full_key[..32].copy_from_slice(&*seed);
     full_key[32..].copy_from_slice(verifying_key.as_bytes());
-    let private_key_b58 = bs58::encode(&full_key).into_string();
+    let private_key_b58 = bs58::encode(&*full_key).into_string();
     let address = bs58::encode(verifying_key.as_bytes()).into_string();
 
     let wallet_data = serde_json::json!({
@@ -66,7 +94,7 @@ pub async fn init() -> Result<()> {
 
 pub async fn status(api_url: &str) -> Result<()> {
     let wallet = load_wallet()?;
-    let address = wallet["address"].as_str().unwrap_or("unknown");
+    let address = &wallet.address;
 
     println!("Wallet Address: {}", address);
     println!("Gateway:        {}", api_url);
@@ -103,14 +131,17 @@ pub async fn status(api_url: &str) -> Result<()> {
 
 pub fn export() -> Result<()> {
     let wallet = load_wallet()?;
-    let key = wallet["private_key"].as_str().unwrap_or("not found");
     eprintln!("WARNING: Keep this key secret! Anyone with this key controls your funds.");
     eprintln!();
-    println!("{}", key);
+    // Explicit `expose_secret()` keeps the unwrap path documented at the
+    // single point where the secret legitimately leaves the SecretString
+    // — there's no other way to extract the inner value, so any future
+    // reviewer can grep for `expose_secret` to find every use site.
+    println!("{}", wallet.private_key.expose_secret());
     Ok(())
 }
 
-pub(crate) fn load_wallet() -> Result<serde_json::Value> {
+pub(crate) fn load_wallet() -> Result<WalletData> {
     let path = wallet_file();
     if !path.exists() {
         anyhow::bail!(
@@ -119,7 +150,24 @@ pub(crate) fn load_wallet() -> Result<serde_json::Value> {
         );
     }
     let data = fs::read_to_string(&path).context("failed to read wallet file")?;
-    serde_json::from_str(&data).context("wallet file is corrupted")
+    let parsed: serde_json::Value =
+        serde_json::from_str(&data).context("wallet file is corrupted")?;
+
+    let address = parsed
+        .get("address")
+        .and_then(|v| v.as_str())
+        .context("wallet file missing 'address' field")?
+        .to_string();
+    let private_key = parsed
+        .get("private_key")
+        .and_then(|v| v.as_str())
+        .context("wallet file missing 'private_key' field")?
+        .to_string();
+
+    Ok(WalletData {
+        address,
+        private_key: SecretString::from(private_key),
+    })
 }
 
 #[cfg(test)]
@@ -192,8 +240,29 @@ mod tests {
         .expect("write file");
 
         let wallet = load_wallet().expect("load should succeed");
-        assert_eq!(wallet["address"], "def");
-        assert_eq!(wallet["private_key"], "abc");
+        assert_eq!(wallet.address, "def");
+        assert_eq!(wallet.private_key.expose_secret(), "abc");
+    }
+
+    #[tokio::test]
+    async fn test_wallet_data_debug_redacts_private_key() {
+        // Defense-in-depth: any future caller that {:?}-formats a
+        // WalletData (e.g. inside an anyhow .context() chain) must NOT
+        // expose the private key. SecretString redacts itself; this test
+        // pins that contract.
+        let wallet = WalletData {
+            address: "AddressVisible".to_string(),
+            private_key: SecretString::from("secret-key-must-not-leak".to_string()),
+        };
+        let debug_output = format!("{:?}", wallet);
+        assert!(
+            !debug_output.contains("secret-key-must-not-leak"),
+            "Debug must not expose private key: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("AddressVisible"),
+            "Debug should expose non-secret fields: {debug_output}"
+        );
     }
 
     #[tokio::test]
@@ -210,10 +279,9 @@ mod tests {
         );
 
         let wallet = load_wallet().expect("should load created wallet");
-        let address = wallet["address"].as_str().expect("address field");
-        assert!(!address.is_empty(), "address should not be empty");
+        assert!(!wallet.address.is_empty(), "address should not be empty");
         assert!(
-            wallet["private_key"].as_str().is_some(),
+            !wallet.private_key.expose_secret().is_empty(),
             "private_key should be present"
         );
     }
@@ -230,7 +298,7 @@ mod tests {
         let wallet2 = load_wallet().expect("load after second init");
 
         assert_eq!(
-            wallet1["address"], wallet2["address"],
+            wallet1.address, wallet2.address,
             "second init should not overwrite existing wallet"
         );
     }
@@ -258,8 +326,8 @@ mod tests {
         init().await.expect("init");
 
         let wallet = load_wallet().expect("load");
-        let address = wallet["address"].as_str().expect("address");
-        let private_key = wallet["private_key"].as_str().expect("private_key");
+        let address = &wallet.address;
+        let private_key = wallet.private_key.expose_secret();
 
         // Address should be base58 (32-44 chars for Solana pubkeys)
         assert!(
@@ -280,7 +348,7 @@ mod tests {
         assert_eq!(key_bytes.len(), 64, "private key should be 64 bytes");
         let derived_address = bs58::encode(&key_bytes[32..]).into_string();
         assert_eq!(
-            derived_address, address,
+            &derived_address, address,
             "address should match pubkey from private key"
         );
     }

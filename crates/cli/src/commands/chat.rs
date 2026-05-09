@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
 use solvela_x402::types::{
     PaymentAccept, PaymentPayload, PaymentRequired, Resource, SolanaPayload,
 };
+use zeroize::Zeroizing;
 
 use crate::commands::wallet::load_wallet;
 
@@ -121,11 +123,11 @@ pub async fn run(
         }
     }
 
-    // Load wallet.
+    // Load wallet. `expose_secret()` is the documented escape hatch for
+    // SecretString — every site that pulls the raw key is greppable for
+    // future reviewers.
     let wallet = load_wallet()?;
-    let private_key_b58 = wallet["private_key"]
-        .as_str()
-        .context("wallet missing private_key field")?;
+    let private_key_b58: &str = wallet.private_key.expose_secret();
 
     // Select the preferred payment scheme (escrow > exact, or override).
     let accepted = select_payment_scheme(&payment_required.accepts, scheme)?.clone();
@@ -174,13 +176,22 @@ pub async fn run(
             .await
             .context("failed to build escrow deposit transaction")?;
 
-            // Derive agent pubkey from keypair.
-            let key_bytes = bs58::decode(private_key_b58)
-                .into_vec()
-                .context("keypair decode")?;
-            let seed: [u8; 32] = key_bytes[..32]
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("bad seed"))?;
+            // Derive agent pubkey from keypair. Both `key_bytes` (Vec<u8>
+            // holding seed||pubkey) and `seed` ([u8; 32], the raw ed25519
+            // secret scalar) are wrapped in `Zeroizing` so the buffers are
+            // scrubbed when this scope exits. `agent_pubkey` is the
+            // public verifying key — non-secret, no wrap needed.
+            let key_bytes = Zeroizing::new(
+                bs58::decode(private_key_b58)
+                    .into_vec()
+                    .context("keypair decode")?,
+            );
+            let mut seed = Zeroizing::new([0u8; 32]);
+            seed.copy_from_slice(
+                key_bytes
+                    .get(..32)
+                    .ok_or_else(|| anyhow::anyhow!("bad seed"))?,
+            );
             let agent_pubkey = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
             let agent_pubkey_b58 = bs58::encode(agent_pubkey.as_bytes()).into_string();
 
