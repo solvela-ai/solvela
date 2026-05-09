@@ -49,15 +49,11 @@ pub async fn init() -> Result<()> {
         "created_at": chrono::Utc::now().to_rfc3339(),
     });
 
-    fs::write(wallet_file(), serde_json::to_string_pretty(&wallet_data)?)
+    // Atomic write: chmod 0600 happens on the tempfile FD before the rename,
+    // closing the race window where the previous fs::write + set_permissions
+    // pair would briefly leave the key file world-readable.
+    crate::commands::util::write_atomic_json(&wallet_file(), &wallet_data)
         .context("failed to write wallet file")?;
-
-    // Restrict file permissions to owner-only on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(wallet_file(), fs::Permissions::from_mode(0o600))?;
-    }
 
     println!("Wallet created!");
     println!("Address:   {}", address);
