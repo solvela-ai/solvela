@@ -76,6 +76,7 @@ async fn log_spend_writes_redis_hourly_daily_monthly_counters(pool: PgPool) {
         tx_signature: None,
         request_id: None,
         session_id: None,
+        estimated_cost_usdc: None,
     });
 
     let hour_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H"));
@@ -123,6 +124,7 @@ async fn log_spend_accumulates_across_calls(pool: PgPool) {
         tx_signature: None,
         request_id: None,
         session_id: None,
+        estimated_cost_usdc: None,
     };
     tracker.log_spend(entry.clone());
     tracker.log_spend(entry.clone());
@@ -221,7 +223,15 @@ async fn check_budget_rejects_when_daily_limit_would_be_exceeded(pool: PgPool) {
         } => {
             assert_eq!(w, wallet);
             assert_eq!(limit, 1.0);
-            assert!((spent - 1.05).abs() < 1e-9);
+            // H1 (atomic check-and-commit): the prior `check_budget(0.04)`
+            // committed to the daily counter, so it's now 0.99. Adding
+            // 0.10 would land at 1.09 (which is what `spent` reports as
+            // the would-have-been amount). Pre-H1 this was 0.95 + 0.10
+            // = 1.05 because the check was read-only.
+            assert!(
+                (spent - 1.09).abs() < 1e-9,
+                "expected spent ≈ 1.09 (post-add value), got {spent}"
+            );
         }
         other => panic!("expected BudgetExceeded, got {other:?}"),
     }
@@ -489,6 +499,7 @@ async fn log_spend_writes_team_counters_when_wallet_in_team(pool: PgPool) {
         tx_signature: None,
         request_id: None,
         session_id: None,
+        estimated_cost_usdc: None,
     });
 
     let now = Utc::now();
@@ -682,4 +693,80 @@ async fn get_redis_spend_returns_value_for_present_key() {
     assert!((val - 0.42).abs() < 1e-9);
 
     redis_del(&client, &[&key]).await;
+}
+
+/// Regression for the H1 TOCTOU finding: under concurrent `check_budget`
+/// calls for the same wallet, the total committed spend must NEVER exceed
+/// the limit. Pre-fix, two concurrent calls each read the same `spend`
+/// value before either incremented, both passed the check, and total
+/// overshoot was `N × estimated_cost`.
+///
+/// This test fires N concurrent `check_budget` calls each requesting
+/// `estimated = limit / 2`. With proper serialization, exactly two can
+/// succeed (covering the limit); the rest must fail. Without it, all N
+/// would succeed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn check_budget_serializes_concurrent_callers(pool: PgPool) {
+    use std::sync::Arc;
+
+    let client = redis_client();
+    let wallet = unique_wallet();
+
+    sqlx::query("INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc) VALUES ($1, 1.00)")
+        .bind(&wallet)
+        .execute(&pool)
+        .await
+        .expect("seed wallet_budget");
+
+    let tracker = Arc::new(UsageTracker::new(Some(pool.clone()), Some(client.clone())));
+
+    // Fire 10 concurrent calls each asking for $0.50. With a $1.00 daily
+    // limit, exactly 2 can fit; the other 8 must be rejected.
+    const N: usize = 10;
+    const PER_CALL: f64 = 0.50;
+    let mut handles = Vec::with_capacity(N);
+    for _ in 0..N {
+        let tracker = Arc::clone(&tracker);
+        let wallet = wallet.clone();
+        handles.push(tokio::spawn(async move {
+            tracker.check_budget(&wallet, PER_CALL).await
+        }));
+    }
+
+    let mut ok = 0usize;
+    let mut exceeded = 0usize;
+    for h in handles {
+        match h.await.expect("join") {
+            Ok(()) => ok += 1,
+            Err(UsageError::BudgetExceeded { .. }) => exceeded += 1,
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        ok, 2,
+        "exactly 2 of {N} concurrent ${PER_CALL} calls must fit a $1.00 limit; got {ok}"
+    );
+    assert_eq!(
+        exceeded,
+        N - 2,
+        "the remaining concurrent calls must all be rejected; got {exceeded}"
+    );
+
+    // Cleanup
+    let now = chrono::Utc::now();
+    let day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
+    let hour_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H"));
+    let month_key = format!("spend:{}:{}", wallet, now.format("%Y-%m"));
+    redis_del(
+        &client,
+        &[
+            &day_key,
+            &hour_key,
+            &month_key,
+            &format!("budget_config:{wallet}"),
+            &format!("team_member:{wallet}"),
+        ],
+    )
+    .await;
 }

@@ -397,7 +397,10 @@ pub async fn get_wallet_budget(
 
     let (hourly_limit, daily_limit, monthly_limit) = match row {
         Ok(Some(r)) => r,
-        Ok(None) => (None, Some(100.0), None), // Default $100/day
+        // Single source of truth shared with the enforcement path
+        // (`BudgetConfig::default()`); diverging defaults would let
+        // the API report a different cap than the gate enforces.
+        Ok(None) => (None, Some(crate::usage::DEFAULT_DAILY_LIMIT_USDC), None),
         Err(e) => {
             tracing::warn!(wallet = %wallet, error = %e, "failed to query wallet budget");
             return (

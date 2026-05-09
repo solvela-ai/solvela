@@ -10,12 +10,17 @@ use uuid::Uuid;
 
 /// Default daily limit when no per-wallet budget row exists.
 ///
+/// **Single source of truth for both the enforcement path** (this module's
+/// `BudgetConfig::default()`) **and the display path** (the
+/// `routes::orgs::budget::get_wallet_budget` handler). Diverging defaults
+/// would let the API report a different limit than the gate enforces.
+///
 /// TODO(GHSA-86cr-h3rx-vj6j): migrate budget limits and spend counters from f64
 /// USDC to integer atomic units (u64, 6 decimal places) throughout this module
 /// and the Redis INCRBYFLOAT paths below.  This is the broader refactor deferred
 /// from the GHSA-86cr-h3rx-vj6j advisory; the immediate input-validation fix for
 /// `estimated_atomic_cost` is in `routes/chat/cost.rs`.
-const DEFAULT_DAILY_LIMIT_USDC: f64 = 100.0;
+pub const DEFAULT_DAILY_LIMIT_USDC: f64 = 100.0;
 
 /// TTL for cached wallet budget config in Redis (seconds).
 const BUDGET_CONFIG_CACHE_TTL: u64 = 60;
@@ -111,6 +116,13 @@ pub struct SpendLogEntry {
     pub tx_signature: Option<String>,
     pub request_id: Option<String>,
     pub session_id: Option<String>,
+    /// Cost that was tentatively committed to the Redis spend counters at
+    /// `check_budget` time. When `Some`, `log_spend` increments the counters
+    /// by `(cost_usdc - estimated_cost_usdc)` so the ledger settles to the
+    /// actual cost without double-counting the reservation. When `None`, the
+    /// counters were not pre-committed (legacy / proxy / test paths) and
+    /// `log_spend` increments by `cost_usdc` directly.
+    pub estimated_cost_usdc: Option<f64>,
 }
 
 /// Error types for usage tracking.
@@ -233,12 +245,23 @@ impl UsageTracker {
             });
         }
 
-        // Update Redis hot-path counters
+        // Update Redis hot-path counters.
+        //
+        // If `estimated_cost_usdc` is `Some`, `check_budget` already committed
+        // that amount to each window's counter via the atomic INCRBYFLOAT in
+        // `incr_check_or_rollback` (the H1 fix). To avoid double-counting,
+        // we increment by the *delta* (`cost - estimated`) here, which can
+        // be negative if actual usage came in under the estimate. If
+        // `estimated_cost_usdc` is `None` no reservation was committed
+        // (legacy / proxy / test paths), so we increment by the full cost.
         if let Some(client) = &self.redis_client {
             let client = client.clone();
             let db_pool = self.db_pool.clone();
             let wallet = entry.wallet_address;
-            let cost = entry.cost_usdc;
+            let cost = match entry.estimated_cost_usdc {
+                Some(reserved) => entry.cost_usdc - reserved,
+                None => entry.cost_usdc,
+            };
             tokio::spawn(async move {
                 let mut conn = match client.get_multiplexed_async_connection().await {
                     Ok(c) => c,
@@ -271,8 +294,24 @@ impl UsageTracker {
                 let month_key = format!("spend:{}:{}", wallet, now.format("%Y-%m"));
                 incr_and_expire(&mut conn, &month_key, cost, 86400 * 31).await;
 
-                // Team-level counters: look up team membership
-                let team_id = get_team_for_wallet(&mut conn, db_pool.as_ref(), &wallet).await;
+                // Team-level counters: look up team membership.
+                // log_spend runs in a fire-and-forget tokio::spawn after the
+                // request has been served, so a DB error here can't deny the
+                // request — we log and skip team bookkeeping (the wallet
+                // counter is still updated). check_budget enforces the
+                // strict fail-closed semantic on the request hot path.
+                let team_id = match get_team_for_wallet(&mut conn, db_pool.as_ref(), &wallet).await
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!(
+                            wallet = %wallet,
+                            error = %e,
+                            "team membership lookup failed during spend log; skipping team counters"
+                        );
+                        None
+                    }
+                };
                 if let Some(tid) = team_id {
                     let tid_str = tid.to_string();
                     let team_hour_key =
@@ -328,132 +367,149 @@ impl UsageTracker {
         }
 
         // Try Redis hot-path budget check.
-        if let Some(client) = &self.redis_client {
-            match client.get_multiplexed_async_connection().await {
-                Ok(mut conn) => {
-                    let now = Utc::now();
+        let Some(client) = &self.redis_client else {
+            return Ok(());
+        };
 
-                    // Load per-wallet budget config (DB-backed, cached in Redis 60s)
-                    let config =
-                        get_wallet_budget_config(&mut conn, self.db_pool.as_ref(), wallet_address)
-                            .await;
+        let mut conn = match client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(e) => {
+                // Fail-closed: deny the request when we cannot reach Redis.
+                warn!(
+                    wallet = %wallet_address,
+                    estimated_cost_usdc = estimated_cost_usdc,
+                    error = %e,
+                    "budget_check_denied: Redis connection failed, denying request (fail-closed)"
+                );
+                return Err(UsageError::Redis(e.to_string()));
+            }
+        };
 
-                    // --- Hourly limit ---
-                    if let Some(hourly_limit) = config.hourly {
-                        let hour_key =
-                            format!("spend:{}:{}", wallet_address, now.format("%Y-%m-%dT%H"));
-                        let hourly_spend = redis_get_f64(&mut conn, &hour_key)
-                            .await
-                            .map_err(UsageError::Redis)?;
-                        if hourly_spend + estimated_cost_usdc > hourly_limit + USDC_EPSILON {
-                            return Err(UsageError::BudgetExceeded {
-                                wallet: wallet_address.to_string(),
-                                limit: hourly_limit,
-                                spent: hourly_spend + estimated_cost_usdc,
-                            });
-                        }
+        let now = Utc::now();
+
+        // Tracks counters we've already incremented in this call, so we can
+        // roll them all back if a later window exceeds its limit. Without
+        // this, a request that fits hourly+daily but not monthly would leave
+        // hourly and daily over-counted by `estimated_cost_usdc`.
+        let mut committed: Vec<(String, f64)> = Vec::new();
+
+        // Helper: try to commit one window. On exceeded → roll back everything
+        // accumulated so far + return the BudgetExceeded error. On Redis error
+        // → roll back + propagate as Redis error.
+        macro_rules! try_commit {
+            ($key:expr, $amount:expr, $limit:expr, $ttl:expr) => {{
+                let key: String = $key;
+                match incr_check_or_rollback(&mut conn, &key, $amount, $limit, $ttl).await {
+                    Ok(new_total) => {
+                        committed.push((key, $amount));
+                        new_total
                     }
-
-                    // --- Daily limit ---
-                    if let Some(daily_limit) = config.daily {
-                        let day_key =
-                            format!("spend:{}:{}", wallet_address, now.format("%Y-%m-%d"));
-                        let daily_spend = redis_get_f64(&mut conn, &day_key)
-                            .await
-                            .map_err(UsageError::Redis)?;
-                        if daily_spend + estimated_cost_usdc > daily_limit + USDC_EPSILON {
-                            return Err(UsageError::BudgetExceeded {
-                                wallet: wallet_address.to_string(),
-                                limit: daily_limit,
-                                spent: daily_spend + estimated_cost_usdc,
-                            });
-                        }
+                    Err(IncrCheckResult::Exceeded { current }) => {
+                        // `current` is the post-add value the counter held
+                        // before Lua rolled it back — i.e. what the spend
+                        // would have been if we'd committed. That's exactly
+                        // the "spent" amount the BudgetExceeded error wants
+                        // to report.
+                        rollback_committed(&mut conn, &committed).await;
+                        return Err(UsageError::BudgetExceeded {
+                            wallet: wallet_address.to_string(),
+                            limit: $limit,
+                            spent: current,
+                        });
                     }
-
-                    // --- Monthly limit ---
-                    if let Some(monthly_limit) = config.monthly {
-                        let month_key = format!("spend:{}:{}", wallet_address, now.format("%Y-%m"));
-                        let monthly_spend = redis_get_f64(&mut conn, &month_key)
-                            .await
-                            .map_err(UsageError::Redis)?;
-                        if monthly_spend + estimated_cost_usdc > monthly_limit + USDC_EPSILON {
-                            return Err(UsageError::BudgetExceeded {
-                                wallet: wallet_address.to_string(),
-                                limit: monthly_limit,
-                                spent: monthly_spend + estimated_cost_usdc,
-                            });
-                        }
-                    }
-
-                    // --- Team-level budget enforcement ---
-                    let team_id =
-                        get_team_for_wallet(&mut conn, self.db_pool.as_ref(), wallet_address).await;
-
-                    if let Some(tid) = team_id {
-                        let team_config =
-                            get_team_budget_config(&mut conn, self.db_pool.as_ref(), tid).await;
-
-                        if let Some(team_cfg) = team_config {
-                            let tid_str = tid.to_string();
-
-                            if let Some(hourly_limit) = team_cfg.hourly {
-                                let key =
-                                    format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%dT%H"));
-                                let spend = redis_get_f64(&mut conn, &key)
-                                    .await
-                                    .map_err(UsageError::Redis)?;
-                                if spend + estimated_cost_usdc > hourly_limit + USDC_EPSILON {
-                                    return Err(UsageError::BudgetExceeded {
-                                        wallet: wallet_address.to_string(),
-                                        limit: hourly_limit,
-                                        spent: spend + estimated_cost_usdc,
-                                    });
-                                }
-                            }
-
-                            if let Some(daily_limit) = team_cfg.daily {
-                                let key =
-                                    format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%d"));
-                                let spend = redis_get_f64(&mut conn, &key)
-                                    .await
-                                    .map_err(UsageError::Redis)?;
-                                if spend + estimated_cost_usdc > daily_limit + USDC_EPSILON {
-                                    return Err(UsageError::BudgetExceeded {
-                                        wallet: wallet_address.to_string(),
-                                        limit: daily_limit,
-                                        spent: spend + estimated_cost_usdc,
-                                    });
-                                }
-                            }
-
-                            if let Some(monthly_limit) = team_cfg.monthly {
-                                let key = format!("team_spend:{}:{}", tid_str, now.format("%Y-%m"));
-                                let spend = redis_get_f64(&mut conn, &key)
-                                    .await
-                                    .map_err(UsageError::Redis)?;
-                                if spend + estimated_cost_usdc > monthly_limit + USDC_EPSILON {
-                                    return Err(UsageError::BudgetExceeded {
-                                        wallet: wallet_address.to_string(),
-                                        limit: monthly_limit,
-                                        spent: spend + estimated_cost_usdc,
-                                    });
-                                }
-                            }
-                        }
+                    Err(IncrCheckResult::Redis(msg)) => {
+                        rollback_committed(&mut conn, &committed).await;
+                        return Err(UsageError::Redis(msg));
                     }
                 }
-                Err(e) => {
-                    // Fail-closed: deny the request when we cannot reach Redis.
-                    // Without a connection we cannot verify spend, so we must not
-                    // allow the request through. See doc comment on check_budget.
-                    warn!(
-                        wallet = %wallet_address,
-                        estimated_cost_usdc = estimated_cost_usdc,
-                        error = %e,
-                        "budget_check_denied: Redis connection failed, denying request (fail-closed)"
-                    );
-                    return Err(UsageError::Redis(e.to_string()));
+            }};
+        }
+
+        // Load per-wallet budget config (DB-backed, cached in Redis 60s)
+        let config =
+            get_wallet_budget_config(&mut conn, self.db_pool.as_ref(), wallet_address).await;
+
+        // --- Wallet hourly limit ---
+        if let Some(hourly_limit) = config.hourly {
+            let _ = try_commit!(
+                format!("spend:{}:{}", wallet_address, now.format("%Y-%m-%dT%H")),
+                estimated_cost_usdc,
+                hourly_limit,
+                7200
+            );
+        }
+
+        // --- Wallet daily limit ---
+        if let Some(daily_limit) = config.daily {
+            let _ = try_commit!(
+                format!("spend:{}:{}", wallet_address, now.format("%Y-%m-%d")),
+                estimated_cost_usdc,
+                daily_limit,
+                86400
+            );
+        }
+
+        // --- Wallet monthly limit ---
+        if let Some(monthly_limit) = config.monthly {
+            let _ = try_commit!(
+                format!("spend:{}:{}", wallet_address, now.format("%Y-%m")),
+                estimated_cost_usdc,
+                monthly_limit,
+                86400 * 31
+            );
+        }
+
+        // --- Team-level budget enforcement ---
+        // H4 fix: get_team_for_wallet now returns Result. A DB error
+        // propagates as UsageError::Database, denying the request rather
+        // than silently skipping team enforcement (the previous behavior
+        // was fail-open: a transient DB blip would let the wallet's
+        // permissive individual budget bypass a tighter team cap).
+        match get_team_for_wallet(&mut conn, self.db_pool.as_ref(), wallet_address).await {
+            Ok(Some(tid)) => {
+                let team_config =
+                    get_team_budget_config(&mut conn, self.db_pool.as_ref(), tid).await;
+
+                if let Some(team_cfg) = team_config {
+                    let tid_str = tid.to_string();
+
+                    if let Some(hourly_limit) = team_cfg.hourly {
+                        let _ = try_commit!(
+                            format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%dT%H")),
+                            estimated_cost_usdc,
+                            hourly_limit,
+                            7200
+                        );
+                    }
+                    if let Some(daily_limit) = team_cfg.daily {
+                        let _ = try_commit!(
+                            format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%d")),
+                            estimated_cost_usdc,
+                            daily_limit,
+                            86400
+                        );
+                    }
+                    if let Some(monthly_limit) = team_cfg.monthly {
+                        let _ = try_commit!(
+                            format!("team_spend:{}:{}", tid_str, now.format("%Y-%m")),
+                            estimated_cost_usdc,
+                            monthly_limit,
+                            86400 * 31
+                        );
+                    }
                 }
+            }
+            Ok(None) => {
+                // Wallet is not in any team — nothing to enforce.
+            }
+            Err(e) => {
+                rollback_committed(&mut conn, &committed).await;
+                warn!(
+                    wallet = %wallet_address,
+                    error = %e,
+                    "team membership lookup failed; denying request (fail-closed)"
+                );
+                return Err(UsageError::Database(e));
             }
         }
 
@@ -522,6 +578,115 @@ async fn incr_and_expire(
 
     if let Err(e) = result {
         warn!(error = %e, key = %key, "failed to atomically INCRBYFLOAT+EXPIRE in Redis");
+    }
+}
+
+/// Lua script: atomically increment a counter, set TTL, then check the new
+/// value against a limit. If the new value exceeds the limit, the increment
+/// is rolled back inside the same atomic execution.
+///
+/// Closes the H1 TOCTOU: the previous `redis_get_f64 + arithmetic + later
+/// log_spend INCRBYFLOAT` pattern let two concurrent requests both pass the
+/// check before either committed, so total overshoot under burst could be
+/// `N × estimated_cost`. Now the check and commit happen in a single
+/// `EVAL`, serialized by Redis.
+///
+/// KEYS[1] = counter key
+/// ARGV[1] = amount to add
+/// ARGV[2] = limit + epsilon (the "exceeded" boundary)
+/// ARGV[3] = TTL in seconds
+///
+/// Always returns the post-add value (the value the counter held immediately
+/// after `INCRBYFLOAT amount`, even if a rollback was then issued). The Rust
+/// caller compares this against the limit to decide ok vs. exceeded.
+///
+/// Note: returns the value as a STRING — Redis serializes Lua numbers as
+/// int64 (truncating decimals), so we have to round-trip the float as a
+/// string and parse it in Rust to preserve precision.
+const INCR_CHECK_LUA: &str = r#"
+local cur = redis.call('INCRBYFLOAT', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[3])
+if tonumber(cur) > tonumber(ARGV[2]) then
+    redis.call('INCRBYFLOAT', KEYS[1], '-' .. ARGV[1])
+end
+return tostring(cur)
+"#;
+
+/// Atomically attempt to commit `amount` to a spend counter. Returns
+/// `Ok(new_total)` on success — the counter was incremented and persists.
+/// Returns `Err(BudgetExceeded { current })` when the counter would have
+/// exceeded `limit + USDC_EPSILON`; in that case the increment was rolled
+/// back and `current` reflects the pre-call value.
+///
+/// Errors other than budget-exceeded propagate as `UsageError::Redis` so the
+/// caller can fail closed.
+async fn incr_check_or_rollback(
+    conn: &mut redis::aio::MultiplexedConnection,
+    key: &str,
+    amount: f64,
+    limit: f64,
+    ttl_secs: u64,
+) -> Result<f64, IncrCheckResult> {
+    let limit_with_epsilon = limit + USDC_EPSILON;
+    // Lua returns the post-add value as a string (Redis truncates Lua
+    // numbers to int64 on serialization, so we have to keep the float in
+    // string form across the Redis reply boundary).
+    let new_value_str: String = redis::Script::new(INCR_CHECK_LUA)
+        .key(key)
+        .arg(amount.to_string())
+        .arg(limit_with_epsilon.to_string())
+        .arg(ttl_secs)
+        .invoke_async(conn)
+        .await
+        .map_err(|e| IncrCheckResult::Redis(e.to_string()))?;
+    let new_value: f64 = new_value_str
+        .parse()
+        .map_err(|e| IncrCheckResult::Redis(format!("non-numeric script reply: {e}")))?;
+
+    if new_value > limit_with_epsilon {
+        // Lua already rolled back the INCRBYFLOAT; `new_value` is the
+        // would-have-been value (post-add), which is exactly what the
+        // BudgetExceeded error wants to report as "spent".
+        Err(IncrCheckResult::Exceeded { current: new_value })
+    } else {
+        Ok(new_value)
+    }
+}
+
+/// Internal result type for `incr_check_or_rollback` — separate from
+/// `UsageError` so the caller can distinguish "budget exceeded" (a normal
+/// flow control case) from "Redis unreachable" (fail-closed).
+enum IncrCheckResult {
+    Exceeded { current: f64 },
+    Redis(String),
+}
+
+/// Roll back a list of previously-committed counters. Used when a later
+/// budget window in the same `check_budget` call exceeds its limit, so the
+/// earlier-committed reservations need to be released.
+///
+/// Each rollback is best-effort: if Redis errors here we log and continue.
+/// The alternative is to return an error and have the caller retry the
+/// rollback, which adds complexity for a tail case.
+async fn rollback_committed(
+    conn: &mut redis::aio::MultiplexedConnection,
+    keys_and_amounts: &[(String, f64)],
+) {
+    for (key, amount) in keys_and_amounts {
+        let neg = -*amount;
+        let result: Result<f64, redis::RedisError> = redis::cmd("INCRBYFLOAT")
+            .arg(key)
+            .arg(neg)
+            .query_async(conn)
+            .await;
+        if let Err(e) = result {
+            warn!(
+                error = %e,
+                key = %key,
+                amount,
+                "failed to roll back budget reservation after later window exceeded"
+            );
+        }
     }
 }
 
@@ -638,11 +803,20 @@ async fn get_wallet_budget_config(
 
 /// Look up the team_id for a wallet. Checks Redis cache (`team_member:{wallet}`),
 /// falls back to DB query on `team_wallets`. Returns `None` if not in any team.
+/// Look up the team a wallet belongs to.
+///
+/// Returns `Ok(Some(team_id))` when the wallet is mapped to a team,
+/// `Ok(None)` when not, and `Err(msg)` on a DB error.
+///
+/// H4 fix: previously returned `Option<Uuid>` and silently swallowed DB
+/// errors as `None`, which fail-opened team budget enforcement on
+/// transient DB blips. The check_budget caller now propagates the error
+/// as `UsageError::Database` and denies the request.
 async fn get_team_for_wallet(
     conn: &mut redis::aio::MultiplexedConnection,
     db_pool: Option<&sqlx::PgPool>,
     wallet: &str,
-) -> Option<Uuid> {
+) -> Result<Option<Uuid>, String> {
     let cache_key = format!("team_member:{wallet}");
 
     // Try Redis cache
@@ -653,10 +827,10 @@ async fn get_team_for_wallet(
     {
         // A cached "none" sentinel means the wallet has no team
         if tid_str == "none" {
-            return None;
+            return Ok(None);
         }
         if let Ok(tid) = tid_str.parse::<Uuid>() {
-            return Some(tid);
+            return Ok(Some(tid));
         }
     }
 
@@ -672,13 +846,14 @@ async fn get_team_for_wallet(
             Ok(Some((tid,))) => Some(tid),
             Ok(None) => None,
             Err(e) => {
-                // Error-level: team budget enforcement is skipped on DB failure (fail-open for team
-                // budgets). Wallet-level budget still applies as the primary guard.
-                error!(wallet = %wallet, error = %e, "failed to query team_wallets — team budget enforcement skipped");
-                None
+                // Propagate the error so check_budget can fail closed.
+                error!(wallet = %wallet, error = %e, "failed to query team_wallets");
+                return Err(format!("team_wallets lookup failed: {e}"));
             }
         }
     } else {
+        // No DB pool — wallet has no team membership we can verify, but
+        // this isn't an error: the operator chose to run without a DB.
         None
     };
 
@@ -694,7 +869,7 @@ async fn get_team_for_wallet(
         .query_async(conn)
         .await;
 
-    team_id
+    Ok(team_id)
 }
 
 /// Load team budget config from `team_budgets` table. Cached in Redis with 60s TTL.
@@ -968,6 +1143,7 @@ mod tests {
             tx_signature: None,
             request_id: None,
             session_id: None,
+            estimated_cost_usdc: None,
         });
     }
 
