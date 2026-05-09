@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Context;
 use tracing::{info, warn};
 
 /// Read an environment variable with dual-prefix support.
@@ -587,7 +588,10 @@ async fn main() -> anyhow::Result<()> {
                 monitor_config.rpc_url = app_config.solana.rpc_url.clone();
             }
 
-            let monitor = Arc::new(BalanceMonitor::new(monitor_config, wallet_pubkeys));
+            let monitor = Arc::new(
+                BalanceMonitor::new(monitor_config, wallet_pubkeys)
+                    .context("failed to build balance monitor HTTP client")?,
+            );
             info!(
                 wallets = monitor.wallet_count(),
                 interval_secs = app_config.monitor.check_interval_secs,

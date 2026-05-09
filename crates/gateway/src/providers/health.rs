@@ -62,6 +62,14 @@ struct ProviderHealth {
     ewma_latency_ms: f64,
     /// EWMA alpha (smoothing factor).
     ewma_alpha: f64,
+    /// `true` while a half-open probe request is in flight. The classic
+    /// half-open invariant is "exactly one probe at a time"; without this
+    /// flag, multiple concurrent callers all observe `HalfOpen` at once,
+    /// `is_available()` returns `true` to each of them, and a recovering
+    /// provider gets hammered with N concurrent requests the moment
+    /// cooldown expires. Cleared by the next `record_success` or
+    /// `record_failure` (closed-on-success or reopened-on-failure).
+    probe_in_flight: bool,
 }
 
 impl ProviderHealth {
@@ -72,6 +80,7 @@ impl ProviderHealth {
             opened_at: None,
             ewma_latency_ms: 0.0,
             ewma_alpha: 0.2, // ~10s window with 2s avg request time
+            probe_in_flight: false,
         }
     }
 }
@@ -121,6 +130,11 @@ impl ProviderHealthTracker {
             health.opened_at = None;
         }
 
+        // Clear the probe slot regardless of state — a concurrent caller
+        // that was previously deflected can now retry against the fresh
+        // closed/half-open state.
+        health.probe_in_flight = false;
+
         self.cleanup_old_outcomes(health);
     }
 
@@ -143,8 +157,18 @@ impl ProviderHealthTracker {
             info!(provider, "circuit breaker: half-open → open (probe failed)");
             health.state = CircuitState::Open;
             health.opened_at = Some(now);
+            // Probe slot is released when the circuit reopens — the next
+            // half-open transition (after a fresh cooldown) will claim a
+            // new probe slot via is_available.
+            health.probe_in_flight = false;
             return;
         }
+
+        // Defensive clear in case a probe-claimed call somehow took the
+        // closed/open path (shouldn't happen given the above transitions,
+        // but cheap insurance against future refactors leaving the flag
+        // stuck true).
+        health.probe_in_flight = false;
 
         self.cleanup_old_outcomes(health);
         self.evaluate_circuit(provider, health);
@@ -160,7 +184,19 @@ impl ProviderHealthTracker {
 
         match health.state {
             CircuitState::Closed => true,
-            CircuitState::HalfOpen => true, // Allow probe request
+            CircuitState::HalfOpen => {
+                // Half-open allows exactly ONE probe at a time. If another
+                // caller already grabbed the probe slot, this caller must
+                // wait — return false so the fallback chain tries the
+                // next provider instead of stacking concurrent probes on
+                // a recovering upstream.
+                if health.probe_in_flight {
+                    false
+                } else {
+                    health.probe_in_flight = true;
+                    true
+                }
+            }
             CircuitState::Open => {
                 // Check if cooldown has elapsed
                 if let Some(opened_at) = health.opened_at {
@@ -170,6 +206,11 @@ impl ProviderHealthTracker {
                             "circuit breaker: open → half-open (cooldown elapsed)"
                         );
                         health.state = CircuitState::HalfOpen;
+                        // Claim the probe slot for the caller that
+                        // triggered the transition. Subsequent concurrent
+                        // callers will see `probe_in_flight = true` and
+                        // be deflected.
+                        health.probe_in_flight = true;
                         true
                     } else {
                         false
@@ -247,6 +288,9 @@ impl ProviderHealthTracker {
                 health.opened_at = None;
             }
 
+            // Release the model-level probe slot — see ProviderHealth doc.
+            health.probe_in_flight = false;
+
             self.cleanup_old_outcomes(health);
         }
         // Cascade to provider level (models lock is dropped)
@@ -277,11 +321,15 @@ impl ProviderHealthTracker {
                 );
                 health.state = CircuitState::Open;
                 health.opened_at = Some(now);
+                health.probe_in_flight = false;
                 // Drop lock before cascading, then cascade
                 drop(models);
                 self.record_failure(provider, latency_ms).await;
                 return;
             }
+
+            // Defensive clear (mirrors record_failure provider-level).
+            health.probe_in_flight = false;
 
             self.cleanup_old_outcomes(health);
             self.evaluate_model_circuit(provider, model, health);
@@ -301,7 +349,15 @@ impl ProviderHealthTracker {
 
         match health.state {
             CircuitState::Closed => true,
-            CircuitState::HalfOpen => true,
+            CircuitState::HalfOpen => {
+                // One probe at a time — see is_available for rationale.
+                if health.probe_in_flight {
+                    false
+                } else {
+                    health.probe_in_flight = true;
+                    true
+                }
+            }
             CircuitState::Open => {
                 if let Some(opened_at) = health.opened_at {
                     if opened_at.elapsed() >= self.config.cooldown {
@@ -310,6 +366,7 @@ impl ProviderHealthTracker {
                             model, "model circuit breaker: open → half-open (cooldown elapsed)"
                         );
                         health.state = CircuitState::HalfOpen;
+                        health.probe_in_flight = true;
                         true
                     } else {
                         false
@@ -640,5 +697,44 @@ mod tests {
             (rate - 0.75).abs() < 0.01,
             "expected 75% failure rate at provider level, got {rate}"
         );
+    }
+
+    /// H6 regression: when the circuit transitions to half-open, exactly
+    /// ONE caller may probe; subsequent concurrent callers must be
+    /// deflected (return false from `is_available`). Pre-fix, all
+    /// concurrent callers saw `HalfOpen` and `is_available` returned
+    /// `true` to each, hammering the recovering provider.
+    #[tokio::test]
+    async fn half_open_admits_only_one_concurrent_probe() {
+        let tracker = ProviderHealthTracker::new(test_config());
+
+        // Force the circuit open: enough failures to exceed min_requests
+        // and trip the threshold.
+        for _ in 0..10 {
+            tracker.record_failure("openai", 500).await;
+        }
+        assert_eq!(tracker.get_state("openai").await, CircuitState::Open);
+
+        // Wait for cooldown to elapse so the next is_available()
+        // transitions Open → HalfOpen.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // First caller: takes the probe slot, returns true.
+        assert!(tracker.is_available("openai").await);
+        assert_eq!(tracker.get_state("openai").await, CircuitState::HalfOpen);
+
+        // Second concurrent caller while still half-open: must be
+        // deflected because the probe is in flight.
+        assert!(
+            !tracker.is_available("openai").await,
+            "second half-open caller must be deflected (probe slot already claimed)"
+        );
+
+        // After the probe completes (success here), the slot reopens
+        // and the circuit closes. A subsequent caller should be allowed
+        // through normally.
+        tracker.record_success("openai", 100).await;
+        assert_eq!(tracker.get_state("openai").await, CircuitState::Closed);
+        assert!(tracker.is_available("openai").await);
     }
 }
