@@ -28,6 +28,7 @@ pub async fn create_org(
         name: body.name,
         slug: body.slug,
     };
+    let owner_wallet = body.owner_wallet.clone();
 
     match queries::create_org(pool, req, body.owner_wallet).await {
         Ok(org) => {
@@ -35,8 +36,14 @@ pub async fn create_org(
                 pool,
                 AuditEntry {
                     org_id: Some(org.id),
-                    actor_wallet: None,
+                    // Audit attribution: this route is admin-only
+                    // (require_admin above), so actor_admin = true. We
+                    // also record the owner_wallet as the audit subject
+                    // so operators can trace which wallet was granted
+                    // ownership without joining `org_members`.
+                    actor_wallet: Some(owner_wallet),
                     actor_api_key: None,
+                    actor_admin: true,
                     action: "org.created".to_string(),
                     resource_type: "organization".to_string(),
                     resource_id: Some(org.id.to_string()),

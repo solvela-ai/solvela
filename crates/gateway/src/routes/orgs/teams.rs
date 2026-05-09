@@ -25,10 +25,7 @@ pub async fn create_team(
 
     let pool = require_db!(state);
 
-    let actor_api_key = match &auth {
-        AuthContext::OrgKey(ctx) => Some(ctx.api_key_id),
-        AuthContext::Admin => None,
-    };
+    let (actor_api_key, actor_admin) = auth.audit_actor();
 
     match queries::create_team(pool, org_id, body).await {
         Ok(team) => {
@@ -38,6 +35,7 @@ pub async fn create_team(
                     org_id: Some(org_id),
                     actor_wallet: None,
                     actor_api_key,
+                    actor_admin,
                     action: "team.created".to_string(),
                     resource_type: "team".to_string(),
                     resource_id: Some(team.id.to_string()),
@@ -107,14 +105,21 @@ pub async fn add_member(
         return resp;
     }
 
-    // Prevent role escalation: callers cannot assign a role higher than their own
+    // Prevent role escalation. Only Owners can promote others to
+    // Owner OR Admin — an Admin-keyed caller can still add Members but
+    // can't spawn additional Admins. Without this, a single compromised
+    // Admin key would let an attacker fork the Admin tier indefinitely
+    // with no Owner involvement, defeating the rationale for a separate
+    // Admin level.
     if let AuthContext::OrgKey(ref ctx) = auth {
         if let Some(ref requested_role) = body.role {
-            if *requested_role == OrgRole::Owner && ctx.role != OrgRole::Owner {
+            if matches!(requested_role, OrgRole::Owner | OrgRole::Admin)
+                && ctx.role != OrgRole::Owner
+            {
                 return (
                     StatusCode::FORBIDDEN,
                     Json(json!({
-                        "error": "only owners can assign the owner role"
+                        "error": "only owners can assign the owner or admin role"
                     })),
                 )
                     .into_response();
@@ -128,10 +133,7 @@ pub async fn add_member(
 
     let pool = require_db!(state);
 
-    let actor_api_key = match &auth {
-        AuthContext::OrgKey(ctx) => Some(ctx.api_key_id),
-        AuthContext::Admin => None,
-    };
+    let (actor_api_key, actor_admin) = auth.audit_actor();
 
     match queries::add_member(pool, org_id, body).await {
         Ok(member) => {
@@ -141,6 +143,7 @@ pub async fn add_member(
                     org_id: Some(org_id),
                     actor_wallet: None,
                     actor_api_key,
+                    actor_admin,
                     action: "member.added".to_string(),
                     resource_type: "org_member".to_string(),
                     resource_id: Some(member.id.to_string()),
@@ -244,12 +247,9 @@ pub async fn assign_wallet(
             .into_response();
     }
 
-    let actor_api_key = match &auth {
-        AuthContext::OrgKey(ctx) => Some(ctx.api_key_id),
-        AuthContext::Admin => None,
-    };
+    let (actor_api_key, actor_admin) = auth.audit_actor();
 
-    match queries::assign_wallet(pool, team_id, &body).await {
+    match queries::assign_wallet(pool, org_id, team_id, &body).await {
         Ok(wallet) => {
             log_audit(
                 pool,
@@ -257,6 +257,7 @@ pub async fn assign_wallet(
                     org_id: Some(org_id),
                     actor_wallet: None,
                     actor_api_key,
+                    actor_admin,
                     action: "wallet.assigned".to_string(),
                     resource_type: "team_wallet".to_string(),
                     resource_id: Some(wallet.id.to_string()),
@@ -321,7 +322,7 @@ pub async fn list_team_wallets(
             .into_response();
     }
 
-    match queries::list_team_wallets(pool, team_id).await {
+    match queries::list_team_wallets(pool, org_id, team_id).await {
         Ok(wallets) => (StatusCode::OK, Json(wallets)).into_response(),
         Err(e) => {
             tracing::warn!(team_id = %team_id, error = %e, "failed to list team wallets");
