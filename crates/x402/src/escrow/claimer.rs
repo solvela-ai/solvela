@@ -508,7 +508,11 @@ pub(crate) async fn do_claim(params: &ClaimParams) -> Result<String, Error> {
 // ---------------------------------------------------------------------------
 
 /// SysvarRecentBlockhashes pubkey (used in AdvanceNonceAccount instruction).
-const SYSVAR_RECENT_BLOCKHASHES_ID: &str = "SysvarRecentB1teleworLdhashes11111111111111";
+///
+/// Source of truth: `solana-sdk-ids` crate, `sysvar::recent_blockhashes::ID`.
+/// Must decode to exactly 32 bytes — guarded by
+/// `tests::sysvar_recent_blockhashes_id_decodes_to_32_bytes`.
+const SYSVAR_RECENT_BLOCKHASHES_ID: &str = "SysvarRecentB1ockHashes11111111111111111111";
 
 /// Data needed to build an AdvanceNonceAccount instruction.
 struct NonceAdvanceInfo {
@@ -590,6 +594,24 @@ mod tests {
     use super::*;
     use crate::fee_payer::FeePayerPool;
     use crate::nonce_pool::NoncePool;
+
+    /// Regression guard: `SYSVAR_RECENT_BLOCKHASHES_ID` must decode to a 32-byte
+    /// pubkey. A previous typo silently broke durable-nonce claims because the
+    /// decode failure was swallowed by `try_fetch_nonce`'s fallback path.
+    #[test]
+    fn sysvar_recent_blockhashes_id_decodes_to_32_bytes() {
+        let bytes = bs58::decode(SYSVAR_RECENT_BLOCKHASHES_ID)
+            .into_vec()
+            .expect("SYSVAR_RECENT_BLOCKHASHES_ID must be valid base58");
+        assert_eq!(
+            bytes.len(),
+            32,
+            "SYSVAR_RECENT_BLOCKHASHES_ID must decode to 32 bytes (got {})",
+            bytes.len()
+        );
+        decode_bs58_pubkey(SYSVAR_RECENT_BLOCKHASHES_ID)
+            .expect("SYSVAR_RECENT_BLOCKHASHES_ID must round-trip through decode_bs58_pubkey");
+    }
 
     /// Generate a deterministic valid base58-encoded ed25519 keypair (64 bytes)
     fn test_keypair_b58(seed: u8) -> String {
