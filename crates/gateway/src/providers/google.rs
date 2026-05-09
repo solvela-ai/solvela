@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use solvela_protocol::{
     ChatChoice, ChatMessage, ChatRequest, ChatResponse, ModelInfo, Role, Usage,
@@ -270,11 +270,20 @@ impl LLMProvider for GoogleProvider {
         let response = response.error_for_status()?;
         let body_text = response.text().await?;
         let gemini_resp: GeminiResponse = serde_json::from_str(&body_text).map_err(|e| {
+            // The full body can contain user-prompt-derived content (PII,
+            // confidential business data, safety-filtered fragments). Log
+            // only structural metadata at WARN; full preview at DEBUG so it
+            // is suppressed at default production log levels.
             warn!(
                 model = %original_model,
                 error = %e,
-                body_preview = %&body_text[..body_text.len().min(500)],
+                body_len = body_text.len(),
                 "failed to parse Gemini response"
+            );
+            debug!(
+                model = %original_model,
+                body_preview = %&body_text[..body_text.len().min(500)],
+                "Gemini response body preview (debug only)"
             );
             e
         })?;
