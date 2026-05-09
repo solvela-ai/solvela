@@ -181,6 +181,16 @@ impl UsageTracker {
         let id = Uuid::new_v4();
         let created_at = Utc::now();
 
+        // Session tokens are bearer-equivalent: anyone with a leaked log line
+        // can replay session-authenticated requests without paying. Log only
+        // an 8-char correlation prefix so entries can be matched without
+        // exposing the full token. Wallet pubkey, request_id, and tx_signature
+        // remain in full — they're public on-chain or correlation-only.
+        let session_prefix = entry
+            .session_id
+            .as_deref()
+            .map(|s| s.chars().take(8).collect::<String>())
+            .unwrap_or_else(|| "none".to_string());
         info!(
             wallet = %entry.wallet_address,
             model = %entry.model,
@@ -190,7 +200,7 @@ impl UsageTracker {
             cost_usdc = entry.cost_usdc,
             tx_signature = entry.tx_signature.as_deref().unwrap_or("none"),
             request_id = entry.request_id.as_deref().unwrap_or("none"),
-            session_id = entry.session_id.as_deref().unwrap_or("none"),
+            session_prefix = %session_prefix,
             "spend logged"
         );
 
