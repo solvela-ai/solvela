@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use metrics::gauge;
 use serde::Deserialize;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Lamports per SOL (1 SOL = 1_000_000_000 lamports).
 const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
@@ -184,7 +184,14 @@ impl BalanceMonitor {
                     );
                 }
                 AlertLevel::Healthy => {
-                    info!(
+                    // `debug!` (not `info!`): with a 5-minute check interval,
+                    // an INFO line per wallet streams the entire fee-payer
+                    // pool composition to log aggregators / SIEMs forever.
+                    // Solana pubkeys aren't secrets in isolation, but the
+                    // operator's full pool composition is sensitive infra
+                    // info. Warning/Critical branches stay at their current
+                    // levels — operators need those.
+                    debug!(
                         wallet = %result.wallet_pubkey,
                         balance_sol = %result.balance_sol,
                         lamports = result.lamports,

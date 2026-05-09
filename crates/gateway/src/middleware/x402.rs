@@ -13,12 +13,38 @@ use solvela_x402::types::PaymentPayload;
 use crate::AppState;
 
 /// Decoded payment information stored in request extensions.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually to redact the raw signed-transaction
+/// payload. The default derive would expose the full base64 transaction
+/// (and any embedded signatures) any time this struct is formatted via
+/// `{:?}` — e.g. through `tracing::debug!(?ext, ...)` on request
+/// extensions. Routes/handlers should never need the raw transaction in
+/// logs; if they do, log the parsed payload's fields explicitly.
+#[derive(Clone)]
 pub struct PaymentInfo {
     /// The decoded payment payload from the PAYMENT-SIGNATURE header.
     pub payload: PaymentPayload,
     /// The raw header value (for re-encoding if needed).
     pub raw_header: String,
+}
+
+impl std::fmt::Debug for PaymentInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Show enough metadata to be useful for debugging (network, scheme,
+        // resource URL) while redacting the raw transaction. The first 8
+        // chars of `raw_header` are kept as a correlation prefix so log
+        // entries can be matched up without exposing the full payload.
+        let raw_prefix: String = self.raw_header.chars().take(8).collect();
+        f.debug_struct("PaymentInfo")
+            .field("network", &self.payload.accepted.network)
+            .field("scheme", &self.payload.accepted.scheme)
+            .field("resource", &self.payload.resource.url)
+            .field(
+                "raw_header",
+                &format_args!("{raw_prefix}…[{} bytes redacted]", self.raw_header.len()),
+            )
+            .finish()
+    }
 }
 
 /// x402 payment extraction middleware.
@@ -195,5 +221,32 @@ mod tests {
             PayloadData::Direct(p) => assert_eq!(p.transaction, "base64encodedtx"),
             PayloadData::Escrow(_) => panic!("expected Direct variant"),
         }
+    }
+
+    /// Regression: `Debug` on `PaymentInfo` must redact the raw signed
+    /// transaction. The previous `#[derive(Debug)]` exposed the full
+    /// base64 transaction (including signatures) any time the struct was
+    /// formatted via `{:?}`.
+    #[test]
+    fn payment_info_debug_redacts_raw_header() {
+        let secret_tx = "AAAAAAAAAAAAAAAAAAAAAAA_super_secret_signed_tx_payload_AAAAAAAAAA";
+        let info = PaymentInfo {
+            payload: sample_payload(),
+            raw_header: secret_tx.to_string(),
+        };
+        let debug = format!("{info:?}");
+        assert!(
+            !debug.contains("super_secret_signed_tx_payload"),
+            "Debug output must NOT contain full raw_header: {debug}"
+        );
+        let expected_marker = format!("[{} bytes redacted]", secret_tx.len());
+        assert!(
+            debug.contains(&expected_marker),
+            "Debug output must indicate redaction with byte count {expected_marker:?}: {debug}"
+        );
+        // Useful metadata IS shown.
+        assert!(debug.contains("network"));
+        assert!(debug.contains("resource"));
+        assert!(debug.contains("/v1/chat/completions"));
     }
 }

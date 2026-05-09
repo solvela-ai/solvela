@@ -18,6 +18,19 @@ pub enum GatewayError {
     #[error("payment required")]
     PaymentRequired,
 
+    /// Inner string is forwarded to the client verbatim in the 402 response
+    /// body — used for both user-friendly error messages ("transaction has
+    /// already been used", "Payment verification failed", etc.) and the
+    /// serialized `PaymentRequired` challenge payload.
+    ///
+    /// Constructors MUST NOT pass through:
+    /// - raw provider/facilitator/RPC error bodies (those go through
+    ///   `ProviderError`/`SettlementFailed` which sanitize),
+    /// - internal hostnames/URLs,
+    /// - parser exception details that fingerprint the implementation.
+    ///
+    /// When in doubt, log the internal detail at `warn!` and return a
+    /// static safe-to-forward message here.
     #[error("invalid payment: {0}")]
     InvalidPayment(String),
 
