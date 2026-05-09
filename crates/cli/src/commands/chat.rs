@@ -49,7 +49,16 @@ pub async fn run(
     yes: bool,
     scheme: Option<&str>,
 ) -> Result<()> {
-    let client = reqwest::Client::new();
+    // Single client serves the gateway round-trip (which proxies LLM
+    // completions, ~30-90 s typical) and the Solana RPC calls
+    // (`solana_tx::*` helpers; ~1-5 s typical). The 180 s safety-net
+    // covers the slowest legitimate path. Without a timeout, a stalled
+    // gateway or RPC hangs the process indefinitely after the keypair
+    // has already been loaded and the transaction signed.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .context("failed to build HTTP client")?;
 
     let body = serde_json::json!({
         "model": model,
