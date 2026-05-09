@@ -17,6 +17,13 @@ use thiserror::Error;
 pub enum ServiceRegistryError {
     #[error("failed to parse services.toml: {0}")]
     ParseError(#[from] toml::de::Error),
+
+    #[error("invalid service entry '{id}': {source}")]
+    InvalidEntry {
+        id: String,
+        #[source]
+        source: RegistrationError,
+    },
 }
 
 /// Errors returned by `ServiceRegistry::register()`.
@@ -126,14 +133,19 @@ impl ServiceRegistry {
     }
 
     /// Parse a TOML string (content of `services.toml`) into a registry.
+    ///
+    /// Each entry is validated through the same checks `register()` enforces
+    /// (id format, name/category bounds, endpoint scheme, positive price).
+    /// A malformed entry causes the whole load to fail with
+    /// `ServiceRegistryError::InvalidEntry` — fail-closed beats serving an
+    /// unsafe registry.
     pub fn from_toml(toml_str: &str) -> Result<Self, ServiceRegistryError> {
         let raw: RawServices = toml::from_str(toml_str)?;
 
-        let mut services: Vec<ServiceEntry> = raw
-            .services
-            .into_iter()
-            .map(|(id, raw)| ServiceEntry {
-                id,
+        let mut services: Vec<ServiceEntry> = Vec::with_capacity(raw.services.len());
+        for (id, raw) in raw.services {
+            let entry = ServiceEntry {
+                id: id.clone(),
                 name: raw.name,
                 category: raw.category,
                 endpoint: raw.endpoint,
@@ -147,8 +159,13 @@ impl ServiceRegistry {
                 source: "config".to_string(),
                 healthy: None,
                 price_per_request_usdc: raw.price_per_request_usdc,
-            })
-            .collect();
+            };
+            validate_entry(&entry).map_err(|source| ServiceRegistryError::InvalidEntry {
+                id: id.clone(),
+                source,
+            })?;
+            services.push(entry);
+        }
 
         // Stable alphabetical order so response is deterministic.
         services.sort_by(|a, b| a.id.cmp(&b.id));
@@ -181,41 +198,11 @@ impl ServiceRegistry {
     /// Validates the entry and inserts it into the registry. Returns
     /// `Err(RegistrationError)` if validation fails or the ID is taken.
     pub fn register(&mut self, entry: ServiceEntry) -> Result<(), RegistrationError> {
-        // Validate id: non-empty, max 64, [a-z0-9\-] only
-        if entry.id.is_empty()
-            || entry.id.len() > 64
-            || !entry
-                .id
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        {
-            return Err(RegistrationError::InvalidId);
-        }
+        validate_entry(&entry)?;
 
-        // Check uniqueness
+        // Check uniqueness against the current registry.
         if self.services.iter().any(|s| s.id == entry.id) {
             return Err(RegistrationError::DuplicateId(entry.id));
-        }
-
-        // Validate name
-        if entry.name.is_empty() || entry.name.len() > 128 {
-            return Err(RegistrationError::InvalidName);
-        }
-
-        // Validate category
-        if entry.category.is_empty() || entry.category.len() > 32 {
-            return Err(RegistrationError::InvalidCategory);
-        }
-
-        // Validate endpoint
-        if !entry.endpoint.starts_with("https://") {
-            return Err(RegistrationError::InvalidEndpoint);
-        }
-
-        // Validate price
-        match entry.price_per_request_usdc {
-            Some(price) if price > 0.0 => {}
-            _ => return Err(RegistrationError::InvalidPrice),
         }
 
         self.services.push(entry);
@@ -224,7 +211,62 @@ impl ServiceRegistry {
 
         Ok(())
     }
+}
 
+/// Validate a `ServiceEntry`'s field values without checking uniqueness.
+///
+/// Single source of truth for both `from_toml` (load-time) and `register()`
+/// (runtime registration) so a malformed `services.toml` cannot bypass the
+/// checks runtime registration enforces.
+///
+/// Internal services (`internal == true`) use relative paths like
+/// `/v1/chat/completions` for their `endpoint`; external services must use
+/// HTTPS absolute URLs.
+fn validate_entry(entry: &ServiceEntry) -> Result<(), RegistrationError> {
+    // id: non-empty, max 64, [a-z0-9-] only
+    if entry.id.is_empty()
+        || entry.id.len() > 64
+        || !entry
+            .id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(RegistrationError::InvalidId);
+    }
+
+    // name
+    if entry.name.is_empty() || entry.name.len() > 128 {
+        return Err(RegistrationError::InvalidName);
+    }
+
+    // category
+    if entry.category.is_empty() || entry.category.len() > 32 {
+        return Err(RegistrationError::InvalidCategory);
+    }
+
+    // endpoint — HTTPS-only for external; relative path for internal.
+    if entry.internal {
+        if !entry.endpoint.starts_with('/') {
+            return Err(RegistrationError::InvalidEndpoint);
+        }
+    } else if !entry.endpoint.starts_with("https://") {
+        return Err(RegistrationError::InvalidEndpoint);
+    }
+
+    // Price — only required for external services. Internal services are
+    // billed per-token via the chat pipeline, so `price_per_request_usdc`
+    // is optional for them.
+    if !entry.internal {
+        match entry.price_per_request_usdc {
+            Some(price) if price > 0.0 => {}
+            _ => return Err(RegistrationError::InvalidPrice),
+        }
+    }
+
+    Ok(())
+}
+
+impl ServiceRegistry {
     /// Update the health status for a service by ID.
     ///
     /// Returns `true` if the service was found (and updated), `false` otherwise.
@@ -480,5 +522,91 @@ internal = true
             registry.register(entry),
             Err(RegistrationError::InvalidPrice)
         );
+    }
+
+    /// Regression for the SSRF gap where `from_toml` skipped validation:
+    /// loading a `services.toml` with an `http://` endpoint for an
+    /// external service must now fail, not be silently accepted.
+    #[test]
+    fn from_toml_rejects_external_service_with_http_endpoint() {
+        let bad = r#"
+[services.bad-external]
+name = "Bad External"
+endpoint = "http://10.0.0.1/internal"
+category = "data"
+x402_enabled = true
+internal = false
+pricing_label = "$0.001"
+price_per_request_usdc = 0.001
+"#;
+        let err = ServiceRegistry::from_toml(bad).expect_err("must reject http external endpoint");
+        match err {
+            ServiceRegistryError::InvalidEntry { id, source } => {
+                assert_eq!(id, "bad-external");
+                assert_eq!(source, RegistrationError::InvalidEndpoint);
+            }
+            other => panic!("expected InvalidEntry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_toml_rejects_external_service_with_zero_price() {
+        let bad = r#"
+[services.zero-price]
+name = "Zero Price"
+endpoint = "https://example.com/api"
+category = "data"
+x402_enabled = true
+internal = false
+pricing_label = "$0"
+price_per_request_usdc = 0.0
+"#;
+        let err = ServiceRegistry::from_toml(bad).expect_err("must reject zero price");
+        match err {
+            ServiceRegistryError::InvalidEntry { id, source } => {
+                assert_eq!(id, "zero-price");
+                assert_eq!(source, RegistrationError::InvalidPrice);
+            }
+            other => panic!("expected InvalidEntry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_toml_rejects_invalid_id_charset() {
+        // Capital letters and other non-allowlist chars must be rejected.
+        let bad = r#"
+[services."BadId"]
+name = "Bad"
+endpoint = "https://example.com/api"
+category = "data"
+x402_enabled = true
+internal = false
+pricing_label = "$0.001"
+price_per_request_usdc = 0.001
+"#;
+        let err = ServiceRegistry::from_toml(bad).expect_err("must reject invalid id");
+        match err {
+            ServiceRegistryError::InvalidEntry { source, .. } => {
+                assert_eq!(source, RegistrationError::InvalidId);
+            }
+            other => panic!("expected InvalidEntry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_toml_accepts_internal_service_without_price() {
+        // Internal services are billed per-token via the chat pipeline; their
+        // `price_per_request_usdc` is optional and a missing field must NOT
+        // cause from_toml to reject the entry.
+        let ok = r#"
+[services.llm-gateway]
+name = "LLM Intelligence"
+endpoint = "/v1/chat/completions"
+category = "intelligence"
+x402_enabled = true
+internal = true
+"#;
+        let registry = ServiceRegistry::from_toml(ok).expect("internal-without-price must load");
+        assert_eq!(registry.all().len(), 1);
     }
 }

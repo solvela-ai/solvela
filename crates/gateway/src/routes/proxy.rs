@@ -468,8 +468,15 @@ pub async fn proxy_service(
 
     // Build a per-request client that pins the validated DNS resolution,
     // preventing DNS rebinding between the SSRF check and the connection.
+    //
+    // `redirect::Policy::none()` is critical: reqwest's default policy follows
+    // up to 10 redirects, each with a fresh DNS lookup that bypasses the
+    // `.resolve()` pin AND `resolve_and_validate_endpoint`. Without this,
+    // a `302 Location: http://169.254.169.254/...` from a registered upstream
+    // would land us inside cloud metadata or other internal infrastructure.
     let pinned_client = reqwest::Client::builder()
         .resolve(&validated_host, validated_addr)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| GatewayError::Internal(format!("HTTP client error: {e}")))?;
 
@@ -977,11 +984,18 @@ mod tests {
         use solvela_x402::facilitator::Facilitator;
 
         let mut reg = ServiceRegistry::empty();
+        // Endpoint shape must match the validator's rule: internal services
+        // use a relative path; external services use an absolute https URL.
+        let endpoint = if internal {
+            "/v1/test".to_string()
+        } else {
+            "https://test.example.com/api".to_string()
+        };
         reg.register(ServiceEntry {
             id: "test-svc".to_string(),
             name: "Test Service".to_string(),
             category: "test".to_string(),
-            endpoint: "https://test.example.com/api".to_string(),
+            endpoint,
             x402_enabled,
             internal,
             description: None,
