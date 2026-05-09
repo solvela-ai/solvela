@@ -1,0 +1,29 @@
+# cargo-audit configuration
+# https://docs.rs/cargo-audit/latest/cargo_audit/
+
+[advisories]
+# Ignore advisories that are known to be unreachable in our build.
+# Each entry MUST include a notes block in this file's comments
+# explaining why the advisory does not affect us, and how to verify
+# the unreachability claim.
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin Attack timing sidechannel in `rsa 0.9.x`.
+    #
+    # Path: rsa <- sqlx-mysql <- sqlx-macros-core <- sqlx-macros <- sqlx
+    #
+    # We use sqlx with `default-features = false, features = ["postgres", ...]`
+    # (see workspace Cargo.toml). `sqlx-macros-core 0.8.6` declares
+    # `sqlx-mysql` as an OPTIONAL dependency (gated behind the `mysql`
+    # feature, which we do not enable). cargo-audit reads `Cargo.lock`
+    # without applying feature gates, so it reports `sqlx-mysql` (and
+    # transitively `rsa`) as present even though they are never compiled.
+    #
+    # Verify: `find target/{debug,release}/deps -name '*sqlx_mysql*'` is
+    # empty in any of our builds. No `rsa` symbol appears in the gateway
+    # binary.
+    #
+    # If sqlx upstream stops listing `sqlx-mysql` unconditionally in
+    # `sqlx-macros-core`'s deps block (or releases an `rsa` upgrade),
+    # remove this ignore.
+    "RUSTSEC-2023-0071",
+]
