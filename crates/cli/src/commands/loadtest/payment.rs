@@ -254,10 +254,8 @@ impl PaymentStrategy for EscrowPaymentStrategy {
         let current_slot = fetch_current_slot(&self.rpc_url, &self.rpc_client)
             .await
             .context("failed to fetch current slot for escrow expiry")?;
-        let expiry_slot = crate::commands::util::escrow_expiry_slot(
-            current_slot,
-            accepted.max_timeout_seconds,
-        );
+        let expiry_slot =
+            crate::commands::util::escrow_expiry_slot(current_slot, accepted.max_timeout_seconds);
 
         // Build and sign the escrow deposit transaction.
         let deposit_tx = build_escrow_deposit(

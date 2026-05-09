@@ -287,12 +287,28 @@ pub async fn run_install(args: InstallArgs) -> Result<()> {
         );
     }
 
-    // Resolve wallet address: explicit arg > wallet.json > emit a note
+    // Resolve wallet address: explicit arg > wallet.json > emit a note.
+    //
+    // The explicit `--wallet` flag is already gated by `value_parser =
+    // validate_wallet`; the on-disk path was not. Re-validate the loaded
+    // address before it flows into `claude mcp add -e SOLANA_WALLET_ADDRESS=...`
+    // — a hand-edited or attacker-placed wallet file with an embedded
+    // newline would otherwise smuggle an extra `-e` env var into the
+    // child process and could persist into the user's Claude Code config.
     let wallet_address = if let Some(w) = args.wallet {
         Some(w)
     } else {
         match load_wallet() {
-            Ok(wallet) => wallet["address"].as_str().map(str::to_owned),
+            Ok(wallet) => match wallet["address"].as_str() {
+                Some(addr) => Some(validate_wallet(addr).map_err(|e| {
+                    anyhow::anyhow!(
+                        "wallet.json contains an invalid address: {}. \
+                         Re-run 'solvela wallet init' or pass --wallet=<pubkey> explicitly.",
+                        e
+                    )
+                })?),
+                None => None,
+            },
             Err(_) => {
                 eprintln!(
                     "Note: no wallet found at ~/.solvela/wallet.json. \
