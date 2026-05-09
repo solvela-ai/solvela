@@ -3,7 +3,14 @@ use serde::{Deserialize, Serialize};
 use crate::cost::CostBreakdown;
 
 /// Describes a resource that requires payment.
+///
+/// `deny_unknown_fields`: the field set is fully owned by this codebase
+/// and the x402 spec; rejecting unknown keys at parse time prevents
+/// clients from stuffing extra metadata into the inbound
+/// `PaymentPayload.resource` where the gateway might later start reading
+/// it without realizing it's unvalidated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Resource {
     /// The URL path of the resource.
     pub url: String,
@@ -13,6 +20,7 @@ pub struct Resource {
 
 /// Describes an accepted payment method.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PaymentAccept {
     /// Payment scheme (e.g., "exact", "escrow").
     pub scheme: String,
@@ -34,6 +42,7 @@ pub struct PaymentAccept {
 
 /// The full 402 Payment Required response body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PaymentRequired {
     pub x402_version: u8,
     pub resource: Resource,
@@ -44,13 +53,24 @@ pub struct PaymentRequired {
 
 /// Solana-specific payment data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SolanaPayload {
     /// Base64-encoded signed versioned transaction.
     pub transaction: String,
 }
 
 /// Escrow-specific payment payload (scheme = "escrow").
+///
+/// `deny_unknown_fields` interacts with the parent `PayloadData` enum's
+/// `untagged` deserialization to reject ambiguous payloads: a client that
+/// sends both `transaction` (Direct's field) and `deposit_tx` (Escrow's
+/// fields) used to silently deserialize as `Escrow` because Escrow had
+/// all required fields. With `deny_unknown_fields` Escrow now rejects
+/// the extra `transaction` key, and untagged falls through to Direct
+/// (which then rejects the extra `deposit_tx`), so the ambiguous case
+/// errors out at parse time instead of silently picking one variant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EscrowPayload {
     /// Base64-encoded signed deposit transaction (Solana versioned tx).
     pub deposit_tx: String,
@@ -73,6 +93,7 @@ pub enum PayloadData {
 
 /// The payment payload sent in the `PAYMENT-SIGNATURE` header.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PaymentPayload {
     pub x402_version: u8,
     pub resource: Resource,
