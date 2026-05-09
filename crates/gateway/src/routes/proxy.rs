@@ -932,4 +932,413 @@ mod tests {
             "error message must indicate service degradation, got: {message}"
         );
     }
+
+    // ---------------------------------------------------------------------
+    // Validation / lookup branch coverage
+    //
+    // Each test calls `proxy_service` directly (no Router) and asserts on
+    // the GatewayError variant. Tests cover:
+    //   - service registry lookup misses + service-config rejections
+    //   - 402 with PaymentRequired body when no header is present
+    //   - PAYMENT-SIGNATURE encoding / decode failures
+    //   - every payment-payload field validation gate
+    //   - scheme/payload mismatch detection
+    //   - facilitator failure (empty verifier list)
+    //   - in-memory replay detection (non-durable-nonce path)
+    // ---------------------------------------------------------------------
+
+    use crate::services::{ServiceEntry, ServiceRegistry};
+    use crate::AppState;
+    use axum::body::Body;
+    use axum::extract::{Path, State};
+    use axum::http::HeaderMap;
+    use base64::Engine;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// Construct an AppState with a single configured service.
+    /// Service id is always "test-svc"; tunable fields:
+    /// - `price`: `price_per_request_usdc` (None = no pricing)
+    /// - `internal`: rejects with "use /v1/chat/completions"
+    /// - `x402_enabled`: rejects with "service does not support x402 payments"
+    /// - `healthy`: `Some(false)` returns 503; `Some(true)` and `None` proceed
+    fn make_state_with_service(
+        price: Option<f64>,
+        internal: bool,
+        x402_enabled: bool,
+        healthy: Option<bool>,
+    ) -> Arc<AppState> {
+        use crate::config::AppConfig;
+        use crate::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
+        use crate::providers::ProviderRegistry;
+        use crate::routes::escrow::new_slot_cache;
+        use crate::usage::UsageTracker;
+        use solvela_router::models::ModelRegistry;
+        use solvela_x402::facilitator::Facilitator;
+
+        let mut reg = ServiceRegistry::empty();
+        reg.register(ServiceEntry {
+            id: "test-svc".to_string(),
+            name: "Test Service".to_string(),
+            category: "test".to_string(),
+            endpoint: "https://test.example.com/api".to_string(),
+            x402_enabled,
+            internal,
+            description: None,
+            pricing_label: "per-request".to_string(),
+            chains: vec!["solana".to_string()],
+            source: "api".to_string(),
+            healthy,
+            price_per_request_usdc: price,
+        })
+        .expect("valid test service entry");
+
+        Arc::new(AppState {
+            config: AppConfig::default(),
+            model_registry: ModelRegistry::from_toml(
+                "[models.placeholder]\nprovider=\"t\"\nmodel_id=\"t\"\ndisplay_name=\"T\"\n\
+                 input_cost_per_million=1.0\noutput_cost_per_million=1.0\ncontext_window=4096\n\
+                 supports_streaming=false\nsupports_tools=false\nsupports_vision=false",
+            )
+            .expect("valid placeholder model TOML"),
+            service_registry: RwLock::new(reg),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator: Facilitator::new(vec![]),
+            usage: UsageTracker::noop(),
+            cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            prometheus_handle: None,
+            dev_bypass_payment: false,
+        })
+    }
+
+    /// Build a structurally-valid PaymentPayload for `service_id` at $0.01
+    /// (10_500 atomic with 5% fee). Caller can mutate the returned value
+    /// to corrupt one field per test.
+    fn valid_payload(service_id: &str) -> solvela_x402::types::PaymentPayload {
+        solvela_x402::types::PaymentPayload {
+            x402_version: 1,
+            resource: solvela_x402::types::Resource {
+                url: format!("/v1/services/{service_id}/proxy"),
+                method: "POST".to_string(),
+            },
+            accepted: solvela_x402::types::PaymentAccept {
+                scheme: "exact".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "10500".to_string(),
+                asset: USDC_MINT.to_string(),
+                // AppConfig::default().solana.recipient_wallet is empty by default.
+                pay_to: String::new(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: solvela_x402::types::PayloadData::Direct(solvela_x402::types::SolanaPayload {
+                transaction: format!("test_tx_{}", uuid::Uuid::new_v4().simple()),
+            }),
+        }
+    }
+
+    fn payload_to_header(p: &solvela_x402::types::PaymentPayload) -> String {
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(p).expect("ser"))
+    }
+
+    fn make_headers_with_payment(p: &solvela_x402::types::PaymentPayload) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "payment-signature",
+            payload_to_header(p).parse().expect("ascii"),
+        );
+        h
+    }
+
+    /// Convenience: drive `proxy_service` directly and unwrap the error variant.
+    async fn call_expect_err(
+        state: Arc<AppState>,
+        service_id: &str,
+        headers: HeaderMap,
+    ) -> GatewayError {
+        proxy_service(
+            State(state),
+            Path(service_id.to_string()),
+            headers,
+            Body::empty(),
+        )
+        .await
+        .expect_err("expected GatewayError")
+    }
+
+    // ── Lookup / config rejections ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn proxy_returns_404_when_service_not_found() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let err = call_expect_err(state, "missing-svc", HeaderMap::new()).await;
+        assert!(
+            matches!(err, GatewayError::ModelNotFound(ref m) if m.contains("missing-svc")),
+            "expected ModelNotFound, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_internal_service() {
+        let state = make_state_with_service(Some(0.01), /*internal=*/ true, true, None);
+        let err = call_expect_err(state, "test-svc", HeaderMap::new()).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m) if m.contains("internal")),
+            "expected BadRequest about internal services, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_service_without_x402() {
+        let state = make_state_with_service(Some(0.01), false, /*x402_enabled=*/ false, None);
+        let err = call_expect_err(state, "test-svc", HeaderMap::new()).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m) if m.contains("x402")),
+            "expected BadRequest about x402 support, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_returns_503_for_unhealthy_service() {
+        let state = make_state_with_service(Some(0.01), false, true, Some(false));
+        let response = proxy_service(
+            State(state),
+            Path("test-svc".to_string()),
+            HeaderMap::new(),
+            Body::empty(),
+        )
+        .await
+        .expect("unhealthy must return Ok(503), not GatewayError");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // Note: the "no price configured" branch in proxy_service is defensive
+    // against corrupt TOML state. ServiceRegistry::register rejects
+    // price=None with InvalidPrice, so it can't be exercised without
+    // bypassing the registry's validated entry path.
+
+    // ── Payment header gating ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn proxy_returns_402_with_payment_required_when_no_header() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let err = call_expect_err(state, "test-svc", HeaderMap::new()).await;
+        match err {
+            GatewayError::InvalidPayment(body) => {
+                let json: serde_json::Value =
+                    serde_json::from_str(&body).expect("body must be PaymentRequired JSON");
+                assert_eq!(json["accepts"][0]["amount"], "10500");
+                assert_eq!(json["accepts"][0]["asset"], USDC_MINT);
+                assert_eq!(json["cost_breakdown"]["currency"], "USDC");
+            }
+            other => panic!("expected InvalidPayment with PaymentRequired body, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_non_ascii_payment_header() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let mut headers = HeaderMap::new();
+        // \xff is not valid UTF-8 / ASCII — to_str() fails on the value.
+        headers.insert(
+            "payment-signature",
+            axum::http::HeaderValue::from_bytes(b"\xff").expect("raw bytes"),
+        );
+        let err = call_expect_err(state, "test-svc", headers).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m) if m.contains("encoding")),
+            "expected BadRequest about header encoding, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_undecodable_payment_header() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let mut headers = HeaderMap::new();
+        headers.insert("payment-signature", "not-a-payment".parse().expect("ascii"));
+        let err = call_expect_err(state, "test-svc", headers).await;
+        assert!(
+            matches!(err, GatewayError::InvalidPayment(_)),
+            "expected InvalidPayment from decode failure, got {err:?}"
+        );
+    }
+
+    // ── Per-field payload validation ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn proxy_rejects_payment_with_wrong_resource_url() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let mut p = valid_payload("test-svc");
+        p.resource.url = "/v1/services/other-svc/proxy".to_string();
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::InvalidPayment(ref m) if m.contains("does not match")),
+            "expected InvalidPayment about resource mismatch, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_payment_with_wrong_method() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let mut p = valid_payload("test-svc");
+        p.resource.method = "GET".to_string();
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m) if m.contains("POST")),
+            "expected BadRequest about method, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_payment_with_wrong_network() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let mut p = valid_payload("test-svc");
+        p.accepted.network = "ethereum:mainnet".to_string();
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m) if m.contains("network")),
+            "expected BadRequest about network, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_payment_with_wrong_asset() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let mut p = valid_payload("test-svc");
+        p.accepted.asset = "FakeMint11111111111111111111111111111111111".to_string();
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m) if m.contains("USDC mint")),
+            "expected BadRequest about asset/USDC mint, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_payment_with_wrong_pay_to() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let mut p = valid_payload("test-svc");
+        p.accepted.pay_to = "WrongRecipientWallet1111111111111111111111".to_string();
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m) if m.contains("pay_to")),
+            "expected BadRequest about pay_to, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_payment_with_unparseable_amount() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let mut p = valid_payload("test-svc");
+        p.accepted.amount = "not-a-number".to_string();
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m) if m.contains("amount format")),
+            "expected BadRequest about amount format, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_payment_with_insufficient_amount() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let mut p = valid_payload("test-svc");
+        p.accepted.amount = "10000".to_string(); // expected is 10_500
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m) if m.contains("insufficient")),
+            "expected BadRequest about insufficient amount, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_exact_scheme_with_escrow_payload() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let mut p = valid_payload("test-svc");
+        // scheme="exact" but payload is escrow-shaped — must reject.
+        p.payload = solvela_x402::types::PayloadData::Escrow(solvela_x402::types::EscrowPayload {
+            deposit_tx: "dGVzdA==".to_string(),
+            service_id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+            agent_pubkey: "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz".to_string(),
+        });
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m) if m.contains("exact") && m.contains("escrow")),
+            "expected BadRequest about scheme/payload mismatch, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_escrow_scheme_with_direct_payload() {
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let mut p = valid_payload("test-svc");
+        p.accepted.scheme = "escrow".to_string();
+        // payload is still Direct — must reject for the inverse mismatch.
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m) if m.contains("escrow") && m.contains("direct")),
+            "expected BadRequest about escrow/direct mismatch, got {err:?}"
+        );
+    }
+
+    // ── Replay + facilitator path ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn proxy_facilitator_failure_returns_invalid_payment() {
+        // With Facilitator::new(vec![]) the verify call fails → InvalidPayment
+        // with the GHSA-cgqx-mg48-949v sanitized error message.
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let p = valid_payload("test-svc");
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        match err {
+            GatewayError::InvalidPayment(msg) => {
+                assert!(msg.contains("verification failed"), "msg: {msg}");
+                assert!(
+                    !msg.contains("verifier"),
+                    "must not leak verifier internals: {msg}"
+                );
+            }
+            other => panic!("expected InvalidPayment from empty facilitator, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_in_memory_replay_rejects_second_use_of_same_tx() {
+        // Standard (non-durable-nonce) tx_raw goes through the in-memory LRU
+        // when cache is None. First call fails verification but records the tx;
+        // second call short-circuits at the replay-detected branch.
+        let state = make_state_with_service(Some(0.01), false, true, None);
+        let p = valid_payload("test-svc");
+
+        let first = call_expect_err(
+            Arc::clone(&state),
+            "test-svc",
+            make_headers_with_payment(&p),
+        )
+        .await;
+        assert!(
+            matches!(first, GatewayError::InvalidPayment(_)),
+            "first call must reach verification (which fails), got {first:?}"
+        );
+
+        let second = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        match second {
+            GatewayError::InvalidPayment(msg) => {
+                assert!(
+                    msg.contains("already been used"),
+                    "second call must hit replay-detected branch, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidPayment from replay, got {other:?}"),
+        }
+    }
 }
