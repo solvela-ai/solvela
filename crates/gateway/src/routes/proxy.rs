@@ -239,9 +239,14 @@ pub async fn proxy_service(
     // Step 4: Payment present — decode and verify
     let raw_header = payment_header.expect("checked above");
     let payload = decode_payment_header(raw_header).map_err(|e| {
-        GatewayError::InvalidPayment(format!(
-            "PAYMENT-SIGNATURE header could not be decoded: {e}"
-        ))
+        // Don't echo the parser error — log it internally and return a
+        // sanitized message. See `GatewayError::InvalidPayment` doc.
+        warn!(error = %e, "PAYMENT-SIGNATURE header decode failed (proxy)");
+        GatewayError::InvalidPayment(
+            "PAYMENT-SIGNATURE header could not be decoded. \
+             Encode a valid PaymentPayload as standard base64 JSON."
+                .to_string(),
+        )
     })?;
 
     // Validate resource URL matches this proxy endpoint
