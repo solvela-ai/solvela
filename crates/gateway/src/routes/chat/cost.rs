@@ -558,43 +558,18 @@ supports_vision = false
         assert!(result.unwrap() > 0, "valid cost should be positive");
     }
 
-    #[test]
-    fn test_estimated_atomic_cost_rejects_nan() {
-        let reg = registry_with_cost(f64::NAN);
-        let result = estimated_atomic_cost(&reg, "test-model", &simple_req());
-        // NaN cost_per_million propagates to a NaN total; estimated_atomic_cost
-        // must reject it rather than silently cast NaN→0.
-        match result {
-            Err(e) => assert!(
-                e.contains("non-finite") || e.contains("NaN") || e.contains("failed"),
-                "error should mention non-finite or NaN, got: {e}"
-            ),
-            Ok(v) => panic!("NaN cost must not produce Ok({v})"),
-        }
-    }
-
-    #[test]
-    fn test_estimated_atomic_cost_rejects_positive_infinity() {
-        let reg = registry_with_cost(f64::INFINITY);
-        let result = estimated_atomic_cost(&reg, "test-model", &simple_req());
-        match result {
-            Err(e) => assert!(
-                e.contains("non-finite") || e.contains("inf") || e.contains("failed"),
-                "error should mention non-finite or infinity, got: {e}"
-            ),
-            Ok(v) => panic!("INFINITY cost must not produce Ok({v})"),
-        }
-    }
-
-    #[test]
-    fn test_estimated_atomic_cost_rejects_negative_infinity() {
-        let reg = registry_with_cost(f64::NEG_INFINITY);
-        let result = estimated_atomic_cost(&reg, "test-model", &simple_req());
-        match result {
-            Err(_) => {} // expected — non-finite or negative check
-            Ok(v) => panic!("-INFINITY cost must not produce Ok({v})"),
-        }
-    }
+    // R1 note: tests asserting NaN/+Inf/-Inf input through `registry_with_cost`
+    // were removed because PR-R1 added a load-time validator in
+    // `solvela_router::models::from_toml` that rejects non-finite and
+    // negative pricing at the source — `registry_with_cost(f64::NAN)` now
+    // panics at the `from_toml(...)` step, so those test inputs are
+    // unreachable at this layer. The router crate carries equivalent
+    // coverage in `from_toml_rejects_nan_negative_and_infinite_pricing`.
+    //
+    // The downstream `estimated_atomic_cost` guard is retained as
+    // defense-in-depth: it still catches the case where finite inputs
+    // produce a non-finite intermediate via arithmetic overflow (the
+    // surviving overflow test below).
 
     #[test]
     fn test_estimated_atomic_cost_rejects_overflow() {
