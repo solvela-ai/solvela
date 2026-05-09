@@ -16,7 +16,12 @@ pub enum ModelRegistryError {
 }
 
 /// TOML-deserialized model entry from `config/models.toml`.
+///
+/// `deny_unknown_fields` catches typos at startup — pre-fix, a typo like
+/// `input_cost_per_milion = 2.50` would silently leave the real field
+/// at its default (zero) and produce a $0 cost quote.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelEntry {
     pub provider: String,
     pub model_id: String,
@@ -42,46 +47,104 @@ pub struct ModelEntry {
 
 /// TOML top-level structure: `[models.<id>]`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelsConfig {
     pub models: HashMap<String, ModelEntry>,
 }
 
 /// In-memory model registry loaded from TOML config.
+#[derive(Debug)]
 pub struct ModelRegistry {
     models: HashMap<String, ModelInfo>,
 }
 
 impl ModelRegistry {
     /// Load the registry from a TOML string (contents of `config/models.toml`).
+    ///
+    /// Validation pass at load time rejects:
+    /// - Non-finite (`NaN`/`±∞`) or negative `input_cost_per_million` /
+    ///   `output_cost_per_million`. Without this guard, a corrupt TOML
+    ///   entry would silently propagate `NaN` through `estimate_cost` and
+    ///   ultimately result in a `$0` quote (gateway PR #191 fixed the
+    ///   downstream cast in `compute_actual_atomic_cost`; this is the
+    ///   upstream guard at config-load time).
+    /// - Duplicate canonical keys (`provider/model_id`) where the two
+    ///   entries have **different** pricing. Equal-pricing duplicates are
+    ///   allowed because the TOML lets operators name the same underlying
+    ///   provider model under two human-friendly aliases.
     pub fn from_toml(toml_str: &str) -> Result<Self, ModelRegistryError> {
         let config: ModelsConfig =
             toml::from_str(toml_str).map_err(|e| ModelRegistryError::ParseError(e.to_string()))?;
 
-        let models = config
-            .models
-            .into_iter()
-            .flat_map(|(key, entry)| {
-                let id = format!("{}/{}", entry.provider, entry.model_id);
-                let info = ModelInfo {
-                    id: id.clone(),
-                    provider: entry.provider,
-                    model_id: entry.model_id,
-                    display_name: entry.display_name,
-                    input_cost_per_million: entry.input_cost_per_million,
-                    output_cost_per_million: entry.output_cost_per_million,
-                    context_window: entry.context_window,
-                    supports_streaming: entry.supports_streaming,
-                    supports_tools: entry.supports_tools,
-                    supports_vision: entry.supports_vision,
-                    reasoning: entry.reasoning,
-                    supports_structured_output: entry.supports_structured_output,
-                    supports_batch: entry.supports_batch,
-                    max_output_tokens: entry.max_output_tokens,
-                };
-                // Register under both the key and the canonical id
-                vec![(key, info.clone()), (id, info)]
-            })
-            .collect();
+        // Validation pass: every entry must have finite, non-negative pricing.
+        for (key, entry) in &config.models {
+            if !entry.input_cost_per_million.is_finite() || entry.input_cost_per_million < 0.0 {
+                return Err(ModelRegistryError::ParseError(format!(
+                    "model {key:?}: input_cost_per_million must be finite and non-negative, got {}",
+                    entry.input_cost_per_million
+                )));
+            }
+            if !entry.output_cost_per_million.is_finite() || entry.output_cost_per_million < 0.0 {
+                return Err(ModelRegistryError::ParseError(format!(
+                    "model {key:?}: output_cost_per_million must be finite and non-negative, got {}",
+                    entry.output_cost_per_million
+                )));
+            }
+        }
+
+        // Build the registry. Each entry is registered under both its TOML
+        // key and the canonical `provider/model_id`, so a single model is
+        // typically reachable via two lookup keys. Two TOML entries that
+        // reduce to the same canonical key are tolerated only when their
+        // pricing matches — otherwise the silent last-write-wins behavior
+        // of `HashMap::collect` would non-deterministically pick one.
+        let mut models: HashMap<String, ModelInfo> = HashMap::new();
+        for (key, entry) in config.models {
+            let id = format!("{}/{}", entry.provider, entry.model_id);
+            let info = ModelInfo {
+                id: id.clone(),
+                provider: entry.provider,
+                model_id: entry.model_id,
+                display_name: entry.display_name,
+                input_cost_per_million: entry.input_cost_per_million,
+                output_cost_per_million: entry.output_cost_per_million,
+                context_window: entry.context_window,
+                supports_streaming: entry.supports_streaming,
+                supports_tools: entry.supports_tools,
+                supports_vision: entry.supports_vision,
+                reasoning: entry.reasoning,
+                supports_structured_output: entry.supports_structured_output,
+                supports_batch: entry.supports_batch,
+                max_output_tokens: entry.max_output_tokens,
+            };
+
+            // Reject canonical-key collisions only when they would change
+            // the resolved pricing.
+            if let Some(existing) = models.get(&id) {
+                let pricing_matches =
+                    (existing.input_cost_per_million - info.input_cost_per_million).abs()
+                        < f64::EPSILON
+                        && (existing.output_cost_per_million - info.output_cost_per_million).abs()
+                            < f64::EPSILON;
+                if !pricing_matches {
+                    return Err(ModelRegistryError::ParseError(format!(
+                        "duplicate canonical key {id:?} with conflicting pricing: \
+                         entry {key:?} has input={}/output={} but a previous entry \
+                         registered input={}/output={}",
+                        info.input_cost_per_million,
+                        info.output_cost_per_million,
+                        existing.input_cost_per_million,
+                        existing.output_cost_per_million
+                    )));
+                }
+            }
+
+            // TOML key gets its own entry too (legacy). It's expected to be
+            // unique per TOML — `toml::from_str` into HashMap already
+            // enforces that — so no collision check is needed here.
+            models.insert(key, info.clone());
+            models.insert(id, info);
+        }
 
         Ok(Self { models })
     }
@@ -225,5 +288,152 @@ supports_streaming = true
         let registry = ModelRegistry::from_toml(TEST_TOML).unwrap();
         let all = registry.all();
         assert_eq!(all.len(), 2);
+    }
+
+    /// R1 regression: NaN/Infinity/negative pricing must be rejected at
+    /// load time, not silently propagated through `estimate_cost` to the
+    /// chat path's f64-as-u64 saturating cast.
+    #[test]
+    fn from_toml_rejects_nan_negative_and_infinite_pricing() {
+        for (label, body) in [
+            (
+                "NaN input cost",
+                r#"
+[models.bad]
+provider = "test"
+model_id = "bad"
+display_name = "Bad"
+input_cost_per_million = nan
+output_cost_per_million = 1.0
+context_window = 4096
+"#,
+            ),
+            (
+                "Infinity output cost",
+                r#"
+[models.bad]
+provider = "test"
+model_id = "bad"
+display_name = "Bad"
+input_cost_per_million = 1.0
+output_cost_per_million = inf
+context_window = 4096
+"#,
+            ),
+            (
+                "negative input cost",
+                r#"
+[models.bad]
+provider = "test"
+model_id = "bad"
+display_name = "Bad"
+input_cost_per_million = -0.50
+output_cost_per_million = 1.0
+context_window = 4096
+"#,
+            ),
+        ] {
+            let err =
+                ModelRegistry::from_toml(body).expect_err(&format!("{label} must be rejected"));
+            match err {
+                ModelRegistryError::ParseError(msg) => {
+                    assert!(
+                        msg.contains("input_cost_per_million")
+                            || msg.contains("output_cost_per_million"),
+                        "{label}: error must name the offending field, got: {msg}"
+                    );
+                }
+                other => panic!("{label}: expected ParseError, got {other:?}"),
+            }
+        }
+    }
+
+    /// R1 regression: an unknown TOML field (e.g. typo `input_cost_per_milion`)
+    /// must error at load, not silently default the real field to zero.
+    #[test]
+    fn from_toml_rejects_unknown_field_typo() {
+        let body = r#"
+[models.typo]
+provider = "test"
+model_id = "typo"
+display_name = "Typo"
+input_cost_per_milion = 2.50
+output_cost_per_million = 5.00
+context_window = 4096
+"#;
+        let err = ModelRegistry::from_toml(body)
+            .expect_err("unknown field must be rejected by deny_unknown_fields");
+        let msg = match err {
+            ModelRegistryError::ParseError(m) => m,
+            other => panic!("expected ParseError, got {other:?}"),
+        };
+        assert!(
+            msg.contains("unknown") || msg.contains("input_cost_per_milion"),
+            "error must surface the unknown field, got: {msg}"
+        );
+    }
+
+    /// R1 regression: two entries with the same canonical key but
+    /// **different** pricing must be rejected. Equal-pricing duplicates
+    /// are allowed (this is what the production `claude-sonnet-4-6` /
+    /// `claude-sonnet-4-5` pair was relying on; either entry is safe to
+    /// land in the registry first because the resolved pricing is
+    /// identical).
+    #[test]
+    fn from_toml_rejects_canonical_collision_with_conflicting_pricing() {
+        let body = r#"
+[models.first]
+provider = "test"
+model_id = "shared"
+display_name = "First"
+input_cost_per_million = 1.00
+output_cost_per_million = 2.00
+context_window = 4096
+
+[models.second]
+provider = "test"
+model_id = "shared"
+display_name = "Second"
+input_cost_per_million = 9.99
+output_cost_per_million = 2.00
+context_window = 4096
+"#;
+        let err = ModelRegistry::from_toml(body)
+            .expect_err("canonical-key collision with conflicting pricing must error");
+        let msg = match err {
+            ModelRegistryError::ParseError(m) => m,
+            other => panic!("expected ParseError, got {other:?}"),
+        };
+        assert!(
+            msg.contains("duplicate canonical key") && msg.contains("test/shared"),
+            "error must mention the canonical key, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_toml_allows_canonical_collision_with_identical_pricing() {
+        let body = r#"
+[models.first]
+provider = "test"
+model_id = "shared"
+display_name = "First"
+input_cost_per_million = 3.00
+output_cost_per_million = 15.00
+context_window = 4096
+
+[models.second]
+provider = "test"
+model_id = "shared"
+display_name = "Second"
+input_cost_per_million = 3.00
+output_cost_per_million = 15.00
+context_window = 4096
+"#;
+        let registry = ModelRegistry::from_toml(body)
+            .expect("equal-pricing duplicates should load successfully");
+        // Both TOML keys and the shared canonical key all resolve.
+        assert!(registry.get("first").is_some());
+        assert!(registry.get("second").is_some());
+        assert!(registry.get("test/shared").is_some());
     }
 }
