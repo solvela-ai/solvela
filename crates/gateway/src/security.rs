@@ -149,16 +149,23 @@ fn is_private_ip(ip: IpAddr) -> bool {
             || (octets[0] == 172 && (16..=31).contains(&octets[1]))
             // 192.168.0.0/16 — private
             || (octets[0] == 192 && octets[1] == 168)
-            // 169.254.0.0/16 — link-local (cloud metadata)
+            // 169.254.0.0/16 — link-local (cloud metadata, e.g. AWS IMDS)
             || (octets[0] == 169 && octets[1] == 254)
             // 0.0.0.0/8 — "this" network
             || octets[0] == 0
+            // 100.64.0.0/10 — RFC 6598 carrier-grade NAT shared address space.
+            // Many cloud providers route this to internal/customer infra.
+            || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
         }
         IpAddr::V6(v6) => {
             // ::1 — IPv6 loopback
             v6 == std::net::Ipv6Addr::LOCALHOST
             // fe80::/10 — IPv6 link-local
             || (v6.segments()[0] & 0xffc0) == 0xfe80
+            // ::ffff:0:0/96 — IPv4-mapped IPv6. Recurse through the V4 arm
+            // so private IPv4 ranges (e.g. ::ffff:10.0.0.1) are caught here
+            // rather than slipping through as "public IPv6".
+            || v6.to_ipv4_mapped().is_some_and(|v4| is_private_ip(IpAddr::V4(v4)))
         }
     }
 }
@@ -262,6 +269,30 @@ mod tests {
     #[test]
     fn test_public_v6() {
         assert!(!is_private_ip("2607:f8b0:4004:800::200e".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_cgnat_100_64() {
+        // RFC 6598 — 100.64.0.0/10. Boundaries:
+        // 100.64.0.0 through 100.127.255.255 must be treated as private.
+        assert!(is_private_ip("100.64.0.0".parse().unwrap()));
+        assert!(is_private_ip("100.64.0.1".parse().unwrap()));
+        assert!(is_private_ip("100.96.0.1".parse().unwrap()));
+        assert!(is_private_ip("100.127.255.255".parse().unwrap()));
+        // Just outside the /10 — must remain public.
+        assert!(!is_private_ip("100.63.255.255".parse().unwrap()));
+        assert!(!is_private_ip("100.128.0.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_ipv4_mapped_ipv6_private_addresses_caught() {
+        // ::ffff:10.0.0.1 must be classified the same as 10.0.0.1 (private).
+        assert!(is_private_ip("::ffff:10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:169.254.169.254".parse().unwrap()));
+        assert!(is_private_ip("::ffff:100.64.0.1".parse().unwrap()));
+        // ::ffff:8.8.8.8 maps to public 8.8.8.8 — must remain public.
+        assert!(!is_private_ip("::ffff:8.8.8.8".parse().unwrap()));
     }
 
     // -----------------------------------------------------------------------

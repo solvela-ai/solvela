@@ -93,6 +93,28 @@ struct GeminiUsageMetadata {
 // Format translation
 // ---------------------------------------------------------------------------
 
+/// Validate that a Gemini model name is safe to interpolate into the
+/// generative-language API URL.
+///
+/// The handler builds
+/// `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`
+/// — without this guard, an attacker-controlled `req.model` containing `/`,
+/// `?`, `#`, or `:` would manipulate the request path, query, or action verb.
+/// Gemini model IDs in practice are ASCII alphanumerics plus `-`, `.`, `_`
+/// (e.g. `gemini-2.5-flash`, `gemini-1.5-pro-002`).
+fn validate_gemini_model_name(model: &str) -> Result<(), String> {
+    if model.is_empty() {
+        return Err("google model name must not be empty".to_string());
+    }
+    if !model
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
+    {
+        return Err(format!("invalid google model id: {model:?}"));
+    }
+    Ok(())
+}
+
 fn to_gemini_request(req: &ChatRequest) -> GeminiRequest {
     // Extract system instruction
     let system_instruction: Option<GeminiContent> = {
@@ -246,6 +268,11 @@ impl LLMProvider for GoogleProvider {
         // Extract Gemini model name (e.g., "google/gemini-2.5-flash" → "gemini-2.5-flash")
         let model_name = req.model.strip_prefix("google/").unwrap_or(&req.model);
 
+        // Allowlist the model-name characters before URL interpolation —
+        // see `validate_gemini_model_name` for rationale.
+        validate_gemini_model_name(model_name)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
         // API key sent as a header (not a URL query param) to prevent key leakage
         // in server logs, proxy logs, and browser history.
         let url = format!(
@@ -398,5 +425,45 @@ mod tests {
         assert_eq!(chat_resp.choices[0].message.content, "Hi there!");
         assert_eq!(chat_resp.choices[0].finish_reason, Some("stop".to_string()));
         assert_eq!(chat_resp.usage.as_ref().unwrap().total_tokens, 8);
+    }
+
+    // ---------------------------------------------------------------------
+    // validate_gemini_model_name (URL-injection allowlist)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn validate_gemini_model_name_accepts_real_model_ids() {
+        for ok in [
+            "gemini-2.5-flash",
+            "gemini-1.5-pro-002",
+            "gemini-2.0-flash-exp",
+            "gemini_pro_v1",
+            "AcceptedAlnum123",
+        ] {
+            assert!(
+                validate_gemini_model_name(ok).is_ok(),
+                "model id {ok:?} must validate"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_gemini_model_name_rejects_url_injection() {
+        // Each of these would otherwise alter the request URL.
+        for bad in [
+            "",
+            "gemini/../../../etc/passwd",
+            "gemini-2.5-flash:streamGenerateContent",
+            "gemini-2.5-flash?api_key=stolen",
+            "gemini-2.5-flash#fragment",
+            "gemini 2.5 flash",
+            "gemini\nflash",
+            "../../models/private",
+        ] {
+            assert!(
+                validate_gemini_model_name(bad).is_err(),
+                "model id {bad:?} must be rejected"
+            );
+        }
     }
 }
