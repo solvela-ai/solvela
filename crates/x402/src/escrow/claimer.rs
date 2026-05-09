@@ -711,6 +711,95 @@ mod tests {
     }
 
     #[test]
+    fn is_insufficient_sol_error_matches_all_documented_patterns() {
+        // Each of the four match arms in is_insufficient_sol_error must trigger.
+        assert!(is_insufficient_sol_error(&Error::Rpc(
+            "Transaction simulation failed: Transaction results in an account (0) with insufficient lamports".to_string()
+        )), "lowercase 'insufficient lamports' must match");
+        assert!(
+            is_insufficient_sol_error(&Error::Rpc("insufficient funds".to_string())),
+            "'insufficient funds' must match"
+        );
+        assert!(
+            is_insufficient_sol_error(&Error::Rpc("Insufficient SOL balance".to_string())),
+            "'insufficient sol' (case-insensitive) must match"
+        );
+        assert!(
+            is_insufficient_sol_error(&Error::Rpc("Custom: 0x1".to_string())),
+            "the '0x1' InsufficientFunds program error code must match"
+        );
+    }
+
+    #[test]
+    fn is_insufficient_sol_error_is_case_insensitive() {
+        assert!(is_insufficient_sol_error(&Error::Rpc(
+            "INSUFFICIENT LAMPORTS for fee".to_string()
+        )));
+        assert!(is_insufficient_sol_error(&Error::Rpc(
+            "INSUFFICIENT FUNDS".to_string()
+        )));
+    }
+
+    #[test]
+    fn is_insufficient_sol_error_rejects_unrelated_errors() {
+        assert!(!is_insufficient_sol_error(&Error::Rpc(
+            "Blockhash not found".to_string()
+        )));
+        assert!(!is_insufficient_sol_error(&Error::Rpc(
+            "Transaction simulation failed".to_string()
+        )));
+        assert!(!is_insufficient_sol_error(&Error::Rpc("0x2".to_string())));
+    }
+
+    /// claim_async with a fee-payer pool that has been drained (all wallets
+    /// marked unhealthy) returns silently — never spawns a task.
+    #[tokio::test]
+    async fn claim_async_short_circuits_when_no_healthy_fee_payer() {
+        let keys = vec![test_keypair_b58(7)];
+        let pool = make_pool(&keys);
+        // Mark the only fee payer unhealthy so `next()` returns Err.
+        pool.mark_failed(0);
+        let claimer = EscrowClaimer::new(
+            "https://api.devnet.solana.com".to_string(),
+            pool,
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
+            "11111111111111111111111111111111",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            None,
+        )
+        .expect("construct");
+
+        // Should return without panicking; the success path would spawn a tokio task.
+        claimer.claim_async([0u8; 32], [0u8; 32], 1_000);
+    }
+
+    /// do_claim_with_params with no healthy fee payer returns Err synchronously.
+    #[tokio::test]
+    async fn do_claim_with_params_errors_when_no_healthy_fee_payer() {
+        let keys = vec![test_keypair_b58(8)];
+        let pool = make_pool(&keys);
+        pool.mark_failed(0);
+        let claimer = EscrowClaimer::new(
+            "https://api.devnet.solana.com".to_string(),
+            pool,
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
+            "11111111111111111111111111111111",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            None,
+        )
+        .expect("construct");
+
+        let result = do_claim_with_params(&claimer, [0u8; 32], [0u8; 32], 1_000).await;
+        assert!(result.is_err(), "drained pool must yield Err");
+        match result.unwrap_err() {
+            Error::EscrowClaimFailed(msg) => {
+                assert!(msg.contains("no healthy fee payer"), "msg: {msg}");
+            }
+            other => panic!("expected EscrowClaimFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_nonce_fallback_when_pool_none() {
         let params = ClaimParams {
             rpc_url: "https://api.devnet.solana.com".to_string(),
