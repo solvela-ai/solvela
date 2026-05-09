@@ -41,4 +41,9 @@ pub enum EscrowError {
     /// Vault held zero tokens at refund time.
     #[msg("Vault is empty; nothing to refund")]
     EmptyVault,
+
+    /// Expiry slot is too close to current slot — the claim transaction
+    /// must have a realistic chance to propagate before refund opens.
+    #[msg("Expiry slot is too close to now; insufficient claim buffer")]
+    ExpiryTooSoon,
 }

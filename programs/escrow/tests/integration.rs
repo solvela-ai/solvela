@@ -705,3 +705,201 @@ fn test_deposit_with_excessive_expiry_rejected() {
         "deposit with excessive expiry_slot must fail (ExpiryTooFar)"
     );
 }
+
+#[test]
+fn test_claim_succeeds_despite_vault_dust() {
+    // H1 regression. SPL token's CloseAccount aborts if the account holds
+    // any non-zero balance, and anyone (including the agent) can transfer
+    // dust into the vault ATA — vault address is publicly derivable, and
+    // SPL transfers require only the sender's signature. Without the
+    // post-transfer drain in claim.rs, a single dust unit blocks every
+    // claim and forces refund-after-expiry, giving the agent free service.
+    let mut ctx = setup();
+    let service_id = [45u8; 32];
+    let amount = 1_000_000u64;
+
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+    let (escrow_pda, bump) = deposit_helper(&mut ctx, &service_id, amount, 500);
+
+    // Simulate an external dust transfer into the vault. inject_ata
+    // overwrites the existing vault ATA's balance while preserving owner
+    // (= escrow PDA), mint, and rent lamports — equivalent to a
+    // post-deposit SPL transfer of 1 unit from any third party.
+    inject_ata(&mut ctx.svm, &escrow_pda, &ctx.usdc_mint, amount + 1);
+
+    // Full claim. Must succeed despite the dust.
+    let ix = build_claim_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        &service_id,
+        bump,
+        amount,
+    );
+    send_tx(&mut ctx.svm, &[ix], &ctx.provider, &[&ctx.provider])
+        .expect("claim must succeed even when vault holds external dust");
+
+    // Provider got the full claim amount.
+    let provider_ata = get_associated_token_address(&ctx.provider.pubkey(), &ctx.usdc_mint);
+    assert_eq!(read_token_balance(&ctx.svm, &provider_ata), Some(amount));
+
+    // Agent received the dust (drain destination). This preserves the
+    // contract — surplus is unrelated to the contracted payment, so it
+    // returns to the depositor.
+    let agent_ata = get_associated_token_address(&ctx.agent.pubkey(), &ctx.usdc_mint);
+    assert_eq!(
+        read_token_balance(&ctx.svm, &agent_ata),
+        Some(1),
+        "agent should receive the drained dust"
+    );
+
+    // Vault and escrow closed cleanly.
+    let vault = find_vault_ata(&escrow_pda, &ctx.usdc_mint);
+    assert!(!account_exists(&ctx.svm, &vault), "vault should be closed");
+    assert!(
+        !account_exists(&ctx.svm, &escrow_pda),
+        "escrow should be closed"
+    );
+}
+
+#[test]
+fn test_deposit_with_default_provider_rejected() {
+    // M3: deposit.rs:41 explicitly rejects `provider == Pubkey::default()`,
+    // but the path was untested end-to-end. Default-key provider could
+    // never legitimately sign a claim, so deposits naming it would brick
+    // funds until refund.
+    let mut ctx = setup();
+    let service_id = [46u8; 32];
+    let amount = 1_000_000u64;
+
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+
+    let ix = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &solana_sdk::pubkey::Pubkey::default(), // zero key
+        &ctx.usdc_mint,
+        amount,
+        &service_id,
+        500,
+    );
+    let result = send_tx(&mut ctx.svm, &[ix], &ctx.agent, &[&ctx.agent]);
+    assert!(
+        result.is_err(),
+        "deposit with provider = Pubkey::default() must fail (InvalidProvider)"
+    );
+}
+
+#[test]
+fn test_deposit_expiry_too_soon_fails() {
+    // H2 regression. The previous lower bound on `expiry_slot` was just
+    // `> now`, which let an adversarial agent set `expiry = now + 1`,
+    // receive the LLM response, and refund before the gateway's claim
+    // tx could confirm. The new `MIN_EXPIRY_BUFFER = 50` floor (and the
+    // matching off-chain verifier check in `crates/x402/src/escrow/verifier.rs`)
+    // closes this. Submit a deposit with `expiry = now + 1` — must fail
+    // with ExpiryTooSoon (not InvalidExpiry, which only fires on
+    // expiry <= now).
+    let mut ctx = setup();
+    let service_id = [49u8; 32];
+    let amount = 1_000_000u64;
+
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+
+    let now = ctx.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
+    let ix = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        amount,
+        &service_id,
+        now + 1, // passes `> now` but fails `>= now + MIN_EXPIRY_BUFFER`
+    );
+    let result = send_tx(&mut ctx.svm, &[ix], &ctx.agent, &[&ctx.agent]);
+    assert!(
+        result.is_err(),
+        "deposit with expiry_slot = now + 1 must fail (ExpiryTooSoon)"
+    );
+
+    // Also exercise the exact boundary: `now + (MIN_EXPIRY_BUFFER - 1)`
+    // must fail; `now + MIN_EXPIRY_BUFFER` must succeed.
+    let service_id_just_under = [50u8; 32];
+    let now_a = ctx.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+    let ix_under = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        amount,
+        &service_id_just_under,
+        now_a + solvela_escrow::MIN_EXPIRY_BUFFER - 1,
+    );
+    assert!(
+        send_tx(&mut ctx.svm, &[ix_under], &ctx.agent, &[&ctx.agent]).is_err(),
+        "deposit one slot below MIN_EXPIRY_BUFFER must fail"
+    );
+
+    let service_id_at_min = [51u8; 32];
+    let now_b = ctx.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+    let ix_min = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        amount,
+        &service_id_at_min,
+        now_b + solvela_escrow::MIN_EXPIRY_BUFFER,
+    );
+    send_tx(&mut ctx.svm, &[ix_min], &ctx.agent, &[&ctx.agent])
+        .expect("deposit at exactly MIN_EXPIRY_BUFFER must succeed");
+}
+
+#[test]
+fn test_deposit_max_escrow_slots_boundary() {
+    // M4: exact-boundary regression for the ExpiryTooFar guard. The
+    // `<=` comparison in deposit.rs means `expiry - now == MAX_ESCROW_SLOTS`
+    // must succeed and `+1` must fail. Previously only `u64::MAX` was
+    // tested.
+    let mut ctx = setup();
+    let max = solvela_escrow::MAX_ESCROW_SLOTS;
+    let amount = 1_000_000u64;
+
+    // Sub-test 1: exactly at the boundary — should succeed.
+    let service_id_ok = [47u8; 32];
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+    let now = ctx.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
+    let ix_ok = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        amount,
+        &service_id_ok,
+        now + max,
+    );
+    send_tx(&mut ctx.svm, &[ix_ok], &ctx.agent, &[&ctx.agent])
+        .expect("deposit at exactly MAX_ESCROW_SLOTS must succeed");
+
+    // Sub-test 2: one slot past the boundary — must fail.
+    let service_id_bad = [48u8; 32];
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, amount);
+    let now2 = ctx.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
+    let ix_bad = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        amount,
+        &service_id_bad,
+        now2 + max + 1,
+    );
+    let result = send_tx(&mut ctx.svm, &[ix_bad], &ctx.agent, &[&ctx.agent]);
+    assert!(
+        result.is_err(),
+        "deposit one slot past MAX_ESCROW_SLOTS must fail (ExpiryTooFar)"
+    );
+}

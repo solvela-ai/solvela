@@ -69,6 +69,29 @@ pub fn claim(ctx: Context<Claim>, actual_amount: u64) -> Result<()> {
         token::transfer(cpi_refund, refund)?;
     }
 
+    // Drain any vault residual to agent before close. SPL token's
+    // close_account requires balance == 0, and an attacker (including the
+    // agent themselves) can transfer dust tokens directly to the vault ATA
+    // at any time after deposit confirms — vault is a public address
+    // derivable from on-chain data and SPL transfers don't require
+    // recipient signature. Without this drain, a single dust unit blocks
+    // the entire claim path and forces refund-after-expiry, giving the
+    // agent free service. Reload to read the post-transfer balance.
+    ctx.accounts.vault.reload()?;
+    let surplus = ctx.accounts.vault.amount;
+    if surplus > 0 {
+        let cpi_drain = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.vault.to_account_info(),
+                to: ctx.accounts.agent_token_account.to_account_info(),
+                authority: ctx.accounts.escrow.to_account_info(),
+            },
+            signer_seeds,
+        );
+        token::transfer(cpi_drain, surplus)?;
+    }
+
     // Close vault ATA (returns rent to agent)
     let cpi_close = CpiContext::new_with_signer(
         ctx.accounts.token_program.to_account_info(),

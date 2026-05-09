@@ -196,6 +196,43 @@ pub async fn poll_for_confirmation(
     }
 }
 
+/// Fetch the current confirmed slot via Solana JSON-RPC `getSlot`.
+///
+/// Used by escrow verification to enforce a minimum buffer between the
+/// claimed `expiry_slot` in a deposit instruction and the slot at which
+/// the gateway is verifying — see `EscrowVerifier::verify_payment` and
+/// the matching on-chain `MIN_EXPIRY_BUFFER` guard in
+/// `programs/escrow/src/instructions/deposit.rs`.
+pub async fn get_current_slot(client: &Client, rpc_url: &str) -> Result<u64, Error> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getSlot",
+        "params": [{"commitment": "confirmed"}],
+    });
+
+    let response = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    let result: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    if let Some(error) = result.get("error") {
+        return Err(Error::Rpc(error.to_string()));
+    }
+
+    result
+        .get("result")
+        .and_then(|r| r.as_u64())
+        .ok_or_else(|| Error::Rpc("getSlot did not return a u64 result".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

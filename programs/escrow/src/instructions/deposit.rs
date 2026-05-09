@@ -4,7 +4,7 @@ use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 use crate::errors::EscrowError;
 use crate::state::Escrow;
-use crate::{MAX_ESCROW_SLOTS, USDC_MINT};
+use crate::{MAX_ESCROW_SLOTS, MIN_EXPIRY_BUFFER, USDC_MINT};
 
 /// Deposit USDC into the PDA vault, locking funds for a specific service request.
 ///
@@ -29,6 +29,16 @@ pub fn deposit(
     require!(
         expiry_slot.saturating_sub(now) <= MAX_ESCROW_SLOTS,
         EscrowError::ExpiryTooFar,
+    );
+    // Floor the deposit-to-expiry gap so an adversarial agent can't set
+    // `expiry_slot = now + 1`, receive the LLM response (which the gateway
+    // delivers HTTP-side immediately after settlement), and refund before
+    // the gateway's claim transaction can confirm. ~20 s buffer at
+    // 400ms/slot. The off-chain verifier in
+    // `crates/x402/src/escrow/verifier.rs` enforces an equivalent buffer.
+    require!(
+        expiry_slot.saturating_sub(now) >= MIN_EXPIRY_BUFFER,
+        EscrowError::ExpiryTooSoon,
     );
 
     // Provider field is `UncheckedAccount` (no on-chain owner constraint), so

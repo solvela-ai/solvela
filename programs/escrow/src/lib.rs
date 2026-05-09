@@ -54,6 +54,16 @@ pub const USDC_MINT: Pubkey = pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDn
 /// clients that would otherwise lock funds for years).
 pub const MAX_ESCROW_SLOTS: u64 = 216_000;
 
+/// Minimum allowed gap between current slot and `expiry_slot` at deposit
+/// time. ~20 s at 400ms/slot — wide enough for any realistic claim
+/// transaction to propagate and confirm, tight enough to reject the
+/// trivially-adversarial `expiry_slot = now + 1` case where an agent
+/// would otherwise receive service from the gateway and refund before
+/// the gateway's claim transaction can land. The off-chain verifier in
+/// `crates/x402/src/escrow/verifier.rs` enforces an equivalent buffer
+/// so the gateway rejects the deposit before delivering a response.
+pub const MIN_EXPIRY_BUFFER: u64 = 50;
+
 declare_id!("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
 
 #[program]

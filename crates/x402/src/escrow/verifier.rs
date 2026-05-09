@@ -43,6 +43,15 @@ fn extract_deposit_amount(message: &ParsedMessage, escrow_program_id: &[u8; 32])
     Some(u64::from_le_bytes(amount_bytes))
 }
 
+/// Minimum number of slots that must remain between the deposit's
+/// `expiry_slot` and the current slot at verification time. Mirrors
+/// `MIN_EXPIRY_BUFFER` in `programs/escrow/src/lib.rs` (on-chain enforcement).
+/// Without this off-chain check, an adversarial agent could deposit with
+/// `expiry_slot = now + 1`, the gateway would deliver the LLM response after
+/// successful verification, and the gateway's claim transaction would fail
+/// to land before refund opens — leaving the agent with free service.
+const MIN_EXPIRY_BUFFER_SLOTS: u64 = 50;
+
 // ---------------------------------------------------------------------------
 // EscrowVerifier
 // ---------------------------------------------------------------------------
@@ -222,6 +231,13 @@ impl PaymentVerifier for EscrowVerifier {
             )
         })?;
 
+        let expiry_bytes: [u8; 8] = deposit_ix.data[48..56].try_into().map_err(|_| {
+            Error::InvalidTransaction(
+                "failed to parse expiry_slot from instruction data".to_string(),
+            )
+        })?;
+        let ix_expiry_slot = u64::from_le_bytes(expiry_bytes);
+
         // Verify amount >= required (gateway-set, never trust client claims)
         if ix_amount < required_amount {
             return Err(Error::InsufficientPayment {
@@ -308,6 +324,26 @@ impl PaymentVerifier for EscrowVerifier {
                 expected: bs58::encode(&vault_ata).into_string(),
                 actual: bs58::encode(&ix_vault).into_string(),
             });
+        }
+
+        // After all offline structural checks pass, verify the deposit's
+        // expiry_slot leaves enough headroom for the gateway's claim
+        // transaction to land. Performed last because it's the only check
+        // that requires an RPC round-trip — keeping malformed-tx tests
+        // offline-only. Without this an adversarial agent could deposit
+        // with `expiry_slot = now + 1`, the gateway would deliver the LLM
+        // response after settle, then the gateway's claim tx would fail
+        // with EscrowExpired and the agent would refund — free service.
+        // The matching on-chain guard (`MIN_EXPIRY_BUFFER` in
+        // `programs/escrow/src/instructions/deposit.rs`) is the backstop.
+        let current_slot =
+            crate::solana_rpc::get_current_slot(&self.http_client, &self.rpc_url).await?;
+        let buffer = ix_expiry_slot.saturating_sub(current_slot);
+        if buffer < MIN_EXPIRY_BUFFER_SLOTS {
+            return Err(Error::InvalidTransaction(format!(
+                "deposit expiry_slot {} is too close to current slot {} (buffer {} < required {})",
+                ix_expiry_slot, current_slot, buffer, MIN_EXPIRY_BUFFER_SLOTS
+            )));
         }
 
         info!(
@@ -566,7 +602,9 @@ mod tests {
             http_client: reqwest::Client::new(),
         };
 
-        // verify_payment doesn't hit the network (only settle_payment does)
+        // verify_payment hits Solana RPC once (`getSlot` for the
+        // expiry-buffer check); this test exercises that RPC call against
+        // devnet. Settlement still only happens in `settle_payment`.
         let result = verifier.verify_payment(&payload).await;
         assert!(
             result.is_ok(),
