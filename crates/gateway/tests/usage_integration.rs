@@ -180,6 +180,7 @@ async fn log_spend_persists_row_when_db_configured(pool: PgPool) {
         tx_signature: Some("tx-test-sig".to_string()),
         request_id: Some("req-abc".to_string()),
         session_id: None,
+        estimated_cost_usdc: None,
     });
 
     // Fire-and-forget: poll briefly for the row to land.
@@ -243,6 +244,7 @@ async fn log_spend_with_no_backends_does_not_panic() {
         tx_signature: None,
         request_id: None,
         session_id: None,
+        estimated_cost_usdc: None,
     });
 }
 

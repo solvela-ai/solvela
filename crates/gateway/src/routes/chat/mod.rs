@@ -652,6 +652,10 @@ pub async fn chat_completions(
                         })
                     }) {
                     Ok(cost) => {
+                        // Pass the estimated_cost that was committed to Redis
+                        // counters in `check_budget` so log_spend can adjust
+                        // by the (actual − estimated) delta. Without this,
+                        // counters would be double-incremented.
                         state.usage.log_spend(SpendLogEntry {
                             wallet_address: wallet_address.clone(),
                             model: req.model.clone(),
@@ -662,6 +666,7 @@ pub async fn chat_completions(
                             tx_signature: tx_signature.clone(),
                             request_id: request_id.clone(),
                             session_id: session_id.clone(),
+                            estimated_cost_usdc: Some(estimated_cost),
                         });
                     }
                     Err(e) => {

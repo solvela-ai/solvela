@@ -550,6 +550,11 @@ pub async fn proxy_service(
         tx_signature,
         request_id: request_id.clone(),
         session_id: None,
+        // Service-marketplace proxy doesn't go through `check_budget`
+        // (it has flat per-request pricing, not per-wallet budgets), so no
+        // reservation is committed and log_spend increments by the full
+        // cost. None preserves the legacy behavior here.
+        estimated_cost_usdc: None,
     });
 
     // Handle upstream response based on status
