@@ -8,13 +8,41 @@ use crate::orgs::models::{
     CreateOrgRequest, CreateTeamRequest, OrgMember, OrgRole, Organization, Team, TeamWallet,
 };
 
-/// Length of the stored key prefix: "solvela_k_" (10) + first 4 hex chars of the key = 14. Used for display only; uniqueness is ensured by the full key hash.
-const KEY_PREFIX_LEN: usize = 14;
+/// Number of UUID hex chars (no hyphens) included after `"solvela_k_"` in the
+/// stored display prefix. The prefix derives from the API-key row's UUID `id`
+/// — NOT from the random key material — so reading the `key_prefix` column
+/// reveals zero entropy of the underlying key.
+///
+/// Old-format rows (created before this change) carry a 4-hex prefix sliced
+/// from the key bytes themselves; those keep working because `verify_api_key`
+/// looks up by `key_hash`, not by prefix. They should be revoked and reissued
+/// at the operator's convenience.
+const KEY_PREFIX_DISPLAY_UUID_CHARS: usize = 8;
 
-/// Generate a new API key: "solvela_k_" + 32 random hex chars.
+/// Number of random bytes for the API-key body. 32 bytes (256-bit entropy)
+/// matches modern bearer-token recommendations (NIST SP 800-63B, OWASP).
+const KEY_RANDOM_BYTES: usize = 32;
+
+/// Generate a new API key: `"solvela_k_"` + 64 random hex chars (256 bits).
+///
+/// Old-format keys generated before this change carry 128 bits of entropy
+/// (16 random bytes / 32 hex chars). Both formats are accepted by
+/// `verify_api_key` since verification is hash-based.
 pub fn generate_api_key() -> String {
-    let bytes: [u8; 16] = rand::random();
+    let bytes: [u8; KEY_RANDOM_BYTES] = rand::random();
     format!("solvela_k_{}", hex::encode(bytes))
+}
+
+/// Build the displayable, non-secret prefix for an API-key row.
+///
+/// Format: `"solvela_k_"` + first 8 chars of the row UUID's simple-form (no
+/// hyphens). The prefix contains zero bytes of the underlying random key, so
+/// even with full read access to the `api_keys` table an attacker cannot use
+/// it to reduce the brute-force search space.
+fn key_prefix_for_display(row_id: Uuid) -> String {
+    let id_simple = row_id.simple().to_string();
+    let len = id_simple.len().min(KEY_PREFIX_DISPLAY_UUID_CHARS);
+    format!("solvela_k_{}", &id_simple[..len])
 }
 
 /// Compute the SHA-256 hex digest of an API key.
@@ -189,9 +217,14 @@ pub async fn list_members(pool: &PgPool, org_id: Uuid) -> Result<Vec<OrgMember>,
     .await
 }
 
-/// Assign a wallet address to a team.
+/// Assign a wallet address to a team. Requires both `team_id` and `org_id`
+/// so the query itself enforces team-belongs-to-org — defense in depth on
+/// top of the route-handler check. If `team_id` is not in `org_id`, the
+/// `INSERT ... SELECT WHERE EXISTS` returns zero rows and the function
+/// surfaces a `RowNotFound` error.
 pub async fn assign_wallet(
     pool: &PgPool,
+    org_id: Uuid,
     team_id: Uuid,
     req: &AssignWalletRequest,
 ) -> Result<TeamWallet, sqlx::Error> {
@@ -201,7 +234,8 @@ pub async fn assign_wallet(
     sqlx::query_as::<_, TeamWallet>(
         r#"
         INSERT INTO team_wallets (id, team_id, wallet_address, created_at)
-        VALUES ($1, $2, $3, $4)
+        SELECT $1, $2, $3, $4
+        WHERE EXISTS (SELECT 1 FROM teams WHERE id = $2 AND org_id = $5)
         RETURNING id, team_id, wallet_address, created_at
         "#,
     )
@@ -209,24 +243,31 @@ pub async fn assign_wallet(
     .bind(team_id)
     .bind(&req.wallet_address)
     .bind(now)
+    .bind(org_id)
     .fetch_one(pool)
     .await
 }
 
-/// List all wallets assigned to a team.
+/// List all wallets assigned to a team, scoped to the org. The
+/// `EXISTS (SELECT 1 FROM teams ...)` guard means a `team_id` that doesn't
+/// belong to `org_id` returns an empty list rather than data from another
+/// tenant — defense in depth on top of the route-handler check.
 pub async fn list_team_wallets(
     pool: &PgPool,
+    org_id: Uuid,
     team_id: Uuid,
 ) -> Result<Vec<TeamWallet>, sqlx::Error> {
     sqlx::query_as::<_, TeamWallet>(
         r#"
-        SELECT id, team_id, wallet_address, created_at
-        FROM team_wallets
-        WHERE team_id = $1
-        ORDER BY created_at ASC
+        SELECT tw.id, tw.team_id, tw.wallet_address, tw.created_at
+        FROM team_wallets tw
+        WHERE tw.team_id = $1
+          AND EXISTS (SELECT 1 FROM teams WHERE id = $1 AND org_id = $2)
+        ORDER BY tw.created_at ASC
         "#,
     )
     .bind(team_id)
+    .bind(org_id)
     .fetch_all(pool)
     .await
 }
@@ -246,8 +287,9 @@ pub async fn create_api_key(
 
     let key = generate_api_key();
     let key_hash = hash_api_key(&key);
-    debug_assert!(key.is_ascii());
-    let key_prefix = key[..KEY_PREFIX_LEN].to_string();
+    // Display prefix is derived from the row UUID, not the key bytes — see
+    // `key_prefix_for_display` for why. This is the H3 fix.
+    let key_prefix = key_prefix_for_display(id);
 
     let expires_at = req
         .expires_in_days
@@ -377,17 +419,49 @@ mod tests {
     #[test]
     fn generate_api_key_has_correct_prefix_and_length() {
         let key = generate_api_key();
-        // Prefix: "solvela_k_" (10 chars) + 32 hex chars from 16 bytes = 42 total
+        // Prefix: "solvela_k_" (10 chars) + 64 hex chars from 32 bytes = 74 total.
+        // Bumped from 16 -> 32 bytes (128 -> 256 bits) per H3 fix.
         assert!(
             key.starts_with("solvela_k_"),
             "key should start with 'solvela_k_', got: {key}"
         );
         assert_eq!(
             key.len(),
-            42,
-            "key should be 42 chars long (10 prefix + 32 hex), got: {}",
+            74,
+            "key should be 74 chars long (10 prefix + 64 hex), got: {}",
             key.len()
         );
+    }
+
+    /// Regression: the displayable key prefix must be derived from the row
+    /// UUID, NOT the random key bytes. Without this, anyone with read
+    /// access to the api_keys table could see the first 16 bits of every
+    /// key and reduce brute-force search by that much.
+    #[test]
+    fn key_prefix_for_display_does_not_leak_key_material() {
+        let key = generate_api_key();
+        let id = Uuid::new_v4();
+        let prefix = key_prefix_for_display(id);
+
+        // Prefix is deterministic from the UUID alone — same UUID always
+        // produces the same prefix.
+        assert_eq!(prefix, key_prefix_for_display(id));
+
+        // Prefix shape: "solvela_k_" + first 8 chars of UUID simple form.
+        assert!(prefix.starts_with("solvela_k_"));
+        assert_eq!(prefix.len(), "solvela_k_".len() + 8);
+
+        // The hex chars after the literal "solvela_k_" must come from the
+        // UUID, not from the random key. Compare against the first 8 chars
+        // of the UUID's simple form.
+        let key_random_part = &key["solvela_k_".len()..];
+        let prefix_random_part = &prefix["solvela_k_".len()..];
+        assert_ne!(
+            &key_random_part[..8.min(key_random_part.len())],
+            prefix_random_part,
+            "prefix must NOT match the first 8 chars of the random key body"
+        );
+        assert_eq!(prefix_random_part, &id.simple().to_string()[..8]);
     }
 
     #[test]
