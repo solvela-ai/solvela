@@ -115,11 +115,14 @@ impl FeePayerPool {
 
         let mut wallets = Vec::with_capacity(keys.len());
         for (i, key_b58) in keys.iter().enumerate() {
-            let key_bytes = bs58::decode(key_b58)
+            let mut key_bytes = bs58::decode(key_b58)
                 .into_vec()
                 .map_err(|e| FeePayerError::InvalidKey(format!("key {i}: {e}")))?;
 
             if key_bytes.len() != 64 {
+                // Zero the decode buffer even on length mismatch — a 32-byte
+                // ed25519 secret would also pass through here.
+                key_bytes.iter_mut().for_each(|b| *b = 0);
                 return Err(FeePayerError::InvalidKey(format!(
                     "key {i}: expected 64 bytes, got {}",
                     key_bytes.len()
@@ -128,6 +131,12 @@ impl FeePayerPool {
 
             let mut keypair = [0u8; 64];
             keypair.copy_from_slice(&key_bytes);
+
+            // Zero the intermediate decode buffer now that the secret is in
+            // `keypair`. `FeePayerWallet::Drop` zeros `keypair`; without
+            // this, the secret would also live on in `key_bytes` until the
+            // allocator reuses the heap slot.
+            key_bytes.iter_mut().for_each(|b| *b = 0);
 
             // Public key is bytes 32..64
             let pubkey_b58 = bs58::encode(&keypair[32..64]).into_string();
@@ -180,9 +189,21 @@ impl FeePayerPool {
 
     /// Round-robin selection, skipping wallets currently in cooldown.
     ///
-    /// Tries up to `len()` candidates starting from the current counter position.
-    /// A wallet is eligible if it has never failed, or if its cooldown has expired
-    /// (in which case the `failed_at` timestamp is cleared).
+    /// Each call atomically claims a slot via `fetch_add(1)`; under
+    /// concurrent calls the issued slots are monotonically distinct, which
+    /// preserves round-robin distribution even when some wallets are in
+    /// cooldown. Tries up to `len()` candidates starting from the issued
+    /// slot. A wallet is eligible if it has never failed, or if its
+    /// cooldown has expired (in which case the `failed_at` timestamp is
+    /// cleared).
+    ///
+    /// History note: an earlier version layered a `counter.store(start +
+    /// offset + 1)` on top of the `fetch_add` to "skip past" wallets in
+    /// cooldown. Under contention that store could overwrite a concurrent
+    /// caller's slot, breaking monotonicity and clustering returns onto a
+    /// few wallets (throughput cliff when one wallet hits an RPC rate
+    /// limit). Pure `fetch_add` is already correct — the per-call modulo
+    /// scan handles cooldown transparently.
     pub fn next(&self) -> Result<Arc<FeePayerWallet>, FeePayerError> {
         let n = self.wallets.len();
         if n == 0 {
@@ -217,11 +238,6 @@ impl FeePayerPool {
             };
 
             if is_available {
-                // Advance counter past this wallet so next call starts at the next one
-                if offset > 0 {
-                    // We skipped `offset` wallets, advance counter accordingly
-                    self.counter.store(start + offset + 1, Ordering::Relaxed);
-                }
                 return Ok(Arc::clone(wallet));
             }
         }
