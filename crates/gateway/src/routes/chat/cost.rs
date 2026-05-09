@@ -5,7 +5,73 @@
 
 use tracing::warn;
 
-use solvela_protocol::{ChatRequest, ModelInfo};
+use solvela_protocol::{ChatRequest, ModelInfo, Usage};
+
+/// Hard ceiling on `completion_tokens` when neither the request nor the model
+/// registry declares a tighter cap. Prevents a misbehaving / compromised
+/// provider from inflating `usage.completion_tokens` to something the
+/// gateway cannot have priced for.
+const DEFAULT_COMPLETION_TOKENS_CAP: u32 = 8192;
+
+/// Cap a provider-reported `Usage` to limits the gateway has actually priced
+/// for. Provider responses are trusted today (the gateway speaks
+/// OpenAI-compat to the provider and parses the JSON back), but a compromised
+/// or misbehaving provider could inflate `completion_tokens` to over-bill the
+/// agent, or deflate `prompt_tokens` to under-bill the gateway. Both flow
+/// directly into `compute_actual_atomic_cost` and `state.usage.log_spend`,
+/// so both need bounding before they reach billing.
+///
+/// Caps:
+/// - `completion_tokens` ≤ min(`req.max_tokens`, `model_info.max_output_tokens`,
+///   `DEFAULT_COMPLETION_TOKENS_CAP`). Whichever the gateway treated as the
+///   priceable ceiling at quote time is the right cap; we take the tightest.
+/// - `prompt_tokens` ≤ `model_info.context_window`. The provider cannot have
+///   processed more than the context window without errors, so anything
+///   above is a sign of a corrupt response.
+/// - `total_tokens` is recomputed from the capped components — provider-supplied
+///   totals are not trusted independently.
+pub(crate) fn cap_usage_to_request_limits(
+    usage: &Usage,
+    req: &ChatRequest,
+    model_info: &ModelInfo,
+) -> Usage {
+    let completion_cap = [
+        req.max_tokens,
+        model_info.max_output_tokens,
+        Some(DEFAULT_COMPLETION_TOKENS_CAP),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(DEFAULT_COMPLETION_TOKENS_CAP);
+
+    let prompt = usage.prompt_tokens.min(model_info.context_window);
+    let completion = usage.completion_tokens.min(completion_cap);
+
+    if completion < usage.completion_tokens {
+        warn!(
+            model = %model_info.model_id,
+            reported = usage.completion_tokens,
+            cap = completion,
+            "provider reported completion_tokens above gateway cap — clamping for billing"
+        );
+    }
+    if prompt < usage.prompt_tokens {
+        warn!(
+            model = %model_info.model_id,
+            reported = usage.prompt_tokens,
+            cap = prompt,
+            "provider reported prompt_tokens above context window — clamping for billing"
+        );
+    }
+
+    let total = prompt.saturating_add(completion);
+    Usage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: total,
+    }
+}
 
 /// Rough token estimate: ~4 chars per token.
 pub(crate) fn estimate_input_tokens(req: &ChatRequest) -> u32 {
@@ -18,15 +84,36 @@ pub(crate) fn estimate_input_tokens(req: &ChatRequest) -> u32 {
 /// Uses integer arithmetic to avoid f64 precision loss on financial amounts.
 /// Cost per million tokens is converted to micro-USDC (atomic units) early,
 /// then all math stays in u128 to prevent overflow on large token counts.
+///
+/// Returns `None` when the model registry's per-million pricing is non-finite
+/// (NaN/Inf) or negative, or when the final atomic total would overflow `u64`.
+/// Rust's `f64 as u128` cast is saturating: `NaN` → 0 and `INFINITY` →
+/// `u128::MAX`. Without this guard, a corrupt `models.toml` entry with `NaN`
+/// pricing would silently quote a $0 cost (escrow claim then no-ops on the
+/// `claim_amount == 0` guard), and an `INFINITY` entry would wrap on the
+/// `* 105 / 100` step. Both are silent revenue gaps.
 pub(crate) fn compute_actual_atomic_cost(
     prompt_tokens: u32,
     completion_tokens: u32,
     model_info: &ModelInfo,
-) -> u64 {
-    // Convert cost-per-million-tokens from USDC (f64) to atomic micro-USDC (u64)
-    // by multiplying by 1_000_000. This is the only f64->int conversion.
-    let input_cost_atomic_per_million = (model_info.input_cost_per_million * 1_000_000.0) as u128;
-    let output_cost_atomic_per_million = (model_info.output_cost_per_million * 1_000_000.0) as u128;
+) -> Option<u64> {
+    let input = model_info.input_cost_per_million;
+    let output = model_info.output_cost_per_million;
+    if !input.is_finite() || !output.is_finite() || input < 0.0 || output < 0.0 {
+        warn!(
+            model = %model_info.model_id,
+            input_cost = input,
+            output_cost = output,
+            "model pricing is non-finite or negative — refusing to compute cost"
+        );
+        return None;
+    }
+
+    // Convert cost-per-million-tokens from USDC (f64) to atomic micro-USDC (u128)
+    // by multiplying by 1_000_000. This is the only f64->int conversion; the
+    // `is_finite` guard above ensures the cast is well-defined.
+    let input_cost_atomic_per_million = (input * 1_000_000.0) as u128;
+    let output_cost_atomic_per_million = (output * 1_000_000.0) as u128;
 
     // tokens * atomic_cost_per_million / 1_000_000 = atomic cost
     let input_atomic = (prompt_tokens as u128) * input_cost_atomic_per_million / 1_000_000;
@@ -36,7 +123,10 @@ pub(crate) fn compute_actual_atomic_cost(
     // 5% platform fee: total = provider * 105 / 100
     let total_atomic = provider_atomic * 105 / 100;
 
-    total_atomic as u64
+    // Final overflow guard: u128 → u64. With sane pricing this never trips,
+    // but guarding here means a pathological combination of huge tokens ×
+    // huge pricing surfaces as None instead of silent wrap.
+    u64::try_from(total_atomic).ok()
 }
 
 /// Upper bound for the `total` USDC cost that `estimated_atomic_cost` will accept.
@@ -311,7 +401,7 @@ mod tests {
         };
 
         let atomic = compute_actual_atomic_cost(1000, 500, &model_info);
-        assert_eq!(atomic, 7875);
+        assert_eq!(atomic, Some(7875));
     }
 
     #[test]
@@ -333,7 +423,7 @@ mod tests {
             max_output_tokens: None,
         };
 
-        assert_eq!(compute_actual_atomic_cost(0, 0, &model_info), 0);
+        assert_eq!(compute_actual_atomic_cost(0, 0, &model_info), Some(0));
     }
 
     #[test]
@@ -363,9 +453,10 @@ supports_vision = false
         // Single 5% fee → 1_050_000. A double-applied fee would yield 1_102_500.
         let atomic = compute_actual_atomic_cost(1_000_000, 0, model_info);
         assert_eq!(
-            atomic, 1_050_000,
-            "expected exactly 1.05x provider cost (single 5% fee); got {atomic}. \
-             1_102_500 here means the fee is being applied twice."
+            atomic,
+            Some(1_050_000),
+            "expected exactly 1.05x provider cost (single 5% fee); got {atomic:?}. \
+             Some(1_102_500) here means the fee is being applied twice."
         );
     }
 
@@ -389,7 +480,141 @@ supports_vision = false
         };
 
         let atomic = compute_actual_atomic_cost(1, 0, &model_info);
-        assert_eq!(atomic, 1_050_000);
+        assert_eq!(atomic, Some(1_050_000));
+    }
+
+    // =========================================================================
+    // cap_usage_to_request_limits — provider-trust bounds (H7)
+    // =========================================================================
+
+    fn test_model_info() -> ModelInfo {
+        ModelInfo {
+            id: "test/model".to_string(),
+            provider: "test".to_string(),
+            model_id: "test-model".to_string(),
+            display_name: "Test".to_string(),
+            input_cost_per_million: 1.0,
+            output_cost_per_million: 1.0,
+            context_window: 4096,
+            supports_streaming: false,
+            supports_tools: false,
+            supports_vision: false,
+            reasoning: false,
+            supports_structured_output: false,
+            supports_batch: false,
+            max_output_tokens: Some(2048),
+        }
+    }
+
+    fn req_with_max_tokens(max: Option<u32>) -> ChatRequest {
+        use solvela_protocol::ChatRequest;
+        ChatRequest {
+            model: "test/model".to_string(),
+            messages: vec![],
+            max_tokens: max,
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        }
+    }
+
+    #[test]
+    fn cap_usage_clamps_completion_to_req_max_tokens() {
+        let model = test_model_info();
+        let req = req_with_max_tokens(Some(500));
+        // Provider claims 9999 completion tokens. Gateway only priced for ≤500.
+        let inflated = solvela_protocol::Usage {
+            prompt_tokens: 100,
+            completion_tokens: 9999,
+            total_tokens: 10099,
+        };
+        let capped = cap_usage_to_request_limits(&inflated, &req, &model);
+        assert_eq!(capped.completion_tokens, 500);
+        assert_eq!(capped.prompt_tokens, 100);
+        assert_eq!(capped.total_tokens, 600);
+    }
+
+    #[test]
+    fn cap_usage_clamps_prompt_to_context_window() {
+        let model = test_model_info(); // context_window = 4096
+        let req = req_with_max_tokens(Some(500));
+        // Provider claims a wildly inflated prompt token count.
+        let inflated = solvela_protocol::Usage {
+            prompt_tokens: 1_000_000,
+            completion_tokens: 100,
+            total_tokens: 1_000_100,
+        };
+        let capped = cap_usage_to_request_limits(&inflated, &req, &model);
+        assert_eq!(capped.prompt_tokens, 4096);
+        assert_eq!(capped.completion_tokens, 100);
+        assert_eq!(capped.total_tokens, 4196);
+    }
+
+    #[test]
+    fn cap_usage_falls_back_to_model_max_output_when_request_uncapped() {
+        let model = test_model_info(); // max_output_tokens = Some(2048)
+        let req = req_with_max_tokens(None); // no req cap
+        let inflated = solvela_protocol::Usage {
+            prompt_tokens: 10,
+            completion_tokens: 9999,
+            total_tokens: 10009,
+        };
+        let capped = cap_usage_to_request_limits(&inflated, &req, &model);
+        // Falls back to model.max_output_tokens (2048), which is tighter
+        // than DEFAULT_COMPLETION_TOKENS_CAP (8192).
+        assert_eq!(capped.completion_tokens, 2048);
+    }
+
+    #[test]
+    fn cap_usage_passes_through_when_within_limits() {
+        let model = test_model_info();
+        let req = req_with_max_tokens(Some(1000));
+        let normal = solvela_protocol::Usage {
+            prompt_tokens: 100,
+            completion_tokens: 500,
+            total_tokens: 600,
+        };
+        let capped = cap_usage_to_request_limits(&normal, &req, &model);
+        assert_eq!(capped.prompt_tokens, 100);
+        assert_eq!(capped.completion_tokens, 500);
+        assert_eq!(capped.total_tokens, 600);
+    }
+
+    /// Regression for the H3 finding: NaN/Inf/negative pricing must return
+    /// None, not silently saturate to 0 or u64::MAX. A corrupt models.toml
+    /// entry must not be a silent revenue gap.
+    #[test]
+    fn test_compute_actual_atomic_cost_rejects_non_finite_pricing() {
+        let mut model_info = ModelInfo {
+            id: "test/model".to_string(),
+            provider: "test".to_string(),
+            model_id: "model".to_string(),
+            display_name: "Test".to_string(),
+            input_cost_per_million: f64::NAN,
+            output_cost_per_million: 1.00,
+            context_window: 128_000,
+            supports_streaming: false,
+            supports_tools: false,
+            supports_vision: false,
+            reasoning: false,
+            supports_structured_output: false,
+            supports_batch: false,
+            max_output_tokens: None,
+        };
+        // NaN input cost
+        assert_eq!(compute_actual_atomic_cost(1000, 500, &model_info), None);
+        // Infinity input cost
+        model_info.input_cost_per_million = f64::INFINITY;
+        assert_eq!(compute_actual_atomic_cost(1000, 500, &model_info), None);
+        // Negative output cost
+        model_info.input_cost_per_million = 1.00;
+        model_info.output_cost_per_million = -0.001;
+        assert_eq!(compute_actual_atomic_cost(1000, 500, &model_info), None);
+        // NaN output cost
+        model_info.output_cost_per_million = f64::NAN;
+        assert_eq!(compute_actual_atomic_cost(1000, 500, &model_info), None);
     }
 
     // =========================================================================

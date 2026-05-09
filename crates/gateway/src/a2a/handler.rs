@@ -160,7 +160,11 @@ async fn handle_new_request(
             data: None,
         })?;
 
-    // Create and save task record
+    // Create and save task record. We persist `max_tokens` so step 3
+    // (payment-submitted) re-applies the same cap to the provider call —
+    // without this, the agent paid for ≤max_tokens output but the provider
+    // would be invoked with max_tokens=None and could return an unbounded
+    // response, leaving the gateway to absorb the overrun.
     let task_id = new_task_id();
     let record = TaskRecord {
         id: task_id.clone(),
@@ -168,6 +172,7 @@ async fn handle_new_request(
         original_message: user_text,
         payment_required: payment_required_json.clone(),
         model: Some(resolved_model.clone()),
+        max_tokens: Some(max_tokens),
         created_at: chrono::Utc::now(),
     };
 
@@ -394,7 +399,7 @@ async fn handle_payment_submitted(
         settlement.tx_signature
     };
 
-    // Build ChatRequest from stored original message
+    // Build ChatRequest from stored original message.
     let model = record.model.unwrap_or_else(|| "auto".to_string());
     let resolved_model = resolve_model(&model, &record.original_message, state)?;
 
@@ -407,6 +412,12 @@ async fn handle_payment_submitted(
             data: None,
         })?;
 
+    // Re-apply the max_tokens cap that was used to compute the quoted cost
+    // in step 2 (handle_new_request). Records persisted before the H1 fix
+    // have `max_tokens = None`; for those we fall back to the historical
+    // 1000-token default so the cap is never silently absent.
+    let enforced_max_tokens = record.max_tokens.unwrap_or(1000);
+
     let chat_req = ChatRequest {
         model: resolved_model.clone(),
         messages: vec![ChatMessage {
@@ -416,7 +427,7 @@ async fn handle_payment_submitted(
             tool_calls: None,
             tool_call_id: None,
         }],
-        max_tokens: None,
+        max_tokens: Some(enforced_max_tokens),
         temperature: None,
         top_p: None,
         stream: false,

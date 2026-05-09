@@ -26,6 +26,15 @@ pub struct TaskRecord {
     pub payment_required: serde_json::Value,
     /// Model hint from the original request (if provided).
     pub model: Option<String>,
+    /// Output-token cap that was used to compute the quoted cost in step 2.
+    /// Step 3 (payment-submitted) MUST re-apply this cap when calling the
+    /// provider so actual output cannot exceed what the agent has already
+    /// paid for. `serde(default)` keeps deserialization backward-compatible
+    /// with task records persisted before this field was added — those
+    /// records will be processed with the call-site fallback rather than
+    /// silently uncapped.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -155,6 +164,7 @@ mod tests {
             original_message: "Hello, what is Solana?".to_string(),
             payment_required: serde_json::json!({"x402_version": 2}),
             model: Some("auto".to_string()),
+            max_tokens: Some(1000),
             created_at: chrono::Utc::now(),
         };
 
@@ -165,6 +175,7 @@ mod tests {
         assert_eq!(deserialized.state, TaskState::InputRequired);
         assert_eq!(deserialized.original_message, "Hello, what is Solana?");
         assert_eq!(deserialized.model, Some("auto".to_string()));
+        assert_eq!(deserialized.max_tokens, Some(1000));
     }
 
     #[test]
@@ -175,12 +186,36 @@ mod tests {
             original_message: "test".to_string(),
             payment_required: serde_json::json!({}),
             model: None,
+            max_tokens: None,
             created_at: chrono::Utc::now(),
         };
 
         let json = serde_json::to_string(&record).expect("serialize"); // safe: known struct
         let deserialized: TaskRecord = serde_json::from_str(&json).expect("deserialize"); // safe: just serialized
         assert_eq!(deserialized.model, None);
+        assert_eq!(deserialized.max_tokens, None);
         assert_eq!(deserialized.state, TaskState::Completed);
+    }
+
+    /// Regression: TaskRecord JSON written before the H1 fix did not include
+    /// `max_tokens`. Deserialization must succeed with `max_tokens = None`
+    /// rather than failing on an unknown-field/missing-field error, so
+    /// in-flight tasks across a deploy boundary still resolve.
+    #[test]
+    fn test_task_record_legacy_payload_without_max_tokens_deserializes() {
+        let legacy = serde_json::json!({
+            "id": "a2a_legacy",
+            "state": "input-required",
+            "original_message": "hi",
+            "payment_required": {"x402_version": 2},
+            "model": "auto",
+            "created_at": "2026-05-09T00:00:00Z"
+        })
+        .to_string();
+
+        let deserialized: TaskRecord =
+            serde_json::from_str(&legacy).expect("legacy record must deserialize");
+        assert_eq!(deserialized.max_tokens, None);
+        assert_eq!(deserialized.model, Some("auto".to_string()));
     }
 }
