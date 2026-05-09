@@ -118,7 +118,12 @@ pub async fn run(
         .unwrap_or(ESCROW_PROGRAM_ID)
         .to_string();
 
-    let client = reqwest::Client::new();
+    // RPC-only client. 30 s safety-net so a stalled RPC node fails fast
+    // instead of hanging the recovery flow after the user has typed `--execute`.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
 
     // --- Discover escrows owned by the local wallet ---
     let escrows = discover_escrows(&rpc_url, &program_id_str, &agent_pubkey, &client)

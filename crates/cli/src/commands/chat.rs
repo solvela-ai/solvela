@@ -49,7 +49,16 @@ pub async fn run(
     yes: bool,
     scheme: Option<&str>,
 ) -> Result<()> {
-    let client = reqwest::Client::new();
+    // Single client serves the gateway round-trip (which proxies LLM
+    // completions, ~30-90 s typical) and the Solana RPC calls
+    // (`solana_tx::*` helpers; ~1-5 s typical). The 180 s safety-net
+    // covers the slowest legitimate path. Without a timeout, a stalled
+    // gateway or RPC hangs the process indefinitely after the keypair
+    // has already been loaded and the transaction signed.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .context("failed to build HTTP client")?;
 
     let body = serde_json::json!({
         "model": model,
@@ -145,8 +154,10 @@ pub async fn run(
             let current_slot = crate::commands::solana_tx::fetch_current_slot(&rpc_url, &client)
                 .await
                 .context("failed to fetch current slot for escrow expiry")?;
-            let timeout_slots = (accepted.max_timeout_seconds * 1000) / 400;
-            let expiry_slot = current_slot + timeout_slots;
+            let expiry_slot = crate::commands::util::escrow_expiry_slot(
+                current_slot,
+                accepted.max_timeout_seconds,
+            );
             let deposit_tx = crate::commands::solana_tx::build_escrow_deposit(
                 private_key_b58,
                 &accepted.pay_to,

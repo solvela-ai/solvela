@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Write as IoWrite;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -109,50 +108,11 @@ pub fn read_entry(path: &Path) -> Result<Option<Value>> {
         .cloned())
 }
 
-/// Atomically write `value` as pretty JSON to `path`:
-/// 1. Write to a temp file in the same directory (same filesystem → rename is atomic).
-/// 2. Rename temp file over the target path.
-/// 3. On Unix, chmod 0600.
+/// Atomically write `value` as pretty JSON to `path`. Thin wrapper over the
+/// shared `crate::commands::util::write_atomic_json` helper so MCP host
+/// configs share the same chmod-before-rename guarantees the wallet file gets.
 pub fn write_atomic(path: &Path, value: &Value) -> Result<()> {
-    let parent = path
-        .parent()
-        .with_context(|| format!("no parent directory for {}", path.display()))?;
-
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create directory {}", parent.display()))?;
-
-    let json = serde_json::to_string_pretty(value).context("failed to serialize JSON")?;
-
-    // Write to temp file in same directory for atomic rename.
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)
-        .context("failed to create temp file for atomic write")?;
-    tmp.write_all(json.as_bytes())
-        .context("failed to write to temp file")?;
-    tmp.write_all(b"\n")
-        .context("failed to write newline to temp file")?;
-    tmp.flush().context("failed to flush temp file")?;
-
-    // Set 0600 permissions on the tempfile FD BEFORE the atomic rename so the
-    // file is never visible on disk with wider permissions (no race window).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tmp.as_file()
-            .set_permissions(fs::Permissions::from_mode(0o600))
-            .context("failed to set permissions on temp file")?;
-    }
-
-    tmp.persist(path)
-        .with_context(|| format!("failed to persist temp file to {}", path.display()))?;
-
-    // Belt-and-braces: re-apply after rename in case of cross-filesystem fallback.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to set permissions on {}", path.display()))?;
-    }
-
+    crate::commands::util::write_atomic_json(path, value)?;
     tracing::info!("wrote config to {}", path.display());
     Ok(())
 }
