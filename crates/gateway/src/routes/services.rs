@@ -55,6 +55,12 @@ pub async fn list_services(
             true
         })
         .map(|svc| {
+            // `svc.healthy` is intentionally NOT included here. Surfacing
+            // per-service health status to anonymous callers tells them
+            // when a gateway-proxied internal endpoint is down, which is
+            // useful reconnaissance for availability attacks. Operators
+            // can query health via a dedicated admin-protected endpoint
+            // (TODO: add `GET /v1/admin/services/health`).
             json!({
                 "id": svc.id,
                 "name": svc.name,
@@ -66,7 +72,6 @@ pub async fn list_services(
                 "pricing": svc.pricing_label,
                 "chains": svc.chains,
                 "source": svc.source,
-                "healthy": svc.healthy,
                 "price_per_request_usdc": svc.price_per_request_usdc,
             })
         })

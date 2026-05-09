@@ -54,10 +54,25 @@ pub async fn get_nonce(State(state): State<Arc<AppState>>) -> impl IntoResponse 
             StatusCode::OK,
             Json(json!({
                 "nonce_account": entry.nonce_account,
-                "authority": entry.authority,
                 "nonce_value": nonce_value,
-                // NOTE: rpc_url is intentionally omitted — it may contain an
-                // embedded API key (e.g. ?api-key=xxxx) that must not be leaked.
+                // NOTE: `authority` is intentionally omitted — it's the
+                // fee-payer wallet pubkey associated with this nonce.
+                // Solana pubkeys aren't secrets in isolation, but
+                // streaming the full set of fee-payer authorities to
+                // anonymous callers discloses the operator's pool
+                // composition (sensitive ops info). Clients don't need
+                // `authority` to construct a transaction; nonce_account
+                // and nonce_value are sufficient for the AdvanceNonce
+                // instruction.
+                //
+                // NOTE: `rpc_url` is intentionally omitted — it may contain
+                // an embedded API key (e.g. `?api-key=xxxx`) that must not
+                // be leaked.
+                //
+                // The endpoint stays unauthenticated because agents need
+                // it BEFORE they can sign a paying request; gating on a
+                // session would create a chicken-and-egg. Enumeration risk
+                // is bounded by the global rate-limit middleware.
             })),
         )
             .into_response(),
