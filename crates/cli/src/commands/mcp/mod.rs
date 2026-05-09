@@ -53,17 +53,7 @@ pub enum McpAction {
     Uninstall(UninstallArgs),
 }
 
-/// Validate a gateway URL: must parse as http or https.
-fn validate_gateway_url(s: &str) -> Result<String, String> {
-    let parsed = url::Url::parse(s).map_err(|e| format!("invalid URL '{}': {}", s, e))?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err(format!(
-            "gateway URL must use http or https scheme, got '{}'",
-            parsed.scheme()
-        ));
-    }
-    Ok(s.to_owned())
-}
+use crate::commands::util::validate_gateway_url;
 
 /// Validate a Solana wallet pubkey: base58 chars only, length 32–44.
 fn validate_wallet(s: &str) -> Result<String, String> {

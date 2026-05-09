@@ -60,6 +60,25 @@ pub(crate) fn write_atomic_json(path: &Path, value: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Validate a gateway URL: must parse as `http://...` or `https://...`.
+///
+/// Used by clap as `value_parser` on every CLI argument that accepts a
+/// gateway URL — both the global `--api-url` (which is the trust anchor
+/// for the entire payment flow) and the `mcp install --gateway-url`
+/// sub-argument. Without this, a user (or a poisoned `SOLVELA_API_URL`
+/// env var) could point the CLI at `file:///etc/passwd` or any other
+/// scheme reqwest happens to support.
+pub(crate) fn validate_gateway_url(s: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(s).map_err(|e| format!("invalid URL '{}': {}", s, e))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(format!(
+            "gateway URL must use http or https scheme, got '{}'",
+            parsed.scheme()
+        ));
+    }
+    Ok(s.to_owned())
+}
+
 /// Hard upper bound on how many Solana slots into the future an escrow's
 /// expiry may be set, as seen from the CLI's perspective. Solana slots are
 /// ~400 ms each, so 10_000 slots ≈ 66 minutes — comfortably above any

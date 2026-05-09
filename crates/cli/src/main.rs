@@ -15,7 +15,12 @@ pub(crate) static ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_
 #[command(version)]
 struct Cli {
     /// Gateway API URL
-    #[arg(long, env = "SOLVELA_API_URL", default_value = "http://localhost:8402")]
+    #[arg(
+        long,
+        env = "SOLVELA_API_URL",
+        default_value = "http://localhost:8402",
+        value_parser = commands::util::validate_gateway_url,
+    )]
     api_url: String,
 
     #[command(subcommand)]
