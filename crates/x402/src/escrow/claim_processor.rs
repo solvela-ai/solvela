@@ -599,4 +599,230 @@ mod tests {
         assert_eq!(snap.claims_failed, 0);
         assert_eq!(snap.claims_retried, 0);
     }
+
+    // ---------------------------------------------------------------------
+    // process_pending_claims integration tests
+    //
+    // Cover the DB-bound branches without touching RPC. EscrowClaimer is
+    // built with a drained fee-payer pool so do_claim_with_params returns
+    // Err synchronously before any HTTP call (matches the "no healthy fee
+    // payer" path tested in claimer.rs::do_claim_with_params_errors_*).
+    // ---------------------------------------------------------------------
+
+    use crate::fee_payer::FeePayerPool;
+    use sqlx::PgPool;
+
+    /// Generate a deterministic valid base58-encoded ed25519 keypair.
+    fn test_keypair_b58(seed: u8) -> String {
+        use ed25519_dalek::SigningKey;
+        let mut secret = [0u8; 32];
+        secret[0] = seed;
+        secret[31] = seed.wrapping_add(1);
+        let signing_key = SigningKey::from_bytes(&secret);
+        let mut keypair_bytes = [0u8; 64];
+        keypair_bytes[..32].copy_from_slice(&signing_key.to_bytes());
+        keypair_bytes[32..].copy_from_slice(signing_key.verifying_key().as_bytes());
+        bs58::encode(&keypair_bytes).into_string()
+    }
+
+    /// Construct an EscrowClaimer whose only fee payer is marked unhealthy,
+    /// so any do_claim_with_params call fails immediately with
+    /// "no healthy fee payer" without touching the network.
+    fn drained_test_claimer() -> Arc<EscrowClaimer> {
+        let pool = Arc::new(FeePayerPool::from_keys(&[test_keypair_b58(99)]).expect("pool"));
+        pool.mark_failed(0);
+        Arc::new(
+            EscrowClaimer::new(
+                "https://api.devnet.solana.com".to_string(),
+                pool,
+                "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
+                "11111111111111111111111111111111",
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                None,
+            )
+            .expect("construct"),
+        )
+    }
+
+    const VALID_AGENT_B58: &str = "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz";
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn process_pending_claims_returns_ok_when_circuit_breaker_open(pool: PgPool) {
+        // Pre-seed a pending claim that the loop would otherwise pick up.
+        claim_queue::enqueue_claim(&pool, &[1u8; 32], VALID_AGENT_B58, 1_000, None)
+            .await
+            .expect("enqueue");
+
+        // Trip the circuit breaker before processing.
+        let cb =
+            ClaimCircuitBreaker::with_params(Duration::from_secs(60), Duration::from_secs(60), 4);
+        for _ in 0..4 {
+            cb.record_failure();
+        }
+        assert!(cb.is_open(), "fixture must trip the breaker");
+
+        let claimer = drained_test_claimer();
+        process_pending_claims(&pool, &claimer, &cb, None)
+            .await
+            .expect("must short-circuit on open breaker");
+
+        // Claim must remain pending — the loop returned without writing.
+        let status: String = sqlx::query_scalar("SELECT status FROM escrow_claim_queue LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("read");
+        assert_eq!(status, "pending", "must not touch DB when breaker is open");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn process_pending_claims_returns_ok_with_empty_queue(pool: PgPool) {
+        let cb = ClaimCircuitBreaker::new();
+        let claimer = drained_test_claimer();
+        process_pending_claims(&pool, &claimer, &cb, None)
+            .await
+            .expect("empty queue must return Ok");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn process_pending_claims_marks_max_retries_claim_as_failed(pool: PgPool) {
+        let id = claim_queue::enqueue_claim(&pool, &[1u8; 32], VALID_AGENT_B58, 1_000, None)
+            .await
+            .expect("enqueue");
+        // Force attempts = MAX while keeping status='pending' so fetch_pending_claims
+        // picks the row up. (mark_in_progress would flip status to 'in_progress' and
+        // the recent updated_at would exclude it from the next poll.)
+        sqlx::query("UPDATE escrow_claim_queue SET attempts = $1 WHERE id = $2::uuid")
+            .bind(MAX_CLAIM_ATTEMPTS)
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .expect("force attempts");
+
+        let cb = ClaimCircuitBreaker::new();
+        let metrics = Arc::new(EscrowMetrics::default());
+        let claimer = drained_test_claimer();
+        process_pending_claims(&pool, &claimer, &cb, Some(&metrics))
+            .await
+            .expect("loop should succeed");
+
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM escrow_claim_queue WHERE id = $1::uuid")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("read");
+        assert_eq!(status, "failed", "max-retries must mark permanently failed");
+        assert_eq!(metrics.snapshot().claims_failed, 1, "metric must increment");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn process_pending_claims_marks_invalid_agent_pubkey_as_failed(pool: PgPool) {
+        // bs58-invalid agent pubkey must fail before the RPC call.
+        let id = claim_queue::enqueue_claim(&pool, &[1u8; 32], "not-valid-bs58!!!", 1_000, None)
+            .await
+            .expect("enqueue");
+
+        let cb = ClaimCircuitBreaker::new();
+        let metrics = Arc::new(EscrowMetrics::default());
+        let claimer = drained_test_claimer();
+        process_pending_claims(&pool, &claimer, &cb, Some(&metrics))
+            .await
+            .expect("loop should succeed");
+
+        let (status, attempts, error_message): (String, i32, Option<String>) = sqlx::query_as(
+            "SELECT status, attempts, error_message
+             FROM escrow_claim_queue WHERE id = $1::uuid",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .expect("read");
+
+        // After mark_in_progress(+1) + mark_attempt_failed(invalid bs58),
+        // status returns to pending (under MAX) and error_message is set.
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 1, "mark_in_progress must have incremented");
+        let msg = error_message.expect("error_message must be set");
+        assert!(msg.contains("invalid agent pubkey"), "msg: {msg}");
+
+        // Metric must increment claims_failed (this branch counts as failure).
+        assert_eq!(metrics.snapshot().claims_failed, 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn process_pending_claims_marks_attempt_failed_when_claimer_errors(pool: PgPool) {
+        // Valid claim with a valid bs58 agent — but the claimer's fee-payer
+        // pool is drained, so do_claim_with_params returns Err synchronously
+        // before any HTTP call.
+        let id = claim_queue::enqueue_claim(&pool, &[1u8; 32], VALID_AGENT_B58, 1_000, None)
+            .await
+            .expect("enqueue");
+
+        let cb = ClaimCircuitBreaker::new();
+        let metrics = Arc::new(EscrowMetrics::default());
+        let claimer = drained_test_claimer();
+        process_pending_claims(&pool, &claimer, &cb, Some(&metrics))
+            .await
+            .expect("loop should succeed");
+
+        let (status, attempts, error_message): (String, i32, Option<String>) = sqlx::query_as(
+            "SELECT status, attempts, error_message
+             FROM escrow_claim_queue WHERE id = $1::uuid",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .expect("read");
+
+        // mark_in_progress (+1) → submission Err → mark_attempt_failed → pending again.
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 1);
+        let msg = error_message.expect("error_message must be set");
+        assert!(
+            msg.contains("no healthy fee payer"),
+            "claimer error must propagate to error_message: {msg}"
+        );
+
+        // Below MAX → counts as a retry, not a failure.
+        let snap = metrics.snapshot();
+        assert_eq!(snap.claims_submitted, 1);
+        assert_eq!(snap.claims_retried, 1);
+        assert_eq!(snap.claims_failed, 0);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn process_pending_claims_counts_failure_when_attempts_at_max_after_increment(
+        pool: PgPool,
+    ) {
+        // After mark_in_progress, attempts becomes MAX_CLAIM_ATTEMPTS exactly.
+        // The submission errors, mark_attempt_failed marks the row failed,
+        // and metrics must increment claims_failed (not claims_retried).
+        let id = claim_queue::enqueue_claim(&pool, &[1u8; 32], VALID_AGENT_B58, 1_000, None)
+            .await
+            .expect("enqueue");
+        // Force attempts = MAX-1 while keeping status='pending' so the row passes
+        // the entry guard (entry.attempts < MAX_CLAIM_ATTEMPTS) and the
+        // post-increment value (entry.attempts + 1) hits MAX exactly.
+        sqlx::query("UPDATE escrow_claim_queue SET attempts = $1 WHERE id = $2::uuid")
+            .bind(MAX_CLAIM_ATTEMPTS - 1)
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .expect("force attempts");
+
+        let cb = ClaimCircuitBreaker::new();
+        let metrics = Arc::new(EscrowMetrics::default());
+        let claimer = drained_test_claimer();
+        process_pending_claims(&pool, &claimer, &cb, Some(&metrics))
+            .await
+            .expect("loop should succeed");
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.claims_submitted, 1);
+        assert_eq!(
+            snap.claims_failed, 1,
+            "attempts+1 == MAX must count as permanent failure"
+        );
+        assert_eq!(snap.claims_retried, 0);
+    }
 }
