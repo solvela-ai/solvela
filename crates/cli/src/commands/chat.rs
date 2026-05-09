@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
 use solvela_x402::types::{
     PaymentAccept, PaymentPayload, PaymentRequired, Resource, SolanaPayload,
@@ -121,11 +122,11 @@ pub async fn run(
         }
     }
 
-    // Load wallet.
+    // Load wallet. `expose_secret()` is the documented escape hatch for
+    // SecretString — every site that pulls the raw key is greppable for
+    // future reviewers.
     let wallet = load_wallet()?;
-    let private_key_b58 = wallet["private_key"]
-        .as_str()
-        .context("wallet missing private_key field")?;
+    let private_key_b58: &str = wallet.private_key.expose_secret();
 
     // Select the preferred payment scheme (escrow > exact, or override).
     let accepted = select_payment_scheme(&payment_required.accepts, scheme)?.clone();

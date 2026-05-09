@@ -9,6 +9,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use secrecy::ExposeSecret;
 
 use crate::commands::wallet::load_wallet;
 
@@ -81,9 +82,7 @@ pub async fn run(
 
     // --- Load wallet ---
     let wallet = load_wallet()?;
-    let private_key_b58 = wallet["private_key"]
-        .as_str()
-        .context("wallet missing private_key field")?;
+    let private_key_b58: &str = wallet.private_key.expose_secret();
 
     let key_bytes = bs58::decode(private_key_b58)
         .into_vec()
