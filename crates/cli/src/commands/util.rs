@@ -59,3 +59,64 @@ pub(crate) fn write_atomic_json(path: &Path, value: &Value) -> Result<()> {
 
     Ok(())
 }
+
+/// Hard upper bound on how many Solana slots into the future an escrow's
+/// expiry may be set, as seen from the CLI's perspective. Solana slots are
+/// ~400 ms each, so 10_000 slots ≈ 66 minutes — comfortably above any
+/// legitimate `max_timeout_seconds` the gateway should advertise (the
+/// gateway-side ceiling is 300 s ≈ 750 slots) while still rejecting
+/// malicious or misconfigured responses that would push the expiry far
+/// enough out to be effectively never.
+const MAX_ESCROW_EXPIRY_SLOTS_AHEAD: u64 = 10_000;
+
+/// Compute the Solana slot at which an escrow PDA created now should expire.
+///
+/// The intermediate `(seconds * 1000) / 400` arithmetic operates on `u64`
+/// and a hostile or buggy gateway returning a `max_timeout_seconds` near
+/// `u64::MAX / 1000` would silently wrap in release mode, producing a tiny
+/// or zero `timeout_slots` and a near-`current_slot` `expiry_slot`. That
+/// makes the deposited PDA refundable almost immediately, opening a
+/// reverse-the-payment race against the gateway's claim.
+///
+/// Saturating arithmetic plus the `MAX_ESCROW_EXPIRY_SLOTS_AHEAD` cap
+/// closes both the wrap-to-zero case and the unbounded-future case.
+pub(crate) fn escrow_expiry_slot(current_slot: u64, max_timeout_seconds: u64) -> u64 {
+    let timeout_slots = max_timeout_seconds
+        .saturating_mul(1000)
+        .saturating_div(400)
+        .min(MAX_ESCROW_EXPIRY_SLOTS_AHEAD);
+    current_slot.saturating_add(timeout_slots)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escrow_expiry_typical_300s() {
+        // 300 s × 2.5 slots/s = 750 slots ahead.
+        assert_eq!(escrow_expiry_slot(1_000_000, 300), 1_000_750);
+    }
+
+    #[test]
+    fn escrow_expiry_clamps_huge_values() {
+        // u64::MAX seconds would wrap without saturation; with the cap it
+        // tops out at MAX_ESCROW_EXPIRY_SLOTS_AHEAD slots ahead.
+        assert_eq!(
+            escrow_expiry_slot(1_000_000, u64::MAX),
+            1_000_000 + MAX_ESCROW_EXPIRY_SLOTS_AHEAD,
+        );
+    }
+
+    #[test]
+    fn escrow_expiry_zero_seconds() {
+        assert_eq!(escrow_expiry_slot(1_000_000, 0), 1_000_000);
+    }
+
+    #[test]
+    fn escrow_expiry_saturates_current_slot_overflow() {
+        // Even with a near-u64::MAX current_slot, saturating_add prevents
+        // wrap-to-zero (which would also produce an instantly-refundable PDA).
+        assert_eq!(escrow_expiry_slot(u64::MAX - 100, 300), u64::MAX);
+    }
+}

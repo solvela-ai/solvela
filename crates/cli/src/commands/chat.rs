@@ -154,8 +154,10 @@ pub async fn run(
             let current_slot = crate::commands::solana_tx::fetch_current_slot(&rpc_url, &client)
                 .await
                 .context("failed to fetch current slot for escrow expiry")?;
-            let timeout_slots = (accepted.max_timeout_seconds * 1000) / 400;
-            let expiry_slot = current_slot + timeout_slots;
+            let expiry_slot = crate::commands::util::escrow_expiry_slot(
+                current_slot,
+                accepted.max_timeout_seconds,
+            );
             let deposit_tx = crate::commands::solana_tx::build_escrow_deposit(
                 private_key_b58,
                 &accepted.pay_to,
