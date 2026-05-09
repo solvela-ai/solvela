@@ -850,4 +850,386 @@ supports_vision = false
         assert!(result.is_err(), "unknown model should error");
         assert_eq!(result.unwrap_err().code, ERR_MODEL_NOT_FOUND); // safe: just asserted is_err
     }
+
+    // -----------------------------------------------------------------
+    // Tests below depend on a local Redis at 127.0.0.1:6379 (matches
+    // CI services in .github/workflows/ci.yml and `docker compose up`).
+    // -----------------------------------------------------------------
+
+    /// Build a test AppState wired to a real Redis client. Each test uses
+    /// `new_task_id()` so task keys are unique and never collide across
+    /// parallel runs.
+    fn test_state_with_redis() -> Arc<AppState> {
+        use crate::cache::{CacheConfig, ResponseCache};
+
+        let redis_client =
+            redis::Client::open("redis://127.0.0.1:6379").expect("local Redis must be reachable");
+        let cache = ResponseCache::from_client(redis_client, CacheConfig::default())
+            .expect("ResponseCache::from_client should not connect");
+
+        Arc::new(AppState {
+            config: AppConfig::default(),
+            model_registry: ModelRegistry::from_toml(
+                r#"
+[models.test-model]
+provider = "test"
+model_id = "test-model"
+display_name = "Test"
+input_cost_per_million = 1.0
+output_cost_per_million = 2.0
+context_window = 4096
+supports_streaming = false
+supports_tools = false
+supports_vision = false
+                "#,
+            )
+            .expect("valid test model TOML"),
+            service_registry: RwLock::new(ServiceRegistry::empty()),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator: Facilitator::new(vec![]),
+            usage: UsageTracker::noop(),
+            cache: Some(cache),
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            prometheus_handle: None,
+            dev_bypass_payment: false,
+        })
+    }
+
+    fn user_msg_with_text(text: &str, model: Option<&str>) -> MessageSendParams {
+        MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: text.to_string(),
+                }],
+                metadata: model.map(|m| {
+                    let mut map = serde_json::Map::new();
+                    map.insert("model".to_string(), json!(m));
+                    map
+                }),
+            },
+            task_id: None,
+        }
+    }
+
+    /// New-request happy path: with Redis configured, save_task succeeds and
+    /// the handler returns an input-required Task carrying x402 payment metadata.
+    #[tokio::test]
+    async fn new_request_returns_input_required_task_with_payment_metadata() {
+        let state = test_state_with_redis();
+        let params = user_msg_with_text("Hello world", Some("test-model"));
+
+        let result = handle_new_request(&state, &params)
+            .await
+            .expect("happy path must succeed with Redis");
+
+        assert_eq!(result["status"]["state"], "input-required");
+        let metadata = &result["status"]["message"]["metadata"];
+        assert_eq!(metadata[x402_meta::STATUS_KEY], x402_meta::PAYMENT_REQUIRED);
+        assert!(
+            metadata[x402_meta::REQUIRED_KEY]["accepts"].is_array(),
+            "PaymentRequired.accepts must be present"
+        );
+        assert!(
+            result["id"].as_str().map(str::len).unwrap_or(0) > 0,
+            "task id must be set"
+        );
+    }
+
+    /// New request through the public dispatcher with a Redis-backed state.
+    #[tokio::test]
+    async fn handle_message_send_dispatches_new_request_happy_path() {
+        let state = test_state_with_redis();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "message/send".to_string(),
+            id: json!("req-happy"),
+            params: json!({
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "Hi"}],
+                    "metadata": {"model": "test-model"}
+                }
+            }),
+        };
+
+        let result = handle_message_send(state, &HeaderMap::new(), &request)
+            .await
+            .expect("dispatch must succeed");
+        assert_eq!(result["status"]["state"], "input-required");
+    }
+
+    /// Payment submission must include a metadata object on the message.
+    #[tokio::test]
+    async fn payment_submitted_without_metadata_is_invalid_params() {
+        let state = test_state_with_redis();
+        let new_params = user_msg_with_text("test", Some("test-model"));
+        let task_value = handle_new_request(&state, &new_params).await.expect("task");
+        let task_id = task_value["id"].as_str().expect("id").to_string();
+
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: "pay".to_string(),
+                }],
+                metadata: None,
+            },
+            task_id: Some(task_id.clone()),
+        };
+
+        let err = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &params)
+            .await
+            .expect_err("missing metadata must reject");
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+    }
+
+    /// Payment metadata must carry the `payment-submitted` status sentinel.
+    #[tokio::test]
+    async fn payment_submitted_with_wrong_status_is_invalid_params() {
+        let state = test_state_with_redis();
+        let new_params = user_msg_with_text("test", Some("test-model"));
+        let task_value = handle_new_request(&state, &new_params).await.expect("task");
+        let task_id = task_value["id"].as_str().expect("id").to_string();
+
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(x402_meta::STATUS_KEY.to_string(), json!("not-submitted"));
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: "pay".to_string(),
+                }],
+                metadata: Some(metadata),
+            },
+            task_id: Some(task_id.clone()),
+        };
+
+        let err = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &params)
+            .await
+            .expect_err("wrong status must reject");
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+        assert!(err.message.contains(x402_meta::STATUS_KEY));
+    }
+
+    /// Payment metadata with the right status but no payload field is rejected.
+    #[tokio::test]
+    async fn payment_submitted_without_payload_is_invalid_params() {
+        let state = test_state_with_redis();
+        let new_params = user_msg_with_text("test", Some("test-model"));
+        let task_value = handle_new_request(&state, &new_params).await.expect("task");
+        let task_id = task_value["id"].as_str().expect("id").to_string();
+
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            x402_meta::STATUS_KEY.to_string(),
+            json!(x402_meta::PAYMENT_SUBMITTED),
+        );
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: "pay".to_string(),
+                }],
+                metadata: Some(metadata),
+            },
+            task_id: Some(task_id.clone()),
+        };
+
+        let err = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &params)
+            .await
+            .expect_err("missing payload must reject");
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+        assert!(err.message.contains(x402_meta::PAYLOAD_KEY));
+    }
+
+    /// Payment payload that fails to deserialize as a `PaymentPayload` is rejected.
+    #[tokio::test]
+    async fn payment_submitted_with_invalid_payload_is_invalid_params() {
+        let state = test_state_with_redis();
+        let new_params = user_msg_with_text("test", Some("test-model"));
+        let task_value = handle_new_request(&state, &new_params).await.expect("task");
+        let task_id = task_value["id"].as_str().expect("id").to_string();
+
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            x402_meta::STATUS_KEY.to_string(),
+            json!(x402_meta::PAYMENT_SUBMITTED),
+        );
+        // PaymentPayload requires structured fields — a bare string fails serde.
+        metadata.insert(x402_meta::PAYLOAD_KEY.to_string(), json!("not-a-payload"));
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: "pay".to_string(),
+                }],
+                metadata: Some(metadata),
+            },
+            task_id: Some(task_id.clone()),
+        };
+
+        let err = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &params)
+            .await
+            .expect_err("invalid payload must reject");
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+    }
+
+    /// With an empty facilitator and a valid-shape payload, verification fails;
+    /// handler returns ERR_PAYMENT_FAILED with a sanitized message
+    /// (per GHSA-cgqx-mg48-949v: do not echo verifier internals).
+    #[tokio::test]
+    async fn payment_submitted_facilitator_failure_returns_payment_failed() {
+        let state = test_state_with_redis();
+        let new_params = user_msg_with_text("test", Some("test-model"));
+        let task_value = handle_new_request(&state, &new_params).await.expect("task");
+        let task_id = task_value["id"].as_str().expect("id").to_string();
+
+        let tx_raw = format!("test_tx_{}", uuid::Uuid::new_v4().simple());
+        let payload = json!({
+            "x402_version": solvela_x402::types::X402_VERSION,
+            "resource": {"url": "/v1/chat/completions", "method": "POST"},
+            "accepted": {
+                "scheme": "exact",
+                "network": solvela_x402::types::SOLANA_NETWORK,
+                "amount": "1000",
+                "asset": solvela_x402::types::USDC_MINT,
+                "pay_to": "11111111111111111111111111111111",
+                "max_timeout_seconds": solvela_x402::types::MAX_TIMEOUT_SECONDS,
+            },
+            "payload": { "transaction": tx_raw }
+        });
+
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            x402_meta::STATUS_KEY.to_string(),
+            json!(x402_meta::PAYMENT_SUBMITTED),
+        );
+        metadata.insert(x402_meta::PAYLOAD_KEY.to_string(), payload);
+
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: "pay".to_string(),
+                }],
+                metadata: Some(metadata),
+            },
+            task_id: Some(task_id.clone()),
+        };
+
+        let err = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &params)
+            .await
+            .expect_err("empty facilitator must fail to verify");
+        assert_eq!(err.code, ERR_PAYMENT_FAILED);
+        assert!(
+            !err.message.contains("verifier"),
+            "must not leak verifier internals: {}",
+            err.message
+        );
+    }
+
+    /// Resending the same tx_raw a second time hits the replay-detected branch
+    /// (the first call records the tx in Redis even though facilitator fails).
+    #[tokio::test]
+    async fn payment_submitted_replay_returns_payment_failed_with_replay_message() {
+        let state = test_state_with_redis();
+        let new_params = user_msg_with_text("test", Some("test-model"));
+        let task_value = handle_new_request(&state, &new_params).await.expect("task");
+        let task_id = task_value["id"].as_str().expect("id").to_string();
+
+        let tx_raw = format!("replay_tx_{}", uuid::Uuid::new_v4().simple());
+        let payload = json!({
+            "x402_version": solvela_x402::types::X402_VERSION,
+            "resource": {"url": "/v1/chat/completions", "method": "POST"},
+            "accepted": {
+                "scheme": "exact",
+                "network": solvela_x402::types::SOLANA_NETWORK,
+                "amount": "1000",
+                "asset": solvela_x402::types::USDC_MINT,
+                "pay_to": "11111111111111111111111111111111",
+                "max_timeout_seconds": solvela_x402::types::MAX_TIMEOUT_SECONDS,
+            },
+            "payload": { "transaction": tx_raw }
+        });
+
+        let build_params = || {
+            let mut metadata = serde_json::Map::new();
+            metadata.insert(
+                x402_meta::STATUS_KEY.to_string(),
+                json!(x402_meta::PAYMENT_SUBMITTED),
+            );
+            metadata.insert(x402_meta::PAYLOAD_KEY.to_string(), payload.clone());
+            MessageSendParams {
+                message: Message {
+                    role: MessageRole::User,
+                    parts: vec![Part::Text {
+                        text: "pay".to_string(),
+                    }],
+                    metadata: Some(metadata),
+                },
+                task_id: Some(task_id.clone()),
+            }
+        };
+
+        // First call records the tx (and fails verification — empty facilitator).
+        let first = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &build_params())
+            .await
+            .expect_err("first call fails verification");
+        assert_eq!(first.code, ERR_PAYMENT_FAILED);
+
+        // Second call short-circuits at replay detection.
+        let second = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &build_params())
+            .await
+            .expect_err("second call must hit replay path");
+        assert_eq!(second.code, ERR_PAYMENT_FAILED);
+        assert!(
+            second.message.contains("Replay"),
+            "must report replay: {}",
+            second.message
+        );
+    }
+
+    /// resolve_model resolves built-in profile aliases ("auto", "eco", etc.)
+    /// to a concrete model id without consulting the registry.
+    #[test]
+    fn resolve_model_handles_profile_aliases() {
+        let state = test_state();
+
+        for alias in ["auto", "eco", "premium", "free"] {
+            let resolved = resolve_model(alias, "what is solana", &state)
+                .unwrap_or_else(|e| panic!("profile alias {alias} must resolve: {:?}", e));
+            assert!(
+                !resolved.is_empty(),
+                "profile alias {alias} must produce a non-empty model id"
+            );
+        }
+    }
+
+    /// resolve_model resolves model aliases (e.g., "sonnet") to the canonical id.
+    #[test]
+    fn resolve_model_handles_model_aliases() {
+        let state = test_state();
+        let resolved = resolve_model("sonnet", "anything", &state).expect("sonnet must resolve");
+        assert!(
+            resolved.starts_with("anthropic/"),
+            "sonnet must map to the anthropic canonical id, got {resolved}"
+        );
+
+        let resolved = resolve_model("gpt5", "anything", &state).expect("gpt5 must resolve");
+        assert!(
+            resolved.starts_with("openai/"),
+            "gpt5 must map to the openai canonical id, got {resolved}"
+        );
+    }
 }
