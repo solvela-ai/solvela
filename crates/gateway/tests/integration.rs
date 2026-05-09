@@ -4200,11 +4200,17 @@ async fn test_register_service_validates_required_fields() {
 // Discovery / Health tests
 // ---------------------------------------------------------------------------
 
+/// G5 H2 regression: per-service `healthy` MUST NOT be exposed in the
+/// unauthenticated `GET /v1/services` listing. Surfacing the health
+/// status to anonymous callers tells them when a gateway-proxied
+/// internal endpoint is down — useful reconnaissance for availability
+/// attacks. Operators can query health via a dedicated admin-protected
+/// endpoint.
 #[tokio::test]
-async fn test_services_list_includes_health_status() {
+async fn test_services_list_omits_health_status_from_public_response() {
     let (app, state) = test_app_with_state();
 
-    // Set health on web-search to true
+    // Set health on web-search to true so the registry holds a value.
     {
         let mut registry = state.service_registry.write().await;
         registry.set_health("web-search", true);
@@ -4226,13 +4232,15 @@ async fn test_services_list_includes_health_status() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let data = json["data"].as_array().unwrap();
 
-    // Find web-search and verify healthy=true
-    let ws = data.iter().find(|s| s["id"] == "web-search").unwrap();
-    assert_eq!(ws["healthy"], true);
-
-    // Other services should have healthy=null (never checked)
-    let llm = data.iter().find(|s| s["id"] == "llm-gateway").unwrap();
-    assert!(llm["healthy"].is_null());
+    // No service entry in the public listing should carry a `healthy`
+    // field — even when the registry has a value. The field is admin-gated.
+    for svc in data {
+        assert!(
+            svc.get("healthy").is_none(),
+            "service {} must not expose `healthy` in the public listing: {svc}",
+            svc["id"]
+        );
+    }
 }
 
 #[tokio::test]

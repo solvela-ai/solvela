@@ -19,14 +19,19 @@ pub async fn create_api_key(
         return resp;
     }
 
-    // Prevent role escalation: callers cannot assign a role higher than their own
+    // Prevent role escalation: only Owners can mint Owner OR Admin API
+    // keys. An Admin-keyed caller can still mint Member-role keys but
+    // can't spawn additional Admin keys. See `routes/orgs/teams.rs`
+    // add_member for full rationale.
     if let AuthContext::OrgKey(ref ctx) = auth {
         if let Some(ref requested_role) = body.role {
-            if *requested_role == OrgRole::Owner && ctx.role != OrgRole::Owner {
+            if matches!(requested_role, OrgRole::Owner | OrgRole::Admin)
+                && ctx.role != OrgRole::Owner
+            {
                 return (
                     StatusCode::FORBIDDEN,
                     Json(json!({
-                        "error": "only owners can assign the owner role"
+                        "error": "only owners can assign the owner or admin role"
                     })),
                 )
                     .into_response();
@@ -40,10 +45,7 @@ pub async fn create_api_key(
 
     let pool = require_db!(state);
 
-    let actor_api_key = match &auth {
-        AuthContext::OrgKey(ctx) => Some(ctx.api_key_id),
-        AuthContext::Admin => None,
-    };
+    let (actor_api_key, actor_admin) = auth.audit_actor();
 
     match queries::create_api_key(pool, org_id, body).await {
         Ok(created) => {
@@ -53,6 +55,7 @@ pub async fn create_api_key(
                     org_id: Some(org_id),
                     actor_wallet: None,
                     actor_api_key,
+                    actor_admin,
                     action: "api_key.created".to_string(),
                     resource_type: "api_key".to_string(),
                     resource_id: Some(created.id.to_string()),
@@ -118,10 +121,7 @@ pub async fn revoke_api_key(
     }
     let pool = require_db!(state);
 
-    let actor_api_key = match &auth {
-        AuthContext::OrgKey(ctx) => Some(ctx.api_key_id),
-        AuthContext::Admin => None,
-    };
+    let (actor_api_key, actor_admin) = auth.audit_actor();
 
     match queries::revoke_api_key(pool, key_id, org_id).await {
         Ok(true) => {
@@ -131,6 +131,7 @@ pub async fn revoke_api_key(
                     org_id: Some(org_id),
                     actor_wallet: None,
                     actor_api_key,
+                    actor_admin,
                     action: "api_key.revoked".to_string(),
                     resource_type: "api_key".to_string(),
                     resource_id: Some(key_id.to_string()),

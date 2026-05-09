@@ -222,6 +222,7 @@ async fn assign_and_list_team_wallets(pool: PgPool) {
 
     assign_wallet(
         &pool,
+        org.id,
         team.id,
         &AssignWalletRequest {
             wallet_address: SECOND_WALLET.to_string(),
@@ -230,7 +231,7 @@ async fn assign_and_list_team_wallets(pool: PgPool) {
     .await
     .expect("assign");
 
-    let wallets = list_team_wallets(&pool, team.id)
+    let wallets = list_team_wallets(&pool, org.id, team.id)
         .await
         .expect("list wallets");
     assert_eq!(wallets.len(), 1);
@@ -257,7 +258,9 @@ async fn create_api_key_returns_plaintext_once_and_persists_hash(pool: PgPool) {
     .expect("create_api_key");
 
     assert!(created.key.starts_with("solvela_k_"));
-    assert_eq!(created.key.len(), 42);
+    // 74 = "solvela_k_" (10) + 64 hex chars from 32 random bytes (256-bit
+    // entropy per H3 fix; was 42 = 10 + 32 hex from 16 bytes pre-fix).
+    assert_eq!(created.key.len(), 74);
     assert_eq!(created.role, OrgRole::Admin);
     assert!(
         created.expires_at.is_some(),

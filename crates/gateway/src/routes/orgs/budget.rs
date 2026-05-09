@@ -137,10 +137,7 @@ pub async fn set_team_budget(
                 }
             }
 
-            let actor_api_key = match &auth {
-                AuthContext::OrgKey(ctx) => Some(ctx.api_key_id),
-                AuthContext::Admin => None,
-            };
+            let (actor_api_key, actor_admin) = auth.audit_actor();
 
             log_audit(
                 pool,
@@ -148,6 +145,7 @@ pub async fn set_team_budget(
                     org_id: Some(org_id),
                     actor_wallet: None,
                     actor_api_key,
+                    actor_admin,
                     action: "budget.team_updated".to_string(),
                     resource_type: "team_budget".to_string(),
                     resource_id: Some(team_id.to_string()),
@@ -345,8 +343,11 @@ pub async fn set_wallet_budget(
                 pool,
                 AuditEntry {
                     org_id: None,
+                    // Admin-only route (require_admin above), so this entry
+                    // is attributable to a privileged operator action.
                     actor_wallet: None,
                     actor_api_key: None,
+                    actor_admin: true,
                     action: "budget.wallet_updated".to_string(),
                     resource_type: "wallet_budget".to_string(),
                     resource_id: Some(wallet.clone()),
