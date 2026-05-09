@@ -222,55 +222,6 @@ impl SolanaVerifier {
             })
     }
 
-    /// Poll for transaction confirmation with a timeout and exponential backoff.
-    ///
-    /// Starts polling at 500ms intervals, doubling up to a 4s cap. The overall
-    /// timeout (default 30s) is unchanged — only the inter-poll interval grows.
-    async fn confirm_transaction(&self, signature: &str, timeout_secs: u64) -> Result<(), Error> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(timeout_secs);
-        let mut interval = std::time::Duration::from_millis(500);
-        let max_interval = std::time::Duration::from_secs(4);
-
-        loop {
-            if start.elapsed() > timeout {
-                return Err(Error::Timeout);
-            }
-
-            let result = self
-                .rpc_request("getSignatureStatuses", serde_json::json!([[signature]]))
-                .await?;
-
-            if let Some(value) = result.get("result").and_then(|r| r.get("value")) {
-                if let Some(status) = value.as_array().and_then(|arr| arr.first()) {
-                    if !status.is_null() {
-                        // Check for transaction error
-                        if let Some(err) = status.get("err") {
-                            if !err.is_null() {
-                                return Err(Error::SettlementFailed(format!(
-                                    "transaction failed: {err}"
-                                )));
-                            }
-                        }
-
-                        // Check confirmation status
-                        if let Some(confirmation) =
-                            status.get("confirmationStatus").and_then(|s| s.as_str())
-                        {
-                            if confirmation == "confirmed" || confirmation == "finalized" {
-                                info!(signature, status = confirmation, "transaction confirmed");
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-            }
-
-            tokio::time::sleep(interval).await;
-            interval = (interval * 2).min(max_interval);
-        }
-    }
-
     /// Send a JSON-RPC request to the Solana cluster.
     async fn rpc_request(
         &self,
@@ -490,8 +441,19 @@ impl PaymentVerifier for SolanaVerifier {
 
         info!(signature = %signature, "transaction sent, waiting for confirmation");
 
-        // Wait for confirmation (30 second timeout)
-        match self.confirm_transaction(&signature, 30).await {
+        // Wait for confirmation (30 second timeout). Delegates to the shared
+        // `solana_rpc::poll_for_confirmation` so SolanaVerifier and
+        // EscrowVerifier converge on identical confirmation semantics
+        // (`confirmed`/`finalized` only — `processed` is not durable enough
+        // for payment settlement).
+        match crate::solana_rpc::poll_for_confirmation(
+            &self.http_client,
+            &self.rpc_url,
+            &signature,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        {
             Ok(()) => {
                 info!(signature = %signature, "settlement confirmed");
                 Ok(SettlementResult {
