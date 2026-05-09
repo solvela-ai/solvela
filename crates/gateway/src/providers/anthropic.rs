@@ -165,11 +165,15 @@ fn from_anthropic_response(resp: AnthropicResponse, original_model: &str) -> Cha
             },
             finish_reason,
         }],
-        usage: Some(Usage {
-            prompt_tokens: resp.usage.input_tokens,
-            completion_tokens: resp.usage.output_tokens,
-            total_tokens: resp.usage.input_tokens + resp.usage.output_tokens,
-        }),
+        // `Usage::new` does the saturating add for total_tokens. A plain
+        // `prompt + completion` panics in debug builds on overflow and
+        // silently wraps in release; the gateway billing path
+        // (`cap_usage_to_request_limits`) reads `total_tokens` directly,
+        // so a wrapped value would propagate into spend tracking.
+        usage: Some(Usage::new(
+            resp.usage.input_tokens,
+            resp.usage.output_tokens,
+        )),
     }
 }
 
