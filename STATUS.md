@@ -2,13 +2,13 @@
 
 > Live shipping status. See [`CHANGELOG.md`](./CHANGELOG.md) for history, [`SECURITY.md`](./SECURITY.md) for disclosure.
 
-_Last refreshed: 2026-05-09 — whole-repo security review pass complete; 18 must-ship PRs landed on `main`._
+_Last refreshed: 2026-05-10 — escrow program redeployed to mainnet with the 2026-05-09 review-pass fixes._
 
 ## Shipped
 
 - **Gateway** — Axum HTTP server with chat completions, image generation, A2A protocol, model registry, escrow endpoints, enterprise org/team/audit/budget endpoints, Prometheus metrics. 5 LLM providers (OpenAI, Anthropic, Google, xAI, DeepSeek).
 - **Protocol** — `solvela-protocol`, `solvela-x402`, `solvela-router`, `solvela-cli` published to crates.io. v0.1.1 was published with mixed/MIT metadata; v0.2.0 corrects this and aligns with the per-component split (gateway BUSL-1.1, libraries MIT, SDKs MIT). `cargo install solvela-cli` works.
-- **Escrow program** — Anchor / USDC-SPL trustless escrow. Deployed to Solana mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`. Upgraded 2026-05-08 (slot 418438627, tx `2Rp69yKfyxeeawrFRPZbLma9NytxEXSz8PeWPdNYzWm4e3Fr2xihP3T23PiwDB9xYbnUwN8kmsnrgBKjP2dbBbuE`, bytecode SHA-256 `2293edfce3a0e7b1b0332bc32d9f7a9e58105a2a3f825ee05d8a4f7fbf57bf26`) to patch two latent settlement-path footguns surfaced in pre-launch security review — a claim-vs-refund race at the expiry boundary and a refund deadlock when the agent had closed their USDC ATA. Six secondary hardening items shipped alongside (PR #160). `getProgramAccounts` returned zero at upgrade time; both flaws were latent and unexploited.
+- **Escrow program** — Anchor / USDC-SPL trustless escrow. Deployed to Solana mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`. Last redeployed 2026-05-10 (slot 418832804, tx `58ud2vrh8KsiwST8AsA9qUE7kJpN1NTDvaz8TfzqbG9RRkHM64tUMD974efAigzktVPg5DWXrbE6GWQd6wjFNkxb`, bytecode SHA-256 `5fb8e7548f0653a165803523c322b8d19eab06310462d8621c7250e912bf16c9`) to ship the 2026-05-09 review-pass fixes — vault dust-stuffing drain + minimum expiry buffer + `Transfer` → `TransferChecked` defense-in-depth across all 5 token transfer sites (PRs [#198](https://github.com/solvela-ai/solvela/pull/198) + [#200](https://github.com/solvela-ai/solvela/pull/200)). Prior upgrade 2026-05-08 (slot 418438627, tx `2Rp69yKfyxeeawrFRPZbLma9NytxEXSz8PeWPdNYzWm4e3Fr2xihP3T23PiwDB9xYbnUwN8kmsnrgBKjP2dbBbuE`) closed a claim-vs-refund race at the expiry boundary and a refund deadlock on closed agent ATAs (PR [#160](https://github.com/solvela-ai/solvela/pull/160)). `getProgramAccounts` returned zero at both redeploys; all flaws were latent and unexploited.
 - **SDKs** — Python, TypeScript, Go, and a wallet-client (Rust) SDK in separate repos: `solvela-python` (v0.1.0), `solvela-ts` (v0.2.0), `solvela-go` (v0.1.0), `solvela-client` (v0.2.0). Tagged + GitHub Released 2026-04-29 as the security-hardening release; Go is live via the module proxy, PyPI/npm/crates.io uploads pending operator credentials.
 - **Dashboard + Docs** — Next.js app serving `solvela.ai`, `app.solvela.ai`, `docs.solvela.ai` via subdomain middleware. `www.solvela.ai` 308-redirects to apex.
 
@@ -26,7 +26,7 @@ _Last refreshed: 2026-05-09 — whole-repo security review pass complete; 18 mus
 - Load tested to ~400 RPS sustained at p99 < 300 ms.
 - `cargo test` suite green at HEAD.
 - 4 required CI checks gate every merge to `main`: Rust (fmt, clippy, test), Smoke test, Security audit (cargo-audit), Docker build.
-- **Whole-repo security review pass complete (2026-05-09)** — 18 must-ship PRs (#182–#199) landed across all 6 workspace crates plus the Anchor escrow program. All HIGH/CRITICAL findings closed in source. See `CHANGELOG.md` and `SECURITY.md` for the per-finding breakdown. Cleanup-tier wave 1 ([PR #200](https://github.com/solvela-ai/solvela/pull/200), 8 MEDIUMs) open for review.
+- **Whole-repo security review pass complete (2026-05-09)** — 18 must-ship PRs (#182–#199) + cleanup-tier wave 1 (#200, 8 MEDIUMs) landed across all 6 workspace crates plus the Anchor escrow program. All HIGH/CRITICAL findings closed in source; escrow bytecode redeployed to mainnet 2026-05-10. See `CHANGELOG.md` and `SECURITY.md` for the per-finding breakdown.
 
 ## Repo hardening
 
@@ -38,6 +38,6 @@ _Last refreshed: 2026-05-09 — whole-repo security review pass complete; 18 mus
 
 - **Registry uploads for SDKs** (PyPI, npm, crates.io) — pending operator credentials.
 - **Vercel API token rotation** and **GitHub org 2FA enforcement** — operator-side actions still pending.
-- **Escrow program redeploy with #198 + #200 source fixes** — the 2026-05-09 review pass added a vault-dust drain in `claim`, a minimum-expiry-buffer guard in `deposit`, and a `Transfer` → `TransferChecked` migration across all 5 transfer sites. All landed in `main` source; the deployed mainnet bytecode (`9neDH…HLU`) does **not** yet include these. `getProgramAccounts` confirms zero on-chain deposits — both newly-discovered footguns are latent and unexploited (see `SECURITY.md`). Redeploy follows the 2026-05-08 ceremony pattern.
 - **Anchor 0.31 → 1.0 migration on the escrow program** (#155 / #156) — coordinated bump alongside the broader Solana 1.x → @solana/kit ecosystem migration. Not security-critical now that the deployed bytecode is hardened.
+- **Squads multisig migration for the upgrade authority** — `EDM9pao5…` is currently single-sig and the keypair file lives on the operator workstation (warm, not truly air-gapped). Squads multisig (1-of-1 → 2-of-N with HW co-signer) is the standard next step for Solana protocol upgrade authorities. See `SECURITY.md`.
 - **Dedicated escrow CI workflow** (#162) — `programs/escrow/` opts out of the workspace and isn't covered by the cross-cutting Rust job. Cargo build-sbf + LiteSVM integration tests should run on every escrow-touching PR.
