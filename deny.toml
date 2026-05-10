@@ -1,0 +1,87 @@
+# cargo-deny configuration for Solvela.
+#
+# Runs in CI alongside cargo-audit. Audit checks vulnerabilities; deny
+# adds license, source, and dependency-graph hygiene on top.
+#
+# Source of truth for the lint policy. Adjust here, not in the workflow.
+# See https://embarkstudios.github.io/cargo-deny/ for the full schema.
+
+[graph]
+# Restrict the graph to the targets we actually deploy to. This trims
+# platform-specific transitives (UEFI bindings, Windows-only crates,
+# Darwin-only crates) that would otherwise pull in licenses we don't
+# need to audit and never ship. Add a target if/when we ship to it.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+all-features = false
+
+[output]
+feature-depth = 1
+
+# ----------------------------------------------------------------------
+# Advisories — RustSec database. cargo-audit (in ci.yml) and cargo-deny
+# both consult RustSec, but cargo-audit reads the full Cargo.lock graph
+# while cargo-deny respects the [graph].targets filter above. The
+# RUSTSEC-2023-0071 ignore lives in ci.yml for cargo-audit; cargo-deny
+# doesn't see the affected crate after target filtering, so it has no
+# entry here. Add ignores below only when this tool surfaces a finding.
+# ----------------------------------------------------------------------
+[advisories]
+yanked = "deny"
+ignore = []
+
+# ----------------------------------------------------------------------
+# Licenses — list reflects what's actually in the dependency graph
+# today. New licenses are denied by default; add them here with a brief
+# reason if a future dep introduces one.
+# ----------------------------------------------------------------------
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "BUSL-1.1",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+# ----------------------------------------------------------------------
+# Bans — catch dependency-graph foot-guns. We keep `multiple-versions`
+# at warn because the Solana ecosystem has unavoidable duplicates and
+# fixing every one is out of scope. Wildcards are hard-denied since they
+# break reproducible builds.
+# ----------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+# ----------------------------------------------------------------------
+# Sources — only crates.io is allowed. New git sources require an
+# explicit entry below with a comment explaining why we're depending on
+# unpublished code.
+# ----------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []
