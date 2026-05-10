@@ -10,7 +10,7 @@ A `.well-known/security.txt` is served from `api.solvela.ai`.
 
 The gateway (`api.solvela.ai`) and dashboard (`solvela.ai`, `app.solvela.ai`, `docs.solvela.ai`) run on a clean dependency tree (`cargo audit` and `npm audit` both pass at HEAD).
 
-The escrow program is deployed to Solana mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`. Upgrade authority is held at `EDM9pao5miQdJYfzCtZii9cVn5ZHTBJq84Y9yyqZbsr4` (single-sig, stored offline). Authority was migrated on 2026-05-08 from the gateway's hot-wallet keypair (`B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A`) so a runtime compromise of the gateway can no longer escalate to upgrade rights over the deployed program. Migration to a Squads multisig (or hardware-wallet-backed authority) is the next planned step.
+The escrow program is deployed to Solana mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`. Upgrade authority is held at `EDM9pao5miQdJYfzCtZii9cVn5ZHTBJq84Y9yyqZbsr4` (single-sig, stored on the operator workstation, not air-gapped). Authority was migrated on 2026-05-08 from the gateway's hot-wallet keypair (`B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A`) so a runtime compromise of the gateway can no longer escalate to upgrade rights over the deployed program. Migration to a Squads multisig (or hardware-wallet-backed authority) is the next planned step.
 
 ## Known transitive advisories — accepted with reason
 
