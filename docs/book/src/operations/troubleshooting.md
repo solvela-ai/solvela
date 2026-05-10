@@ -79,10 +79,10 @@ Key fields to check:
 
 ## CLI Diagnostics
 
-The `rcr doctor` command runs a comprehensive check:
+The `solvela doctor` command runs a comprehensive check:
 
 ```bash
-cargo run -p cli -- doctor
+cargo run -p solvela-cli -- doctor
 ```
 
 Checks performed:
