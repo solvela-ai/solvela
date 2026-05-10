@@ -56,10 +56,10 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y \
     ca-certificates libssl3 libpq5 \
     && rm -rf /var/lib/apt/lists/*
-RUN useradd --uid 1001 --no-create-home --shell /bin/false rcr
+RUN useradd --uid 1001 --no-create-home --shell /bin/false solvela
 COPY --from=builder /app/target/release/solvela /usr/local/bin/solvela
 EXPOSE 8402
-USER rcr
+USER solvela
 CMD ["/usr/local/bin/solvela"]
 ```
 
@@ -67,7 +67,7 @@ Key points:
 
 - Dependencies are cached in the `cargo chef cook` step -- only rebuilds when `Cargo.toml`/`Cargo.lock` change
 - Runtime image is `debian:bookworm-slim` (minimal, no build tools)
-- Runs as non-root user `rcr` (UID 1001)
+- Runs as non-root user `solvela` (UID 1001)
 - Exposes port 8402
 
 Build the image:
@@ -142,7 +142,7 @@ fly secrets set SOLVELA_SOLANA_FEE_PAYER_KEY=your-fee-payer-key
 fly secrets set SOLVELA_ADMIN_TOKEN=your-admin-token
 fly secrets set DATABASE_URL=postgres://...
 fly secrets set REDIS_URL=redis://...
-fly secrets set RCR_SESSION_SECRET=your-session-secret
+fly secrets set SOLVELA_SESSION_SECRET=your-session-secret
 ```
 
 ### Health Checks
@@ -155,7 +155,7 @@ Before deploying to production:
 
 - [ ] Set `SOLVELA_ENV=production` (disables localhost CORS origins)
 - [ ] Set `SOLVELA_ADMIN_TOKEN` (protects `/metrics` and `/v1/escrow/health`)
-- [ ] Set `RCR_SESSION_SECRET` to a stable value (auto-generated secret changes on restart)
+- [ ] Set `SOLVELA_SESSION_SECRET` to a stable value (auto-generated secret changes on restart)
 - [ ] Set `SOLVELA_SOLANA_RPC_URL` to a mainnet-beta endpoint
 - [ ] Configure `DATABASE_URL` with production PostgreSQL credentials
 - [ ] Configure `REDIS_URL` with production Redis

@@ -21,13 +21,13 @@ import (
     "log"
     "os"
 
-    rcr "github.com/solvela-ai/solvela-go"
+    solvela "github.com/solvela-ai/solvela-go"
 )
 
 func main() {
-    client, err := rcr.NewClient(
-        rcr.WithAPIURL("https://api.solvela.ai"),
-        rcr.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
+    client, err := solvela.NewClient(
+        solvela.WithAPIURL("https://api.solvela.ai"),
+        solvela.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
     )
     if err != nil {
         log.Fatal(err)
@@ -45,12 +45,12 @@ func main() {
 ## Client options
 
 ```go
-client, err := rcr.NewClient(
-    rcr.WithAPIURL("https://api.solvela.ai"),
-    rcr.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
-    rcr.WithSessionBudget(0.10),              // USDC cap
-    rcr.WithTimeout(30 * time.Second),        // default: 60s
-    rcr.WithHTTPClient(customHTTPClient),     // replace the http.Client entirely
+client, err := solvela.NewClient(
+    solvela.WithAPIURL("https://api.solvela.ai"),
+    solvela.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
+    solvela.WithSessionBudget(0.10),              // USDC cap
+    solvela.WithTimeout(30 * time.Second),        // default: 60s
+    solvela.WithHTTPClient(customHTTPClient),     // replace the http.Client entirely
 )
 ```
 
@@ -77,11 +77,11 @@ text, err := client.Chat(ctx, "openai/gpt-4o", "Explain proof of history.")
 Full OpenAI-compatible request. Returns a `*ChatResponse`.
 
 ```go
-resp, err := client.ChatCompletion(ctx, rcr.ChatRequest{
+resp, err := client.ChatCompletion(ctx, solvela.ChatRequest{
     Model: "auto",
-    Messages: []rcr.ChatMessage{
-        {Role: rcr.RoleSystem, Content: "You are a blockchain expert."},
-        {Role: rcr.RoleUser, Content: "What is a validator?"},
+    Messages: []solvela.ChatMessage{
+        {Role: solvela.RoleSystem, Content: "You are a blockchain expert."},
+        {Role: solvela.RoleUser, Content: "What is a validator?"},
     },
     MaxTokens:   intPtr(500),
     Temperature: float64Ptr(0.7),
@@ -161,9 +161,9 @@ import "errors"
 
 resp, err := client.ChatCompletion(ctx, req)
 if err != nil {
-    var payErr *rcr.PaymentError
-    var budgetErr *rcr.BudgetExceededError
-    var apiErr *rcr.APIError
+    var payErr *solvela.PaymentError
+    var budgetErr *solvela.BudgetExceededError
+    var apiErr *solvela.APIError
 
     switch {
     case errors.As(err, &budgetErr):
