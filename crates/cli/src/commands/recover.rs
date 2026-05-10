@@ -206,10 +206,17 @@ pub async fn run(
         return Ok(());
     }
 
-    // Pre-balance
-    let pre_balance = fetch_sol_balance(&rpc_url, &agent_pubkey_b58, &client)
-        .await
-        .unwrap_or(0);
+    // Pre-balance. Display-only — log RPC failures so the user can tell a
+    // genuine "0 lamports" wallet apart from a network error masquerading
+    // as zero. Either way we proceed with refund attempts; the value is
+    // not load-bearing.
+    let pre_balance = match fetch_sol_balance(&rpc_url, &agent_pubkey_b58, &client).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to fetch pre-refund SOL balance; displaying 0");
+            0
+        }
+    };
     println!("Pre-refund SOL balance : {pre_balance} lamports");
 
     // Confirmation prompt
@@ -269,10 +276,16 @@ pub async fn run(
         }
     }
 
-    // Post-balance
-    let post_balance = fetch_sol_balance(&rpc_url, &agent_pubkey_b58, &client)
-        .await
-        .unwrap_or(0);
+    // Post-balance — same display-only treatment as the pre-balance
+    // above. A failure here would otherwise mask a successful refund as
+    // "0 lamports recovered" in the summary line.
+    let post_balance = match fetch_sol_balance(&rpc_url, &agent_pubkey_b58, &client).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to fetch post-refund SOL balance; displaying 0");
+            0
+        }
+    };
     println!();
     println!("Post-refund SOL balance: {post_balance} lamports");
     println!("Recovery complete: {success} succeeded, {failure} failed");

@@ -46,10 +46,43 @@ OPENSSL_NO_PKG_CONFIG=1 OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu OPENSSL_INCLUD
 ```
 Prefer LiteSVM for fast deterministic tests; use Surfpool/mainnet-fork only when you need real-account behaviour.
 
+### Build Fallback
+If `anchor build` exits silently without producing `target/deploy/solvela_escrow.so` (a known foot-gun on some toolchain combinations — Anchor 0.31.1 vs newer cargo), use the underlying SBF builder directly:
+
+```bash
+cd programs/escrow && cargo build-sbf
+```
+
+This produces the same `.so` artifact and runs the same SBF compilation pipeline that `anchor build` invokes — just without Anchor's outer wrapping. Verified to produce a valid program in this repo's tooling configuration.
+
+### Deployment Checklist
+The `mainnet` feature flag selects which USDC mint the deployed program accepts at compile time. **Mainnet deploys MUST be built with `--features mainnet`** — without it, the program targets the devnet USDC mint and would silently reject all mainnet USDC deposits with `mint mismatch`.
+
+```bash
+# Mainnet deploy — selects EPjFW…USDC mint
+cargo build-sbf -- --features mainnet
+
+# Devnet / local-validator deploy (default) — selects 4zMM…USDC mint
+cargo build-sbf
+```
+
+Before invoking `solana program deploy`, verify the resulting `.so` is the right variant by inspecting the constants:
+
+```bash
+cargo expand --features mainnet | grep 'USDC_MINT.*=' | head -1
+# Expect: pub const USDC_MINT: Pubkey = pubkey!("EPjFW…");
+```
+
+There is no on-chain self-check for which mint the deployed bytecode references — the program would happily accept the configured-at-compile-time mint, mainnet or devnet. The discipline lives in this checklist.
+
+### Lint Notes (informational)
+`cargo clippy --all-targets -- -D warnings` against this crate emits ~14 `unexpected cfg condition value` warnings on newer Rust toolchains. These originate inside Anchor 0.31.1's macro-generated code (`#[program]`, `#[derive(Accounts)]`) and don't reflect any issue with this program's source. Workspace clippy (`cargo clippy --workspace`) doesn't surface them because escrow is not a workspace member. Either tolerate the noise locally, or add `RUSTFLAGS="--cap-lints=warn"` to your dev shell.
+
 ### Common Patterns
 - `#[error_code]` enum with `#[msg("…")]` on every variant.
 - CPI with PDA signer using `CpiContext::new_with_signer` (see root AGENTS.md for the canonical snippet).
 - Require-guards: `require!(cond, EscrowError::Foo);`.
+- Token transfers use `TransferChecked` (mint + decimals validated at the SPL token program level), not bare `Transfer`.
 
 ## Dependencies
 
@@ -57,6 +90,6 @@ Prefer LiteSVM for fast deterministic tests; use Surfpool/mainnet-fork only when
 - Client-side counterpart in `crates/x402/src/escrow/`.
 
 ### External
-- `anchor-lang`, `anchor-spl` (for `token::transfer` CPIs), `solana-program`.
+- `anchor-lang`, `anchor-spl` (for `token::transfer_checked` CPIs), `solana-program`.
 
 <!-- MANUAL: -->

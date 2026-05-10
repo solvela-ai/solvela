@@ -211,7 +211,14 @@ pub async fn build_usdc_transfer(
         .parse()
         .context("invalid recipient wallet address")?;
 
-    let usdc_mint: Pubkey = USDC_MINT.parse().expect("USDC_MINT constant is valid");
+    // USDC_MINT is a hardcoded literal in this file, so the parse is
+    // infallible in practice. `?` rather than `.expect()` keeps the
+    // CLAUDE.md "no expect/unwrap in non-test code" rule honest — if a
+    // future refactor swaps the constant to something env-derived, the
+    // error path is already in place.
+    let usdc_mint: Pubkey = USDC_MINT
+        .parse()
+        .with_context(|| format!("USDC_MINT constant '{USDC_MINT}' did not parse as a Pubkey"))?;
     let token_program = Pubkey::TOKEN_PROGRAM_ID;
 
     // --- 3. Derive ATAs ---

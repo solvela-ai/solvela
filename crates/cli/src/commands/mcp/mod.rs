@@ -379,7 +379,13 @@ pub async fn run_install(args: InstallArgs) -> Result<()> {
         }
         _ => {
             let home = home_dir()?;
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            // `cwd` resolves the project-scope `.mcp.json` location. A
+            // silent fallback to `.` would mask EACCES/ENOENT (cwd
+            // deleted out from under us, or permission lost) and write
+            // the config to a path the user didn't expect — bail with
+            // a clear error instead.
+            let cwd = std::env::current_dir()
+                .context("failed to read current working directory; project-scope mcp install requires a readable cwd")?;
             let path = config_path(&host, &scope, &home, &cwd).ok_or_else(|| {
                 anyhow::anyhow!("internal: host {} has no config path (bug)", host)
             })?;
@@ -441,7 +447,13 @@ pub async fn run_uninstall(args: UninstallArgs) -> Result<()> {
         }
         _ => {
             let home = home_dir()?;
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            // `cwd` resolves the project-scope `.mcp.json` location. A
+            // silent fallback to `.` would mask EACCES/ENOENT (cwd
+            // deleted out from under us, or permission lost) and write
+            // the config to a path the user didn't expect — bail with
+            // a clear error instead.
+            let cwd = std::env::current_dir()
+                .context("failed to read current working directory; project-scope mcp install requires a readable cwd")?;
             let path = config_path(&host, &scope, &home, &cwd).ok_or_else(|| {
                 anyhow::anyhow!("internal: host {} has no config path (bug)", host)
             })?;
