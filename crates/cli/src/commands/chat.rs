@@ -95,7 +95,16 @@ pub async fn run(
 
     // --- 402 Payment Required ---
     let error_body: serde_json::Value = resp.json().await?;
-    let error_msg = error_body["error"]["message"].as_str().unwrap_or("");
+    // Surface a clear actionable error when `error.message` is missing or
+    // non-string. Otherwise the empty-string fallback flowed straight into
+    // serde_json::from_str("") which returns "EOF while parsing a value"
+    // — accurate but useless for the user trying to debug a malformed
+    // 402 response from the gateway.
+    let error_msg = error_body["error"]["message"].as_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "gateway 402 response missing error.message field; raw body: {error_body}"
+        )
+    })?;
 
     let payment_required: PaymentRequired = serde_json::from_str(error_msg)
         .context("failed to parse PaymentRequired from 402 response")?;
