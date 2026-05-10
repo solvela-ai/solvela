@@ -8,7 +8,7 @@ Returns aggregated spend statistics for a specific wallet over a configurable ti
 
 ```bash
 curl -s http://localhost:8402/v1/wallet/7YkAzWalletPubkey.../stats?days=30 \
-  -H "x-rcr-session: <hmac-session-token>" | jq
+  -H "Authorization: Bearer <hmac-session-token>" | jq
 ```
 
 ### Path Parameters
@@ -25,7 +25,7 @@ curl -s http://localhost:8402/v1/wallet/7YkAzWalletPubkey.../stats?days=30 \
 
 ### Authentication
 
-The endpoint requires a valid session token in the `x-rcr-session` header. This is an HMAC token signed with the gateway's `RCR_SESSION_SECRET`. The SDKs handle token acquisition automatically.
+The endpoint requires a valid session token in the `Authorization: Bearer <token>` header. The gateway issues this token in the `x-solvela-session` response header (also mirrored to the legacy `x-rcr-session` header) after a successful paid chat completion -- clients pass it back on subsequent stats requests. The token is HMAC-signed with the gateway's `SOLVELA_SESSION_SECRET` (legacy `RCR_SESSION_SECRET` accepted as a fallback). The SDKs handle token acquisition automatically.
 
 ## Response
 
@@ -99,7 +99,7 @@ The endpoint requires a valid session token in the `x-rcr-session` header. This 
 | Status | Cause |
 |--------|-------|
 | 400 | Invalid wallet address format (not base58, wrong length) |
-| 401 | Missing or invalid `x-rcr-session` token |
+| 401 | Missing or invalid `Authorization: Bearer` token |
 | 400 | `days` parameter out of range (< 1 or > 365) |
 | 503 | PostgreSQL not configured (stats require database) |
 
@@ -107,4 +107,4 @@ The endpoint requires a valid session token in the `x-rcr-session` header. This 
 
 This endpoint requires PostgreSQL (`DATABASE_URL`) to be configured. Without a database, the endpoint returns 503.
 
-The session token is verified using HMAC-SHA256 with the `RCR_SESSION_SECRET`. If no secret is configured, the gateway generates one at startup (it will change on restart, invalidating all existing tokens).
+The session token is verified using HMAC-SHA256 with the `SOLVELA_SESSION_SECRET` (legacy `RCR_SESSION_SECRET` accepted as a fallback). If no secret is configured, the gateway generates an ephemeral one at startup (it changes on restart, invalidating all existing tokens).

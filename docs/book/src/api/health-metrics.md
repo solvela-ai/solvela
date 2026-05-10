@@ -16,7 +16,7 @@ curl -s http://localhost:8402/health | jq
 }
 ```
 
-No authentication required. Used by load balancers, health probes, and the `rcr doctor` command.
+No authentication required. Used by load balancers, health probes, and the `solvela doctor` command.
 
 ## Prometheus Metrics
 
@@ -30,15 +30,15 @@ curl -s http://localhost:8402/metrics \
 ```
 
 ```
-# HELP rcr_requests_total Total HTTP requests
-# TYPE rcr_requests_total counter
-rcr_requests_total{method="POST",path="/v1/chat/completions",status="200"} 1247
-rcr_requests_total{method="POST",path="/v1/chat/completions",status="402"} 892
-rcr_requests_total{method="GET",path="/health",status="200"} 4521
+# HELP solvela_requests_total Total HTTP requests
+# TYPE solvela_requests_total counter
+solvela_requests_total{method="POST",path="/v1/chat/completions",status="200"} 1247
+solvela_requests_total{method="POST",path="/v1/chat/completions",status="402"} 892
+solvela_requests_total{method="GET",path="/health",status="200"} 4521
 
-# HELP rcr_request_duration_seconds Request processing time
-# TYPE rcr_request_duration_seconds histogram
-rcr_request_duration_seconds_bucket{method="POST",path="/v1/chat/completions",le="0.5"} 312
+# HELP solvela_request_duration_seconds Request processing time
+# TYPE solvela_request_duration_seconds histogram
+solvela_request_duration_seconds_bucket{method="POST",path="/v1/chat/completions",le="0.5"} 312
 ...
 ```
 
@@ -46,22 +46,22 @@ rcr_request_duration_seconds_bucket{method="POST",path="/v1/chat/completions",le
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `rcr_requests_total` | Counter | `method`, `path`, `status` | Total HTTP requests (excludes `/metrics`) |
-| `rcr_request_duration_seconds` | Histogram | `method`, `path` | Request processing time |
-| `rcr_active_requests` | Gauge | -- | Currently in-flight requests |
-| `rcr_payments_total` | Counter | `status` | Payment outcomes (`verified`, `cached`, `free`, `none`, `failed`) |
-| `rcr_payment_amount_usdc` | Histogram | -- | Payment amounts in USDC |
-| `rcr_replay_rejections_total` | Counter | -- | Replay attack rejections |
-| `rcr_provider_request_duration_seconds` | Histogram | `provider` | Upstream provider latency |
-| `rcr_provider_errors_total` | Counter | `provider`, `error_type` | Provider errors by type (`timeout`, `auth`, `rate_limit`, `server_error`, `unknown`) |
-| `rcr_cache_total` | Counter | `result` | Cache outcomes (`hit`, `miss`, `skip`) |
-| `rcr_escrow_claims_total` | Counter | `result` | Escrow claim outcomes (`success`, `failure`) |
-| `rcr_escrow_queue_depth` | Gauge | -- | Pending escrow claims in queue |
-| `rcr_fee_payer_balance_sol` | Gauge | `pubkey` | Fee payer SOL balance (for monitoring tx fee funding) |
-| `rcr_service_health` | Gauge | `service_id` | Service health status (1.0 = healthy, 0.0 = unhealthy) |
+| `solvela_requests_total` | Counter | `method`, `path`, `status` | Total HTTP requests (excludes `/metrics`) |
+| `solvela_request_duration_seconds` | Histogram | `method`, `path` | Request processing time |
+| `solvela_active_requests` | Gauge | -- | Currently in-flight requests |
+| `solvela_payments_total` | Counter | `status` | Payment outcomes (`verified`, `cached`, `free`, `none`, `failed`) |
+| `solvela_payment_amount_usdc` | Histogram | -- | Payment amounts in USDC |
+| `solvela_replay_rejections_total` | Counter | -- | Replay attack rejections |
+| `solvela_provider_request_duration_seconds` | Histogram | `provider` | Upstream provider latency |
+| `solvela_provider_errors_total` | Counter | `provider`, `error_type` | Provider errors by type (`timeout`, `auth`, `rate_limit`, `server_error`, `unknown`) |
+| `solvela_cache_total` | Counter | `result` | Cache outcomes (`hit`, `miss`, `skip`) |
+| `solvela_escrow_claims_total` | Counter | `result` | Escrow claim outcomes (`success`, `failure`) |
+| `solvela_escrow_queue_depth` | Gauge | -- | Pending escrow claims in queue |
+| `solvela_fee_payer_balance_sol` | Gauge | `pubkey` | Fee payer SOL balance (for monitoring tx fee funding) |
+| `solvela_service_health` | Gauge | `service_id` | Service health status (1.0 = healthy, 0.0 = unhealthy) |
 
 ```admonish tip
-All metric names use the `rcr_` prefix to avoid collisions with other exporters. This matches the `RCR_` prefix convention used for environment variables.
+All metric names use the `solvela_` prefix to avoid collisions with other exporters. This matches the `SOLVELA_` prefix convention used for environment variables (the legacy `RCR_` prefix is still accepted as a fallback for compatibility).
 ```
 
 ## Escrow Config

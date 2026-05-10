@@ -22,7 +22,7 @@ graph TB
         PY[Python SDK]
         TS[TypeScript SDK]
         GO[Go SDK]
-        CLI[rcr CLI]
+        CLI[solvela CLI]
         MCP[MCP Server]
     end
 
@@ -71,7 +71,7 @@ graph TB
 | `x402` | Pure protocol library. Solana verification, escrow integration, fee payer pool, nonce pool. No Axum dependency. |
 | `router` | 15-dimension rule-based request scorer, routing profiles (eco/auto/premium/free), model registry. |
 | `protocol` | Shared wire-format types (`solvela-protocol`). Payment types, OpenAI-compatible chat types, model info. Published to crates.io. |
-| `cli` | `rcr` CLI binary: wallet, chat, models, health, stats, doctor commands. |
+| `cli` | `solvela` CLI binary: wallet, chat, models, health, stats, doctor commands. |
 
 The Anchor escrow program lives in `programs/escrow/` and is **not** a workspace member to avoid dependency version conflicts.
 
