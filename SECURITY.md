@@ -66,7 +66,7 @@ Solvela's posture is to surface and patch latent flaws before they harm users, r
 
 ### 2026-05-09 — Whole-repo security review pass
 
-Internal review-pass across all 6 workspace crates plus the standalone Anchor escrow program. 18 must-ship PRs ([#182](https://github.com/solvela-ai/solvela/pull/182)–[#199](https://github.com/solvela-ai/solvela/pull/199)) landed on `main` and one cleanup-tier PR ([#200](https://github.com/solvela-ai/solvela/pull/200)) is open with 8 deferred MEDIUMs. Each of the 7 crate-level reviews was conducted by a fresh agent against the post-merge `main`, with findings triaged into CRITICAL/HIGH (must-ship) and MEDIUM (cleanup-tier) by severity bar. Deployment-state notes on each finding below.
+Internal review-pass across all 6 workspace crates plus the standalone Anchor escrow program. 18 must-ship PRs ([#182](https://github.com/solvela-ai/solvela/pull/182)–[#199](https://github.com/solvela-ai/solvela/pull/199)) landed on `main` and one cleanup-tier PR ([#200](https://github.com/solvela-ai/solvela/pull/200)) followed with 8 deferred MEDIUMs. Each of the 7 crate-level reviews was conducted by a fresh agent against the post-merge `main`, with findings triaged into CRITICAL/HIGH (must-ship) and MEDIUM (cleanup-tier) by severity bar. Mainnet escrow bytecode redeployed 2026-05-10 with the in-source fixes (see Redeployed section below).
 
 #### Headline CRITICAL findings (deployed gateway, fixed at HEAD)
 
@@ -76,11 +76,11 @@ Internal review-pass across all 6 workspace crates plus the standalone Anchor es
 | Gateway balance monitor | `Client::build` error was swallowed; if it failed, the gateway started without monitoring and silently never alerted on low fee-payer balance | Propagate the error through `anyhow::Context`; gateway fails to start if monitor can't be built | [#194](https://github.com/solvela-ai/solvela/pull/194) |
 | x402 verifier | Sysvar typo + missing provider check let a malformed deposit verify successfully | Correct sysvar pubkey + `has_one = provider` constraint enforced by the verifier | [#182](https://github.com/solvela-ai/solvela/pull/182) |
 
-#### Headline CRITICAL findings (escrow program, source-fixed, **mainnet redeploy pending**)
+#### Headline CRITICAL findings (escrow program, redeployed to mainnet 2026-05-10)
 
-These fixes are **in `main` source** but **not yet in the deployed mainnet bytecode** (`9neDH…HLU`). `getProgramAccounts` against the program ID returned zero accounts at the time these findings landed — the deployed bytecode has handled no real customer escrows, so neither footgun has any opportunity to fire. The findings are documented under the disclosure-transparency principle, not because of any incident.
+These fixes are now **live in the deployed mainnet bytecode** (`9neDH…HLU`, slot 418832804, bytecode SHA-256 `5fb8e7548f0653a165803523c322b8d19eab06310462d8621c7250e912bf16c9`). Between the 2026-05-09 source merge and the 2026-05-10 redeploy, `getProgramAccounts` against the program ID returned zero accounts — the deployed bytecode handled no real customer escrows during the in-source-only window, so neither footgun had any opportunity to fire. The findings are documented under the disclosure-transparency principle, not because of any incident.
 
-| Footgun | What could happen | Fix (in-source) |
+| Footgun | What could happen | Fix |
 |---|---|---|
 | **Vault dust stuffing** | `spl-token`'s `CloseAccount` aborts on any non-zero balance. Vault ATA address is publicly derivable and SPL transfers don't require recipient signature — anyone (including the agent) could transfer 1 dust unit into the vault between deposit confirmation and the gateway's claim. The claim's `close_account` CPI then fails, the entire claim tx reverts, the provider can never claim. After expiry the agent refunds full balance + dust at zero net cost. Net: agent gets the LLM response (already delivered HTTP-side before claim), provider gets nothing. | `claim` instruction now reloads the vault after the contracted transfers and drains any surplus to the agent's ATA before `close_account`. Tested via a regression test that injects 1 dust unit into the vault post-deposit and asserts `claim` succeeds. ([#198](https://github.com/solvela-ai/solvela/pull/198)) |
 | **Instant-refund window via tight `expiry_slot`** | `expiry_slot > now` was the only lower bound on deposit. Agent could deposit with `expiry_slot = now + 1`, gateway verifies + delivers the LLM response after settlement, gateway's claim transaction can't realistically land before `slot >= expiry_slot`, claim fails with `EscrowExpired`, agent calls `refund` and recovers the deposit. Same blast radius as the dust attack via different mechanism. | Two-layer fix: new `MIN_EXPIRY_BUFFER = 50` slots (~20 s) on-chain in `deposit.rs`; off-chain verifier in `crates/x402/src/escrow/verifier.rs` now parses the previously-skipped `expiry_slot` field from the deposit instruction data, fetches current slot via a new `solana_rpc::get_current_slot` helper, and rejects deposits where `expiry_slot - current_slot < 50`. ([#198](https://github.com/solvela-ai/solvela/pull/198)) |
@@ -89,7 +89,7 @@ These fixes are **in `main` source** but **not yet in the deployed mainnet bytec
 
 Twenty-plus HIGH findings across the gateway (info-leak cluster, financial correctness, budget enforcement, multi-tenant authz role-cap), x402 (atomic claim queue, fee-payer counter race, nonce-pool authority check, secret-decode-buffer zeroing), router (load-time pricing validation), protocol (`#[serde(deny_unknown_fields)]` on every payment payload type, `Role::Unknown` forward-compat, `Usage::new` saturating constructor), CLI (`fs::write`+chmod race on the wallet file, missing payment-bearing HTTP timeouts, `expiry_slot` arithmetic wrappable to a near-zero value, global `--api-url` accepting `file://`, disk-loaded wallet address re-validation, `WalletData` redacted-Debug, `Zeroizing<>` on derived secret arrays). Per-PR breakdown in `CHANGELOG.md`.
 
-#### Cleanup-tier wave 1 — 8 MEDIUMs deferred, now in PR #200
+#### Cleanup-tier wave 1 — 8 MEDIUMs shipped in PR #200
 
 Defence-in-depth and quality items: HTTP timeouts on read-only CLI listings, removal of stray `.expect()` in production paths, surfacing previously-swallowed RPC errors via `tracing::warn!`, clearer `error_msg` paths, `Transfer` → `TransferChecked` migration across all 5 escrow token-transfer sites (defense-in-depth over existing mint pinning), and a deployment checklist for `--features mainnet` plus a `cargo build-sbf` fallback in `programs/escrow/AGENTS.md`. None security-critical.
 
@@ -99,9 +99,9 @@ Defence-in-depth and quality items: HTTP timeouts on read-only CLI listings, rem
 - Per-crate test counts at HEAD: cli 189, x402 132, gateway 497, router 19, protocol 18; escrow 23 integration + 8 unit tests pass via `cargo build-sbf && cargo test --features sbf`.
 - `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` both clean.
 
-#### Outstanding
+#### Redeployed
 
-The escrow source fixes from #198 + #200 are not yet in the deployed mainnet bytecode. Redeploy follows the 2026-05-08 ceremony pattern (build with `--features mainnet`, hash-verify, `solana program deploy`); tracked in `STATUS.md` follow-ups. Until then, the deployed program (`9neDH…HLU`) remains on the 2026-05-08 bytecode (hash `2293edfce3a0e7b1b0332bc32d9f7a9e58105a2a3f825ee05d8a4f7fbf57bf26`); `getProgramAccounts` confirms zero on-chain deposits, so the new footguns have no impact surface.
+The escrow source fixes from #198 + #200 shipped to mainnet on 2026-05-10. Build was reproduced from `main` at commit `53d1c610` with `cargo build-sbf` (Anchor 0.31.1 toolchain), 23 LiteSVM integration tests + 8 unit tests passing, and bytecode SHA-256 verified post-deploy via `solana program dump` against the local artifact: `5fb8e7548f0653a165803523c322b8d19eab06310462d8621c7250e912bf16c9` (310,360 bytes). Redeploy tx: [`58ud2vrh8KsiwST8AsA9qUE7kJpN1NTDvaz8TfzqbG9RRkHM64tUMD974efAigzktVPg5DWXrbE6GWQd6wjFNkxb`](https://solscan.io/tx/58ud2vrh8KsiwST8AsA9qUE7kJpN1NTDvaz8TfzqbG9RRkHM64tUMD974efAigzktVPg5DWXrbE6GWQd6wjFNkxb), slot 418832804. Authority unchanged (`EDM9pao5miQdJYfzCtZii9cVn5ZHTBJq84Y9yyqZbsr4`); fee paid by gateway hot wallet `B7reP7…` (~0.00001 SOL). `getProgramAccounts` returned zero at redeploy time; the upgrade was zero-impact.
 
 ### 2026-05-08 — Escrow program code review
 

@@ -2,9 +2,13 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-10 — Escrow program redeploy
+
+Escrow bytecode redeployed to mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU` on slot 418832804 (tx `58ud2vrh8KsiwST8AsA9qUE7kJpN1NTDvaz8TfzqbG9RRkHM64tUMD974efAigzktVPg5DWXrbE6GWQd6wjFNkxb`, bytecode SHA-256 `5fb8e7548f0653a165803523c322b8d19eab06310462d8621c7250e912bf16c9`, 310,360 bytes). Closes the disclosure caveat from the 2026-05-09 review pass — the two CRIT-class escrow footguns ([#198](https://github.com/solvela-ai/solvela/pull/198): vault dust stuffing + instant-refund window) and the `Transfer` → `TransferChecked` defense-in-depth migration ([#200](https://github.com/solvela-ai/solvela/pull/200)) are now live in deployed bytecode. `getProgramAccounts` returned zero at redeploy time; transition was zero-impact. Authority unchanged (`EDM9pao5miQdJYfzCtZii9cVn5ZHTBJq84Y9yyqZbsr4`); fee paid by gateway hot wallet `B7reP7…`.
+
 ## 2026-05-09 — Whole-repo security review pass
 
-Internal review-pass across all 6 workspace crates plus the standalone Anchor escrow program. 18 must-ship PRs ([#182](https://github.com/solvela-ai/solvela/pull/182)–[#199](https://github.com/solvela-ai/solvela/pull/199)) landed on `main`; cleanup-tier wave 1 ([#200](https://github.com/solvela-ai/solvela/pull/200)) open with 8 deferred MEDIUMs. All HIGH/CRITICAL findings closed in source. The deployed mainnet escrow bytecode does not yet include the 2026-05-09 escrow source fixes — a redeploy is tracked in `STATUS.md` follow-ups. `getProgramAccounts` returned zero accounts when the new findings landed — both newly-discovered escrow footguns were latent and unexploited.
+Internal review-pass across all 6 workspace crates plus the standalone Anchor escrow program. 18 must-ship PRs ([#182](https://github.com/solvela-ai/solvela/pull/182)–[#199](https://github.com/solvela-ai/solvela/pull/199)) landed on `main`; cleanup-tier wave 1 ([#200](https://github.com/solvela-ai/solvela/pull/200)) followed with 8 deferred MEDIUMs. All HIGH/CRITICAL findings closed in source. Mainnet redeploy completed 2026-05-10 (see entry above). `getProgramAccounts` returned zero accounts when the new findings landed — both newly-discovered escrow footguns were latent and unexploited.
 
 ### x402 protocol library — 7 PRs ([#182–#188](https://github.com/solvela-ai/solvela/pull/182))
 
@@ -41,7 +45,7 @@ Two CRIT-class footguns closed; both result in the same blast radius (free servi
 - **Vault dust stuffing** — `spl-token`'s `CloseAccount` aborts on any non-zero balance. Vault ATA address is publicly derivable and SPL transfers don't require recipient signature, so anyone (incl. the agent) could transfer 1 dust unit into the vault and brick the provider's claim path. After expiry the agent refunds full amount + dust at zero net cost. **Fix:** reload + drain vault residual to agent before `close_account`.
 - **Instant-refund window** — `expiry_slot > now` was the only lower bound. Agent could deposit with `expiry_slot = now + 1`, gateway delivers response, gateway's claim tx can't land before slot moves past expiry, claim fails, agent refunds. **Fix (two layers):** new `MIN_EXPIRY_BUFFER = 50` slots on-chain (`programs/escrow/src/lib.rs`); off-chain verifier in `crates/x402/src/escrow/verifier.rs` parses the previously-skipped `expiry_slot` field, fetches current slot via new `solana_rpc::get_current_slot` helper, and rejects deposits with `buffer < 50`.
 
-### Cleanup wave 1 — 1 PR ([#200](https://github.com/solvela-ai/solvela/pull/200), open)
+### Cleanup wave 1 — 1 PR ([#200](https://github.com/solvela-ai/solvela/pull/200))
 
 8 deferred MEDIUMs across CLI and escrow: `models.rs` HTTP timeout, `solana_tx.rs` USDC-MINT-parse `.expect()` removed, `recover.rs` swallowed RPC errors now `tracing::warn!`'d, `chat.rs` 402-error-chain clarification, `mcp/mod.rs` cwd-failure bail, `Transfer` → `TransferChecked` across all 5 escrow transfer sites (defense-in-depth over existing mint pinning), and a deployment checklist + `cargo build-sbf` fallback note in `programs/escrow/AGENTS.md`. None security-critical.
 
