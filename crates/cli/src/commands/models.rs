@@ -1,7 +1,14 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 pub async fn list(api_url: &str) -> Result<()> {
-    let resp = reqwest::get(format!("{}/v1/models", api_url)).await?;
+    // Match the timeout posture of `wallet::status` and `health::check`
+    // — bare `reqwest::get(...)` has no timeout, so a stalled gateway
+    // would hang the CLI indefinitely on a read-only listing.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("failed to build HTTP client")?;
+    let resp = client.get(format!("{}/v1/models", api_url)).send().await?;
     let body: serde_json::Value = resp.json().await?;
 
     if let Some(data) = body["data"].as_array() {
