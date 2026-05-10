@@ -267,7 +267,7 @@ response, _ := client.Chat(ctx, "openai/gpt-4o", "Hello!")
 
 ## CLI
 
-The `rcr` CLI provides wallet management, model discovery, chat, and diagnostics.
+The `solvela` CLI provides wallet management, model discovery, chat, and diagnostics.
 
 ```bash
 cargo install --path crates/cli
