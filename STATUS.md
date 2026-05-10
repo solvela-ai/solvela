@@ -2,7 +2,7 @@
 
 > Live shipping status. See [`CHANGELOG.md`](./CHANGELOG.md) for history, [`SECURITY.md`](./SECURITY.md) for disclosure.
 
-_Last refreshed: 2026-05-08 — escrow program upgraded with hardened bytecode._
+_Last refreshed: 2026-05-09 — whole-repo security review pass complete; 18 must-ship PRs landed on `main`._
 
 ## Shipped
 
@@ -26,6 +26,7 @@ _Last refreshed: 2026-05-08 — escrow program upgraded with hardened bytecode._
 - Load tested to ~400 RPS sustained at p99 < 300 ms.
 - `cargo test` suite green at HEAD.
 - 4 required CI checks gate every merge to `main`: Rust (fmt, clippy, test), Smoke test, Security audit (cargo-audit), Docker build.
+- **Whole-repo security review pass complete (2026-05-09)** — 18 must-ship PRs (#182–#199) landed across all 6 workspace crates plus the Anchor escrow program. All HIGH/CRITICAL findings closed in source. See `CHANGELOG.md` and `SECURITY.md` for the per-finding breakdown. Cleanup-tier wave 1 ([PR #200](https://github.com/solvela-ai/solvela/pull/200), 8 MEDIUMs) open for review.
 
 ## Repo hardening
 
@@ -37,5 +38,6 @@ _Last refreshed: 2026-05-08 — escrow program upgraded with hardened bytecode._
 
 - **Registry uploads for SDKs** (PyPI, npm, crates.io) — pending operator credentials.
 - **Vercel API token rotation** and **GitHub org 2FA enforcement** — operator-side actions still pending.
+- **Escrow program redeploy with #198 + #200 source fixes** — the 2026-05-09 review pass added a vault-dust drain in `claim`, a minimum-expiry-buffer guard in `deposit`, and a `Transfer` → `TransferChecked` migration across all 5 transfer sites. All landed in `main` source; the deployed mainnet bytecode (`9neDH…HLU`) does **not** yet include these. `getProgramAccounts` confirms zero on-chain deposits — both newly-discovered footguns are latent and unexploited (see `SECURITY.md`). Redeploy follows the 2026-05-08 ceremony pattern.
 - **Anchor 0.31 → 1.0 migration on the escrow program** (#155 / #156) — coordinated bump alongside the broader Solana 1.x → @solana/kit ecosystem migration. Not security-critical now that the deployed bytecode is hardened.
 - **Dedicated escrow CI workflow** (#162) — `programs/escrow/` opts out of the workspace and isn't covered by the cross-cutting Rust job. Cargo build-sbf + LiteSVM integration tests should run on every escrow-touching PR.
