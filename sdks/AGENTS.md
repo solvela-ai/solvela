@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-04-16 | Updated: 2026-04-16 -->
+<!-- Generated: 2026-04-16 | Updated: 2026-05-10 -->
 
 # sdks
 
@@ -12,7 +12,7 @@ _(no loose files — see subdirectories)_
 ## Subdirectories
 | Directory | Purpose |
 |-----------|---------|
-| `go/` | Go SDK — signing support in progress (see `go/AGENTS.md`) |
+| `go/` | Redirect stub — canonical Go SDK lives at [solvela-ai/solvela-go](https://github.com/solvela-ai/solvela-go) |
 | `typescript/` | TypeScript/Node SDK (see `typescript/AGENTS.md`) |
 | `python/` | Python SDK (see `python/AGENTS.md`) |
 | `mcp/` | MCP server exposing Solvela as tools to MCP clients (see `mcp/AGENTS.md`) |
