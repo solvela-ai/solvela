@@ -39,5 +39,4 @@ _Last refreshed: 2026-05-10 — escrow program redeployed to mainnet with the 20
 - **Registry uploads for SDKs** (PyPI, npm, crates.io) — pending operator credentials.
 - **Vercel API token rotation** and **GitHub org 2FA enforcement** — operator-side actions still pending.
 - **Anchor 0.31 → 1.0 migration on the escrow program** (#155 / #156) — coordinated bump alongside the broader Solana 1.x → @solana/kit ecosystem migration. Not security-critical now that the deployed bytecode is hardened.
-- **Squads multisig migration for the upgrade authority** — `EDM9pao5…` is currently single-sig and the keypair file lives on the operator workstation (warm, not truly air-gapped). Squads multisig (1-of-1 → 2-of-N with HW co-signer) is the standard next step for Solana protocol upgrade authorities. See `SECURITY.md`.
 - **Dedicated escrow CI workflow** (#162) — `programs/escrow/` opts out of the workspace and isn't covered by the cross-cutting Rust job. Cargo build-sbf + LiteSVM integration tests should run on every escrow-touching PR.
