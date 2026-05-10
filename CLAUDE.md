@@ -52,9 +52,6 @@ cargo fmt --all -- --check        # CI mode (check only)
 # Dashboard tests
 npm --prefix dashboard test
 
-# Go SDK tests
-go test ./... -v
-
 # Local dev stack
 docker compose up -d              # PostgreSQL + Redis
 cp .env.example .env              # fill in at least one provider API key
