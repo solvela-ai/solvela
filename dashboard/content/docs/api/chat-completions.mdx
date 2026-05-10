@@ -222,13 +222,13 @@ data: [DONE]
         "fmt"
         "log"
         "os"
-        rcr "github.com/solvela-ai/solvela-go"
+        solvela "github.com/solvela-ai/solvela-go"
     )
 
     func main() {
-        client, err := rcr.NewClient(
-            rcr.WithAPIURL("https://api.solvela.ai"),
-            rcr.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
+        client, err := solvela.NewClient(
+            solvela.WithAPIURL("https://api.solvela.ai"),
+            solvela.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
         )
         if err != nil {
             log.Fatal(err)
@@ -244,11 +244,11 @@ data: [DONE]
         fmt.Println(text)
 
         // Full request
-        resp, err := client.ChatCompletion(ctx, rcr.ChatRequest{
+        resp, err := client.ChatCompletion(ctx, solvela.ChatRequest{
             Model: "openai/gpt-4o",
-            Messages: []rcr.ChatMessage{
-                {Role: rcr.RoleSystem, Content: "You are a blockchain expert."},
-                {Role: rcr.RoleUser, Content: "Explain proof of history."},
+            Messages: []solvela.ChatMessage{
+                {Role: solvela.RoleSystem, Content: "You are a blockchain expert."},
+                {Role: solvela.RoleUser, Content: "Explain proof of history."},
             },
             MaxTokens:   intPtr(500),
             Temperature: float64Ptr(0.7),

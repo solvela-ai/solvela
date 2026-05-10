@@ -86,12 +86,12 @@ First, send a request without any payment header. The gateway will respond with 
     import (
         "context"
         "fmt"
-        rcr "github.com/solvela-ai/solvela-go"
+        solvela "github.com/solvela-ai/solvela-go"
     )
 
     func main() {
-        client, _ := rcr.NewClient(
-            rcr.WithAPIURL("https://api.solvela.ai"),
+        client, _ := solvela.NewClient(
+            solvela.WithAPIURL("https://api.solvela.ai"),
         )
         reply, err := client.Chat(context.Background(), "auto", "What is x402?")
         if err != nil {
@@ -200,9 +200,9 @@ Build and sign a USDC-SPL transfer transaction to the `pay_to` address for the `
   </Tab>
   <Tab value="Go">
     ```go
-    client, _ := rcr.NewClient(
-        rcr.WithAPIURL("https://api.solvela.ai"),
-        rcr.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
+    client, _ := solvela.NewClient(
+        solvela.WithAPIURL("https://api.solvela.ai"),
+        solvela.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
     )
 
     reply, err := client.Chat(ctx, "gpt-4o", "Explain Solana in one sentence.")
