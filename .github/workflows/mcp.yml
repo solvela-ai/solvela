@@ -5,11 +5,18 @@ on:
     paths:
       - 'sdks/mcp/**'
       - 'sdks/signer-core/**'
+      # Wire-format types in `crates/protocol/` are hand-mirrored by the
+      # TS SDK. A change here doesn't directly run the SDK, but re-running
+      # SDK CI is the cheapest way to flag "did anyone update the SDK
+      # side?". Proper end-to-end wire-compat verification needs SDK
+      # tests against a live gateway — tracked separately.
+      - 'crates/protocol/**'
       - '.github/workflows/mcp.yml'
   pull_request:
     paths:
       - 'sdks/mcp/**'
       - 'sdks/signer-core/**'
+      - 'crates/protocol/**'
       - '.github/workflows/mcp.yml'
 
 defaults:
