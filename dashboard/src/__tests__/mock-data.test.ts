@@ -40,12 +40,12 @@ describe("SPEND_HISTORY", () => {
     expect(SPEND_HISTORY[0].requests).toBe(SPEND_HISTORY[0].requests);
   });
 
-  it("first entry is Feb 1", () => {
-    expect(SPEND_HISTORY[0].date).toBe("Feb 1");
+  it("first entry is Mar 16", () => {
+    expect(SPEND_HISTORY[0].date).toBe("Mar 16");
   });
 
-  it("last entry is Mar 2", () => {
-    expect(SPEND_HISTORY[29].date).toBe("Mar 2");
+  it("last entry is Apr 14", () => {
+    expect(SPEND_HISTORY[29].date).toBe("Apr 14");
   });
 });
 
@@ -78,8 +78,8 @@ describe("MODEL_USAGE", () => {
     }
   });
 
-  it("has 5 model entries", () => {
-    expect(MODEL_USAGE).toHaveLength(5);
+  it("has 8 model entries", () => {
+    expect(MODEL_USAGE).toHaveLength(8);
   });
 });
 
