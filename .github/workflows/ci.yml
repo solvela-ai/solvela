@@ -63,6 +63,131 @@ jobs:
           REDIS_URL: redis://localhost:6379
         run: cargo test --all
 
+  coverage:
+    name: Test coverage (informational)
+    runs-on: ubuntu-latest
+    # Non-blocking — informational output only. Reports scoped coverage
+    # numbers to the workflow summary so we can pick a CI-enforced
+    # threshold for the payment hot path with real data, not a guess.
+    # Runs independently of `rust` to keep wall-clock low.
+    continue-on-error: true
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: solvela
+          POSTGRES_PASSWORD: solvela
+          POSTGRES_DB: solvela_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U solvela"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c676846f29d98ff6b0106d3608c7ffd4048af17b  # v2
+
+      - name: Cache cargo-llvm-cov binary
+        id: cache-cargo-llvm-cov
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ~/.cargo/bin/cargo-llvm-cov
+          # Bump the version suffix here when you want a fresh install.
+          key: ${{ runner.os }}-cargo-llvm-cov-0.6
+
+      - name: Install cargo-llvm-cov
+        if: steps.cache-cargo-llvm-cov.outputs.cache-hit != 'true'
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Install lcov
+        run: sudo apt-get update && sudo apt-get install -y lcov
+
+      - name: Collect coverage
+        env:
+          DATABASE_URL: postgres://solvela:solvela@localhost:5432/solvela_test
+          REDIS_URL: redis://localhost:6379
+        # Match the rust job's `cargo test --all` semantics — default features,
+        # workspace scope. Escrow is not a workspace member (CLAUDE.md rule
+        # #11), so it is intentionally excluded; cover it separately if/when
+        # the threshold gate lands.
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      - name: Build scoped reports
+        run: |
+          set -euo pipefail
+
+          # `crates/x402/`: payment protocol library — Solana verification,
+          # escrow integration, fee payer, nonce pool. A regression here
+          # means money loss.
+          lcov --quiet --extract lcov.info '*/crates/x402/*' \
+            --output-file lcov-x402.info
+
+          # Gateway payment hot path: `routes/chat/**` (cost calc, payment
+          # extraction, provider proxy) and `middleware/x402.rs` (header
+          # decode, replay protection, verifier dispatch).
+          lcov --quiet --extract lcov.info \
+            '*/crates/gateway/src/routes/chat/*' \
+            '*/crates/gateway/src/middleware/x402.rs' \
+            --output-file lcov-payment.info
+
+          summary() {
+            # `lcov --summary` writes the percentages to stderr; merge with
+            # `2>&1` and grep just the lines/functions rows we care about.
+            lcov --summary "$1" 2>&1 | grep -E '^\s+(lines|functions)' || true
+          }
+
+          {
+            echo "## Test coverage (informational, non-blocking)"
+            echo ""
+            echo "Scoped to payment-critical code. Use these numbers to pick a CI-enforced threshold before flipping the gate to required."
+            echo ""
+            echo "### Workspace overall"
+            echo '```'
+            summary lcov.info
+            echo '```'
+            echo ""
+            echo "### \`crates/x402/\` — protocol library (verification, escrow, fee payer, nonce)"
+            echo '```'
+            summary lcov-x402.info
+            echo '```'
+            echo ""
+            echo "### Gateway payment hot path — \`routes/chat/**\` + \`middleware/x402.rs\`"
+            echo '```'
+            summary lcov-payment.info
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload lcov reports
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5.0.0
+        with:
+          name: coverage-lcov
+          path: |
+            lcov.info
+            lcov-x402.info
+            lcov-payment.info
+          retention-days: 14
+
   audit:
     name: Security audit (cargo-audit)
     runs-on: ubuntu-latest
