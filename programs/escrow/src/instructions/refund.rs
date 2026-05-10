@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{self, CloseAccount, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, CloseAccount, Mint, Token, TokenAccount, TransferChecked};
 
 use crate::errors::EscrowError;
 use crate::state::Escrow;
@@ -33,16 +33,20 @@ pub fn refund(ctx: Context<Refund>) -> Result<()> {
     // refund that quietly does nothing.
     let vault_amount = ctx.accounts.vault.amount;
     require!(vault_amount > 0, EscrowError::EmptyVault);
+    // `TransferChecked` validates mint + decimals at the SPL token program
+    // level — defense-in-depth over the `has_one = mint` constraint on the
+    // escrow account.
     let cpi_transfer = CpiContext::new_with_signer(
         ctx.accounts.token_program.to_account_info(),
-        Transfer {
+        TransferChecked {
             from: ctx.accounts.vault.to_account_info(),
+            mint: ctx.accounts.mint.to_account_info(),
             to: ctx.accounts.agent_token_account.to_account_info(),
             authority: ctx.accounts.escrow.to_account_info(),
         },
         signer_seeds,
     );
-    token::transfer(cpi_transfer, vault_amount)?;
+    token::transfer_checked(cpi_transfer, vault_amount, ctx.accounts.mint.decimals)?;
 
     // Close vault ATA (returns rent to agent)
     let cpi_close = CpiContext::new_with_signer(

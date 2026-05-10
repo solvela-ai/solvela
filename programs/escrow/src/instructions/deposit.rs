@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Mint, Token, TokenAccount, TransferChecked};
 
 use crate::errors::EscrowError;
 use crate::state::Escrow;
@@ -65,14 +65,21 @@ pub fn deposit(
     escrow.expiry_slot = expiry_slot;
     escrow.bump = ctx.bumps.escrow;
 
-    // Transfer USDC from agent's ATA → vault ATA
-    let cpi_accounts = Transfer {
+    // Transfer USDC from agent's ATA → vault ATA. `TransferChecked`
+    // (over plain `Transfer`) passes the mint and its decimals through
+    // to the SPL token program for in-CPI validation. Mint is already
+    // pinned via `address = USDC_MINT` on the Accounts struct so this
+    // is strict defense-in-depth — but if a future refactor weakens
+    // the binding, `transfer_checked` would still reject a mismatched
+    // mint and the wrong decimals.
+    let cpi_accounts = TransferChecked {
         from: ctx.accounts.agent_token_account.to_account_info(),
+        mint: ctx.accounts.mint.to_account_info(),
         to: ctx.accounts.vault.to_account_info(),
         authority: ctx.accounts.agent.to_account_info(),
     };
     let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
-    token::transfer(cpi_ctx, amount)?;
+    token::transfer_checked(cpi_ctx, amount, ctx.accounts.mint.decimals)?;
 
     emit!(DepositEvent {
         agent: escrow.agent,

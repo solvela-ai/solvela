@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{self, CloseAccount, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, CloseAccount, Mint, Token, TokenAccount, TransferChecked};
 
 use crate::errors::EscrowError;
 use crate::state::Escrow;
@@ -36,17 +36,21 @@ pub fn claim(ctx: Context<Claim>, actual_amount: u64) -> Result<()> {
     ];
     let signer_seeds = &[seeds];
 
-    // Transfer actual_amount → provider ATA
+    // Transfer actual_amount → provider ATA. `TransferChecked` validates
+    // the mint and decimals at the SPL token program level — defense-in-
+    // depth over the existing `has_one = mint` constraint on the escrow.
+    let mint_decimals = ctx.accounts.mint.decimals;
     let cpi_transfer = CpiContext::new_with_signer(
         ctx.accounts.token_program.to_account_info(),
-        Transfer {
+        TransferChecked {
             from: ctx.accounts.vault.to_account_info(),
+            mint: ctx.accounts.mint.to_account_info(),
             to: ctx.accounts.provider_token_account.to_account_info(),
             authority: ctx.accounts.escrow.to_account_info(),
         },
         signer_seeds,
     );
-    token::transfer(cpi_transfer, actual_amount)?;
+    token::transfer_checked(cpi_transfer, actual_amount, mint_decimals)?;
 
     // Refund remainder → agent ATA. The `actual_amount <= escrow.amount`
     // guard above already prevents underflow, but `checked_sub` makes the
@@ -59,14 +63,15 @@ pub fn claim(ctx: Context<Claim>, actual_amount: u64) -> Result<()> {
     if refund > 0 {
         let cpi_refund = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
-            Transfer {
+            TransferChecked {
                 from: ctx.accounts.vault.to_account_info(),
+                mint: ctx.accounts.mint.to_account_info(),
                 to: ctx.accounts.agent_token_account.to_account_info(),
                 authority: ctx.accounts.escrow.to_account_info(),
             },
             signer_seeds,
         );
-        token::transfer(cpi_refund, refund)?;
+        token::transfer_checked(cpi_refund, refund, mint_decimals)?;
     }
 
     // Drain any vault residual to agent before close. SPL token's
@@ -82,14 +87,15 @@ pub fn claim(ctx: Context<Claim>, actual_amount: u64) -> Result<()> {
     if surplus > 0 {
         let cpi_drain = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
-            Transfer {
+            TransferChecked {
                 from: ctx.accounts.vault.to_account_info(),
+                mint: ctx.accounts.mint.to_account_info(),
                 to: ctx.accounts.agent_token_account.to_account_info(),
                 authority: ctx.accounts.escrow.to_account_info(),
             },
             signer_seeds,
         );
-        token::transfer(cpi_drain, surplus)?;
+        token::transfer_checked(cpi_drain, surplus, mint_decimals)?;
     }
 
     // Close vault ATA (returns rent to agent)
