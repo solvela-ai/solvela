@@ -220,6 +220,8 @@ All prices are provider cost in USDC. A 5% platform fee is applied on top. See `
 
 ### Python
 
+Lives in the standalone [`solvela-python`](https://github.com/solvela-ai/solvela-python) repo.
+
 ```bash
 pip install solvela
 ```
@@ -231,20 +233,9 @@ client = LLMClient()
 response = client.chat("openai/gpt-4o", "Hello!")
 ```
 
-### TypeScript
-
-```bash
-npm install @solvela/sdk
-```
-
-```typescript
-import { LLMClient } from '@solvela/sdk';
-
-const client = new LLMClient();
-const response = await client.chat('openai/gpt-4o', 'Hello!');
-```
-
 ### Go
+
+Lives in the standalone [`solvela-go`](https://github.com/solvela-ai/solvela-go) repo.
 
 ```bash
 go get github.com/solvela-ai/solvela-go
@@ -255,7 +246,18 @@ client, _ := solvela.NewClient()
 response, _ := client.Chat(ctx, "openai/gpt-4o", "Hello!")
 ```
 
-### MCP (Claude Code)
+### TypeScript / JavaScript
+
+In-repo under `sdks/`:
+
+| Package | Use case |
+|---|---|
+| [`@solvela/ai-sdk-provider`](sdks/ai-sdk-provider) | Vercel AI SDK provider — the recommended path for most TS apps |
+| [`@solvela/openclaw-provider`](sdks/openclaw-provider) | OpenClaw plugin that registers Solvela as a first-class LLM provider |
+| [`@solvela/signer-core`](sdks/signer-core) | Shared low-level signing / x402 protocol library used by the providers above |
+| [`@solvela/mcp-server`](sdks/mcp) | MCP server (see "MCP" below) |
+
+### MCP (Claude Code, Cursor, Claude Desktop, OpenClaw)
 
 ```bash
 # Add to your Claude Code MCP config:
