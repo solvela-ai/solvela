@@ -42,10 +42,15 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
+# Create non-root runtime user (no home, no login shell)
+RUN useradd --uid 1001 --no-create-home --shell /usr/sbin/nologin solvela
+
 WORKDIR /app
 
-COPY --from=builder /app/target/release/solvela-gateway .
-COPY --from=builder /app/config/ config/
+COPY --from=builder --chown=solvela:solvela /app/target/release/solvela-gateway .
+COPY --from=builder --chown=solvela:solvela /app/config/ config/
+
+USER solvela
 
 EXPOSE 8402
 
