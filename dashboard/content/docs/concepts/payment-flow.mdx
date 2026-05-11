@@ -176,10 +176,18 @@ All official SDKs support a `sessionBudget` option that caps total spending for 
   </Tab>
   <Tab value="Python">
     ```python
+    from solvela import SolvelaClient, ClientConfig, Wallet, KeypairSigner
+
+    # solvela-sdk 0.2.0 caps spend per call, not per session.
+    # Track lifetime spend yourself if you need a session-wide budget.
+    wallet = Wallet.from_env("SOLANA_PRIVATE_KEY")
     client = SolvelaClient(
-        endpoint="https://api.solvela.ai",
-        wallet_key=os.environ["SOLANA_PRIVATE_KEY"],
-        session_budget="0.10",  # max $0.10 USDC this session
+        config=ClientConfig(
+            gateway_url="https://api.solvela.ai",
+            max_payment_amount=100_000,  # per-call cap: 0.10 USDC (atomic units)
+        ),
+        wallet=wallet,
+        signer=KeypairSigner(wallet=wallet),
     )
     ```
   </Tab>

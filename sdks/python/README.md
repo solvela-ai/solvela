@@ -3,5 +3,5 @@
 The Solvela Python SDK now lives at https://github.com/solvela-ai/solvela-python.
 
 ```
-pip install solvela
+pip install solvela-sdk
 ```
