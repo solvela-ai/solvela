@@ -2,7 +2,7 @@
 
 > Live shipping status. See [`CHANGELOG.md`](./CHANGELOG.md) for history, [`SECURITY.md`](./SECURITY.md) for disclosure.
 
-_Last refreshed: 2026-05-10 — escrow program redeployed to mainnet with the 2026-05-09 review-pass fixes._
+_Last refreshed: 2026-05-11 — gateway runtime container now runs as non-root; doc/runtime parity restored across deploy + monitoring + auth surfaces._
 
 ## Shipped
 
@@ -33,6 +33,7 @@ _Last refreshed: 2026-05-10 — escrow program redeployed to mainnet with the 20
 - **Branch protection on `solvela-ai/solvela:main`** — 1 PR approval required, 4 required CI checks, branches must be up-to-date, conversation resolution required, force-push and delete blocked.
 - **Auto-merge enabled** for dependabot patch/minor batches with required-checks gating.
 - **Hourly deploy-staleness check** (`.github/workflows/deploy-staleness-check.yml`) opens an issue if production lags `main` HEAD by more than an hour.
+- **Container hardening** — gateway runtime stage runs as non-root `solvela` user (UID 1001, no home, no login shell) since [#215](https://github.com/solvela-ai/solvela/pull/215) (2026-05-11). Files copied from the build stage use `--chown=solvela:solvela`; verified via CI smoke test that the container responds on `/health` as the non-root user.
 
 ## Known follow-ups
 
