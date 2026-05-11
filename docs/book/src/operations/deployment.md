@@ -29,43 +29,57 @@ Migrations in `migrations/` are mounted into the PostgreSQL container and run au
 
 ## Docker Build
 
-The `Dockerfile` uses a 3-stage build with `cargo-chef` for dependency caching:
+The `Dockerfile` uses a 2-stage build. Dependency caching is achieved by copying workspace manifests first and compiling against dummy source files, then bringing in the real source for the final compile:
 
 ```dockerfile
-# Stage 1: chef -- prepare dependency recipe
-FROM rust:bookworm AS chef
-RUN cargo install cargo-chef
+# Stage 1: Build
+FROM rust:1.88-slim-bookworm AS builder
+RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
 
-# Stage 2: builder -- cook deps then build release binary
-FROM rust:bookworm AS builder
-RUN cargo install cargo-chef
+# Copy workspace manifests first for dependency caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/protocol/Cargo.toml crates/protocol/Cargo.toml
+COPY crates/x402/Cargo.toml crates/x402/Cargo.toml
+COPY crates/router/Cargo.toml crates/router/Cargo.toml
+COPY crates/gateway/Cargo.toml crates/gateway/Cargo.toml
+COPY crates/cli/Cargo.toml crates/cli/Cargo.toml
+
+# Compile against dummy sources so deps land in the cache layer
+RUN mkdir -p crates/protocol/src crates/x402/src crates/router/src crates/gateway/src crates/cli/src && \
+    echo "pub fn _dummy() {}" > crates/protocol/src/lib.rs && \
+    echo "pub fn _dummy() {}" > crates/x402/src/lib.rs && \
+    echo "pub fn _dummy() {}" > crates/router/src/lib.rs && \
+    echo "pub fn _dummy() {}" > crates/gateway/src/lib.rs && \
+    echo "fn main() {}" > crates/gateway/src/main.rs && \
+    echo "pub fn _dummy() {}" > crates/cli/src/lib.rs && \
+    echo "fn main() {}" > crates/cli/src/main.rs
+RUN cargo build --release --bin solvela-gateway 2>/dev/null || true
+
+# Copy real source + config + migrations, then rebuild
+COPY crates/ crates/
+COPY config/ config/
+COPY migrations/ migrations/
+RUN touch crates/protocol/src/lib.rs crates/x402/src/lib.rs crates/router/src/lib.rs crates/gateway/src/lib.rs crates/gateway/src/main.rs
+RUN cargo build --release --bin solvela-gateway
+
+# Stage 2: Runtime
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=chef /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
-COPY . .
-RUN cargo build --release -p gateway
-
-# Stage 3: runtime -- minimal image
-FROM debian:bookworm-slim AS runtime
-RUN apt-get update && apt-get install -y \
-    ca-certificates libssl3 libpq5 \
-    && rm -rf /var/lib/apt/lists/*
-RUN useradd --uid 1001 --no-create-home --shell /bin/false solvela
-COPY --from=builder /app/target/release/solvela /usr/local/bin/solvela
+COPY --from=builder /app/target/release/solvela-gateway .
+COPY --from=builder /app/config/ config/
 EXPOSE 8402
-USER solvela
-CMD ["/usr/local/bin/solvela"]
+CMD ["./solvela-gateway"]
 ```
 
 Key points:
 
-- Dependencies are cached in the `cargo chef cook` step -- only rebuilds when `Cargo.toml`/`Cargo.lock` change
-- Runtime image is `debian:bookworm-slim` (minimal, no build tools)
-- Runs as non-root user `solvela` (UID 1001)
-- Exposes port 8402
+- Dependency caching is layer-based: workspace `Cargo.toml`s + dummy sources compile first; the real source is copied in a later layer so unchanged dependencies don't rebuild.
+- Migration SQL files in `migrations/` are read at compile time by `sqlx::migrate!`, so they must be present in the build context.
+- Runtime image is `debian:bookworm-slim` with only `ca-certificates` installed.
+- Exposes port 8402.
+- The runtime stage currently runs as root. Adding a non-root user is a recommended hardening step (separate from this snippet).
 
 Build the image:
 
