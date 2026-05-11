@@ -2,6 +2,35 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-11 — Gateway container hardening
+
+Production `Dockerfile` runtime stage now runs as a non-root `solvela` user (UID 1001, no home, no login shell) instead of root ([#215](https://github.com/solvela-ai/solvela/pull/215)). Files copied from the build stage use `--chown=solvela:solvela` so the binary and config are owned by the runtime user; `USER solvela` is set before `EXPOSE` / `CMD`. Port 8402 is unprivileged so the non-root bind works; the gateway writes nothing to local disk in production (logs go to stdout, Postgres/Redis are external). Verified locally and via the CI smoke test that `id` reports `uid=1001(solvela)` and `/health` responds. Closes the hardening gap surfaced during the [#214](https://github.com/solvela-ai/solvela/pull/214) Dockerfile-snippet sync — both deployment doc snippets had been claiming non-root hardening that wasn't in the actual Dockerfile. The Dockerfile and both deployment doc pages are now consistent.
+
+## 2026-05-10 — Documentation rot cleanup
+
+Five docs-only PRs closing out the rebrand-rot scan triggered by the [#205](https://github.com/solvela-ai/solvela/pull/205) review pass. Two of the fixes were factually wrong about *runtime behavior*, not just stale labels — anyone following the docs verbatim would have hit broken state.
+
+### Runtime-divergent fixes (real bugs, not just labels)
+
+- **`operations/deployment.{mdx,md}`** told users to `fly secrets set RCR_SESSION_SECRET=…`. The runtime now emits a deprecation warning for that env var and reads `SOLVELA_SESSION_SECRET` (`crates/gateway/src/main.rs:479`). Following the doc verbatim would have left session tokens HMAC-signed with an env var the gateway flags as deprecated on every boot. ([#212](https://github.com/solvela-ai/solvela/pull/212), [#213](https://github.com/solvela-ai/solvela/pull/213))
+- **`operations/monitoring.md` + `api/health-metrics.md`** documented every Prometheus metric with the `rcr_` prefix in both metric tables and PromQL examples. Actual runtime emits `solvela_*` (verified across `middleware/metrics.rs`, `routes/chat/provider.rs`, `service_health.rs`, `balance_monitor.rs`). Anyone copying the alert rules or dashboard panels would have produced consistently empty Grafana graphs. ([#213](https://github.com/solvela-ai/solvela/pull/213))
+- **`api/wallet-stats.md`** described `GET /v1/wallet/{addr}/stats` as reading the session token from an `x-rcr-session` *request header*. The route actually reads `Authorization: Bearer <token>` (`crates/gateway/src/routes/stats.rs:110`); the `x-{solvela,rcr}-session` headers are only emitted in *responses* (`routes/chat/mod.rs:603-610`) for clients to echo back. Anyone following the doc verbatim would have hit 401 on every stats request. ([#213](https://github.com/solvela-ai/solvela/pull/213))
+
+### Dockerfile snippet / reality sync ([#214](https://github.com/solvela-ai/solvela/pull/214))
+
+Both deployment doc snippets claimed a 3-stage `cargo-chef` build with a non-root user and binary path `target/release/solvela`. The real `Dockerfile` is a 2-stage build with manual manifest-copy caching, `--bin solvela-gateway`, and (at the time) running as root. Synced both snippets line-by-line with `Dockerfile` and explicitly flagged the non-root-user gap as a hardening follow-up — closed the next day in #215 (see entry above).
+
+### Rebrand drift ([#205](https://github.com/solvela-ai/solvela/pull/205), [#211](https://github.com/solvela-ai/solvela/pull/211), [#212](https://github.com/solvela-ai/solvela/pull/212), [#213](https://github.com/solvela-ai/solvela/pull/213))
+
+`rcr` → `solvela` across `CLAUDE.md`, `README.md`, `sdks/AGENTS.md`, six pages in `dashboard/content/docs/`, and seven pages in `docs/book/src/`: CLI command names (`rcr doctor` → `solvela doctor`), crate references (`rcr-cli` → `solvela-cli`), Go SDK import aliases, and a dead pointer to a non-existent `sdks/go/AGENTS.md`. The Go SDK (now standalone at `solvela-ai/solvela-go`) had three stale in-tree pages duplicating upstream content; all replaced with redirect stubs matching the existing `sdks/go/README.md` pattern.
+
+### Skipped (intentional backward-compat, not rot)
+
+- Postgres `rcr` / `rcr_dev_password` dev credentials in docker-compose-derived docs.
+- Redis `rcr:*` keyspace prefix — documented backward-compat per `crates/gateway/src/cache.rs`.
+- `x-rcr-*` legacy response headers — still emitted alongside `x-solvela-*` for compatibility.
+- `RCR_*` env-var fallbacks where the doc already qualified with "(or `RCR_…` for backward compat)".
+
 ## 2026-05-10 — Escrow program redeploy
 
 Escrow bytecode redeployed to mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU` on slot 418832804 (tx `58ud2vrh8KsiwST8AsA9qUE7kJpN1NTDvaz8TfzqbG9RRkHM64tUMD974efAigzktVPg5DWXrbE6GWQd6wjFNkxb`, bytecode SHA-256 `5fb8e7548f0653a165803523c322b8d19eab06310462d8621c7250e912bf16c9`, 310,360 bytes). Closes the disclosure caveat from the 2026-05-09 review pass — the two CRIT-class escrow footguns ([#198](https://github.com/solvela-ai/solvela/pull/198): vault dust stuffing + instant-refund window) and the `Transfer` → `TransferChecked` defense-in-depth migration ([#200](https://github.com/solvela-ai/solvela/pull/200)) are now live in deployed bytecode. `getProgramAccounts` returned zero at redeploy time; transition was zero-impact. Authority unchanged (`EDM9pao5miQdJYfzCtZii9cVn5ZHTBJq84Y9yyqZbsr4`); fee paid by gateway hot wallet `B7reP7…`.
