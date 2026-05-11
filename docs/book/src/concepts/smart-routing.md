@@ -112,11 +112,22 @@ curl -X POST http://localhost:8402/v1/chat/completions \
 
 ### Via Python SDK
 
-```python
-from solvela import LLMClient
+Smart routing in `solvela-sdk` 0.2.0 is invoked by passing a profile name (`"auto"` / `"eco"` / `"premium"` / `"free"`) as the model — there is no separate `smart_chat` method.
 
-client = LLMClient(api_url="http://localhost:8402")
-response = client.smart_chat("Explain quantum entanglement", profile="eco")
+```python
+import asyncio
+from solvela import SolvelaClient, ClientConfig
+from solvela.types import ChatRequest, ChatMessage, Role
+
+async def main():
+    client = SolvelaClient(config=ClientConfig(gateway_url="http://localhost:8402"))
+    response = await client.chat(ChatRequest(
+        model="eco",  # routing profile — gateway picks the cheapest capable model
+        messages=[ChatMessage(role=Role.USER, content="Explain quantum entanglement")],
+    ))
+    print(response.choices[0].message.content)
+
+asyncio.run(main())
 ```
 
 ### Via CLI

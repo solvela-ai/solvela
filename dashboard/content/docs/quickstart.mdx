@@ -70,13 +70,20 @@ First, send a request without any payment header. The gateway will respond with 
   </Tab>
   <Tab value="Python">
     ```python
-    from solvela import LLMClient
+    import asyncio
+    from solvela import SolvelaClient
+    from solvela.types import ChatRequest, ChatMessage, Role
 
-    client = LLMClient(api_url='https://api.solvela.ai')
+    async def main():
+        client = SolvelaClient()  # defaults to https://api.solvela.ai
+        # The SDK handles the 402 flow when a Signer is configured.
+        response = await client.chat(ChatRequest(
+            model='auto',
+            messages=[ChatMessage(role=Role.USER, content='What is x402?')],
+        ))
+        print(response.choices[0].message.content)
 
-    # The SDK automatically handles the 402 flow.
-    reply = client.chat('auto', 'What is x402?')
-    print(reply)
+    asyncio.run(main())
     ```
   </Tab>
   <Tab value="Go">
@@ -185,17 +192,24 @@ Build and sign a USDC-SPL transfer transaction to the `pay_to` address for the `
   </Tab>
   <Tab value="Python">
     ```python
-    import os
-    from solvela import LLMClient
+    import asyncio
+    from solvela import SolvelaClient, Wallet, KeypairSigner
+    from solvela.types import ChatRequest, ChatMessage, Role
 
-    client = LLMClient(
-        private_key=os.environ['SOLANA_PRIVATE_KEY'],  # base58 private key
-        api_url='https://api.solvela.ai',
-    )
+    async def main():
+        wallet = Wallet.from_env('SOLANA_PRIVATE_KEY')  # base58 keypair
+        signer = KeypairSigner(wallet=wallet)
+        client = SolvelaClient(wallet=wallet, signer=signer)
 
-    reply = client.chat('gpt-4o', 'Explain Solana in one sentence.')
-    print(reply)
-    print(f'Spent: {client.session_spent:.6f} USDC')
+        response = await client.chat(ChatRequest(
+            model='gpt-4o',
+            messages=[ChatMessage(role=Role.USER, content='Explain Solana in one sentence.')],
+        ))
+        print(response.choices[0].message.content)
+        balance = await client.usdc_balance()
+        print(f'Wallet USDC balance: {balance:.6f}')
+
+    asyncio.run(main())
     ```
   </Tab>
   <Tab value="Go">

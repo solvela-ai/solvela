@@ -221,14 +221,23 @@ All prices are provider cost in USDC. A 5% platform fee is applied on top. See `
 ### Python
 
 ```bash
-pip install solvela
+pip install solvela-sdk
 ```
 
 ```python
-from solvela import LLMClient
+import asyncio
+from solvela import SolvelaClient
+from solvela.types import ChatRequest, ChatMessage, Role
 
-client = LLMClient()
-response = client.chat("openai/gpt-4o", "Hello!")
+async def main():
+    client = SolvelaClient()  # defaults to https://api.solvela.ai
+    response = await client.chat(ChatRequest(
+        model="openai/gpt-4o",
+        messages=[ChatMessage(role=Role.USER, content="Hello!")],
+    ))
+    print(response.choices[0].message.content)
+
+asyncio.run(main())
 ```
 
 ### TypeScript
@@ -379,7 +388,7 @@ crates/
 programs/
   escrow/           Anchor escrow program (deposit/claim/refund, PDA vault)
 sdks/
-  python/           pip install solvela
+  python/           pip install solvela-sdk (canonical source: github.com/solvela-ai/solvela-python)
   go/               go get github.com/solvela-ai/solvela-go
   mcp/              Claude Code MCP server
   signer-core/      Shared x402 parser + payment-signer primitives

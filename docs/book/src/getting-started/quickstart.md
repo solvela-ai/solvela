@@ -100,11 +100,19 @@ This is the x402 protocol in action. The agent must:
 With an SDK (recommended), payment is transparent:
 
 ```python
-from solvela import LLMClient
+import asyncio
+from solvela import SolvelaClient, ClientConfig
+from solvela.types import ChatRequest, ChatMessage, Role
 
-client = LLMClient(api_url="http://localhost:8402")
-reply = client.chat("openai/gpt-4o-mini", "Hello!")
-print(reply)
+async def main():
+    client = SolvelaClient(config=ClientConfig(gateway_url="http://localhost:8402"))
+    response = await client.chat(ChatRequest(
+        model="openai/gpt-4o-mini",
+        messages=[ChatMessage(role=Role.USER, content="Hello!")],
+    ))
+    print(response.choices[0].message.content)
+
+asyncio.run(main())
 ```
 
 Or using the CLI:

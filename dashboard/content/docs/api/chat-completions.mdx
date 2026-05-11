@@ -184,33 +184,42 @@ data: [DONE]
   </Tab>
   <Tab value="Python">
     ```python
-    import os
-    from solvela import LLMClient
+    import asyncio
+    from solvela import SolvelaClient, ClientConfig, Wallet, KeypairSigner
+    from solvela.types import ChatRequest, ChatMessage, Role
 
-    client = LLMClient(
-        private_key=os.environ['SOLANA_PRIVATE_KEY'],
-        api_url='https://api.solvela.ai',
-        session_budget=0.10,  # stop if we spend more than $0.10
-    )
+    async def main():
+        wallet = Wallet.from_env('SOLANA_PRIVATE_KEY')
+        signer = KeypairSigner(wallet=wallet)
+        client = SolvelaClient(
+            config=ClientConfig(
+                gateway_url='https://api.solvela.ai',
+                max_payment_amount=100_000,  # per-call cap: 0.10 USDC (atomic units)
+            ),
+            wallet=wallet,
+            signer=signer,
+        )
 
-    # Simple one-shot
-    text = client.chat('auto', 'What is Solana?')
-    print(text)
+        # Quick request — model 'auto' invokes the smart router.
+        quick = await client.chat(ChatRequest(
+            model='auto',
+            messages=[ChatMessage(role=Role.USER, content='What is Solana?')],
+        ))
+        print(quick.choices[0].message.content)
 
-    # Full request
-    from solvela import ChatMessage, Role
+        # Full request with system prompt + sampling controls.
+        response = await client.chat(ChatRequest(
+            model='openai/gpt-4o',
+            messages=[
+                ChatMessage(role=Role.SYSTEM, content='You are a blockchain expert.'),
+                ChatMessage(role=Role.USER, content='Explain proof of history.'),
+            ],
+            max_tokens=500,
+            temperature=0.7,
+        ))
+        print(response.choices[0].message.content)
 
-    response = client.chat_completion(
-        model='openai/gpt-4o',
-        messages=[
-            ChatMessage(role=Role.SYSTEM, content='You are a blockchain expert.'),
-            ChatMessage(role=Role.USER, content='Explain proof of history.'),
-        ],
-        max_tokens=500,
-        temperature=0.7,
-    )
-    print(response.choices[0].message.content)
-    print(f'Spent: {client.session_spent:.6f} USDC')
+    asyncio.run(main())
     ```
   </Tab>
   <Tab value="Go">
