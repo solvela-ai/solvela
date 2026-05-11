@@ -2,7 +2,7 @@
 
 > Live shipping status. See [`CHANGELOG.md`](./CHANGELOG.md) for history, [`SECURITY.md`](./SECURITY.md) for disclosure.
 
-_Last refreshed: 2026-05-11 — gateway runtime container now runs as non-root; doc/runtime parity restored across deploy + monitoring + auth surfaces._
+_Last refreshed: 2026-05-11 — Python SDK doc surface aligned with `solvela-sdk` 0.2.0 across handbook, dashboard, README, and quickstart (3-PR sweep, tiers A+B); container hardening + doc/runtime parity from earlier same-day work still in effect._
 
 ## Shipped
 

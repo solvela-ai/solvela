@@ -2,6 +2,33 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-11 — Python SDK doc surface aligned with `solvela-sdk` 0.2.0
+
+Three-PR sweep ([#219](https://github.com/solvela-ai/solvela/pull/219), [#220](https://github.com/solvela-ai/solvela/pull/220), [#221](https://github.com/solvela-ai/solvela/pull/221)) bringing the entire docs corpus onto the published `solvela-sdk` 0.2.0 surface. The Python SDK had been on PyPI long enough that the in-repo docs had drifted to describe a fictional API (`LLMClient` / `AsyncLLMClient` classes, `client.chat("model", "prompt")` positional shape, `client.smart_chat(profile=…)`, `client.chat_completion(…)`, `client.list_models()`, `wallet_key=` / `session_budget=` constructor args, `pip install solvela`) that did not exist in the published package. Anyone following the docs verbatim hit `ImportError` on line one.
+
+### Tier A — canonical SDK pages ([#219](https://github.com/solvela-ai/solvela/pull/219), [#220](https://github.com/solvela-ai/solvela/pull/220))
+
+- **`docs/book/src/sdks/python.md`** ([#219](https://github.com/solvela-ai/solvela/pull/219)) — full rewrite of the mdBook handbook Python SDK page against the actual published surface: `SolvelaClient` + `ClientConfig` / `ClientBuilder`, `Wallet` + `KeypairSigner`, `BalanceMonitor`, the full `ClientError` hierarchy (`PaymentRequiredError`, `PaymentRejectedError`, `AmountExceedsMaxError`, `RecipientMismatchError`, `InsufficientBalanceError`, `GatewayError`, `SignerError`, `WalletError`, `TimeoutError`), `OpenAICompat`, custom signers via the `Signer` ABC, and `BalanceMonitor` ↔ `client.balance_state_setter()` wiring.
+- **`dashboard/content/docs/sdks/python.mdx` + `index.mdx`** ([#220](https://github.com/solvela-ai/solvela/pull/220)) — same rewrite ported to the Vercel dashboard with Fumadocs conventions (`<Tabs>` / `<Note>`, `/docs/concepts/x402` link form). Index card description + comparison-table row updated to stop advertising "sync + async" when the new SDK is async-only.
+
+### Tier B — corpus sync ([#221](https://github.com/solvela-ai/solvela/pull/221))
+
+7 files still describing the removed API elsewhere in the corpus, swept onto the 0.2.0 surface so click-throughs from quickstart / README don't hit non-working code:
+
+- `README.md` — top-level Python snippet + `sdks/python/` directory listing line
+- `dashboard/content/docs/quickstart.mdx` — both Python tabs (with and without signing)
+- `dashboard/content/docs/api/chat-completions.mdx` — Python tab
+- `dashboard/content/docs/concepts/payment-flow.mdx` — Python tab; `max_payment_amount` (per-call) replaces `session_budget` (lifetime) with an inline note about the semantic shift
+- `docs/book/src/getting-started/quickstart.md` — Python snippet
+- `docs/book/src/concepts/smart-routing.md` — Python snippet + prose; `client.smart_chat(profile=…)` is replaced by passing the profile name (`"auto"` / `"eco"` / `"premium"` / `"free"`) as `model` in `ChatRequest`
+- `sdks/python/README.md` — stub `pip install solvela` → `solvela-sdk`
+
+### Out of scope (intentional)
+
+TypeScript `LLMClient` references in `README.md`, `dashboard/content/docs/quickstart.mdx`, and `dashboard/content/docs/api/chat-completions.mdx` were left untouched. The npm `@solvela/sdk@0.2.1` package is wire-incompatible with the production gateway today, so updating the snippets to use the current TS SDK API would document a broken client. Tracked as **tier-C**; needs a separate decision (remove TS tabs / replace with `curl` / point at `@solvela/signer-core` in-repo path). Go and Rust tabs also unchanged — different SDKs, different release cadences.
+
+The "Session Budgets" section thesis in `payment-flow.mdx` ("all official SDKs cap lifetime spend") is no longer uniformly true now that `solvela-sdk` only exposes per-call caps via `max_payment_amount`; reconciling across all four SDKs is a separate doc rewrite outside this sweep's Python-only scope.
+
 ## 2026-05-11 — Gateway container hardening
 
 Production `Dockerfile` runtime stage now runs as a non-root `solvela` user (UID 1001, no home, no login shell) instead of root ([#215](https://github.com/solvela-ai/solvela/pull/215)). Files copied from the build stage use `--chown=solvela:solvela` so the binary and config are owned by the runtime user; `USER solvela` is set before `EXPOSE` / `CMD`. Port 8402 is unprivileged so the non-root bind works; the gateway writes nothing to local disk in production (logs go to stdout, Postgres/Redis are external). Verified locally and via the CI smoke test that `id` reports `uid=1001(solvela)` and `/health` responds. Closes the hardening gap surfaced during the [#214](https://github.com/solvela-ai/solvela/pull/214) Dockerfile-snippet sync — both deployment doc snippets had been claiming non-root hardening that wasn't in the actual Dockerfile. The Dockerfile and both deployment doc pages are now consistent.
