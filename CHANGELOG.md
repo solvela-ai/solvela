@@ -2,6 +2,30 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-12 — Review-batch closeout + `solvela-protocol@0.2.1` published
+
+### Review-batch closeout (#165, #166, #168, #169, #171, #172 merged; #167, #170 closed as superseded)
+
+The 2026-05-09 named review pass ([#182](https://github.com/solvela-ai/solvela/pull/182)–[#202](https://github.com/solvela-ai/solvela/pull/202)) shipped the H-tier findings but left the earlier-numbered M-tier batch ([#165](https://github.com/solvela-ai/solvela/pull/165)–[#172](https://github.com/solvela-ai/solvela/pull/172), all opened 2026-05-08) sitting idle for four days. STATUS / CHANGELOG / memory had been claiming the arc was fully closed because the *named* PRs had merged.
+
+A file-level diff audit (not symbol-grep — see below) classified each PR as superseded vs outstanding:
+
+- **[#167](https://github.com/solvela-ai/solvela/pull/167)** (H-tier — atomic budget check+reserve + fail-closed team lookup) — closed. Already in main via [#192](https://github.com/solvela-ai/solvela/pull/192) under a different symbol name: #167 wrote `CHECK_AND_RESERVE_LUA` (GET → check → INCRBYFLOAT); #192 took the inverse approach with `incr_check_or_rollback` (INCRBYFLOAT → check → rollback). Atomic guarantee equivalent. H3 fail-closed `get_team_for_wallet → Result<…>` also in main via the same #192. **The symbol-name divergence was the trap that hid this from the first audit pass.**
+- **[#170](https://github.com/solvela-ai/solvela/pull/170)** (M-3 — `test_deposit_with_default_provider_rejected`) — closed. Already at `programs/escrow/tests/integration.rs:767`, landed via [#198](https://github.com/solvela-ai/solvela/pull/198).
+- **[#165](https://github.com/solvela-ai/solvela/pull/165)** (signer-core validates `pay_to` / `amount` / `program` before signing), **[#168](https://github.com/solvela-ai/solvela/pull/168)** (M4 — `tx_raw` truncation at 5 replay-log sites), **[#169](https://github.com/solvela-ai/solvela/pull/169)** (M2 SDK — `release.yml` shell-injection via env-var binding), **[#172](https://github.com/solvela-ai/solvela/pull/172)** (M1 — per-route replay-LRU bucket via `ReplayPath` enum) — clean approve+squash, CI green, no rebase needed.
+- **[#171](https://github.com/solvela-ai/solvela/pull/171)** (M2 — A2A submitted-amount validation; `accepted.amount = "1"` against a `"1000000"` quote was being forwarded to the facilitator and accepted) — rebased. Conflict was a test-module insertion overlap plus a missing `}` at the divergence point. Call site relocated to **after the replay check** (matching the PR body's stated ordering) so the existing `payment_submitted_replay_returns_payment_failed_with_replay_message` test in main keeps passing.
+- **[#166](https://github.com/solvela-ai/solvela/pull/166)** (H4 — defense-in-depth `require!(provider_token_account.key() != agent_token_account.key())` in escrow `claim()`) — rebased. Single conflict was the `EscrowError` variant append order: #198's `ExpiryTooSoon` already in main with discriminant 9, this PR's `DuplicateClaimAccounts` appended as 10 per the wire-code stability comment in `errors.rs:26-28`. Every existing variant kept its index.
+
+The escrow upgrade authority's `claim()` now has four guards before any state mutation: `actual_amount ≤ deposit`, `actual_amount > 0`, `slot < expiry_slot`, and the new `provider_ata != agent_ata`.
+
+**Process lesson recorded in memory:** named-arc closure ≠ findings closure. The symbol-name grep that initially flagged #167 as "still open" missed #192's supersession because the implementations chose different Lua-script names for the same atomic guarantee. Future review-pass closeouts must audit via file-level diff against the wave's PRs, not via grepping for the open PR's symbols.
+
+### `solvela-protocol@0.2.1` published to crates.io ([#231](https://github.com/solvela-ai/solvela/pull/231))
+
+Patch bump carrying the [#229](https://github.com/solvela-ai/solvela/pull/229) `ModelInfo` nested-wire fix. Two-line diff (`crates/protocol/Cargo.toml` version + `Cargo.lock`). Patch (not minor) is correct under Cargo SemVer: the Rust API surface of `ModelInfo` is byte-identical before and after #229 — only the serde wire shape changed, and that's downstream behavior, not API. Caret-range uptake: `^0.2` matches `0.2.1` automatically, so every downstream consumer pinned to `solvela-protocol = "0.2"` picks up the fix on next `cargo update` with no per-consumer `Cargo.toml` edit. crates.io timeline stays continuous (`0.1.0` → `0.2.1` — `0.2.0` was tagged in the repo for license-metadata cleanup but never published).
+
+Operator note: the on-disk crates.io token had been silently revoked; a fresh token scoped to `solvela-*` crates with `publish-new` + `publish-update` is now in `~/.cargo/credentials.toml`. Recorded in memory so the next publish doesn't re-walk the diagnosis tree.
+
 ## 2026-05-12 — Docs accuracy sweep + protocol wire fix
 
 ### Docs accuracy sweep ([#225](https://github.com/solvela-ai/solvela/pull/225), [#226](https://github.com/solvela-ai/solvela/pull/226), [#227](https://github.com/solvela-ai/solvela/pull/227))

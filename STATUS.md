@@ -2,7 +2,7 @@
 
 > Live shipping status. See [`CHANGELOG.md`](./CHANGELOG.md) for history, [`SECURITY.md`](./SECURITY.md) for disclosure.
 
-_Last refreshed: 2026-05-12 — docs accuracy sweep ([#225](https://github.com/solvela-ai/solvela/pull/225) README + mdBook retirement, [#226](https://github.com/solvela-ai/solvela/pull/226) `docs/AGENTS.md` cleanup, [#227](https://github.com/solvela-ai/solvela/pull/227) root `AGENTS.md` Repository Map refresh); protocol wire fix ([#229](https://github.com/solvela-ai/solvela/pull/229)) closes silent zero-fill in `ModelInfo` deserialization across all SDK consumers via hand-rolled `Serialize`/`Deserialize` against the gateway's nested `{pricing, capabilities}` shape._
+_Last refreshed: 2026-05-12 — review-batch closeout: 6 M-tier security fixes from the 2026-05-08 review merged ([#165](https://github.com/solvela-ai/solvela/pull/165) signer-core validation, [#166](https://github.com/solvela-ai/solvela/pull/166) escrow duplicate-ATA guard, [#168](https://github.com/solvela-ai/solvela/pull/168) `tx_raw` truncation in replay logs, [#169](https://github.com/solvela-ai/solvela/pull/169) release.yml shell-injection fix, [#171](https://github.com/solvela-ai/solvela/pull/171) A2A submitted-amount validation, [#172](https://github.com/solvela-ai/solvela/pull/172) per-route replay-LRU namespacing); 2 closed as already-superseded ([#167](https://github.com/solvela-ai/solvela/pull/167) by [#192](https://github.com/solvela-ai/solvela/pull/192), [#170](https://github.com/solvela-ai/solvela/pull/170) by [#198](https://github.com/solvela-ai/solvela/pull/198)). `solvela-protocol@0.2.1` published to crates.io ([#231](https://github.com/solvela-ai/solvela/pull/231) version bump carrying the [#229](https://github.com/solvela-ai/solvela/pull/229) `ModelInfo` wire fix; downstream consumers on `^0.2` pick up automatically on next `cargo update`). Earlier: docs accuracy sweep ([#225](https://github.com/solvela-ai/solvela/pull/225) README + mdBook retirement, [#226](https://github.com/solvela-ai/solvela/pull/226) `docs/AGENTS.md`, [#227](https://github.com/solvela-ai/solvela/pull/227) root `AGENTS.md`); protocol wire fix ([#229](https://github.com/solvela-ai/solvela/pull/229))._
 
 ## Shipped
 
@@ -26,7 +26,7 @@ _Last refreshed: 2026-05-12 — docs accuracy sweep ([#225](https://github.com/s
 - Load tested to ~400 RPS sustained at p99 < 300 ms.
 - `cargo test` suite green at HEAD.
 - 4 required CI checks gate every merge to `main`: Rust (fmt, clippy, test), Smoke test, Security audit (cargo-audit), Docker build.
-- **Whole-repo security review pass complete (2026-05-09)** — 18 must-ship PRs (#182–#199) + cleanup-tier wave 1 (#200, 8 MEDIUMs) landed across all 6 workspace crates plus the Anchor escrow program. All HIGH/CRITICAL findings closed in source; escrow bytecode redeployed to mainnet 2026-05-10. See `CHANGELOG.md` and `SECURITY.md` for the per-finding breakdown.
+- **Whole-repo security review pass complete (2026-05-09, M-tier closeout 2026-05-12)** — 18 must-ship PRs (#182–#199) + cleanup-tier wave 1 (#200, 8 MEDIUMs) landed across all 6 workspace crates plus the Anchor escrow program; the lower-numbered M-tier batch (#165–#172) was audited 2026-05-12 (2 superseded by the must-ship wave, 6 merged that same day). All HIGH/CRITICAL findings closed in source; escrow bytecode redeployed to mainnet 2026-05-10. See `CHANGELOG.md` and `SECURITY.md` for the per-finding breakdown.
 
 ## Repo hardening
 
