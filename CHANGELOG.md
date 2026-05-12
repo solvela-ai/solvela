@@ -211,7 +211,6 @@ Per-SDK highlights:
 ### Repository hardening
 
 - **Branch protection on `main`** — 1 PR approval, 4 required CI checks (Rust fmt/clippy/test, Smoke test, Security audit, Docker build), branches must be up-to-date, force-push/delete blocked.
-- **Hourly deploy-staleness check** (`.github/workflows/deploy-staleness-check.yml`) — opens a tracking issue if production sha lags `main` by more than 1 hour. Closes the gap that caused a 10-day silent stall.
 - **`www.solvela.ai`** added as a 308 redirect to the apex on Vercel.
 - **GitHub Releases** — first releases tagged on the main repo (`v0.1.1`, `solvela-x402-v0.1.2`) and on all four SDK repos.
 
