@@ -1,0 +1,34 @@
+name: sdks-go
+
+on:
+  push:
+    paths:
+      - 'sdks/go/**'
+      - '.github/workflows/sdks-go.yml'
+  pull_request:
+    paths:
+      - 'sdks/go/**'
+      - '.github/workflows/sdks-go.yml'
+
+defaults:
+  run:
+    working-directory: sdks/go
+
+jobs:
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Match the CI matrix the SDK had as a standalone repo.
+        go: ['1.23']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: sdks/go/go.sum
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./... -count=1
