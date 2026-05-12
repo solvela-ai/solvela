@@ -104,31 +104,31 @@ describe("providerColor", () => {
 
 describe("providerBadgeClass", () => {
   it("returns emerald classes for openai", () => {
-    expect(providerBadgeClass("openai")).toBe("bg-emerald-100 text-emerald-800");
+    expect(providerBadgeClass("openai")).toBe("bg-emerald-500/15 text-emerald-400");
   });
 
   it("returns orange classes for anthropic", () => {
-    expect(providerBadgeClass("anthropic")).toBe("bg-orange-100 text-orange-800");
+    expect(providerBadgeClass("anthropic")).toBe("bg-orange-500/15 text-orange-400");
   });
 
   it("returns blue classes for google", () => {
-    expect(providerBadgeClass("google")).toBe("bg-blue-100 text-blue-800");
+    expect(providerBadgeClass("google")).toBe("bg-blue-500/15 text-blue-400");
   });
 
   it("returns gray classes for xai", () => {
-    expect(providerBadgeClass("xai")).toBe("bg-gray-100 text-gray-800");
+    expect(providerBadgeClass("xai")).toBe("bg-gray-500/15 text-gray-400");
   });
 
   it("returns indigo classes for deepseek", () => {
-    expect(providerBadgeClass("deepseek")).toBe("bg-indigo-100 text-indigo-800");
+    expect(providerBadgeClass("deepseek")).toBe("bg-indigo-500/15 text-indigo-400");
   });
 
   it("is case-insensitive", () => {
-    expect(providerBadgeClass("OpenAI")).toBe("bg-emerald-100 text-emerald-800");
+    expect(providerBadgeClass("OpenAI")).toBe("bg-emerald-500/15 text-emerald-400");
   });
 
   it("returns fallback classes for unknown provider", () => {
-    expect(providerBadgeClass("mistral")).toBe("bg-gray-100 text-gray-700");
+    expect(providerBadgeClass("mistral")).toBe("bg-gray-500/15 text-gray-400");
   });
 });
 
