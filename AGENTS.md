@@ -17,13 +17,13 @@ Each top-level directory has its own `AGENTS.md` describing its contents, testin
 | `crates/` | Rust workspace — gateway (only binary), x402, router, protocol, cli (see `crates/AGENTS.md`) |
 | `programs/` | Standalone Anchor program(s); NOT workspace members (see `programs/AGENTS.md`) |
 | `dashboard/` | Next.js 16 product + docs site (see `dashboard/AGENTS.md`) |
-| `sdks/` | Client SDKs — Go / TypeScript / Python / MCP (see `sdks/AGENTS.md`) |
+| `sdks/` | Client SDKs — Python, Go, MCP, CLI npm wrapper, signer-core, AI SDK + OpenClaw providers; canonical TypeScript SDK is external (see `sdks/AGENTS.md`) |
 | `integrations/` | Third-party-framework adapters (ElizaOS, OpenClaw) (see `integrations/AGENTS.md`) |
 | `config/` | Static TOML config consumed at startup (see `config/AGENTS.md`) |
 | `migrations/` | PostgreSQL migrations — idempotent, auto-applied on startup (see `migrations/AGENTS.md`) |
 | `scripts/` | Dev/ops helper scripts (see `scripts/AGENTS.md`) |
 | `loadtest/` | Containerized load-test harness (see `loadtest/AGENTS.md`) |
-| `docs/` | Repo-internal docs — plans, research, book, product (see `docs/AGENTS.md`) |
+| `docs/` | Repo-internal product strategy docs — use cases, FAQ, regulatory positioning, how-it-works (see `docs/AGENTS.md`) |
 
 Nested directories follow the same pattern: each non-trivial subdirectory has its own `AGENTS.md` with a `<!-- Parent: ../AGENTS.md -->` pointer for navigation.
 
