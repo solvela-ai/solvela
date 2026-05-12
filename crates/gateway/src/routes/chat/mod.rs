@@ -458,7 +458,7 @@ pub async fn chat_completions(
                 } else {
                     replay_set.put(tx_raw.to_string(), now);
                     warn!(
-                        tx = %tx_raw,
+                        tx_prefix = &tx_raw[..tx_raw.len().min(88)],
                         "payment accepted under degraded in-memory replay protection (no Redis)"
                     );
                     false
@@ -468,7 +468,10 @@ pub async fn chat_completions(
             if replay_detected {
                 counter!("solvela_replay_rejections_total").increment(1);
                 counter!("solvela_payments_total", "status" => "failed").increment(1);
-                warn!(tx = %tx_raw, "replay attack detected — transaction already used");
+                warn!(
+                    tx_prefix = &tx_raw[..tx_raw.len().min(88)],
+                    "replay attack detected — transaction already used"
+                );
                 return Err(GatewayError::InvalidPayment(
                     "transaction has already been used; each payment signature may only be submitted once".to_string()
                 ));
