@@ -230,43 +230,43 @@ data: [DONE]
         "context"
         "fmt"
         "log"
-        "os"
+
         solvela "github.com/solvela-ai/solvela-go"
     )
 
     func main() {
-        client, err := solvela.NewClient(
-            solvela.WithAPIURL("https://api.solvela.ai"),
-            solvela.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
+        wallet, err := solvela.WalletFromEnv("SOLANA_PRIVATE_KEY")
+        if err != nil {
+            log.Fatal(err)
+        }
+        // solvela-go ships UnimplementedSigner — implement the Signer
+        // interface yourself for paid requests. See /docs/sdks/go.
+        signer := myKeypairSigner{wallet: wallet}
+
+        client, err := solvela.NewClient(wallet, signer,
+            solvela.WithGatewayURL("https://api.solvela.ai"),
+            solvela.WithMaxPaymentAmount(100_000), // per-call cap: 0.10 USDC atomic
         )
         if err != nil {
             log.Fatal(err)
         }
+        defer client.Close()
 
         ctx := context.Background()
-
-        // Simple one-shot
-        text, err := client.Chat(ctx, "auto", "What is Solana?")
-        if err != nil {
-            log.Fatal(err)
-        }
-        fmt.Println(text)
-
-        // Full request
-        resp, err := client.ChatCompletion(ctx, solvela.ChatRequest{
+        maxTokens, temperature := 500, 0.7
+        resp, err := client.Chat(ctx, &solvela.ChatRequest{
             Model: "openai/gpt-4o",
             Messages: []solvela.ChatMessage{
                 {Role: solvela.RoleSystem, Content: "You are a blockchain expert."},
                 {Role: solvela.RoleUser, Content: "Explain proof of history."},
             },
-            MaxTokens:   intPtr(500),
-            Temperature: float64Ptr(0.7),
+            MaxTokens:   &maxTokens,
+            Temperature: &temperature,
         })
         if err != nil {
             log.Fatal(err)
         }
         fmt.Println(resp.Choices[0].Message.Content)
-        fmt.Printf("Spent: %.6f USDC\n", client.GetSessionSpent())
     }
     ```
   </Tab>
