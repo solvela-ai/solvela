@@ -133,4 +133,14 @@ mod tests {
         assert!(solvela_escrow::MAX_ESCROW_SLOTS >= 100_000);
         assert!(solvela_escrow::MAX_ESCROW_SLOTS <= 1_000_000);
     }
+
+    #[test]
+    fn test_duplicate_claim_accounts_variant_exists() {
+        // Compile-time sentinel for the defense-in-depth guard added to
+        // claim() that rejects `provider_token_account == agent_token_account`.
+        // The full reject path needs LiteSVM (tests/integration.rs); this
+        // test ensures the variant survives a refactor on the default
+        // `cargo test` surface so a regression that removes it is loud.
+        let _err = solvela_escrow::errors::EscrowError::DuplicateClaimAccounts;
+    }
 }
