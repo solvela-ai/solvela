@@ -2,7 +2,7 @@
 
 > Live shipping status. See [`CHANGELOG.md`](./CHANGELOG.md) for history, [`SECURITY.md`](./SECURITY.md) for disclosure.
 
-_Last refreshed: 2026-05-11 — Python SDK doc surface aligned with `solvela-sdk` 0.2.0 across handbook, dashboard, README, and quickstart (3-PR sweep, tiers A+B); container hardening + doc/runtime parity from earlier same-day work still in effect._
+_Last refreshed: 2026-05-12 — docs accuracy sweep ([#225](https://github.com/solvela-ai/solvela/pull/225) README + mdBook retirement, [#226](https://github.com/solvela-ai/solvela/pull/226) `docs/AGENTS.md` cleanup, [#227](https://github.com/solvela-ai/solvela/pull/227) root `AGENTS.md` Repository Map refresh); protocol wire fix ([#229](https://github.com/solvela-ai/solvela/pull/229)) closes silent zero-fill in `ModelInfo` deserialization across all SDK consumers via hand-rolled `Serialize`/`Deserialize` against the gateway's nested `{pricing, capabilities}` shape._
 
 ## Shipped
 
@@ -41,3 +41,8 @@ _Last refreshed: 2026-05-11 — Python SDK doc surface aligned with `solvela-sdk
 - **Vercel API token rotation** and **GitHub org 2FA enforcement** — operator-side actions still pending.
 - **Anchor 0.31 → 1.0 migration on the escrow program** (#155 / #156) — coordinated bump alongside the broader Solana 1.x → @solana/kit ecosystem migration. Not security-critical now that the deployed bytecode is hardened.
 - **Dedicated escrow CI workflow** (#162) — `programs/escrow/` opts out of the workspace and isn't covered by the cross-cutting Rust job. Cargo build-sbf + LiteSVM integration tests should run on every escrow-touching PR.
+- **Protocol wire follow-ups deferred from [#229](https://github.com/solvela-ai/solvela/pull/229)** —
+  1. **Type split** into `ModelRegistration` (gateway-internal, no Serde) vs `ModelInfo` (wire-only) to make round-trip lossiness structurally impossible.
+  2. **Route `GET /v1/models` through `ModelInfo::serialize`** — `crates/gateway/src/routes/models.rs:10-42` currently emits the wire shape via inline `serde_json::json!{}`, creating two parallel definitions and drift risk.
+  3. **`compile_fail` doc-test** on `ModelInfo` to catch a future `#[derive(Serialize, Deserialize)]` regression at compile time.
+  4. **TS SDK type divergence** — `sdks/typescript/dist/types.d.ts` defines `ModelInfo` as `{ id, object, owned_by }`; verify canonical `solvela-ai/solvela-ts` is in the same state and re-publish if so.

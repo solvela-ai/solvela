@@ -2,6 +2,27 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-12 — Docs accuracy sweep + protocol wire fix
+
+### Docs accuracy sweep ([#225](https://github.com/solvela-ai/solvela/pull/225), [#226](https://github.com/solvela-ai/solvela/pull/226), [#227](https://github.com/solvela-ai/solvela/pull/227))
+
+Three parallel cleanup PRs landing the same day.
+
+- **`README.md`** ([#225](https://github.com/solvela-ai/solvela/pull/225)) — `cd Solvela` (wrong case) → `cd solvela`; hardcoded per-crate test counts (gateway 199, x402 74, router 13, workspace 402+) replaced with neutral copy pointing at `cargo test` (actual today is 497+122 gateway, 152 x402, 19 router, etc.); model count `27` → `26` (registry has 26, the table itself showed 26); dead `HANDOFF.md` pointer in the Deployment section retargeted to `STATUS.md` + `CHANGELOG.md`; `sdks/cli-npm/` added to the Project Structure block (it was the only tracked `sdks/*` subdir missing).
+- **mdBook handbook retired** ([#225](https://github.com/solvela-ai/solvela/pull/225)) — deleted `docs/book/` (29 files: `book.toml`, `SUMMARY`, `AGENTS`, and 26 pages under `getting-started/`, `concepts/`, `api/`, `sdks/`, `operations/`). The handbook had no deployment path — GitHub Pages was never enabled on the repo and no CI workflow built or published it. The public docs site at `docs.solvela.ai` is served by the Fumadocs dashboard (`dashboard/content/docs/*.mdx`) via Vercel auto-deploy and already covered the same surface. Recent PRs ([#213](https://github.com/solvela-ai/solvela/pull/213), [#219](https://github.com/solvela-ai/solvela/pull/219), the RCR rebrand sweep) had been keeping the book in lockstep with the dashboard at zero reader benefit — pure maintenance overhead.
+- **`docs/AGENTS.md`** ([#226](https://github.com/solvela-ai/solvela/pull/226)) — file claimed `docs/` contained six subdirectories; only `book/` (now retired) and `product/` actually existed. Dropped phantom rows for `plans/`, `research/`, `load-tests/`, `superpowers/`; trimmed the over-broad Purpose line; fixed stale `solvela.vercel.app` → `docs.solvela.ai`; dropped the plan-lifecycle bullet referencing the retired `HANDOFF.md`; dropped the `YYYY-MM-DD-slug.md` filename-convention bullet (only applied to non-existent dirs).
+- **Root `AGENTS.md`** ([#227](https://github.com/solvela-ai/solvela/pull/227)) — two stale rows in the Repository Map table. `sdks/` description claimed "Go / TypeScript / Python / MCP" but the directory has 7 tracked subdirs (Python, Go, MCP, cli-npm, signer-core, AI SDK + OpenClaw providers; canonical TS SDK is external). `docs/` description was "plans, research, book, product" — now matches the trimmed reality after #225 + #226.
+
+### Protocol wire fix ([#229](https://github.com/solvela-ai/solvela/pull/229))
+
+`ModelInfo` is the on-the-wire record at `GET /v1/models` and the sibling SDKs (Python, Go, TypeScript) deserialize it directly. Pre-0.3.0, `solvela-protocol` derived `Serialize` / `Deserialize` on flat top-level fields (`input_cost_per_million`, `supports_streaming`, …), but the **gateway emits a NESTED shape** — `pricing.input_per_million` and `capabilities.streaming`. Net effect: every SDK consumer silently parsed every response with all-zero pricing and all-false capabilities. No panic, no error, no log line. Pure zero-fill.
+
+The fix replaces the derives with hand-rolled `Serialize` / `Deserialize` impls translating between the flat Rust struct (gateway-internal API preserved unchanged) and a private `ModelInfoWire` carrying the nested shape, with private `Pricing` / `Capabilities` sub-structs. `Deserialize` is intentionally lossy: `model_id`, `supports_structured_output`, `supports_batch`, `max_output_tokens` are not on the wire and default to empty / `false` / `None`. Contract documented at the impl as SDK-consumer-only; gateway-internal code constructs from the registry and never round-trips through JSON.
+
+Specialized 5-agent review (rust-reviewer, security-reviewer, type-design-analyzer, silent-failure-hunter, pr-test-analyzer) caught a CI-blocker (`derivable_impls` clippy lint on `Capabilities::default` — switched to `#[derive(Default)]`), a redundant `.map_err(de::Error::custom)?` (simplified to `?`), and a missing test for the partial-pricing-block case (block present but field absent → silent 0.0; new test pins the contract). Deferred follow-ups tracked in `STATUS.md` Known follow-ups.
+
+5 unit tests in `mod tests` covering serialize-emits-nested-shape, deserialize-of-actual-gateway-payload (the regression case), defensive-defaults for missing blocks, partial-block silent-zero-fill, and round-trip preservation.
+
 ## 2026-05-11 — Python SDK doc surface aligned with `solvela-sdk` 0.2.0
 
 Three-PR sweep ([#219](https://github.com/solvela-ai/solvela/pull/219), [#220](https://github.com/solvela-ai/solvela/pull/220), [#221](https://github.com/solvela-ai/solvela/pull/221)) bringing the entire docs corpus onto the published `solvela-sdk` 0.2.0 surface. The Python SDK had been on PyPI long enough that the in-repo docs had drifted to describe a fictional API (`LLMClient` / `AsyncLLMClient` classes, `client.chat("model", "prompt")` positional shape, `client.smart_chat(profile=…)`, `client.chat_completion(…)`, `client.list_models()`, `wallet_key=` / `session_budget=` constructor args, `pip install solvela`) that did not exist in the published package. Anyone following the docs verbatim hit `ImportError` on line one.
