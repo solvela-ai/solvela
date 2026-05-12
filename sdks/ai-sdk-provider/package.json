@@ -40,7 +40,7 @@
     "size": "size-limit"
   },
   "dependencies": {
-    "@ai-sdk/openai-compatible": "2.0.46",
+    "@ai-sdk/openai-compatible": "2.0.47",
     "@ai-sdk/provider-utils": "^4.0.27",
     "@solvela/signer-core": "file:../signer-core",
     "bs58": "^5.0.0"
