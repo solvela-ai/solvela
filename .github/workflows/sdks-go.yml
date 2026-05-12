@@ -25,7 +25,7 @@ jobs:
         go: ['1.23']
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go }}
           cache-dependency-path: sdks/go/go.sum
