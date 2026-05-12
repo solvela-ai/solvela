@@ -99,7 +99,7 @@ The installer never writes `SOLANA_WALLET_KEY` to disk. Store it in `~/.solvela/
 
 ```bash
 git clone https://github.com/solvela-ai/solvela.git
-cd Solvela
+cd solvela
 cargo build
 ```
 
@@ -305,12 +305,12 @@ cargo build --release                 # Release build
 ### Test
 
 ```bash
-# Rust workspace (402+ tests)
+# Rust workspace — run `cargo test` for current counts; suites are growing
 cargo test                            # All workspace tests
-cargo test -p gateway                 # 199 tests (161 unit + 38 integration)
-cargo test -p x402                    # 74 tests
-cargo test -p router                  # 13 tests
-cargo test -p solvela-protocol      # 18 tests
+cargo test -p gateway                 # gateway unit + integration
+cargo test -p x402                    # x402 protocol
+cargo test -p router                  # smart router
+cargo test -p solvela-protocol        # wire-format types
 
 # Single test
 cargo test -p gateway test_health_endpoint -- --exact
@@ -370,7 +370,7 @@ Environment variables use the `SOLVELA_` prefix. Provider API keys follow the st
 
 See [`.env.example`](.env.example) for the full reference. Configuration files live in `config/`:
 
-- `models.toml` -- Model registry with per-token pricing (5 providers, 27 models)
+- `models.toml` -- Model registry with per-token pricing (5 providers, 26 models)
 - `default.toml` -- Server host/port, Solana RPC URL, monitor thresholds
 - `services.toml` -- x402 service marketplace registry
 
@@ -390,6 +390,7 @@ programs/
 sdks/
   python/           pip install solvela-sdk (canonical source: github.com/solvela-ai/solvela-python)
   go/               go get github.com/solvela-ai/solvela-go
+  cli-npm/          @solvela/cli — npm-distributed wrapper around the Rust CLI (pre-release)
   mcp/              Claude Code MCP server
   signer-core/      Shared x402 parser + payment-signer primitives
   ai-sdk-provider/  Vercel AI SDK provider for Solvela
@@ -426,7 +427,7 @@ fly status -a solvela-gateway
 curl https://solvela-gateway.fly.dev/health
 ```
 
-See `HANDOFF.md` for full deployment status and blockers.
+See [`STATUS.md`](./STATUS.md) for live shipping status and [`CHANGELOG.md`](./CHANGELOG.md) for chronological history.
 
 ## Licensing
 
