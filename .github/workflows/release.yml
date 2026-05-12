@@ -103,11 +103,20 @@ jobs:
 
       - name: Determine tag
         id: tag
+        # Bind workflow_dispatch input via env: instead of `${{ ... }}`
+        # interpolation directly into the shell. Direct interpolation lets
+        # an attacker who can trigger the workflow inject arbitrary shell
+        # via a tag value containing `$()` / backticks / newlines.
+        # workflow_dispatch is gated to write-permission users today, but
+        # the env-var pattern is the GitHub-recommended hardening regardless.
+        env:
+          TAG_INPUT: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "TAG=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+            echo "TAG=$TAG_INPUT" >> "$GITHUB_OUTPUT"
           else
-            echo "TAG=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "TAG=$REF_NAME" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create draft GitHub Release
