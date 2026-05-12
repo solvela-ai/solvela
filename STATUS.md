@@ -32,7 +32,6 @@ _Last refreshed: 2026-05-12 — review-batch closeout: 6 M-tier security fixes f
 
 - **Branch protection on `solvela-ai/solvela:main`** — 1 PR approval required, 4 required CI checks, branches must be up-to-date, conversation resolution required, force-push and delete blocked.
 - **Auto-merge enabled** for dependabot patch/minor batches with required-checks gating.
-- **Hourly deploy-staleness check** (`.github/workflows/deploy-staleness-check.yml`) opens an issue if production lags `main` HEAD by more than an hour.
 - **Container hardening** — gateway runtime stage runs as non-root `solvela` user (UID 1001, no home, no login shell) since [#215](https://github.com/solvela-ai/solvela/pull/215) (2026-05-11). Files copied from the build stage use `--chown=solvela:solvela`; verified via CI smoke test that the container responds on `/health` as the non-root user.
 
 ## Known follow-ups
