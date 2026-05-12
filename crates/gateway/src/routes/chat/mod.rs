@@ -437,6 +437,7 @@ pub async fn chat_completions(
                 // Same pattern as crates/x402/src/fee_payer.rs and a2a/handler.rs.
                 let mut replay_set = state
                     .replay_set
+                    .for_path(crate::ReplayPath::Chat)
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let now = Instant::now();
