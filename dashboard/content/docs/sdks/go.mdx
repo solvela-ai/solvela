@@ -1,8 +1,14 @@
 ---
 title: Go SDK
-description: Go client for Solvela with context-aware x402 payment handling
+description: Go client for Solvela with functional-option configuration and transparent x402 payments
 ---
 
+
+`solvela-go` is the official Go SDK for the Solvela gateway. Context-aware, goroutine-safe, dataclass-style typed, and handles the x402 payment handshake transparently when a `Signer` is wired in.
+
+- **Module:** [`github.com/solvela-ai/solvela-go`](https://pkg.go.dev/github.com/solvela-ai/solvela-go)
+- **Source:** [`solvela-ai/solvela-go`](https://github.com/solvela-ai/solvela-go)
+- **Go:** 1.23+
 
 ## Installation
 
@@ -10,175 +16,383 @@ description: Go client for Solvela with context-aware x402 payment handling
 go get github.com/solvela-ai/solvela-go
 ```
 
+The SDK depends only on the standard library plus `github.com/mr-tron/base58`. No Solana SDK is pulled in by default — that decision is left to the `Signer` implementation you plug in.
+
+<Note>
+  **`UnimplementedSigner` is a stub.** The signer shipped in `solvela-go` returns an error from `SignPayment` — it exists so the package compiles, not so it signs. To make paid requests, implement the `Signer` interface yourself (see [Custom signers](#custom-signers)) or call the gateway through the Python or TypeScript SDK, which ship working keypair signers.
+</Note>
+
 ## Quick start
 
 ```go
 package main
 
 import (
-    "context"
-    "fmt"
-    "log"
-    "os"
+	"context"
+	"fmt"
+	"log"
 
-    solvela "github.com/solvela-ai/solvela-go"
+	solvela "github.com/solvela-ai/solvela-go"
 )
 
 func main() {
-    client, err := solvela.NewClient(
-        solvela.WithAPIURL("https://api.solvela.ai"),
-        solvela.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
-    )
-    if err != nil {
-        log.Fatal(err)
-    }
+	wallet, _, err := solvela.CreateWallet()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Wallet:", wallet.Address())
 
-    ctx := context.Background()
-    reply, err := client.Chat(ctx, "auto", "What is Solana?")
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Println(reply)
+	client, err := solvela.NewClient(wallet, nil,
+		solvela.WithGatewayURL("https://api.solvela.ai"),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.Close()
+
+	models, err := client.Models(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, m := range models[:3] {
+		fmt.Printf("%s — %s ($%.2f/M in)\n", m.ID, m.DisplayName, m.InputUsdcPerMillion)
+	}
 }
 ```
 
-## Client options
+Without a `Signer`, paid endpoints return `*PaymentRequiredError` on the first call so the agent can react.
+
+## Configuration
+
+`NewClient` takes a `*Wallet`, a `Signer` (optional — pass `nil` if you only need unsigned endpoints like `Models()`), and zero or more functional options.
 
 ```go
-client, err := solvela.NewClient(
-    solvela.WithAPIURL("https://api.solvela.ai"),
-    solvela.WithPrivateKey(os.Getenv("SOLANA_PRIVATE_KEY")),
-    solvela.WithSessionBudget(0.10),              // USDC cap
-    solvela.WithTimeout(30 * time.Second),        // default: 60s
-    solvela.WithHTTPClient(customHTTPClient),     // replace the http.Client entirely
+import (
+	"time"
+
+	solvela "github.com/solvela-ai/solvela-go"
+)
+
+client, err := solvela.NewClient(wallet, signer,
+	solvela.WithGatewayURL("https://api.solvela.ai"),     // default: https://api.solvela.ai
+	solvela.WithRPCURL("https://api.mainnet-beta.solana.com"),
+	solvela.WithTimeout(60*time.Second),                  // default: 180s
+	solvela.WithMaxPaymentAmount(10_000_000),             // per-call cap: 10 USDC atomic
+	solvela.WithExpectedRecipient("recipient-wallet-pub"),// if set, gateway must pay-to this
+	solvela.WithCache(true),                              // opt-in response caching
+	solvela.WithSessions(true),                           // opt-in three-strike escalation
+	solvela.WithSessionTTL(30*time.Minute),
+	solvela.WithQualityCheck(true),                       // opt-in degraded-response retry
+	solvela.WithMaxQualityRetries(2),
+	solvela.WithFreeFallbackModel("openai/gpt-4o-mini"),  // swap on zero balance
 )
 ```
 
 | Option | Description |
 |--------|-------------|
-| `WithAPIURL(url)` | Gateway base URL. Trailing slash is trimmed. |
-| `WithPrivateKey(key)` | Base58 Solana private key for signing payments. |
-| `WithSessionBudget(budget)` | USDC spend cap. Returns `BudgetExceededError` when exceeded. |
-| `WithTimeout(d)` | Override the default 60s HTTP timeout. |
-| `WithHTTPClient(client)` | Replace the default `http.Client`. Useful for custom transports. |
+| `WithGatewayURL(url)` | Gateway base URL. Plaintext `http://` only allowed for `localhost`, `127.0.0.1`, `::1`. |
+| `WithRPCURL(url)` | Solana JSON-RPC endpoint your `Signer` should target. |
+| `WithTimeout(d)` | Override the 180s default HTTP timeout. |
+| `WithMaxPaymentAmount(atomic)` | Cap each signed payment. Default: 10 USDC (`10_000_000` atomic units). |
+| `WithExpectedRecipient(addr)` | Refuse 402s whose `pay_to` doesn't match. |
+| `WithCache(bool)` / `WithSessions(bool)` | Toggle in-memory caches. Default: both off. |
+| `WithSessionTTL(d)` | Lifetime of session entries when sessions are on. |
+| `WithQualityCheck(bool)` / `WithMaxQualityRetries(n)` | Retry on empty/repetitive/truncated responses. |
+| `WithFreeFallbackModel(id)` | Substitute this model when the polled balance hits zero. Requires `WithBalanceMonitor`. |
+| `WithBalanceMonitor(interval, fetcher)` | Background USDC balance poller (see [Balance monitoring](#balance-monitoring)). |
 
-## Methods
+### Security defaults
 
-### `Chat(ctx, model, prompt)`
+- Non-loopback `gateway_url` must use `https://`. Plaintext `http://` to a remote host returns `*ClientError` from `NewClient`.
+- Unknown payment schemes from the gateway raise `*ClientError` at JSON decode time rather than silently mis-branching downstream.
+- `MaxPaymentAmount` defaults to 10 USDC (atomic) — a misbehaving gateway cannot drain the wallet on a single call.
+- The HTTP client refuses redirects to keep the `Payment-Signature` header from leaking to a third party.
 
-Simple one-shot chat. Returns the assistant reply as a string.
+## The chat flow
+
+`Chat()` runs the default path as a single request. Opt-in flags add steps: balance guard → session lookup → cache check → request → quality check → cache store → session record.
+
+<Tabs items={['Without signer', 'With wallet + signer']}>
+  <Tab value="Without signer">
+    ```go
+    package main
+
+    import (
+    	"context"
+    	"errors"
+    	"fmt"
+    	"log"
+
+    	solvela "github.com/solvela-ai/solvela-go"
+    )
+
+    func main() {
+    	wallet, _, _ := solvela.CreateWallet()
+    	client, err := solvela.NewClient(wallet, nil,
+    		solvela.WithGatewayURL("https://api.solvela.ai"),
+    	)
+    	if err != nil {
+    		log.Fatal(err)
+    	}
+
+    	req := &solvela.ChatRequest{
+    		Model: "openai/gpt-4o-mini",
+    		Messages: []solvela.ChatMessage{
+    			{Role: solvela.RoleUser, Content: "Hello!"},
+    		},
+    	}
+    	_, err = client.Chat(context.Background(), req)
+
+    	var prErr *solvela.PaymentRequiredError
+    	if errors.As(err, &prErr) {
+    		pr := prErr.PaymentRequired
+    		fmt.Printf("price quote: %s %s\n", pr.CostBreakdown.Total, pr.CostBreakdown.Currency)
+    	}
+    }
+    ```
+  </Tab>
+  <Tab value="With wallet + signer">
+    ```go
+    wallet, err := solvela.WalletFromEnv("SOLANA_PRIVATE_KEY")
+    if err != nil {
+    	log.Fatal(err)
+    }
+
+    // Implement your own Signer — see the Custom signers section below.
+    signer := myKeypairSigner{wallet: wallet}
+
+    client, err := solvela.NewClient(wallet, signer,
+    	solvela.WithGatewayURL("https://api.solvela.ai"),
+    	solvela.WithMaxPaymentAmount(100_000), // per-call cap: 0.10 USDC atomic
+    )
+    if err != nil {
+    	log.Fatal(err)
+    }
+    defer client.Close()
+
+    resp, err := client.Chat(context.Background(), &solvela.ChatRequest{
+    	Model: "openai/gpt-4o",
+    	Messages: []solvela.ChatMessage{
+    		{Role: solvela.RoleUser, Content: "Explain proof of history."},
+    	},
+    })
+    if err != nil {
+    	log.Fatal(err)
+    }
+    fmt.Println(resp.Choices[0].Message.Content)
+    ```
+  </Tab>
+</Tabs>
+
+`ChatResponse` is OpenAI-compatible — `resp.ID`, `resp.Choices[i].Message`, `resp.Usage`.
+
+With a signer wired up, the SDK automatically:
+
+1. Sends the request.
+2. Receives 402 with the price quote.
+3. Picks a compatible scheme (`SchemeExact` or `SchemeEscrow`) whose network and asset match the configured Solana mainnet + USDC mint.
+4. Calls `signer.SignPayment(ctx, amount, payTo, resource, accepted)` to build and sign the SPL transfer.
+5. Retries with the `Payment-Signature` header.
+
+If the gateway returns 402 *again* after the signed retry, the SDK returns `*PaymentRejectedError` carrying the rejection reason so the caller can inspect why.
+
+## Streaming
 
 ```go
-text, err := client.Chat(ctx, "openai/gpt-4o", "Explain proof of history.")
-```
-
-### `ChatCompletion(ctx, req)`
-
-Full OpenAI-compatible request. Returns a `*ChatResponse`.
-
-```go
-resp, err := client.ChatCompletion(ctx, solvela.ChatRequest{
-    Model: "auto",
-    Messages: []solvela.ChatMessage{
-        {Role: solvela.RoleSystem, Content: "You are a blockchain expert."},
-        {Role: solvela.RoleUser, Content: "What is a validator?"},
-    },
-    MaxTokens:   intPtr(500),
-    Temperature: float64Ptr(0.7),
-})
+ch, err := client.ChatStream(ctx, req)
 if err != nil {
-    log.Fatal(err)
+	log.Fatal(err)
 }
-fmt.Println(resp.Choices[0].Message.Content)
-fmt.Printf("Spent: %.6f USDC\n", client.GetSessionSpent())
-```
-
-### `SmartChat(ctx, prompt, profile)`
-
-Routes through the smart router with the given profile (`"auto"`, `"eco"`, `"premium"`, `"free"`).
-
-```go
-resp, err := client.SmartChat(ctx, "Prove quicksort complexity", "premium")
-```
-
-### `ListModels(ctx)`
-
-Returns all available models as `json.RawMessage`.
-
-```go
-models, err := client.ListModels(ctx)
-```
-
-### `Health(ctx)`
-
-Gateway health check. Returns `map[string]any`. Equivalent to `GET https://api.solvela.ai/health`.
-
-```go
-status, err := client.Health(ctx)
-```
-
-### `GetSessionSpent()`
-
-Returns total USDC spent this session. Thread-safe.
-
-```go
-spent := client.GetSessionSpent()
-```
-
-### `GetSpending(ctx)`
-
-Returns a `*SpendSummary` with wallet address, session spent, and remaining budget.
-
-```go
-summary, err := client.GetSpending(ctx)
-fmt.Printf("Wallet: %s, Spent: %.6f USDC\n", summary.WalletAddress, summary.SessionSpentUSDC)
-```
-
-## Concurrency
-
-The client is goroutine-safe. `sessionSpent` is protected by an internal mutex. You can share one client across goroutines.
-
-```go
-var wg sync.WaitGroup
-for _, prompt := range prompts {
-    wg.Add(1)
-    go func(p string) {
-        defer wg.Done()
-        _, err := client.Chat(ctx, "eco", p)
-        if err != nil {
-            log.Println(err)
-        }
-    }(prompt)
+for chunk := range ch {
+	if chunk.Err != nil {
+		log.Fatal(chunk.Err)
+	}
+	if len(chunk.Chunk.Choices) > 0 && chunk.Chunk.Choices[0].Delta.Content != nil {
+		fmt.Print(*chunk.Chunk.Choices[0].Delta.Content)
+	}
 }
-wg.Wait()
-fmt.Printf("Total spent: %.6f USDC\n", client.GetSessionSpent())
+fmt.Println()
 ```
 
-## Error handling
+`ChatStream` runs the same preflight payment handshake as `Chat` — a `Signer` is required for paid streaming, otherwise the call returns `*PaymentRequiredError` before opening the stream. A post-signing 402 on the streaming POST is converted to `*PaymentRejectedError`.
+
+## Models and pricing
+
+```go
+models, err := client.Models(ctx)
+if err != nil {
+	log.Fatal(err)
+}
+for _, m := range models {
+	fmt.Printf("%-35s in=%5.2f  out=%5.2f  ctx=%7d  tools=%t vision=%t reasoning=%t\n",
+		m.ID, m.InputUsdcPerMillion, m.OutputUsdcPerMillion, m.ContextWindow,
+		m.SupportsTools, m.SupportsVision, m.Reasoning)
+}
+```
+
+`ModelInfo` mirrors the gateway's `/v1/models` shape — capabilities and pricing are flattened off the nested `capabilities` and `pricing` objects the gateway emits.
+
+| Field | Type | Description |
+|---|---|---|
+| `ID` | `string` | Canonical model identifier (e.g. `"openai/gpt-4o"`) |
+| `Provider` | `string` | Upstream provider (`"openai"`, `"anthropic"`, …) |
+| `DisplayName` | `string` | Human-readable label |
+| `ContextWindow` | `int` | Maximum input tokens |
+| `SupportsStreaming` / `SupportsTools` / `SupportsVision` / `Reasoning` | `bool` | Capability flags |
+| `InputUsdcPerMillion` / `OutputUsdcPerMillion` | `float64` | Provider rate in USDC per million tokens (human units, not atomic) |
+| `Currency` / `FeePercent` | `string` / `int` | Platform fee terms (`"USDC"` / `5` by default) |
+
+## Error hierarchy
+
+Every SDK error is a concrete struct implementing `error`. Use `errors.As` to branch on a specific type:
 
 ```go
 import "errors"
 
-resp, err := client.ChatCompletion(ctx, req)
+resp, err := client.Chat(ctx, req)
 if err != nil {
-    var payErr *solvela.PaymentError
-    var budgetErr *solvela.BudgetExceededError
-    var apiErr *solvela.APIError
-
-    switch {
-    case errors.As(err, &budgetErr):
-        fmt.Printf("Budget exceeded: spent=%.6f budget=%.6f\n",
-            budgetErr.Spent, budgetErr.Budget)
-    case errors.As(err, &payErr):
-        fmt.Println("Payment failed:", payErr.Message)
-    case errors.As(err, &apiErr):
-        fmt.Printf("API error %d: %s\n", apiErr.StatusCode, apiErr.Message)
-    default:
-        log.Fatal(err)
-    }
+	var prErr *solvela.PaymentRequiredError
+	var rejErr *solvela.PaymentRejectedError
+	var amtErr *solvela.AmountExceedsMaxError
+	var gwErr *solvela.GatewayError
+	var toErr *solvela.TimeoutError
+	switch {
+	case errors.As(err, &prErr):
+		fmt.Printf("Payment needed: %s %s\n",
+			prErr.PaymentRequired.CostBreakdown.Total,
+			prErr.PaymentRequired.CostBreakdown.Currency)
+	case errors.As(err, &rejErr):
+		fmt.Printf("Rejected: %s\n", rejErr.Reason)
+	case errors.As(err, &amtErr):
+		fmt.Printf("Quote %d exceeds local cap %d\n", amtErr.Amount, amtErr.MaxAmount)
+	case errors.As(err, &gwErr):
+		fmt.Printf("Gateway HTTP %d: %s\n", gwErr.Status, gwErr.Message)
+	case errors.As(err, &toErr):
+		fmt.Printf("Timed out after %.1fs\n", toErr.TimeoutSecs)
+	default:
+		log.Fatal(err)
+	}
 }
 ```
 
+| Error | Returned when |
+|---|---|
+| `*PaymentRequiredError` | Gateway returns 402 and no `Signer` is configured (or no compatible scheme was found). Carries `PaymentRequired`. |
+| `*PaymentRejectedError` | Gateway returns 402 *again* after a signed retry. Carries `Reason`. |
+| `*AmountExceedsMaxError` | Gateway's quoted amount exceeds the configured `MaxPaymentAmount`. Carries `Amount` and `MaxAmount`. |
+| `*RecipientMismatchError` | Gateway's `pay_to` doesn't match the configured `ExpectedRecipient`. |
+| `*InsufficientBalanceError` | Wallet balance is too low for the quoted amount. Carries `Have` / `Need`. |
+| `*GatewayError` | Non-200/402 HTTP response. Carries `Status` and `Message`. |
+| `*SignerError` | The configured `Signer` failed to build or sign the payment transaction. |
+| `*WalletError` | Wallet operation failed (e.g. base58 decode, keypair length). |
+| `*TimeoutError` | HTTP timeout exceeded. Carries `TimeoutSecs`. |
+| `*QualityDegradedError` | Response failed the quality check after `MaxQualityRetries`. Carries `Reason` and the degraded `Response`. |
+| `*ClientError` | Catch-all for wire-format violations (unknown payment scheme, malformed amount, invalid gateway URL). |
+
+## Balance monitoring
+
+For long-running agents, `WithBalanceMonitor` starts a background goroutine that polls USDC balance and wires transitions back into the client's balance guard.
+
+```go
+fetcher := func() (float64, error) {
+	// Query your Solana RPC for the wallet's USDC token-account balance.
+	// Return the float USDC value (not atomic units).
+	return queryUsdcBalance(wallet.Address())
+}
+
+client, err := solvela.NewClient(wallet, signer,
+	solvela.WithGatewayURL("https://api.solvela.ai"),
+	solvela.WithBalanceMonitor(30*time.Second, fetcher),
+	solvela.WithFreeFallbackModel("openai/gpt-4o-mini"),
+)
+if err != nil {
+	log.Fatal(err)
+}
+defer client.Close()
+```
+
+When the polled balance hits `0.0` and `FreeFallbackModel` is set, the chat balance guard swaps the requested model for the free fallback automatically. Without a monitor, `LastKnownBalance` stays unset and the guard is dormant.
+
+## Concurrency
+
+`SolvelaClient`, `ResponseCache`, `SessionStore`, and `BalanceMonitor` are all goroutine-safe — their internal state is protected by a mutex. Share one client across goroutines:
+
+```go
+var wg sync.WaitGroup
+for _, prompt := range prompts {
+	wg.Add(1)
+	go func(p string) {
+		defer wg.Done()
+		req := &solvela.ChatRequest{
+			Model: "openai/gpt-4o-mini",
+			Messages: []solvela.ChatMessage{{Role: solvela.RoleUser, Content: p}},
+		}
+		if _, err := client.Chat(ctx, req); err != nil {
+			log.Println(err)
+		}
+	}(prompt)
+}
+wg.Wait()
+```
+
+## Custom signers
+
+`solvela-go` ships only the `UnimplementedSigner` stub. To send paid requests, implement the `Signer` interface yourself:
+
+```go
+type Signer interface {
+	SignPayment(
+		ctx context.Context,
+		amountAtomic uint64,
+		recipient string,
+		resource solvela.Resource,
+		accepted solvela.PaymentAccept,
+	) (*solvela.PaymentPayload, error)
+}
+```
+
+A minimal sketch using `crypto/ed25519` plus a Solana JSON-RPC client of your choice:
+
+```go
+type myKeypairSigner struct {
+	wallet *solvela.Wallet
+	rpc    SolanaRPC // your client — e.g. gagliardetto/solana-go
+}
+
+func (s myKeypairSigner) SignPayment(
+	ctx context.Context,
+	amountAtomic uint64,
+	recipient string,
+	resource solvela.Resource,
+	accepted solvela.PaymentAccept,
+) (*solvela.PaymentPayload, error) {
+	// 1. Build a USDC-SPL transfer to `recipient` for `amountAtomic`.
+	// 2. Sign with s.wallet.Sign(...) or by passing the raw key into your RPC client.
+	// 3. Return a PaymentPayload populated with the signed transaction.
+	signedTxB64 := buildAndSignUsdcSplTransfer(ctx, s.rpc, s.wallet, recipient, amountAtomic)
+	return &solvela.PaymentPayload{
+		X402Version: solvela.X402Version,
+		Resource:    resource,
+		Accepted:    accepted,
+		Payload:     solvela.SolanaPayload{Transaction: signedTxB64},
+	}, nil
+}
+```
+
+Wire amounts (`PaymentAccept.Amount`) are decimal strings in atomic USDC units (1 USDC = 1,000,000). `SignPayment` is invoked with `amountAtomic` already parsed by the SDK.
+
+## Smoke harness
+
+A 100-line smoke test in [`scripts/smoke/main.go`](https://github.com/solvela-ai/solvela-go/blob/main/scripts/smoke/main.go) exercises the wire contract against a live gateway: it lists models, asserts at least one reports streaming + paid input pricing, and issues an unsigned chat to verify the 402 round-trip parses cleanly. Run it before tagging a release:
+
+```bash
+SOLVELA_GATEWAY_URL=https://staging.solvela.ai go run ./scripts/smoke
+```
+
+## Cancellation and timeouts
+
+`WithTimeout(d)` (default 180s) caps every HTTP call. Cancel an in-flight `Chat` by cancelling the `context.Context` you pass in — the underlying `http.Client` honors `ctx.Done()` and surfaces the cancellation as either `ctx.Err()` or `*TimeoutError`.
+
 <Note>
-  Source code: [`solvela-ai/solvela-go`](https://github.com/solvela-ai/solvela-go). Import `github.com/solvela-ai/solvela-go` and use the `solvela` package alias.
+  Source: [`solvela-ai/solvela-go`](https://github.com/solvela-ai/solvela-go). The canonical chat-flow entry point is [`client.go`](https://github.com/solvela-ai/solvela-go/blob/main/client.go); the smoke harness lives at [`scripts/smoke/main.go`](https://github.com/solvela-ai/solvela-go/blob/main/scripts/smoke/main.go). See also [x402 Protocol](/docs/concepts/x402) for the underlying payment flow.
 </Note>

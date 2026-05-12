@@ -57,7 +57,7 @@ If you are using the TypeScript, Python, Rust, or Go SDK, you never need to impl
   </Step>
 
   <Step title="Sign the Solana transaction">
-    Construct a USDC-SPL transfer for the exact `amount` to the `pay_to` address and sign it with your wallet's private key. The SDKs use `@solana/web3.js` (TypeScript), `solders` (Python), the `solana` crate (Rust), or `gagliardetto/solana-go` (Go) to do this.
+    Construct a USDC-SPL transfer for the exact `amount` to the `pay_to` address and sign it with your wallet's private key. The TypeScript SDK uses `@solana/web3.js`, the Python SDK uses `solders`, and the Rust CLI uses the `solana` crate. The Go SDK ships an `UnimplementedSigner` stub; implementers typically reach for `gagliardetto/solana-go` (or any Solana RPC client) to build and sign the transfer themselves — see [the Go SDK page](/docs/sdks/go#custom-signers).
 
     The signing step never broadcasts the transaction — it only produces a signed transaction bytes object. The gateway broadcasts it after verifying the signature is valid.
 
@@ -202,11 +202,15 @@ All official SDKs support a `sessionBudget` option that caps total spending for 
   </Tab>
   <Tab value="Go">
     ```go
-    client, err := solvela.NewClient(solvela.Config{
-        Endpoint:      "https://api.solvela.ai",
-        WalletKey:     os.Getenv("SOLANA_PRIVATE_KEY"),
-        SessionBudget: "0.10",
-    })
+    // solvela-go caps spend per call, not per session.
+    // Track lifetime spend yourself if you need a session-wide budget.
+    wallet, _ := solvela.WalletFromEnv("SOLANA_PRIVATE_KEY")
+    signer := myKeypairSigner{wallet: wallet} // see /docs/sdks/go#custom-signers
+
+    client, err := solvela.NewClient(wallet, signer,
+        solvela.WithGatewayURL("https://api.solvela.ai"),
+        solvela.WithMaxPaymentAmount(100_000), // per-call cap: 0.10 USDC atomic
+    )
     ```
   </Tab>
 </Tabs>
