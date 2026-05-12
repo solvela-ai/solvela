@@ -56,7 +56,11 @@ updates:
       patch-and-minor:
         update-types: [patch, minor]
 
-  # ── @solana/web3.js 1.x consumers (mcp, openclaw-provider, integrations)
+  # ── @solana/web3.js 1.x consumers ───────────────────────────────────────
+  # mcp, openclaw-provider, integrations/openclaw, signer-core,
+  # ai-sdk-provider — every npm manifest in this repo that pulls
+  # @solana/web3.js 1.x or @solana/spl-token 0.4.x.
+  #
   # bigint-buffer (high) and uuid <14.0.0 (moderate) are both pinned by
   # @solana/web3.js 1.x. The npm-suggested "fix" downgrades to 0.9.2 which
   # is a regression. Resolution path: migrate to @solana/kit. See SECURITY.md.
@@ -96,13 +100,31 @@ updates:
       - dependency-name: "@solana/web3.js"
         versions: ["<2"]
 
-  # ── Other npm packages ──────────────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /sdks/signer-core
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: bigint-buffer
+      - dependency-name: uuid
+        versions: ["<14.0.0"]
+      - dependency-name: "@solana/web3.js"
+        versions: ["<2"]
+
   - package-ecosystem: npm
     directory: /sdks/ai-sdk-provider
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: bigint-buffer
+      - dependency-name: uuid
+        versions: ["<14.0.0"]
+      - dependency-name: "@solana/web3.js"
+        versions: ["<2"]
 
+  # ── Other npm packages ──────────────────────────────────────────────────
   - package-ecosystem: npm
     directory: /sdks/cli-npm
     schedule:
