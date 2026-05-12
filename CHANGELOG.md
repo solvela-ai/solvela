@@ -2,6 +2,16 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-12 — Go SDK consolidated into the monorepo ([#252](https://github.com/solvela-ai/solvela/pull/252))
+
+PR [#252](https://github.com/solvela-ai/solvela/pull/252) pulled the standalone `solvela-ai/solvela-go` repo into `sdks/go/`, rewrote the module path to `github.com/solvela-ai/solvela/sdks/go` (only `live_test.go` and `scripts/smoke/main.go` referenced the old path), and added a path-scoped `.github/workflows/sdks-go.yml` mirroring the `mcp.yml` pattern. All 14 CI checks green pre-merge; `go vet` / `go build` / `go test ./... -count=1` clean at the new path. Per-package `LICENSE` and `SECURITY.md` intentionally not copied — the monorepo-root files apply.
+
+Tagged `sdks/go/v0.1.0` (annotated, points at `9807bf3d`) so `proxy.golang.org` indexes the new module path. The path-prefixed tag follows the same convention as the existing `solvela-x402-v0.1.2` sub-module tag in this repo, which is what Go's module proxy requires for subdirectory modules.
+
+`solvela-ai/solvela-go` archived with a redirect README pointing at the monorepo. Existing `go get github.com/solvela-ai/solvela-go` pins continue to resolve from `proxy.golang.org`'s cache; new code should import `github.com/solvela-ai/solvela/sdks/go`. The archive is reversible via `gh repo unarchive` if anything turns out wrong.
+
+**Why this matters:** wire-format drift between the gateway and the Go SDK is now structurally impossible — any change to `crates/protocol/**` that breaks the Go SDK fails the `sdks-go` CI job in the same PR that introduces it. This closes the Go portion of the cross-repo contract-risk class that fired on 2026-05-11 (the `ModelInfo` zero-fill incident, which hit all 4 SDKs simultaneously). TypeScript, Python, and Rust SDK consolidations remain optional follow-ups; each is independent of the others, and stopping after the Go consolidation still leaves a durable structural improvement.
+
 ## 2026-05-12 — Review-batch closeout + `solvela-protocol@0.2.1` published
 
 ### Review-batch closeout (#165, #166, #168, #169, #171, #172 merged; #167, #170 closed as superseded)
