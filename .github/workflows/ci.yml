@@ -188,6 +188,36 @@ jobs:
             lcov-payment.info
           retention-days: 14
 
+  deny:
+    name: Dependency hygiene (cargo-deny)
+    runs-on: ubuntu-latest
+    # Checks licenses, sources, advisories (RustSec), and dependency-graph
+    # bans against deny.toml. Runs independently — parallel with rust/audit.
+    # Source of truth for policy is deny.toml; this job is just the runner.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Cache cargo-deny binary
+        id: cache-cargo-deny
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          # Bump the version suffix here when you want a fresh install.
+          key: ${{ runner.os }}-cargo-deny-0.19
+
+      - name: Install Rust toolchain
+        if: steps.cache-cargo-deny.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+
+      - name: Install cargo-deny
+        if: steps.cache-cargo-deny.outputs.cache-hit != 'true'
+        run: cargo install cargo-deny --locked
+
+      - name: Run cargo deny check
+        run: cargo deny check
+
   audit:
     name: Security audit (cargo-audit)
     runs-on: ubuntu-latest
