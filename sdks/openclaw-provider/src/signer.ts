@@ -168,13 +168,16 @@ export class SolvelaSigner {
     }
 
     // Step 7 — Escrow deposit counter WARN (HF-P3-H6)
-    // Emit a warning every 10 escrow/auto deposits to remind users about auto-claim reliance.
+    // Emit a warning every 10 escrow/auto deposits to remind users that the
+    // claim path relies on gateway auto-claim until both halves of F4 ship
+    // (client wrapper landed; gateway /v1/escrow/settle endpoint pending).
     if (this.signingMode === 'escrow' || this.signingMode === 'auto') {
       this.escrowDepositCount++;
       if (this.escrowDepositCount % 10 === 0) {
         process.stderr.write(
           `[solvela-openclaw] WARN: ${this.escrowDepositCount} escrow deposits made; ` +
-            'auto-claim relies on gateway timeout. Direct mode recommended until F4 escrow-claim hook lands.\n',
+            'gateway auto-claim still handles reconciliation (F4 settle endpoint not yet deployed). ' +
+            'See README.md "Escrow accounting (F4)".\n',
         );
       }
     }

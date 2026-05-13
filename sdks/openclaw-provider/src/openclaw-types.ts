@@ -1,51 +1,58 @@
 /**
- * Minimal OpenClaw Provider Plugin SDK type stubs.
+ * Type surface for the Solvela OpenClaw Provider Plugin.
  *
- * These are typed against the documented API surface from
- * https://docs.openclaw.ai/plugins/sdk-provider-plugins
+ * What is REAL (imported from upstream npm packages):
  *
- * The actual OpenClaw runtime injects the real `api` object at load time;
- * these types exist only for TypeScript type-checking during development.
- * They are intentionally conservative — only the hooks used by this plugin.
+ *   - StreamFn — comes from @earendil-works/pi-agent-core. Real signature is
+ *     (model, context, options?) => AssistantMessageEventStream | Promise<...>.
+ *     See node_modules/@earendil-works/pi-agent-core/dist/types.d.ts and
+ *     node_modules/@earendil-works/pi-ai/dist/stream.d.ts. The OpenClaw runtime
+ *     invokes wrapped StreamFns as 3-arg — canonical refs:
+ *       - openclaw/openclaw@main: src/agents/pi-embedded-runner/extra-params.ts:418
+ *       - openclaw/openclaw@main: src/agents/pi-embedded-runner/openai-stream-wrappers.ts:567
+ *       - openclaw/openclaw@main: src/plugin-sdk/provider-stream-shared.test.ts:78
  *
- * WARNING: These are hand-rolled stubs of OpenClaw SDK types. Sync with
- * upstream when OpenClaw publishes @openclaw/sdk (HF-P3-M6).
+ * What is STILL a hand-rolled stub (no upstream npm equivalent today):
  *
- * wrapStreamFn shape (HF-P3-H1): The real SDK docs confirm the factory shape:
- *   `(ctx: StreamFnContext) => StreamFn`
- * Plan §10.5 showed a flat `(request, next)` shape — that section is stale.
- * This file declares the correct factory shape.
+ *   - The plugin SDK surface (`OpenClawApi`, `ProviderConfig`, `StreamFnContext`,
+ *     `CatalogContext`, `DynamicModelContext`, `ResolvedModel`, `ProviderAuthMethod`,
+ *     `CatalogResult`). These shapes live in openclaw/openclaw@main:src/plugins/types.ts
+ *     but are not yet published as a standalone package. They are conservatively
+ *     mirrored here for the hooks this plugin uses. Re-verify against canonical
+ *     before adding new fields.
+ *
+ * PR 1 (type honesty) intentionally exposes the bug at compile time:
+ * the `wrapStreamFn` body in src/index.ts is built around a fictional
+ * 1-arg (params) shape — the OpenClaw runtime calls it as 3-arg
+ * (model, context, options). The typechecker now flags this. PR 3 fixes
+ * the runtime path (undici dispatcher); only then will typecheck go green.
+ *
+ * DO NOT mark the broken sites with @ts-expect-error to "fix" CI — the
+ * compile failure is the deliverable for PR 1.
  */
 
 import type { SolvelaModel } from './models.generated.js';
 
-/** A stream function that executes one inference call. */
-export type StreamFn = (params: StreamParams) => Promise<StreamResult>;
+// Real StreamFn — sourced from upstream. Never redeclare locally.
+export type { StreamFn } from '@earendil-works/pi-agent-core';
+import type { StreamFn } from '@earendil-works/pi-agent-core';
 
-/** Parameters passed to a stream function (outbound request). */
-export interface StreamParams {
-  /** Outbound HTTP headers — mutate to inject payment headers. */
-  headers: Record<string, string>;
-  /** Request body (JSON string). */
-  body?: string;
-  /** Target URL. */
-  url?: string;
-  [key: string]: unknown;
-}
-
-/** Result returned by a stream function. */
-export type StreamResult = unknown;
-
-/** Context passed to the wrapStreamFn hook. */
+/**
+ * Context passed to the wrapStreamFn hook.
+ *
+ * Stub — mirrored from openclaw/openclaw@main:src/plugins/types.ts. Only the
+ * fields this plugin reads. The `streamFn` field is now typed against the
+ * real StreamFn (3-arg) — wrapping it requires `(model, context, options)`.
+ */
 export interface StreamFnContext {
-  /** The existing stream function to wrap. */
+  /** The inner stream function to wrap. */
   streamFn?: StreamFn;
   /** The resolved model for this call. */
   model?: ResolvedModel;
   [key: string]: unknown;
 }
 
-/** A resolved model entry (as returned by catalog.run). */
+/** A resolved model entry (as returned by catalog.run). Stub — see file header. */
 export interface ResolvedModel {
   id: string;
   name: string;
@@ -53,13 +60,13 @@ export interface ResolvedModel {
   [key: string]: unknown;
 }
 
-/** Context passed to catalog.run. */
+/** Context passed to catalog.run. Stub — see file header. */
 export interface CatalogContext {
   resolveProviderApiKey: (providerId: string) => { apiKey?: string };
   [key: string]: unknown;
 }
 
-/** Result shape returned by catalog.run. */
+/** Result shape returned by catalog.run. Stub — see file header. */
 export interface CatalogResult {
   provider: {
     baseUrl: string;
@@ -69,26 +76,26 @@ export interface CatalogResult {
   };
 }
 
-/** Context passed to resolveDynamicModel. */
+/** Context passed to resolveDynamicModel. Stub — see file header. */
 export interface DynamicModelContext {
   modelId: string;
   [key: string]: unknown;
 }
 
-/** Auth method declaration for the provider manifest. */
+/** Auth method declaration for the provider manifest. Stub — see file header. */
 export interface ProviderAuthMethod {
   method: 'api-key' | 'oauth' | 'none';
   envVar?: string;
   [key: string]: unknown;
 }
 
-/** The OpenClaw plugin API object injected by the host at load time. */
+/** The OpenClaw plugin API object injected by the host at load time. Stub — see file header. */
 export interface OpenClawApi {
   registerProvider(config: ProviderConfig): void;
   [key: string]: unknown;
 }
 
-/** Full provider registration config. */
+/** Full provider registration config. Stub — see file header. */
 export interface ProviderConfig {
   id: string;
   label: string;

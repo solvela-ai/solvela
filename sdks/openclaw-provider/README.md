@@ -35,8 +35,8 @@ Phase 1 MCP server pattern).
 
 ## Signing modes
 
-- **`direct`** (default in Phase 3): Forces direct USDC TransferChecked only.
-  Recommended until F4 (escrow-claim hook) ships.
+- **`direct`** (default): Forces direct USDC TransferChecked only. Recommended
+  for v1 — no client-side escrow accounting needed.
 - **`auto`**: Prefers the escrow payment scheme when the gateway advertises it,
   falls back to direct TransferChecked.
 - **`escrow`**: Forces escrow-only. If the gateway doesn't advertise escrow for
@@ -46,16 +46,32 @@ Phase 1 MCP server pattern).
   `dev_bypass_payment` mode. Parity with the Phase 1 MCP server. Never use in
   production against a live gateway.
 
-**Phase 3 note on escrow:** Escrow mode works in Phase 3, but the plugin has no
-stream-completion hook to trigger the claim. Every escrow deposit relies on the
-gateway auto-claim after `max_timeout_seconds`. Until F4 (escrow-claim hook on
-stream completion) ships, **`direct` is the recommended default**. If you
-explicitly set `SOLVELA_SIGNING_MODE=escrow` or `auto`, the plugin emits a
-warning every 10 deposits reminding you of this.
+### Escrow accounting (F4)
 
-**Security note on `direct` mode:** Direct-transfer payments are non-refundable
-if the stream fails mid-response. If recovery from partial-stream failures is
-important to you, wait for F4 before using escrow mode in production.
+Escrow mode deposits a max-amount USDC envelope on-chain before the call; the
+gateway claims the actual cost back from the deposit after the stream
+completes. There are two ways the claim can be triggered:
+
+1. **Gateway auto-claim after `max_timeout_seconds`** — works today; the
+   deposit is reconciled on a timer, so refunds for over-deposits arrive
+   asynchronously.
+2. **Client-side `wrapStreamForF4`** — the plugin exports a `wrapStreamForF4`
+   helper that observes the stream's `result()` Promise and POSTs the actual
+   token usage to the gateway's `/v1/escrow/settle` endpoint as soon as the
+   stream finishes. Reduces reconciliation latency from minutes to
+   milliseconds.
+
+The `wrapStreamForF4` wrapper is fully implemented and unit-tested
+(`tests/f4-wrapper.test.ts`). The matching gateway endpoint at
+`/v1/escrow/settle` is planned but not yet deployed — until it lands, settle
+POSTs return 404 and the wrapper logs a warning (the stream consumer is
+unaffected). Until the endpoint is live, you can still safely use escrow mode
+and rely on the auto-claim timer.
+
+**Security note on `direct` mode:** Direct-transfer payments are
+non-refundable if the stream fails mid-response. If recovery from
+partial-stream failures matters for your workload, prefer escrow mode (with
+F4 once the gateway endpoint ships, or auto-claim today).
 
 ## Dev bypass
 

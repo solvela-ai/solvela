@@ -60,6 +60,8 @@ import type { PaymentRequired } from '@solvela/signer-core';
 export { SOLVELA_MODELS } from './models.generated.js';
 export { ROUTING_PROFILES } from './registry.js';
 export type { OpenClawApi } from './openclaw-types.js';
+export { wrapStreamForF4 } from './f4-wrapper.js';
+export type { F4Context, F4Stats, ResultableStream } from './f4-wrapper.js';
 
 // ---------------------------------------------------------------------------
 // Config from environment
@@ -120,6 +122,40 @@ function getSessionBudget(): number | undefined {
     return undefined;
   }
   return parsed;
+}
+
+// ---------------------------------------------------------------------------
+// Probe body builder
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a stub request body for the gateway probe.
+ *
+ * The probe is a POST to `/v1/chat/completions` that returns a 402 with cost
+ * info. The gateway prices upfront off `model` + `max_tokens` ceiling, so the
+ * probe body doesn't need to byte-match the real call in direct mode — we
+ * just need the same `model.id` and any cost-sensitive options pi-ai will
+ * forward (max_tokens, temperature). Escrow mode requires byte-perfect
+ * alignment for PDA derivation; see docs/escrow-byte-alignment.md.
+ */
+interface ProbeInputOptions {
+  maxTokens?: unknown;
+  temperature?: unknown;
+  topP?: unknown;
+}
+
+function buildProbeBody(
+  modelId: string,
+  options: ProbeInputOptions | undefined,
+): string {
+  const body: Record<string, unknown> = {
+    model: modelId,
+    messages: [{ role: 'user', content: '' }],
+  };
+  if (typeof options?.maxTokens === 'number') body['max_tokens'] = options.maxTokens;
+  if (typeof options?.temperature === 'number') body['temperature'] = options.temperature;
+  if (typeof options?.topP === 'number') body['top_p'] = options.topP;
+  return JSON.stringify(body);
 }
 
 // ---------------------------------------------------------------------------
@@ -346,32 +382,36 @@ export default function register(api: OpenClawApi, opts: RegisterOptions = {}): 
     /**
      * wrapStreamFn — per-call payment-signature injection.
      *
-     * The hook receives a context containing the existing stream function and
-     * returns a wrapped version that injects the PAYMENT-SIGNATURE header
-     * before calling the original stream function.
+     * Receives `ctx` containing the inner `StreamFn` (from
+     * `@earendil-works/pi-agent-core`), returns a wrapped `StreamFn` that
+     * injects the `payment-signature` header before forwarding the call.
      *
-     * Signature note (HF-P3-H1): The real OpenClaw SDK docs confirm the factory
-     * shape `(ctx) => async (params) => inner(params)`. Plan §10.5 used a flat
-     * `(request, next)` shape — that section is stale. This implementation is correct.
+     * Signature is the canonical 3-arg `(model, context, options)`, matching
+     * how OpenClaw invokes wrapped StreamFns at runtime
+     * (src/agents/pi-embedded-runner/extra-params.ts:418) and how internal
+     * wrappers like `createOpenAIAttributionHeadersWrapper` inject headers
+     * (src/agents/pi-embedded-runner/openai-stream-wrappers.ts:567).
      *
      * Flow:
-     *   1. Validate ctx.streamFn — throw if absent (HF-P3-C3)
-     *   2. Serialize request body once as canonical JSON string (HF-P3-C1)
-     *   3. Write canonical body back to params (HF-P3-C1 — ensures probe and inner() match)
-     *   4. Probe the gateway with the canonical body to get a 402 PaymentRequired
-     *   5. Call signer.buildHeader() to produce the base64 payment-signature
-     *   6. Inject `params.headers['payment-signature'] = header`
-     *   7. Call inner(params); on failure → refund budget (HF-P3-C2)
+     *   1. Validate ctx.streamFn
+     *   2. Build a probe body from model.id + cost-sensitive options fields
+     *   3. Probe the gateway → 402 PaymentRequired
+     *   4. Sign payment via signer.buildHeader()
+     *   5. Forward to inner(model, context, { ...options, headers: { ...,
+     *      'payment-signature': header } })
+     *   6. On inner() failure → refund session budget
      *
-     * solvela/not-configured guard: if the resolved model is the diagnostic shadow,
-     * throw a clear config error rather than attempting to sign.
+     * Probe body is a stub: model id + max_tokens / temperature extracted
+     * from options. Direct mode tolerates this because the gateway prices
+     * upfront off model + max_tokens ceiling, not message content. Escrow
+     * mode requires byte-perfect probe/real-call body alignment for PDA
+     * derivation — that needs the dispatcher pattern. See
+     * docs/escrow-byte-alignment.md.
      *
-     * DO NOT change this to use Authorization: Bearer — the gateway middleware
-     * reads 'payment-signature' (lowercase), not an Authorization header.
+     * DO NOT change this to use `Authorization: Bearer` — the gateway
+     * middleware reads `payment-signature` (lowercase).
      */
     wrapStreamFn: (ctx: StreamFnContext): StreamFn => {
-      // Fail loud — silently returning undefined allows OpenClaw to call the
-      // inner stream without a payment header (HF-P3-C3).
       if (!ctx?.streamFn || typeof ctx.streamFn !== 'function') {
         throw new Error(
           'Solvela: wrapStreamFn invoked without a valid streamFn. ' +
@@ -380,55 +420,52 @@ export default function register(api: OpenClawApi, opts: RegisterOptions = {}): 
         );
       }
 
+      // Smoke check: warn if ctx.streamFn arity is 0. Real StreamFn is 3-arg
+      // (model, context, options). A 0-arg function suggests the host swapped
+      // in a (...args) rest-param wrapper or a 0-arg stub — symptom of the
+      // pi-coding-agent 0.63.0 regression class (openclaw#55760, #55816, #57860).
+      // We warn rather than throw because Function.length can be 0 for valid
+      // wrappers built with rest-params, but the combination of (a) sitting on
+      // wrapStreamFn and (b) arity 0 has been a real defect signal.
+      if (ctx.streamFn.length === 0) {
+        process.stderr.write(
+          '[solvela-openclaw] WARN: ctx.streamFn arity is 0 — expected (model, context, options). ' +
+            'May indicate the OpenClaw runtime swapped the wrapped streamFn with a rest-arg stub. ' +
+            'See openclaw/openclaw#55760 for the pi-coding-agent 0.63.0 regression class.\n',
+        );
+      }
+
       const inner = ctx.streamFn;
 
-      return async (params) => {
-        // 'off' mode: skip signing entirely — forward to inner() without a payment header.
-        // Gateway will 402 unless it's in dev_bypass_payment mode. Parity with Phase 1 MCP.
+      return async (model, context, options) => {
         if (signingMode === 'off') {
           process.stderr.write(
             '[solvela-openclaw] WARN: signingMode=off — forwarding request without payment header.\n',
           );
-          return inner(params);
+          return inner(model, context, options);
         }
 
-        // solvela/not-configured guard (HF-P3-H5)
-        const resolvedModelId =
-          typeof ctx.model?.id === 'string' ? ctx.model.id : undefined;
-        if (resolvedModelId === 'solvela/not-configured') {
+        if (model?.id === 'solvela/not-configured') {
           throw new Error(
             'Solvela: SOLANA_WALLET_KEY is not set. ' +
               'Set SOLANA_WALLET_KEY to your base58-encoded Solana wallet key to use Solvela.',
           );
         }
 
-        // Step 2+3: Serialize body once and write back to params as canonical string (HF-P3-C1).
-        // Both probe and inner() see byte-identical bodies — prevents PDA derivation mismatch.
-        const requestBody =
-          typeof params.body === 'string' ? params.body : JSON.stringify(params.body ?? {});
-        params.body = requestBody;
-
         const apiUrl = getApiUrl();
-        const resourceUrl =
-          typeof params.url === 'string' ? params.url : `${apiUrl}/v1/chat/completions`;
+        const resourceUrl = `${apiUrl}/v1/chat/completions`;
+        const probeBody = buildProbeBody(model.id, options);
 
-        // Steps 4+5: Probe and sign
         let paymentHeader: string;
         let cost: number;
         try {
-          // Probe at the same URL we'll sign and call. Avoids cost-mismatch
-          // when the wrapped stream targets a non-chat-completions route
-          // (e.g. /v1/embeddings) and the gateway prices it differently.
-          const paymentInfo = await fetchPaymentRequired(apiUrl, requestBody, resourceUrl);
-          // Number() (not parseFloat) so trailing garbage like "0.001SOL"
-          // produces NaN — surfaces immediately at the validation in
-          // signer.buildHeader rather than silently reserving against
-          // an unvalidated value.
+          const paymentInfo = await fetchPaymentRequired(apiUrl, probeBody, resourceUrl);
+          // Number() (not parseFloat) so "0.001SOL" → NaN, surfacing at
+          // signer.buildHeader rather than silently reserving an unvalidated value.
           cost = Number(paymentInfo.cost_breakdown?.total ?? 'NaN');
-          paymentHeader = await signer.buildHeader(paymentInfo, resourceUrl, requestBody);
+          paymentHeader = await signer.buildHeader(paymentInfo, resourceUrl, probeBody);
         } catch (err) {
           if (err instanceof GatewayAcceptedWithoutPayment) {
-            // dev_bypass_payment mode — only allowed with explicit opt-in (HF-P3-C4)
             if (process.env['SOLVELA_ALLOW_DEV_BYPASS'] !== '1') {
               throw new Error(
                 'Solvela: gateway probe returned 200 unexpectedly (no 402 envelope). ' +
@@ -439,28 +476,26 @@ export default function register(api: OpenClawApi, opts: RegisterOptions = {}): 
             process.stderr.write(
               '[solvela-openclaw] WARN: Gateway accepted without payment (SOLVELA_ALLOW_DEV_BYPASS=1). No signing this call.\n',
             );
-            return inner(params);
+            return inner(model, context, options);
           }
-          // Surface signing failures clearly — err.message is safe (SDK strips key bytes)
           throw new Error(
             `Solvela payment signing failed: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
 
-        // Step 6: Inject payment-signature header (lowercase, matching middleware/x402.rs:38)
-        params.headers = {
-          ...params.headers,
-          'payment-signature': paymentHeader,
+        // Merge payment-signature into options.headers — canonical pattern
+        // from createOpenAIAttributionHeadersWrapper.
+        const wrappedOptions = {
+          ...options,
+          headers: {
+            ...options?.headers,
+            'payment-signature': paymentHeader,
+          },
         };
 
-        // Step 7: Call inner with refund on failure (HF-P3-C2).
-        // If inner() throws (network, gateway 500, stream error), the session budget
-        // is refunded — the real call never succeeded.
         try {
-          const result = await inner(params);
-          return result;
+          return await inner(model, context, wrappedOptions);
         } catch (err) {
-          // Refund — the real call never succeeded
           await signer.refundBudget(cost);
           throw err;
         }

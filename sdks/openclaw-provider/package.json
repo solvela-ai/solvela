@@ -13,7 +13,7 @@
     "generate:models": "node --import tsx/esm scripts/generate-models.ts",
     "prebuild": "npm run generate:models",
     "build": "tsc",
-    "test": "node --import tsx/esm --test tests/index.test.ts tests/signer.test.ts tests/manifest.test.ts tests/models.test.ts tests/registry.test.ts",
+    "test": "node --import tsx/esm --test tests/index.test.ts tests/signer.test.ts tests/manifest.test.ts tests/models.test.ts tests/registry.test.ts tests/f4-wrapper.test.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
   },
@@ -27,6 +27,8 @@
     "bs58": "^5.0.0"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.74.0",
+    "@earendil-works/pi-ai": "0.74.0",
     "@iarna/toml": "^2.2.5",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
