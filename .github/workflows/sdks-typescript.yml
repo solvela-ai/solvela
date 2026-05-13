@@ -1,0 +1,35 @@
+name: sdks-typescript
+
+on:
+  push:
+    paths:
+      - 'sdks/typescript/**'
+      - '.github/workflows/sdks-typescript.yml'
+  pull_request:
+    paths:
+      - 'sdks/typescript/**'
+      - '.github/workflows/sdks-typescript.yml'
+
+defaults:
+  run:
+    working-directory: sdks/typescript
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Match the CI matrix the SDK had as a standalone repo.
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx vitest run tests/unit tests/integration
