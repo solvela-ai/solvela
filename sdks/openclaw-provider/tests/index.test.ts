@@ -254,29 +254,66 @@ describe('Plugin registration', () => {
     register(api);
     const cfg = (config as unknown as { config: ProviderConfig }).config;
 
-    let capturedParams: { headers: Record<string, string> } | null = null;
-    const mockStreamFn = async (params: { headers: Record<string, string> }) => {
-      capturedParams = params;
-      return { status: 200 };
-    };
-
-    const ctx: StreamFnContext = { streamFn: mockStreamFn as unknown as typeof mockStreamFn };
+    const { fn, getCalled } = makeCapturingStreamFn();
+    const ctx: StreamFnContext = { streamFn: fn };
     const wrapped = cfg.wrapStreamFn!(ctx)!;
 
-    await wrapped({
-      headers: { 'content-type': 'application/json' },
-      body: '{"model":"auto","messages":[]}',
-      url: 'http://127.0.0.1:9999/v1/chat/completions',
-    });
+    await callWrapped(wrapped);
 
-    assert.ok(capturedParams !== null, 'inner stream function must be called');
-    const captured = capturedParams as { headers: Record<string, string> };
+    const called = getCalled();
+    assert.ok(called !== null, 'inner stream function must be called');
+    const opts = called.options as { headers?: Record<string, string> } | undefined;
     assert.ok(
-      !('payment-signature' in captured.headers),
+      !opts?.headers || !('payment-signature' in opts.headers),
       'payment-signature must NOT be injected in off mode',
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Helpers for the new (model, context, options) StreamFn shape
+// ---------------------------------------------------------------------------
+
+interface CapturedCall {
+  model: unknown;
+  context: unknown;
+  options: unknown;
+}
+
+/**
+ * Build a StreamFn-shaped mock that captures the 3-arg call from wrapStreamFn's
+ * wrapped function. Returns the mock plus a `getCalled` accessor to inspect
+ * the most recent call's (model, context, options) tuple.
+ */
+function makeCapturingStreamFn(opts: { throwOnCall?: Error } = {}): {
+  fn: NonNullable<StreamFnContext['streamFn']>;
+  getCalled: () => CapturedCall | null;
+} {
+  let called: CapturedCall | null = null;
+  const fn = ((model: unknown, context: unknown, options: unknown) => {
+    called = { model, context, options };
+    if (opts.throwOnCall) throw opts.throwOnCall;
+    return {} as never;
+  }) as unknown as NonNullable<StreamFnContext['streamFn']>;
+  return { fn, getCalled: () => called };
+}
+
+/**
+ * Invoke a wrapped StreamFn with fake (model, context, options) args. The
+ * runtime doesn't introspect these beyond `model.id` and `options.headers`,
+ * so minimal stubs suffice.
+ */
+function callWrapped(
+  wrapped: NonNullable<ReturnType<NonNullable<ProviderConfig['wrapStreamFn']>>>,
+  opts: { modelId?: string; maxTokens?: number } = {},
+): ReturnType<typeof wrapped> {
+  const fakeModel = { id: opts.modelId ?? 'auto' } as never;
+  const fakeContext = { messages: [] } as never;
+  const fakeOptions = (opts.maxTokens != null
+    ? { maxTokens: opts.maxTokens, headers: {} }
+    : { headers: {} }) as never;
+  return wrapped(fakeModel, fakeContext, fakeOptions);
+}
 
 describe('wrapStreamFn', () => {
   it('throws when ctx.streamFn is absent (HF-P3-C3)', () => {
@@ -293,123 +330,84 @@ describe('wrapStreamFn', () => {
     );
   });
 
-  it('injects payment-signature header when gateway returns 402', async () => {
+  it('injects payment-signature header into options.headers when gateway returns 402', async () => {
     const { server, port } = await startMock402Server();
 
     process.env['SOLVELA_API_URL'] = `http://127.0.0.1:${port}`;
     process.env['SOLANA_WALLET_KEY'] = 'fake_wallet_key_for_test';
 
     const { api, config } = makeMockApi();
-    // DI signer bypasses real SDK signing — returns known non-stub header
     register(api, { _signer: makeDISigner() });
     const cfg = (config as unknown as { config: ProviderConfig }).config;
 
-    let capturedParams: { headers: Record<string, string> } | null = null;
-    const mockStreamFn = async (params: { headers: Record<string, string> }) => {
-      capturedParams = params;
-      return { status: 200 };
-    };
-
-    const ctx: StreamFnContext = { streamFn: mockStreamFn as unknown as typeof mockStreamFn };
+    const { fn, getCalled } = makeCapturingStreamFn();
+    const ctx: StreamFnContext = { streamFn: fn };
     const wrapped = cfg.wrapStreamFn!(ctx)!;
     assert.ok(typeof wrapped === 'function', 'wrapStreamFn must return a function');
 
     try {
-      await wrapped({
-        headers: { 'content-type': 'application/json' },
-        body: '{"model":"auto","messages":[]}',
-        url: `http://127.0.0.1:${port}/v1/chat/completions`,
-      });
+      await callWrapped(wrapped);
     } finally {
       server.close();
     }
 
-    assert.ok(capturedParams !== null, 'inner stream function must be called');
-    const captured = capturedParams as { headers: Record<string, string> };
+    const called = getCalled();
+    assert.ok(called !== null, 'inner stream function must be called');
+    const opts = called.options as { headers?: Record<string, string> };
     assert.ok(
-      'payment-signature' in captured.headers,
-      'payment-signature header must be injected',
+      opts.headers && 'payment-signature' in opts.headers,
+      'payment-signature header must be injected into options.headers',
     );
-    const header = captured.headers['payment-signature'];
-    assert.ok(typeof header === 'string' && header.length > 10, 'payment-signature must be a non-trivial base64 string');
+    const header = opts.headers!['payment-signature'];
+    assert.ok(
+      typeof header === 'string' && header.length > 10,
+      'payment-signature must be a non-trivial base64 string',
+    );
 
     // Verify it decodes to valid JSON with x402_version
     const decoded = JSON.parse(Buffer.from(header, 'base64').toString('utf-8'));
     assert.ok(decoded.x402_version !== undefined, 'decoded header must have x402_version');
   });
 
-  it('body written back to params as canonical string (HF-P3-C1)', async () => {
-    const { server, port } = await startMock402Server();
+  it('probe body uses model.id from wrapStreamFn args', async () => {
+    // Capture the body the gateway sees on the probe POST.
+    let probedBody = '';
+    const probeServer = await startMockServer((res) => {
+      res.writeHead(402, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(mock402));
+    });
+    // Wrap the server with one that captures the request body
+    probeServer.server.removeAllListeners('request');
+    probeServer.server.on('request', (req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        probedBody = Buffer.concat(chunks).toString('utf-8');
+        res.writeHead(402, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(mock402));
+      });
+    });
 
-    process.env['SOLVELA_API_URL'] = `http://127.0.0.1:${port}`;
+    process.env['SOLVELA_API_URL'] = `http://127.0.0.1:${probeServer.port}`;
     process.env['SOLANA_WALLET_KEY'] = 'fake_wallet_key_for_test';
 
     const { api, config } = makeMockApi();
     register(api, { _signer: makeDISigner() });
     const cfg = (config as unknown as { config: ProviderConfig }).config;
 
-    let capturedParams: { body?: unknown } | null = null;
-    const mockStreamFn = async (params: { body?: unknown }) => {
-      capturedParams = params;
-      return { status: 200 };
-    };
-
-    const ctx: StreamFnContext = { streamFn: mockStreamFn as unknown as typeof mockStreamFn };
+    const { fn } = makeCapturingStreamFn();
+    const ctx: StreamFnContext = { streamFn: fn };
     const wrapped = cfg.wrapStreamFn!(ctx)!;
 
-    const originalBody = '{"model":"auto","messages":[]}';
-    const inParams = {
-      headers: { 'content-type': 'application/json' },
-      body: originalBody,
-      url: `http://127.0.0.1:${port}/v1/chat/completions`,
-    };
     try {
-      await wrapped(inParams);
+      await callWrapped(wrapped, { modelId: 'gpt-4o', maxTokens: 1024 });
     } finally {
-      server.close();
+      probeServer.server.close();
     }
 
-    // params.body must be the canonical string (HF-P3-C1)
-    assert.strictEqual(inParams.body, originalBody, 'params.body must be set to canonical string');
-    assert.strictEqual(capturedParams!.body, originalBody, 'inner() params.body must match canonical string');
-  });
-
-  it('object body is stringified to canonical JSON string (HF-P3-C1 object branch)', async () => {
-    const { server, port } = await startMock402Server();
-
-    process.env['SOLVELA_API_URL'] = `http://127.0.0.1:${port}`;
-    process.env['SOLANA_WALLET_KEY'] = 'fake_wallet_key_for_test';
-
-    const { api, config } = makeMockApi();
-    register(api, { _signer: makeDISigner() });
-    const cfg = (config as unknown as { config: ProviderConfig }).config;
-
-    let capturedParams: { body?: unknown } | null = null;
-    const mockStreamFn = async (params: { body?: unknown }) => {
-      capturedParams = params;
-      return { status: 200 };
-    };
-
-    const ctx: StreamFnContext = { streamFn: mockStreamFn as unknown as typeof mockStreamFn };
-    const wrapped = cfg.wrapStreamFn!(ctx)!;
-
-    const objectBody = { model: 'auto', messages: [{ role: 'user', content: 'hi' }] };
-    const inParams: { headers: Record<string, string>; body: unknown; url: string } = {
-      headers: { 'content-type': 'application/json' },
-      body: objectBody,
-      url: `http://127.0.0.1:${port}/v1/chat/completions`,
-    };
-    try {
-      await wrapped(inParams as Parameters<typeof wrapped>[0]);
-    } finally {
-      server.close();
-    }
-
-    // After the call, params.body must be a string (not the original object)
-    assert.strictEqual(typeof inParams.body, 'string', 'object body must be stringified to string');
-    const expectedJson = JSON.stringify(objectBody);
-    assert.strictEqual(inParams.body, expectedJson, 'body must be JSON.stringify of original object');
-    assert.strictEqual(capturedParams!.body, expectedJson, 'inner() must receive the canonical string');
+    const probed = JSON.parse(probedBody);
+    assert.strictEqual(probed.model, 'gpt-4o', 'probe body must carry the model.id from wrapStreamFn args');
+    assert.strictEqual(probed.max_tokens, 1024, 'probe body must carry options.maxTokens as max_tokens');
   });
 
   it('refunds budget on inner() failure (HF-P3-C2)', async () => {
@@ -424,22 +422,13 @@ describe('wrapStreamFn', () => {
     register(api, { _signer: diSigner });
     const cfg = (config as unknown as { config: ProviderConfig }).config;
 
-    // inner() always throws
-    const mockStreamFn = async () => {
-      throw new Error('network error');
-    };
-
-    const ctx: StreamFnContext = { streamFn: mockStreamFn as unknown as typeof mockStreamFn };
+    // First call: inner throws → budget should be refunded
+    const { fn: throwingFn } = makeCapturingStreamFn({ throwOnCall: new Error('network error') });
+    const ctx: StreamFnContext = { streamFn: throwingFn };
     const wrapped = cfg.wrapStreamFn!(ctx)!;
 
-    // Should throw from inner() but NOT from budget exceeded
     await assert.rejects(
-      () =>
-        wrapped({
-          headers: {},
-          body: '{"model":"auto","messages":[]}',
-          url: `http://127.0.0.1:${port}/v1/chat/completions`,
-        }),
+      async () => { await callWrapped(wrapped); },
       (err: Error) => {
         assert.ok(err.message === 'network error', `expected network error, got: ${err.message}`);
         return true;
@@ -448,28 +437,19 @@ describe('wrapStreamFn', () => {
 
     server1.close();
 
-    // The budget was refunded — second call should NOT hit budget exceeded.
-    // Start a fresh 402 server on a new random port.
+    // Second call: budget should still be available (refunded above)
     const { server: server2, port: port2 } = await startMock402Server();
     process.env['SOLVELA_API_URL'] = `http://127.0.0.1:${port2}`;
 
-    let secondCallSucceeded = false;
-    const mockStreamFn2 = async () => {
-      secondCallSucceeded = true;
-      return { status: 200 };
-    };
-    const ctx2: StreamFnContext = { streamFn: mockStreamFn2 as unknown as typeof mockStreamFn2 };
+    const { fn: succeedingFn, getCalled } = makeCapturingStreamFn();
+    const ctx2: StreamFnContext = { streamFn: succeedingFn };
     const wrapped2 = cfg.wrapStreamFn!(ctx2)!;
     try {
-      await wrapped2({
-        headers: {},
-        body: '{"model":"auto","messages":[]}',
-        url: `http://127.0.0.1:${port2}/v1/chat/completions`,
-      });
+      await callWrapped(wrapped2);
     } finally {
       server2.close();
     }
-    assert.ok(secondCallSucceeded, 'second call must succeed — budget must have been refunded');
+    assert.ok(getCalled() !== null, 'second call must succeed — budget must have been refunded');
   });
 
   it('throws when gateway returns 200 without SOLVELA_ALLOW_DEV_BYPASS=1 (HF-P3-C4)', async () => {
@@ -482,18 +462,13 @@ describe('wrapStreamFn', () => {
     register(api);
     const cfg = (config as unknown as { config: ProviderConfig }).config;
 
-    const mockStreamFn = async () => ({ status: 200 });
-    const ctx: StreamFnContext = { streamFn: mockStreamFn as unknown as typeof mockStreamFn };
+    const { fn } = makeCapturingStreamFn();
+    const ctx: StreamFnContext = { streamFn: fn };
     const wrapped = cfg.wrapStreamFn!(ctx)!;
 
     try {
       await assert.rejects(
-        () =>
-          wrapped({
-            headers: { 'content-type': 'application/json' },
-            body: '{"model":"auto","messages":[]}',
-            url: `http://127.0.0.1:${port}/v1/chat/completions`,
-          }),
+        async () => { await callWrapped(wrapped); },
         (err: Error) => {
           assert.ok(
             err.message.includes('SOLVELA_ALLOW_DEV_BYPASS=1'),
@@ -517,30 +492,21 @@ describe('wrapStreamFn', () => {
     register(api);
     const cfg = (config as unknown as { config: ProviderConfig }).config;
 
-    let capturedParams: { headers: Record<string, string> } | null = null;
-    const mockStreamFn = async (params: { headers: Record<string, string> }) => {
-      capturedParams = params;
-      return { status: 200 };
-    };
-
-    const ctx: StreamFnContext = { streamFn: mockStreamFn as unknown as typeof mockStreamFn };
+    const { fn, getCalled } = makeCapturingStreamFn();
+    const ctx: StreamFnContext = { streamFn: fn };
     const wrapped = cfg.wrapStreamFn!(ctx)!;
 
     try {
-      await wrapped({
-        headers: { 'content-type': 'application/json' },
-        body: '{"model":"auto","messages":[]}',
-        url: `http://127.0.0.1:${port}/v1/chat/completions`,
-      });
+      await callWrapped(wrapped);
     } finally {
       server.close();
     }
 
-    assert.ok(capturedParams !== null, 'inner stream function must be called');
-    const captured2 = capturedParams as { headers: Record<string, string> };
-    // In dev_bypass mode with flag set, payment-signature is NOT injected
+    const called = getCalled();
+    assert.ok(called !== null, 'inner stream function must be called');
+    const opts = called.options as { headers?: Record<string, string> } | undefined;
     assert.ok(
-      !('payment-signature' in captured2.headers),
+      !opts?.headers || !('payment-signature' in opts.headers),
       'payment-signature must NOT be injected in dev_bypass mode',
     );
   });
