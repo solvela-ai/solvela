@@ -1,0 +1,55 @@
+{
+  "name": "@solvela/sdk",
+  "version": "0.2.1",
+  "description": "TypeScript SDK for Solvela — Solana-native AI agent payment gateway",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/solvela-ai/solvela.git",
+    "directory": "sdks/typescript"
+  },
+  "homepage": "https://github.com/solvela-ai/solvela/tree/main/sdks/typescript#readme",
+  "bugs": {
+    "url": "https://github.com/solvela-ai/solvela/issues"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "lint": "tsc --noEmit",
+    "smoke": "tsc -p scripts && node scripts/dist/scripts/smoke.js"
+  },
+  "engines": { "node": ">=20.19" },
+  "license": "MIT",
+  "dependencies": {
+    "@solana/web3.js": "^1.95",
+    "@solana/spl-token": "^0.4",
+    "bip39": "^3.1",
+    "bs58": "^6"
+  },
+  "devDependencies": {
+    "typescript": "^5.5",
+    "vitest": "^4",
+    "@types/node": "^20"
+  }
+}
