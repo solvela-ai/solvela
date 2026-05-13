@@ -1,0 +1,37 @@
+name: sdks-python
+
+on:
+  push:
+    paths:
+      - 'sdks/python/**'
+      - '.github/workflows/sdks-python.yml'
+  pull_request:
+    paths:
+      - 'sdks/python/**'
+      - '.github/workflows/sdks-python.yml'
+
+defaults:
+  run:
+    working-directory: sdks/python
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Trim to oldest-supported + current per the consolidation runbook.
+        # Standalone repo also covered 3.11; drop here to reduce CI cost.
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: sdks/python/pyproject.toml
+      - run: pip install -e ".[dev]"
+      - run: ruff check src/ tests/
+      - run: ruff format --check src/ tests/
+      - run: pytest tests/unit/ tests/integration/ -v --tb=short
