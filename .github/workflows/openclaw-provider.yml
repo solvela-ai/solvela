@@ -171,3 +171,37 @@ jobs:
       # ecosystem. Dependabot security alerts cover the high-severity gap on
       # the repo level; this job catches CRITICAL regressions in CI.
       - run: npm audit --production --audit-level=critical
+
+  guard-deprecated-openclaw-imports:
+    # OpenClaw is mid-refactor ("slim core, expand plugins" — 2026-05-13 audit).
+    # The following import paths and symbols are deprecated or removed in
+    # upstream OpenClaw; using them in Solvela's plugin will silently break on
+    # the next OpenClaw LTS. See docs.openclaw.ai/plugins/sdk-migration.md.
+    name: Guard deprecated OpenClaw imports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Fail on deprecated OpenClaw imports
+        run: |
+          set -e
+          # Patterns drawn from docs.openclaw.ai/plugins/sdk-migration.md:
+          #   - openclaw/plugin-sdk/compat        — deprecated barrel
+          #   - openclaw/plugin-sdk/infra-runtime — deprecated barrel
+          #   - openclaw/plugin-sdk/config-runtime — deprecated barrel
+          #   - openclaw/extension-api            — replaced by openclaw/plugin-sdk/* subpaths
+          #   - registerEmbeddedExtensionFactory  — removed in v2026.4.24,
+          #     replaced by registerAgentToolResultMiddleware
+          # If you intentionally need any of these, update this guard and
+          # document the OpenClaw version compatibility in the import site.
+          FOUND=$(grep -rEn \
+            'openclaw/plugin-sdk/compat|openclaw/plugin-sdk/infra-runtime|openclaw/plugin-sdk/config-runtime|openclaw/extension-api|registerEmbeddedExtensionFactory' \
+            sdks/openclaw-provider/src sdks/openclaw-provider/tests sdks/openclaw-provider/scripts 2>/dev/null || true)
+          if [ -n "$FOUND" ]; then
+            echo "ERROR: deprecated OpenClaw imports detected in sdks/openclaw-provider/:"
+            echo "$FOUND"
+            echo ""
+            echo "These import paths/symbols are deprecated or removed upstream."
+            echo "See: https://docs.openclaw.ai/plugins/sdk-migration.md"
+            exit 1
+          fi
+          echo "OK: no deprecated OpenClaw imports in sdks/openclaw-provider/"
