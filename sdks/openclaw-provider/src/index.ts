@@ -60,6 +60,8 @@ import type { PaymentRequired } from '@solvela/signer-core';
 export { SOLVELA_MODELS } from './models.generated.js';
 export { ROUTING_PROFILES } from './registry.js';
 export type { OpenClawApi } from './openclaw-types.js';
+export { wrapStreamForF4 } from './f4-wrapper.js';
+export type { F4Context, F4Stats, ResultableStream } from './f4-wrapper.js';
 
 // ---------------------------------------------------------------------------
 // Config from environment
@@ -415,6 +417,21 @@ export default function register(api: OpenClawApi, opts: RegisterOptions = {}): 
           'Solvela: wrapStreamFn invoked without a valid streamFn. ' +
             'This likely means the OpenClaw SDK version is incompatible. ' +
             'Verify @solvela/openclaw-provider is up to date.',
+        );
+      }
+
+      // Smoke check: warn if ctx.streamFn arity is 0. Real StreamFn is 3-arg
+      // (model, context, options). A 0-arg function suggests the host swapped
+      // in a (...args) rest-param wrapper or a 0-arg stub — symptom of the
+      // pi-coding-agent 0.63.0 regression class (openclaw#55760, #55816, #57860).
+      // We warn rather than throw because Function.length can be 0 for valid
+      // wrappers built with rest-params, but the combination of (a) sitting on
+      // wrapStreamFn and (b) arity 0 has been a real defect signal.
+      if (ctx.streamFn.length === 0) {
+        process.stderr.write(
+          '[solvela-openclaw] WARN: ctx.streamFn arity is 0 — expected (model, context, options). ' +
+            'May indicate the OpenClaw runtime swapped the wrapped streamFn with a rest-arg stub. ' +
+            'See openclaw/openclaw#55760 for the pi-coding-agent 0.63.0 regression class.\n',
         );
       }
 
