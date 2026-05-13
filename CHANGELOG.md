@@ -2,6 +2,16 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-12 — TypeScript SDK consolidated into the monorepo ([#259](https://github.com/solvela-ai/solvela/pull/259))
+
+PR [#259](https://github.com/solvela-ai/solvela/pull/259) pulled the standalone `solvela-ai/solvela-ts` repo into `sdks/typescript/` and added a path-scoped `.github/workflows/sdks-typescript.yml` mirroring `sdks-go.yml` (Node 20/22 matrix, `tsc --noEmit`, vitest unit + integration). All required CI checks green pre-merge; `npm ci && npm run build && npx vitest run tests/unit tests/integration` clean at the new path — 17 files, 138 tests. Per-package `LICENSE`/`SECURITY.md` and the standalone `.github/` (CI + release-npm workflow) intentionally not copied; monorepo-root `LICENSE` and `SECURITY.md` apply, and the npm publish pipeline will be re-created in a follow-up before the next release.
+
+Tagged `sdks/typescript/v0.2.1` (annotated, points at `cf7a4960`) as the first monorepo-hosted release marker. The npm package name `@solvela/sdk` is preserved — `npm install @solvela/sdk` is unchanged. `package.json` `repository`/`homepage`/`bugs` URLs now point at the monorepo with `"directory": "sdks/typescript"` so the npm package page deep-links to the right tree.
+
+`solvela-ai/solvela-ts` archived with a redirect README pointing at the monorepo. Existing installs and import paths continue to work without changes; the archive is reversible via `gh repo unarchive` if anything turns out wrong.
+
+**Why this matters:** wire-format drift between the gateway and the TypeScript SDK is now structurally impossible — any change to `crates/protocol/**` that breaks the TS SDK fails the `sdks-typescript` CI job in the same PR that introduces it. Combined with the Go consolidation in [#252](https://github.com/solvela-ai/solvela/pull/252), this closes the second of four SDKs against the cross-repo contract-risk class that fired on 2026-05-11 (the `ModelInfo` zero-fill incident). Python and Rust client SDK consolidations remain optional follow-ups; each is independent of the others, and stopping after the TypeScript consolidation still leaves a durable structural improvement.
+
 ## 2026-05-12 — Go SDK consolidated into the monorepo ([#252](https://github.com/solvela-ai/solvela/pull/252))
 
 PR [#252](https://github.com/solvela-ai/solvela/pull/252) pulled the standalone `solvela-ai/solvela-go` repo into `sdks/go/`, rewrote the module path to `github.com/solvela-ai/solvela/sdks/go` (only `live_test.go` and `scripts/smoke/main.go` referenced the old path), and added a path-scoped `.github/workflows/sdks-go.yml` mirroring the `mcp.yml` pattern. All 14 CI checks green pre-merge; `go vet` / `go build` / `go test ./... -count=1` clean at the new path. Per-package `LICENSE` and `SECURITY.md` intentionally not copied — the monorepo-root files apply.
