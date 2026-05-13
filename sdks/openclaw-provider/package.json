@@ -13,7 +13,7 @@
     "generate:models": "node --import tsx/esm scripts/generate-models.ts",
     "prebuild": "npm run generate:models",
     "build": "tsc",
-    "test": "node --import tsx/esm --test tests/index.test.ts tests/signer.test.ts tests/manifest.test.ts tests/models.test.ts tests/registry.test.ts",
+    "test": "node --import tsx/esm --test tests/index.test.ts tests/signer.test.ts tests/manifest.test.ts tests/models.test.ts tests/registry.test.ts tests/f4-wrapper.test.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
   },
