@@ -17,7 +17,12 @@ cargo install solvela-cli
 # Optional: defaults to https://api.solvela.ai
 export SOLVELA_API_URL=https://api.solvela.ai
 
-solvela wallet init                 # generate a Solana keypair
+# Required for any paid command (signs the USDC-SPL transaction).
+# Public endpoint is fine for a smoke test; use Helius/QuickNode/Triton
+# for real usage to avoid rate limits.
+export SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+
+solvela wallet init                 # generate a Solana keypair (fund the printed address with USDC + a little SOL)
 solvela chat --model auto "hello"   # ask the smart router to pick a model
 solvela models                      # list available models + per-token pricing
 solvela doctor                      # check config + gateway reachability
