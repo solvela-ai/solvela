@@ -262,9 +262,10 @@ Build and sign a USDC-SPL transfer transaction to the `pay_to` address for the `
   </Tab>
   <Tab value="solvela CLI">
     ```bash
-    # Set your private key
-    export SOLVELA_SOLANA_PRIVATE_KEY=<your-base58-private-key>
+    # One-time: generate a wallet at ~/.solvela/wallet.json and fund it with USDC-SPL
+    solvela wallet init
 
+    # Each call signs from ~/.solvela/wallet.json automatically (no env var needed)
     solvela chat --model openai/gpt-4o "Explain Solana in one sentence."
     ```
   </Tab>

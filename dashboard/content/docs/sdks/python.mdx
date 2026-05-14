@@ -7,7 +7,7 @@ description: Async-first Python client for Solvela with built-in Solana signing 
 `solvela-sdk` is the official Python SDK for the Solvela gateway. It's async-only, dataclass-typed, and handles the x402 payment handshake transparently when a `Signer` is configured.
 
 - **Package:** [`solvela-sdk` on PyPI](https://pypi.org/project/solvela-sdk/)
-- **Source:** [`solvela-ai/solvela-python`](https://github.com/solvela-ai/solvela-python)
+- **Source:** [`sdks/python/`](https://github.com/solvela-ai/solvela/tree/main/sdks/python) in the monorepo
 - **Python:** 3.10+
 
 ## Installation
@@ -301,5 +301,5 @@ class MyCustomSigner(Signer):
 `ClientConfig.timeout` (default 180s) caps every HTTP call. Cancel an in-flight `chat()` by cancelling the surrounding asyncio task — `httpx` propagates cancellation through cleanly.
 
 <Note>
-  Source: [`solvela-ai/solvela-python`](https://github.com/solvela-ai/solvela-python). The canonical chat-flow entry point is [`src/solvela/client.py`](https://github.com/solvela-ai/solvela-python/blob/main/src/solvela/client.py); a 60-line end-to-end smoke test lives at [`scripts/smoke.py`](https://github.com/solvela-ai/solvela-python/blob/main/scripts/smoke.py). See also [x402 Protocol](/docs/concepts/x402) for the underlying payment flow.
+  Source: [`sdks/python/`](https://github.com/solvela-ai/solvela/tree/main/sdks/python) in the monorepo. The canonical chat-flow entry point is [`src/solvela/client.py`](https://github.com/solvela-ai/solvela/blob/main/sdks/python/src/solvela/client.py); a 60-line end-to-end smoke test lives at [`scripts/smoke.py`](https://github.com/solvela-ai/solvela/blob/main/sdks/python/scripts/smoke.py). See also [x402 Protocol](/docs/concepts/x402) for the underlying payment flow.
 </Note>

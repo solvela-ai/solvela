@@ -10,39 +10,66 @@ The Solvela MCP server exposes the gateway's capabilities as MCP tools, enabling
 
 ## Installation
 
+The MCP server is **not published to npm** today (`package.json` is marked
+`private: true`). Build it from the monorepo:
+
 ```bash
-npx @solvela/mcp
+git clone https://github.com/solvela-ai/solvela.git
+cd solvela/sdks/mcp
+npm install
+npm run build
+# Built artifact: dist/index.js
 ```
 
-Or install globally:
+Run it directly to confirm the build:
 
 ```bash
-npm install -g @solvela/mcp
-solvela-mcp
+node dist/index.js
 ```
 
 ## Configuration
 
-Set these environment variables before starting the server:
+The server reads these environment variables on startup:
+
+| Variable | Required | Description |
+|---|---|---|
+| `SOLANA_WALLET_KEY` | Yes (for paid calls) | Base58-encoded Solana keypair secret |
+| `SOLANA_RPC_URL` | Yes (for paid calls) | Solana JSON-RPC endpoint |
+| `SOLVELA_API_URL` | No | Gateway base URL (default `https://api.solvela.ai`) |
+| `SOLVELA_SESSION_BUDGET` | No | Per-session USDC cap (e.g. `2.00`) |
+| `SOLVELA_TIMEOUT_MS` | No | HTTP timeout for gateway calls |
+| `SOLVELA_SIGNING_MODE` | No | `auto` / `escrow` / `direct` / `off` (default `auto`) |
+| `SOLVELA_ESCROW_PROGRAM_ID` | If `escrow` mode | Escrow program ID on Solana mainnet |
+| `SOLVELA_RECIPIENT_WALLET` | If `escrow` mode | Gateway recipient pubkey |
 
 ```bash
 export SOLVELA_API_URL=https://api.solvela.ai
-export SOLVELA_SOLANA_PRIVATE_KEY=<base58-private-key>
+export SOLANA_WALLET_KEY=<base58-keypair-secret>
+export SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 ```
+
+<Warning>
+`SOLANA_WALLET_KEY` is the full Solana keypair secret. Treat it like any other
+production credential — never commit it to source, and prefer a secrets manager
+or your host's encrypted env-var store over a plaintext shell profile.
+</Warning>
 
 ## Claude Desktop integration
 
-Add to your `claude_desktop_config.json`:
+Add an entry to `claude_desktop_config.json` that points at your locally-built
+`dist/index.js` (absolute path required — `npx` is not available because the
+package is not on npm):
 
 ```json
 {
   "mcpServers": {
     "solvela": {
-      "command": "npx",
-      "args": ["@solvela/mcp"],
+      "command": "node",
+      "args": ["/absolute/path/to/solvela/sdks/mcp/dist/index.js"],
       "env": {
         "SOLVELA_API_URL": "https://api.solvela.ai",
-        "SOLVELA_SOLANA_PRIVATE_KEY": "<your-private-key>"
+        "SOLANA_WALLET_KEY": "<base58-keypair-secret>",
+        "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com"
       }
     }
   }
