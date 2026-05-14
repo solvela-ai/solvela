@@ -56,9 +56,9 @@ func main() {
 
 The core SDK (transport, caching, sessions, quality checking, streaming, balance monitoring) is fully implemented and tested.
 
-**`KeypairSigner` is not yet implemented.** The bundled `KeypairSigner` type returns an error when `SignPayment` is called — it is a placeholder, not a working signer. To make payments you have two options:
+**`UnimplementedSigner` is the bundled placeholder.** It exists so the SDK compiles and the rest of the surface area (transport, caching, sessions, streaming) can be exercised, but `SignPayment` returns an error — it is **not** a working signer. To make real payments you have two options:
 
-1. **Use a different SDK** — the [Python SDK](https://github.com/solvela-ai/solvela-python) and TypeScript SDK include working `KeypairSigner` implementations backed by their respective Solana libraries.
+1. **Use a different SDK** — the [Python SDK](https://github.com/solvela-ai/solvela/tree/main/sdks/python) and [TypeScript SDK](https://github.com/solvela-ai/solvela/tree/main/sdks/typescript) include working `KeypairSigner` implementations backed by their respective Solana libraries.
 2. **Implement a custom `Signer`** — the `Signer` interface is pluggable. Provide your own implementation using `crypto/ed25519` (already in the Go standard library) and a Solana JSON-RPC client of your choice.
 
 ```go
@@ -129,6 +129,10 @@ go test ./... -v -count=1
 # Live tests (requires running gateway)
 go test ./... -v -tags=live
 ```
+
+## Documentation
+
+[docs.solvela.ai/sdks/go](https://docs.solvela.ai/sdks/go) — full reference, context patterns, custom Signer guide.
 
 ## License
 

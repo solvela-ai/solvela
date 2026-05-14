@@ -143,3 +143,11 @@ npm test                  # Run all tests
 **Do not publish** until Phase 4 approval. The `package.json` version is
 `1.0.0-draft` to signal pre-release status. Publishing is gated on private
 user testing (Phase 3) and a go/no-go from the user before Phase 4 distribution.
+
+## Documentation
+
+[docs.solvela.ai/sdks](https://docs.solvela.ai/sdks) — Solvela SDK index. (Dedicated OpenClaw provider page is pending publish.)
+
+## License
+
+MIT
