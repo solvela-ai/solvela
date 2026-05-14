@@ -411,7 +411,7 @@ Solvela is deployed on Fly.io:
 
 | Resource | URL / Name |
 |----------|------------|
-| Gateway | `solvela-gateway.fly.dev` |
+| Gateway | `api.solvela.ai` (Fly app: `solvela-gateway`) |
 | PostgreSQL | `solvela-db` (Fly Postgres 17.2) |
 | Redis | `solvela-cache` (Upstash, ord + iad) |
 
@@ -424,7 +424,7 @@ fly secrets set -a solvela-gateway OPENAI_API_KEY=... ANTHROPIC_API_KEY=...
 
 # Check status
 fly status -a solvela-gateway
-curl https://solvela-gateway.fly.dev/health
+curl https://api.solvela.ai/health
 ```
 
 See [`STATUS.md`](./STATUS.md) for live shipping status and [`CHANGELOG.md`](./CHANGELOG.md) for chronological history.
