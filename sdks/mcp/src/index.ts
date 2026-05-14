@@ -35,6 +35,7 @@ import {
 import { GatewayClient, type ChatMessage } from './client.js';
 import { getTools } from './tools.js';
 import { createSessionStore } from './session.js';
+import { validateArgs } from './validate-args.js';
 import { createPaymentHeader, decodePaymentHeader, isStubTransaction } from '@solvela/signer-core';
 import type { PaymentRequired, PaymentAccept } from '@solvela/signer-core';
 import { Connection, PublicKey } from '@solana/web3.js';
@@ -169,13 +170,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case 'chat': {
-        const { model, prompt, system, max_tokens, temperature } = args as {
+        // T-3A: runtime-validate args before dispatch — MCP schema is advisory.
+        const { model, prompt, system, max_tokens, temperature } = validateArgs<{
           model: string;
           prompt: string;
           system?: string;
           max_tokens?: number;
           temperature?: number;
-        };
+        }>('chat', args, {
+          model: { kind: 'string', required: true },
+          prompt: { kind: 'string', required: true },
+          system: { kind: 'string', required: false },
+          max_tokens: { kind: 'number', required: false },
+          temperature: { kind: 'number', required: false },
+        });
 
         const messages: ChatMessage[] = [];
         if (system) messages.push({ role: 'system', content: system });
@@ -199,12 +207,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'smart_chat': {
-        const { prompt, profile = 'auto', system, max_tokens } = args as {
+        // T-3A: validate + enforce profile enum. The schema declares the enum
+        // but nothing stopped a host from sending profile='premium!!' which
+        // would have flowed straight into client.chat() as a model id.
+        const { prompt, profile = 'auto', system, max_tokens } = validateArgs<{
           prompt: string;
-          profile?: string;
+          profile?: 'eco' | 'auto' | 'premium' | 'free';
           system?: string;
           max_tokens?: number;
-        };
+        }>('smart_chat', args, {
+          prompt: { kind: 'string', required: true },
+          profile: { kind: 'stringEnum', required: false, values: ['eco', 'auto', 'premium', 'free'] },
+          system: { kind: 'string', required: false },
+          max_tokens: { kind: 'number', required: false },
+        });
 
         const messages: ChatMessage[] = [];
         if (system) messages.push({ role: 'system', content: system });
@@ -243,7 +259,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_models': {
-        const { filter } = args as { filter?: string };
+        // T-3A: filter is optional but, if present, must be a string —
+        // otherwise filter.toLowerCase() below blows up with TypeError.
+        const { filter } = validateArgs<{ filter?: string }>('list_models', args ?? {}, {
+          filter: { kind: 'string', required: false },
+        });
         const modelsResp = await client.listModels();
 
         let models = modelsResp.data;
@@ -274,7 +294,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'spending': {
-        const { reset = false } = (args ?? {}) as { reset?: boolean };
+        // T-3A: reset must be a real boolean — `reset: "true"` would silently
+        // become truthy and clear the session file via client.resetSession().
+        const { reset = false } = validateArgs<{ reset?: boolean }>('spending', args ?? {}, {
+          reset: { kind: 'boolean', required: false },
+        });
 
         if (reset) {
           await client.resetSession();
