@@ -8,25 +8,22 @@ The Solvela TypeScript SDK lives in the monorepo at
 
 ## Status
 
-<Warning>
-The currently-published `@solvela/sdk@0.2.x` on npm is **not yet wire-compatible
-with the production gateway at `api.solvela.ai`**. The `PaymentPayload` envelope
-it emits does not match the shape the gateway deserializes. A republish that
-aligns with the v2 wire format is pending; until then, do not use `@solvela/sdk`
-for production payments.
-</Warning>
+<Note>
+`@solvela/sdk@0.2.2` (published 2026-05-14) ships the v2 wire-format fix and is
+wire-aligned with the production gateway at `api.solvela.ai`. Pin to `^0.2.2` —
+earlier `0.2.x` releases emit a `PaymentPayload` envelope shape the gateway
+no longer accepts.
+</Note>
 
-If you're building inside this monorepo and need x402 signing today, depend on
+For low-level use inside or outside the monorepo, the
 [`@solvela/signer-core`](https://github.com/solvela-ai/solvela/tree/main/sdks/signer-core)
-directly — that's what `sdks/mcp/`, `sdks/openclaw-provider/`, and
-`sdks/ai-sdk-provider/` use to talk to the gateway. Outside the monorepo,
-drive the gateway directly with `fetch`/`curl` (see the [Quickstart](/docs/quickstart)
-cURL tab and [Payment Flow](/docs/concepts/payment-flow)).
+package exposes the x402 parser + payment-signer primitives that
+`sdks/mcp/`, `sdks/openclaw-provider/`, and `sdks/ai-sdk-provider/` build on.
 
 ## Documentation
 
 - **Source:** [`sdks/typescript/`](https://github.com/solvela-ai/solvela/tree/main/sdks/typescript) in the monorepo
-- **npm package:** [@solvela/sdk](https://www.npmjs.com/package/@solvela/sdk) (pre-1.0; see status above)
+- **npm package:** [@solvela/sdk](https://www.npmjs.com/package/@solvela/sdk) (current: `0.2.2`)
 
 ## History
 
