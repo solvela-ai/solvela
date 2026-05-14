@@ -14,7 +14,14 @@
     "start": "node dist/index.js",
     "test": "node --test tests/server.test.ts tests/contract.test.ts tests/session.test.ts tests/escrow.test.ts"
   },
-  "keywords": ["mcp", "solana", "usdc", "x402", "llm", "ai-agent"],
+  "keywords": [
+    "mcp",
+    "solana",
+    "usdc",
+    "x402",
+    "llm",
+    "ai-agent"
+  ],
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -27,5 +34,9 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1",
+    "ip-address": "^10.1.1"
   }
 }

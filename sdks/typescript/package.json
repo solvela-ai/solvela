@@ -39,7 +39,9 @@
     "lint": "tsc --noEmit",
     "smoke": "tsc -p scripts && node scripts/dist/scripts/smoke.js"
   },
-  "engines": { "node": ">=20.19" },
+  "engines": {
+    "node": ">=20.19"
+  },
   "license": "MIT",
   "dependencies": {
     "@solana/web3.js": "^1.95",
@@ -51,5 +53,8 @@
     "typescript": "^5.5",
     "vitest": "^4",
     "@types/node": "^20"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }
