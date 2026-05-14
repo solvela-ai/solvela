@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Rust implementation of the x402 payment protocol — Solana verification, escrow integration, fee payer pool, nonce pool. Powers the Solvela LLM gateway."
 authors = ["Solvela Contributors"]
 homepage = "https://solvela.ai"
+readme = "README.md"
 keywords = ["x402", "solana", "usdc", "payments", "escrow"]
 categories = ["api-bindings", "cryptography"]
 
