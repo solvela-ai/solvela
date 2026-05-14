@@ -16,6 +16,11 @@
     "typescript": "^6.0.3"
   },
   "openclaw": {
-    "extensions": ["dist/index.js"]
+    "extensions": [
+      "dist/index.js"
+    ]
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }

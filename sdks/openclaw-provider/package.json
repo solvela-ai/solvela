@@ -17,7 +17,15 @@
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
   },
-  "keywords": ["openclaw", "solvela", "solana", "usdc", "x402", "llm", "provider-plugin"],
+  "keywords": [
+    "openclaw",
+    "solvela",
+    "solana",
+    "usdc",
+    "x402",
+    "llm",
+    "provider-plugin"
+  ],
   "license": "MIT",
   "dependencies": {
     "@solvela/signer-core": "file:../signer-core",
@@ -33,5 +41,8 @@
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }
