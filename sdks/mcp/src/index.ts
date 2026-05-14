@@ -36,6 +36,7 @@ import { GatewayClient, type ChatMessage, type ChatResponse } from './client.js'
 import { getTools } from './tools.js';
 import { createSessionStore } from './session.js';
 import { validateArgs } from './validate-args.js';
+import { parseStrictUsdc } from './parse-amount.js';
 import { createPaymentHeader, decodePaymentHeader, isStubTransaction } from '@solvela/signer-core';
 import type { PaymentRequired, PaymentAccept } from '@solvela/signer-core';
 import { Connection, PublicKey } from '@solana/web3.js';
@@ -366,21 +367,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           max_timeout_seconds?: number;
         };
 
-        // H3: Strict amount parsing — reject scientific notation, trailing garbage, non-positive.
-        // Regex accepts only plain decimal strings: digits optionally followed by '.' + digits.
-        if (!/^\d+(\.\d+)?$/.test(amount_usdc)) {
-          throw new McpError(
-            ErrorCode.InvalidParams,
-            `amount_usdc must be a positive decimal number (e.g. "5.00"), got: ${JSON.stringify(amount_usdc)}`,
-          );
-        }
-        const amount = Number(amount_usdc);
-        if (!Number.isFinite(amount) || amount <= 0) {
-          throw new McpError(
-            ErrorCode.InvalidParams,
-            `amount_usdc must be positive, got: ${amount_usdc}`,
-          );
-        }
+        // H3: Strict amount parsing — extracted to parseStrictUsdc so the
+        // tests can import the real function instead of re-implementing the
+        // regex inline (audit finding; previously a regex change would not
+        // have failed the parseStrictUsdc tests).
+        const amount = parseStrictUsdc(amount_usdc);
 
         // Per-call cap
         if (amount > maxEscrowDeposit) {
