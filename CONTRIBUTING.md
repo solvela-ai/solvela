@@ -53,7 +53,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full architecture overview, build matrix,
 
 - Code that adds custodial flows, fiat conversion, or anything triggering MSB/state-licensing requirements.
 - New chain support (EVM/Base) without a corresponding `PaymentVerifier` impl behind a feature flag.
-- Test mocks that don't match the production gateway response shape (this is what caused the v0.1.0 → v0.1.1 patch).
+- Test mocks that don't match the production gateway response shape. This has bitten us before — keep mocks honest, or use the real `tower::ServiceExt::oneshot` integration-test pattern in `crates/gateway/tests/`.
 - Changes that touch the on-chain escrow program without an updated audit reference.
 
 ## License and Developer Certificate of Origin
@@ -68,14 +68,15 @@ Solvela uses a **per-component license split**. By contributing, you agree that 
 
 Every commit must include a `Signed-off-by` line. This is the [Developer Certificate of Origin](https://developercertificate.org/) — a lightweight statement that you have the right to submit your contribution under the applicable license. There is no separate CLA to sign.
 
-```bash
-# Sign every commit automatically
-git commit -s -m "feat(router): add new scoring dimension"
+The repo ships with tracked git hooks in `.githooks/` that handle DCO automatically. Activate them once per clone:
 
-# Or configure once
-git config commit.gpgsign true   # optional
-git config format.signoff true   # ensures -s by default
+```bash
+git config core.hooksPath .githooks
 ```
+
+That enables `prepare-commit-msg` (auto-injects a `Signed-off-by:` trailer matching your `user.name` / `user.email` on every commit, idempotent) and `commit-msg` (enforces the trailer matches the author identity, mirroring the GitHub-side DCO check). The trailer is generated from the `user.email` in your local git config — make sure it's the address you want on the public commit log.
+
+If you'd rather sign manually, `git commit -s` works too. The legacy `git config format.signoff true` / `commit.signoff true` flags do **not** reliably cover all git invocation paths (notably HEREDOC `-m` from scripts) — the `.githooks/` setup is the source of truth.
 
 A `Signed-off-by: Your Name <your.email@example.com>` line at the end of the commit message is what CI checks.
 

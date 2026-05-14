@@ -202,17 +202,25 @@ All prices are provider cost in USDC. A 5% platform fee is applied on top. See `
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat (x402 paid) |
+| `POST` | `/v1/images/generations` | OpenAI-compatible image generation (x402 paid) |
 | `POST` | `/v1/services/{id}/proxy` | Proxy to x402-enabled external service |
 | `POST` | `/v1/services/register` | Register external service (admin) |
+| `POST` | `/v1/escrow/settle` | Client-initiated escrow claim after stream completion |
+| `POST` | `/a2a` | A2A protocol JSON-RPC endpoint |
 | `GET` | `/v1/models` | List available models with pricing |
 | `GET` | `/v1/services` | Service marketplace discovery |
 | `GET` | `/v1/supported` | x402 payment method discovery |
+| `GET` | `/v1/nonce` | Durable nonce for replay-safe transactions |
 | `GET` | `/v1/wallet/{address}/stats` | Wallet spend statistics (session auth) |
 | `GET` | `/v1/escrow/config` | Escrow program configuration |
 | `GET` | `/v1/escrow/health` | Escrow claim metrics (admin) |
+| `GET` | `/v1/admin/stats` | Aggregate gateway statistics (admin) |
+| `GET` | `/.well-known/agent.json` | A2A AgentCard for agent discovery |
 | `GET` | `/pricing` | Per-model USDC cost breakdown |
 | `GET` | `/health` | Gateway health check |
 | `GET` | `/metrics` | Prometheus metrics (admin) |
+
+Enterprise org/team/budget/audit endpoints live under `/v1/orgs/...` and `/v1/wallets/{wallet}/budget`. See [Enterprise docs](https://docs.solvela.ai/enterprise) for the full CRUD reference.
 
 ---
 
@@ -284,7 +292,7 @@ response, _ := client.Chat(ctx, "openai/gpt-4o", "Hello!")
 The `solvela` CLI provides wallet management, model discovery, chat, and diagnostics.
 
 ```bash
-cargo install --path crates/cli
+cargo install solvela-cli
 
 solvela wallet init          # Generate Solana keypair
 solvela models               # List models and pricing
