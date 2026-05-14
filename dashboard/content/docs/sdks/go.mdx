@@ -6,14 +6,14 @@ description: Go client for Solvela with functional-option configuration and tran
 
 `solvela-go` is the official Go SDK for the Solvela gateway. Context-aware, goroutine-safe, dataclass-style typed, and handles the x402 payment handshake transparently when a `Signer` is wired in.
 
-- **Module:** [`github.com/solvela-ai/solvela-go`](https://pkg.go.dev/github.com/solvela-ai/solvela-go)
-- **Source:** [`solvela-ai/solvela-go`](https://github.com/solvela-ai/solvela-go)
+- **Module:** [`github.com/solvela-ai/solvela/sdks/go`](https://pkg.go.dev/github.com/solvela-ai/solvela/sdks/go)
+- **Source:** [`sdks/go/`](https://github.com/solvela-ai/solvela/tree/main/sdks/go) in the monorepo
 - **Go:** 1.23+
 
 ## Installation
 
 ```bash
-go get github.com/solvela-ai/solvela-go
+go get github.com/solvela-ai/solvela/sdks/go
 ```
 
 The SDK depends only on the standard library plus `github.com/mr-tron/base58`. No Solana SDK is pulled in by default — that decision is left to the `Signer` implementation you plug in.
@@ -32,7 +32,7 @@ import (
 	"fmt"
 	"log"
 
-	solvela "github.com/solvela-ai/solvela-go"
+	solvela "github.com/solvela-ai/solvela/sdks/go"
 )
 
 func main() {
@@ -70,7 +70,7 @@ Without a `Signer`, paid endpoints return `*PaymentRequiredError` on the first c
 import (
 	"time"
 
-	solvela "github.com/solvela-ai/solvela-go"
+	solvela "github.com/solvela-ai/solvela/sdks/go"
 )
 
 client, err := solvela.NewClient(wallet, signer,
@@ -123,7 +123,7 @@ client, err := solvela.NewClient(wallet, signer,
     	"fmt"
     	"log"
 
-    	solvela "github.com/solvela-ai/solvela-go"
+    	solvela "github.com/solvela-ai/solvela/sdks/go"
     )
 
     func main() {
@@ -383,7 +383,7 @@ Wire amounts (`PaymentAccept.Amount`) are decimal strings in atomic USDC units (
 
 ## Smoke harness
 
-A 100-line smoke test in [`scripts/smoke/main.go`](https://github.com/solvela-ai/solvela-go/blob/main/scripts/smoke/main.go) exercises the wire contract against a live gateway: it lists models, asserts at least one reports streaming + paid input pricing, and issues an unsigned chat to verify the 402 round-trip parses cleanly. Run it before tagging a release:
+A 100-line smoke test in [`sdks/go/scripts/smoke/main.go`](https://github.com/solvela-ai/solvela/blob/main/sdks/go/scripts/smoke/main.go) exercises the wire contract against a live gateway: it lists models, asserts at least one reports streaming + paid input pricing, and issues an unsigned chat to verify the 402 round-trip parses cleanly. Run it before tagging a release:
 
 ```bash
 SOLVELA_GATEWAY_URL=https://staging.solvela.ai go run ./scripts/smoke
@@ -394,5 +394,5 @@ SOLVELA_GATEWAY_URL=https://staging.solvela.ai go run ./scripts/smoke
 `WithTimeout(d)` (default 180s) caps every HTTP call. Cancel an in-flight `Chat` by cancelling the `context.Context` you pass in — the underlying `http.Client` honors `ctx.Done()` and surfaces the cancellation as either `ctx.Err()` or `*TimeoutError`.
 
 <Note>
-  Source: [`solvela-ai/solvela-go`](https://github.com/solvela-ai/solvela-go). The canonical chat-flow entry point is [`client.go`](https://github.com/solvela-ai/solvela-go/blob/main/client.go); the smoke harness lives at [`scripts/smoke/main.go`](https://github.com/solvela-ai/solvela-go/blob/main/scripts/smoke/main.go). See also [x402 Protocol](/docs/concepts/x402) for the underlying payment flow.
+  Source: [`sdks/go/`](https://github.com/solvela-ai/solvela/tree/main/sdks/go) in the monorepo. The canonical chat-flow entry point is [`client.go`](https://github.com/solvela-ai/solvela/blob/main/sdks/go/client.go); the smoke harness lives at [`sdks/go/scripts/smoke/main.go`](https://github.com/solvela-ai/solvela/blob/main/sdks/go/scripts/smoke/main.go). See also [x402 Protocol](/docs/concepts/x402) for the underlying payment flow.
 </Note>

@@ -19,13 +19,18 @@ cargo build --release -p solvela-cli
 
 ## Configuration
 
-The CLI reads configuration from environment variables:
+The CLI binds one environment variable:
 
 ```bash
-export SOLVELA_API_URL=https://api.solvela.ai
-export SOLVELA_SOLANA_PRIVATE_KEY=<base58-private-key>   # for paid requests
-export RUST_LOG=info  # optional logging
+export SOLVELA_API_URL=https://api.solvela.ai   # optional; default https://api.solvela.ai
+export RUST_LOG=info                             # optional logging
 ```
+
+The wallet is **not** read from an environment variable — there is no
+`SOLVELA_SOLANA_PRIVATE_KEY` or similar. The CLI loads the keypair from
+`~/.solvela/wallet.json` on every paid command. Initialize one with
+`solvela wallet init` (see [`solvela wallet`](#solvela-wallet) below) and fund
+the printed address with USDC-SPL + a small amount of SOL before signing.
 
 ## Commands
 
@@ -64,10 +69,12 @@ solvela health
 
 ### `solvela wallet`
 
-Display wallet information and USDC balance.
+Manage the local wallet at `~/.solvela/wallet.json`. Three subcommands:
 
 ```bash
-solvela wallet
+solvela wallet init     # Generate a new Solana keypair and print the address to fund
+solvela wallet status   # Show address + USDC-SPL balance
+solvela wallet export   # Print the base58 secret key (handle with care)
 ```
 
 ### `solvela stats`
