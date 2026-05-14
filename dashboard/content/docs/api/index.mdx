@@ -58,6 +58,7 @@ All endpoints accept and return `application/json`. Streaming responses use SSE 
 | `GET` | `/v1/supported` | Supported payment networks and schemes |
 | `GET` | `/v1/nonce` | Fetch a durable nonce for replay-safe transactions |
 | `POST` | `/v1/images/generations` | Image generation (OpenAI-compatible) |
+| `POST` | `/v1/escrow/settle` | Client-initiated early escrow claim after stream completion (see [Escrow → F4 settle](/docs/concepts/escrow#client-initiated-settle-f4)) |
 | `GET` | `/.well-known/agent.json` | A2A AgentCard for agent discovery |
 | `POST` | `/a2a` | A2A protocol JSON-RPC endpoint |
 

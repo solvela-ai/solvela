@@ -91,6 +91,37 @@ When choosing the escrow scheme, the `payment-signature` header contains a `Paym
 }
 ```
 
+## Client-initiated settle (F4)
+
+By default the gateway claims escrow at request end. For streaming responses, clients can drop reconciliation latency from minutes (auto-timeout) to milliseconds by calling `POST /v1/escrow/settle` once the stream completes — the gateway computes the actual cost from the reported token counts and fires the claim immediately.
+
+This endpoint is what `@solvela/openclaw-provider`'s `wrapStreamForF4` wrapper calls after each `wrapStreamFn` invocation finishes.
+
+```http title="POST /v1/escrow/settle"
+{
+  "service_id":           "<base64 32-byte service id, same value used in the deposit>",
+  "agent_pubkey":         "<base58 Solana pubkey of the depositor>",
+  "model":                "openai/gpt-4o",
+  "status":               "completed",
+  "actual_prompt_tokens":     128,
+  "actual_completion_tokens": 256
+}
+```
+
+**Behavior:**
+
+- `status: "completed"` with both `actual_*_tokens` fields → gateway looks up the model in the registry, computes the actual atomic-USDC cost, and enqueues a claim. The escrow program rejects over-claims on-chain, so the cost is bounded by the deposit regardless of what the client reports.
+- `status: "error"` → gateway logs the error and fires no claim. The deposit is reconciled by the escrow program's on-chain auto-timeout refund path (same as the pre-F4 flow). No `actual_*_tokens` fields are needed.
+- Missing tokens with `status: "completed"`, unknown `model`, or non-finite pricing → `400`.
+
+**Idempotency:** when PostgreSQL is configured, the durable claim queue dedupes by `(service_id, agent)`. Without a database, a duplicate settle call can produce a second on-chain claim attempt; the escrow program rejects the second because the deposit account is already drained.
+
+**Auth (v1):** the endpoint is fire-and-forget. The on-chain escrow program is the source of truth — a misrouted settle (wrong `agent_pubkey` or `service_id`) fails at the chain layer, logged but not surfaced to the client. Future hardening (HMAC over the body, or an agent signature over `(service_id, model, status, tokens)`) is tracked but not yet shipped.
+
+<Note>
+  As of 2026-05-14, the F4 wrapper in `@solvela/openclaw-provider` is unit-tested but not yet invoked from the plugin's hot path because `@solvela/signer-core` does not yet expose `service_id` from the encoded payment-header transaction. Until that lands, escrow accounting still relies on the on-chain auto-timeout refund. See [`STATUS.md` Known follow-ups](https://github.com/solvela-ai/solvela/blob/main/STATUS.md#known-follow-ups).
+</Note>
+
 ## Refund behavior
 
 If the gateway fails to claim within `max_timeout_seconds`, the agent can invoke the `refund` instruction on the escrow program to reclaim their deposit. The refund path is enforced on-chain by the Anchor program — no trust in the gateway is required.
