@@ -19,6 +19,8 @@ import assert from 'node:assert/strict';
 
 import { GatewayClient } from '../src/client.ts';
 import { TOOLS } from '../src/tools.ts';
+import { validateArgs } from '../src/validate-args.ts';
+import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 // ---------------------------------------------------------------------------
 // Ensure signing key is absent for all tests (without-key mode)
@@ -620,6 +622,140 @@ describe('TOOLS', () => {
   it('all tools have non-empty descriptions', () => {
     for (const tool of TOOLS) {
       assert.ok(tool.description && tool.description.length > 10, `Tool ${tool.name} has no description`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateArgs — runtime guard for MCP tool dispatch (T-3A)
+// ---------------------------------------------------------------------------
+
+describe('validateArgs', () => {
+  const chatSchema = {
+    model: { kind: 'string', required: true },
+    prompt: { kind: 'string', required: true },
+    system: { kind: 'string', required: false },
+    max_tokens: { kind: 'number', required: false },
+    temperature: { kind: 'number', required: false },
+  } as const;
+
+  const smartSchema = {
+    prompt: { kind: 'string', required: true },
+    profile: { kind: 'stringEnum', required: false, values: ['eco', 'auto', 'premium', 'free'] },
+  } as const;
+
+  it('passes through valid args (chat)', () => {
+    const out = validateArgs<{ model: string; prompt: string }>(
+      'chat',
+      { model: 'openai/gpt-4o', prompt: 'Hi' },
+      chatSchema,
+    );
+    assert.equal(out.model, 'openai/gpt-4o');
+    assert.equal(out.prompt, 'Hi');
+  });
+
+  it('rejects missing required field with InvalidParams', () => {
+    try {
+      validateArgs('chat', { model: 'openai/gpt-4o' }, chatSchema);
+      assert.fail('expected throw');
+    } catch (err) {
+      assert.ok(err instanceof McpError);
+      assert.equal((err as McpError).code, ErrorCode.InvalidParams);
+      assert.match((err as McpError).message, /missing required field 'prompt'/);
+    }
+  });
+
+  it('rejects wrong-type required field (model: number) with InvalidParams', () => {
+    // The audit's example: args = { model: 42 } would flow into client.chat(42, ...)
+    // without this guard.
+    try {
+      validateArgs('chat', { model: 42, prompt: 'Hi' }, chatSchema);
+      assert.fail('expected throw');
+    } catch (err) {
+      assert.ok(err instanceof McpError);
+      assert.equal((err as McpError).code, ErrorCode.InvalidParams);
+      assert.match((err as McpError).message, /field 'model' must be a string, got number/);
+    }
+  });
+
+  it('rejects wrong-type optional field (max_tokens: string) with InvalidParams', () => {
+    try {
+      validateArgs('chat', { model: 'x', prompt: 'y', max_tokens: '100' }, chatSchema);
+      assert.fail('expected throw');
+    } catch (err) {
+      assert.match((err as McpError).message, /field 'max_tokens' must be a finite number, got string/);
+    }
+  });
+
+  it('rejects NaN as a number field', () => {
+    try {
+      validateArgs('chat', { model: 'x', prompt: 'y', temperature: NaN }, chatSchema);
+      assert.fail('expected throw');
+    } catch (err) {
+      assert.match((err as McpError).message, /temperature.*finite number/);
+    }
+  });
+
+  it('allows omitted optional fields', () => {
+    const out = validateArgs<{ model: string; prompt: string }>(
+      'chat',
+      { model: 'x', prompt: 'y' },
+      chatSchema,
+    );
+    assert.equal(out.model, 'x');
+  });
+
+  it('rejects bad enum value (smart_chat profile = "premium!!")', () => {
+    try {
+      validateArgs('smart_chat', { prompt: 'hi', profile: 'premium!!' }, smartSchema);
+      assert.fail('expected throw');
+    } catch (err) {
+      assert.ok(err instanceof McpError);
+      assert.equal((err as McpError).code, ErrorCode.InvalidParams);
+      assert.match((err as McpError).message, /profile.*must be one of 'eco'\|'auto'\|'premium'\|'free'/);
+    }
+  });
+
+  it('accepts each declared enum value', () => {
+    for (const p of ['eco', 'auto', 'premium', 'free']) {
+      const out = validateArgs<{ prompt: string; profile?: string }>(
+        'smart_chat',
+        { prompt: 'hi', profile: p },
+        smartSchema,
+      );
+      assert.equal(out.profile, p);
+    }
+  });
+
+  it('rejects non-object args (null, array, primitive)', () => {
+    for (const bad of [null, [], 'string', 42, true]) {
+      try {
+        validateArgs('chat', bad, chatSchema);
+        assert.fail(`expected throw for ${JSON.stringify(bad)}`);
+      } catch (err) {
+        assert.ok(err instanceof McpError, `not an McpError: ${err}`);
+        assert.match((err as McpError).message, /arguments must be an object/);
+      }
+    }
+  });
+
+  it('boolean field — accepts true/false, rejects "true" string', () => {
+    const out = validateArgs<{ reset?: boolean }>(
+      'spending',
+      { reset: true },
+      { reset: { kind: 'boolean', required: false } },
+    );
+    assert.equal(out.reset, true);
+
+    try {
+      validateArgs(
+        'spending',
+        { reset: 'true' },
+        { reset: { kind: 'boolean', required: false } },
+      );
+      assert.fail('expected throw');
+    } catch (err) {
+      assert.match((err as McpError).message, /reset.*must be a boolean, got string/);
     }
   });
 });
