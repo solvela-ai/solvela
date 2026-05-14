@@ -10,7 +10,7 @@ AI agents pay for LLM API calls with USDC-SPL on Solana via the x402 protocol.
 npm install @solvela/sdk
 ```
 
-Requires Node.js 18+.
+Requires Node.js 20.19+ (matches the `engines.node` constraint in `package.json`). Earlier Node versions are not tested and may fail at install or import time.
 
 ## Quick Start
 
@@ -97,6 +97,10 @@ const client = new SolvelaClient({
   },
 });
 ```
+
+## Documentation
+
+[docs.solvela.ai/sdks/typescript](https://docs.solvela.ai/sdks/typescript) — full reference, error handling, streaming and OpenAI-compat patterns.
 
 ## License
 

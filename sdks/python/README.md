@@ -102,6 +102,10 @@ SOLVELA_LIVE_TESTS=1 pytest tests/live/ -v
 ruff check src/ tests/
 ```
 
+## Documentation
+
+[docs.solvela.ai/sdks/python](https://docs.solvela.ai/sdks/python) — full reference, async patterns, error handling.
+
 ## License
 
 MIT

@@ -146,6 +146,7 @@ All configuration is via environment variables:
 | `SOLVELA_TIMEOUT_MS` | `60000` | Request timeout in milliseconds |
 | `SOLVELA_SIGNING_MODE` | `auto` | Payment signing mode: `auto`, `escrow`, `direct`, or `off` |
 | `SOLVELA_ALLOW_DEV_BYPASS` | — | Set to `1` to silence the dev_bypass_payment gateway warning |
+| `SOLVELA_INSECURE_HTTP` | — | Set to `1` to silence the MITM warning when `SOLVELA_API_URL` is plaintext `http://`. Loopback and `*.local` hosts skip the warning unconditionally. |
 | `SOLVELA_ESCROW_MODE` | — | Set to `enabled` to expose the `deposit_escrow` tool |
 | `SOLVELA_MAX_ESCROW_DEPOSIT` | `5.0` | Per-call deposit cap in USDC (applies only when escrow mode is enabled) |
 | `SOLVELA_MAX_ESCROW_SESSION` | `20.0` | Cumulative session deposit cap in USDC (applies only when escrow mode is enabled) |

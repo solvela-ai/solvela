@@ -62,6 +62,10 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.solvela.xyz | sh
 cargo install solvela-cli
 ```
 
+## Documentation
+
+[docs.solvela.ai/sdks/rust](https://docs.solvela.ai/sdks/rust) — full reference for the `solvela` CLI commands and wallet flows (this npm package is a distribution shim around the same Rust binary).
+
 ## License
 
 MIT
