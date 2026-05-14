@@ -8,10 +8,12 @@ export const APP_URL = 'https://app.solvela.ai'
 export const QUICKSTART_URL = 'https://docs.solvela.ai/docs/quickstart'
 export const ESCROW_PROGRAM_ID = '9neDHouXgEgHZDde5Sp'
 
+// Uptime and p50 latency were removed pending a public status page;
+// claiming SLA-shaped numbers without one is the kind of statement
+// enterprise procurement will challenge. Re-add with hard data
+// behind them, not before.
 export const METRICS = [
-  { label: 'uptime', value: 99.98, suffix: '%', decimals: 2 },
-  { label: 'p50 latency', value: 38, suffix: 'ms', decimals: 0 },
-  { label: 'models', value: 26, suffix: '+', decimals: 0 },
+  { label: 'models', value: 25, suffix: '+', decimals: 0 },
   { label: 'platform fee', value: 5, suffix: '%', decimals: 0 },
 ]
 

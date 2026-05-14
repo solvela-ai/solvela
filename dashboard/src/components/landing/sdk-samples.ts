@@ -16,18 +16,22 @@ export const SAMPLES: Sample[] = [
     id: 'ts',
     label: 'typescript',
     lang: 'typescript',
-    install: 'npm i @solvela/sdk',
-    status: 'live',
-    code: `import { Solvela } from '@solvela/sdk'
+    install: 'npm i @solvela/sdk  # republish pending — use curl today',
+    status: 'soon',
+    code: `// @solvela/sdk@0.2.x predates the current wire format and will
+// not complete a real payment against api.solvela.ai. Republish is
+// pending. Drive the gateway directly until the new SDK ships:
 
-const solvela = new Solvela({ keypair: wallet })
-
-const reply = await solvela.chat.completions.create({
-  model: 'auto',
-  messages: [{ role: 'user', content: 'hi' }],
+const res = await fetch('https://api.solvela.ai/v1/chat/completions', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    model: 'auto',
+    messages: [{ role: 'user', content: 'hi' }],
+  }),
 })
-
-// 402 handshake + escrow claim handled for you.`,
+// 402 first, then sign + retry with the payment-signature header.
+// Full handshake: docs.solvela.ai/quickstart`,
   },
   {
     id: 'vercel',
@@ -52,7 +56,7 @@ const { text } = await generateText({
     id: 'py',
     label: 'python',
     lang: 'python',
-    install: 'pip install solvela',
+    install: 'pip install solvela-sdk',
     status: 'live',
     code: `from solvela import Solvela
 
@@ -67,7 +71,7 @@ reply = solvela.chat.completions.create(
     id: 'go',
     label: 'go',
     lang: 'go',
-    install: 'go get github.com/solvela-ai/solvela-go',
+    install: 'go get github.com/solvela-ai/solvela/sdks/go',
     status: 'live',
     code: `client := solvela.New(solvela.WithKeypair(wallet))
 
@@ -107,15 +111,16 @@ const reply = await model.invoke('summarize this transcript in one sentence.')`,
     id: 'mcp',
     label: 'mcp',
     lang: 'json',
-    install: 'npx @solvela/mcp',
-    status: 'live',
+    install: 'git clone solvela-ai/solvela && cd sdks/mcp && npm i && npm run build',
+    status: 'alpha',
     code: `// works in claude code, cursor, and openclaw — drop into .mcp.json
+// npm publish pending; point at your local build of dist/index.js
 {
   "mcpServers": {
     "solvela": {
-      "command": "npx",
-      "args": ["@solvela/mcp"],
-      "env": { "SOLVELA_WALLET": "<keypair.json>" }
+      "command": "node",
+      "args": ["<repo>/sdks/mcp/dist/index.js"],
+      "env": { "SOLANA_WALLET_KEY": "<base58-keypair-secret>" }
     }
   }
 }`,

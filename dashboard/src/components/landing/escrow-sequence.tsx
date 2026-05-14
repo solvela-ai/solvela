@@ -149,7 +149,7 @@ export function EscrowSequence() {
               usdc-spl
             </span>
             <span className="rounded-md border border-border px-2 py-1">
-              audited flows
+              open-source flows
             </span>
           </div>
 
