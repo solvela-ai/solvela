@@ -2,7 +2,7 @@
 
 Solana-native AI agent payment gateway. No API keys, no accounts -- just wallets.
 
-![Rust](https://img.shields.io/badge/rust-1.85%2B-F97316?style=flat&logo=rust&logoColor=white)
+![Rust](https://img.shields.io/badge/rust-stable-F97316?style=flat&logo=rust&logoColor=white)
 ![Gateway License](https://img.shields.io/badge/gateway-BUSL--1.1-F97316?style=flat)
 ![Libraries License](https://img.shields.io/badge/libraries-MIT-F97316?style=flat)
 ![SDKs License](https://img.shields.io/badge/sdks-MIT-F97316?style=flat)
@@ -62,7 +62,7 @@ Proxy any x402-enabled external service through the gateway. Admin-controlled re
 
 ### SDKs
 
-Client libraries for Python, TypeScript, and Go. Each SDK includes wallet management, on-chain signing, response caching, session tracking, degraded response detection, and a 7-step smart chat flow. MCP server for Claude Code, Cursor, Claude Desktop, and OpenClaw integration.
+Client libraries for **Python**, **TypeScript**, and **Go**. Each ships wallet management, on-chain signing, response caching, session tracking, degraded response detection, and a 7-step smart chat flow. Plus framework-level packages: an **MCP server** (Claude Code, Cursor, Claude Desktop, OpenClaw), a **Vercel AI SDK provider**, an **OpenClaw provider** plugin, a **signer-core** primitives package shared across the TypeScript ecosystem, and an **npm CLI shim** that bundles the Rust `solvela` binary.
 
 The `solvela` CLI includes a host-config installer that sets up the MCP server in one command:
 
@@ -91,7 +91,7 @@ The installer never writes `SOLANA_WALLET_KEY` to disk. Store it in `~/.solvela/
 
 ### Prerequisites
 
-- Rust 1.85+
+- Rust (latest stable; CI builds on `dtolnay/rust-toolchain@stable`)
 - Docker and Docker Compose (for PostgreSQL + Redis)
 - At least one LLM provider API key
 

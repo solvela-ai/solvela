@@ -16,15 +16,15 @@ _No backers at this tier yet. Become the first: [github.com/sponsors/solvela-ai]
 
 ## Infrastructure ($250/mo)
 
-_No backers at this tier yet._
+_Be the first sponsor at this tier: [github.com/sponsors/solvela-ai](https://github.com/sponsors/solvela-ai)._
 
 ## Operator ($50/mo)
 
-_No backers at this tier yet._
+_Be the first sponsor at this tier: [github.com/sponsors/solvela-ai](https://github.com/sponsors/solvela-ai)._
 
 ## Supporter ($10/mo)
 
-_No backers at this tier yet._
+_Be the first sponsor at this tier: [github.com/sponsors/solvela-ai](https://github.com/sponsors/solvela-ai)._
 
 ## In-kind sponsors
 
