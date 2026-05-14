@@ -13,7 +13,15 @@ _(no loose files — see subdirectories)_
 | Directory | Purpose |
 |-----------|---------|
 | `elizaos/` | ElizaOS plugin (TypeScript) — exposes Solvela as an action + provider (see `elizaos/AGENTS.md`) |
-| `openclaw/` | OpenClaw integration (TypeScript) — routes OpenClaw requests through Solvela (see `openclaw/AGENTS.md`) |
+| `openclaw/` | OpenClaw integration (TypeScript) — routes OpenClaw requests through Solvela via the older `intercept` hook (see `openclaw/AGENTS.md`) |
+
+> **Two OpenClaw plugins coexist on purpose.** This directory ships
+> `@solvela/router` (intercept-style, v0.1.0, stable). The newer
+> `@solvela/openclaw-provider` (wrapStreamFn-style, v1.0.0-draft, not yet
+> published) lives at `../sdks/openclaw-provider/`. Don't merge them —
+> they target different OpenClaw plugin contracts. See
+> `openclaw/README.md` for the user-facing "which one to install"
+> decision matrix.
 
 ## For AI Agents
 
