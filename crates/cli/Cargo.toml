@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Command-line interface for the Solvela LLM payment gateway — wallet, chat, models, escrow, MCP, load testing"
 authors = ["Solvela Contributors"]
 homepage = "https://solvela.ai"
+readme = "README.md"
 keywords = ["solana", "llm", "x402", "cli", "ai"]
 categories = ["command-line-utilities"]
 

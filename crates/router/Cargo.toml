@@ -7,6 +7,7 @@ repository.workspace = true
 description = "15-dimension request scorer + routing profiles + model registry for the Solvela LLM payment gateway"
 authors = ["Solvela Contributors"]
 homepage = "https://solvela.ai"
+readme = "README.md"
 keywords = ["solana", "llm", "routing", "x402", "ai"]
 categories = ["api-bindings"]
 
