@@ -19,12 +19,18 @@ cargo build --release -p solvela-cli
 
 ## Configuration
 
-The CLI binds one environment variable:
+The CLI reads these environment variables:
 
 ```bash
-export SOLVELA_API_URL=https://api.solvela.ai   # optional; default https://api.solvela.ai
-export RUST_LOG=info                             # optional logging
+export SOLVELA_API_URL=https://api.solvela.ai              # optional; default https://api.solvela.ai
+export SOLANA_RPC_URL=https://api.mainnet-beta.solana.com  # required for any paid command (signs USDC-SPL tx)
+export RUST_LOG=info                                       # optional logging
 ```
+
+`SOLANA_RPC_URL` is required whenever the CLI has to sign a payment
+(`solvela chat`, `solvela recover`). The public Solana endpoint above
+works for a smoke test, but its rate limits will throttle real usage —
+point at your own Helius/QuickNode/Triton RPC for anything beyond that.
 
 The wallet is **not** read from an environment variable — there is no
 `SOLVELA_SOLANA_PRIVATE_KEY` or similar. The CLI loads the keypair from
@@ -44,11 +50,14 @@ solvela chat "Explain Solana in one sentence."
 # Specify a model
 solvela chat --model gpt-4o "Explain Solana in one sentence."
 
-# Use a routing profile
+# Use a routing profile (eco, auto, premium, free)
 solvela chat --model auto "Complex analysis task..."
 
-# Streaming output
-solvela chat --stream "Write a short story about a Rust programmer."
+# Skip the cost-confirmation prompt (for scripted use)
+solvela chat --yes "Write a short story about a Rust programmer."
+
+# Force a specific payment scheme (default: prefer escrow over exact)
+solvela chat --scheme exact "Quick one-shot question."
 ```
 
 ### `solvela models`
