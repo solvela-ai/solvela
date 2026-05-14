@@ -138,6 +138,11 @@ const client = new GatewayClient({
   timeoutMs,
   signingMode,
   sessionStore,
+  // SEC-H1: pin recipient + escrow program ID so a phishing 402 cannot
+  // redirect signed transfers. Empty strings are normalized to undefined so
+  // unset env vars do not collide with valid base58 pubkeys at validation.
+  expectedRecipient: escrowRecipientWallet || undefined,
+  expectedEscrowProgramId: escrowProgramId || undefined,
 });
 
 // ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@ import {
   isStubHeader,
   sanitizeGatewayError,
 } from '@solvela/signer-core';
-import type { PaymentRequired, PaymentAccept } from '@solvela/signer-core';
+import type { PaymentRequired, PaymentAccept, PaymentExpectations } from '@solvela/signer-core';
 import type { SessionStore, SessionState } from './session.js';
 
 export type { PaymentRequired, PaymentAccept };
@@ -93,6 +93,18 @@ export interface GatewayClientOptions {
   signingMode?: 'auto' | 'escrow' | 'direct' | 'off';
   /** Optional session persistence store. When provided, sessionSpent survives restarts. */
   sessionStore?: SessionStore;
+  /**
+   * Pinned recipient pubkey. When set, the SDK refuses to sign any 402
+   * whose chosen accept has a `pay_to` other than this value — defending
+   * against a phishing gateway / DNS hijack pointing payments at an
+   * attacker wallet. STRONGLY RECOMMENDED for production deployments.
+   */
+  expectedRecipient?: string;
+  /**
+   * Pinned escrow program ID. When set AND the chosen scheme is `escrow`,
+   * the SDK refuses to sign if `escrow_program_id` does not match.
+   */
+  expectedEscrowProgramId?: string;
 }
 
 /**
@@ -106,6 +118,8 @@ export class GatewayClient {
   private readonly sessionBudget?: number;
   private readonly timeoutMs: number;
   private readonly signingMode: 'auto' | 'escrow' | 'direct' | 'off';
+  private readonly expectedRecipient?: string;
+  private readonly expectedEscrowProgramId?: string;
   /**
    * Integer micro-USDC counters (1 USDC = 1_000_000 micro-USDC).
    * Using integers prevents floating-point drift (e.g. 7 × 0.1 ≠ 0.7 in IEEE-754).
@@ -143,6 +157,8 @@ export class GatewayClient {
     this.timeoutMs = opts.timeoutMs ?? 60_000;
     this.signingMode = opts.signingMode ?? 'auto';
     this.sessionStore = opts.sessionStore;
+    this.expectedRecipient = opts.expectedRecipient;
+    this.expectedEscrowProgramId = opts.expectedEscrowProgramId;
     // Kick off the load immediately so the first mutex entry doesn't add latency.
     this.sessionStatePromise = opts.sessionStore
       ? opts.sessionStore.load().catch((err) => {
@@ -282,9 +298,24 @@ export class GatewayClient {
         const filteredPaymentInfo = { ...paymentInfo, accepts: filteredAccepts };
         const privateKey = process.env['SOLANA_WALLET_KEY'];
 
+        // SEC-H1: bound what the gateway can ask us to sign. `maxAmount` is
+        // always known (we just budget-reserved it). `recipient` and
+        // `escrowProgramId` are only enforced if the caller pinned them via
+        // env config — without pinning, an attacker who controls the 402
+        // response can still substitute their own pay_to, but the maxAmount
+        // cap stops them from inflating the cost beyond the cost_breakdown
+        // total the budget mutex already authorized.
+        const expected: PaymentExpectations = { maxAmount: BigInt(costMicro) };
+        if (this.expectedRecipient !== undefined) {
+          expected.recipient = this.expectedRecipient;
+        }
+        if (this.expectedEscrowProgramId !== undefined) {
+          expected.escrowProgramId = this.expectedEscrowProgramId;
+        }
+
         let paymentHeader: string;
         try {
-          paymentHeader = await createPaymentHeader(filteredPaymentInfo, url, privateKey, bodyStr);
+          paymentHeader = await createPaymentHeader(filteredPaymentInfo, url, privateKey, bodyStr, expected);
         } catch (err) {
           // HF2: Refund the reserved budget — signer never succeeded.
           await this.budgetMutex.runExclusive(async () => {
