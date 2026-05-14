@@ -256,7 +256,7 @@ const response = await client.chat('openai/gpt-4o', 'Hello!');
 ### Go
 
 ```bash
-go get github.com/solvela-ai/solvela-go
+go get github.com/solvela-ai/solvela/sdks/go
 ```
 
 ```go
@@ -321,10 +321,10 @@ cargo test --manifest-path programs/escrow/Cargo.toml
 # SDK tests (mcp + ai-sdk-provider + openclaw-provider live in this repo)
 cd sdks/mcp && npm test
 
-# Standalone SDK repos:
-#   Python:     https://github.com/solvela-ai/solvela-python
-#   TypeScript: https://github.com/solvela-ai/solvela-ts
-#   Go:         https://github.com/solvela-ai/solvela-go
+# In-repo SDK test suites:
+#   Python:     (cd sdks/python && pytest)
+#   TypeScript: (cd sdks/typescript && npm test)
+#   Go:         (cd sdks/go && go test ./...)
 ```
 
 ### Lint
@@ -388,14 +388,14 @@ crates/
 programs/
   escrow/           Anchor escrow program (deposit/claim/refund, PDA vault)
 sdks/
-  python/           pip install solvela-sdk (canonical source: github.com/solvela-ai/solvela-python)
-  go/               go get github.com/solvela-ai/solvela-go
+  python/           pip install solvela-sdk
+  typescript/       npm install @solvela/sdk
+  go/               go get github.com/solvela-ai/solvela/sdks/go
   cli-npm/          @solvela/cli — npm-distributed wrapper around the Rust CLI (pre-release)
   mcp/              Claude Code MCP server
   signer-core/      Shared x402 parser + payment-signer primitives
   ai-sdk-provider/  Vercel AI SDK provider for Solvela
   openclaw-provider/ OpenClaw plugin (Solvela as first-class LLM provider)
-# TypeScript SDK lives at github.com/solvela-ai/solvela-ts (npm: @solvela/sdk)
 config/
   models.toml       Model registry + pricing
   default.toml      Gateway configuration

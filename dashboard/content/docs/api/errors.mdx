@@ -153,4 +153,4 @@ See [x402 Protocol](/docs/concepts/x402) for the full flow.
 
 **Cause:** Too many requests from this IP or wallet within the rate limit window.
 
-**Fix:** Back off and retry. The gateway ceiling is approximately 400 RPS. Use exponential backoff for retries.
+**Fix:** Back off and retry. The default ceiling is **60 requests per 60-second sliding window** per wallet/IP — use the `X-RateLimit-Reset` header to time retries rather than a fixed backoff. See [Rate Limits](/docs/api/rate-limits).
