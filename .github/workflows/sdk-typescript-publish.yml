@@ -1,0 +1,97 @@
+name: sdk-typescript publish
+
+on:
+  push:
+    tags:
+      - 'sdks/typescript/v*'
+
+concurrency:
+  group: sdk-typescript-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+# OIDC token required for npm --provenance attestation.
+permissions:
+  id-token: write
+  contents: read
+
+defaults:
+  run:
+    working-directory: sdks/typescript
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    environment: npm-publish
+
+    steps:
+      - name: Checkout (full history so tag is reachable)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+          # Registry URL required for NODE_AUTH_TOKEN to be injected by setup-node.
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies (ignore-scripts)
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      - name: Test (unit + integration)
+        run: npm test
+
+      # Determine dist-tag from the git tag name:
+      #   sdks/typescript/v0.2.2-rc.1  → --tag rc
+      #   sdks/typescript/v0.2.2        → --tag latest  (default, omit flag)
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          if [[ "$TAG_NAME" =~ -rc\.[0-9]+$ ]]; then
+            echo "RC tag detected — publishing with --tag rc"
+            npm publish --tag rc --provenance
+          else
+            echo "Release tag detected — publishing with --tag latest"
+            npm publish --access public --provenance
+          fi
+
+      # After publish, download the tarball from the registry and compare its
+      # SHA-256 against the locally-built tarball to confirm no substitution.
+      - name: Verify published tarball SHA matches local build
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          PKG_VERSION=$(jq -r '.version' package.json)
+          PKG_NAME=$(jq -r '.name' package.json)
+
+          echo "Verifying $PKG_NAME@$PKG_VERSION"
+
+          LOCAL_TARBALL=$(npm pack --dry-run --json 2>/dev/null | \
+            python3 -c "import sys,json; print(json.load(sys.stdin)[0]['filename'])")
+          npm pack 2>/dev/null
+          LOCAL_SHA=$(shasum -a 256 "$LOCAL_TARBALL" | awk '{print $1}')
+          echo "Local tarball SHA256: $LOCAL_SHA"
+
+          TARBALL_URL=$(npm view "${PKG_NAME}@${PKG_VERSION}" dist.tarball)
+          echo "Registry tarball URL: $TARBALL_URL"
+          curl -fsSL "$TARBALL_URL" -o registry.tgz
+          REGISTRY_SHA=$(shasum -a 256 registry.tgz | awk '{print $1}')
+          echo "Registry tarball SHA256: $REGISTRY_SHA"
+
+          if [ "$LOCAL_SHA" = "$REGISTRY_SHA" ]; then
+            echo "SHA match confirmed — tarball integrity verified."
+          else
+            echo "ERROR: SHA mismatch! Local=$LOCAL_SHA Registry=$REGISTRY_SHA"
+            exit 1
+          fi
