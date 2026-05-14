@@ -7,7 +7,7 @@
 //! - [`response`] — Debug headers, session tokens, response construction
 
 pub(crate) mod cost;
-mod payment;
+pub(crate) mod payment;
 mod provider;
 mod response;
 

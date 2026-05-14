@@ -5179,3 +5179,178 @@ async fn test_a2a_message_send_no_text_returns_error() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json["error"].is_object(), "should return JSON-RPC error");
 }
+
+// ---------------------------------------------------------------------------
+// POST /v1/escrow/settle (F4 settle endpoint)
+// ---------------------------------------------------------------------------
+
+async fn post_settle(body: serde_json::Value) -> axum::http::Response<Body> {
+    test_app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/escrow/settle")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn settle_body_json(resp: axum::http::Response<Body>) -> serde_json::Value {
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn settle_status_error_returns_ok_with_no_claim() {
+    let resp = post_settle(serde_json::json!({
+        "service_id": "svc_test_error",
+        "agent_pubkey": "AgentPubkey1111111111111111111111111111111111",
+        "model": "any-model",
+        "status": "error"
+    }))
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = settle_body_json(resp).await;
+    assert_eq!(body["ok"], true);
+    assert!(
+        body.get("claim_amount").is_none(),
+        "claim_amount must be absent on error status, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn settle_missing_tokens_on_completed_returns_400() {
+    let resp = post_settle(serde_json::json!({
+        "service_id": "svc_test_missing_tokens",
+        "agent_pubkey": "AgentPubkey1111111111111111111111111111111111",
+        "model": "openai-gpt-4o",
+        "status": "completed"
+    }))
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = settle_body_json(resp).await;
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("actual_prompt_tokens"),
+        "error must mention required token fields, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn settle_unknown_model_returns_400() {
+    let resp = post_settle(serde_json::json!({
+        "service_id": "svc_test_unknown_model",
+        "agent_pubkey": "AgentPubkey1111111111111111111111111111111111",
+        "model": "no-such-model-xyz",
+        "status": "completed",
+        "actual_prompt_tokens": 10,
+        "actual_completion_tokens": 20
+    }))
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = settle_body_json(resp).await;
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("unknown model"),
+        "error must mention unknown model, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn settle_completed_with_known_model_returns_claim_amount() {
+    let resp = post_settle(serde_json::json!({
+        "service_id": "svc_test_completed",
+        "agent_pubkey": "AgentPubkey1111111111111111111111111111111111",
+        "model": "openai-gpt-4o",
+        "status": "completed",
+        "actual_prompt_tokens": 1000,
+        "actual_completion_tokens": 500
+    }))
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = settle_body_json(resp).await;
+    assert_eq!(body["ok"], true);
+    let claim = body["claim_amount"].as_u64();
+    assert!(
+        claim.is_some_and(|c| c > 0),
+        "claim_amount must be present and positive, got: {body}"
+    );
+
+    // Sanity-check the cost matches compute_actual_atomic_cost.
+    // gpt-4o: input=2.50 USDC/M, output=10.00 USDC/M, +5% fee
+    // 1000 prompt @ 2.50/M = 2500 micro-USDC
+    // 500 completion @ 10.00/M = 5000 micro-USDC
+    // total before fee: 7500 micro-USDC
+    // after 5% fee: 7500 * 105 / 100 = 7875 micro-USDC
+    assert_eq!(
+        claim.unwrap(),
+        7875,
+        "claim must equal computed cost (1000 in + 500 out at gpt-4o pricing + 5% fee)"
+    );
+}
+
+#[tokio::test]
+async fn settle_zero_tokens_returns_zero_claim() {
+    let resp = post_settle(serde_json::json!({
+        "service_id": "svc_test_zero",
+        "agent_pubkey": "AgentPubkey1111111111111111111111111111111111",
+        "model": "openai-gpt-4o",
+        "status": "completed",
+        "actual_prompt_tokens": 0,
+        "actual_completion_tokens": 0
+    }))
+    .await;
+
+    // Zero tokens compute to zero cost. fire_escrow_claim short-circuits on
+    // claim_amount==0, but the handler still returns 200 with claim_amount=0
+    // (the handler doesn't filter; it forwards whatever cost was computed).
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = settle_body_json(resp).await;
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["claim_amount"].as_u64(), Some(0));
+}
+
+#[tokio::test]
+async fn settle_malformed_json_returns_400() {
+    let resp = test_app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/escrow/settle")
+                .header("content-type", "application/json")
+                .body(Body::from("{ not valid json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        resp.status().is_client_error(),
+        "malformed JSON must return 4xx, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn settle_unknown_status_returns_400() {
+    let resp = post_settle(serde_json::json!({
+        "service_id": "svc_test_unknown_status",
+        "agent_pubkey": "AgentPubkey1111111111111111111111111111111111",
+        "model": "openai-gpt-4o",
+        "status": "weird-status"
+    }))
+    .await;
+
+    assert!(
+        resp.status().is_client_error(),
+        "unknown status enum value must return 4xx, got {}",
+        resp.status()
+    );
+}
