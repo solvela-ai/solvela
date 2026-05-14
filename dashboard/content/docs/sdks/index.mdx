@@ -6,20 +6,15 @@ description: Client libraries for Solvela — TypeScript, Python, Go, Rust CLI, 
 
 Official SDKs are available for four languages plus an MCP server. All SDKs handle the x402 payment handshake automatically — pass a private key and the SDK signs transactions for you.
 
-<Warning>
-**The TypeScript SDK is not wire-compatible with the live gateway today.** The currently-published `@solvela/sdk@0.2.x` on npm predates the v2 payment envelope and will not complete a real payment against `api.solvela.ai`. Until a new SDK release ships, TypeScript users have two working options:
-
-- Use the [`@solvela/signer-core`](/docs/sdks/typescript) primitives from the monorepo (`sdks/signer-core/`) to parse the 402 envelope and sign payments yourself.
-- Drive the gateway directly with `curl` or `fetch` — see the [Quickstart](/docs/quickstart) cURL tab and [Payment Flow](/docs/concepts/payment-flow).
-
-The Python, Go, and Rust CLI SDKs are wire-aligned with the live gateway.
-</Warning>
+<Note>
+`@solvela/sdk@0.2.2` (published 2026-05-14) ships the v2 wire-format fix and is wire-aligned with the live gateway. Pin to `^0.2.2` — earlier `0.2.x` releases predate the v2 payment envelope and will not complete a real payment against `api.solvela.ai`.
+</Note>
 
 ## Comparison
 
 | Language | Package | Install | x402 Auto-payment | Async |
 |----------|---------|---------|-------------------|-------|
-| TypeScript ⚠ | `@solvela/sdk` | `npm install @solvela/sdk` | Pre-1.0, wire-incompat (see above) | Yes |
+| TypeScript | `@solvela/sdk` | `npm install @solvela/sdk@^0.2.2` | Yes | Yes |
 | Python | `solvela-sdk` | `pip install solvela-sdk` | Yes | Yes (async-only) |
 | Go | `github.com/solvela-ai/solvela/sdks/go` | `go get github.com/solvela-ai/solvela/sdks/go` | Yes (BYO Signer) | Yes (context-based) |
 | Rust CLI | `solvela-cli` | `cargo install solvela-cli` | Yes | — |
@@ -38,7 +33,7 @@ All four language SDKs live in the [`solvela-ai/solvela`](https://github.com/sol
 The wallet-client Rust crate (`solvela-client`) and its `solvela` CLI binary remain at [`solvela-ai/solvela-client`](https://github.com/solvela-ai/solvela-client) pending a separate consolidation.
 
 <CardGroup>
-  <Card title="TypeScript" description="@solvela/sdk — pre-1.0; not yet wire-aligned with prod gateway (see warning above)" href="/docs/sdks/typescript" />
+  <Card title="TypeScript" description="@solvela/sdk@^0.2.2 — async client with automatic x402 signing and built-in Solana wallet support" href="/docs/sdks/typescript" />
   <Card title="Python" description="pip install solvela-sdk — async-first client with built-in Solana signing" href="/docs/sdks/python" />
   <Card title="Go" description="go get github.com/solvela-ai/solvela/sdks/go — context-aware, goroutine-safe; ships an UnimplementedSigner stub (bring your own)" href="/docs/sdks/go" />
   <Card title="Rust CLI" description="cargo install solvela-cli — interactive chat, model listing, health checks" href="/docs/sdks/rust" />

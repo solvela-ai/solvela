@@ -360,7 +360,7 @@ Environment variables use the `SOLVELA_` prefix. Provider API keys follow the st
 | `SOLVELA_SOLANA_RECIPIENT_WALLET` | Yes | USDC payment destination (base58) |
 | `SOLVELA_SOLANA_FEE_PAYER_KEY` | For escrow | Hot wallet key for claim transactions |
 | `SOLVELA_SOLANA_ESCROW_PROGRAM_ID` | For escrow | Anchor escrow program ID |
-| `SOLVELA_SERVER_PORT` | No | Gateway port (default: `8402`) |
+| `SOLVELA_PORT` | No | Gateway port (default: `8402`) |
 | `SOLVELA_ADMIN_TOKEN` | No | Admin auth for `/metrics` and `/v1/escrow/health` |
 | `DATABASE_URL` | No | PostgreSQL connection string |
 | `REDIS_URL` | No | Redis connection string |

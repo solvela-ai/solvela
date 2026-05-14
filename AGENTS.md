@@ -125,7 +125,7 @@ const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb
 - [ ] Use typed `Account<'info, T>` — never `UncheckedAccount` without explicit owner check
 - [ ] Every authority field validated with `has_one` or explicit `Signer<'info>`
 - [ ] PDA seeds include user-specific key — never shared across users
-- [ ] No `init_if_needed` — use `init` to prevent reinitialization attacks
+- [ ] Default to `init`; only use `init_if_needed` for a documented reason (e.g. recreating an agent's USDC ATA that may have been closed for rent reclamation — see `programs/escrow/` refund path). Reinitialization-attack vector must be ruled out explicitly
 - [ ] CPIs use `Program<'info, Token>` — never accept arbitrary program accounts
 - [ ] Checked arithmetic throughout: `checked_add`, `checked_sub`, `checked_mul`
 - [ ] Account closure uses Anchor `close =` constraint — prevents revival attacks
