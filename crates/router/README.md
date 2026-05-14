@@ -19,8 +19,8 @@ solvela-router = "0.2"
 ## What's inside
 
 - `scorer` — 15-dimension request scorer
-- `profile` — eco/auto/premium/free routing profiles
-- `registry` — model registry loader (consumes `config/models.toml`)
+- `profiles` — eco/auto/premium/free routing profiles
+- `models` — model registry loader (consumes `config/models.toml`, configured by the host application)
 
 ## Links
 

@@ -17,7 +17,7 @@ cargo install solvela-cli
 # Optional: defaults to https://api.solvela.ai
 export SOLVELA_API_URL=https://api.solvela.ai
 
-solvela wallet new                  # generate a Solana keypair
+solvela wallet init                 # generate a Solana keypair
 solvela chat --model auto "hello"   # ask the smart router to pick a model
 solvela models                      # list available models + per-token pricing
 solvela doctor                      # check config + gateway reachability

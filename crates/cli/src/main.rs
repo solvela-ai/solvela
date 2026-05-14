@@ -18,7 +18,7 @@ struct Cli {
     #[arg(
         long,
         env = "SOLVELA_API_URL",
-        default_value = "http://localhost:8402",
+        default_value = "https://api.solvela.ai",
         value_parser = commands::util::validate_gateway_url,
     )]
     api_url: String,

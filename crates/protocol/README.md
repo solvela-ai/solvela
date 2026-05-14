@@ -16,7 +16,7 @@ solvela-protocol = "0.2"
 
 ## What's inside
 
-- `PaymentRequired`, `PaymentPayload`, `Accept` — x402 wire types
+- `PaymentRequired`, `PaymentPayload`, `PaymentAccept` — x402 wire types
 - `ChatRequest`, `ChatResponse` — OpenAI-compatible chat types
 - `ModelInfo` — model registry entry shape
 - USDC mint, Solana network IDs, and other shared constants
