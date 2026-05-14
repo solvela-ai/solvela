@@ -20,7 +20,7 @@ export function UpgradeCta() {
           this page plus the dashboard.
         </p>
         <Link
-          href="https://solvela.ai/pricing"
+          href="https://docs.solvela.ai/docs/concepts/pricing"
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-1.5 px-4 py-2 text-[14px] font-medium bg-[#1F1E1D] text-[#FAF9F5] border border-[#1F1E1D] rounded-md hover:opacity-90 transition-opacity"

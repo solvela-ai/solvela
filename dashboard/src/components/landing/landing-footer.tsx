@@ -32,7 +32,7 @@ export function LandingFooter() {
               { label: 'docs', href: DOCS_URL },
               { label: 'app', href: APP_URL },
               { label: 'quickstart', href: `${DOCS_URL}/docs/quickstart` },
-              { label: 'changelog', href: `${DOCS_URL}/docs/changelog` },
+              { label: 'changelog', href: `${GITHUB_URL}/blob/main/CHANGELOG.md` },
             ]}
           />
 
