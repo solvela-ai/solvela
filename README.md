@@ -247,10 +247,15 @@ npm install @solvela/sdk
 ```
 
 ```typescript
-import { LLMClient } from '@solvela/sdk';
+import { SolvelaClient, ChatRequest, ChatMessage } from '@solvela/sdk';
 
-const client = new LLMClient();
-const response = await client.chat('openai/gpt-4o', 'Hello!');
+const client = new SolvelaClient({
+  config: { gatewayUrl: 'https://api.solvela.ai' },
+});
+const response = await client.chat(
+  new ChatRequest('openai/gpt-4o', [new ChatMessage('user', 'Hello!')]),
+);
+console.log(response.choices[0].message.content);
 ```
 
 ### Go

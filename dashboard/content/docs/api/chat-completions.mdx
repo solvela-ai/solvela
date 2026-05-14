@@ -157,29 +157,32 @@ data: [DONE]
   </Tab>
   <Tab value="TypeScript">
     ```typescript
-    import { LLMClient } from '@solvela/sdk';
+    import { SolvelaClient, ChatRequest, ChatMessage } from '@solvela/sdk';
 
-    const client = new LLMClient({
-      apiUrl: 'https://api.solvela.ai',
-      // private key signs payments automatically
+    const client = new SolvelaClient({
+      config: { gatewayUrl: 'https://api.solvela.ai' },
+      // wallet + signer load from SOLANA_PRIVATE_KEY by default
     });
 
     // Simple one-shot
-    const text = await client.chat('auto', 'What is Solana?');
-    console.log(text);
+    const simple = await client.chat(
+      new ChatRequest('auto', [new ChatMessage('user', 'What is Solana?')]),
+    );
+    console.log(simple.choices[0].message.content);
 
-    // Full request with options
-    const response = await client.chatCompletion({
-      model: 'openai/gpt-4o',
-      messages: [
-        { role: 'system', content: 'You are a blockchain expert.' },
-        { role: 'user', content: 'Explain proof of history.' },
-      ],
-      maxTokens: 500,
-      temperature: 0.7,
-    });
+    // Full request with options (maxTokens, temperature)
+    const response = await client.chat(
+      new ChatRequest(
+        'openai/gpt-4o',
+        [
+          new ChatMessage('system', 'You are a blockchain expert.'),
+          new ChatMessage('user', 'Explain proof of history.'),
+        ],
+        /* maxTokens */ 500,
+        /* temperature */ 0.7,
+      ),
+    );
     console.log(response.choices[0].message.content);
-    console.log('Spent:', client.getSessionSpent(), 'USDC');
     ```
   </Tab>
   <Tab value="Python">
