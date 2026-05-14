@@ -28,32 +28,58 @@ If you are using the TypeScript, Python, Rust, or Go SDK, you never need to impl
   </Step>
 
   <Step title="Parse the 402 response">
-    The 402 body contains everything your client needs to construct a valid payment.
+    The 402 body wraps the `PaymentRequired` object inside an OpenAI-style `error.message` field as a JSON string. Parse `error.message` as JSON to access the fields.
 
-    ```json title="402 response body"
+    ```json title="402 response body (wire shape)"
     {
-      "x402_version": 1,
-      "cost_breakdown": {
-        "provider_cost": "0.000150",
-        "platform_fee": "0.000008",
-        "total": "0.000158",
-        "currency": "USDC",
-        "fee_percent": 5.0
-      },
-      "accepts": [
-        {
-          "scheme": "exact",
-          "network": "solana",
-          "amount": "158",
-          "asset": "USDC-SPL",
-          "pay_to": "<recipient_wallet>",
-          "max_timeout_seconds": 300
-        }
-      ]
+      "error": {
+        "type": "invalid_payment",
+        "message": "{\"x402_version\":2,\"resource\":{\"url\":\"/v1/chat/completions\",\"method\":\"POST\"},\"accepts\":[{\"scheme\":\"exact\",\"network\":\"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp\",\"amount\":\"2625\",\"asset\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"pay_to\":\"<gateway-recipient-wallet>\",\"max_timeout_seconds\":300},{\"scheme\":\"escrow\",\"network\":\"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp\",\"amount\":\"2625\",\"asset\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"pay_to\":\"<gateway-recipient-wallet>\",\"max_timeout_seconds\":300,\"escrow_program_id\":\"9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU\"}],\"cost_breakdown\":{\"provider_cost\":\"0.002500\",\"platform_fee\":\"0.000125\",\"total\":\"0.002625\",\"currency\":\"USDC\",\"fee_percent\":5},\"error\":\"Payment required\"}"
+      }
     }
     ```
 
-    Your client should read `accepts[0].amount` for the atomic-unit value and `accepts[0].pay_to` for the destination wallet. The `max_timeout_seconds` field tells you how long the signed transaction will be accepted before expiring.
+    Once you `JSON.parse(error.message)`, the inner `PaymentRequired` looks like:
+
+    ```json title="Parsed PaymentRequired"
+    {
+      "x402_version": 2,
+      "resource": { "url": "/v1/chat/completions", "method": "POST" },
+      "accepts": [
+        {
+          "scheme": "exact",
+          "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          "amount": "2625",
+          "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "pay_to": "<gateway-recipient-wallet>",
+          "max_timeout_seconds": 300
+        },
+        {
+          "scheme": "escrow",
+          "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          "amount": "2625",
+          "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "pay_to": "<gateway-recipient-wallet>",
+          "max_timeout_seconds": 300,
+          "escrow_program_id": "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+        }
+      ],
+      "cost_breakdown": {
+        "provider_cost": "0.002500",
+        "platform_fee": "0.000125",
+        "total": "0.002625",
+        "currency": "USDC",
+        "fee_percent": 5
+      },
+      "error": "Payment required"
+    }
+    ```
+
+    <Warning>
+    The `asset` field is the **SPL mint address** of the token being requested, not a symbolic name. For mainnet USDC this is always `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`. Verify this byte-for-byte in your client before signing — older drafts of the protocol used the literal string `"USDC-SPL"` and clients hardcoded against that will silently skip mint validation. The `network` field uses CAIP-2 form (`solana:<cluster-genesis-hash>`); the trailing identifier is the mainnet cluster genesis hash.
+    </Warning>
+
+    Your client should read `accepts[0].amount` for the atomic-unit value, `accepts[0].pay_to` for the destination wallet, and `accepts[0].asset` for the SPL mint. The `max_timeout_seconds` field tells you how long the signed transaction will be accepted before expiring.
   </Step>
 
   <Step title="Sign the Solana transaction">
@@ -66,18 +92,20 @@ If you are using the TypeScript, Python, Rust, or Go SDK, you never need to impl
     </Warning>
   </Step>
 
-  <Step title="Resubmit with the PAYMENT-SIGNATURE header">
-    Resend the original request body with the signed transaction encoded as base58 in the `PAYMENT-SIGNATURE` header.
+  <Step title="Resubmit with the payment-signature header">
+    Build a `PaymentPayload` JSON object containing your signed transaction, base64-encode the JSON, and resend the original request with the encoded value in the `payment-signature` header.
 
     ```bash title="Paid request"
     curl -X POST https://api.solvela.ai/v1/chat/completions \
       -H "Content-Type: application/json" \
-      -H "PAYMENT-SIGNATURE: 5UfgJ4...Kx29mQ" \
+      -H "payment-signature: <base64-encoded-PaymentPayload-JSON>" \
       -d '{
         "model": "auto",
         "messages": [{ "role": "user", "content": "Hello" }]
       }'
     ```
+
+    The `PaymentPayload` envelope itself contains `scheme`, `network`, and a `payload` field with the base58-encoded signed transaction bytes. The outer header value is base64-encoded JSON; the inner signed transaction is base58. See [x402 Protocol](/docs/concepts/x402) for the exact shape.
   </Step>
 
   <Step title="Receive the LLM response">
@@ -130,10 +158,10 @@ The `accepts` array may contain one or both payment schemes. Choose based on you
     ```json
     {
       "scheme": "exact",
-      "network": "solana",
-      "amount": "158",
-      "asset": "USDC-SPL",
-      "pay_to": "GatewayWa11et...",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "amount": "2625",
+      "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "pay_to": "<gateway-recipient-wallet>",
       "max_timeout_seconds": 300
     }
     ```
@@ -148,11 +176,12 @@ The `accepts` array may contain one or both payment schemes. Choose based on you
     ```json
     {
       "scheme": "escrow",
-      "network": "solana",
-      "amount": "158",
-      "asset": "USDC-SPL",
-      "escrow_program": "EscrowProg...",
-      "max_timeout_seconds": 300
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "amount": "2625",
+      "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "pay_to": "<gateway-recipient-wallet>",
+      "max_timeout_seconds": 300,
+      "escrow_program_id": "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
     }
     ```
   </Tab>

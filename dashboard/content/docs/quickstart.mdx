@@ -12,9 +12,9 @@ description: Make your first paid API call to Solvela in 5 minutes
 
 Before you start, you need:
 
-- A **Solana wallet** with a keypair (e.g. generated with `solana-keygen new`)
+- A **Solana wallet** with a keypair (e.g. generated with `solana-keygen new` or `solvela wallet new`)
 - **USDC-SPL** in that wallet on Solana mainnet (mint: `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`)
-- A small amount of **SOL** for transaction fees (about 0.002 SOL per call)
+- A small amount of **SOL** for transaction fees (Solana base fee is 5,000 lamports per signature — roughly 0.000005 SOL per call)
 
 </Step>
 
@@ -37,7 +37,7 @@ The SDKs handle the payment handshake automatically. Pick your language:
   </Tab>
   <Tab value="Go">
     ```bash
-    go get github.com/solvela-ai/solvela-go
+    go get github.com/solvela-ai/solvela/sdks/go
     ```
   </Tab>
   <Tab value="None (cURL)">
@@ -96,7 +96,7 @@ First, send a request without any payment header. The gateway will respond with 
         "fmt"
         "log"
 
-        solvela "github.com/solvela-ai/solvela-go"
+        solvela "github.com/solvela-ai/solvela/sdks/go"
     )
 
     func main() {
@@ -203,7 +203,7 @@ Build and sign a USDC-SPL transfer transaction to the `pay_to` address for the `
       // or pass it as a constructor option
     });
 
-    const reply = await client.chat('gpt-4o', 'Explain Solana in one sentence.');
+    const reply = await client.chat('openai/gpt-4o', 'Explain Solana in one sentence.');
     console.log(reply);
     console.log('Spent:', client.getSessionSpent(), 'USDC');
     ```
@@ -220,7 +220,7 @@ Build and sign a USDC-SPL transfer transaction to the `pay_to` address for the `
         client = SolvelaClient(wallet=wallet, signer=signer)
 
         response = await client.chat(ChatRequest(
-            model='gpt-4o',
+            model='openai/gpt-4o',
             messages=[ChatMessage(role=Role.USER, content='Explain Solana in one sentence.')],
         ))
         print(response.choices[0].message.content)
@@ -265,7 +265,7 @@ Build and sign a USDC-SPL transfer transaction to the `pay_to` address for the `
     # Set your private key
     export SOLVELA_SOLANA_PRIVATE_KEY=<your-base58-private-key>
 
-    solvela chat --model gpt-4o "Explain Solana in one sentence."
+    solvela chat --model openai/gpt-4o "Explain Solana in one sentence."
     ```
   </Tab>
 </Tabs>
@@ -283,7 +283,7 @@ curl https://api.solvela.ai/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "payment-signature: <base64-encoded-PaymentPayload>" \
   -d '{
-    "model": "gpt-4o",
+    "model": "openai/gpt-4o",
     "messages": [{"role": "user", "content": "Explain Solana in one sentence."}]
   }'
 ```

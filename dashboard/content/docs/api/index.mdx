@@ -63,7 +63,7 @@ All endpoints accept and return `application/json`. Streaming responses use SSE 
 
 ## Rate limiting
 
-The gateway enforces per-IP and per-wallet rate limits. The default ceiling is approximately 400 RPS. Exceeding the limit returns `429 Too Many Requests`.
+The gateway enforces per-IP and per-wallet rate limits. The default is **60 requests per 60-second sliding window** per wallet (and the same per IP, before wallet identity is established). Always read `X-RateLimit-Limit` and `X-RateLimit-Reset` from response headers rather than hardcoding expected values. Exceeding the limit returns `429 Too Many Requests`. Enterprise API keys can override these limits — see [Rate Limits](/docs/api/rate-limits).
 
 ## Error format
 
