@@ -356,6 +356,98 @@ describe('GatewayClient', () => {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // SEC-H1: PaymentExpectations — refuse-to-sign on phishing 402 responses.
+  // The chosen accept's pay_to and amount come from the gateway, which is
+  // attacker-controllable (DNS hijack, MITM, misconfigured host config). The
+  // client MUST refuse to sign when those values diverge from caller
+  // expectations and MUST refund the budget reservation it made before
+  // attempting to sign.
+  // -------------------------------------------------------------------------
+
+  it('SEC-H1: rejects 402 whose pay_to does not match expectedRecipient (and refunds budget)', async () => {
+    const phishing402 = {
+      ...payment402,
+      accepts: [{
+        ...payment402.accepts[0],
+        pay_to: 'AttackerWa11et1111111111111111111111111111111', // 43 chars, valid base58 shape
+      }],
+    };
+
+    const restore = mockFetch([
+      { status: 402, body: { error: { message: JSON.stringify(phishing402) } } },
+    ]);
+
+    try {
+      const c = new GatewayClient({
+        apiUrl: 'http://test.local',
+        expectedRecipient: '11111111111111111111111111111111', // what the caller pinned
+      });
+      await assert.rejects(
+        () => c.chat('openai/gpt-4o', [{ role: 'user', content: 'Hi' }]),
+        /Payment signing failed:.*recipient mismatch/,
+      );
+      // Budget reservation made before signing must be refunded after refusal.
+      assert.equal(c.spendSummary().session_usdc_spent, '0.000000');
+      assert.equal(c.spendSummary().total_requests, 0);
+    } finally {
+      restore();
+    }
+  });
+
+  it('SEC-H1: rejects 402 whose amount exceeds the cost_breakdown.total cap (and refunds budget)', async () => {
+    // Gateway returns a believable cost_breakdown.total but an inflated
+    // accepts[0].amount — the SDK must catch this via maxAmount: BigInt(costMicro)
+    // because the budget mutex authorized only the cost_breakdown amount.
+    const inflated402 = {
+      ...payment402,
+      accepts: [{
+        ...payment402.accepts[0],
+        amount: '99999999999', // way more than the 2500 micro-USDC in cost_breakdown
+      }],
+      // cost_breakdown.total stays at '0.002500' so the budget reservation
+      // computes costMicro = 2500. The signer must refuse the 99999999999.
+    };
+
+    const restore = mockFetch([
+      { status: 402, body: { error: { message: JSON.stringify(inflated402) } } },
+    ]);
+
+    try {
+      const c = new GatewayClient({ apiUrl: 'http://test.local' });
+      await assert.rejects(
+        () => c.chat('openai/gpt-4o', [{ role: 'user', content: 'Hi' }]),
+        /Payment signing failed:.*amount cap exceeded/,
+      );
+      assert.equal(c.spendSummary().session_usdc_spent, '0.000000');
+      assert.equal(c.spendSummary().total_requests, 0);
+    } finally {
+      restore();
+    }
+  });
+
+  it('SEC-H1: matching expectedRecipient passes through (stub-mode 200)', async () => {
+    // Sanity check the positive path: when pay_to matches, the SDK proceeds
+    // normally. Without this we couldn't tell whether expectedRecipient
+    // works at all vs. always rejects.
+    const restore = mockFetch([
+      { status: 402, body: { error: { message: JSON.stringify(payment402) } } },
+      { status: 200, body: chatResp },
+    ]);
+
+    try {
+      const c = new GatewayClient({
+        apiUrl: 'http://test.local',
+        expectedRecipient: payment402.accepts[0].pay_to,
+      });
+      const resp = await c.chat('openai/gpt-4o', [{ role: 'user', content: 'Hi' }]);
+      assert.equal(resp.choices[0].message.content, 'Paid reply');
+      assert.equal(c.spendSummary().session_usdc_spent, '0.002500');
+    } finally {
+      restore();
+    }
+  });
+
   it('listModels returns model list', async () => {
     const modelsResp = {
       object: 'list',
