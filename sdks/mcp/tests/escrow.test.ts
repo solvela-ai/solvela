@@ -17,6 +17,7 @@ import * as path from 'node:path';
 
 import { GatewayClient } from '../src/client.ts';
 import { createSessionStore } from '../src/session.ts';
+import { parseStrictUsdc } from '../src/parse-amount.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -291,34 +292,13 @@ describe('deposit_escrow session cap persistence', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Escrow mode gate (SOLVELA_ESCROW_MODE env var) — simulated validation
+// SOLVELA_ESCROW_MODE gate — previously three tests here asserted
+// `process.env['SOLVELA_ESCROW_MODE'] === 'enabled'` (JS string equality, not
+// any SDK code path). They would have passed even if index.ts deleted its
+// escrow gating entirely. Removed in favour of the `getTools()` block below,
+// which exercises the real production path. (Audit finding; deferred from
+// PR #277.)
 // ---------------------------------------------------------------------------
-
-describe('deposit_escrow SOLVELA_ESCROW_MODE gate', () => {
-  afterEach(() => {
-    delete process.env['SOLVELA_ESCROW_MODE'];
-  });
-
-  it('escrow is disabled when SOLVELA_ESCROW_MODE is not set', () => {
-    delete process.env['SOLVELA_ESCROW_MODE'];
-    const enabled = process.env['SOLVELA_ESCROW_MODE'] === 'enabled';
-    assert.equal(enabled, false, 'escrow should be disabled when env var is unset');
-  });
-
-  it('escrow is enabled when SOLVELA_ESCROW_MODE=enabled', () => {
-    process.env['SOLVELA_ESCROW_MODE'] = 'enabled';
-    const enabled = process.env['SOLVELA_ESCROW_MODE'] === 'enabled';
-    assert.equal(enabled, true, 'escrow should be enabled when env var is "enabled"');
-  });
-
-  it('any other SOLVELA_ESCROW_MODE value is invalid', () => {
-    const invalidValues = ['true', '1', 'yes', 'on', 'ENABLED'];
-    for (const val of invalidValues) {
-      const enabled = val === 'enabled';
-      assert.equal(enabled, false, `"${val}" should not be treated as enabled`);
-    }
-  });
-});
 
 // ---------------------------------------------------------------------------
 // getTools() — deposit_escrow appears only when escrow is enabled
@@ -397,19 +377,9 @@ describe('spending tool reset flag', () => {
 // ---------------------------------------------------------------------------
 
 describe('deposit_escrow strict amount parsing (H3)', () => {
-  // These tests validate the regex-first parse logic that index.ts uses.
-  // The regex is: /^\d+(\.\d+)?$/ — only accepts plain decimal strings.
-
-  function parseStrictUsdc(raw: string): number {
-    if (!/^\d+(\.\d+)?$/.test(raw)) {
-      throw new Error(`amount_usdc must be a positive decimal number, got: ${JSON.stringify(raw)}`);
-    }
-    const n = Number(raw);
-    if (!Number.isFinite(n) || n <= 0) {
-      throw new Error(`amount_usdc must be positive, got: ${raw}`);
-    }
-    return n;
-  }
+  // Tests the REAL parseStrictUsdc imported from src/parse-amount.ts.
+  // Previously this block re-implemented the regex inline — a production
+  // regex change would not have failed these tests (audit finding).
 
   it('plain decimal "5.00" is accepted', () => {
     assert.equal(parseStrictUsdc('5.00'), 5.0);
