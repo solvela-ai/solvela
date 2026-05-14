@@ -2,11 +2,11 @@ import { CountUp } from './count-up'
 import { METRICS } from './config'
 
 // Asymmetric widths break the "identical-tile grid" template. The first
-// tile (uptime) gets the most room; the last (platform fee) is compact.
+// tile gets the most room and the salmon left rail.
 export function InlineMetrics() {
   return (
     <div
-      className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-[var(--border)] sm:grid-cols-[1.2fr_1fr_1fr_0.9fr]"
+      className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-[var(--border)] sm:grid-cols-[1.4fr_1fr]"
     >
       {METRICS.map((m, i) => (
         <div

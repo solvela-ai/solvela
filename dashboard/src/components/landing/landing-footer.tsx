@@ -61,7 +61,7 @@ export function LandingFooter() {
             title="solvela"
             links={[
               { label: 'github', href: GITHUB_URL },
-              { label: 'status', href: `${APP_URL}/overview` },
+              { label: 'status', href: 'https://api.solvela.ai/health' },
               { label: 'security', href: `${DOCS_URL}/docs/operations/security` },
             ]}
           />
