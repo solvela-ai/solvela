@@ -48,6 +48,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install pytest
+        run: pip install --no-cache-dir pytest==9.0.2
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
 
