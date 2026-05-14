@@ -398,6 +398,70 @@ describe('GatewayClient', () => {
     const c = new GatewayClient({ apiUrl: 'http://test.local' });
     assert.equal(c.spendSummary().budget_remaining, null);
   });
+
+  // -------------------------------------------------------------------------
+  // T-3D: plaintext http:// gateway URL — warn unless SOLVELA_INSECURE_HTTP=1
+  // or the host is localhost/127.0.0.1/.local.
+  // -------------------------------------------------------------------------
+
+  function captureStderr(): { restore: () => void; output: () => string } {
+    const original = process.stderr.write.bind(process.stderr);
+    let captured = '';
+    process.stderr.write = (chunk: string | Uint8Array): boolean => {
+      captured += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8');
+      return true;
+    };
+    return {
+      restore: () => {
+        process.stderr.write = original;
+      },
+      output: () => captured,
+    };
+  }
+
+  it('T-3D: warns on plaintext http:// gateway URL with non-dev host', () => {
+    const cap = captureStderr();
+    try {
+      new GatewayClient({ apiUrl: 'http://attacker.example' });
+      assert.match(cap.output(), /WARN: gateway URL http:\/\/attacker\.example is plaintext HTTP/);
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it('T-3D: does NOT warn on http://localhost or 127.0.0.1', () => {
+    for (const host of ['http://localhost:8402', 'http://127.0.0.1:8402', 'http://api.local']) {
+      const cap = captureStderr();
+      try {
+        new GatewayClient({ apiUrl: host });
+        assert.doesNotMatch(cap.output(), /WARN: gateway URL/, `should not warn for ${host}`);
+      } finally {
+        cap.restore();
+      }
+    }
+  });
+
+  it('T-3D: SOLVELA_INSECURE_HTTP=1 silences the warning', () => {
+    process.env['SOLVELA_INSECURE_HTTP'] = '1';
+    const cap = captureStderr();
+    try {
+      new GatewayClient({ apiUrl: 'http://attacker.example' });
+      assert.doesNotMatch(cap.output(), /WARN: gateway URL/);
+    } finally {
+      cap.restore();
+      delete process.env['SOLVELA_INSECURE_HTTP'];
+    }
+  });
+
+  it('T-3D: does NOT warn on https://', () => {
+    const cap = captureStderr();
+    try {
+      new GatewayClient({ apiUrl: 'https://api.solvela.ai' });
+      assert.doesNotMatch(cap.output(), /WARN: gateway URL/);
+    } finally {
+      cap.restore();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -128,9 +128,12 @@ export class GatewayClient {
 
   constructor(opts: GatewayClientOptions = {}) {
     if (!opts.apiUrl && !process.env['SOLVELA_API_URL'] && process.env['RCR_API_URL']) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        '[solvela-mcp] RCR_API_URL is deprecated; set SOLVELA_API_URL instead. RCR_API_URL will be removed by 2026-08-01.',
+      // T-3C: use process.stderr.write — consistent with the rest of the file.
+      // `console.warn` routes through any logging framework patching `console`,
+      // which can swallow or re-route the deprecation message.
+      process.stderr.write(
+        '[solvela-mcp] RCR_API_URL is deprecated; set SOLVELA_API_URL instead. ' +
+        'RCR_API_URL will be removed by 2026-08-01.\n',
       );
     }
     this.apiUrl = (
@@ -139,6 +142,30 @@ export class GatewayClient {
       process.env['RCR_API_URL'] ?? // backward-compat fallback (warning emitted above)
       'https://api.solvela.ai'
     ).replace(/\/$/, '');
+
+    // T-3D: warn loudly on plaintext http:// gateway URLs. The 402 response is
+    // attacker-controllable when transport isn't TLS — a MITM can substitute
+    // its own pay_to and amount even though PaymentExpectations (PR #272)
+    // will refuse to sign mismatches. Allow http://localhost / 127.0.0.1 /
+    // *.local for dev silently; warn otherwise. Set SOLVELA_INSECURE_HTTP=1
+    // to suppress the warning once you've acknowledged the risk.
+    if (this.apiUrl.startsWith('http://') && process.env['SOLVELA_INSECURE_HTTP'] !== '1') {
+      const hostMatch = /^http:\/\/([^/:]+)/.exec(this.apiUrl);
+      const host = hostMatch?.[1] ?? '';
+      const isDevHost =
+        host === 'localhost' ||
+        host === '127.0.0.1' ||
+        host === '[::1]' ||
+        host.endsWith('.local') ||
+        host.endsWith('.localhost');
+      if (!isDevHost) {
+        process.stderr.write(
+          `[solvela-mcp] WARN: gateway URL ${this.apiUrl} is plaintext HTTP. ` +
+          `A MITM could swap pay_to/amount in the 402 response. Use https:// in production, ` +
+          `or set SOLVELA_INSECURE_HTTP=1 to silence this warning.\n`,
+        );
+      }
+    }
     this.sessionBudget = opts.sessionBudget;
     this.timeoutMs = opts.timeoutMs ?? 60_000;
     this.signingMode = opts.signingMode ?? 'auto';

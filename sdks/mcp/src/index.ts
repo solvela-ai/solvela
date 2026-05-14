@@ -32,7 +32,7 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { GatewayClient, type ChatMessage } from './client.js';
+import { GatewayClient, type ChatMessage, type ChatResponse } from './client.js';
 import { getTools } from './tools.js';
 import { createSessionStore } from './session.js';
 import { createPaymentHeader, decodePaymentHeader, isStubTransaction } from '@solvela/signer-core';
@@ -182,7 +182,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         messages.push({ role: 'user', content: prompt });
 
         const response = await client.chat(model, messages, { maxTokens: max_tokens, temperature });
-        const reply = response.choices[0]?.message.content ?? '';
+        const reply = extractReply(response);
 
         return {
           content: [
@@ -211,7 +211,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         messages.push({ role: 'user', content: prompt });
 
         const response = await client.chat(profile, messages, { maxTokens: max_tokens });
-        const reply = response.choices[0]?.message.content ?? '';
+        const reply = extractReply(response);
 
         return {
           content: [
@@ -500,8 +500,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 new PublicKey(escrowProgramId),
               );
               escrowPda = pda.toBase58();
-            } catch {
-              escrowPda = '(derivation failed — see agent_pubkey + service_id)';
+            } catch (pdaErr) {
+              // T-3E: previously stored a placeholder string in escrowPda. That
+              // value could be mistaken for a real account address downstream.
+              // Leave escrowPda empty and log the failure to stderr — the
+              // tool response now reports `escrow_pda_derivation_error` instead.
+              const msg = pdaErr instanceof Error ? pdaErr.message : String(pdaErr);
+              process.stderr.write(
+                `[solvela-mcp] WARN: PDA derivation failed (agent=${agentPubkey}): ${msg}\n`,
+              );
+              escrowPda = '';
             }
           }
         });
@@ -513,7 +521,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               text: JSON.stringify(
                 {
                   deposit_tx_signature: depositTxSignature,
+                  // T-3E: escrow_pda is empty when off-chain derivation failed.
+                  // Callers should branch on derivation_error rather than parse this.
                   escrow_pda: escrowPda,
+                  escrow_pda_derivation_error: escrowPda === '' ? true : undefined,
                   amount_deposited_usdc: amount.toFixed(6),
                   session_deposits_total_usdc: newTotal.toFixed(6),
                   session_deposits_cap_usdc: maxEscrowSession.toFixed(6),
@@ -533,6 +544,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   } catch (err) {
     if (err instanceof McpError) throw err;
 
+    // T-3B: log full stack to stderr before re-wrapping — McpError surfaces
+    // only `.message` to the host, which makes it impossible to correlate
+    // signing failures vs. gateway failures vs. parse failures vs. unexpected
+    // crashes. Stderr is out-of-band on stdio transport so this is safe.
+    if (err instanceof Error && err.stack) {
+      process.stderr.write(`[solvela-mcp] ERROR: ${err.stack}\n`);
+    }
     const message = err instanceof Error ? err.message : String(err);
     throw new McpError(ErrorCode.InternalError, message);
   }
@@ -541,6 +559,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * T-3F: extract the first assistant message from a chat response, throwing
+ * on an empty `choices` array.
+ *
+ * Background: the previous shape `response.choices[0]?.message.content ?? ''`
+ * silently turned an empty-choices response into a successful tool call with
+ * blank text. That happens when a provider error is wrapped in a 200 by the
+ * gateway, when a future schema change adds an `errors`-only response, or
+ * when the gateway stubs a response in a misconfigured dev environment. The
+ * MCP host saw "success, empty answer" instead of "the request failed."
+ *
+ * Throwing `McpError(InternalError, ...)` lets the host surface the failure
+ * to its UI and lets the user retry; the alternative (a blank reply) burned
+ * the user's budget on a non-response.
+ */
+function extractReply(response: ChatResponse): string {
+  if (!Array.isArray(response.choices) || response.choices.length === 0) {
+    throw new McpError(
+      ErrorCode.InternalError,
+      'Gateway returned a chat response with no choices — provider error wrapped in 200, ' +
+      'stubbed gateway response, or schema mismatch. Check the gateway logs.',
+    );
+  }
+  return response.choices[0].message.content ?? '';
+}
 
 function formatUsage(response: { model: string; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }): string {
   const u = response.usage;
