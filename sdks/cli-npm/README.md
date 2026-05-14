@@ -25,8 +25,8 @@ solvela --version
 solvela mcp install
 
 # Wallet management
-solvela wallet create
-solvela wallet balance
+solvela wallet init      # generate a new keypair (prints the address to fund)
+solvela wallet status    # show address + USDC-SPL balance
 
 # View available models
 solvela models
