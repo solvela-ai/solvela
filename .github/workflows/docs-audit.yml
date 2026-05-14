@@ -1,0 +1,84 @@
+name: Docs audit
+
+# Runs the mechanical docs drift detector under scripts/audit-docs/.
+# Fires only when something that could affect the docs↔code contract changes
+# (markdown/MDX files, the CLI source, the model registry, the audit infra
+# itself, or version files). The CLI binary is built in release mode because
+# both the cli_examples and subcommand_coverage checks shell out to
+# `solvela --help`.
+
+on:
+  pull_request:
+    paths:
+      - "**/*.md"
+      - "**/*.mdx"
+      - "crates/cli/src/**"
+      - "crates/gateway/src/**"
+      - "crates/protocol/src/constants.rs"
+      - "config/models.toml"
+      - "sdks/typescript/package.json"
+      - "Cargo.toml"
+      - "scripts/audit-docs/**"
+      - ".github/workflows/docs-audit.yml"
+  push:
+    branches: ["**"]
+    paths:
+      - "**/*.md"
+      - "**/*.mdx"
+      - "crates/cli/src/**"
+      - "crates/gateway/src/**"
+      - "crates/protocol/src/constants.rs"
+      - "config/models.toml"
+      - "sdks/typescript/package.json"
+      - "Cargo.toml"
+      - "scripts/audit-docs/**"
+      - ".github/workflows/docs-audit.yml"
+
+jobs:
+  audit:
+    name: audit-docs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c676846f29d98ff6b0106d3608c7ffd4048af17b  # v2
+
+      - name: Run unit tests
+        run: python3 -m pytest scripts/audit-docs/tests/ -v
+
+      - name: Build solvela-cli
+        # cli_examples and subcommand_coverage check `--help` against the real
+        # binary — they degrade to a warning if it's missing, but in CI we
+        # want flag drift to actually fail.
+        run: cargo build --release -p solvela-cli
+
+      - name: Run audit (errors fail the build)
+        id: audit
+        run: |
+          set +e
+          python3 scripts/audit-docs/audit.py --format text | tee audit-docs-output.txt
+          ec=${PIPESTATUS[0]}
+          python3 scripts/audit-docs/audit.py --format json > audit-docs-findings.json || true
+          echo "exit_code=$ec" >> "$GITHUB_OUTPUT"
+          exit $ec
+
+      - name: Upload findings artifact
+        if: always() && steps.audit.outputs.exit_code != '0'
+        uses: actions/upload-artifact@v7
+        with:
+          name: audit-docs-findings
+          path: |
+            audit-docs-findings.json
+            audit-docs-output.txt
+          retention-days: 14
