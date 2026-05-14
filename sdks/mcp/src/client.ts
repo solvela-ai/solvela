@@ -245,6 +245,11 @@ export class GatewayClient {
       body: bodyStr,
     });
 
+    // HF12: track whether we committed a budget reservation so a malformed
+    // 200 body (caught by parseJson below) can roll the reservation back.
+    // Stays `null` on the initial-200 path where no reservation happened.
+    let costMicroCommitted: number | null = null;
+
     if (resp.status === 402) {
       // HF5: parse402 throws instead of returning null.
       const paymentInfo = parse402(await resp.text());
@@ -279,6 +284,7 @@ export class GatewayClient {
         this.sessionSpentMicro += costMicro;
         await this.persistState();
       });
+      costMicroCommitted = costMicro;
 
       if (this.signingMode === 'off') {
         // off mode: send without payment header; gateway will likely 402 again
@@ -404,19 +410,49 @@ export class GatewayClient {
       throw new Error(`Gateway error ${resp.status}: ${sanitized}`);
     }
 
-    return resp.json() as Promise<ChatResponse>;
+    // HF12: A status-200 with a non-JSON body (proxy timeout HTML page, truncated
+    // response) used to throw an uncaught SyntaxError and silently leave the budget
+    // reservation committed. Catch parse failures, refund the committed cost (if
+    // we came through the 402 path), decrement requestCount, and rethrow with a
+    // descriptive message so the operator can tell parse failure apart from gateway
+    // error apart from signing failure.
+    try {
+      return (await resp.json()) as ChatResponse;
+    } catch (err) {
+      const parseMsg = err instanceof Error ? err.message : String(err);
+      await this.budgetMutex.runExclusive(async () => {
+        if (costMicroCommitted !== null) {
+          this.sessionSpentMicro = Math.max(0, this.sessionSpentMicro - costMicroCommitted);
+        }
+        this.requestCount = Math.max(0, this.requestCount - 1);
+        await this.persistState();
+      });
+      throw new Error(
+        `Gateway returned malformed JSON for chat (status ${resp.status}): ${parseMsg}`,
+      );
+    }
   }
 
   async listModels(): Promise<ModelsResponse> {
     const resp = await this.fetchWithTimeout(`${this.apiUrl}/v1/models`);
     if (!resp.ok) throw new Error(`Failed to list models: ${resp.status}`);
-    return resp.json() as Promise<ModelsResponse>;
+    try {
+      return (await resp.json()) as ModelsResponse;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Gateway returned malformed JSON for /v1/models (status ${resp.status}): ${msg}`);
+    }
   }
 
   async health(): Promise<HealthResponse> {
     const resp = await this.fetchWithTimeout(`${this.apiUrl}/health`);
     if (!resp.ok) throw new Error(`Health check failed: ${resp.status}`);
-    return resp.json() as Promise<HealthResponse>;
+    try {
+      return (await resp.json()) as HealthResponse;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Gateway returned malformed JSON for /health (status ${resp.status}): ${msg}`);
+    }
   }
 
   spendSummary(): SpendSummary {

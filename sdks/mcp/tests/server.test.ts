@@ -448,6 +448,96 @@ describe('GatewayClient', () => {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // HF12: malformed-JSON 200 must refund the committed budget reservation and
+  // surface a descriptive error (not a raw SyntaxError). Audit flagged this
+  // as a silent over-accounting bug: budget was committed at 402 reservation
+  // time but never refunded on parse failure.
+  // -------------------------------------------------------------------------
+
+  it('HF12: chat retry returns 200 with non-JSON body → refunds budget + throws descriptive error', async () => {
+    // Custom mock — mockFetch helper always returns valid JSON; we need a
+    // .json() that throws to simulate a proxy timeout HTML page or a
+    // truncated response body.
+    let callCount = 0;
+    const originalFetch = globalThis.fetch;
+    // @ts-expect-error — intentional mock override
+    globalThis.fetch = async (_url: string, _init?: RequestInit): Promise<Response> => {
+      callCount++;
+      if (callCount === 1) {
+        const bodyStr = JSON.stringify({ error: { message: JSON.stringify(payment402) } });
+        return {
+          status: 402,
+          ok: false,
+          json: () => Promise.resolve(JSON.parse(bodyStr)),
+          text: () => Promise.resolve(bodyStr),
+        } as unknown as Response;
+      }
+      // Retry returns 200 with a malformed body — simulates an HTML proxy page.
+      return {
+        status: 200,
+        ok: true,
+        json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON at position 0')),
+        text: () => Promise.resolve('<html>504 Gateway Timeout</html>'),
+      } as unknown as Response;
+    };
+
+    try {
+      const c = new GatewayClient({ apiUrl: 'http://test.local' });
+      await assert.rejects(
+        () => c.chat('openai/gpt-4o', [{ role: 'user', content: 'Hi' }]),
+        /Gateway returned malformed JSON for chat.*Unexpected token/,
+      );
+      // Budget reservation was committed during 402 handling — must be refunded.
+      assert.equal(c.spendSummary().session_usdc_spent, '0.000000');
+      // requestCount was bumped just before parse — must be rolled back.
+      assert.equal(c.spendSummary().total_requests, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('HF12: chat retry returns non-2xx → budget is refunded (regression for the existing refund path)', async () => {
+    // The refund at client.ts (non-2xx retry) has been live since HF2 but
+    // had no test. Lock the behavior in: 402 → sign → retry 500 → throw + refund.
+    const restore = mockFetch([
+      { status: 402, body: { error: { message: JSON.stringify(payment402) } } },
+      { status: 500, body: { error: 'internal error' } },
+    ]);
+
+    try {
+      const c = new GatewayClient({ apiUrl: 'http://test.local' });
+      await assert.rejects(
+        () => c.chat('openai/gpt-4o', [{ role: 'user', content: 'Hi' }]),
+        /Gateway error 500/,
+      );
+      assert.equal(c.spendSummary().session_usdc_spent, '0.000000');
+      assert.equal(c.spendSummary().total_requests, 0);
+    } finally {
+      restore();
+    }
+  });
+
+  it('HF12: listModels with non-JSON body → throws descriptive error (not raw SyntaxError)', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (): Promise<Response> => ({
+      status: 200,
+      ok: true,
+      json: () => Promise.reject(new SyntaxError('Unexpected end of JSON input')),
+      text: () => Promise.resolve(''),
+    }) as unknown as Response;
+
+    try {
+      const c = new GatewayClient({ apiUrl: 'http://test.local' });
+      await assert.rejects(
+        () => c.listModels(),
+        /Gateway returned malformed JSON for \/v1\/models.*Unexpected end of JSON input/,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('listModels returns model list', async () => {
     const modelsResp = {
       object: 'list',
