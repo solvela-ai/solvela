@@ -14,8 +14,7 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE",
-    "SECURITY.md"
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public",
