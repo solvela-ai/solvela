@@ -12,7 +12,7 @@ at evidence don't get to claim a bug.
 
 ## Status
 
-Two agentic checks ship today:
+Three agentic checks ship today:
 
 - **`page_review`** — one agent per top-tier user-facing doc; broad mandate
   to find anything that would mislead a reader.
@@ -20,9 +20,11 @@ Two agentic checks ship today:
   paid chat, list models); compares all SDKs' implementations against the
   protocol wire types and Rust CLI reference. Catches the `@solvela/sdk@0.2.1`
   wire-incompat bug class.
+- **`pr_diff`** — on every PR, one agent reads the diff and predicts which
+  doc pages probably need updating. CI workflow posts a **sticky comment**
+  on the PR with the suggestions. Informational only; never blocks merge.
 
-Remaining Phase 2 checks (PR-diff comment poster, clean-container onboarding
-simulation) are deferred to follow-up PRs.
+The clean-container onboarding simulation is deferred to a follow-up PR.
 
 ## Running it
 
@@ -58,7 +60,27 @@ python scripts/audit-docs/audit.py --agentic sdk_parity --op send_paid_chat
 
 # Run both checks in one pass — they share the budget tracker.
 python scripts/audit-docs/audit.py --agentic page_review --agentic sdk_parity
+
+# PR-diff suggestions — preview what the CI comment would say.
+python scripts/audit-docs/audit.py --agentic pr_diff \
+  --diff origin/main..HEAD \
+  --comment-out /tmp/preview.md
+cat /tmp/preview.md
 ```
+
+### CI integration (pr_diff only)
+
+The `.github/workflows/docs-audit-pr.yml` workflow runs `pr_diff` on every PR
+(open / push / reopen) and posts a sticky comment with the suggestions. It:
+
+- Skips silently when `ANTHROPIC_API_KEY` is unset (forks, contributors).
+- Posts at most ONE comment per PR — re-runs delete the prior comment by
+  sentinel match before posting the new one.
+- Hard-caps spend at `$0.50` per PR via `--max-cost-usd`.
+- Never blocks merge — the workflow has no `required` status check.
+
+Add the `ANTHROPIC_API_KEY` repo secret to enable. Without it, the workflow
+runs to the gate step and exits cleanly (no comment, no failure).
 
 JSON output (for piping into the same `Finding`-shaped pipeline as Phase 1):
 
@@ -79,7 +101,8 @@ that's ~$0.01–0.03 per page.
 | `page_review` full corpus (~43 pages) | $1.50–2.00 | $7–10 | $0.40–0.60 |
 | `sdk_parity` 1 op | ~$0.05 | ~$0.25 | ~$0.02 |
 | `sdk_parity` all 3 ops | ~$0.30 | ~$1.50 | ~$0.10 |
-| Both checks combined | ~$2.30 | ~$11 | ~$0.70 |
+| `pr_diff` per PR (typical) | $0.02–0.10 | $0.10–0.50 | <$0.02 |
+| All three checks combined | ~$2.40 | ~$11.50 | ~$0.75 |
 
 The orchestrator tracks token usage cumulatively and hard-stops when the
 configured budget is reached. Set `--max-cost-usd` to control the ceiling.
@@ -118,6 +141,6 @@ citation discipline. Gating CI on an LLM call would (a) eat tokens on every
 PR and (b) train reviewers to ignore the audit when it cries wolf. Manual
 or cron-driven runs preserve the signal.
 
-A future PR may add **PR-diff comment posting** — an LLM looks at the diff,
-posts the suggestion as a PR comment, but never blocks merge. That's a
-different shape from this PR.
+`pr_diff` is the only agentic check that runs in CI by default — but it
+**posts a comment, never fails the build**. The deliberate split: if you
+trust the audit enough to gate on it, write a mechanical check instead.
