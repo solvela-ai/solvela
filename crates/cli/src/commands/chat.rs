@@ -32,6 +32,17 @@ fn select_payment_scheme<'a>(
 }
 
 /// Generate a unique 32-byte service_id by hashing the request body + random nonce.
+///
+/// Issue #118 security invariant: the nonce is load-bearing. Without it,
+/// two identical request bodies would produce the same service_id →
+/// same escrow PDA → same vault ATA, all derivable off-chain *before*
+/// the deposit broadcasts (front-running ATA creation, confidentiality
+/// leak via on-chain correlation of vault address to specific prompts).
+/// The on-chain program treats `service_id` as opaque bytes, so this is
+/// a purely off-chain discipline — do NOT remove the nonce mix here.
+/// Regression test: `tests::test_generate_service_id_unique_with_nonce`.
+/// See `crates/x402/src/escrow/AGENTS.md` "service_id MUST mix a
+/// per-request CSPRNG nonce" for the parallel TS-side implementation.
 fn generate_service_id(request_body: &[u8]) -> Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     hasher.update(request_body);
