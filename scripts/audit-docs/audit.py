@@ -3,10 +3,16 @@
 
 Run from repo root:
 
-    python scripts/audit-docs/audit.py            # all checks, pretty output
+    python scripts/audit-docs/audit.py            # all mechanical checks, pretty output
     python scripts/audit-docs/audit.py --format json
     python scripts/audit-docs/audit.py --check cli_examples
     python scripts/audit-docs/audit.py --check-external --strict
+
+Agentic Phase 2 checks (LLM-driven, opt-in, cost-bearing):
+
+    python scripts/audit-docs/audit.py --agentic page_review --dry-run
+    python scripts/audit-docs/audit.py --agentic page_review --max-cost-usd 5
+    python scripts/audit-docs/audit.py --agentic page_review --doc dashboard/content/docs/quickstart.mdx
 
 Exit codes:
   0  no errors
@@ -75,6 +81,39 @@ def _detect_repo_root() -> Path:
     )
 
 
+def _run_agentic(args, ctx: AuditContext) -> list[Finding]:
+    """Lazy-import the agentic layer so the mechanical-only path stays free
+    of the anthropic SDK dependency."""
+    from agentic import page_review  # noqa: WPS433
+    from agentic.client import make_client  # noqa: WPS433
+
+    try:
+        client = make_client(
+            model=args.model,
+            max_cost_usd=args.max_cost_usd,
+            dry_run=args.dry_run,
+        )
+    except RuntimeError as e:
+        eprint(f"audit-docs: agentic setup failed: {e}")
+        return [
+            Finding(
+                check="agentic",
+                severity=Severity.ERROR,
+                message=str(e),
+            )
+        ]
+
+    findings: list[Finding] = []
+    for name in args.agentic:
+        if name == "page_review":
+            result = page_review.run(ctx, client=client, doc_filter=args.doc)
+            findings.extend(result.findings)
+            page_review.print_summary(result)
+        else:
+            eprint(f"audit-docs: unknown agentic check: {name}")
+    return findings
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="audit-docs",
@@ -102,6 +141,39 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Also HEAD-check external URLs in the links check (slow, network-dependent).",
     )
+
+    # Agentic (Phase 2) flags. Default off; --agentic opts in.
+    parser.add_argument(
+        "--agentic",
+        action="append",
+        choices=["page_review"],
+        help="Run an LLM-driven agentic check. May be repeated. Default: none.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Agentic only: estimate token use without calling the API.",
+    )
+    parser.add_argument(
+        "--model",
+        default="claude-sonnet-4-6",
+        help="Agentic only: model id (default: claude-sonnet-4-6).",
+    )
+    parser.add_argument(
+        "--max-cost-usd",
+        type=float,
+        default=5.0,
+        help="Agentic only: hard ceiling on total spend per run (default: 5.0).",
+    )
+    parser.add_argument(
+        "--doc",
+        action="append",
+        help=(
+            "Agentic only: narrow to one or more doc relpaths (repeatable). "
+            "Useful for iterating on a single page."
+        ),
+    )
+
     args = parser.parse_args(argv)
 
     try:
@@ -118,7 +190,10 @@ def main(argv: list[str] | None = None) -> int:
         sdk_source_files=find_sdk_sources(repo_root),
     )
 
-    selected = args.check or list(CHECKS.keys())
+    # If the user asked for ONLY agentic checks, skip the mechanical pass.
+    run_mechanical = not (args.agentic and not args.check)
+
+    selected = args.check or (list(CHECKS.keys()) if run_mechanical else [])
     findings: list[Finding] = []
     for name in selected:
         mod = CHECKS[name]
@@ -126,6 +201,9 @@ def main(argv: list[str] | None = None) -> int:
             findings.extend(mod.run(ctx, check_external=args.check_external))
         else:
             findings.extend(mod.run(ctx))
+
+    if args.agentic:
+        findings.extend(_run_agentic(args, ctx))
 
     if args.format == "json":
         sys.stdout.write(format_findings_json(findings))

@@ -1,0 +1,9 @@
+# Optional dependencies for the agentic Phase 2 checks. The Phase 1
+# mechanical checks need no install — pure stdlib.
+#
+#   pip install -r scripts/audit-docs/requirements.txt
+#
+# pytest is listed for CI; the audit itself doesn't need it.
+
+anthropic>=0.45.0,<1.0.0
+pytest>=8.0,<10.0
