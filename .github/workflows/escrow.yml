@@ -1,0 +1,131 @@
+name: escrow
+
+# Dedicated CI for the Anchor escrow program at programs/escrow/.
+#
+# The escrow crate opts out of the parent Cargo workspace
+# (programs/escrow/Cargo.toml top-line `[workspace]`) because anchor-lang
+# 0.31 pins thiserror ^1 / base64 ^0.21 while the workspace uses ^2 /
+# ^0.22. That opt-out means the workspace's `Rust (fmt, clippy, test)`
+# job at .github/workflows/ci.yml does NOT exercise this program — see
+# issue #162 for the gap that motivated this file. Mirrors the dedicated
+# workflows for the sibling opt-out packages: openclaw-provider.yml,
+# mcp.yml, ai-sdk-provider.yml.
+
+on:
+  push:
+    paths:
+      - 'programs/escrow/**'
+      - '.github/workflows/escrow.yml'
+  pull_request:
+    paths:
+      - 'programs/escrow/**'
+      - '.github/workflows/escrow.yml'
+
+defaults:
+  run:
+    working-directory: programs/escrow
+
+# Concurrency: cancel any in-flight run for the same PR/branch when a
+# new commit lands, matching the rest of the repo's CI workflows.
+concurrency:
+  group: escrow-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  unit:
+    name: Unit tests (no .so required)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      # tests/unit.rs has no feature gate; tests/integration.rs is gated
+      # behind `--features sbf`. Default `cargo test` runs the unit suite
+      # from a fresh checkout without needing target/deploy/*.so.
+      - run: cargo test --test unit
+
+  mainnet-build:
+    name: cargo check --features mainnet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      # Mainnet deploys MUST be built with `--features mainnet` — without
+      # it the program targets the devnet USDC mint and would silently
+      # reject all mainnet USDC deposits (`mint mismatch`). Only the
+      # actual deploy uses this flag, so without this job a mainnet-only
+      # compile error would go unnoticed until release day.
+      - run: cargo check --lib --features mainnet
+
+  sbf-build:
+    name: cargo build-sbf
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Solana CLI
+        # `release.anza.xyz` is the post-rebrand canonical URL after
+        # Solana Labs → Anza handover; `release.solana.com` still
+        # redirects but Anza is the active source of truth. The install
+        # script drops the toolchain in $HOME/.local/share/solana/...
+        # and prepends its bin dir to PATH for subsequent steps.
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+      - name: Show toolchain versions
+        run: |
+          solana --version
+          cargo build-sbf --version
+      - run: cargo build-sbf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: solvela_escrow.so
+          path: programs/escrow/target/deploy/solvela_escrow.so
+          retention-days: 7
+
+  integration:
+    name: Integration tests (LiteSVM, --features sbf)
+    runs-on: ubuntu-latest
+    needs: sbf-build
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: solvela_escrow.so
+          path: programs/escrow/target/deploy/
+      # tests/integration.rs is gated behind `--features sbf` because
+      # it `include_bytes!`s target/deploy/solvela_escrow.so. The
+      # sbf-build job produced that .so above; this job runs the
+      # LiteSVM-driven happy-path + error-case suite against it.
+      - run: cargo test --features sbf --test integration
+
+# Notes on what's intentionally NOT here:
+#
+# - clippy --all-targets -- -D warnings:  Anchor 0.31's macro crates
+#   (`anchor-attribute-program`, `anchor-derive-accounts`) emit ~14
+#   `unexpected_cfgs` warnings on current rustc that can't be fixed
+#   without an Anchor 0.32+ migration. Tracked in issue #114 (and
+#   #155/#156 for the broader anchor 1.0 plan). Adding clippy with
+#   `-D warnings` today would always fail; without `-D warnings` it
+#   would always pass and add no signal. Re-evaluate after the
+#   anchor upgrade lands.
+#
+# - cargo audit / cargo-deny: the workspace's CI already runs these
+#   against the workspace tree. The escrow crate's dependency set is
+#   pinned by anchor-lang 0.31's lockfile and shares many transitive
+#   deps with the workspace, so a separate audit run here would
+#   double-cover with no extra signal.
+#
+# - Solana toolchain caching: deferred until cold-start time becomes
+#   a real friction point. The install is ~30s; if PR throughput
+#   makes that visible, add an actions/cache step keyed on
+#   `solana --version`.
