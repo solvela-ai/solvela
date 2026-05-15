@@ -30,6 +30,23 @@ _(none)_
 - Use checked arithmetic everywhere (`checked_add`, `checked_sub`) — escrow deals with funds.
 - Fire-and-forget claim submission: the gateway writes to `claim_queue` synchronously, but a background task drains it. Never block a user request on claim settlement.
 
+#### `service_id` MUST mix a per-request CSPRNG nonce (security invariant)
+
+`crates/x402/src/escrow/` accepts `service_id: [u8; 32]` as an input — derivation is the client's responsibility. **Clients MUST mix a per-request CSPRNG nonce into the `service_id` hash**, not derive it as a pure function of `request_body` alone. Without the nonce, two identical request bodies produce the same `service_id` → the same escrow PDA → the same vault ATA, all of which are computable off-chain from `(agent_pubkey, service_id_derivation_rule, USDC_MINT)` *before* the deposit broadcasts. That enables:
+
+1. **Front-running ATA creation** — an attacker pre-creates the vault ATA. Post-#115 this no longer breaks claim, but is still a confusion vector.
+2. **Confidentiality leak** — an on-chain observer who knows the derivation rule can correlate vault addresses to specific prompts/models. Service traffic patterns become decoderable from the public ledger.
+3. **Pre-deposit grief** — pre-creating the vault ATA with dust skews telemetry counters.
+
+The on-chain program treats `service_id` as opaque bytes, so this is a purely off-chain discipline. The nonce becomes part of the off-chain receipt and is persisted alongside the deposit (e.g. in `claim_queue.service_id`) so the gateway can re-derive PDAs at claim time.
+
+Current implementations:
+
+- **Rust CLI**: `crates/cli/src/commands/chat.rs::generate_service_id` — SHA-256 of `(request_body, 8-byte CSPRNG nonce via getrandom)`. Regression test: `tests::test_generate_service_id_unique_with_nonce`.
+- **TS signer-core**: `sdks/signer-core/src/sign.ts::buildEscrowPaymentHeader` — SHA-256 of `(bodyBytes, 8-byte CSPRNG via node:crypto.randomBytes)`. Regression test: `'service_id differs across calls (random component)'` in `sdks/signer-core/tests/sign.test.ts`.
+
+If you add a new client (Go SDK, in-tree gateway test fixture, etc.), mirror the same `SHA-256(body || nonce)` shape and add an `identical_body_distinct_service_ids` regression test. Filed under issue #118.
+
 ### Testing Requirements
 ```bash
 cargo test -p x402 escrow

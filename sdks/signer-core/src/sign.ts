@@ -218,6 +218,19 @@ async function buildEscrowPaymentHeader(
   requestBody: string | undefined,
 ): Promise<EscrowInner> {
   const bodyBytes = Buffer.from(requestBody ?? '', 'utf-8');
+  // Issue #118 security invariant: the service_id MUST mix a per-request
+  // CSPRNG nonce, not be a pure function of requestBody alone. Without
+  // the nonce, two identical request bodies would produce the same
+  // service_id → same escrow PDA → same vault ATA, all derivable
+  // off-chain *before* the deposit broadcasts (front-running ATA
+  // creation, confidentiality leak via on-chain correlation of vault
+  // address to specific prompts). The on-chain program treats
+  // service_id as opaque bytes, so this is a purely off-chain
+  // discipline — do NOT remove `random` thinking it's unused. The
+  // matching test is 'service_id differs across calls (random
+  // component)' in tests/sign.test.ts. See also
+  // `crates/x402/src/escrow/AGENTS.md` "service_id MUST mix a
+  // per-request CSPRNG nonce".
   const random = randomBytes(8);
   const serviceId = createHash('sha256').update(bodyBytes).update(random).digest();
   const serviceIdB64 = serviceId.toString('base64');
