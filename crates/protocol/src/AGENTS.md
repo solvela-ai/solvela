@@ -28,7 +28,7 @@ _(none)_
 ### Working In This Directory
 - These are public wire types. Adding a field: use `#[serde(default)]` or `Option<T>` so existing clients keep working. Renaming: bump a version, do not silently break.
 - Derive order: `Debug, Clone, Serialize, Deserialize` (Serde last).
-- Use `#[serde(rename_all = "snake_case")]` only when the spec requires it — otherwise rely on default camelCase-via-Serde.
+- Field names serialize as the Rust identifier verbatim — i.e. **snake_case** in idiomatic Rust. Serde does **not** rename by default. The wire format is snake_case across every struct in this crate (`pay_to`, `cost_breakdown`, `x402_version`, `context_window`, `input_cost_per_million`, `supports_streaming`, etc.). Apply `#[serde(rename_all = "camelCase")]` explicitly only if a spec requires camelCase — that is a breaking wire-format change and requires a major version bump and coordinated SDK rollout.
 - Keep modules small — one logical concept per file.
 
 ### Testing Requirements
