@@ -64,6 +64,26 @@ jobs:
           base_sha="${{ github.event.pull_request.base.sha }}"
           echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
 
+      - name: Diag — probe api.anthropic.com (temporary)
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          http=$(curl -sS -o /tmp/anth.body -w "%{http_code}" \
+            -X POST https://api.anthropic.com/v1/messages \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -d '{"model":"claude-haiku-4-5-20251001","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}')
+          curl_rc=$?
+          echo "curl exit: $curl_rc"
+          echo "HTTP status: $http"
+          echo "--- response body (sk-* prefixes redacted defensively) ---"
+          head -c 800 /tmp/anth.body | sed -E 's/(sk-[a-zA-Z0-9_-]{4})[a-zA-Z0-9_-]+/\1***REDACTED***/g'
+          echo
+          echo "--- end body ---"
+
       - name: Run pr_diff
         if: steps.gate.outputs.skip != 'true'
         env:
