@@ -1,0 +1,82 @@
+name: Docs audit (onboarding journey)
+
+# Runs the journey scenario(s) end-to-end. Catches the bug class where the
+# docs say one thing and a user following them verbatim hits a confusing
+# error (the original `solvela chat` / SOLANA_RPC_URL incident).
+#
+# Not on pull_request — needs a Rust build (3-5 min) and would slow every
+# PR for limited per-PR value. Run on:
+#   - workflow_dispatch (manual, useful before a release)
+#   - weekly cron (Sunday 06:00 UTC) — catches drift between active PRs
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "Scenario id to run (default: rust_cli)"
+        required: false
+        default: "rust_cli"
+        type: string
+  schedule:
+    - cron: "0 6 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  journey:
+    name: onboarding journey
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c676846f29d98ff6b0106d3608c7ffd4048af17b  # v2
+
+      - name: Build solvela-cli
+        run: cargo build --release -p solvela-cli
+
+      - name: Resolve scenario id
+        id: scn
+        run: |
+          # Cron triggers don't fill the `inputs` block; default to rust_cli.
+          scenario="${{ inputs.scenario }}"
+          if [ -z "${scenario}" ]; then
+            scenario="rust_cli"
+          fi
+          echo "name=${scenario}" >> "$GITHUB_OUTPUT"
+
+      - name: Run journey
+        id: journey
+        run: |
+          set +e
+          python3 scripts/audit-docs/audit.py \
+            --journey "${{ steps.scn.outputs.name }}" \
+            --format text | tee journey-output.txt
+          ec=${PIPESTATUS[0]}
+          python3 scripts/audit-docs/audit.py \
+            --journey "${{ steps.scn.outputs.name }}" \
+            --format json > journey-findings.json || true
+          echo "exit_code=${ec}" >> "$GITHUB_OUTPUT"
+          exit ${ec}
+
+      - name: Upload findings on failure
+        if: always() && steps.journey.outputs.exit_code != '0'
+        uses: actions/upload-artifact@v7
+        with:
+          name: journey-findings-${{ steps.scn.outputs.name }}
+          path: |
+            journey-findings.json
+            journey-output.txt
+          retention-days: 30

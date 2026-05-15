@@ -14,6 +14,11 @@ Agentic Phase 2 checks (LLM-driven, opt-in, cost-bearing):
     python scripts/audit-docs/audit.py --agentic page_review --max-cost-usd 5
     python scripts/audit-docs/audit.py --agentic page_review --doc dashboard/content/docs/quickstart.mdx
 
+Onboarding journey simulation (deterministic, opt-in):
+
+    python scripts/audit-docs/audit.py --journey rust_cli
+    python scripts/audit-docs/audit.py --journey help
+
 Exit codes:
   0  no errors
   1  at least one error finding (or warning when --strict)
@@ -134,6 +139,16 @@ def _run_agentic(args, ctx: AuditContext) -> list[Finding]:
     return findings
 
 
+def _run_journey(args, ctx: AuditContext) -> list[Finding]:
+    """Lazy-import the journey layer; runs each named scenario."""
+    from journey import orchestrator as journey_orch  # noqa: WPS433
+
+    scenario_names = [j for j in args.journey if j != "help"]
+    result = journey_orch.run(ctx, scenario_names)
+    journey_orch.print_summary(result)
+    return result.findings
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="audit-docs",
@@ -217,6 +232,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    parser.add_argument(
+        "--journey",
+        action="append",
+        help=(
+            "Run a deterministic onboarding-journey scenario. Repeatable. "
+            "Use `--journey help` to list scenarios."
+        ),
+    )
+
     args = parser.parse_args(argv)
 
     try:
@@ -233,8 +257,18 @@ def main(argv: list[str] | None = None) -> int:
         sdk_source_files=find_sdk_sources(repo_root),
     )
 
-    # If the user asked for ONLY agentic checks, skip the mechanical pass.
-    run_mechanical = not (args.agentic and not args.check)
+    # Handle `--journey help` before anything else — just list scenarios.
+    if args.journey and any(j == "help" for j in args.journey):
+        from journey import orchestrator as journey_orch  # noqa: WPS433
+
+        for name, desc in journey_orch.list_scenarios():
+            print(f"{name}  {desc}")
+        return 0
+
+    # If the user asked for ONLY agentic or journey checks, skip mechanical.
+    run_mechanical = not (
+        (args.agentic or args.journey) and not args.check
+    )
 
     selected = args.check or (list(CHECKS.keys()) if run_mechanical else [])
     findings: list[Finding] = []
@@ -247,6 +281,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.agentic:
         findings.extend(_run_agentic(args, ctx))
+
+    if args.journey:
+        findings.extend(_run_journey(args, ctx))
 
     if args.format == "json":
         sys.stdout.write(format_findings_json(findings))
