@@ -347,6 +347,47 @@ describe('parseGateway402', () => {
     expect(() => parseGateway402(garbage)).toThrow(SolvelaPaymentError);
   });
 
+  it('rejects accept.amount with trailing garbage at parse time (not at selectAccept)', () => {
+    // Issue #129: the pre-schema parser accepted any non-empty string for
+    // `accepts[i].amount` and only caught format errors when `BigInt()`
+    // was called in `selectAccept` — fine for the chosen accept, but a
+    // malformed amount on a non-selected accept (`scheme="exact"`, but
+    // listed alongside other entries) would slip past validation and
+    // could surface as a runtime crash deeper in the pipeline. The
+    // valibot `decimalAmount` validator catches it at parse time.
+    const envelope = buildEnvelope({
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+          amount: '2625USDC', // trailing currency suffix
+          asset: USDC_MINT_MAINNET,
+          pay_to: 'RecipientWallet',
+          max_timeout_seconds: 300,
+        },
+      ],
+    });
+    expect(() => parseGateway402(envelope)).toThrow(SolvelaPaymentError);
+    expect(() => parseGateway402(envelope)).toThrow(/accepts\[0\]\.amount/);
+  });
+
+  it('rejects cost_breakdown.fee_percent that is not a number', () => {
+    // Schema enforces `number()` on fee_percent. Previously this would
+    // have been a hand-coded `typeof` check that's easy to forget when
+    // extending the wire format.
+    const envelope = buildEnvelope({
+      cost_breakdown: {
+        provider_cost: '0.002500',
+        platform_fee: '0.000125',
+        total: '0.002625',
+        currency: 'USDC',
+        fee_percent: '5' as unknown as number, // string, not number
+      },
+    });
+    expect(() => parseGateway402(envelope)).toThrow(SolvelaPaymentError);
+    expect(() => parseGateway402(envelope)).toThrow(/cost_breakdown\.fee_percent/);
+  });
+
   it('throws SolvelaPaymentError when error.type is missing', () => {
     const envelope = {
       error: {
