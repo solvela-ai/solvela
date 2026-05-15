@@ -17,8 +17,15 @@ pub struct Escrow {
     pub amount: u64,
     /// 32-byte service/request correlation ID (e.g. SHA-256 of request body).
     pub service_id: [u8; 32],
-    /// Slot at which the agent may reclaim funds if service is not delivered.
-    /// Must be > current slot at deposit time.
+    /// First slot at which the escrow is considered expired. The claim window
+    /// is `slot < expiry_slot` (active before expiry); refund is `slot >=
+    /// expiry_slot` (active at and after expiry); deposit requires
+    /// `expiry_slot > now` (escrow must be born with at least one active
+    /// slot). The three comparison operators differ (`<`, `>=`, `>`) because
+    /// they reference the same boundary from different sides — see the
+    /// inline comment in `instructions/deposit.rs` for the full state
+    /// machine. Boundary regression test:
+    /// `tests/integration.rs::test_deposit_expiry_equal_now_fails`.
     pub expiry_slot: u64,
     /// PDA bump seed.
     pub bump: u8,
