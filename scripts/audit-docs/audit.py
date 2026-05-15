@@ -115,6 +115,20 @@ def _run_agentic(args, ctx: AuditContext) -> list[Finding]:
             result = sdk_parity.run(ctx, client=client, op_filter=args.op)
             findings.extend(result.findings)
             sdk_parity.print_summary(result)
+        elif name == "pr_diff":
+            from agentic import pr_diff  # noqa: WPS433
+
+            result = pr_diff.run(ctx, client=client, diff_range=args.diff)
+            findings.extend(result.findings)
+            pr_diff.print_summary(result)
+            if args.comment_out:
+                try:
+                    with open(args.comment_out, "w", encoding="utf-8") as fh:
+                        fh.write(result.comment_markdown)
+                except OSError as e:
+                    eprint(
+                        f"audit-docs: could not write --comment-out file: {e}"
+                    )
         else:
             eprint(f"audit-docs: unknown agentic check: {name}")
     return findings
@@ -152,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--agentic",
         action="append",
-        choices=["page_review", "sdk_parity"],
+        choices=["page_review", "sdk_parity", "pr_diff"],
         help="Run an LLM-driven agentic check. May be repeated. Default: none.",
     )
     parser.add_argument(
@@ -185,6 +199,21 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Agentic sdk_parity only: narrow to one or more canonical op "
             "ids (repeatable). See agentic/canonical_ops.py for valid names."
+        ),
+    )
+    parser.add_argument(
+        "--diff",
+        default="origin/main..HEAD",
+        help=(
+            "Agentic pr_diff only: git diff range to audit "
+            "(default: origin/main..HEAD)."
+        ),
+    )
+    parser.add_argument(
+        "--comment-out",
+        help=(
+            "Agentic pr_diff only: also write the PR-comment markdown to "
+            "this path. Used by the CI workflow."
         ),
     )
 

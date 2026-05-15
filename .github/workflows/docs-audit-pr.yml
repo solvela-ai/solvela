@@ -1,0 +1,101 @@
+name: Docs audit (PR-diff suggestions)
+
+# Runs the agentic pr_diff check on every PR. Posts a sticky comment with
+# doc-update suggestions. Informational only — never blocks merge.
+#
+# Requires the `ANTHROPIC_API_KEY` repo secret. If it isn't set, the
+# workflow exits cleanly without posting (so external contributor PRs
+# from forks, which can't read secrets, don't fail noisily).
+#
+# Posts at most one comment per PR. Subsequent runs replace the prior
+# comment by sentinel match (`<!-- audit-docs-pr-comment -->`).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: docs-audit-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-diff-suggest:
+    name: pr_diff suggestions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Skip when ANTHROPIC_API_KEY is unset
+        id: gate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "ANTHROPIC_API_KEY is not set; skipping agentic pr_diff."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout (full history for git diff)
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Python
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install audit deps
+        if: steps.gate.outputs.skip != 'true'
+        run: pip install --no-cache-dir -r scripts/audit-docs/requirements.txt
+
+      - name: Resolve base SHA
+        if: steps.gate.outputs.skip != 'true'
+        id: base
+        run: |
+          base_sha="${{ github.event.pull_request.base.sha }}"
+          echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Run pr_diff
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python3 scripts/audit-docs/audit.py \
+            --agentic pr_diff \
+            --diff "${{ steps.base.outputs.base_sha }}..HEAD" \
+            --max-cost-usd 0.5 \
+            --comment-out audit-docs-pr-comment.md \
+            --format text
+
+      - name: Replace sticky comment
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          sentinel='<!-- audit-docs-pr-comment -->'
+
+          # Find a prior sticky comment and delete it so we post exactly one.
+          prior_id=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            --paginate \
+            --jq ".[] | select(.body | startswith(\"${sentinel}\")) | .id" \
+            | head -1)
+          if [ -n "${prior_id:-}" ]; then
+            echo "Deleting prior comment id=${prior_id}"
+            gh api -X DELETE "repos/${REPO}/issues/comments/${prior_id}"
+          fi
+
+          gh pr comment "${PR_NUMBER}" \
+            --repo "${REPO}" \
+            --body-file audit-docs-pr-comment.md
