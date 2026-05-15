@@ -272,6 +272,41 @@ fn test_deposit_expiry_in_past_fails() {
 }
 
 #[test]
+fn test_deposit_expiry_equal_now_fails() {
+    // Boundary regression for #119. The deposit guard is strict
+    // (`expiry_slot > now`) because `expiry_slot` denotes the *first expired
+    // slot* — claim is gated on `slot < expiry_slot` and refund on
+    // `slot >= expiry_slot`, so at `slot == expiry_slot` claim fails and
+    // refund succeeds. A deposit at `expiry_slot == now` would create an
+    // escrow that is born already expired (refundable on the next slot
+    // before any provider can claim). This test pins the strict inequality
+    // so a future refactor to `expiry_slot >= now` would be loud.
+    let mut ctx = setup();
+    let service_id = [222u8; 32];
+
+    inject_ata(&mut ctx.svm, &ctx.agent.pubkey(), &ctx.usdc_mint, 1_000_000);
+
+    // Warp to a known slot, then attempt a deposit with expiry == that slot.
+    let now = 100u64;
+    warp_and_refresh(&mut ctx.svm, now);
+
+    let ix = build_deposit_ix(
+        &ctx.program_id,
+        &ctx.agent.pubkey(),
+        &ctx.provider.pubkey(),
+        &ctx.usdc_mint,
+        1_000_000,
+        &service_id,
+        now, // exactly current slot — boundary case
+    );
+    let result = send_tx(&mut ctx.svm, &[ix], &ctx.agent, &[&ctx.agent]);
+    assert!(
+        result.is_err(),
+        "deposit at expiry boundary (expiry_slot == now) must fail (InvalidExpiry)"
+    );
+}
+
+#[test]
 fn test_claim_exceeds_deposit_fails() {
     let mut ctx = setup();
     let service_id = [22u8; 32];

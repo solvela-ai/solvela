@@ -21,6 +21,14 @@ pub fn deposit(
     require!(amount > 0, EscrowError::ZeroAmount);
 
     let now = Clock::get()?.slot;
+    // `expiry_slot` semantically denotes the *first expired slot*. At deposit
+    // time we require strict `expiry_slot > now` so the escrow is born with
+    // at least one active slot. Pairs symmetrically with the claim
+    // (`slot < expiry_slot`) and refund (`slot >= expiry_slot`) guards: at
+    // `slot == expiry_slot` claim fails and refund succeeds, so creating an
+    // escrow with `expiry_slot == now` would mean it's born already expired.
+    // The boundary case is locked in by
+    // `tests/integration.rs::test_deposit_expiry_equal_now_fails`.
     require!(expiry_slot > now, EscrowError::InvalidExpiry);
     // Cap the deposit-to-expiry gap so a buggy or adversarial client can't
     // pass `expiry_slot = u64::MAX` and lock the agent out of refund forever.
