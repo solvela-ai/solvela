@@ -35,7 +35,7 @@ _(none)_
 `crates/x402/src/escrow/` accepts `service_id: [u8; 32]` as an input — derivation is the client's responsibility. **Clients MUST mix a per-request CSPRNG nonce into the `service_id` hash**, not derive it as a pure function of `request_body` alone. Without the nonce, two identical request bodies produce the same `service_id` → the same escrow PDA → the same vault ATA, all of which are computable off-chain from `(agent_pubkey, service_id_derivation_rule, USDC_MINT)` *before* the deposit broadcasts. That enables:
 
 1. **Front-running ATA creation** — an attacker pre-creates the vault ATA. Post-#115 this no longer breaks claim, but is still a confusion vector.
-2. **Confidentiality leak** — an on-chain observer who knows the derivation rule can correlate vault addresses to specific prompts/models. Service traffic patterns become decoderable from the public ledger.
+2. **Confidentiality leak** — an on-chain observer who knows the derivation rule can correlate vault addresses to specific prompts/models. Service traffic patterns become decodable from the public ledger.
 3. **Pre-deposit grief** — pre-creating the vault ATA with dust skews telemetry counters.
 
 The on-chain program treats `service_id` as opaque bytes, so this is a purely off-chain discipline. The nonce becomes part of the off-chain receipt and is persisted alongside the deposit (e.g. in `claim_queue.service_id`) so the gateway can re-derive PDAs at claim time.
