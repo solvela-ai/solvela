@@ -26,7 +26,7 @@ Trustless USDC-SPL escrow. Agents deposit USDC into a PDA keyed by `(agent, serv
 
 ### Working In This Directory
 - PDA seeds: `[b"escrow", agent.key().as_ref(), &service_id]` — keep in sync with `crates/x402/src/escrow/pda.rs`.
-- Run the full Anchor security checklist (root `AGENTS.md`): typed accounts, has_one validations, no `init_if_needed`, checked arithmetic, account closure via `close =`, duplicate-account guard.
+- Run the full Anchor security checklist (root `AGENTS.md`): typed accounts, has_one validations, checked arithmetic, account closure via `close =`, duplicate-account guard. **`init_if_needed` exception**: permitted only for Associated Token Accounts (`associated_token::*`) because ATA addresses are deterministic from `(mint, owner)` — re-init of an existing ATA is a safe no-op (Anchor checks `is_initialized` first) and an attacker can't substitute a different account. The program uses this exception in `deposit.rs` (vault), `claim.rs` (provider + agent token accounts), and `refund.rs` (agent token account). Do not extend it to arbitrary accounts; the root AGENTS.md checklist's "Reinitialization-attack vector must be ruled out explicitly" applies.
 - Account sizing uses `#[derive(InitSpace)]` + `8 + Escrow::INIT_SPACE` (8-byte discriminator prefix).
 - Never mutate this program's state layout without a versioned migration plan — existing on-chain accounts will become unreadable.
 
