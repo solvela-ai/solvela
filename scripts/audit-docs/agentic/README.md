@@ -12,10 +12,17 @@ at evidence don't get to claim a bug.
 
 ## Status
 
-This PR ships exactly one agentic check: **per-page review**. One agent per
-top-tier user-facing doc; broad mandate to find anything that misleads a
-reader. Other Phase 2 checks (SDK parity sweep, PR-diff comment poster,
-clean-container onboarding simulation) are deferred to follow-up PRs.
+Two agentic checks ship today:
+
+- **`page_review`** — one agent per top-tier user-facing doc; broad mandate
+  to find anything that would mislead a reader.
+- **`sdk_parity`** — one agent per canonical operation (init wallet, send
+  paid chat, list models); compares all SDKs' implementations against the
+  protocol wire types and Rust CLI reference. Catches the `@solvela/sdk@0.2.1`
+  wire-incompat bug class.
+
+Remaining Phase 2 checks (PR-diff comment poster, clean-container onboarding
+simulation) are deferred to follow-up PRs.
 
 ## Running it
 
@@ -41,6 +48,16 @@ python scripts/audit-docs/audit.py --agentic page_review --model claude-opus-4-7
 
 # Override the budget ceiling.
 python scripts/audit-docs/audit.py --agentic page_review --max-cost-usd 10
+
+# SDK parity sweep — compares TS / Python / Go implementations of each
+# canonical operation against the protocol wire types + Rust CLI reference.
+python scripts/audit-docs/audit.py --agentic sdk_parity
+
+# Just one canonical op (useful when iterating on a specific divergence).
+python scripts/audit-docs/audit.py --agentic sdk_parity --op send_paid_chat
+
+# Run both checks in one pass — they share the budget tracker.
+python scripts/audit-docs/audit.py --agentic page_review --agentic sdk_parity
 ```
 
 JSON output (for piping into the same `Finding`-shaped pipeline as Phase 1):
@@ -56,11 +73,13 @@ Default model: **Claude Sonnet 4.6** (`claude-sonnet-4-6`). Per page: roughly
 tokens (structured findings). At Sonnet pricing (~$3/MT in, ~$15/MT out),
 that's ~$0.01–0.03 per page.
 
-| Corpus size | Sonnet | Opus 4.7 | Haiku 4.5 |
+| Run | Sonnet 4.6 | Opus 4.7 | Haiku 4.5 |
 |---|---|---|---|
-| 1 page | <$0.05 | ~$0.20 | <$0.01 |
-| 20 pages (current curated set) | $0.30–1.00 | $1.50–5.00 | $0.10–0.30 |
-| All 50+ docs (future expansion) | $1–3 | $5–15 | $0.30–1.00 |
+| `page_review` 1 page | <$0.05 | ~$0.20 | <$0.01 |
+| `page_review` full corpus (~43 pages) | $1.50–2.00 | $7–10 | $0.40–0.60 |
+| `sdk_parity` 1 op | ~$0.05 | ~$0.25 | ~$0.02 |
+| `sdk_parity` all 3 ops | ~$0.30 | ~$1.50 | ~$0.10 |
+| Both checks combined | ~$2.30 | ~$11 | ~$0.70 |
 
 The orchestrator tracks token usage cumulatively and hard-stops when the
 configured budget is reached. Set `--max-cost-usd` to control the ceiling.

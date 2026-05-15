@@ -109,6 +109,12 @@ def _run_agentic(args, ctx: AuditContext) -> list[Finding]:
             result = page_review.run(ctx, client=client, doc_filter=args.doc)
             findings.extend(result.findings)
             page_review.print_summary(result)
+        elif name == "sdk_parity":
+            from agentic import sdk_parity  # noqa: WPS433
+
+            result = sdk_parity.run(ctx, client=client, op_filter=args.op)
+            findings.extend(result.findings)
+            sdk_parity.print_summary(result)
         else:
             eprint(f"audit-docs: unknown agentic check: {name}")
     return findings
@@ -146,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--agentic",
         action="append",
-        choices=["page_review"],
+        choices=["page_review", "sdk_parity"],
         help="Run an LLM-driven agentic check. May be repeated. Default: none.",
     )
     parser.add_argument(
@@ -169,8 +175,16 @@ def main(argv: list[str] | None = None) -> int:
         "--doc",
         action="append",
         help=(
-            "Agentic only: narrow to one or more doc relpaths (repeatable). "
-            "Useful for iterating on a single page."
+            "Agentic page_review only: narrow to one or more doc relpaths "
+            "(repeatable). Useful for iterating on a single page."
+        ),
+    )
+    parser.add_argument(
+        "--op",
+        action="append",
+        help=(
+            "Agentic sdk_parity only: narrow to one or more canonical op "
+            "ids (repeatable). See agentic/canonical_ops.py for valid names."
         ),
     )
 

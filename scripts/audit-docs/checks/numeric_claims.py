@@ -70,6 +70,15 @@ def run(ctx: AuditContext) -> list[Finding]:
             "status.md",
         }:
             continue
+        # The audit infra's own docs document the auditor itself, including
+        # historical bug examples (e.g. "@solvela/sdk@0.2.1 was wire-incompat").
+        # Those references are illustrative, not current claims.
+        try:
+            rel = doc.relative_to(ctx.repo_root).as_posix()
+        except ValueError:
+            rel = str(doc)
+        if rel.startswith("scripts/audit-docs/"):
+            continue
         try:
             text = doc.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
