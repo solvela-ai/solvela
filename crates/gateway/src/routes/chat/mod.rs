@@ -235,10 +235,10 @@ pub async fn chat_completions(
             error: "Payment required".to_string(),
         };
 
-        return Err(GatewayError::InvalidPayment(
-            serde_json::to_string(&payment_required)
-                .unwrap_or_else(|_| "payment required".to_string()),
-        ));
+        // Emit the PaymentRequired body at the top level of the 402 response
+        // per x402 spec — NOT wrapped in the OpenAI-style error envelope.
+        // See `GatewayError::PaymentChallenge` doc and issue #217.
+        return Err(GatewayError::PaymentChallenge(Box::new(payment_required)));
     }
 
     // Step 4: Payment present — try to decode and verify via Facilitator

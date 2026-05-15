@@ -230,10 +230,11 @@ pub async fn proxy_service(
             error: "Payment required".to_string(),
         };
 
-        return Err(GatewayError::InvalidPayment(
-            serde_json::to_string(&payment_required)
-                .unwrap_or_else(|_| "payment required".to_string()),
-        ));
+        // Emit the PaymentRequired body at the top level of the 402 response
+        // per x402 spec — NOT wrapped in the OpenAI-style error envelope.
+        // Mirrors `routes::chat::chat_completions`. See
+        // `GatewayError::PaymentChallenge` doc and issue #217.
+        return Err(GatewayError::PaymentChallenge(Box::new(payment_required)));
     }
 
     // Step 4: Payment present — decode and verify
@@ -1163,14 +1164,17 @@ mod tests {
         let state = make_state_with_service(Some(0.01), false, true, None);
         let err = call_expect_err(state, "test-svc", HeaderMap::new()).await;
         match err {
-            GatewayError::InvalidPayment(body) => {
-                let json: serde_json::Value =
-                    serde_json::from_str(&body).expect("body must be PaymentRequired JSON");
-                assert_eq!(json["accepts"][0]["amount"], "10500");
-                assert_eq!(json["accepts"][0]["asset"], USDC_MINT);
-                assert_eq!(json["cost_breakdown"]["currency"], "USDC");
+            // Issue #217: 402 now carries a top-level `PaymentRequired`
+            // via the `PaymentChallenge` variant, not a stringified-JSON
+            // body inside `InvalidPayment`. Assertions read the same
+            // fields off the struct directly.
+            GatewayError::PaymentChallenge(pr) => {
+                // pr: Box<PaymentRequired> — auto-derefs for field access.
+                assert_eq!(pr.accepts[0].amount, "10500");
+                assert_eq!(pr.accepts[0].asset, USDC_MINT);
+                assert_eq!(pr.cost_breakdown.currency, "USDC");
             }
-            other => panic!("expected InvalidPayment with PaymentRequired body, got {other:?}"),
+            other => panic!("expected PaymentChallenge with PaymentRequired body, got {other:?}"),
         }
     }
 

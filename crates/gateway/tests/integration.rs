@@ -686,12 +686,10 @@ async fn test_chat_returns_402_without_payment() {
     assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let payment_info: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    // The error message contains the serialized PaymentRequired JSON
-    let error_msg = json["error"]["message"].as_str().unwrap();
-    let payment_info: serde_json::Value = serde_json::from_str(error_msg).unwrap();
-
+    // Issue #217: 402 body is the PaymentRequired at the top level
+    // (x402-spec compliant), not wrapped in the OpenAI error envelope.
     assert_eq!(payment_info["x402_version"], 2);
     assert!(payment_info["accepts"].is_array());
     assert!(payment_info["cost_breakdown"]["total"].is_string());
@@ -962,11 +960,8 @@ async fn test_402_response_contains_x402_fields() {
     assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-    // Parse the embedded PaymentRequired JSON from the error message
-    let error_msg = json["error"]["message"].as_str().unwrap();
-    let pr: serde_json::Value = serde_json::from_str(error_msg).unwrap();
+    // Issue #217: PaymentRequired is the top-level 402 body.
+    let pr: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
     // x402 version
     assert_eq!(pr["x402_version"], 2);
@@ -1442,9 +1437,8 @@ async fn test_402_offers_escrow_when_configured() {
     assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let error_msg = json["error"]["message"].as_str().unwrap();
-    let pr: serde_json::Value = serde_json::from_str(error_msg).unwrap();
+    // Issue #217: PaymentRequired is the top-level 402 body.
+    let pr: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
     let accepts = pr["accepts"].as_array().unwrap();
     assert_eq!(
@@ -1484,9 +1478,8 @@ async fn test_402_no_escrow_when_not_configured() {
     assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let error_msg = json["error"]["message"].as_str().unwrap();
-    let pr: serde_json::Value = serde_json::from_str(error_msg).unwrap();
+    // Issue #217: PaymentRequired is the top-level 402 body.
+    let pr: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
     let accepts = pr["accepts"].as_array().unwrap();
     assert_eq!(accepts.len(), 1, "should only offer exact scheme");
@@ -1975,11 +1968,8 @@ async fn test_chat_with_tools_returns_402() {
     assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-    // The error message contains the serialized PaymentRequired JSON
-    let error_msg = json["error"]["message"].as_str().unwrap();
-    let payment_info: serde_json::Value = serde_json::from_str(error_msg).unwrap();
+    // Issue #217: PaymentRequired is the top-level 402 body.
+    let payment_info: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
     assert_eq!(payment_info["x402_version"], 2);
     assert!(payment_info["accepts"].is_array());
@@ -3952,11 +3942,9 @@ async fn test_proxy_returns_402_with_cost_breakdown() {
     assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-    // The 402 response is wrapped inside the error.message as serialized JSON
-    let error_msg = json["error"]["message"].as_str().unwrap();
-    let payment_info: serde_json::Value = serde_json::from_str(error_msg).unwrap();
+    // Issue #217: services proxy 402 body is the PaymentRequired at the
+    // top level (mirrors the chat completions route fix).
+    let payment_info: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
     assert_eq!(payment_info["x402_version"], 2);
     assert_eq!(payment_info["error"], "Payment required");
