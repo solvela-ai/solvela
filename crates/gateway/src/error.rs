@@ -1,6 +1,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
+use solvela_x402::types::PaymentRequired;
 
 /// Gateway-level errors returned as HTTP responses.
 ///
@@ -18,10 +19,34 @@ pub enum GatewayError {
     #[error("payment required")]
     PaymentRequired,
 
+    /// Emit a 402 with the x402-spec-compliant `PaymentRequired` body
+    /// at the top level (NOT wrapped in the OpenAI-style error envelope).
+    /// Used when the client hasn't presented a payment header yet and the
+    /// gateway needs to advertise the cost + accepted schemes. Issue #217
+    /// fix: previously this payload was stringified into
+    /// `InvalidPayment(json_string)` and double-encoded inside
+    /// `{ error: { message: "<json>" } }`, which violated the x402 spec.
+    ///
+    /// `InvalidPayment(String)` remains for short messages tied to a
+    /// specific failure ("bad signature", "expired", "resource mismatch")
+    /// — those keep the OpenAI envelope shape because they carry a single
+    /// diagnostic string, not a structured challenge.
+    ///
+    /// `Box`ed to keep the enum small: `PaymentRequired` is ~208 bytes
+    /// (Vec + multiple Strings), and every `Result<_, GatewayError>` along
+    /// the request path would otherwise carry that footprint. The boxed
+    /// allocation only happens on the 402 cold path.
+    #[error("payment challenge")]
+    PaymentChallenge(Box<PaymentRequired>),
+
     /// Inner string is forwarded to the client verbatim in the 402 response
-    /// body — used for both user-friendly error messages ("transaction has
-    /// already been used", "Payment verification failed", etc.) and the
-    /// serialized `PaymentRequired` challenge payload.
+    /// body — used for user-friendly error messages tied to a specific
+    /// failure ("transaction has already been used", "Payment verification
+    /// failed", "resource mismatch", etc.).
+    ///
+    /// For the *challenge* payload (no payment presented yet), use
+    /// `PaymentChallenge(PaymentRequired)` so the body is emitted at the
+    /// top level per the x402 spec, not stringified into this envelope.
     ///
     /// Constructors MUST NOT pass through:
     /// - raw provider/facilitator/RPC error bodies (those go through
@@ -49,6 +74,17 @@ pub enum GatewayError {
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
+        // PaymentChallenge emits the x402-spec body directly (no OpenAI
+        // envelope), so it bypasses the (status, error_type, message)
+        // tuple machinery the other variants share. See variant docs.
+        if let GatewayError::PaymentChallenge(payment_required) = &self {
+            return (
+                StatusCode::PAYMENT_REQUIRED,
+                axum::Json(payment_required.as_ref()),
+            )
+                .into_response();
+        }
+
         let (status, error_type, message) = match &self {
             GatewayError::ModelNotFound(msg) => {
                 (StatusCode::NOT_FOUND, "model_not_found", msg.clone())
@@ -90,6 +126,12 @@ impl IntoResponse for GatewayError {
                     "internal_error",
                     "Internal server error".to_string(),
                 )
+            }
+            // Handled by the `if let` short-circuit above. The arm exists
+            // purely so the inner match stays exhaustive without an `_`
+            // wildcard that would silently swallow any future variant.
+            GatewayError::PaymentChallenge(_) => {
+                unreachable!("PaymentChallenge is handled by the early return above")
             }
         };
 
@@ -238,6 +280,76 @@ mod tests {
             GatewayError::Internal("crash".to_string()).to_string(),
             "internal error: crash"
         );
+        assert_eq!(
+            GatewayError::PaymentChallenge(Box::new(build_test_payment_required())).to_string(),
+            "payment challenge"
+        );
+    }
+
+    /// Build a minimal valid `PaymentRequired` for tests that need to
+    /// construct the `PaymentChallenge` variant. Synthetic values only.
+    fn build_test_payment_required() -> PaymentRequired {
+        use solvela_x402::types::{CostBreakdown, PaymentAccept, Resource};
+        PaymentRequired {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepts: vec![PaymentAccept {
+                scheme: "exact".to_string(),
+                network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp".to_string(),
+                amount: "10500".to_string(),
+                asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                pay_to: "TestRecipient11111111111111111111111111111".to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            }],
+            cost_breakdown: CostBreakdown {
+                provider_cost: "0.010000".to_string(),
+                platform_fee: "0.000500".to_string(),
+                total: "0.010500".to_string(),
+                currency: "USDC".to_string(),
+                fee_percent: 5,
+            },
+            error: "Payment required".to_string(),
+        }
+    }
+
+    /// Issue #217: the `PaymentChallenge` variant emits `PaymentRequired`
+    /// at the top level (x402-spec compliant) — NOT wrapped in the
+    /// OpenAI-style `{ error: { type, message } }` envelope that every
+    /// other variant uses. Lock that contract here so a future refactor
+    /// that "uniformizes" the response shape is loud.
+    #[tokio::test]
+    async fn test_payment_challenge_emits_top_level_payment_required() {
+        let (status, json) = error_response(GatewayError::PaymentChallenge(Box::new(
+            build_test_payment_required(),
+        )))
+        .await;
+
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+
+        // Top-level fields per x402 spec.
+        assert_eq!(json["x402_version"], 2);
+        assert!(json["accepts"].is_array());
+        assert_eq!(json["accepts"][0]["scheme"], "exact");
+        assert_eq!(json["accepts"][0]["amount"], "10500");
+        assert_eq!(json["cost_breakdown"]["total"], "0.010500");
+        assert_eq!(json["cost_breakdown"]["currency"], "USDC");
+        assert_eq!(json["cost_breakdown"]["fee_percent"], 5);
+        assert_eq!(json["resource"]["url"], "/v1/chat/completions");
+        assert_eq!(json["error"], "Payment required");
+
+        // Crucial: no OpenAI-style envelope wrapping. The `error` field is
+        // a plain string at top level, not an object. A future regression
+        // that re-wraps the body in `{ error: { type, message: "<json>" } }`
+        // would make `error` an object and trip this assertion.
+        assert!(
+            !json["error"].is_object(),
+            "PaymentChallenge must NOT wrap the PaymentRequired in the OpenAI envelope; \
+             got top-level `error` as object: {json}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -246,6 +358,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_errors_have_consistent_structure() {
+        // NOTE: `PaymentChallenge` is *deliberately* excluded — it emits the
+        // x402-spec `PaymentRequired` body at the top level, which by design
+        // does not carry the `error.type`/`error.message` envelope every
+        // other variant shares. See `test_payment_challenge_emits_top_level_payment_required`.
         let errors: Vec<GatewayError> = vec![
             GatewayError::ModelNotFound("x".to_string()),
             GatewayError::ProviderError("x".to_string()),
