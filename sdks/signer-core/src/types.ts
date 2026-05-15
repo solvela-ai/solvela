@@ -1,36 +1,20 @@
 /**
  * Shared x402 protocol types used across Solvela SDK packages.
  *
- * These are structurally compatible with @solvela/sdk's PaymentRequired,
- * PaymentAccept, and CostBreakdown types — the same wire shape.
+ * `PaymentRequired`, `PaymentAccept`, and `CostBreakdown` are derived
+ * from the valibot schemas in `schema.ts` — the schema is the single
+ * source of truth for the wire format. See issue #129.
+ *
+ * `PaymentExpectations` stays a plain interface declared here: it's a
+ * *caller-side* knob, not part of the wire format, so it has no
+ * counterpart in the validation schema.
  */
 
-export interface CostBreakdown {
-  provider_cost: string;
-  platform_fee: string;
-  total: string;
-  currency: string;
-  fee_percent: number;
-}
-
-export interface PaymentAccept {
-  scheme: string;
-  network: string;
-  amount: string;
-  asset: string;
-  pay_to: string;
-  max_timeout_seconds: number;
-  escrow_program_id?: string;
-}
-
-export interface PaymentRequired {
-  x402_version: number;
-  accepts: PaymentAccept[];
-  cost_breakdown: CostBreakdown;
-  error: string;
-  /** Optional resource metadata — present in gateway envelope shape. */
-  resource?: { url: string; method: string };
-}
+export type {
+  CostBreakdown,
+  PaymentAccept,
+  PaymentRequired,
+} from './schema.js';
 
 /**
  * Caller-side validation knobs for `createPaymentHeader`.
