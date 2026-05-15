@@ -457,12 +457,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           const connection = new Connection(rpcUrl, 'confirmed');
 
-          // Fetch blockhash BEFORE broadcast so lastValidBlockHeight is available for confirmTransaction.
-          const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed') as {
-            blockhash: string;
-            lastValidBlockHeight: number;
-          };
-
           const txBytes = Buffer.from(depositTxB64, 'base64');
 
           // Phase 2 boundary: ONLY throw if broadcast fails.
@@ -482,13 +476,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           depositTxSignature = signature;
 
           // Confirmation: NOT part of the throw boundary.
+          //
+          // Issue #138: previously this code called
+          // `getLatestBlockhash('confirmed')` to obtain a fresh
+          // (blockhash, lastValidBlockHeight) and passed those to the
+          // strategy-object overload of `confirmTransaction`. But the
+          // tx itself was signed by `createPaymentHeader` (now in
+          // signer-core) using a DIFFERENT blockhash from a `finalized`
+          // fetch inside that function — we never see the signing-time
+          // blockhash here, so the strategy-object's lastValidBlockHeight
+          // referenced the wrong window. The poller would either give
+          // up at the wrong time or keep polling past the tx's actual
+          // expiry, producing a `confirmed` flag that didn't reflect
+          // the on-chain reality.
+          //
+          // The bounded signature-only overload polls
+          // `getSignatureStatuses` until either the commitment is
+          // reached or `confirmTransactionInitialTimeout` (default 60s
+          // on the Connection) elapses. This overload is deprecated in
+          // newer @solana/web3.js majors; the proper future fix is
+          // option 2 from the issue (have `createPaymentHeader` return
+          // the signing-time blockhash so we can build the correct
+          // strategy object). That's an API change rippling through
+          // four signer-core consumers — tracked as a follow-up.
+          //
           // If confirmation times out, the tx is in flight — count-on-broadcast means
           // the reservation stands. We signal pending via the confirmed flag.
           try {
-            const confirmation = await connection.confirmTransaction(
-              { signature, blockhash, lastValidBlockHeight },
+            const confirmation = (await connection.confirmTransaction(
+              signature,
               'confirmed',
-            ) as { value: { err: unknown } };
+            )) as { value: { err: unknown } };
             if (confirmation.value.err) {
               // Tx landed but failed on-chain — rare. Count as broadcast-succeeded.
               confirmed = false;
