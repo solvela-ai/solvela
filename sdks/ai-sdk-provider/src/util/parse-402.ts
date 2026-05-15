@@ -7,32 +7,28 @@
  *      { "error": { "type": "invalid_payment",
  *                   "message": "<JSON PaymentRequired>" } }
  *
- *   2. Direct (x402-spec compliant; target shape after issue #217):
+ *   2. Direct (x402-spec compliant; gateway emits this post-#217):
  *      { "x402_version": 2, "resource": {...}, "accepts": [...],
  *        "cost_breakdown": {...}, "error": "Payment required" }
  *
- * Shape detection is duck-typed: a top-level `error.message` string triggers
- * the envelope path; otherwise we expect `x402_version` + `accepts` at the
- * top level. Both shapes flow through the same allowlist + validation.
+ * Validation is delegated to the valibot schema in `schema.ts` — that
+ * file is the single source of truth for the wire format. Issue #129's
+ * acceptance criteria are met by this two-PR split:
+ *   - PR #304 landed the signer-core half (its own schema, in its own
+ *     package, since signer-core has no allowlist requirement).
+ *   - This file is the ai-sdk-provider half — same library (valibot),
+ *     separate schema because `SolvelaPaymentAccept` in
+ *     `wallet-adapter.ts` is the v1 contract this package commits to,
+ *     and it differs from signer-core's wire type (no escrow_program_id).
  *
- * This dual-shape support is deliberately defensive — issue #217 (gateway
- * still emits envelope today, but plans to switch to direct). Landing this
- * parser change first lets the gateway flip unilaterally without a
- * coordinated SDK release.
- *
- * Allowlist (§4.3 T2-G) is applied here for the wire payload: any field on
- * the top-level `PaymentRequired` other than `x402_version`, `accepts[]`,
- * `cost_breakdown`, `resource`, `error` is stripped; within each `accepts[]`
- * entry only the plan-allowlisted fields survive. Non-allowlisted keys such
- * as `internal_trace_id` never reach the returned object and therefore
- * cannot leak into `SolvelaPaymentError.responseBody` downstream.
- *
- * IMPORTANT: the returned `ParsedPaymentRequired` remains structurally
- * compatible with the already-committed `SolvelaPaymentRequired` from
- * `wallet-adapter.ts` (the contract the adapter consumes). The allowlist
- * only drops unknown/extra fields; every plan-level known field is
- * preserved.
+ * Allowlist behavior (§4.3 T2-G): valibot's default `object()` strips
+ * unknown keys silently. Fields like `internal_trace_id` (top-level),
+ * `debug_hash` (accept), `trace_id` (cost_breakdown), `region`
+ * (resource) never appear in the returned object and therefore cannot
+ * leak into `SolvelaPaymentError.responseBody` downstream.
  */
+
+import { safeParse, type BaseIssue } from 'valibot';
 
 import { SolvelaPaymentError } from '../errors.js';
 import type {
@@ -40,6 +36,10 @@ import type {
   SolvelaPaymentCostBreakdown,
   SolvelaPaymentRequired,
 } from '../wallet-adapter.js';
+import {
+  Envelope402Schema,
+  PaymentRequiredSchema,
+} from './schema.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -78,141 +78,36 @@ export const USDC_MINT_MAINNET =
 const REQUIRED_SCHEME = 'exact';
 
 // ---------------------------------------------------------------------------
-// Type guards and primitive extractors
+// Helpers
 // ---------------------------------------------------------------------------
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
 
-function isStringField(obj: Record<string, unknown>, key: string): boolean {
-  return typeof obj[key] === 'string';
-}
-
-function isNumberField(obj: Record<string, unknown>, key: string): boolean {
-  return typeof obj[key] === 'number' && Number.isFinite(obj[key] as number);
-}
-
-// ---------------------------------------------------------------------------
-// Allowlist application
-// ---------------------------------------------------------------------------
-
 /**
- * Extract an allowlisted `SolvelaPaymentAccept` from an unknown object.
- * Drops every field not in the plan-level allowlist (T2-G).
- * Throws if required fields are missing or mistyped.
+ * Render valibot's issue list as `path: message; …` so the failing
+ * field is preserved no matter how deeply nested.
  */
-function applyAcceptAllowlist(
-  raw: unknown,
-  index: number,
-  url: string,
-): SolvelaPaymentAccept {
-  if (!isObject(raw)) {
-    throw new SolvelaPaymentError({
-      message: `[solvela] 402 envelope: accepts[${index}] is not an object`,
-      url,
-      requestBodyValues: undefined,
-    });
-  }
-
-  const required: Array<[string, 'string' | 'number']> = [
-    ['scheme', 'string'],
-    ['network', 'string'],
-    ['amount', 'string'],
-    ['asset', 'string'],
-    ['pay_to', 'string'],
-    ['max_timeout_seconds', 'number'],
-  ];
-
-  for (const [key, kind] of required) {
-    const present =
-      kind === 'string' ? isStringField(raw, key) : isNumberField(raw, key);
-    if (!present) {
-      throw new SolvelaPaymentError({
-        message: `[solvela] 402 envelope: accepts[${index}].${key} missing or wrong type`,
-        url,
-        requestBodyValues: undefined,
-      });
-    }
-  }
-
-  // Construct the allowlisted entry (any extra fields are dropped by this
-  // explicit field-by-field copy).
-  return {
-    scheme: raw['scheme'] as string,
-    network: raw['network'] as string,
-    amount: raw['amount'] as string,
-    asset: raw['asset'] as string,
-    pay_to: raw['pay_to'] as string,
-    max_timeout_seconds: raw['max_timeout_seconds'] as number,
-  };
+function formatIssues(issues: readonly BaseIssue<unknown>[]): string {
+  return issues
+    .map((issue) => {
+      const path = issuePath(issue);
+      return path ? `${path}: ${issue.message}` : issue.message;
+    })
+    .join('; ');
 }
 
-/**
- * Extract an allowlisted `SolvelaPaymentCostBreakdown`.
- * Every field mirrors `wallet-adapter.ts`'s declared shape.
- */
-function applyCostBreakdownAllowlist(
-  raw: unknown,
-  url: string,
-): SolvelaPaymentCostBreakdown {
-  if (!isObject(raw)) {
-    throw new SolvelaPaymentError({
-      message: '[solvela] 402 envelope: cost_breakdown is not an object',
-      url,
-      requestBodyValues: undefined,
-    });
-  }
-
-  const strings = ['provider_cost', 'platform_fee', 'total', 'currency'];
-  for (const key of strings) {
-    if (!isStringField(raw, key)) {
-      throw new SolvelaPaymentError({
-        message: `[solvela] 402 envelope: cost_breakdown.${key} missing or wrong type`,
-        url,
-        requestBodyValues: undefined,
-      });
-    }
-  }
-  if (!isNumberField(raw, 'fee_percent')) {
-    throw new SolvelaPaymentError({
-      message: '[solvela] 402 envelope: cost_breakdown.fee_percent missing or wrong type',
-      url,
-      requestBodyValues: undefined,
-    });
-  }
-
-  return {
-    provider_cost: raw['provider_cost'] as string,
-    platform_fee: raw['platform_fee'] as string,
-    total: raw['total'] as string,
-    currency: raw['currency'] as string,
-    fee_percent: raw['fee_percent'] as number,
-  };
-}
-
-/**
- * Extract an allowlisted `resource` object: `{ url: string, method: string }`.
- */
-function applyResourceAllowlist(
-  raw: unknown,
-  url: string,
-): { url: string; method: string } {
-  if (!isObject(raw)) {
-    throw new SolvelaPaymentError({
-      message: '[solvela] 402 envelope: resource is not an object',
-      url,
-      requestBodyValues: undefined,
-    });
-  }
-  if (!isStringField(raw, 'url') || !isStringField(raw, 'method')) {
-    throw new SolvelaPaymentError({
-      message: '[solvela] 402 envelope: resource.url/method missing or wrong type',
-      url,
-      requestBodyValues: undefined,
-    });
-  }
-  return { url: raw['url'] as string, method: raw['method'] as string };
+function issuePath(issue: BaseIssue<unknown>): string {
+  if (!issue.path || issue.path.length === 0) return '';
+  return issue.path
+    .map((segment, i) => {
+      const key = (segment as { key?: unknown }).key;
+      if (typeof key === 'number') return `[${key}]`;
+      if (typeof key === 'string') return i === 0 ? key : `.${key}`;
+      return '';
+    })
+    .join('');
 }
 
 // ---------------------------------------------------------------------------
@@ -249,127 +144,75 @@ export function parseGateway402(
   }
 
   // Duck-type shape detection. The envelope shape is identified by a
-  // top-level `error.message` string. The direct shape has `x402_version`
-  // and `accepts` at the top level. We probe envelope first since it's
-  // the current default and a direct-shape body would never coincidentally
-  // carry an `error.message` string at the top level (the direct shape's
+  // top-level `error.message` string; otherwise we expect a direct
+  // PaymentRequired body. Probe envelope first — it's the historical
+  // default, and a direct-shape body would never coincidentally carry
+  // an `error.message` string at the top level (the direct shape's
   // `error` field is a plain string like "Payment required").
   const errorField = body['error'];
   const looksLikeEnvelope =
     isObject(errorField) && typeof errorField['message'] === 'string';
 
-  const inner = looksLikeEnvelope
-    ? extractFromEnvelope(errorField as Record<string, unknown>, url)
-    : extractFromDirect(body, url);
-
-  // Required top-level fields on the extracted payload (both shapes).
-  if (!isNumberField(inner, 'x402_version')) {
-    throw new SolvelaPaymentError({
-      message: '[solvela] 402 body: `x402_version` missing or wrong type',
-      url,
-      requestBodyValues: undefined,
-    });
-  }
-  if (!Array.isArray(inner['accepts'])) {
-    throw new SolvelaPaymentError({
-      message: '[solvela] 402 body: `accepts` is not an array',
-      url,
-      requestBodyValues: undefined,
-    });
-  }
-  if (!isStringField(inner, 'error')) {
-    throw new SolvelaPaymentError({
-      message: '[solvela] 402 body: `error` missing or wrong type',
-      url,
-      requestBodyValues: undefined,
-    });
-  }
-
-  const accepts = (inner['accepts'] as unknown[]).map((entry, i) =>
-    applyAcceptAllowlist(entry, i, url),
-  );
-  const cost_breakdown = applyCostBreakdownAllowlist(inner['cost_breakdown'], url);
-  const resource = applyResourceAllowlist(inner['resource'], url);
-
-  return {
-    x402_version: inner['x402_version'] as number,
-    resource,
-    accepts,
-    cost_breakdown,
-    error: inner['error'] as string,
-  };
-}
-
-/**
- * Extract the inner PaymentRequired from the envelope shape:
- *   { error: { type: "invalid_payment", message: "<JSON>" } }
- */
-function extractFromEnvelope(
-  errorField: Record<string, unknown>,
-  url: string,
-): Record<string, unknown> {
-  const type = errorField['type'];
-  const messageJson = errorField['message'];
-  if (typeof type !== 'string' || typeof messageJson !== 'string') {
-    throw new SolvelaPaymentError({
-      message: '[solvela] 402 envelope: `error.type` or `error.message` missing or wrong type',
-      url,
-      requestBodyValues: undefined,
-    });
-  }
-  if (type !== 'invalid_payment') {
-    throw new SolvelaPaymentError({
-      message: `[solvela] 402 envelope: unsupported error.type "${type}"; expected "invalid_payment"`,
-      url,
-      requestBodyValues: undefined,
-    });
-  }
-
   let inner: unknown;
-  try {
-    inner = JSON.parse(messageJson);
-  } catch {
+  if (looksLikeEnvelope) {
+    const envelopeResult = safeParse(Envelope402Schema, body);
+    if (!envelopeResult.success) {
+      throw new SolvelaPaymentError({
+        message: `[solvela] 402 envelope: ${formatIssues(envelopeResult.issues)}`,
+        url,
+        requestBodyValues: undefined,
+      });
+    }
+    // Enforce the historical `error.type === "invalid_payment"` constraint.
+    const type = envelopeResult.output.error.type;
+    if (type !== 'invalid_payment') {
+      throw new SolvelaPaymentError({
+        message: `[solvela] 402 envelope: unsupported error.type "${type}"; expected "invalid_payment"`,
+        url,
+        requestBodyValues: undefined,
+      });
+    }
+    try {
+      inner = JSON.parse(envelopeResult.output.error.message);
+    } catch {
+      throw new SolvelaPaymentError({
+        message: '[solvela] 402 envelope: `error.message` is not valid JSON',
+        url,
+        requestBodyValues: undefined,
+      });
+    }
+    if (!isObject(inner)) {
+      throw new SolvelaPaymentError({
+        message: '[solvela] 402 envelope: inner PaymentRequired is not an object',
+        url,
+        requestBodyValues: undefined,
+      });
+    }
+  } else {
+    inner = body;
+  }
+
+  const innerResult = safeParse(PaymentRequiredSchema, inner);
+  if (!innerResult.success) {
+    // Distinguish the two shapes in the error message so caller debug
+    // output points at the right place. For the direct-shape failure we
+    // also call out the dual-shape rejection so a body that matches
+    // neither shape doesn't read as a partial validation of one.
+    const context = looksLikeEnvelope
+      ? '402 inner PaymentRequired'
+      : '402 body matches neither envelope shape (`error.message` with stringified JSON) nor direct PaymentRequired shape — validation against direct';
     throw new SolvelaPaymentError({
-      message: '[solvela] 402 envelope: `error.message` is not valid JSON',
+      message: `[solvela] ${context}: ${formatIssues(innerResult.issues)}`,
       url,
       requestBodyValues: undefined,
     });
   }
 
-  if (!isObject(inner)) {
-    throw new SolvelaPaymentError({
-      message: '[solvela] 402 envelope: inner PaymentRequired is not an object',
-      url,
-      requestBodyValues: undefined,
-    });
-  }
-
-  return inner;
-}
-
-/**
- * Direct-shape probe: the body itself is the PaymentRequired payload
- * (x402-spec compliant). We don't validate field contents here — the
- * common code path that follows runs the same allowlist + type checks
- * the envelope shape gets.
- */
-function extractFromDirect(
-  body: Record<string, unknown>,
-  url: string,
-): Record<string, unknown> {
-  // Direct shape requires at minimum `x402_version` (number) and `accepts`
-  // (array) at the top level — otherwise we don't recognize the shape and
-  // emit a single clear error pointing at both supported shapes so callers
-  // can diagnose pre-vs-post #217 gateway responses.
-  if (!isNumberField(body, 'x402_version') || !Array.isArray(body['accepts'])) {
-    throw new SolvelaPaymentError({
-      message:
-        '[solvela] 402 body matches neither envelope shape (`error.message` with stringified JSON) nor direct PaymentRequired shape (top-level `x402_version` + `accepts`)',
-      url,
-      requestBodyValues: undefined,
-    });
-  }
-  return body;
+  // valibot's default object() strips unknown keys, so innerResult.output
+  // already contains only the allowlisted fields per the schema. The cast
+  // here just narrows InferOutput<PaymentRequiredSchema> to the public
+  // SolvelaPaymentRequired alias — they are structurally identical.
+  return innerResult.output as ParsedPaymentRequired;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,8 +226,9 @@ function extractFromDirect(
  * @param parsed - Result of `parseGateway402`.
  * @param url    - Request URL for `SolvelaPaymentError.url` on thrown errors.
  *                 Defaults to `''` for callers without URL context.
- * @returns The matching entry plus its `amount` as a `bigint`.
- * @throws SolvelaPaymentError if no entry matches.
+ * @returns `{ accept, cost }` where `cost` is the chosen entry's `amount`
+ *          parsed as a `bigint` (USDC atomic units).
+ * @throws SolvelaPaymentError if no allowlisted entry matches the v1 rule.
  */
 export function selectAccept(
   parsed: ParsedPaymentRequired,
@@ -421,3 +265,7 @@ export function selectAccept(
     requestBodyValues: undefined,
   });
 }
+
+// Re-export the cost_breakdown type for downstream callers that previously
+// imported it from this module's old hand-rolled shape.
+export type ParsedCostBreakdown = SolvelaPaymentCostBreakdown;

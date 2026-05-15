@@ -43,7 +43,8 @@
     "@ai-sdk/openai-compatible": "2.0.47",
     "@ai-sdk/provider-utils": "^4.0.27",
     "@solvela/signer-core": "file:../signer-core",
-    "bs58": "^5.0.0"
+    "bs58": "^5.0.0",
+    "valibot": "^1.4.0"
   },
   "peerDependencies": {
     "@ai-sdk/provider": "^3.0.10",
