@@ -82,6 +82,14 @@ The `.github/workflows/docs-audit-pr.yml` workflow runs `pr_diff` on every PR
 Add the `ANTHROPIC_API_KEY` repo secret to enable. Without it, the workflow
 runs to the gate step and exits cleanly (no comment, no failure).
 
+Set the secret from the terminal (the value reads from stdin, so it doesn't
+land in shell history or in chat):
+
+```bash
+gh secret set ANTHROPIC_API_KEY --repo solvela-ai/solvela
+gh secret list --repo solvela-ai/solvela | grep ANTHROPIC   # verify
+```
+
 JSON output (for piping into the same `Finding`-shaped pipeline as Phase 1):
 
 ```bash
