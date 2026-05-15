@@ -249,9 +249,13 @@ describe('parseGateway402', () => {
     expect(result.resource).not.toHaveProperty('region');
   });
 
-  it('throws SolvelaPaymentError when body is the direct unwrapped x402 shape (not wrapped in envelope)', () => {
-    // The direct { x402_version, accepts, … } shape is NOT supported.
-    // The parser checks for { error: { type, message } } and rejects anything else.
+  it('accepts the direct unwrapped x402 shape (top-level PaymentRequired)', () => {
+    // Issue #217: dual-shape parser. The direct
+    // { x402_version, accepts, cost_breakdown, … } shape is the
+    // x402-spec-compliant body the gateway emits post-#217. Both shapes
+    // must parse to structurally-equivalent ParsedPaymentRequired so the
+    // wallet adapter sees the same contract regardless of which gateway
+    // version emitted the response.
     const directShape = {
       x402_version: 2,
       resource: { url: '/v1/chat/completions', method: 'POST' },
@@ -275,7 +279,72 @@ describe('parseGateway402', () => {
       error: 'Payment required',
     };
 
-    expect(() => parseGateway402(directShape)).toThrow(SolvelaPaymentError);
+    const result = parseGateway402(directShape);
+
+    expect(result.x402_version).toBe(2);
+    expect(result.resource.url).toBe('/v1/chat/completions');
+    expect(result.resource.method).toBe('POST');
+    expect(result.accepts).toHaveLength(1);
+    expect(result.accepts[0].scheme).toBe('exact');
+    expect(result.accepts[0].asset).toBe(USDC_MINT_MAINNET);
+    expect(result.accepts[0].amount).toBe('2625');
+    expect(result.cost_breakdown.total).toBe('0.002625');
+    expect(result.cost_breakdown.fee_percent).toBe(5);
+    expect(result.error).toBe('Payment required');
+  });
+
+  it('direct shape strips extra fields under the allowlist (parity with envelope shape)', () => {
+    const directShapeWithExtras = {
+      x402_version: 2,
+      // extra top-level field
+      internal_trace_id: 'trace-abc-123',
+      resource: {
+        url: '/v1/chat/completions',
+        method: 'POST',
+        // extra resource field
+        region: 'us-east-1',
+      },
+      accepts: [
+        {
+          scheme: 'exact',
+          network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+          amount: '2625',
+          asset: USDC_MINT_MAINNET,
+          pay_to: 'RecipientWallet',
+          max_timeout_seconds: 300,
+          // extra accept field
+          debug_hash: 'sha256-abc',
+        },
+      ],
+      cost_breakdown: {
+        provider_cost: '0.002500',
+        platform_fee: '0.000125',
+        total: '0.002625',
+        currency: 'USDC',
+        fee_percent: 5,
+        // extra cost_breakdown field
+        trace_id: 'cb-trace-xyz',
+      },
+      error: 'Payment required',
+    };
+
+    const result = parseGateway402(directShapeWithExtras);
+
+    expect(Object.keys(result).sort()).toEqual(TOP_LEVEL_KEYS);
+    expect(Object.keys(result.accepts[0]).sort()).toEqual(ACCEPT_KEYS);
+    expect(Object.keys(result.cost_breakdown).sort()).toEqual(COST_BREAKDOWN_KEYS);
+    expect(Object.keys(result.resource).sort()).toEqual(RESOURCE_KEYS);
+    expect(result).not.toHaveProperty('internal_trace_id');
+    expect(result.accepts[0]).not.toHaveProperty('debug_hash');
+    expect(result.cost_breakdown).not.toHaveProperty('trace_id');
+    expect(result.resource).not.toHaveProperty('region');
+  });
+
+  it('rejects bodies that match neither envelope nor direct shape', () => {
+    // No `error.message` string AND no top-level `x402_version`+`accepts` —
+    // should fail fast with a message pointing at both supported shapes.
+    const garbage = { unrelated: 'json', shape: { nope: true } };
+    expect(() => parseGateway402(garbage)).toThrow(SolvelaPaymentError);
   });
 
   it('throws SolvelaPaymentError when error.type is missing', () => {

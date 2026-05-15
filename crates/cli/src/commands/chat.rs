@@ -94,18 +94,41 @@ pub async fn run(
     }
 
     // --- 402 Payment Required ---
+    //
+    // Accept BOTH 402 body shapes the gateway may emit (issue #217):
+    //
+    //   1. Envelope (legacy, current default):
+    //      { "error": { "type": "invalid_payment",
+    //                   "message": "<JSON PaymentRequired>" } }
+    //
+    //   2. Direct (x402-spec compliant; target shape post-#217):
+    //      { "x402_version": 2, "resource": {...}, "accepts": [...],
+    //        "cost_breakdown": {...}, "error": "Payment required" }
+    //
+    // Shape detection is duck-typed: a top-level `error.message` string
+    // triggers the envelope path; otherwise we attempt direct deserialization.
+    // This dual-shape support lets the gateway flip unilaterally without a
+    // coordinated CLI release.
     let error_body: serde_json::Value = resp.json().await?;
-    // Surface a clear actionable error when `error.message` is missing or
-    // non-string. Otherwise the empty-string fallback flowed straight into
-    // serde_json::from_str("") which returns "EOF while parsing a value"
-    // — accurate but useless for the user trying to debug a malformed
-    // 402 response from the gateway.
-    let error_msg = error_body["error"]["message"].as_str().ok_or_else(|| {
-        anyhow::anyhow!("gateway 402 response missing error.message field; raw body: {error_body}")
-    })?;
 
-    let payment_required: PaymentRequired = serde_json::from_str(error_msg)
-        .context("failed to parse PaymentRequired from 402 response")?;
+    let payment_required: PaymentRequired = if let Some(error_msg) =
+        error_body["error"]["message"].as_str()
+    {
+        // Shape 1: envelope.
+        serde_json::from_str(error_msg)
+            .context("failed to parse PaymentRequired from 402 envelope.message")?
+    } else {
+        // Shape 2: direct PaymentRequired at top level. The serde_json error
+        // here is surfaced via `with_context` so a body that matches neither
+        // shape gets a single clear "neither shape matched" message instead
+        // of two cascading errors.
+        serde_json::from_value(error_body.clone()).with_context(|| {
+            format!(
+                "gateway 402 body matched neither envelope shape (`error.message` with stringified JSON) \
+                 nor direct PaymentRequired shape (top-level `x402_version` + `accepts`); raw body: {error_body}"
+            )
+        })?
+    };
 
     // Show cost breakdown.
     let cb = &payment_required.cost_breakdown;
@@ -448,6 +471,86 @@ mod tests {
         assert!(
             result.is_ok(),
             "chat payment flow should succeed with --yes"
+        );
+    }
+
+    /// Issue #217: dual-shape 402 parser. The CLI must decode a 402 body
+    /// emitted in the x402-spec-compliant direct shape
+    /// `{ x402_version, accepts, cost_breakdown, … }` exactly the same as
+    /// the legacy `{ error: { message: "<JSON>" } }` envelope. Mirror of
+    /// `test_chat_402_payment_flow` with only the gateway's 402 body shape
+    /// changed.
+    #[tokio::test]
+    async fn test_chat_402_payment_flow_direct_shape() {
+        let _lock = crate::ENV_MUTEX.lock().await;
+        let _wallet = setup_wallet();
+
+        let mock = MockServer::start().await;
+
+        // Solana RPC getLatestBlockhash mock (same as envelope test).
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "value": {
+                        "blockhash": "11111111111111111111111111111111",
+                        "lastValidBlockHeight": 9999
+                    }
+                }
+            })))
+            .mount(&mock)
+            .await;
+
+        let payment_required = serde_json::json!({
+            "x402_version": 2,
+            "resource": {"url": "/v1/chat/completions", "method": "POST"},
+            "accepts": [{
+                "scheme": "exact",
+                "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+                "amount": "1000",
+                "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "pay_to": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+                "max_timeout_seconds": 300
+            }],
+            "cost_breakdown": {
+                "provider_cost": "0.001000",
+                "platform_fee": "0.000050",
+                "fee_percent": 5,
+                "total": "0.001050",
+                "currency": "USDC"
+            },
+            "error": "Payment required"
+        });
+
+        // Mount 402 with the DIRECT shape — body is the PaymentRequired
+        // payload at the top level, no envelope wrapping.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(402).set_body_json(payment_required))
+            .up_to_n_times(1)
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header_exists("PAYMENT-SIGNATURE"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "Paid response!"}}]
+            })))
+            .mount(&mock)
+            .await;
+
+        std::env::set_var("SOLANA_RPC_URL", mock.uri());
+        let _env_guard = EnvGuard("SOLANA_RPC_URL");
+
+        let result = run(&mock.uri(), "auto", "What is Solana?", true, None).await;
+
+        assert!(
+            result.is_ok(),
+            "chat payment flow should succeed against a direct-shape 402: {:?}",
+            result.err()
         );
     }
 
