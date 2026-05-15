@@ -20,7 +20,8 @@
   "dependencies": {
     "@solana/spl-token": "^0.4.0",
     "@solana/web3.js": "^1.87.0",
-    "bs58": "^6.0.0"
+    "bs58": "^6.0.0",
+    "valibot": "^1.4.0"
   },
   "devDependencies": {
     "@types/node": "^25.7.0",

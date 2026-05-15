@@ -84,6 +84,11 @@ describe('parse402', () => {
       );
     });
 
+    // Issue #129: validation messages now name the failing JSON path
+    // (e.g. `x402_version`, `accepts[1].scheme`, `cost_breakdown.total`),
+    // emitted by the valibot schema in `src/schema.ts`. Tests assert on
+    // the path token rather than the legacy hand-rolled wording so
+    // valibot's natural message format flows through unchanged.
     it('throws on missing x402_version', () => {
       const body = {
         accepts: [validDirectBody.accepts[0]],
@@ -92,7 +97,7 @@ describe('parse402', () => {
       };
       assert.throws(
         () => parse402(JSON.stringify(body)),
-        /missing x402_version/,
+        /x402_version/,
       );
     });
 
@@ -104,7 +109,7 @@ describe('parse402', () => {
       };
       assert.throws(
         () => parse402(JSON.stringify(body)),
-        /missing or empty accepts/,
+        /accepts/,
       );
     });
 
@@ -112,7 +117,7 @@ describe('parse402', () => {
       const body = { ...validDirectBody, accepts: [] };
       assert.throws(
         () => parse402(JSON.stringify(body)),
-        /missing or empty accepts/,
+        /accepts must be non-empty/,
       );
     });
 
@@ -124,7 +129,7 @@ describe('parse402', () => {
         const body = { ...validDirectBody, accepts: [bad] };
         assert.throws(
           () => parse402(JSON.stringify(body)),
-          /accepts\[0\] is not a JSON object/,
+          /accepts\[0\]/,
           `expected ${JSON.stringify(bad)} to be rejected`,
         );
       }
@@ -135,7 +140,7 @@ describe('parse402', () => {
         const body = { ...validDirectBody, accepts: [bad] };
         assert.throws(
           () => parse402(JSON.stringify(body)),
-          /accepts\[0\] missing or invalid 'scheme' field/,
+          /accepts\[0\]/,
           `expected ${JSON.stringify(bad)} to be rejected`,
         );
       }
@@ -148,7 +153,7 @@ describe('parse402', () => {
       };
       assert.throws(
         () => parse402(JSON.stringify(body)),
-        /accepts\[1\] is not a JSON object/,
+        /accepts\[1\]/,
       );
     });
 
@@ -159,7 +164,7 @@ describe('parse402', () => {
       };
       assert.throws(
         () => parse402(JSON.stringify(body)),
-        /invalid cost_breakdown\.total/,
+        /cost_breakdown\.total/,
       );
     });
 
@@ -170,13 +175,14 @@ describe('parse402', () => {
       };
       assert.throws(
         () => parse402(JSON.stringify(body)),
-        /invalid cost_breakdown\.total/,
+        /cost_breakdown\.total/,
       );
     });
 
     // Number() is stricter than parseFloat for trailing garbage:
     //   parseFloat("1.5USDC") → 1.5  (silently strips the suffix — bug)
     //   Number("1.5USDC")    → NaN   (correctly rejects)
+    // The `decimalAmount` schema preserves this stricter check.
     it('throws on cost_breakdown.total with trailing currency suffix', () => {
       for (const total of ['1.5USDC', '0.001SOL', '0.5 USDC', '1.5,']) {
         const body = {
@@ -185,16 +191,16 @@ describe('parse402', () => {
         };
         assert.throws(
           () => parse402(JSON.stringify(body)),
-          /invalid cost_breakdown\.total/,
+          /cost_breakdown\.total/,
           `expected "${total}" to be rejected`,
         );
       }
     });
 
     // Number() coerces empty strings, null, booleans, and arrays to 0 / 1
-    // (unlike parseFloat which yields NaN). Without the typeof+length guard
-    // around the Number() call, those would silently pass the `total < 0`
-    // check. Numeric-typed totals are also rejected — the wire format keeps
+    // (unlike parseFloat which yields NaN). The schema's `string()` step
+    // means those non-string inputs never reach the numeric check.
+    // Numeric-typed totals are also rejected — the wire format keeps
     // USDC amounts as strings to avoid float precision drift.
     it('throws on cost_breakdown.total that is empty or non-string', () => {
       const malformed: unknown[] = ['', null, true, false, [], 0.001];
@@ -205,7 +211,7 @@ describe('parse402', () => {
         };
         assert.throws(
           () => parse402(JSON.stringify(body)),
-          /invalid cost_breakdown\.total/,
+          /cost_breakdown\.total/,
           `expected ${JSON.stringify(total)} to be rejected`,
         );
       }
@@ -216,6 +222,38 @@ describe('parse402', () => {
         () => parse402('[]'),
         /is not a JSON object/,
       );
+    });
+
+    // Issue #129: the schema now validates every accept field, not just
+    // `scheme`. Pre-schema parsers would have happily passed an accept
+    // with missing/empty `pay_to`, `network`, or `asset` — the signer
+    // would then build a tx against a malformed wire payload. Lock the
+    // new per-field coverage so future schema regressions are loud.
+    it('throws when accept fields beyond scheme are malformed', () => {
+      const baseAccept = validDirectBody.accepts[0];
+      const cases: Array<{ label: string; mut: Record<string, unknown>; path: RegExp }> = [
+        { label: 'missing network', mut: { network: undefined }, path: /accepts\[0\]\.network/ },
+        { label: 'empty pay_to', mut: { pay_to: '' }, path: /accepts\[0\]\.pay_to/ },
+        { label: 'numeric asset', mut: { asset: 42 }, path: /accepts\[0\]\.asset/ },
+        {
+          label: 'string max_timeout_seconds',
+          mut: { max_timeout_seconds: '300' },
+          path: /accepts\[0\]\.max_timeout_seconds/,
+        },
+        {
+          label: 'amount with trailing junk',
+          mut: { amount: '2500abc' },
+          path: /accepts\[0\]\.amount/,
+        },
+      ];
+      for (const { label, mut, path } of cases) {
+        const body = { ...validDirectBody, accepts: [{ ...baseAccept, ...mut }] };
+        assert.throws(
+          () => parse402(JSON.stringify(body)),
+          path,
+          `expected ${label} to be rejected at ${path}`,
+        );
+      }
     });
   });
 
