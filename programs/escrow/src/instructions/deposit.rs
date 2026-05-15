@@ -138,6 +138,16 @@ pub struct Deposit<'info> {
     pub agent_token_account: Account<'info, TokenAccount>,
 
     /// Vault ATA owned by the escrow PDA (destination of funds).
+    /// `init_if_needed` because the escrow PDA seeds include
+    /// `service_id`, so different requests from the same agent need
+    /// distinct vault ATAs — the first deposit for a given service_id
+    /// creates the vault; if a prior escrow with the *same* service_id
+    /// somehow leaves a vault around (it shouldn't — claim/refund close
+    /// it), re-init is a safe no-op because Anchor checks
+    /// `is_initialized` first. The ATA address is uniquely determined
+    /// by `(mint, escrow_pda)` so an attacker can't substitute a
+    /// different account. See `programs/escrow/AGENTS.md`
+    /// "init_if_needed exception".
     #[account(
         init_if_needed,
         payer = agent,
