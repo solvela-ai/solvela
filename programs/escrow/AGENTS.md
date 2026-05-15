@@ -56,13 +56,17 @@ cd programs/escrow && cargo build-sbf
 This produces the same `.so` artifact and runs the same SBF compilation pipeline that `anchor build` invokes — just without Anchor's outer wrapping. Verified to produce a valid program in this repo's tooling configuration.
 
 ### Deployment Checklist
-The `mainnet` feature flag selects which USDC mint the deployed program accepts at compile time. **Mainnet deploys MUST be built with `--features mainnet`** — without it, the program targets the devnet USDC mint and would silently reject all mainnet USDC deposits with `mint mismatch`.
+
+**Cluster policy: mainnet-only.** The on-chain program ID
+`9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU` is hardcoded in `src/lib.rs` via `declare_id!` and is only deployed to mainnet-beta. `Anchor.toml` intentionally omits `[programs.localnet]` and `[programs.devnet]` sections so `anchor deploy --provider.cluster {localnet,devnet}` fails fast with a "program not found" error instead of silently targeting the mainnet ID on the wrong cluster. Local integration tests run via LiteSVM (`tests/integration.rs`), not `anchor deploy`. Devnet rehearsal would require per-cluster keypairs and cluster-conditional `declare_id!` — track that as its own scoped effort if/when needed (see closed issue #120 path A).
+
+The `mainnet` feature flag selects which USDC mint the deployed program accepts at compile time. **Mainnet deploys MUST be built with `--features mainnet`** — without it, the program targets the devnet USDC mint (`4zMM…`) and would silently reject all mainnet USDC deposits with `mint mismatch`. This feature flag is independent of the cluster policy above and exists only because the same source compiles for both LiteSVM (default, devnet mint) and mainnet deploys.
 
 ```bash
 # Mainnet deploy — selects EPjFW…USDC mint
 cargo build-sbf -- --features mainnet
 
-# Devnet / local-validator deploy (default) — selects 4zMM…USDC mint
+# LiteSVM / test build (no on-chain deploy) — selects 4zMM…USDC mint
 cargo build-sbf
 ```
 
@@ -73,7 +77,7 @@ cargo expand --features mainnet | grep 'USDC_MINT.*=' | head -1
 # Expect: pub const USDC_MINT: Pubkey = pubkey!("EPjFW…");
 ```
 
-There is no on-chain self-check for which mint the deployed bytecode references — the program would happily accept the configured-at-compile-time mint, mainnet or devnet. The discipline lives in this checklist.
+There is no on-chain self-check for which mint the deployed bytecode references — the program would happily accept the configured-at-compile-time mint. The discipline lives in this checklist.
 
 ### Lint Notes (informational)
 `cargo clippy --all-targets -- -D warnings` against this crate emits ~14 `unexpected cfg condition value` warnings on newer Rust toolchains. These originate inside Anchor 0.31.1's macro-generated code (`#[program]`, `#[derive(Accounts)]`) and don't reflect any issue with this program's source. Workspace clippy (`cargo clippy --workspace`) doesn't surface them because escrow is not a workspace member. Either tolerate the noise locally, or add `RUSTFLAGS="--cap-lints=warn"` to your dev shell.
