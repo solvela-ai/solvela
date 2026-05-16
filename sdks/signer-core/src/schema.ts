@@ -18,6 +18,7 @@
 import {
   array,
   finite,
+  integer,
   minLength,
   minValue,
   nonEmpty,
@@ -98,7 +99,7 @@ export const ResourceSchema = object({
 export const X402_VERSION_CLIENT = 2;
 
 export const PaymentRequiredSchema = object({
-  x402_version: pipe(number(), finite(), minValue(0)),
+  x402_version: pipe(number(), integer(), minValue(0)),
   accepts: pipe(array(PaymentAcceptSchema), minLength(1, 'accepts must be non-empty')),
   cost_breakdown: CostBreakdownSchema,
   error: string(),

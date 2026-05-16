@@ -323,6 +323,27 @@ describe('parse402', () => {
       assert.match(warns[1], /x402_version=1/);
     });
 
+    it('rejects fractional x402_version at parse time (not silently dedup-warned)', () => {
+      _resetDowngradeWarnDedup();
+      const warns: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warns.push(args.map((a) => String(a)).join(' '));
+      };
+      try {
+        const body = { ...validDirectBody, x402_version: 1.5 };
+        assert.throws(
+          () => parse402(JSON.stringify(body)),
+          /x402_version/,
+          'fractional x402_version must be rejected at the schema layer (closes the dedup-Set-balloon vector)',
+        );
+      } finally {
+        console.warn = originalWarn;
+      }
+      // Throwing path must not have emitted a downgrade warn either.
+      assert.equal(warns.length, 0);
+    });
+
     it('warns on envelope-wrapped downgrade too (not just direct shape)', () => {
       _resetDowngradeWarnDedup();
       const inner = { ...validDirectBody, x402_version: 0 };

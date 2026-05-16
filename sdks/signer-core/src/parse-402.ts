@@ -96,6 +96,12 @@ function validateOrThrow(value: unknown, context: string): PaymentRequired {
  * downgraded version warns; subsequent identical downgrades stay
  * silent until the process restarts.
  *
+ * The dedup Set's growth is bounded by `PaymentRequiredSchema`'s
+ * `integer()` + `minValue(0)` guard on `x402_version` — a malformed
+ * gateway sending `0.0001, 0.0002, ...` cannot balloon this Set
+ * because those values are rejected at parse time and never reach
+ * `warnIfDowngrade()`.
+ *
  * Bumps to X402_VERSION_CLIENT in this codebase reset the dedup set
  * implicitly (a previously-warned version may stop being a downgrade).
  */
