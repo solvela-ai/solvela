@@ -85,7 +85,7 @@ jobs:
           solana --version
           cargo build-sbf --version
       - run: cargo build-sbf
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: solvela_escrow.so
           path: programs/escrow/target/deploy/solvela_escrow.so
