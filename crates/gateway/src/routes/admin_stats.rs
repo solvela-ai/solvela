@@ -12,7 +12,6 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::security;
 use crate::AppState;
 
 /// Query parameters for the admin stats endpoint.
@@ -99,7 +98,7 @@ pub async fn admin_stats(
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|token| security::constant_time_eq(token.as_bytes(), admin_token.as_bytes()));
+        .is_some_and(|token| admin_token.verify(token.as_bytes()));
 
     if !authorized {
         return Err((

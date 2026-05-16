@@ -45,6 +45,7 @@ hmac = { workspace = true }
 lru = { workspace = true }
 hex = "0.4"
 rand = "0.10"
+zeroize = { workspace = true }
 
 # Utilities
 uuid = { workspace = true }

@@ -5,11 +5,11 @@ use axum::http::HeaderMap;
 use axum::Json;
 use serde_json::{json, Value};
 
-use crate::security;
+use crate::secret::AdminToken;
 use crate::AppState;
 
 /// Check whether the request carries a valid admin bearer token.
-fn is_admin_authenticated(headers: &HeaderMap, admin_token: Option<&str>) -> bool {
+fn is_admin_authenticated(headers: &HeaderMap, admin_token: Option<&AdminToken>) -> bool {
     let Some(expected) = admin_token else {
         return false;
     };
@@ -17,7 +17,7 @@ fn is_admin_authenticated(headers: &HeaderMap, admin_token: Option<&str>) -> boo
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|token| security::constant_time_eq(token.as_bytes(), expected.as_bytes()))
+        .is_some_and(|token| expected.verify(token.as_bytes()))
 }
 
 /// GET /health — gateway readiness check with dependency status.
@@ -83,7 +83,7 @@ pub async fn health(State(state): State<Arc<AppState>>, headers: HeaderMap) -> J
         }
     };
 
-    let authenticated = is_admin_authenticated(&headers, state.admin_token.as_deref());
+    let authenticated = is_admin_authenticated(&headers, state.admin_token.as_ref());
 
     if authenticated {
         Json(json!({
@@ -228,7 +228,7 @@ supports_vision = false
             replay_set: AppState::new_replay_set(),
             slot_cache: new_slot_cache(),
             escrow_metrics: None,
-            admin_token: Some("test-admin-token".to_string()),
+            admin_token: Some(AdminToken::new("test-admin-token".to_string())),
             prometheus_handle: None,
             dev_bypass_payment: false,
         })

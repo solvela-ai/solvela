@@ -14,6 +14,7 @@ pub mod orgs;
 pub mod payment_util;
 pub mod providers;
 pub mod routes;
+pub mod secret;
 pub mod security;
 pub mod service_health;
 pub mod services;
@@ -81,7 +82,10 @@ pub struct AppState {
     /// `None` when escrow or claim processor is not configured.
     pub escrow_metrics: Option<Arc<solvela_x402::escrow::EscrowMetrics>>,
     /// Admin token for protected endpoints. `None` when not configured.
-    pub admin_token: Option<String>,
+    /// Wrapped in [`secret::AdminToken`] so the value is redacted from `Debug`
+    /// output, zeroized on drop, and only comparable via the constant-time
+    /// `verify` method. See issue #173 (L4 GW).
+    pub admin_token: Option<secret::AdminToken>,
     /// Prometheus metrics handle for rendering the `/metrics` endpoint.
     /// `None` when the recorder failed to install (metrics unavailable).
     pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
