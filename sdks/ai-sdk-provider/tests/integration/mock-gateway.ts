@@ -43,6 +43,7 @@ import {
   MockAgent,
   getGlobalDispatcher,
   setGlobalDispatcher,
+  fetch as undiciFetch,
   type Dispatcher,
 } from 'undici';
 import type { Interceptable, MockInterceptor } from 'undici/types/mock-interceptor';
@@ -159,9 +160,18 @@ export interface MockGatewayHandle {
  */
 export function installMockGateway(baseUrl: string): MockGatewayHandle {
   const previousDispatcher: Dispatcher = getGlobalDispatcher();
+  // undici 8 isolated the global dispatcher to symbol `.2`; Node 22's built-in
+  // fetch still uses `.1`, and the v1-mirror via Dispatcher1Wrapper does NOT
+  // bridge MockAgent's interceptor matching. So MockAgent interceptors are
+  // invisible to `globalThis.fetch` (requests hit the real network and time
+  // out). Swap globalThis.fetch for undici's own fetch — which definitively
+  // dispatches through whatever MockAgent we installed via setGlobalDispatcher.
+  // Restored in reset() below.
+  const previousFetch = globalThis.fetch;
   const agent = new MockAgent({ connections: 1 });
   agent.disableNetConnect();
   setGlobalDispatcher(agent);
+  globalThis.fetch = undiciFetch as typeof globalThis.fetch;
 
   // Extract just the origin (scheme + host + optional port) for agent.get().
   const origin = new URL(baseUrl).origin;
@@ -219,6 +229,7 @@ export function installMockGateway(baseUrl: string): MockGatewayHandle {
     try {
       agent.assertNoPendingInterceptors();
     } finally {
+      globalThis.fetch = previousFetch;
       setGlobalDispatcher(previousDispatcher);
       await agent.close();
       calls.length = 0;

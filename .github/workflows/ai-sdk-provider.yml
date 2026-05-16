@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
       - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
@@ -46,11 +46,12 @@ jobs:
     needs: docs-key-leak-check
     strategy:
       matrix:
-        # Node 18 dropped: vitest 4.x and other dev tooling import
-        # `node:util.styleText`, which was added in Node 20.12. Runtime
-        # code (sign.ts) only needs Node 14+; engines.node in package.json
-        # remains permissive for consumers.
-        node: ['20']
+        # Node 20 dropped: undici 8 (devDep, mocks integration-test transport
+        # via MockAgent) requires engines.node >= 22.19. Node 20 went EOL
+        # April 2026; Node 22 is the current LTS. Runtime code (sign.ts)
+        # only needs Node 14+; engines.node in package.json remains
+        # permissive for consumers (undici is dev-only).
+        node: ['22']
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -71,7 +72,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
       - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
@@ -88,7 +89,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
       - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
@@ -104,11 +105,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Node 18 dropped: vitest 4.x and other dev tooling import
-        # `node:util.styleText`, which was added in Node 20.12. Runtime
-        # code (sign.ts) only needs Node 14+; engines.node in package.json
-        # remains permissive for consumers.
-        node: ['20']
+        # Node 20 dropped: undici 8 (devDep, mocks integration-test transport
+        # via MockAgent) requires engines.node >= 22.19. Node 20 went EOL
+        # April 2026; Node 22 is the current LTS. Runtime code (sign.ts)
+        # only needs Node 14+; engines.node in package.json remains
+        # permissive for consumers (undici is dev-only).
+        node: ['22']
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -129,11 +131,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Node 18 dropped: vitest 4.x and other dev tooling import
-        # `node:util.styleText`, which was added in Node 20.12. Runtime
-        # code (sign.ts) only needs Node 14+; engines.node in package.json
-        # remains permissive for consumers.
-        node: ['20']
+        # Node 20 dropped: undici 8 (devDep, mocks integration-test transport
+        # via MockAgent) requires engines.node >= 22.19. Node 20 went EOL
+        # April 2026; Node 22 is the current LTS. Runtime code (sign.ts)
+        # only needs Node 14+; engines.node in package.json remains
+        # permissive for consumers (undici is dev-only).
+        node: ['22']
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -155,7 +158,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
       - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
@@ -173,7 +176,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
       - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
@@ -209,7 +212,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
       - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
