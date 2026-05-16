@@ -1,3 +1,11 @@
+// SAFETY: `SAMPLES` below feeds `app/page.tsx`'s server-side Shiki pipeline,
+// whose HTML output is rendered via `dangerouslySetInnerHTML` in
+// `./sdk-cta-panel.tsx`. The injection is only safe because every `code`
+// string here is a build-time literal in this file. Do NOT source `code`
+// (or any other field) from runtime input — CMS, query params, fetch
+// responses, user submissions, etc. — without first routing through a
+// sanitizer. See issue #173 (L3 SDK).
+
 import type { SupportedLang } from '@/lib/shiki/highlighter'
 
 export type SampleStatus = 'live' | 'alpha' | 'soon'
