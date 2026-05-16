@@ -167,6 +167,16 @@ export function SdkCtaPanel({ preHighlighted }: SdkCtaPanelProps) {
                 <CopyButton text={active.code} label="copy" />
               </div>
               {activeHtml ? (
+                // Safe: `activeHtml` is server-rendered Shiki output for
+                // entries in the hardcoded `SAMPLES` constant (see
+                // `./sdk-samples.ts`). No runtime data flows into `code` or
+                // `lang`, and Shiki only emits its own typed <span>/<code>
+                // tree. If you ever wire SAMPLES (or `preHighlighted` from
+                // page.tsx) to runtime input, switch to the plain-text
+                // fallback branch below or pipe through a sanitizer first.
+                // The repo's `react/no-danger` lint rule is not currently
+                // enabled by `eslint-config-next`'s default presets; treat
+                // this comment as the policy gate. See issue #173 (L3 SDK).
                 <pre
                   key={active.id}
                   role="tabpanel"
