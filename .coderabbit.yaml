@@ -1,0 +1,29 @@
+# CodeRabbit configuration for solvela-ai/solvela.
+#
+# Policy: auto-review disabled — CR is opt-in via `@coderabbitai review` in
+# a PR comment. Rationale: blanket auto-review on the Rust + Solana stack
+# produced more noise than signal in initial testing (see PR #316, 2026-05-16:
+# 16 "actionable" findings flagged, with several hallucinated APIs,
+# duplicated nitpicks across files, and missed project conventions
+# documented in CLAUDE.md). Reach for CR on security-sensitive or
+# wire-contract PRs; let the rest go through normal review.
+#
+# Re-enabling auto-review is a one-line change (`auto_review.enabled: true`).
+
+language: en-US
+
+reviews:
+  # Don't let CR mark reviews as "Changes requested" — that gates merging
+  # via branch protection in ways we don't want a bot to control.
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  auto_review:
+    enabled: false
+    drafts: false
+
+chat:
+  # Still respond to explicit `@coderabbitai review` / `pause` / `resolve`
+  # commands on PRs and issues.
+  auto_reply: true
