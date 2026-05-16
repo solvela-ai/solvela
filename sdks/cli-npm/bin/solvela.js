@@ -13,15 +13,26 @@ const path = require("path");
 // Map Node's process.platform + process.arch to our package naming convention.
 // Node values: https://nodejs.org/api/process.html#processplatform
 const PLATFORM_MAP = {
-  linux: { x64: "@solvela/cli-linux-x64" },
-  win32: { x64: "@solvela/cli-win32-x64" },
-  darwin: { x64: "@solvela/cli-darwin-x64", arm64: "@solvela/cli-darwin-arm64" },
+  linux: {
+    x64: "@solvela/cli-linux-x64",
+    arm64: "@solvela/cli-linux-arm64",
+  },
+  win32: {
+    x64: "@solvela/cli-win32-x64",
+    arm64: "@solvela/cli-win32-arm64",
+  },
+  darwin: {
+    x64: "@solvela/cli-darwin-x64",
+    arm64: "@solvela/cli-darwin-arm64",
+  },
 };
 
 const SUPPORTED = [
-  "linux/x64  → @solvela/cli-linux-x64",
-  "win32/x64  → @solvela/cli-win32-x64",
-  "darwin/x64 → @solvela/cli-darwin-x64",
+  "linux/x64    → @solvela/cli-linux-x64",
+  "linux/arm64  → @solvela/cli-linux-arm64",
+  "win32/x64    → @solvela/cli-win32-x64",
+  "win32/arm64  → @solvela/cli-win32-arm64",
+  "darwin/x64   → @solvela/cli-darwin-x64",
   "darwin/arm64 → @solvela/cli-darwin-arm64",
 ];
 
