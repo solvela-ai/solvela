@@ -19,6 +19,8 @@ enum BalanceError {
     HttpStatus(u16),
     #[error("failed to parse RPC response: {0}")]
     ParseResponse(String),
+    #[error("RPC returned error: {0}")]
+    RpcError(String),
 }
 
 /// Default poll interval: 30 seconds.
@@ -196,9 +198,16 @@ impl BalanceMonitor {
             .await
             .map_err(|e| BalanceError::ParseResponse(e.to_string()))?;
 
-        // Account not found -> balance is 0
-        if json.get("error").is_some() {
-            return Ok(0.0);
+        // Discriminate the benign "account does not exist" case from real RPC
+        // errors (rate limits, auth failures, malformed requests). Silently
+        // collapsing every error to Ok(0) masks rate-limited endpoints as
+        // "always zero balance" instead of surfacing them to the monitor loop.
+        // See issue #323.
+        if let Some(error) = json.get("error") {
+            if crate::rpc_error::is_account_not_found(&json) {
+                return Ok(0.0);
+            }
+            return Err(BalanceError::RpcError(error.to_string()));
         }
 
         Ok(json["result"]["value"]["uiAmount"].as_f64().unwrap_or(0.0))
@@ -311,6 +320,68 @@ mod tests {
         assert_ne!(balance, u64::MAX, "balance should have been updated");
         assert_eq!(balance, 5_000_000);
 
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_account_not_found_returns_zero_balance() {
+        // Canonical Solana error for a non-existent ATA — must collapse to Ok(0)
+        // so the monitor reports an honest zero rather than masking real outages.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": { "code": -32602, "message": "Invalid param: could not find account" }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let state = Arc::new(AtomicU64::new(u64::MAX));
+        let wallet_address = solana_sdk::pubkey::Pubkey::new_unique().to_string();
+        let monitor = BalanceMonitor::new(Arc::clone(&state), &mock_server.uri(), &wallet_address)
+            .poll_interval(Duration::from_millis(50));
+
+        let handle = tokio::spawn(monitor.run());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // u64::MAX is the "never polled" sentinel; account-not-found must overwrite
+        // it with 0, distinguishing "honest zero balance" from "never polled".
+        assert_eq!(state.load(Ordering::Relaxed), 0);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_does_not_overwrite_last_known_balance() {
+        // A real RPC error (rate limit, auth failure, etc.) must NOT be silenced
+        // to Ok(0) — the monitor preserves the last known balance and the error
+        // surfaces via the tracing::error! arm in run().
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": { "code": -32005, "message": "Server is busy" }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Seed with a known balance so we can verify it's preserved across the error.
+        let state = Arc::new(AtomicU64::new(7_500_000));
+        let wallet_address = solana_sdk::pubkey::Pubkey::new_unique().to_string();
+        let monitor = BalanceMonitor::new(Arc::clone(&state), &mock_server.uri(), &wallet_address)
+            .poll_interval(Duration::from_millis(50));
+
+        let handle = tokio::spawn(monitor.run());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert_eq!(
+            state.load(Ordering::Relaxed),
+            7_500_000,
+            "rate-limit error must not overwrite the last known balance"
+        );
         handle.abort();
     }
 

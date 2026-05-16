@@ -674,9 +674,18 @@ impl SolvelaClient {
             .await
             .map_err(|e| ClientError::BalanceError(format!("failed to parse RPC response: {e}")))?;
 
-        // Account not found → balance is 0
-        if json.get("error").is_some() {
-            return Ok(0.0);
+        // Discriminate the benign "account does not exist" case from real RPC
+        // errors (rate limits, auth failures, malformed requests). Silently
+        // returning Ok(0) on every error makes a malfunctioning RPC look like
+        // an empty wallet, which is a confusing operator experience and hides
+        // outages from retry loops. See issue #323.
+        if let Some(error) = json.get("error") {
+            if crate::rpc_error::is_account_not_found(&json) {
+                return Ok(0.0);
+            }
+            return Err(ClientError::BalanceError(format!(
+                "RPC returned error: {error}"
+            )));
         }
 
         let ui_amount = json["result"]["value"]["uiAmount"].as_f64().unwrap_or(0.0);
@@ -1089,6 +1098,45 @@ mod tests {
 
         let balance = client.usdc_balance().await.unwrap();
         assert!((balance - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_usdc_balance_propagates_real_rpc_errors() {
+        // A non-account-not-found RPC error (e.g., rate limit) must propagate as
+        // Err(ClientError::BalanceError), not be silenced to Ok(0). See #323.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": { "code": -32005, "message": "Server is busy" }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: "http://unused".to_string(),
+                rpc_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let result = client.usdc_balance().await;
+        assert!(result.is_err(), "rate-limit error must propagate as Err");
+        match result.unwrap_err() {
+            ClientError::BalanceError(msg) => {
+                assert!(
+                    msg.contains("Server is busy"),
+                    "error should surface the upstream message: {msg}"
+                );
+            }
+            other => panic!("expected ClientError::BalanceError, got {other:?}"),
+        }
     }
 
     #[tokio::test]
