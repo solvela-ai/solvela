@@ -2,6 +2,43 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-16 (later) — Rust client SDK consolidated into the monorepo + CodeRabbit auto-review rolled back ([#316](https://github.com/solvela-ai/solvela/pull/316), [#319](https://github.com/solvela-ai/solvela/pull/319))
+
+The last cross-repo SDK got pulled into the monorepo, and a one-day CodeRabbit auto-review trial was reverted to opt-in mode. Two issues filed for legitimate inherited findings ([#322](https://github.com/solvela-ai/solvela/issues/322), [#323](https://github.com/solvela-ai/solvela/issues/323)).
+
+### [#316](https://github.com/solvela-ai/solvela/pull/316) — `sdks/rust/` consolidation
+
+PR [#316](https://github.com/solvela-ai/solvela/pull/316) pulled the standalone `solvela-ai/solvela-client` repo into `sdks/rust/` as a non-workspace subtree, mirroring the Go ([#252](https://github.com/solvela-ai/solvela/pull/252)), TypeScript ([#259](https://github.com/solvela-ai/solvela/pull/259)), and Python ([#261](https://github.com/solvela-ai/solvela/pull/261)) consolidations from 2026-05-12. Adds 31 files / +11,008 lines.
+
+**Non-workspace shape** — `sdks/rust/Cargo.toml` keeps its own `[workspace]` opting out of the gateway workspace because it pins `solana-sdk ~4.0` and `reqwest 0.13`, while the gateway workspace has zero `solana-sdk` and uses `reqwest 0.12`. Same opt-out pattern as `programs/escrow/`, `openclaw-provider`, `mcp`, and `ai-sdk-provider`. This shape was the explicit reason the Rust SDK was deferred from the 2026-05-12 sweep — bumping `reqwest` in the gateway is its own refactor and didn't belong in a consolidation PR.
+
+**Protocol path-dep wiring (the whole point)** — `solvela-protocol` repointed from crates.io `"0.1"` to a local path dep on `../../crates/protocol` (`"0.2"`). Combined with the new `.github/workflows/sdks-rust.yml` retriggering on `crates/protocol/**` changes, this closes the Rust SDK's slice of the cross-repo wire-format risk class that fired on 2026-05-11 (the `ModelInfo` zero-fill incident). Any future protocol-shape change now rebuilds + retests the Rust SDK in the same PR.
+
+**Drift the consolidation surfaced** — the standalone SDK's `wire_format::model_info_emits_snake_case` integration test was still asserting the pre-[#229](https://github.com/solvela-ai/solvela/pull/229) flat-snake-case shape (`model_id`, `input_cost_per_million`, `supports_streaming`, ...). Protocol 0.2 had intentionally moved those to nested `capabilities`/`pricing` objects, with `model_id` / `supports_structured_output` / `supports_batch` / `max_output_tokens` flagged as internal-only and never on the wire. Rewrote the test to assert the current wire shape and to explicitly check that the internal-only keys are absent. This is exactly the class of silent drift the same-PR CI coverage is meant to prevent; fixed in the same PR rather than as a follow-up.
+
+**CI** — `.github/workflows/sdks-rust.yml` runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo audit` (one informational `bincode 1.3.3 unmaintained` warning, ecosystem-wide; exit 0). Path triggers on `sdks/rust/**` *and* `crates/protocol/**`. Top-level `permissions: contents: read` so the workflow doesn't inherit broader repo-default `GITHUB_TOKEN` scopes (CodeRabbit nit addressed in the fixup commit before merge).
+
+**Archive** — `solvela-ai/solvela-client` archived 07:39 UTC with a redirect README pointing at `sdks/rust/`. crates.io packages (`solvela-client`, `solvela-client-cli`, `solvela-client-cli-args`, `solvela-client-proxy` at 0.2.1) are unchanged; existing installs and Cargo.toml pins resolve from crates.io's cache. The archive is reversible via `gh repo unarchive` if anything turns out wrong.
+
+**Follow-ups deferred to issues:**
+- [#322](https://github.com/solvela-ai/solvela/issues/322) (`security severity:medium`) — `commands/wallet.rs` import paths echo mnemonic/keypair input to terminal; `cli-args/src/lib.rs` non-Unix branch writes wallet without enforceable ACLs.
+- [#323](https://github.com/solvela-ai/solvela/issues/323) (`bug severity:low`) — `balance.rs::fetch_balance`, `client.rs` USDC balance method, and `doctor.rs` RPC reachability check all swallow non-account-not-found RPC errors as silent `Ok(0)` / "reachable".
+- **Monorepo-native crates.io publish workflow** — port `release-crates.yml` from the archived repo as `.github/workflows/sdks-rust-publish.yml`, tag-triggered on `sdks/rust/v*`. Needed before the next `solvela-client-*` hotfix release. Credentials in place; not blocked.
+
+### [#319](https://github.com/solvela-ai/solvela/pull/319) — `.coderabbit.yaml` disables auto-review
+
+The `coderabbitai` GitHub App was installed at the org level on 2026-05-15. Its first day of blanket auto-review on this Rust + Solana stack (test case: #316) produced **16 "actionable" findings** with mixed signal:
+
+- **3-4 real catches** — missing workflow `permissions:` block on the new `sdks-rust.yml`, mnemonic stdin echo, `balance.rs` RPC error swallowing, non-Unix wallet ACL gap.
+- **3-4 mixed / wrong** — `Duration::from_mins(1)` flagged as "non-existent API" (stable since Rust 1.81; MSRV is 1.91; CI compiled clean — hallucination); `Cargo.toml` `repository` URL flagged as stale (already fixed in the consolidation commit — CR reviewed against outdated state); cache key collision on `(model, messages)` (intentional wallet-agnostic design documented in `CLAUDE.md` rule #16); same `from_mins` finding duplicated across three files to inflate the count.
+- **5+ preference-level nits** — `Option<Option<T>>` builder tri-state, `checked_add` for a u64 request counter, structured tracing tightening, const-vs-inline divider width arithmetic, truncated-mid-word `finish_reason` gating.
+
+**The compounding operational cost** — CR's `COMMENTED` review body lists "16 actionable" verbatim and is immutable. Even after `@coderabbitai pause` + `@coderabbitai resolve` were posted and acknowledged, that review body kept blocking the Solvela-bot's auto-approve heuristic. The bot approved sibling PRs #314, #315, #317, #318 within ~3-5 minutes of CI completion; deliberately skipped #316 for ~75 minutes until a manual approval went through. Net effect: CR added one round of review friction and one operational block in exchange for ~3 catches that would have been found in normal review.
+
+**Config** — `reviews.auto_review.enabled: false` plus `reviews.request_changes_workflow: false` (don't let CR mark reviews as "Changes requested", which would gate merging through branch protection). `chat.auto_reply: true` keeps explicit `@coderabbitai review` / `pause` / `resolve` commands working — CR is now a tool you reach for on security-sensitive or wire-contract PRs, not a blanket reviewer. Re-enabling is a one-line config change.
+
+**Lesson** — when introducing a new bot reviewer to a repo whose merge gate uses another bot, verify the two heuristics compose before turning on blanket coverage. Solvela-bot's logic treats CR's `COMMENTED`-with-actionable as "needs human attention"; CR's review body is immutable post-submit; the two together created a deadlock that only a manual approve could break.
+
 ## 2026-05-16 — Session rollup: anchor `unexpected_cfgs` workaround, undici 8 in ai-sdk-provider, signer-core bootstrap, x402 downgrade warn ([#314](https://github.com/solvela-ai/solvela/pull/314) [#315](https://github.com/solvela-ai/solvela/pull/315) [#317](https://github.com/solvela-ai/solvela/pull/317) [#318](https://github.com/solvela-ai/solvela/pull/318) [#320](https://github.com/solvela-ai/solvela/pull/320))
 
 Five PRs landed in one session. Closes [#114](https://github.com/solvela-ai/solvela/issues/114), [#157](https://github.com/solvela-ai/solvela/issues/157), and addresses [#173](https://github.com/solvela-ai/solvela/issues/173) L1 SDK. Also closed [#135](https://github.com/solvela-ai/solvela/issues/135) (verified resolved by prior [#137](https://github.com/solvela-ai/solvela/pull/137) + [#144](https://github.com/solvela-ai/solvela/pull/144), just never closed).
