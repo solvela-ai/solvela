@@ -49,15 +49,27 @@ The manual JSON snippets for each host are below as a fallback reference.
 
 ## Installation
 
-```bash
-npm install -g @solvela/mcp-server
-```
-
-Or run directly:
+The MCP server is **not published to npm** today (`package.json` is marked
+`private: true`). Build it from the monorepo:
 
 ```bash
-npx @solvela/mcp-server
+git clone https://github.com/solvela-ai/solvela.git
+cd solvela/sdks/mcp
+npm install
+npm run build
+# Built artifact: dist/index.js
 ```
+
+Run it directly to confirm the build:
+
+```bash
+node dist/index.js
+```
+
+The manual JSON snippets below use absolute paths to that built `dist/index.js`
+— `npx @solvela/mcp-server` is not available because the package is not on
+npm. The `solvela mcp install --host=<host>` flow shown in the Quickstart above
+handles the absolute path resolution for you.
 
 ## Setup with Claude Code
 
@@ -67,8 +79,8 @@ Add to your Claude Code MCP configuration (`.claude/settings.json` or project-le
 {
   "mcpServers": {
     "solvela": {
-      "command": "npx",
-      "args": ["@solvela/mcp-server"],
+      "command": "node",
+      "args": ["/absolute/path/to/solvela/sdks/mcp/dist/index.js"],
       "env": {
         "SOLVELA_API_URL": "http://localhost:8402",
         "SOLVELA_SESSION_BUDGET": "1.00",
@@ -92,8 +104,8 @@ Add to your Claude Desktop config (`claude_desktop_config.json`):
 {
   "mcpServers": {
     "solvela": {
-      "command": "npx",
-      "args": ["@solvela/mcp-server"],
+      "command": "node",
+      "args": ["/absolute/path/to/solvela/sdks/mcp/dist/index.js"],
       "env": {
         "SOLVELA_API_URL": "http://localhost:8402",
         "SOLVELA_SESSION_BUDGET": "1.00",
@@ -118,8 +130,8 @@ Add to `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
   "mcpServers": {
     "solvela": {
       "type": "stdio",
-      "command": "npx",
-      "args": ["@solvela/mcp-server"],
+      "command": "node",
+      "args": ["/absolute/path/to/solvela/sdks/mcp/dist/index.js"],
       "env": {
         "SOLVELA_API_URL": "http://localhost:8402",
         "SOLVELA_SESSION_BUDGET": "1.00",
