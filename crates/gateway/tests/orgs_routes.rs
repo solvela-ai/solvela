@@ -33,6 +33,15 @@ use gateway::AppState;
 use solvela_router::models::ModelRegistry;
 
 const ADMIN_TOKEN: &str = "test-admin-token";
+
+// Valid 32-byte Solana base58 pubkeys for happy-path fixtures. The wrapped-SOL
+// mint and the USDC-SPL mint are used as visually-distinct placeholders so the
+// org owner and added-member rows are easy to tell apart in test output. The
+// tightened `validate_wallet_address` in `src/routes/orgs/mod.rs` rejects
+// anything that doesn't bs58-decode to exactly 32 bytes, so these constants
+// have to be real pubkeys (see #173 L2 GW).
+const TEST_OWNER_WALLET: &str = "So11111111111111111111111111111111111111112";
+const TEST_MEMBER_WALLET: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const TEST_MODELS_TOML: &str = r#"
 [models.openai-gpt-4o]
 provider = "openai"
@@ -135,7 +144,8 @@ async fn body_to_json(resp: axum::response::Response) -> Value {
 }
 
 async fn create_test_org(app: &Router, slug: &str) -> Uuid {
-    let body = format!(r#"{{"name":"Org {slug}","slug":"{slug}","owner_wallet":"owner-{slug}"}}"#);
+    let body =
+        format!(r#"{{"name":"Org {slug}","slug":"{slug}","owner_wallet":"{TEST_OWNER_WALLET}"}}"#,);
     let resp = app
         .clone()
         .oneshot(json_request("POST", "/v1/orgs", &body))
@@ -163,7 +173,7 @@ async fn create_org_returns_201_with_id(pool: PgPool) {
         .oneshot(json_request(
             "POST",
             "/v1/orgs",
-            r#"{"name":"Acme","slug":"acme","owner_wallet":"acmewallet"}"#,
+            &format!(r#"{{"name":"Acme","slug":"acme","owner_wallet":"{TEST_OWNER_WALLET}"}}"#,),
         ))
         .await
         .expect("call");
@@ -172,7 +182,7 @@ async fn create_org_returns_201_with_id(pool: PgPool) {
     let json = body_to_json(resp).await;
     assert_eq!(json["name"], "Acme");
     assert_eq!(json["slug"], "acme");
-    assert_eq!(json["owner_wallet"], "acmewallet");
+    assert_eq!(json["owner_wallet"], TEST_OWNER_WALLET);
     assert!(Uuid::parse_str(json["id"].as_str().unwrap()).is_ok());
 }
 
@@ -323,13 +333,13 @@ async fn add_and_list_members_via_http(pool: PgPool) {
         .oneshot(json_request(
             "POST",
             &format!("/v1/orgs/{org_id}/members"),
-            r#"{"wallet_address":"alice","role":"admin"}"#,
+            &format!(r#"{{"wallet_address":"{TEST_MEMBER_WALLET}","role":"admin"}}"#),
         ))
         .await
         .expect("add member");
     assert_eq!(resp.status(), StatusCode::CREATED);
     let json = body_to_json(resp).await;
-    assert_eq!(json["wallet_address"], "alice");
+    assert_eq!(json["wallet_address"], TEST_MEMBER_WALLET);
     assert_eq!(json["role"], "admin");
 
     let resp = app
@@ -353,7 +363,7 @@ async fn assign_wallet_404s_when_team_not_in_org(pool: PgPool) {
         .oneshot(json_request(
             "POST",
             &format!("/v1/orgs/{org_id}/teams/{bogus_team}/wallets"),
-            r#"{"wallet_address":"alice"}"#,
+            &format!(r#"{{"wallet_address":"{TEST_MEMBER_WALLET}"}}"#),
         ))
         .await
         .expect("call");
@@ -382,7 +392,7 @@ async fn assign_and_list_team_wallets_via_http(pool: PgPool) {
         .oneshot(json_request(
             "POST",
             &format!("/v1/orgs/{org_id}/teams/{team_id}/wallets"),
-            r#"{"wallet_address":"alice"}"#,
+            &format!(r#"{{"wallet_address":"{TEST_MEMBER_WALLET}"}}"#),
         ))
         .await
         .expect("assign wallet");
@@ -399,7 +409,7 @@ async fn assign_and_list_team_wallets_via_http(pool: PgPool) {
     let json = body_to_json(resp).await;
     let arr = json.as_array().unwrap();
     assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["wallet_address"], "alice");
+    assert_eq!(arr[0]["wallet_address"], TEST_MEMBER_WALLET);
 }
 
 // ---------------------------------------------------------------------------
