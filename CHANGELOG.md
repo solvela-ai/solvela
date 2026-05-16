@@ -2,6 +2,46 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-16 — Session rollup: anchor `unexpected_cfgs` workaround, undici 8 in ai-sdk-provider, signer-core bootstrap, x402 downgrade warn ([#314](https://github.com/solvela-ai/solvela/pull/314) [#315](https://github.com/solvela-ai/solvela/pull/315) [#317](https://github.com/solvela-ai/solvela/pull/317) [#318](https://github.com/solvela-ai/solvela/pull/318) [#320](https://github.com/solvela-ai/solvela/pull/320))
+
+Five PRs landed in one session. Closes [#114](https://github.com/solvela-ai/solvela/issues/114), [#157](https://github.com/solvela-ai/solvela/issues/157), and addresses [#173](https://github.com/solvela-ai/solvela/issues/173) L1 SDK. Also closed [#135](https://github.com/solvela-ai/solvela/issues/135) (verified resolved by prior [#137](https://github.com/solvela-ai/solvela/pull/137) + [#144](https://github.com/solvela-ai/solvela/pull/144), just never closed).
+
+### [#314](https://github.com/solvela-ai/solvela/pull/314) — clear escrow `unexpected_cfgs` warnings + enable deferred clippy CI gate (closes #114)
+
+#114 asked to bump `anchor-lang` 0.31.1 → 0.32+ on the premise that newer macro crates would declare check-cfg metadata. A speculative-bump investigation in an isolated worktree showed the premise wrong: (a) `anchor-lang 0.32.1` pulls `solana-account-info >= 2.3` via `solana-invoke 0.4.0`, but `litesvm 0.6.1` caps `solana-program-runtime <= 2.2.4`, so the only litesvm that resolves is 0.12.0 — which forces Solana 3.x, exactly the post-crate-split tree [#113](https://github.com/solvela-ai/solvela/pull/113) deliberately rolled back from; (b) even on `anchor-lang 1.0.2` (latest, with litesvm 0.12.0) 8 of the original 14 `unexpected_cfgs` warnings still fire because the macro crates' check-cfg hygiene gap spans 0.31 → 1.0.2. The durable fix is rustc's intended escape hatch: a `[lints.rust]` table in `programs/escrow/Cargo.toml` declaring the cfg values as known-valid via `check-cfg`. Whitelist, not blanket-suppress — any *other* unexpected cfg still warns.
+
+Same PR enables the `cargo clippy --all-targets -- -D warnings` job that `escrow.yml`'s tail comment had explicitly deferred until #114 closed. Two real `clippy::assertions_on_constants` lints surfaced in `tests/unit.rs:133-134` — fixed by switching `assert!(MAX_ESCROW_SLOTS >= 100_000)` to `const _: () = assert!(...)`, which moves the bounds check to compile time (a bad bump now fails the build rather than a single test).
+
+Filed an upstream comment on [otter-sec/anchor#3401](https://github.com/otter-sec/anchor/issues/3401) with the workaround and an offer to PR the macro-side fix (Anchor's canonical repo is now `otter-sec/anchor` — both `coral-xyz/anchor` and `solana-foundation/anchor` 301-redirect there).
+
+### [#315](https://github.com/solvela-ai/solvela/pull/315) — clippy `--features` in escrow CI
+
+CodeRabbit nit on #314: the new clippy job ran without enabling any features, so lints inside `#[cfg(feature = "...")]`-gated code (e.g. the `mainnet` USDC mint swap in `lib.rs:46`) weren't being checked. Added all non-`sbf` features to the invocation: `--features mainnet,cpi,no-entrypoint,no-idl,no-log-ix-name`. `sbf` stays excluded because `tests/integration.rs` `include_bytes!`s the `.so` artifact only produced by the `sbf-build` job.
+
+### [#317](https://github.com/solvela-ai/solvela/pull/317) — auto-bootstrap `@solvela/signer-core` on fresh clone
+
+Surfaced while closing #135 (which was already done via #137 + #144 — verified via grep showing zero `from '@solvela/sdk'` imports in any TS source). Fresh-clone walk in any consumer SDK still failed: `npm install && npm run build` in `sdks/{mcp,openclaw-provider,ai-sdk-provider}` errored with `Cannot find module '@solvela/signer-core'` because npm doesn't auto-build `file:` workspace deps. CI worked because each consumer workflow has an explicit "Build signer-core dist/" step; local dev had no equivalent.
+
+New `sdks/signer-core/scripts/ensure-built.mjs` — fast-path script that exits 0 if `dist/` exists, otherwise runs `npm ci && npm run build` in signer-core. Wired as both `prebuild` and `pretest` hooks in each consumer's `package.json`; for consumers with an existing prebuild (openclaw, ai-sdk), the bootstrap is prepended via `&&` so model generation still runs. Verified on totally cold state: `find sdks/signer-core/dist -delete; find sdks/mcp/node_modules -mindepth 1 -delete; npm --prefix sdks/mcp test` → bootstrap fires, 86/86 pass. Warm runs are silent no-ops. CI workflows unchanged — the existing explicit step still runs first, then the prebuild hook's fast-path no-ops on the (now-existing) dist.
+
+### [#318](https://github.com/solvela-ai/solvela/pull/318) — undici 7 → 8 in ai-sdk-provider integration tests (closes #157)
+
+Picks up the bump dependabot deferred in [#106](https://github.com/solvela-ai/solvela/pull/106). Root cause empirically confirmed: undici 8 isolated the global dispatcher to a new internal symbol (`undici.globalDispatcher.2`, [nodejs/undici#4827](https://github.com/nodejs/undici/pull/4827)) and added a `Dispatcher1Wrapper` mirror so Node 22's bundled-undici fetch (still on the `.1` symbol) can keep using `setGlobalDispatcher()`. The mirror bridges handler callbacks for plain `Agent` but **does not bridge MockAgent's interceptor matching** — so on Node 22, `globalThis.fetch` no longer routes through any `MockAgent` installed via `setGlobalDispatcher`. Minimal repro on Node v22.22.0: native fetch fails, `undici.fetch` correctly hits the mock. 85 of 353 ai-sdk-provider tests dropped on the dependabot PR — every test exercising the mock gateway via the provider's default fetch.
+
+Fix contained in `tests/integration/mock-gateway.ts`: alongside `setGlobalDispatcher(agent)`, also swap `globalThis.fetch` for undici's own `fetch` (which definitively dispatches through whatever agent is global). Save and restore the original on `reset()`. 12 integration test files inherit the fix — no per-test changes needed. 268/353 → 353/353 tests pass. Worst-case file (`it-13`) went from 86s timing-out runtime to 1s.
+
+Node matrix bumped 20 → 22 in the workflow (undici 8 has `engines.node >= 22.19.0`). Three matrix blocks + six hardcoded `node-version: '20'` in non-matrix jobs aligned to '22'. Node 20 went EOL April 2026; Node 22 is the current LTS. Runtime stays Node 14+ in the published package's `engines.node` (undici is dev-only, consumers are unaffected).
+
+### [#320](https://github.com/solvela-ai/solvela/pull/320) — x402 protocol downgrade warning in signer-core (#173 L1 SDK)
+
+Picked from [#173](https://github.com/solvela-ai/solvela/issues/173)'s LOW bucket. Before this change, `parse402()` silently accepted any non-negative `x402_version` (the schema enforced only `minValue(0)`), so a gateway returning `x402_version: 0` or `1` against a client signing `2` parsed cleanly with no signal that the protocol contract had drifted.
+
+`parse-402.ts` now emits a `console.warn` on `gateway_version < X402_VERSION_CLIENT`, deduplicated to **one warn per unique downgraded version per process** so a tight request loop doesn't log-flood while still surfacing the regression on first occurrence. `X402_VERSION_CLIENT = 2` is now exported from `schema.ts` as a single source of truth; `sign.ts` aliases it locally to preserve call-site readability.
+
+CodeRabbit on the PR flagged a theoretical Set-balloon vector — a malformed gateway sending `0.0001, 0.0002, ...` could grow the dedup Set unboundedly. CodeRabbit suggested normalizing the dedup key with `Math.trunc()`; the structural fix instead was to add `integer()` to the `x402_version` schema pipe so fractional values are rejected at parse time (throw, not warn) — the warn path then never sees them. 4 new tests cover the downgrade-warn behavior; 1 additional test covers the fractional-version rejection. 88/88 → 89/89 → 90/90 across the iteration.
+
+Downstream regression check: 86/86 mcp, 70/70 openclaw-provider, 353/353 ai-sdk-provider all pass after the signer-core change.
+
 ## 2026-05-12 — Python SDK consolidated into the monorepo ([#261](https://github.com/solvela-ai/solvela/pull/261))
 
 PR [#261](https://github.com/solvela-ai/solvela/pull/261) pulled the standalone `solvela-ai/solvela-python` repo into `sdks/python/` and added a path-scoped `.github/workflows/sdks-python.yml` mirroring `sdks-typescript.yml` (Python 3.10/3.12 matrix, `ruff check` + `ruff format --check`, pytest unit + integration). All required CI checks green pre-merge; `pip install -e ".[dev]"` + `pytest tests/unit/ tests/integration/` clean at the new path — 197 tests pass, 34 files already formatted. Pre-existing stale `rustyclawrouter/` + `tests/` cruft (pre-d2824e0a refactor) was cleared before the rsync. Per-package `LICENSE`/`SECURITY.md` and the standalone `.github/` (CI + release-pypi workflow) intentionally not copied; monorepo-root `LICENSE` and `SECURITY.md` apply, and the PyPI publish pipeline will be re-created in a follow-up before the next release.
