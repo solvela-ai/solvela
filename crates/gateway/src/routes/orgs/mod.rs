@@ -244,6 +244,12 @@ fn validate_slug(slug: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)
             Json(json!({"error": "slug must not start or end with a hyphen"})),
         ));
     }
+    if slug.contains("--") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "slug must not contain consecutive hyphens"})),
+        ));
+    }
     Ok(())
 }
 
@@ -255,14 +261,78 @@ fn validate_name(name: &str, field: &str) -> Result<(), (StatusCode, Json<serde_
             Json(json!({"error": format!("{} must be 1-256 characters", field)})),
         ));
     }
+    // Reject characters that enable log injection, display spoofing, or
+    // bidirectional-text attacks. Names flow into structured logs (tracing!),
+    // JSON audit entries, and dashboard rendering — each surface has a
+    // different escape model and the safest contract is "no control chars,
+    // no bidi overrides, no zero-width spoofing chars". See #173 (L2 GW).
+    if trimmed.chars().any(is_disallowed_display_char) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!(
+                    "{} must not contain control characters, bidirectional overrides, or zero-width characters",
+                    field
+                )
+            })),
+        ));
+    }
     Ok(())
 }
 
+/// Returns true for characters that should be rejected from human-display
+/// fields (names, labels) because they enable log injection, Trojan-Source
+/// style bidi spoofing, or zero-width-character display impersonation.
+fn is_disallowed_display_char(c: char) -> bool {
+    // C0 controls + DEL: includes \r \n \t \0 etc. Newlines in particular
+    // can fake log lines or split structured-log entries.
+    if c.is_control() {
+        return true;
+    }
+    matches!(c,
+        // Bidi formatting / override (Trojan Source — CVE-2021-42574).
+        '\u{202A}'..='\u{202E}'
+        | '\u{2066}'..='\u{2069}'
+        // Zero-width characters used for display spoofing of identifiers.
+        | '\u{200B}'..='\u{200D}'
+        | '\u{2060}'
+        | '\u{FEFF}'
+    )
+}
+
 fn validate_wallet_address(addr: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    // Solana base58-encoded Ed25519 pubkeys are typically 32-44 characters.
+    // The cheap length-only check was accepting arbitrary 1-64-character
+    // strings, including text that wasn't even base58. Decode the input as
+    // base58 and verify it is exactly 32 bytes (the canonical Solana pubkey
+    // size). This catches typos, copy-paste truncation, and obviously-wrong
+    // values at the API boundary instead of letting them propagate to the
+    // database. See #173 (L2 GW).
+    //
+    // 32 bytes encodes to 43-44 base58 characters depending on the leading
+    // byte; clamp the input length below that ceiling first to short-circuit
+    // pathological inputs before bs58 decoding.
     if addr.is_empty() || addr.len() > 64 {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "wallet address must be 1-64 characters"})),
+        ));
+    }
+    let decoded = match bs58::decode(addr).into_vec() {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "wallet address must be a valid base58 string"})),
+            ));
+        }
+    };
+    if decoded.len() != 32 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "wallet address must decode to a 32-byte Solana pubkey"
+            })),
         ));
     }
     Ok(())
@@ -727,6 +797,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_slug_consecutive_hyphens_returns_err() {
+        use super::validate_slug;
+        assert!(validate_slug("my--org").is_err());
+        assert!(validate_slug("my---org").is_err());
+        assert!(validate_slug("a--b").is_err());
+    }
+
+    #[test]
     fn validate_slug_valid() {
         use super::validate_slug;
         assert!(validate_slug("my-org").is_ok());
@@ -764,6 +842,48 @@ mod tests {
         assert!(validate_name("Acme Corp", "name").is_ok());
         assert!(validate_name("a", "name").is_ok());
         assert!(validate_name(&"a".repeat(256), "name").is_ok());
+        // Unicode letters and punctuation are allowed (only display-class
+        // attack chars are rejected).
+        assert!(validate_name("Café del Mar", "name").is_ok());
+        assert!(validate_name("北京", "name").is_ok());
+        assert!(validate_name("ACME Inc. — flagship", "name").is_ok());
+    }
+
+    #[test]
+    fn validate_name_rejects_control_chars() {
+        use super::validate_name;
+        // Newline (log injection): a real attacker would inject something
+        // like "Acme\nFAKE INFO[2026-01-01] auth bypass detected" to forge
+        // log entries.
+        assert!(validate_name("Acme\nFAKE", "name").is_err());
+        assert!(validate_name("Acme\r\nFAKE", "name").is_err());
+        assert!(validate_name("Acme\tco", "name").is_err());
+        assert!(validate_name("Acme\0co", "name").is_err());
+        // DEL
+        assert!(validate_name("Acme\u{007F}co", "name").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_bidi_overrides() {
+        use super::validate_name;
+        // Trojan Source — CVE-2021-42574. RLO (U+202E) and friends can
+        // make "evil.exe" render as "exe.live" or similar.
+        assert!(validate_name("admin\u{202E}eltt", "name").is_err());
+        assert!(validate_name("acme\u{202A}corp", "name").is_err());
+        assert!(validate_name("acme\u{2066}corp", "name").is_err());
+        assert!(validate_name("acme\u{2069}corp", "name").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_zero_width_chars() {
+        use super::validate_name;
+        // Zero-width chars enable display spoofing — "acme" and
+        // "ac\u{200B}me" look identical but compare unequal.
+        assert!(validate_name("ac\u{200B}me", "name").is_err());
+        assert!(validate_name("ac\u{200C}me", "name").is_err());
+        assert!(validate_name("ac\u{200D}me", "name").is_err());
+        assert!(validate_name("ac\u{FEFF}me", "name").is_err());
+        assert!(validate_name("ac\u{2060}me", "name").is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -784,9 +904,31 @@ mod tests {
     }
 
     #[test]
+    fn validate_wallet_address_invalid_base58_returns_err() {
+        use super::validate_wallet_address;
+        // '0', 'O', 'I', 'l' are excluded from the base58 alphabet — using
+        // them must fail decoding rather than slip through.
+        assert!(validate_wallet_address("0OIl1234567890123456789012345678901234567890").is_err());
+        // Plain ASCII text without base58 noise.
+        assert!(validate_wallet_address("not-a-valid-address!!").is_err());
+    }
+
+    #[test]
+    fn validate_wallet_address_wrong_byte_length_returns_err() {
+        use super::validate_wallet_address;
+        // 64 chars of 'a' decodes to ~46 bytes, well over the 32-byte
+        // pubkey size. The old length-only check let this through.
+        assert!(validate_wallet_address(&"a".repeat(64)).is_err());
+        // Short input that decodes to fewer than 32 bytes.
+        assert!(validate_wallet_address("abc").is_err());
+    }
+
+    #[test]
     fn validate_wallet_address_valid() {
         use super::validate_wallet_address;
+        // Wrapped-SOL mint — canonical 32-byte Solana pubkey.
         assert!(validate_wallet_address("So11111111111111111111111111111111111111112").is_ok());
-        assert!(validate_wallet_address(&"a".repeat(64)).is_ok());
+        // USDC-SPL mint.
+        assert!(validate_wallet_address("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").is_ok());
     }
 }
