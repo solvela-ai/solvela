@@ -129,9 +129,10 @@ mod tests {
     fn test_max_escrow_slots_is_sane() {
         // ~1 day at 400ms/slot. Doc-checked sanity bound — if someone bumps
         // it beyond a few days, that's a separate decision (would interact
-        // with the agent's deadline guarantee).
-        assert!(solvela_escrow::MAX_ESCROW_SLOTS >= 100_000);
-        assert!(solvela_escrow::MAX_ESCROW_SLOTS <= 1_000_000);
+        // with the agent's deadline guarantee). Compile-time `const _: () =`
+        // form so a bad bump fails the build, not a single test.
+        const _: () = assert!(solvela_escrow::MAX_ESCROW_SLOTS >= 100_000);
+        const _: () = assert!(solvela_escrow::MAX_ESCROW_SLOTS <= 1_000_000);
     }
 
     #[test]

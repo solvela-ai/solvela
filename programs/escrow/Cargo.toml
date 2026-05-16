@@ -57,3 +57,20 @@ spl-associated-token-account = "6"
 
 [profile.release]
 overflow-checks = true
+
+# Whitelist cfg values that anchor-lang's macros emit but our crate does not
+# declare as features. Without this, rustc's check-cfg lint warns 14 times on
+# every `#[program]` / `#[derive(Accounts)]` expansion. Tracks #114 and
+# upstream Anchor macro check-cfg hygiene — the macro crates still embed
+# these cfgs without check-cfg metadata as of 1.0.2, so an anchor-lang bump
+# would not actually clear the warnings.
+#
+# - feature = "anchor-debug" / "custom-heap" / "custom-panic": Anchor
+#   internal opt-in features we never enable.
+# - target_os = "solana": the SBF on-chain target triple, only set under
+#   `anchor build`. Host-side `cargo check` doesn't see it.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(feature, values("anchor-debug", "custom-heap", "custom-panic"))',
+    'cfg(target_os, values("solana"))',
+] }
