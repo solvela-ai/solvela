@@ -114,7 +114,17 @@ async fn check_rpc(http: &reqwest::Client, rpc_url: &str) -> bool {
 
     match http.post(rpc_url).json(&rpc_body).send().await {
         Ok(resp) if resp.status().is_success() => {
-            let json: serde_json::Value = resp.json().await.unwrap_or_default();
+            // Fail closed on parse errors and ambiguous responses (no numeric
+            // `result`, no `error`). The prior `unwrap_or_default()` + permissive
+            // else-branch reported "RPC reachable" for garbage payloads, which
+            // hid real outages from operators running `doctor`. See issue #323.
+            let json: serde_json::Value = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("[FAIL] Solana RPC response parse error: {e}");
+                    return false;
+                }
+            };
             if let Some(slot) = json.get("result").and_then(serde_json::Value::as_u64) {
                 println!("[ok]  Solana RPC reachable: slot {slot}");
                 true
@@ -122,8 +132,8 @@ async fn check_rpc(http: &reqwest::Client, rpc_url: &str) -> bool {
                 println!("[FAIL] Solana RPC error: {json}");
                 false
             } else {
-                println!("[WARN] Solana RPC reachable but unexpected response");
-                true
+                println!("[FAIL] Solana RPC returned unexpected response: {json}");
+                false
             }
         }
         Ok(resp) => {

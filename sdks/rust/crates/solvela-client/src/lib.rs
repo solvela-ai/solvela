@@ -4,6 +4,7 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub(crate) mod quality;
+pub(crate) mod rpc_error;
 #[allow(dead_code)] // SessionInfo::escalated and cleanup_expired are reserved for future use
 pub(crate) mod session;
 pub(crate) mod signer;
