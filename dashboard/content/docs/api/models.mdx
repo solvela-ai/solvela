@@ -20,17 +20,21 @@ curl https://api.solvela.ai/v1/models
   "data": [
     {
       "id": "gpt-4o",
-      "display_name": "GPT-4o",
+      "object": "model",
       "provider": "openai",
+      "display_name": "GPT-4o",
       "context_window": 128000,
-      "supports_streaming": true,
-      "supports_tools": true,
-      "supports_vision": true,
-      "reasoning": false,
       "pricing": {
-        "input_per_million_usdc": 2.50,
-        "output_per_million_usdc": 10.00,
-        "platform_fee_percent": 5
+        "input_per_million": 2.50,
+        "output_per_million": 10.00,
+        "currency": "USDC",
+        "fee_percent": 5
+      },
+      "capabilities": {
+        "streaming": true,
+        "tools": true,
+        "vision": true,
+        "reasoning": false
       }
     }
   ]
@@ -41,17 +45,19 @@ curl https://api.solvela.ai/v1/models
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | string | The model ID to pass in `model` field of requests |
-| `display_name` | string | Human-readable model name |
+| `id` | string | The model ID to pass in the `model` field of requests |
+| `object` | string | Always `"model"` (OpenAI-compatible discriminator) |
 | `provider` | string | Upstream provider: `openai`, `anthropic`, `google`, `xai`, `deepseek` |
+| `display_name` | string | Human-readable model name |
 | `context_window` | integer | Maximum tokens in the combined input + output |
-| `supports_streaming` | boolean | Whether SSE streaming is available |
-| `supports_tools` | boolean | Whether function calling / tools are supported |
-| `supports_vision` | boolean | Whether image inputs are accepted |
-| `reasoning` | boolean | Whether the model performs multi-step reasoning (o3, Grok, etc.) |
-| `pricing.input_per_million_usdc` | float | Provider cost per million input tokens in USDC |
-| `pricing.output_per_million_usdc` | float | Provider cost per million output tokens in USDC |
-| `pricing.platform_fee_percent` | integer | Platform fee percentage (always `5`) |
+| `pricing.input_per_million` | float | Provider cost per million input tokens, in `pricing.currency` |
+| `pricing.output_per_million` | float | Provider cost per million output tokens, in `pricing.currency` |
+| `pricing.currency` | string | Always `"USDC"` today |
+| `pricing.fee_percent` | integer | Platform fee percentage (always `5`) |
+| `capabilities.streaming` | boolean | Whether SSE streaming is available |
+| `capabilities.tools` | boolean | Whether function calling / tools are supported |
+| `capabilities.vision` | boolean | Whether image inputs are accepted |
+| `capabilities.reasoning` | boolean | Whether the model performs multi-step reasoning (o3, Grok, etc.) |
 
 ## Available models
 

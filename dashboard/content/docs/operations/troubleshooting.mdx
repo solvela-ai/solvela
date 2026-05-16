@@ -9,11 +9,11 @@ description: Common issues, debug headers, and diagnostics
 |---------|-------|-----|
 | Gateway returns 503 for all chat requests | No provider API key configured | Set at least one provider key in `.env` (e.g., `OPENAI_API_KEY`) |
 | 402 response but SDK does not auto-pay | Wallet key not configured | Set `SOLANA_WALLET_KEY` environment variable |
-| "payment_required" with `amount_usdc: "0.000000"` | Using a free model (`gpt-oss-120b`) | Free models do not require payment; remove the `PAYMENT-SIGNATURE` header |
+| 402 returned with `accepts[0].amount: "0"` | Using a free model (`gpt-oss-120b`) | Free models do not require payment; remove the `PAYMENT-SIGNATURE` header |
 | Redis connection refused | Redis not running | Run `docker compose up -d redis` |
 | "replay detected" error | Same transaction signature sent twice | Generate a new transaction for each request |
-| "insufficient amount" error | Payment amount less than quoted price | Use the `amount_usdc` from the 402 response |
-| "recipient mismatch" error | Payment sent to wrong wallet | Send to the `recipient_wallet` from the 402 response |
+| "insufficient amount" error | Payment amount less than quoted price | Use `accepts[0].amount` from the 402 response (atomic units: 1 USDC = 1,000,000) |
+| "recipient mismatch" error | Payment sent to wrong wallet | Send to `accepts[0].pay_to` from the 402 response |
 | 429 Too Many Requests | Per-wallet rate limit exceeded | Wait for the `Retry-After` period, then retry |
 | 500 Internal Server Error on chat | Provider returned unexpected response | Check `RUST_LOG=gateway=debug` for details |
 | "unknown model" error | Model ID not in registry | Use `GET /v1/models` to list valid model IDs |
