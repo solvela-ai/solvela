@@ -34,10 +34,11 @@
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
     "generate-models": "tsx scripts/generate-models.ts",
-    "prebuild": "npm run generate-models",
+    "prebuild": "node ../signer-core/scripts/ensure-built.mjs && npm run generate-models",
     "check:docs": "tsx scripts/check-docs-for-leaked-keys.ts",
     "lint": "tsc --noEmit",
-    "size": "size-limit"
+    "size": "size-limit",
+    "pretest": "node ../signer-core/scripts/ensure-built.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "2.0.47",
