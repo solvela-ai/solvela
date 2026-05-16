@@ -32,7 +32,9 @@ const REPO = path.resolve(__dirname, "..");
 const PACKAGE_FILES = [
   path.join(REPO, "package.json"),
   path.join(REPO, "platforms", "linux-x64", "package.json"),
+  path.join(REPO, "platforms", "linux-arm64", "package.json"),
   path.join(REPO, "platforms", "win32-x64", "package.json"),
+  path.join(REPO, "platforms", "win32-arm64", "package.json"),
   path.join(REPO, "platforms", "darwin-x64", "package.json"),
   path.join(REPO, "platforms", "darwin-arm64", "package.json"),
 ];

@@ -22,15 +22,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Native runners per target — `ubuntu-22.04-arm` and
+        # `windows-11-arm` are GitHub-hosted ARM64 runners (no
+        # cross-compile needed). The pattern mirrors `macos-14`
+        # for `aarch64-apple-darwin` which has been here since
+        # the workflow was first set up.
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             artifact_name: solvela
             asset_name: solvela-x86_64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            artifact_name: solvela
+            asset_name: solvela-aarch64-unknown-linux-gnu
           - target: x86_64-pc-windows-msvc
             os: windows-2022
             artifact_name: solvela.exe
             asset_name: solvela-x86_64-pc-windows-msvc.exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            artifact_name: solvela.exe
+            asset_name: solvela-aarch64-pc-windows-msvc.exe
           - target: x86_64-apple-darwin
             os: macos-13
             artifact_name: solvela

@@ -43,7 +43,9 @@ then delegates to the matching native Rust binary from an optional dependency:
 | Platform | Package |
 |---|---|
 | Linux x64 | `@solvela/cli-linux-x64` |
+| Linux ARM64 | `@solvela/cli-linux-arm64` |
 | Windows x64 | `@solvela/cli-win32-x64` |
+| Windows ARM64 | `@solvela/cli-win32-arm64` |
 | macOS x64 | `@solvela/cli-darwin-x64` |
 | macOS ARM64 | `@solvela/cli-darwin-arm64` |
 

@@ -12,7 +12,9 @@
   },
   "optionalDependencies": {
     "@solvela/cli-linux-x64": "1.0.0-draft",
+    "@solvela/cli-linux-arm64": "1.0.0-draft",
     "@solvela/cli-win32-x64": "1.0.0-draft",
+    "@solvela/cli-win32-arm64": "1.0.0-draft",
     "@solvela/cli-darwin-x64": "1.0.0-draft",
     "@solvela/cli-darwin-arm64": "1.0.0-draft"
   },

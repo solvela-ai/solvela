@@ -1,0 +1,17 @@
+{
+  "name": "@solvela/cli-linux-arm64",
+  "version": "1.0.0-draft",
+  "private": true,
+  "description": "Solvela CLI — Linux ARM64 native binary (AWS Graviton, Raspberry Pi, Asahi)",
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "bin": {
+    "solvela-native": "bin/solvela"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/solvela-ai/solvela.git",
+    "directory": "sdks/cli-npm/platforms/linux-arm64"
+  },
+  "license": "MIT"
+}
