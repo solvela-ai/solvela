@@ -21,6 +21,7 @@ solvela-client-cli-args = { path = "../solvela-client-cli-args", version = "0.2"
 solvela-protocol = { workspace = true }
 reqwest = { workspace = true }
 clap = { workspace = true }
+rpassword = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

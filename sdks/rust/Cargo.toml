@@ -51,6 +51,7 @@ tower-http = { version = "0.6", features = ["limit"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+rpassword = "7"
 
 # Observability
 tracing = "0.1"

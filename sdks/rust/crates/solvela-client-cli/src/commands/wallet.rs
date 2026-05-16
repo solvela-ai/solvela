@@ -57,7 +57,7 @@ fn do_create(wallet_file: &str, force: bool) -> Result<(Wallet, String, PathBuf)
 }
 
 fn import_mnemonic(wallet_args: &WalletArgs, force: bool) -> Result<(), String> {
-    let phrase = read_stdin_line("Enter seed phrase: ")?;
+    let phrase = read_secret_line("Enter seed phrase: ")?;
     let (address, path) = do_import_mnemonic(&phrase, &wallet_args.wallet_file, force)?;
 
     println!("Imported address: {address}");
@@ -84,7 +84,7 @@ fn do_import_mnemonic(
 }
 
 fn import_keypair(wallet_args: &WalletArgs, force: bool) -> Result<(), String> {
-    let b58 = read_stdin_line("Enter base58 keypair: ")?;
+    let b58 = read_secret_line("Enter base58 keypair: ")?;
     let (address, path) = do_import_keypair(&b58, &wallet_args.wallet_file, force)?;
 
     println!("Imported address: {address}");
@@ -181,6 +181,14 @@ fn read_stdin_line(prompt: &str) -> Result<String, String> {
         .map_err(|e| format!("failed to read stdin: {e}"))?;
 
     Ok(line)
+}
+
+// Reads a secret without echoing to the terminal so mnemonics/keypairs don't
+// leak into scrollback, shell history, or screen-recording buffers (#322).
+// On non-TTY stdin (piped input), rpassword reads the line as-is — that path
+// is acceptable because the secret never reaches a terminal in the first place.
+fn read_secret_line(prompt: &str) -> Result<String, String> {
+    rpassword::prompt_password(prompt).map_err(|e| format!("failed to read secret: {e}"))
 }
 
 #[cfg(test)]
