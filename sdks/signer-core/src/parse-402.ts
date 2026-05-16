@@ -24,6 +24,7 @@ import { safeParse, type BaseIssue } from 'valibot';
 import {
   Envelope402Schema,
   PaymentRequiredSchema,
+  X402_VERSION_CLIENT,
   type PaymentRequired,
 } from './schema.js';
 
@@ -80,11 +81,51 @@ export function parse402(raw: string): PaymentRequired {
 function validateOrThrow(value: unknown, context: string): PaymentRequired {
   const result = safeParse(PaymentRequiredSchema, value);
   if (result.success) {
+    warnIfDowngrade(result.output.x402_version);
     return result.output;
   }
   throw new Error(
     `Gateway 402 body failed validation ${context}: ${formatIssues(result.issues)}`,
   );
+}
+
+/**
+ * Emit a single `console.warn` per unique downgraded version observed,
+ * so operators can alert on protocol regression without log-flooding
+ * a tight request loop. The first occurrence of every distinct
+ * downgraded version warns; subsequent identical downgrades stay
+ * silent until the process restarts.
+ *
+ * The dedup Set's growth is bounded by `PaymentRequiredSchema`'s
+ * `integer()` + `minValue(0)` guard on `x402_version` — a malformed
+ * gateway sending `0.0001, 0.0002, ...` cannot balloon this Set
+ * because those values are rejected at parse time and never reach
+ * `warnIfDowngrade()`.
+ *
+ * Bumps to X402_VERSION_CLIENT in this codebase reset the dedup set
+ * implicitly (a previously-warned version may stop being a downgrade).
+ */
+const _warnedVersions = new Set<number>();
+function warnIfDowngrade(gatewayVersion: number): void {
+  if (gatewayVersion >= X402_VERSION_CLIENT) return;
+  if (_warnedVersions.has(gatewayVersion)) return;
+  _warnedVersions.add(gatewayVersion);
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[solvela] x402 protocol downgrade detected: gateway responded with ` +
+      `x402_version=${gatewayVersion}, client speaks ${X402_VERSION_CLIENT}. ` +
+      `Continuing for compatibility, but check that the gateway is up to date.`,
+  );
+}
+
+/**
+ * Test-only: clear the per-process downgrade-warn dedup set so each test
+ * can assert console.warn was called. Not intended for production code.
+ *
+ * @internal
+ */
+export function _resetDowngradeWarnDedup(): void {
+  _warnedVersions.clear();
 }
 
 /**

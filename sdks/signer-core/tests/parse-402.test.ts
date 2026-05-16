@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parse402 } from '../src/parse-402.ts';
+import { parse402, _resetDowngradeWarnDedup } from '../src/parse-402.ts';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -267,6 +267,92 @@ describe('parse402', () => {
       };
       const result = parse402(JSON.stringify({ error: { message: JSON.stringify(body) } }));
       assert.equal(result.accepts[0].scheme, 'escrow');
+    });
+  });
+
+  describe('x402 protocol downgrade warning', () => {
+    function withConsoleWarnSpy(fn: () => void): string[] {
+      const calls: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (...args: unknown[]) => {
+        calls.push(args.map((a) => String(a)).join(' '));
+      };
+      try {
+        fn();
+      } finally {
+        console.warn = originalWarn;
+      }
+      return calls;
+    }
+
+    it('warns when gateway returns x402_version < client (2)', () => {
+      _resetDowngradeWarnDedup();
+      const body = { ...validDirectBody, x402_version: 1 };
+      const warns = withConsoleWarnSpy(() => {
+        parse402(JSON.stringify(body));
+      });
+      assert.equal(warns.length, 1);
+      assert.match(warns[0], /x402 protocol downgrade detected/);
+      assert.match(warns[0], /x402_version=1/);
+      assert.match(warns[0], /client speaks 2/);
+    });
+
+    it('does NOT warn when gateway returns x402_version == client', () => {
+      _resetDowngradeWarnDedup();
+      const warns = withConsoleWarnSpy(() => {
+        parse402(JSON.stringify(validDirectBody));
+      });
+      assert.equal(warns.length, 0);
+    });
+
+    it('warns at most once per process per unique downgraded version', () => {
+      _resetDowngradeWarnDedup();
+      const v0Body = { ...validDirectBody, x402_version: 0 };
+      const v1Body = { ...validDirectBody, x402_version: 1 };
+      const warns = withConsoleWarnSpy(() => {
+        // v0 fires once; second v0 stays silent
+        parse402(JSON.stringify(v0Body));
+        parse402(JSON.stringify(v0Body));
+        // v1 fires once (different downgraded version)
+        parse402(JSON.stringify(v1Body));
+        // v0 still deduped
+        parse402(JSON.stringify(v0Body));
+      });
+      assert.equal(warns.length, 2);
+      assert.match(warns[0], /x402_version=0/);
+      assert.match(warns[1], /x402_version=1/);
+    });
+
+    it('rejects fractional x402_version at parse time (not silently dedup-warned)', () => {
+      _resetDowngradeWarnDedup();
+      const warns: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warns.push(args.map((a) => String(a)).join(' '));
+      };
+      try {
+        const body = { ...validDirectBody, x402_version: 1.5 };
+        assert.throws(
+          () => parse402(JSON.stringify(body)),
+          /x402_version/,
+          'fractional x402_version must be rejected at the schema layer (closes the dedup-Set-balloon vector)',
+        );
+      } finally {
+        console.warn = originalWarn;
+      }
+      // Throwing path must not have emitted a downgrade warn either.
+      assert.equal(warns.length, 0);
+    });
+
+    it('warns on envelope-wrapped downgrade too (not just direct shape)', () => {
+      _resetDowngradeWarnDedup();
+      const inner = { ...validDirectBody, x402_version: 0 };
+      const envelope = { error: { message: JSON.stringify(inner) } };
+      const warns = withConsoleWarnSpy(() => {
+        parse402(JSON.stringify(envelope));
+      });
+      assert.equal(warns.length, 1);
+      assert.match(warns[0], /x402_version=0/);
     });
   });
 });

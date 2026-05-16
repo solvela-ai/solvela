@@ -18,6 +18,7 @@
 import {
   array,
   finite,
+  integer,
   minLength,
   minValue,
   nonEmpty,
@@ -86,8 +87,19 @@ export const ResourceSchema = object({
   method: string(),
 });
 
+/**
+ * The x402 protocol version this client speaks. Mirrors the value embedded
+ * in payloads we sign (see sign.ts). When `parse402()` sees a gateway 402
+ * with `x402_version` lower than this constant, it emits a downgrade
+ * warning so operators can alert on protocol regression.
+ *
+ * Wire-format change: bump in lockstep with the gateway when the on-the-wire
+ * shape changes (e.g. new required fields). Bump-only — never decrement.
+ */
+export const X402_VERSION_CLIENT = 2;
+
 export const PaymentRequiredSchema = object({
-  x402_version: pipe(number(), finite(), minValue(0)),
+  x402_version: pipe(number(), integer(), minValue(0)),
   accepts: pipe(array(PaymentAcceptSchema), minLength(1, 'accepts must be non-empty')),
   cost_breakdown: CostBreakdownSchema,
   error: string(),
