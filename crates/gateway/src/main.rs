@@ -436,10 +436,12 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Read admin token once at startup
+    // Read admin token once at startup, wrap in the secret-safe newtype so
+    // it is redacted from Debug output and zeroized on drop (see #173 L4 GW).
     let admin_token = env_with_fallback("SOLVELA_ADMIN_TOKEN", "RCR_ADMIN_TOKEN")
         .ok()
-        .filter(|t| !t.is_empty());
+        .filter(|t| !t.is_empty())
+        .map(gateway::secret::AdminToken::new);
 
     // Dev-mode payment bypass — only when SOLVELA_DEV_BYPASS_PAYMENT=true AND not production
     let dev_bypass_payment = if is_production {

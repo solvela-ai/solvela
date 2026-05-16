@@ -11,7 +11,6 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 
-use crate::security;
 use crate::AppState;
 
 /// Prometheus text content type per the exposition format spec.
@@ -36,12 +35,12 @@ pub async fn get_metrics(
         }
     };
 
-    // Validate Bearer token using constant-time comparison
+    // Validate Bearer token via the secret-safe newtype's constant-time compare
     let authorized = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|token| security::constant_time_eq(token.as_bytes(), admin_token.as_bytes()));
+        .is_some_and(|token| admin_token.verify(token.as_bytes()));
 
     if !authorized {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();

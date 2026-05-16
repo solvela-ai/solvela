@@ -250,7 +250,9 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
-        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -396,7 +398,9 @@ fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
-        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -463,7 +467,9 @@ fn test_app_with_mock_provider_and_escrow() -> axum::Router {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
-        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -529,7 +535,9 @@ fn test_app_with_escrow() -> axum::Router {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
-        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -1824,7 +1832,9 @@ fn test_app_with_nonce_pool() -> axum::Router {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
-        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -3385,7 +3395,9 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: Some(metrics),
-        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -3544,7 +3556,9 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: Some(Arc::clone(&metrics)),
-        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -3773,7 +3787,9 @@ async fn test_escrow_health_status_down_without_claimer() {
         replay_set: AppState::new_replay_set(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
-        admin_token: Some(TEST_ADMIN_TOKEN.to_string()),
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });

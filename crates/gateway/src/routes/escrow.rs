@@ -15,7 +15,6 @@ use serde::Serialize;
 use serde_json::json;
 use tokio::sync::Mutex;
 
-use crate::security;
 use crate::AppState;
 
 /// Cached Solana slot value with a 5-second TTL.
@@ -157,12 +156,12 @@ pub async fn escrow_health(
         }
     };
 
-    // Validate Bearer token
+    // Validate Bearer token via the secret-safe newtype's constant-time compare
     let authorized = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|token| security::constant_time_eq(token.as_bytes(), admin_token.as_bytes()));
+        .is_some_and(|token| admin_token.verify(token.as_bytes()));
 
     if !authorized {
         return (

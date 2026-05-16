@@ -71,7 +71,7 @@ fn router_with_pool(pool: PgPool) -> Router {
         http_client: reqwest::Client::new(),
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
-        admin_token: Some(ADMIN_TOKEN.to_string()),
+        admin_token: Some(gateway::secret::AdminToken::new(ADMIN_TOKEN.to_string())),
         prometheus_handle: None,
         dev_bypass_payment: false,
     });

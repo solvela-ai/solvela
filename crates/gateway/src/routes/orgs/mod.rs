@@ -36,7 +36,6 @@ use crate::orgs::models::{
     AddMemberRequest, AssignWalletRequest, CreateApiKeyRequest, CreateOrgRequest, CreateTeamRequest,
 };
 use crate::orgs::queries;
-use crate::security;
 use crate::AppState;
 
 /// Query parameters for the audit log endpoint.
@@ -98,7 +97,7 @@ fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Response> 
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|token| security::constant_time_eq(token.as_bytes(), admin_token.as_bytes()));
+        .is_some_and(|token| admin_token.verify(token.as_bytes()));
 
     if !authorized {
         return Err((
@@ -149,9 +148,7 @@ pub(crate) fn require_auth(
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .is_some_and(|token| {
-                security::constant_time_eq(token.as_bytes(), admin_token.as_bytes())
-            });
+            .is_some_and(|token| admin_token.verify(token.as_bytes()));
         if is_admin {
             return Ok(AuthContext::Admin);
         }
@@ -328,7 +325,7 @@ supports_vision = true
             http_client: reqwest::Client::new(),
             slot_cache: crate::routes::escrow::new_slot_cache(),
             escrow_metrics: None,
-            admin_token: admin_token.map(String::from),
+            admin_token: admin_token.map(|t| crate::secret::AdminToken::new(t.to_string())),
             prometheus_handle: None,
             dev_bypass_payment: false,
         });
@@ -488,7 +485,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             slot_cache: crate::routes::escrow::new_slot_cache(),
             escrow_metrics: None,
-            admin_token: Some("admin-secret".to_string()),
+            admin_token: Some(crate::secret::AdminToken::new("admin-secret".to_string())),
             prometheus_handle: None,
             dev_bypass_payment: false,
         };
@@ -531,7 +528,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             slot_cache: crate::routes::escrow::new_slot_cache(),
             escrow_metrics: None,
-            admin_token: Some("admin-secret".to_string()),
+            admin_token: Some(crate::secret::AdminToken::new("admin-secret".to_string())),
             prometheus_handle: None,
             dev_bypass_payment: false,
         };
@@ -577,7 +574,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             slot_cache: crate::routes::escrow::new_slot_cache(),
             escrow_metrics: None,
-            admin_token: Some("admin-secret".to_string()),
+            admin_token: Some(crate::secret::AdminToken::new("admin-secret".to_string())),
             prometheus_handle: None,
             dev_bypass_payment: false,
         };
