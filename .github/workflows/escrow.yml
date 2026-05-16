@@ -43,7 +43,7 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
-    name: cargo clippy --all-targets -- -D warnings
+    name: cargo clippy --all-targets --features … -- -D warnings
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -52,7 +52,13 @@ jobs:
           components: clippy
       # Enabled after #114 cleared the 14 anchor-macro `unexpected_cfgs`
       # warnings via [lints.rust].check-cfg in programs/escrow/Cargo.toml.
-      - run: cargo clippy --all-targets -- -D warnings
+      #
+      # Feature set covers every non-sbf feature so lints inside
+      # feature-gated code paths get checked (e.g. mainnet's USDC mint
+      # swap). `sbf` is excluded because tests/integration.rs and
+      # tests/helpers.rs `include_bytes!` target/deploy/solvela_escrow.so,
+      # which doesn't exist outside the sbf-build job.
+      - run: cargo clippy --all-targets --features mainnet,cpi,no-entrypoint,no-idl,no-log-ix-name -- -D warnings
 
   unit:
     name: Unit tests (no .so required)
