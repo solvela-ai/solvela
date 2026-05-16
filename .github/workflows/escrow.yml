@@ -42,6 +42,18 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  clippy:
+    name: cargo clippy --all-targets -- -D warnings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Enabled after #114 cleared the 14 anchor-macro `unexpected_cfgs`
+      # warnings via [lints.rust].check-cfg in programs/escrow/Cargo.toml.
+      - run: cargo clippy --all-targets -- -D warnings
+
   unit:
     name: Unit tests (no .so required)
     runs-on: ubuntu-latest
@@ -109,15 +121,6 @@ jobs:
       - run: cargo test --features sbf --test integration
 
 # Notes on what's intentionally NOT here:
-#
-# - clippy --all-targets -- -D warnings:  Anchor 0.31's macro crates
-#   (`anchor-attribute-program`, `anchor-derive-accounts`) emit ~14
-#   `unexpected_cfgs` warnings on current rustc that can't be fixed
-#   without an Anchor 0.32+ migration. Tracked in issue #114 (and
-#   #155/#156 for the broader anchor 1.0 plan). Adding clippy with
-#   `-D warnings` today would always fail; without `-D warnings` it
-#   would always pass and add no signal. Re-evaluate after the
-#   anchor upgrade lands.
 #
 # - cargo audit / cargo-deny: the workspace's CI already runs these
 #   against the workspace tree. The escrow crate's dependency set is
