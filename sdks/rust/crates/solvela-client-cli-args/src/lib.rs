@@ -126,22 +126,39 @@ pub fn save_wallet(path: &str, keypair_bytes: &[u8], force: bool) -> Result<Path
         ));
     }
 
+    // Fail closed on platforms where we cannot enforce owner-only ACLs at
+    // file-create time. The previous behavior (write + tracing::warn!) left
+    // the keypair on disk with whatever default ACL the platform applied —
+    // potentially world-readable on shared hosts. See issue #322 problem 2.
+    #[cfg(not(unix))]
+    {
+        let _ = keypair_bytes;
+        return Err(format!(
+            "refusing to write wallet file at {}: owner-only ACL enforcement \
+             is not implemented on this platform. Set the SOLVELA_WALLET_KEY \
+             env var with a base58-encoded keypair instead, or run on a Unix host.",
+            expanded.display()
+        ));
+    }
+
     // Ensure parent directory exists
+    #[cfg(unix)]
     if let Some(parent) = expanded.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create directory {}: {e}", parent.display()))?;
     }
 
-    // Serialize as JSON byte array (Solana CLI format)
-    let json = serde_json::to_string(&keypair_bytes)
-        .map_err(|e| format!("failed to serialize keypair: {e}"))?;
-
-    // Write with restricted permissions from the start (0o600) to avoid
-    // a window where the file is world-readable before chmod.
+    // Serialize as JSON byte array (Solana CLI format) and write with
+    // owner-only permissions. Reached only on Unix — the non-Unix branch
+    // above returned Err.
     #[cfg(unix)]
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        let json = serde_json::to_string(&keypair_bytes)
+            .map_err(|e| format!("failed to serialize keypair: {e}"))?;
+        // Restrict permissions at create time so there's no window in which
+        // the file is world-readable before chmod.
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -151,29 +168,8 @@ pub fn save_wallet(path: &str, keypair_bytes: &[u8], force: bool) -> Result<Path
             .map_err(|e| format!("failed to create {}: {e}", expanded.display()))?;
         file.write_all(json.as_bytes())
             .map_err(|e| format!("failed to write {}: {e}", expanded.display()))?;
+        Ok(expanded)
     }
-
-    #[cfg(not(unix))]
-    {
-        // MEDIUM-3: on non-Unix (Windows in particular) we cannot enforce
-        // 0600-equivalent ACLs without pulling in extra dependencies. Warn
-        // loudly so operators know the wallet file is created with whatever
-        // default ACL the platform applies (typically inherited from the
-        // parent directory and potentially world-readable on shared hosts).
-        // TODO: implement proper Windows ACL hardening via the
-        // `windows-permissions` crate or `OpenOptionsExt::access_mode` so
-        // the file is restricted to the current user only. See audit
-        // finding MEDIUM-3.
-        std::fs::write(&expanded, &json)
-            .map_err(|e| format!("failed to write {}: {e}", expanded.display()))?;
-        tracing::warn!(
-            path = %expanded.display(),
-            "wallet file created without owner-only ACL on non-Unix platform; \
-             treat the file location as sensitive (MEDIUM-3)"
-        );
-    }
-
-    Ok(expanded)
 }
 
 #[cfg(test)]
