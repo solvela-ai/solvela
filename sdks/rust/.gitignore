@@ -1,0 +1,3 @@
+# Cargo build artifacts for this opt-out workspace. The monorepo root
+# .gitignore only ignores /target/, so this sub-workspace needs its own.
+target/

@@ -1,0 +1,91 @@
+name: sdks-rust
+
+# Dedicated CI for the Rust client SDK at sdks/rust/.
+#
+# The SDK opts out of the parent Cargo workspace because it pins
+# solana-sdk ~4.0 + reqwest 0.13, while the gateway workspace has no
+# solana-sdk at all and uses reqwest 0.12. That opt-out means the
+# workspace's `Rust (fmt, clippy, test)` job at .github/workflows/ci.yml
+# does NOT exercise this code — mirrors the pattern used by escrow.yml,
+# openclaw-provider.yml, mcp.yml, and ai-sdk-provider.yml.
+#
+# Path triggers include crates/protocol/** because the SDK consumes
+# `solvela-protocol` via a local path dep — any wire-format change in
+# the protocol crate must rebuild + retest this SDK in the same PR.
+# That same-PR drift coverage is the whole reason this SDK lives in
+# the monorepo now instead of solvela-ai/solvela-client.
+
+on:
+  push:
+    paths:
+      - 'sdks/rust/**'
+      - 'crates/protocol/**'
+      - '.github/workflows/sdks-rust.yml'
+  pull_request:
+    paths:
+      - 'sdks/rust/**'
+      - 'crates/protocol/**'
+      - '.github/workflows/sdks-rust.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: sdks/rust
+
+concurrency:
+  group: sdks-rust-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdks/rust
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdks/rust
+      - run: cargo test --workspace
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdks/rust
+      # The SDK has its own Cargo.lock (separate workspace, see header),
+      # so the monorepo-root cargo audit does not cover it. Scan this
+      # lockfile independently against the RustSec database. Use a shell
+      # step rather than rustsec/audit-check so the workflow's
+      # working-directory default (sdks/rust) applies cleanly.
+      - run: cargo install --locked cargo-audit
+      - run: cargo audit

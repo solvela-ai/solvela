@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/solvela-client",
+    "crates/solvela-client-cli",
+    "crates/solvela-client-cli-args",
+    "crates/solvela-client-proxy",
+]
+
+[workspace.package]
+version = "0.2.1"
+edition = "2021"
+rust-version = "1.91"
+license = "MIT"
+repository = "https://github.com/solvela-ai/solvela-client"
+authors = ["Solvela Contributors"]
+homepage = "https://solvela.ai"
+keywords = ["solana", "x402", "usdc", "payments", "llm"]
+
+[workspace.dependencies]
+# Protocol — local path dep so wire-format drift between gateway and this SDK
+# fails CI in the same PR. Version pin matches the monorepo's crates/protocol.
+solvela-protocol = { path = "../../crates/protocol", version = "0.2" }
+
+# Solana
+solana-sdk = "~4.0"
+spl-token = "9"
+
+# HTTP
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "webpki-roots"] }
+eventsource-stream = "0.2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Crypto
+base64 = "0.22"
+bs58 = "0.5"
+ed25519-dalek = "2"
+bip39 = { version = "2", features = ["rand"] }
+bincode = "1"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# HTTP server (proxy)
+axum = "0.8"
+tower-http = { version = "0.6", features = ["limit"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Observability
+tracing = "0.1"
+
+# Tracing subscriber (binary only)
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+
+# Security
+zeroize = "1"
+dirs = "6"
+lru = "0.18"
+
+# Hashing — stable, deterministic, fast (used for cache keys / session digests).
+# DefaultHasher is randomized per-process and SipHash is slower than necessary
+# for non-cryptographic in-memory keys, so we use AHash explicitly.
+ahash = "0.8"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
