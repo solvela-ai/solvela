@@ -1,0 +1,44 @@
+[package]
+name = "solvela-client-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+description = "Localhost reverse proxy with transparent x402 USDC-SPL payment handling"
+categories = ["command-line-utilities", "web-programming::http-server"]
+
+[lib]
+name = "solvela_client_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "solvela-client-proxy"
+path = "src/main.rs"
+
+[dependencies]
+solvela-client = { path = "../solvela-client", version = "0.2" }
+solvela-client-cli-args = { path = "../solvela-client-cli-args", version = "0.2" }
+solvela-protocol = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+reqwest = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+wiremock = "0.6"
+tower = { version = "0.5", features = ["util"] }
+tokio = { workspace = true, features = ["test-util"] }
+solana-sdk = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

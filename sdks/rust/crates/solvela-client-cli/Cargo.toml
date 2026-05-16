@@ -1,0 +1,31 @@
+[package]
+name = "solvela-client-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+description = "solvela-client — Solvela agent-side payer CLI for Solana-paid AI from your terminal"
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "solvela-client"
+path = "src/main.rs"
+
+[dependencies]
+solvela-client = { path = "../solvela-client", version = "0.2" }
+solvela-client-cli-args = { path = "../solvela-client-cli-args", version = "0.2" }
+solvela-protocol = { workspace = true }
+reqwest = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+
+[lints]
+workspace = true
