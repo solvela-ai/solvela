@@ -27,6 +27,12 @@ on:
       - 'crates/protocol/**'
       - '.github/workflows/sdks-rust.yml'
 
+# Workflow-wide minimal token scope. Audit-check, cache, and clippy jobs
+# only need to read repo contents; explicit scoping avoids inheriting the
+# repo-default GITHUB_TOKEN permissions.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
