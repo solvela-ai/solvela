@@ -42,8 +42,14 @@ import {
 import bs58 from 'bs58';
 
 import type { PaymentAccept, PaymentExpectations, PaymentRequired } from './types.js';
+import { X402_VERSION_CLIENT } from './schema.js';
 
-const X402_VERSION = 2;
+
+// X402_VERSION lives in schema.ts so parse-402.ts can compare incoming
+// versions against the same constant. Re-aliased here to keep call-site
+// readability (X402_VERSION_CLIENT is the right name in parser context,
+// X402_VERSION reads better in sign-payload context).
+const X402_VERSION = X402_VERSION_CLIENT;
 
 /** USDC mainnet mint (6 decimals). */
 const USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
