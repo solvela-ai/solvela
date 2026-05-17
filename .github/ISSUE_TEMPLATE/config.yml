@@ -29,7 +29,7 @@ contact_links:
     about: |
       If you're hosting the gateway as a managed service to third parties, your
       annual revenue derived from the gateway exceeds USD $1M, or you need a
-      support SLA — see the commercial license page or email kd@sky64.io.
+      support SLA — see the commercial license page or email partnerships@solvela.ai.
 
   - name: Become a sponsor of a specific feature
     url: https://github.com/solvela-ai/solvela/discussions/categories/sponsored-features

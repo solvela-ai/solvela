@@ -25,7 +25,7 @@ const GITHUB_SPONSORS_URL = 'https://github.com/sponsors/solvela-ai';
 const POLAR_URL = 'https://polar.sh/solvela-ai';
 const COMMERCIAL_URL = 'https://docs.solvela.ai/docs/enterprise/commercial-license';
 const METRICS_URL = 'https://solvela.ai/metrics';
-const CONTACT_EMAIL = 'kd@sky64.io';
+const CONTACT_EMAIL = 'partnerships@solvela.ai';
 
 // Tiers are deliberate. Each one is named after what it actually pays for —
 // not a vanity ladder. If a sponsor asks "what does $X cover?" we want the

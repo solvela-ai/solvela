@@ -30,7 +30,7 @@ _Be the first sponsor at this tier: [github.com/sponsors/solvela-ai](https://git
 
 Organizations contributing infrastructure credits, RPC quota, security audit time, or other in-kind support that keeps the public gateway online.
 
-_No in-kind sponsors yet. If your organization can contribute Solana RPC credits (Helius, Triton, QuickNode), Fly.io credits, Vercel credits, Upstash credits, or external security audit time, email **kd@sky64.io**._
+_No in-kind sponsors yet. If your organization can contribute Solana RPC credits (Helius, Triton, QuickNode), Fly.io credits, Vercel credits, Upstash credits, or external security audit time, email **partnerships@solvela.ai**._
 
 ## Past backers
 
@@ -42,7 +42,7 @@ _None yet._
 
 - **GitHub Sponsors** — [github.com/sponsors/solvela-ai](https://github.com/sponsors/solvela-ai). Recurring billing; receipts handled by GitHub. Best for individuals and corporate cards.
 - **Polar.sh** — [polar.sh/solvela-ai](https://polar.sh/solvela-ai). One-time payments and crypto-native sponsorship.
-- **In-kind** — email **kd@sky64.io** with what you can contribute.
+- **In-kind** — email **partnerships@solvela.ai** with what you can contribute.
 - **Commercial license** — if the [BSL Additional Use Grant](./LICENSE) doesn't cover your use case, sponsorship isn't the right vehicle. See [`commercial-license.mdx`](./dashboard/content/docs/enterprise/commercial-license.mdx).
 
 ## Transparency

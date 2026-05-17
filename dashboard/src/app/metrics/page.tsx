@@ -475,10 +475,10 @@ export default async function MetricsPage() {
                 Grants, acquihire, integrations, RPC partnerships.
               </p>
               <a
-                href="mailto:kd@sky64.io"
+                href="mailto:partnerships@solvela.ai"
                 className="mt-3 inline-flex h-9 items-center rounded border border-border px-3 font-mono text-xs uppercase tracking-[0.14em] text-text-secondary transition-colors hover:text-foreground"
               >
-                kd@sky64.io ↗
+                partnerships@solvela.ai ↗
               </a>
             </TerminalCard>
           </div>

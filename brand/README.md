@@ -64,7 +64,7 @@ When seeding the GitHub org for the first time, or refreshing branding:
 - [ ] **Avatar**: upload `avatars/png/solvela-500.png` at https://github.com/organizations/solvela-ai/settings/profile
 - [ ] **Description**: `Solana-native x402 LLM gateway. Stablecoin payments for AI agents.`
 - [ ] **URL**: `https://solvela.ai`
-- [ ] **Email**: `partnerships@solvela.ai` (or `kd@sky64.io` until that alias is set up)
+- [ ] **Email**: `partnerships@solvela.ai`
 - [ ] **Location**: city/country (helps Superteam regional grant gating)
 - [ ] **Twitter/X**: org handle if/when one exists
 - [ ] **Pinned repos** in this order: `solvela`, `solvela-python`, `solvela-ts`, `solvela-go`, `solvela-client`
