@@ -1,6 +1,8 @@
 # Solvela
 
-Solana-native AI agent payment gateway. No API keys, no accounts -- just wallets.
+> **Solvela** *(n.)* — the place where settlement happens. From Latin *solvere* (to settle, to pay) + Romance *-ela*. A Solana-native settlement layer for AI agents.
+
+No API keys, no accounts -- just wallets.
 
 ![Rust](https://img.shields.io/badge/rust-stable-F97316?style=flat&logo=rust&logoColor=white)
 ![Gateway License](https://img.shields.io/badge/gateway-BUSL--1.1-F97316?style=flat)
