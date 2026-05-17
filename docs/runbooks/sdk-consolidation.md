@@ -147,7 +147,7 @@ cd /home/kennethdixon/projects/solvela-ts
 git add README.md
 git commit -m "docs: redirect to monorepo at solvela-ai/solvela/sdks/typescript
 
-Signed-off-by: sky4 <kd@sky64.io>"
+Signed-off-by: sky4 <15861617+sky64@users.noreply.github.com>"
 git push origin main
 gh repo archive solvela-ai/solvela-ts --yes
 ```

@@ -461,8 +461,8 @@ Solvela uses a **per-component license split**. Pick the license of the piece yo
 
 - **You're a developer using Solvela's hosted gateway at `api.solvela.ai`** → no license obligations on you, just use it.
 - **You're self-hosting the gateway internally for your own product** → free under the Additional Use Grant if your gross annual revenue attributable to the gateway is under USD $1M.
-- **You're building a competing managed gateway service from this code** → you need a commercial license. Contact `kd@sky64.io`.
-- **Your annual revenue derived from the gateway will exceed USD $1M** → you need a commercial license. Contact `kd@sky64.io`.
+- **You're building a competing managed gateway service from this code** → you need a commercial license. Contact `partnerships@solvela.ai`.
+- **Your annual revenue derived from the gateway will exceed USD $1M** → you need a commercial license. Contact `partnerships@solvela.ai`.
 - **You're embedding the SDK or building on top of the protocol/router crates** → standard MIT obligations apply (preserve the copyright notice, no warranty). No payment to Solvela required.
 
 ### Trademark
