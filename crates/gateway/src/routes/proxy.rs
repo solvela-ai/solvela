@@ -917,6 +917,7 @@ mod tests {
             slot_cache: new_slot_cache(),
             escrow_metrics: None,
             admin_token: None,
+            api_key_hmac_secret: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
         });
@@ -1046,6 +1047,7 @@ mod tests {
             slot_cache: new_slot_cache(),
             escrow_metrics: None,
             admin_token: None,
+            api_key_hmac_secret: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
         })

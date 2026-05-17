@@ -38,7 +38,13 @@ pub async fn extract_api_key(
     {
         if auth.starts_with("solvela_k_") || auth.starts_with("rcr_k_") {
             if let Some(pool) = &state.db_pool {
-                match crate::orgs::queries::verify_api_key(pool, auth).await {
+                match crate::orgs::queries::verify_api_key(
+                    pool,
+                    auth,
+                    state.api_key_hmac_secret.as_deref(),
+                )
+                .await
+                {
                     Ok(Some((api_key, org_id))) => {
                         request.extensions_mut().insert(OrgContext {
                             org_id,
@@ -217,6 +223,7 @@ supports_vision = false
             slot_cache: new_slot_cache(),
             escrow_metrics: None,
             admin_token: None,
+            api_key_hmac_secret: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
         })

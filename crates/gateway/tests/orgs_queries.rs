@@ -253,6 +253,7 @@ async fn create_api_key_returns_plaintext_once_and_persists_hash(pool: PgPool) {
             role: Some(OrgRole::Admin),
             expires_in_days: Some(30),
         },
+        None,
     )
     .await
     .expect("create_api_key");
@@ -273,7 +274,7 @@ async fn create_api_key_returns_plaintext_once_and_persists_hash(pool: PgPool) {
             .fetch_optional(&pool)
             .await
             .expect("query hash");
-    assert_eq!(stored_hash, Some(hash_api_key(&created.key)));
+    assert_eq!(stored_hash, Some(hash_api_key(&created.key, None)));
 
     // The plaintext itself does not appear anywhere in the api_keys row.
     let any_plaintext: i64 = sqlx::query_scalar(
@@ -303,6 +304,7 @@ async fn create_api_key_without_expiry_leaves_expires_at_null(pool: PgPool) {
             role: None,
             expires_in_days: None,
         },
+        None,
     )
     .await
     .expect("create_api_key");
@@ -324,11 +326,12 @@ async fn verify_api_key_returns_some_for_valid_key(pool: PgPool) {
             role: None,
             expires_in_days: None,
         },
+        None,
     )
     .await
     .expect("create");
 
-    let verified = verify_api_key(&pool, &created.key)
+    let verified = verify_api_key(&pool, &created.key, None)
         .await
         .expect("verify")
         .expect("must verify a freshly-created key");
@@ -339,7 +342,7 @@ async fn verify_api_key_returns_some_for_valid_key(pool: PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn verify_api_key_returns_none_for_unknown_key(pool: PgPool) {
     let unknown = generate_api_key();
-    let result = verify_api_key(&pool, &unknown).await.expect("verify");
+    let result = verify_api_key(&pool, &unknown, None).await.expect("verify");
     assert!(result.is_none(), "unknown key returns None");
 }
 
@@ -356,6 +359,7 @@ async fn verify_api_key_returns_none_for_revoked_key(pool: PgPool) {
             role: None,
             expires_in_days: None,
         },
+        None,
     )
     .await
     .expect("create");
@@ -365,7 +369,9 @@ async fn verify_api_key_returns_none_for_revoked_key(pool: PgPool) {
         .expect("revoke");
     assert!(updated, "first revoke returns true");
 
-    let result = verify_api_key(&pool, &created.key).await.expect("verify");
+    let result = verify_api_key(&pool, &created.key, None)
+        .await
+        .expect("verify");
     assert!(result.is_none(), "revoked key must not verify");
 
     let second = revoke_api_key(&pool, created.id, org.id)
@@ -382,7 +388,7 @@ async fn verify_api_key_returns_none_for_expired_key(pool: PgPool) {
 
     // Insert an expired key directly so we don't have to wait.
     let key = generate_api_key();
-    let key_hash = hash_api_key(&key);
+    let key_hash = hash_api_key(&key, None);
     sqlx::query(
         r#"INSERT INTO api_keys (id, org_id, key_prefix, key_hash, name, role, expires_at, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
@@ -399,7 +405,7 @@ async fn verify_api_key_returns_none_for_expired_key(pool: PgPool) {
     .await
     .expect("insert expired key");
 
-    let result = verify_api_key(&pool, &key).await.expect("verify");
+    let result = verify_api_key(&pool, &key, None).await.expect("verify");
     assert!(result.is_none(), "expired key must not verify");
 }
 
@@ -417,6 +423,7 @@ async fn list_api_keys_filters_revoked(pool: PgPool) {
             role: None,
             expires_in_days: None,
         },
+        None,
     )
     .await
     .expect("create active");
@@ -429,6 +436,7 @@ async fn list_api_keys_filters_revoked(pool: PgPool) {
             role: None,
             expires_in_days: None,
         },
+        None,
     )
     .await
     .expect("create to-revoke");
@@ -471,6 +479,7 @@ async fn revoke_api_key_scopes_to_org(pool: PgPool) {
             role: None,
             expires_in_days: None,
         },
+        None,
     )
     .await
     .expect("create");
@@ -485,7 +494,9 @@ async fn revoke_api_key_scopes_to_org(pool: PgPool) {
     );
 
     // The key still verifies.
-    let verified = verify_api_key(&pool, &created.key).await.expect("verify");
+    let verified = verify_api_key(&pool, &created.key, None)
+        .await
+        .expect("verify");
     assert!(
         verified.is_some(),
         "key targeted by a cross-org revoke must remain valid"

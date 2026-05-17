@@ -253,6 +253,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         admin_token: Some(gateway::secret::AdminToken::new(
             TEST_ADMIN_TOKEN.to_string(),
         )),
+        api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -401,6 +402,7 @@ fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
         admin_token: Some(gateway::secret::AdminToken::new(
             TEST_ADMIN_TOKEN.to_string(),
         )),
+        api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -470,6 +472,7 @@ fn test_app_with_mock_provider_and_escrow() -> axum::Router {
         admin_token: Some(gateway::secret::AdminToken::new(
             TEST_ADMIN_TOKEN.to_string(),
         )),
+        api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -538,6 +541,7 @@ fn test_app_with_escrow() -> axum::Router {
         admin_token: Some(gateway::secret::AdminToken::new(
             TEST_ADMIN_TOKEN.to_string(),
         )),
+        api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -1835,6 +1839,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         admin_token: Some(gateway::secret::AdminToken::new(
             TEST_ADMIN_TOKEN.to_string(),
         )),
+        api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -3398,6 +3403,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         admin_token: Some(gateway::secret::AdminToken::new(
             TEST_ADMIN_TOKEN.to_string(),
         )),
+        api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -3559,6 +3565,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         admin_token: Some(gateway::secret::AdminToken::new(
             TEST_ADMIN_TOKEN.to_string(),
         )),
+        api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -3790,6 +3797,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         admin_token: Some(gateway::secret::AdminToken::new(
             TEST_ADMIN_TOKEN.to_string(),
         )),
+        api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
     });
@@ -4923,6 +4931,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         escrow_metrics: None,
         admin_token: None, // <-- no admin token configured
         prometheus_handle: Some(test_prometheus_handle()),
+        api_key_hmac_secret: None,
         dev_bypass_payment: false,
     });
     let app = build_router(
