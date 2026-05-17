@@ -161,6 +161,30 @@ async fn main() -> anyhow::Result<()> {
         Ok("production") | Ok("prod")
     );
 
+    // ── Durable nonce pool ────────────────────────────────────────────────────
+    //
+    // Build a NoncePool from environment variables. Returns an empty pool
+    // (not an error) if no nonce accounts are configured. When unconfigured
+    // the SolanaVerifier rejects all client-submitted durable-nonce
+    // transactions (see #173 L3 GW) — clients must use a recent blockhash
+    // instead. Constructed before SolanaVerifier so we can plumb it in via
+    // `with_nonce_pool` below; also reused by EscrowClaimer.
+    let nonce_pool = {
+        let pool = solvela_x402::nonce_pool::NoncePool::from_env();
+        if pool.is_empty() {
+            warn!(
+                "nonce_pool not configured — client durable-nonce transactions \
+                 will be REJECTED. Set SOLVELA_SOLANA__NONCE_ACCOUNT[_N] to \
+                 allowlist nonce accounts, or instruct clients to use a recent \
+                 blockhash."
+            );
+            None
+        } else {
+            info!(accounts = pool.len(), "durable nonce pool initialized");
+            Some(Arc::new(pool))
+        }
+    };
+
     let solana_verifier = match solvela_x402::solana::SolanaVerifier::new(
         &app_config.solana.rpc_url,
         &app_config.solana.recipient_wallet,
@@ -204,6 +228,15 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Attach the durable-nonce allowlist to the verifier so client-submitted
+    // nonce transactions can be checked against operator-approved accounts.
+    // Without this, the verifier rejects every nonce-based payment (#173 L3 GW).
+    let solana_verifier = if let Some(pool) = &nonce_pool {
+        solana_verifier.with_nonce_pool(Arc::clone(pool))
+    } else {
+        solana_verifier
+    };
+
     // Build verifiers list — always include the direct SolanaVerifier
     let mut verifiers: Vec<Arc<dyn solvela_x402::traits::PaymentVerifier>> =
         vec![Arc::new(solana_verifier)];
@@ -245,23 +278,6 @@ async fn main() -> anyhow::Result<()> {
                     None
                 }
             }
-        }
-    };
-
-    // ── Durable nonce pool ────────────────────────────────────────────────────
-    //
-    // Build a NoncePool from environment variables. Returns an empty pool
-    // (not an error) if no nonce accounts are configured — clients fall back
-    // to using a recent blockhash in that case.
-    // Constructed before EscrowClaimer because the claimer now uses the pool.
-    let nonce_pool = {
-        let pool = solvela_x402::nonce_pool::NoncePool::from_env();
-        if pool.is_empty() {
-            info!("nonce pool empty — clients will use recent blockhash (set SOLVELA_SOLANA__NONCE_ACCOUNT to enable)");
-            None
-        } else {
-            info!(accounts = pool.len(), "durable nonce pool initialized");
-            Some(Arc::new(pool))
         }
     };
 

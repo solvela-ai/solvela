@@ -370,25 +370,7 @@ impl PaymentVerifier for SolanaVerifier {
                 "detected durable nonce transaction — skipping blockhash recency check"
             );
 
-            // If a nonce pool is configured, verify the nonce account is registered.
-            // If not configured, warn operators and accept any client-supplied nonce account.
-            if let Some(pool) = &self.nonce_pool {
-                let nonce_account_b58 = nonce_account.to_string();
-                let is_known = pool
-                    .entries_iter()
-                    .any(|e| e.nonce_account == nonce_account_b58);
-                if !is_known {
-                    return Err(Error::InvalidTransaction(format!(
-                        "nonce account {nonce_account_b58} is not registered in the gateway nonce pool"
-                    )));
-                }
-            } else {
-                tracing::warn!(
-                    nonce_account = %nonce_account,
-                    "nonce_pool not configured — skipping nonce-account validation; \
-                     any client-supplied nonce account is accepted"
-                );
-            }
+            validate_nonce_account(self.nonce_pool.as_deref(), &nonce_account)?;
 
             // Simulate WITHOUT replacing the blockhash (nonce tx must keep its nonce value)
             self.simulate_transaction(&solana_payload.transaction, false)
@@ -480,6 +462,36 @@ impl PaymentVerifier for SolanaVerifier {
             }
         }
     }
+}
+
+/// Validate that a client-submitted durable-nonce transaction's nonce account
+/// is in the operator's allowlist. Fail closed when no pool is configured —
+/// accepting any client-supplied nonce account would let a stale signed
+/// transaction be replayed against any nonce account on chain, bypassing the
+/// blockhash-recency check that protects non-nonce transactions. See issue
+/// #173 (L3 GW).
+fn validate_nonce_account(
+    nonce_pool: Option<&NoncePool>,
+    nonce_account: &Pubkey,
+) -> Result<(), Error> {
+    let Some(pool) = nonce_pool else {
+        return Err(Error::InvalidTransaction(
+            "nonce_pool not configured on the gateway — durable-nonce \
+             transactions require an operator-allowlisted nonce account. \
+             Resubmit with a recent blockhash."
+                .to_string(),
+        ));
+    };
+    let nonce_account_b58 = nonce_account.to_string();
+    let is_known = pool
+        .entries_iter()
+        .any(|e| e.nonce_account == nonce_account_b58);
+    if !is_known {
+        return Err(Error::InvalidTransaction(format!(
+            "nonce account {nonce_account_b58} is not registered in the gateway nonce pool"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -943,5 +955,78 @@ mod tests {
         assert_eq!(transfer.destination, recipient);
         assert_eq!(transfer.amount, 25000);
         assert_eq!(transfer.mint, Some(usdc_mint));
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_nonce_account (#173 L3 GW)
+    // -----------------------------------------------------------------------
+
+    /// A well-known valid 32-byte base58 nonce account pubkey for tests.
+    const TEST_NONCE_ACCOUNT: &str = "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz";
+    const TEST_AUTHORITY: &str = "So11111111111111111111111111111111111111112";
+
+    fn test_nonce_pool_with(account: &str) -> NoncePool {
+        use crate::nonce_pool::NonceEntry;
+        NoncePool::from_entries(vec![NonceEntry {
+            nonce_account: account.to_string(),
+            authority: TEST_AUTHORITY.to_string(),
+        }])
+        .expect("valid entries")
+    }
+
+    #[test]
+    fn test_validate_nonce_account_no_pool_returns_err() {
+        let nonce_account = Pubkey::from_str(TEST_NONCE_ACCOUNT).unwrap();
+        let result = validate_nonce_account(None, &nonce_account);
+        assert!(result.is_err(), "no pool must fail closed");
+        match result.unwrap_err() {
+            Error::InvalidTransaction(msg) => {
+                assert!(
+                    msg.contains("nonce_pool not configured"),
+                    "error must name the missing configuration: {msg}"
+                );
+                assert!(
+                    msg.contains("Resubmit with a recent blockhash"),
+                    "error should direct clients to the safe alternative: {msg}"
+                );
+            }
+            other => panic!("expected InvalidTransaction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_nonce_account_in_pool_returns_ok() {
+        let pool = test_nonce_pool_with(TEST_NONCE_ACCOUNT);
+        let nonce_account = Pubkey::from_str(TEST_NONCE_ACCOUNT).unwrap();
+        let result = validate_nonce_account(Some(&pool), &nonce_account);
+        assert!(
+            result.is_ok(),
+            "allowlisted nonce account must verify: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_nonce_account_not_in_pool_returns_err() {
+        // Pool contains a different account.
+        let pool = test_nonce_pool_with("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        let nonce_account = Pubkey::from_str(TEST_NONCE_ACCOUNT).unwrap();
+        let result = validate_nonce_account(Some(&pool), &nonce_account);
+        assert!(
+            result.is_err(),
+            "non-allowlisted nonce account must be rejected"
+        );
+        match result.unwrap_err() {
+            Error::InvalidTransaction(msg) => {
+                assert!(
+                    msg.contains("not registered in the gateway nonce pool"),
+                    "error must explain the mismatch: {msg}"
+                );
+                assert!(
+                    msg.contains(TEST_NONCE_ACCOUNT),
+                    "error should name the rejected account: {msg}"
+                );
+            }
+            other => panic!("expected InvalidTransaction, got {other:?}"),
+        }
     }
 }
