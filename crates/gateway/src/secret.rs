@@ -1,15 +1,18 @@
 //! Secret-bearing types for the gateway.
 //!
-//! Wraps secrets like the admin token in newtypes that:
+//! Wraps secrets in newtypes that:
 //! - Redact the value in `Debug` output
 //! - Zeroize the underlying bytes on drop
-//! - Force callers through a constant-time comparison helper
+//! - Expose only the narrow operation the secret is meant for (constant-time
+//!   compare for bearer tokens, HMAC computation for keying secrets)
 //!
 //! These are belt-and-braces defenses against accidental log leakage,
-//! heap dumps, and timing side-channels. See issue #173 (L4 GW).
+//! heap dumps, and timing side-channels. See issue #173 (L1 GW, L4 GW).
 
 use std::fmt;
 
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::security::constant_time_eq;
@@ -56,6 +59,52 @@ impl AdminToken {
 impl fmt::Debug for AdminToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("AdminToken").field(&"[REDACTED]").finish()
+    }
+}
+
+/// Server-side keying secret for `HMAC-SHA256(secret, message)`.
+///
+/// Used to keying-hash API keys at rest so a stolen `api_keys.key_hash`
+/// column dump alone is not sufficient to brute-force a candidate key — the
+/// attacker also needs the server secret. See issue #173 (L1 GW).
+///
+/// Like [`AdminToken`], stored as `Vec<u8>` with `ZeroizeOnDrop` and a
+/// redacting `Debug` impl. The only exposed operation is `hmac_sha256_hex`,
+/// which computes the hex digest of the HMAC-SHA256 of a message under this
+/// secret. `PartialEq` is intentionally omitted — there's no caller use case
+/// for comparing two secrets, and adding the impl would invite misuse.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct HmacSecret(Vec<u8>);
+
+impl HmacSecret {
+    /// Wrap raw secret bytes. The caller is responsible for ensuring the
+    /// bytes have at least 128 bits of entropy — NIST SP 800-107 recommends
+    /// at least 16 bytes for HMAC keys. Any length is accepted, but a
+    /// too-short secret defeats the purpose.
+    #[must_use]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// Compute `HMAC-SHA256(self, message)` and return the hex-encoded digest
+    /// (64 chars, lowercase). The output shape matches the existing plain
+    /// `SHA-256` hex digest stored in `api_keys.key_hash`, so the same column
+    /// holds either form during the migration period.
+    #[must_use]
+    pub fn hmac_sha256_hex(&self, message: &[u8]) -> String {
+        // `Hmac::new_from_slice` accepts any key length; per the type's
+        // documentation it never returns Err for `Hmac<Sha256>` (the bound
+        // is `KeyInit`, which is infallible for fixed-output MACs).
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.0).expect("HMAC-SHA256 accepts any key length");
+        mac.update(message);
+        hex::encode(mac.finalize().into_bytes())
+    }
+}
+
+impl fmt::Debug for HmacSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("HmacSecret").field(&"[REDACTED]").finish()
     }
 }
 
@@ -115,5 +164,69 @@ mod tests {
         let non_empty = AdminToken::new("x".to_string());
         assert!(empty.is_empty());
         assert!(!non_empty.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // HmacSecret
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hmac_secret_is_deterministic_for_same_input() {
+        let secret = HmacSecret::new(b"server-side-secret".to_vec());
+        let h1 = secret.hmac_sha256_hex(b"solvela_k_abc123");
+        let h2 = secret.hmac_sha256_hex(b"solvela_k_abc123");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64, "SHA-256 hex digest must be 64 chars");
+        // Lowercase hex only — matches the existing `hex::encode` output.
+        assert!(h1
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn hmac_secret_differs_per_message() {
+        let secret = HmacSecret::new(b"server-side-secret".to_vec());
+        let a = secret.hmac_sha256_hex(b"solvela_k_one");
+        let b = secret.hmac_sha256_hex(b"solvela_k_two");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn hmac_secret_differs_per_key() {
+        let s1 = HmacSecret::new(b"secret-one".to_vec());
+        let s2 = HmacSecret::new(b"secret-two".to_vec());
+        let msg = b"solvela_k_abc";
+        // Different keys must produce different MACs for the same message —
+        // this is the load-bearing property: a stolen DB dump alone is not
+        // enough to verify candidate keys without the secret.
+        assert_ne!(s1.hmac_sha256_hex(msg), s2.hmac_sha256_hex(msg));
+    }
+
+    #[test]
+    fn hmac_secret_known_test_vector() {
+        // RFC 4231 § 4.2 — HMAC-SHA-256 test vector 1:
+        //   Key:  20 bytes of 0x0b
+        //   Data: "Hi There"
+        //   HMAC: b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+        let secret = HmacSecret::new(vec![0x0b; 20]);
+        let got = secret.hmac_sha256_hex(b"Hi There");
+        assert_eq!(
+            got,
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+    }
+
+    #[test]
+    fn hmac_secret_debug_redacts_value() {
+        let secret = HmacSecret::new(b"correct-horse-battery-staple".to_vec());
+        let debug_output = format!("{secret:?}");
+        assert!(
+            !debug_output.contains("correct-horse"),
+            "Debug must not leak the secret: got {debug_output}"
+        );
+        assert!(
+            debug_output.contains("REDACTED"),
+            "Debug must mark value as REDACTED: got {debug_output}"
+        );
     }
 }

@@ -396,6 +396,7 @@ supports_vision = true
             slot_cache: crate::routes::escrow::new_slot_cache(),
             escrow_metrics: None,
             admin_token: admin_token.map(|t| crate::secret::AdminToken::new(t.to_string())),
+            api_key_hmac_secret: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
         });
@@ -556,6 +557,7 @@ mod tests {
             slot_cache: crate::routes::escrow::new_slot_cache(),
             escrow_metrics: None,
             admin_token: Some(crate::secret::AdminToken::new("admin-secret".to_string())),
+            api_key_hmac_secret: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
         };
@@ -599,6 +601,7 @@ mod tests {
             slot_cache: crate::routes::escrow::new_slot_cache(),
             escrow_metrics: None,
             admin_token: Some(crate::secret::AdminToken::new("admin-secret".to_string())),
+            api_key_hmac_secret: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
         };
@@ -645,6 +648,7 @@ mod tests {
             slot_cache: crate::routes::escrow::new_slot_cache(),
             escrow_metrics: None,
             admin_token: Some(crate::secret::AdminToken::new("admin-secret".to_string())),
+            api_key_hmac_secret: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
         };

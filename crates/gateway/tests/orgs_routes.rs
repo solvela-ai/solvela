@@ -81,6 +81,7 @@ fn router_with_pool(pool: PgPool) -> Router {
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         escrow_metrics: None,
         admin_token: Some(gateway::secret::AdminToken::new(ADMIN_TOKEN.to_string())),
+        api_key_hmac_secret: None,
         prometheus_handle: None,
         dev_bypass_payment: false,
     });

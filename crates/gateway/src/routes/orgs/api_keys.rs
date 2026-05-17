@@ -47,7 +47,7 @@ pub async fn create_api_key(
 
     let (actor_api_key, actor_admin) = auth.audit_actor();
 
-    match queries::create_api_key(pool, org_id, body).await {
+    match queries::create_api_key(pool, org_id, body, state.api_key_hmac_secret.as_deref()).await {
         Ok(created) => {
             log_audit(
                 pool,
@@ -248,6 +248,7 @@ mod tests {
             escrow_metrics: None,
             admin_token: None, // no admin token — forces API key auth path
             prometheus_handle: None,
+            api_key_hmac_secret: None,
             dev_bypass_payment: false,
         });
 

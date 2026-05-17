@@ -86,6 +86,13 @@ pub struct AppState {
     /// output, zeroized on drop, and only comparable via the constant-time
     /// `verify` method. See issue #173 (L4 GW).
     pub admin_token: Option<secret::AdminToken>,
+    /// HMAC keying secret for API-key hashing at rest. When `Some`, new API
+    /// keys are stored under HMAC-SHA256(secret, key) instead of plain
+    /// SHA-256(key). Verification accepts both forms during the migration
+    /// window — see [`secret::HmacSecret`] and [`crate::orgs::queries`].
+    /// `None` falls back to legacy plain-SHA-256 behavior with a startup
+    /// warning. See issue #173 (L1 GW).
+    pub api_key_hmac_secret: Option<Arc<secret::HmacSecret>>,
     /// Prometheus metrics handle for rendering the `/metrics` endpoint.
     /// `None` when the recorder failed to install (metrics unavailable).
     pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,

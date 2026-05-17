@@ -7,6 +7,7 @@ use crate::orgs::models::{
     AddMemberRequest, ApiKey, ApiKeyCreated, AssignWalletRequest, CreateApiKeyRequest,
     CreateOrgRequest, CreateTeamRequest, OrgMember, OrgRole, Organization, Team, TeamWallet,
 };
+use crate::secret::HmacSecret;
 
 /// Number of UUID hex chars (no hyphens) included after `"solvela_k_"` in the
 /// stored display prefix. The prefix derives from the API-key row's UUID `id`
@@ -45,11 +46,24 @@ fn key_prefix_for_display(row_id: Uuid) -> String {
     format!("solvela_k_{}", &id_simple[..len])
 }
 
-/// Compute the SHA-256 hex digest of an API key.
-pub fn hash_api_key(key: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
-    hex::encode(hasher.finalize())
+/// Compute the hash of an API key for storage / lookup in `api_keys.key_hash`.
+///
+/// When `hmac_secret` is `Some`, returns `HMAC-SHA256(secret, key)` as a hex
+/// digest. When `None`, returns plain `SHA-256(key)` as a hex digest. Both
+/// forms are 64 lowercase hex chars and share the same column. Verification
+/// in `verify_api_key` checks against both candidate hashes so legacy rows
+/// (written before the operator configured the secret) keep working. See
+/// issue #173 (L1 GW).
+#[must_use]
+pub fn hash_api_key(key: &str, hmac_secret: Option<&HmacSecret>) -> String {
+    match hmac_secret {
+        Some(secret) => secret.hmac_sha256_hex(key.as_bytes()),
+        None => {
+            let mut hasher = Sha256::new();
+            hasher.update(key.as_bytes());
+            hex::encode(hasher.finalize())
+        }
+    }
 }
 
 /// Create a new organization and auto-enroll the owner as a member with role "owner".
@@ -274,19 +288,21 @@ pub async fn list_team_wallets(
 
 /// Create a new API key for an organization.
 ///
-/// Generates a plaintext key, stores only its SHA-256 hash, and returns the
+/// Generates a plaintext key, stores only its hash (HMAC-SHA256 if
+/// `hmac_secret` is `Some`, plain SHA-256 otherwise), and returns the
 /// plaintext key once. The plaintext is never persisted.
 pub async fn create_api_key(
     pool: &PgPool,
     org_id: Uuid,
     req: CreateApiKeyRequest,
+    hmac_secret: Option<&HmacSecret>,
 ) -> Result<ApiKeyCreated, sqlx::Error> {
     let id = Uuid::new_v4();
     let now = Utc::now();
     let role = req.role.unwrap_or(OrgRole::Member);
 
     let key = generate_api_key();
-    let key_hash = hash_api_key(&key);
+    let key_hash = hash_api_key(&key, hmac_secret);
     // Display prefix is derived from the row UUID, not the key bytes — see
     // `key_prefix_for_display` for why. This is the H3 fix.
     let key_prefix = key_prefix_for_display(id);
@@ -324,44 +340,112 @@ pub async fn create_api_key(
 
 /// Verify an API key by hashing it and looking up the hash.
 ///
+/// Computes the candidate hash under the current `hmac_secret` (HMAC-SHA256
+/// if `Some`, plain SHA-256 if `None`) AND a legacy plain-SHA-256 hash, then
+/// looks up `WHERE key_hash IN (primary, legacy)`. This lets the gateway
+/// keep verifying keys that were stored before the operator configured
+/// `SOLVELA_API_KEY_HMAC_SECRET`. When a row matches via the legacy hash and
+/// HMAC is now configured, an opportunistic background task rewrites the
+/// row's `key_hash` to the HMAC form — so active keys self-migrate without
+/// requiring operator rotation. See issue #173 (L1 GW).
+///
 /// Returns `Some((api_key_row, org_id))` when valid, `None` when not found,
 /// expired, or revoked. Updates `last_used_at` fire-and-forget.
 pub async fn verify_api_key(
     pool: &PgPool,
     key: &str,
+    hmac_secret: Option<&HmacSecret>,
 ) -> Result<Option<(ApiKey, Uuid)>, sqlx::Error> {
-    let key_hash = hash_api_key(key);
+    let primary_hash = hash_api_key(key, hmac_secret);
+    // Legacy fallback: always also accept a row stored under plain SHA-256.
+    // When `hmac_secret` is `None`, `primary == legacy` and the `IN` clause
+    // degenerates to a single value (Postgres optimizes this away).
+    let legacy_hash = hash_api_key(key, None);
     let now = Utc::now();
 
-    let row = sqlx::query_as::<_, ApiKey>(
+    // Internal row type that mirrors ApiKey + the stored hash. Needed because
+    // verify_api_key has to know which form (HMAC vs. legacy SHA-256) the row
+    // is stored under to decide whether to opportunistically rehash.
+    #[derive(sqlx::FromRow)]
+    struct ApiKeyRow {
+        id: Uuid,
+        org_id: Uuid,
+        key_prefix: String,
+        name: String,
+        role: OrgRole,
+        last_used_at: Option<chrono::DateTime<Utc>>,
+        expires_at: Option<chrono::DateTime<Utc>>,
+        revoked_at: Option<chrono::DateTime<Utc>>,
+        created_at: chrono::DateTime<Utc>,
+        key_hash: String,
+    }
+
+    let row = sqlx::query_as::<_, ApiKeyRow>(
         r#"
-        SELECT id, org_id, key_prefix, name, role, last_used_at, expires_at, revoked_at, created_at
+        SELECT id, org_id, key_prefix, name, role, last_used_at, expires_at, revoked_at, created_at, key_hash
         FROM api_keys
-        WHERE key_hash = $1
+        WHERE key_hash IN ($1, $2)
           AND revoked_at IS NULL
-          AND (expires_at IS NULL OR expires_at > $2)
+          AND (expires_at IS NULL OR expires_at > $3)
         "#,
     )
-    .bind(&key_hash)
+    .bind(&primary_hash)
+    .bind(&legacy_hash)
     .bind(now)
     .fetch_optional(pool)
     .await?;
 
-    if let Some(api_key) = row {
+    if let Some(row) = row {
+        let stored_hash = row.key_hash;
+        let api_key = ApiKey {
+            id: row.id,
+            org_id: row.org_id,
+            key_prefix: row.key_prefix,
+            name: row.name,
+            role: row.role,
+            last_used_at: row.last_used_at,
+            expires_at: row.expires_at,
+            revoked_at: row.revoked_at,
+            created_at: row.created_at,
+        };
         let org_id = api_key.org_id;
         let key_id = api_key.id;
+        let matched_via_legacy = stored_hash != primary_hash;
 
-        // Fire-and-forget last_used_at update — never block the caller.
+        // Fire-and-forget last_used_at update — never block the caller. When
+        // the row matched via the legacy hash and the operator has now
+        // configured HMAC, also rewrite the key_hash to the HMAC form so the
+        // migration self-completes for active keys.
         let pool_clone = pool.clone();
+        let primary_for_rehash = primary_hash;
         tokio::spawn(async move {
-            let result = sqlx::query(r#"UPDATE api_keys SET last_used_at = $1 WHERE id = $2"#)
-                .bind(Utc::now())
-                .bind(key_id)
-                .execute(&pool_clone)
-                .await;
+            let update_result = if matched_via_legacy {
+                sqlx::query(r#"UPDATE api_keys SET last_used_at = $1, key_hash = $2 WHERE id = $3"#)
+                    .bind(Utc::now())
+                    .bind(&primary_for_rehash)
+                    .bind(key_id)
+                    .execute(&pool_clone)
+                    .await
+            } else {
+                sqlx::query(r#"UPDATE api_keys SET last_used_at = $1 WHERE id = $2"#)
+                    .bind(Utc::now())
+                    .bind(key_id)
+                    .execute(&pool_clone)
+                    .await
+            };
 
-            if let Err(e) = result {
-                tracing::warn!(key_id = %key_id, error = %e, "failed to update api key last_used_at");
+            if let Err(e) = update_result {
+                tracing::warn!(
+                    key_id = %key_id,
+                    rehashed = matched_via_legacy,
+                    error = %e,
+                    "failed to update api key last_used_at",
+                );
+            } else if matched_via_legacy {
+                tracing::info!(
+                    key_id = %key_id,
+                    "rehashed api key from legacy SHA-256 to HMAC-SHA256 on verify (#173 L1 GW)"
+                );
             }
         });
 
@@ -467,8 +551,8 @@ mod tests {
     #[test]
     fn hash_api_key_is_deterministic_and_64_chars() {
         let key = "solvela_k_abc123testkey";
-        let hash1 = hash_api_key(key);
-        let hash2 = hash_api_key(key);
+        let hash1 = hash_api_key(key, None);
+        let hash2 = hash_api_key(key, None);
 
         assert_eq!(hash1, hash2, "hash_api_key must be deterministic");
         assert_eq!(
@@ -479,7 +563,35 @@ mod tests {
         );
 
         // Different inputs must produce different hashes
-        let hash_other = hash_api_key("solvela_k_different");
+        let hash_other = hash_api_key("solvela_k_different", None);
         assert_ne!(hash1, hash_other, "different keys must hash differently");
+    }
+
+    #[test]
+    fn hash_api_key_hmac_mode_differs_from_plain() {
+        let key = "solvela_k_abc123testkey";
+        let secret = HmacSecret::new(b"server-side-secret".to_vec());
+
+        let plain = hash_api_key(key, None);
+        let hmac = hash_api_key(key, Some(&secret));
+
+        assert_ne!(plain, hmac, "HMAC mode must differ from plain SHA-256");
+        assert_eq!(plain.len(), 64);
+        assert_eq!(hmac.len(), 64);
+    }
+
+    #[test]
+    fn hash_api_key_hmac_mode_is_secret_dependent() {
+        let key = "solvela_k_abc123testkey";
+        let s1 = HmacSecret::new(b"secret-one".to_vec());
+        let s2 = HmacSecret::new(b"secret-two".to_vec());
+
+        let h1 = hash_api_key(key, Some(&s1));
+        let h2 = hash_api_key(key, Some(&s2));
+
+        // The defining security property: with different keying secrets, the
+        // same input key produces different stored hashes. A database dump
+        // without the secret cannot be brute-forced against candidate keys.
+        assert_ne!(h1, h2);
     }
 }

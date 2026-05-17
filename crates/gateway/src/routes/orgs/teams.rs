@@ -426,6 +426,7 @@ mod tests {
             escrow_metrics: None,
             admin_token: None, // no admin token — forces API key auth path
             prometheus_handle: None,
+            api_key_hmac_secret: None,
             dev_bypass_payment: false,
         });
 

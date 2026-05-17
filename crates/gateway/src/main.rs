@@ -443,6 +443,26 @@ async fn main() -> anyhow::Result<()> {
         .filter(|t| !t.is_empty())
         .map(gateway::secret::AdminToken::new);
 
+    // Read the API-key HMAC keying secret. When set, new API keys are stored
+    // under HMAC-SHA256(secret, key) instead of plain SHA-256(key). Defense
+    // against database-dump offline brute-force — without the secret, an
+    // attacker holding `api_keys.key_hash` cannot verify candidate keys
+    // (see #173 L1 GW). Optional for back-compat; gateway emits a startup
+    // warn when unset.
+    let api_key_hmac_secret =
+        env_with_fallback("SOLVELA_API_KEY_HMAC_SECRET", "RCR_API_KEY_HMAC_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| Arc::new(gateway::secret::HmacSecret::new(s.into_bytes())));
+    if api_key_hmac_secret.is_none() {
+        warn!(
+            "SOLVELA_API_KEY_HMAC_SECRET is not set — API keys are hashed with \
+             plain SHA-256 (no keying secret). Set this env var to a long, \
+             random value to harden the api_keys.key_hash column against \
+             offline brute-force from a database dump. See #173 L1 GW."
+        );
+    }
+
     // Dev-mode payment bypass — only when SOLVELA_DEV_BYPASS_PAYMENT=true AND not production
     let dev_bypass_payment = if is_production {
         if env_with_fallback("SOLVELA_DEV_BYPASS_PAYMENT", "RCR_DEV_BYPASS_PAYMENT").as_deref()
@@ -477,6 +497,7 @@ async fn main() -> anyhow::Result<()> {
         db_pool,
         escrow_metrics: escrow_metrics.clone(),
         admin_token,
+        api_key_hmac_secret,
         session_secret: {
             let secret = match env_with_fallback("SOLVELA_SESSION_SECRET", "RCR_SESSION_SECRET") {
                 Ok(b64) => {
