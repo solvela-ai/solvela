@@ -26,14 +26,18 @@ export const SAMPLES: Sample[] = [
     lang: 'typescript',
     install: 'npm install @solvela/sdk',
     status: 'live',
-    code: `import { SolvelaClient, ChatRequest, ChatMessage } from '@solvela/sdk'
+    code: `import {
+  SolvelaClient,
+  ChatRequest,
+  ChatMessage,
+  Wallet,
+  KeypairSigner,
+} from '@solvela/sdk'
 
-const client = new SolvelaClient({
-  config: { gatewayUrl: 'https://api.solvela.ai' },
-})
+const wallet = Wallet.fromEnv('SOLANA_PRIVATE_KEY')
+const signer = new KeypairSigner(wallet)
+const client = new SolvelaClient({ wallet, signer })
 
-// SDK reads SOLANA_PRIVATE_KEY from env by default — or pass an explicit
-// wallet + signer in the constructor options.
 const response = await client.chat(
   new ChatRequest('auto', [new ChatMessage('user', 'hi')]),
 )
