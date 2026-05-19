@@ -133,20 +133,21 @@ The receipt model maps cleanly:
 
 So the same opt-in client header set works for EVM with no protocol change beyond the chain-aware enablement gate.
 
-## Replay protection — the failsafe
+## Response cache — adjacent failsafe
 
-Even with pre-auth disabled on Solana and constrained on EVM, the gateway carries a defense-in-depth layer against accidentally-replayed pre-signed payments:
+Even with pre-auth disabled on Solana and constrained on EVM, the gateway carries a related layer that limits the blast radius of accidentally-replayed requests:
 
-The existing **request-dedup cache** at `crates/gateway/src/cache.rs::request_dedup` computes a SHA-256 of the canonicalized request body (sorted keys, agent timestamp prefixes stripped) and caches the response for 30 seconds keyed on that hash. A client that retries the same request within 30s — pre-auth header or not — gets the cached response, NOT a fresh charge.
+The existing **response cache** (`ResponseCache` in [`crates/gateway/src/cache.rs`](https://github.com/solvela-ai/solvela/blob/main/crates/gateway/src/cache.rs)) keys on `SHA-256(model ‖ serialised_messages ‖ temperature)` and stores the upstream completion for the configured TTL (default 10 minutes). A client that issues the same prompt twice within the TTL window — pre-auth header or not — gets the cached response and the upstream LLM is only charged once.
 
-This means: even if a client mishandles its receipt cache and replays a request with both `X-Solvela-PreAuth-Receipt` and a fresh `payment-signature`, the gateway returns the cached response and does not double-charge.
+This is **not** a payment-replay guard. Payment-replay protection is handled separately: the gateway tracks transaction signatures and rejects duplicate `payment-signature` headers with `402 Invalid Payment`. The response cache is a cost-control / latency optimization, not a correctness safeguard against double-charging.
 
-Pre-auth and request-dedup are independent layers:
+The two layers are deliberately independent:
 
-- **Pre-auth** is a *latency* optimization (skip the 402 round-trip).
-- **Request-dedup** is a *correctness* guard (don't charge twice for the same logical request).
+- **Pre-auth** is a *latency* optimization on the gateway's HTTP boundary (skip the 402 round-trip).
+- **Response cache** is a *cost* optimization on the upstream LLM hop (don't call the provider twice for the same prompt).
+- **Payment-signature replay protection** is a *correctness* guard at the verifier (don't accept the same signed transaction twice).
 
-Both ship.
+The pre-auth design only interacts with the first two; it cannot weaken the third.
 
 ## Sequence diagram
 
