@@ -21,10 +21,17 @@ import { LandingTopStrip } from '@/components/landing/landing-chrome';
 import { LandingFooter } from '@/components/landing/landing-footer';
 import { TerminalCard } from '@/components/ui/terminal-card';
 
-const GITHUB_SPONSORS_URL = 'https://github.com/sponsors/solvela-ai';
-const POLAR_URL = 'https://polar.sh/solvela-ai';
-const COMMERCIAL_URL = 'https://docs.solvela.ai/docs/enterprise/commercial-license';
+// GitHub Sponsors and Polar profiles are not yet enabled for solvela-ai;
+// both URLs currently 404 or redirect to the org page. Until the profiles
+// are set up, every CTA on this page funnels to a working mailto:.
+// When the profiles go live, restore the real URLs:
+//   const GITHUB_SPONSORS_URL = 'https://github.com/sponsors/solvela-ai';
+//   const POLAR_URL = 'https://polar.sh/solvela-ai';
 const CONTACT_EMAIL = 'partnerships@solvela.ai';
+const SPONSOR_MAILTO = `mailto:${CONTACT_EMAIL}?subject=Solvela%20Sponsorship`;
+const GITHUB_SPONSORS_URL = SPONSOR_MAILTO;
+const POLAR_URL = SPONSOR_MAILTO;
+const COMMERCIAL_URL = 'https://docs.solvela.ai/docs/enterprise/commercial-license';
 
 // Tiers are deliberate. Each one is named after what it actually pays for —
 // not a vanity ladder. If a sponsor asks "what does $X cover?" we want the
