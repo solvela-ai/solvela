@@ -33,11 +33,7 @@ The client signs an EIP-712 typed-data message against `Attacker Coin / version 
 
 The fix is the most boring and robust possible: the client **only ever** signs against a hardcoded `(name, version)` for each known `(chainId, verifyingContract)` pair. Anything not in the table is rejected.
 
-This pattern is codified in BlockRunAI/blockrun-llm-ts at `src/x402.ts:92`:
-
-> *USDC domain is fixed - NEVER use extra values from payment requirements. The USDC contract on Base uses exactly 'USD Coin' version '2'*
-
-Solvela mirrors that exact discipline.
+The canonical source for these values is the deployed USDC contract itself. Circle's [`FiatTokenV2_2`](https://github.com/circlefin/stablecoin-evm) (and its earlier versions) expose `name()` and `version()` as public view functions, and `DOMAIN_SEPARATOR()` is derived from them per [EIP-712 §Domain](https://eips.ethereum.org/EIPS/eip-712#definition-of-domainseparator). The contract will only redeem a signature whose domain separator matches the values it computed on deployment — an attacker who controls the 402 response can dictate any `(name, version)` they like, but only the contract's own values produce a signature the contract will accept. Hardcoding closes the gap between *what the 402 response says* and *what the contract enforces*.
 
 ## The hardcoded table
 
@@ -174,8 +170,8 @@ When EVM support lands, this table becomes a `const` in `crates/x402`:
 //!
 //! Clients MUST NOT trust facilitator-supplied `extra.name` / `extra.version`
 //! fields — see docs/concepts/eip712-usdc-domain.mdx for the threat model.
-//!
-//! Lesson cited in code: BlockRunAI/blockrun-llm-ts src/x402.ts:92.
+//! The canonical values come from each contract's on-chain `name()` /
+//! `version()` reads against Circle's deployed USDC contracts.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UsdcDomain {

@@ -345,7 +345,7 @@ Per-SDK highlights:
 
 ## 2026-04-07 — First Real Payment + Production Fixes + Telsi Migration Complete
 
-- **Telsi.ai migration to Solvela complete**: Telsi has successfully migrated from BlockRun to Solvela. Second production product now live on the gateway, processing real payments.
+- **Telsi.ai migration to Solvela complete**: Telsi has successfully migrated to Solvela. Second production product now live on the gateway, processing real payments.
 - **First real USDC payment processed**: Telsi Telegram app sent real USDC payment through Solvela on Solana mainnet, received LLM response. End-to-end payment flow verified with actual money on mainnet.
 - **Critical Fly.io config fix (PR #5)**: Gateway was calling `AppConfig::default()` and ignoring all Fly.io env vars for Solana configuration. Root cause: missing `config/default.toml` load in startup path. Result: `recipient_wallet` was always empty despite env vars being set. Fixed by loading `config/default.toml` first, then applying env var overrides. Deployed to production.
 - **CLI resource URL fix (PR #6)**: CLI was sending full URL in payment resource field. Gateway validates resource as path only (per x402 spec). One-line fix: send path instead of full URL.
