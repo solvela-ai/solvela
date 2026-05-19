@@ -12,7 +12,7 @@ export function ProviderRow() {
               className="font-display leading-[1.05] text-foreground"
               style={{ fontSize: 'clamp(1.5rem, 2.4vw, 2rem)', fontWeight: 600 }}
             >
-              One endpoint. Five providers. Twenty-six models.
+              One endpoint. Five providers. Twenty-five+ models.
             </h2>
           </div>
           <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-text-faint">
