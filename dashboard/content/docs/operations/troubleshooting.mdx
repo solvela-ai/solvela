@@ -31,7 +31,7 @@ Enable debug headers to diagnose routing and payment issues:
 ```bash
 curl -X POST http://localhost:8402/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-RCR-Debug: true" \
+  -H "X-Solvela-Debug: true" \
   -H "PAYMENT-SIGNATURE: <payment>" \
   -d '{"model": "auto", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
@@ -39,20 +39,20 @@ curl -X POST http://localhost:8402/v1/chat/completions \
 The response includes:
 
 ```
-X-RCR-Request-Id: 550e8400-e29b-41d4-a716-446655440000
-X-RCR-Model-Requested: auto
-X-RCR-Model-Resolved: google/gemini-2.5-flash
-X-RCR-Route-Profile: auto
-X-RCR-Route-Tier: simple
-X-RCR-Route-Score: -0.3500
-X-RCR-Provider: google
-X-RCR-Cache-Status: miss
-X-RCR-Payment-Status: verified
-X-RCR-Token-Estimate: 10
-X-RCR-Duration-Ms: 1247
+X-Solvela-Request-Id: 550e8400-e29b-41d4-a716-446655440000
+X-Solvela-Model-Requested: auto
+X-Solvela-Model-Resolved: google/gemini-2.5-flash
+X-Solvela-Route-Profile: auto
+X-Solvela-Route-Tier: simple
+X-Solvela-Route-Score: -0.3500
+X-Solvela-Provider: google
+X-Solvela-Cache-Status: miss
+X-Solvela-Payment-Status: verified
+X-Solvela-Token-Estimate: 10
+X-Solvela-Duration-Ms: 1247
 ```
 
-`X-RCR-Request-Id` is always returned (not gated by the debug flag).
+The legacy `X-RCR-*` header set (request flag + every response header) is still emitted for backward compatibility with pre-rebrand clients. `X-Solvela-Request-Id` (and its `X-RCR-Request-Id` mirror) is always returned, not gated by the debug flag.
 
 ## Health Check Interpretation
 
@@ -159,8 +159,8 @@ docker compose ps redis
 # Check connectivity
 redis-cli -h localhost ping
 
-# Check cache keys
-redis-cli -h localhost keys "rcr:*" | head -20
+# Check cache keys (prefixes: solvela:cache: for response cache, solvela:txn: for replay protection)
+redis-cli -h localhost keys "solvela:*" | head -20
 
 # Check memory usage
 redis-cli -h localhost info memory | grep used_memory_human
