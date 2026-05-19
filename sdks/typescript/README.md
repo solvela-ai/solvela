@@ -21,7 +21,7 @@ const client = new SolvelaClient({
   config: { gatewayUrl: 'http://localhost:8402' },
 });
 
-const request = new ChatRequest('gpt-4', [
+const request = new ChatRequest('auto', [
   new ChatMessage('user', 'Hello!'),
 ]);
 

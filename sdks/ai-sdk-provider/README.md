@@ -4,6 +4,18 @@ Vercel AI SDK provider for Solvela — AI agent payments with USDC on Solana via
 
 ## Install
 
+> **⚠️ Not yet published to npm.** `@solvela/ai-sdk-provider` is at `0.2.1` in
+> `package.json` (`private: false`) but has not been published. The npm install
+> command below will fail today. To use the provider now, clone the monorepo
+> and depend on this directory via a `file:` path or workspace link:
+>
+> ```bash
+> git clone https://github.com/solvela-ai/solvela
+> cd solvela/sdks/ai-sdk-provider && npm install && npm run build
+> ```
+
+Once published, the canonical install will be:
+
 ```bash
 npm install @solvela/ai-sdk-provider ai @ai-sdk/provider-utils @ai-sdk/openai-compatible
 ```
