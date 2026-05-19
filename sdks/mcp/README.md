@@ -10,7 +10,7 @@ Install the `solvela` CLI, then run the one-line installer for your host:
 
 ```bash
 # Install the Solvela CLI (once)
-cargo install --path crates/cli
+cargo install solvela-cli
 
 # Install into your preferred host
 solvela mcp install --host=claude-code
