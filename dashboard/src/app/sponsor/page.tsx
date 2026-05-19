@@ -24,7 +24,6 @@ import { TerminalCard } from '@/components/ui/terminal-card';
 const GITHUB_SPONSORS_URL = 'https://github.com/sponsors/solvela-ai';
 const POLAR_URL = 'https://polar.sh/solvela-ai';
 const COMMERCIAL_URL = 'https://docs.solvela.ai/docs/enterprise/commercial-license';
-const METRICS_URL = 'https://solvela.ai/metrics';
 const CONTACT_EMAIL = 'partnerships@solvela.ai';
 
 // Tiers are deliberate. Each one is named after what it actually pays for —
@@ -269,11 +268,11 @@ export default function SponsorPage() {
                       Embedding any non-gateway crate or SDK
                     </td>
                     <td className="py-3 pr-4 text-text-secondary leading-relaxed">
-                      Nothing — Apache-2.0 / MIT, just keep notices
+                      Nothing — all crates and SDKs are MIT, just keep notices
                     </td>
                     <td className="py-3 text-text-tertiary">
-                      <a href={METRICS_URL} className="underline underline-offset-2 hover:text-foreground">
-                        license split →
+                      <a href="https://github.com/solvela-ai/solvela#license" target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:text-foreground">
+                        license split ↗
                       </a>
                     </td>
                   </tr>

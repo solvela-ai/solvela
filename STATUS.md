@@ -39,7 +39,7 @@ _Last refreshed: 2026-05-12 (end of day) — full backlog clear-down. 32 PRs mer
 ## Verified
 
 - All-provider end-to-end payment tests pass with real USDC.
-- Load tested to ~400 RPS sustained at p99 < 300 ms.
+- Load tested via the `solvela loadtest` harness; the most recent run on the production gateway sustained ~400 RPS with p99 < 300 ms. Re-run with `solvela loadtest --rps <n> --duration <s>` after any change to the hot path to confirm the number still holds.
 - `cargo test` suite green at HEAD.
 - 4 required CI checks gate every merge to `main`: Rust (fmt, clippy, test), Smoke test, Security audit (cargo-audit), Docker build.
 - **Whole-repo security review pass complete (2026-05-09, M-tier closeout 2026-05-12)** — 18 must-ship PRs (#182–#199) + cleanup-tier wave 1 (#200, 8 MEDIUMs) landed across all 6 workspace crates plus the Anchor escrow program; the lower-numbered M-tier batch (#165–#172) was audited 2026-05-12 (2 superseded by the must-ship wave, 6 merged that same day). All HIGH/CRITICAL findings closed in source; escrow bytecode redeployed to mainnet 2026-05-10. See `CHANGELOG.md` and `SECURITY.md` for the per-finding breakdown.
