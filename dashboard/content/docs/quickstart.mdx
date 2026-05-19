@@ -293,7 +293,7 @@ curl https://api.solvela.ai/v1/chat/completions \
   }'
 ```
 
-A successful response is standard OpenAI format plus a `x_solvela` cost field.
+A successful response is standard OpenAI format. Gateway-specific metadata (request ID, model fallback used, session token) is returned in `x-solvela-*` response headers; the JSON body itself is unmodified for drop-in OpenAI compatibility.
 
 </Step>
 
