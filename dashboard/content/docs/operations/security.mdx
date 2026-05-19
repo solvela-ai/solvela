@@ -87,7 +87,7 @@ CORS is configured restrictively:
 - **Development** (`SOLVELA_ENV != "production"`): allows `localhost:3000`, `localhost:8080`, `127.0.0.1:3000`
 - **Production** (`SOLVELA_ENV=production`): only origins listed in `SOLVELA_CORS_ORIGINS`
 - **Allowed methods**: GET, POST, OPTIONS only
-- **Allowed headers**: `Content-Type`, `Authorization`, `PAYMENT-SIGNATURE`, `X-Request-Id`, `X-RCR-Debug`, `X-Session-Id`
+- **Allowed headers**: `Content-Type`, `Authorization`, `PAYMENT-SIGNATURE`, `X-Request-Id`, `X-Session-Id`, `X-Solvela-Debug` (canonical) plus legacy `X-RCR-Debug` for pre-rebrand clients
 
 SDK and agent clients are unaffected by CORS since they do not run in browsers.
 
@@ -118,7 +118,7 @@ Every response includes:
 | `X-Content-Type-Options` | `nosniff` | Prevents MIME type sniffing |
 | `X-Frame-Options` | `DENY` | Prevents clickjacking |
 | `Referrer-Policy` | `no-referrer` | Prevents referrer leakage |
-| `X-RCR-Request-Id` | UUID | Request correlation (always present) |
+| `X-Solvela-Request-Id` | UUID | Request correlation (always present). The legacy `X-RCR-Request-Id` mirror is also emitted for pre-rebrand clients. |
 
 ## Prompt Guard
 
