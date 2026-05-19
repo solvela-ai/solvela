@@ -12,10 +12,15 @@ _(no loose files — see subdirectories)_
 ## Subdirectories
 | Directory | Purpose |
 |-----------|---------|
-| `go/` | Redirect stub — canonical Go SDK lives at [solvela-ai/solvela-go](https://github.com/solvela-ai/solvela-go) |
+| `go/` | Go SDK (canonical — consolidated 2026-05-12 from the now-archived `solvela-ai/solvela-go` repo) |
 | `typescript/` | TypeScript/Node SDK (see `typescript/AGENTS.md`) |
 | `python/` | Python SDK (see `python/AGENTS.md`) |
+| `rust/` | Rust client SDK (canonical — consolidated 2026-05-16 from the now-archived `solvela-ai/solvela-client` repo) |
 | `mcp/` | MCP server exposing Solvela as tools to MCP clients (see `mcp/AGENTS.md`) |
+| `ai-sdk-provider/` | Vercel AI SDK provider (`@solvela/ai-sdk-provider`, npm publish pending) |
+| `openclaw-provider/` | OpenClaw provider plugin (`@solvela/openclaw-provider`, npm publish gated on OpenClaw LTS) |
+| `cli-npm/` | npm CLI shim (`@solvela/cli`, npm publish pending) |
+| `signer-core/` | Shared signing primitives (`@solvela/signer-core`, internal-only) |
 
 ## For AI Agents
 

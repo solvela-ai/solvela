@@ -30,7 +30,7 @@ All four language SDKs live in the [`solvela-ai/solvela`](https://github.com/sol
 - MCP server — [`sdks/mcp/`](https://github.com/solvela-ai/solvela/tree/main/sdks/mcp)
 - Vercel AI SDK provider, OpenClaw provider, npm CLI shim, signer-core primitives — [`sdks/ai-sdk-provider/`](https://github.com/solvela-ai/solvela/tree/main/sdks/ai-sdk-provider), [`sdks/openclaw-provider/`](https://github.com/solvela-ai/solvela/tree/main/sdks/openclaw-provider), [`sdks/cli-npm/`](https://github.com/solvela-ai/solvela/tree/main/sdks/cli-npm), [`sdks/signer-core/`](https://github.com/solvela-ai/solvela/tree/main/sdks/signer-core)
 
-The wallet-client Rust crate (`solvela-client`) and its `solvela` CLI binary remain at [`solvela-ai/solvela-client`](https://github.com/solvela-ai/solvela-client) pending a separate consolidation.
+The Rust client SDK was consolidated into the monorepo on 2026-05-16 ([#316](https://github.com/solvela-ai/solvela/pull/316)) at [`sdks/rust/`](https://github.com/solvela-ai/solvela/tree/main/sdks/rust); the standalone `solvela-ai/solvela-client` repo is archived. The four legacy Rust crates (`solvela-client`, `solvela-client-cli`, `solvela-client-cli-args`, `solvela-client-proxy`) remain published on crates.io at `0.2.1` — `cargo install solvela-client-cli` still works. The monorepo's flagship CLI is `solvela-cli` (`cargo install solvela-cli`); a monorepo-native publish workflow for the four legacy crates is the remaining runbook step.
 
 <CardGroup>
   <Card title="TypeScript" description="@solvela/sdk@^0.2.2 — async client with automatic x402 signing and built-in Solana wallet support" href="/docs/sdks/typescript" />

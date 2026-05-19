@@ -24,34 +24,39 @@ export const SAMPLES: Sample[] = [
     id: 'ts',
     label: 'typescript',
     lang: 'typescript',
-    install: 'npm i @solvela/sdk  # republish pending — use curl today',
-    status: 'soon',
-    code: `// @solvela/sdk@0.2.x predates the current wire format and will
-// not complete a real payment against api.solvela.ai. Republish is
-// pending. Drive the gateway directly until the new SDK ships:
+    install: 'npm install @solvela/sdk',
+    status: 'live',
+    code: `import {
+  SolvelaClient,
+  ChatRequest,
+  ChatMessage,
+  Wallet,
+  KeypairSigner,
+} from '@solvela/sdk'
 
-const res = await fetch('https://api.solvela.ai/v1/chat/completions', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    model: 'auto',
-    messages: [{ role: 'user', content: 'hi' }],
-  }),
-})
-// 402 first, then sign + retry with the payment-signature header.
-// Full handshake: docs.solvela.ai/quickstart`,
+const wallet = Wallet.fromEnv('SOLANA_PRIVATE_KEY')
+const signer = new KeypairSigner(wallet)
+const client = new SolvelaClient({ wallet, signer })
+
+const response = await client.chat(
+  new ChatRequest('auto', [new ChatMessage('user', 'hi')]),
+)
+console.log(response.choices[0].message.content)`,
   },
   {
     id: 'vercel',
     label: 'vercel ai sdk',
     lang: 'typescript',
-    install: 'npm i @solvela/ai-sdk-provider ai',
-    status: 'alpha',
-    code: `import { createSolvela } from '@solvela/ai-sdk-provider'
+    install: 'git clone solvela-ai/solvela && cd sdks/ai-sdk-provider && npm i && npm run build',
+    status: 'soon',
+    code: `// @solvela/ai-sdk-provider npm publish pending — build from source
+// for now (see install command above).
+
+import { createSolvelaProvider } from '@solvela/ai-sdk-provider'
 import { createLocalWalletAdapter } from '@solvela/ai-sdk-provider/adapters/local'
 import { generateText } from 'ai'
 
-const solvela = createSolvela({
+const solvela = createSolvelaProvider({
   wallet: createLocalWalletAdapter(keypair),
 })
 
@@ -66,14 +71,22 @@ const { text } = await generateText({
     lang: 'python',
     install: 'pip install solvela-sdk',
     status: 'live',
-    code: `from solvela import Solvela
+    code: `import asyncio
+from solvela import SolvelaClient, Wallet, KeypairSigner
+from solvela.types import ChatRequest, ChatMessage, Role
 
-solvela = Solvela(keypair=wallet)
+async def main():
+    wallet = Wallet.from_env('SOLANA_PRIVATE_KEY')
+    signer = KeypairSigner(wallet=wallet)
+    client = SolvelaClient(wallet=wallet, signer=signer)
 
-reply = solvela.chat.completions.create(
-    model="auto",
-    messages=[{"role": "user", "content": "hi"}],
-)`,
+    response = await client.chat(ChatRequest(
+        model='auto',
+        messages=[ChatMessage(role=Role.USER, content='hi')],
+    ))
+    print(response.choices[0].message.content)
+
+asyncio.run(main())`,
   },
   {
     id: 'go',
@@ -81,20 +94,31 @@ reply = solvela.chat.completions.create(
     lang: 'go',
     install: 'go get github.com/solvela-ai/solvela/sdks/go',
     status: 'live',
-    code: `client := solvela.New(solvela.WithKeypair(wallet))
+    code: `wallet, _ := solvela.WalletFromEnv("SOLANA_PRIVATE_KEY")
 
-reply, err := client.Chat.Completions.Create(ctx, solvela.ChatRequest{
+// Wire your own Signer in production; the SDK ships an UnimplementedSigner
+// stub so unsigned (preview) calls return *PaymentRequiredError.
+client, _ := solvela.NewClient(wallet, signer,
+    solvela.WithGatewayURL("https://api.solvela.ai"),
+)
+defer client.Close()
+
+resp, _ := client.Chat(ctx, &solvela.ChatRequest{
     Model:    "auto",
-    Messages: []solvela.Message{{Role: "user", Content: "hi"}},
+    Messages: []solvela.ChatMessage{{Role: solvela.RoleUser, Content: "hi"}},
 })`,
   },
   {
     id: 'langchain',
     label: 'langchain',
     lang: 'typescript',
-    install: 'npm i @solvela/langchain',
+    install: '# @solvela/langchain not yet published — design sketch below',
     status: 'soon',
-    code: `import { ChatSolvela } from '@solvela/langchain'
+    code: `// Forward-looking sketch: a thin LangChain wrapper over the AI SDK
+// provider, surfaced under '@solvela/langchain' once that package ships.
+// Tracker: docs.solvela.ai/sdks
+
+import { ChatSolvela } from '@solvela/langchain'
 import { createLocalWalletAdapter } from '@solvela/ai-sdk-provider/adapters/local'
 
 const model = new ChatSolvela({
