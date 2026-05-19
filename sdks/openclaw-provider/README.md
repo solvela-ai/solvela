@@ -6,16 +6,23 @@ transparently via the x402 protocol using USDC on Solana.
 
 ## Install
 
-```bash
-npm install @solvela/openclaw-provider
-```
-
-> **Note:** During private testing, install from the local path:
+> **⚠️ Not yet published to npm.** `@solvela/openclaw-provider` is at `1.0.0-draft`
+> and `"private": true` in `package.json`. Until first publish, install from a
+> local checkout:
+>
 > ```bash
 > npm install /path/to/sdks/openclaw-provider
 > ```
-> The `@solvela/sdk` dependency switches to a real npm version range at publish
-> time (Phase 4). During development it references `file:../typescript`.
+>
+> The `@solvela/sdk` dependency is wired as `file:../typescript` during
+> development; it switches to a real npm version range when this package is
+> published.
+
+Once published, the canonical install will be:
+
+```bash
+npm install @solvela/openclaw-provider
+```
 
 ## Environment variables
 

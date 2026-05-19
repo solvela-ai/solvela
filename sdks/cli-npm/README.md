@@ -2,7 +2,14 @@
 
 Solvela CLI — MCP installer and wallet management for Solana x402 payments.
 
-## Installation
+> **⚠️ Not yet published to npm.** `@solvela/cli` is at `1.0.0-draft` and the package
+> is marked `"private": true`. The install commands below will fail until first
+> publish lands. For now, build from source: clone `solvela-ai/solvela` and run
+> `npm install && npm run build` in `sdks/cli-npm/`. The Rust CLI (same surface,
+> different language) is already published as `solvela-cli` on crates.io —
+> `cargo install solvela-cli` is the supported install today.
+
+## Installation (once published)
 
 ```bash
 npm install -g @solvela/cli
