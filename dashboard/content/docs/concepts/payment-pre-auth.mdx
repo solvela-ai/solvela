@@ -13,9 +13,7 @@ Pre-auth is opt-in client-side, advisory server-side, and **MUST be disabled on 
 
 ## Why it matters
 
-Agentic loops typically issue 5–50 LLM calls per task: a planner call, a series of tool-use turns, a final consolidation. With a per-call 402 round-trip, that's 5–50 × ~200ms = 1–10 seconds of pure protocol overhead, on top of the LLM latency itself. Pre-auth collapses the protocol overhead to a single payload-signing operation per turn.
-
-Reference inspiration: BlockRunAI/ClawRouter's `src/payment-preauth.ts` claims "~200ms per call" savings in production agentic workloads.
+Agentic loops typically issue 5–50 LLM calls per task: a planner call, a series of tool-use turns, a final consolidation. A 402 round-trip costs one signing operation client-side plus one verification + RPC call gateway-side — empirically 150–250ms end-to-end on Solana, comparable on EVM. Across 5–50 calls that compounds to 1–10 seconds of pure protocol overhead, on top of the LLM latency itself. Pre-auth collapses the protocol overhead to a single payload-signing operation per turn.
 
 ## Protocol shape
 
@@ -104,22 +102,21 @@ The gateway's HMAC secret rotates per-deploy; receipts older than the most recen
 
 > **Pre-auth MUST be disabled on Solana.**
 
-Solana transactions reference a `recent_blockhash` that **expires in approximately 60–90 seconds**. A pre-signed Solana USDC-SPL transfer carries a specific blockhash; if the gateway accepts a stale pre-signed transaction the cluster *may* still land it within the validity window, *but the same signed payload could land in two different slots if replayed*, producing duplicate transfers — i.e., **double-charging the user's wallet**.
+Solana transactions are bound to a `recent_blockhash` that expires roughly 60–90 seconds after issuance — the cluster enforces this at the validator level (see Solana's [transaction confirmation handling docs](https://solana.com/docs/core/transactions/confirmation)). Once expired, the cluster rejects the transaction outright; the signature can never land. That single chain property rules out pre-auth on Solana for two independent reasons:
 
-This is the same lesson BlockRunAI's ClawRouter learned and codified in `src/payment-preauth.ts` with the comment:
+**1. The validity window is too short to amortize.** Pre-auth's whole payoff is reusing a signed payload across many calls. With a 60–90 second ceiling, the receipt expires before a typical agentic loop finishes its planning phase. The client ends up re-signing on nearly every call anyway, paying the protocol overhead the optimization was supposed to eliminate.
 
-```ts
-// Solana blockhash expires in ~60s; a stale pre-signed tx can double-charge
-if (chain === 'solana') options.skipPreAuth = true;
-```
+**2. There is no off-chain authorization escape hatch.** EVM's EIP-3009 `transferWithAuthorization` lets the signer pick `validAfter` / `validBefore` themselves, and the contract's nonce mapping prevents on-chain replay — the gateway can hold the authorization and settle later within the signer's chosen window. Solana's SPL `transfer_checked` has no equivalent: every settlement must be re-signed against a fresh blockhash and is single-use by signature. A receipt that grants credit toward a "future" Solana call has no on-chain authorization the gateway can later submit on the user's behalf, which means honoring it would require the gateway to front funds against an unenforceable promise.
 
-Solvela's implementation MUST mirror this guard. The gateway-side check is:
+Either argument alone is sufficient. Together they make pre-auth structurally a no-fit for Solana under x402's trustless settlement invariant.
+
+Solvela's implementation:
 
 1. The receipt's `scope.currency` indicates the payment chain.
 2. If `scope.currency === "USDC-SPL"` (Solana), the gateway rejects the pre-auth header even if the receipt itself is valid, returning 402 instead.
 3. Clients on Solana SHOULD NOT cache or send pre-auth receipts. The gateway omits the `X-Solvela-PreAuth-Receipt` header entirely on Solana payment success responses — there is nothing to cache.
 
-This means **on Solana, pre-auth is a no-op** — the gateway behaves exactly as it does today.
+On Solana, pre-auth is a no-op — the gateway behaves exactly as it does today.
 
 ## EVM applicability
 
@@ -261,7 +258,7 @@ When this spec is implemented:
 
 1. **Slot:** `crates/gateway/src/middleware/x402.rs` — add a `PreAuthLayer` that runs *before* the existing `x402` middleware. On hit, sets `Extension<VerifiedPayment>` so the rest of the chain treats the request as paid. On miss or invalid receipt, removes the pre-auth headers and lets the request fall through to the normal 402 path.
 2. **Receipt signing:** new module `crates/gateway/src/preauth.rs` — HMAC-SHA256 signer with rotating secrets. Reuse `ring::hmac` (already a transitive dep).
-3. **Per-chain gate:** explicit `if matches!(chain, Chain::Solana) { return reject_preauth(); }` in the `PreAuthLayer`. Inline comment citing this page and ClawRouter's prior art.
+3. **Per-chain gate:** explicit `if matches!(chain, Chain::Solana) { return reject_preauth(); }` in the `PreAuthLayer`. Inline comment citing this page.
 4. **Client SDK changes:** the standalone `solvela-ts`, `solvela-python`, `solvela-go` repos and the in-monorepo `sdks/mcp` — receipt cache + opt-in header set. Solana code paths remain unchanged.
 5. **Tests:**
    - Receipt round-trip (sign / verify / scope match)
