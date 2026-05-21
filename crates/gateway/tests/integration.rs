@@ -197,8 +197,8 @@ supports_streaming = true
 
 [models.anthropic-claude-sonnet]
 provider = "anthropic"
-model_id = "claude-sonnet-4-20250514"
-display_name = "Claude Sonnet 4"
+model_id = "claude-sonnet-4-6"
+display_name = "Claude Sonnet 4.6"
 input_cost_per_million = 3.00
 output_cost_per_million = 15.00
 context_window = 200000
