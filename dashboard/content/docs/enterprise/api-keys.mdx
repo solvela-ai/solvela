@@ -10,7 +10,7 @@ description: Create and manage org-scoped bearer tokens for programmatic access 
 Org-scoped API keys let programs authenticate without the admin token. Keys are prefixed `solvela_k_` and sent as a standard Bearer token.
 
 ```http
-Authorization: Bearer solvela_k_live_...
+Authorization: Bearer solvela_k_...
 ```
 
 Each key carries a role (`owner`, `admin`, or `member`) that gates what the key can do within the org.
@@ -48,8 +48,8 @@ The full key value is returned **once** at creation time and never shown again. 
 ```json
 {
   "id": "01a4b5c6-...",
-  "key": "solvela_k_live_xxxxxxxxxxxxxxxx",
-  "key_prefix": "solvela_k_live_xxxx",
+  "key": "solvela_k_3f9a1c7e2b8d4f06a5e1c9b7d2f8a4e6c0b3d5f7a9e1c2b4d6f8a0c2e4b6d8f0",
+  "key_prefix": "solvela_k_01a4b5c6",
   "name": "ci-deploy",
   "role": "admin",
   "expires_at": "2025-12-01T00:00:00Z"
@@ -74,7 +74,7 @@ Authorization: Bearer <admin-token | solvela_k_...>
   {
     "id": "01a4b5c6-...",
     "org_id": "018f1a2b-...",
-    "key_prefix": "solvela_k_live_xxxx",
+    "key_prefix": "solvela_k_01a4b5c6",
     "name": "ci-deploy",
     "role": "admin",
     "last_used_at": "2025-09-10T14:22:00Z",
@@ -94,8 +94,12 @@ DELETE /v1/orgs/018f1a2b-.../api-keys/01a4b5c6-...
 Authorization: Bearer <admin-token | solvela_k_...>
 ```
 
-**Response** — `204 No Content`
+**Response** — `200 OK`
 
-Revoked keys are rejected immediately on the next request. There is no grace period.
+```json
+{ "revoked": true }
+```
+
+Revoked keys are rejected immediately on the next request. There is no grace period. Revoking a key that does not exist (or is already revoked) returns `404 Not Found`.
 
 <UpgradeCta />
