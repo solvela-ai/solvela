@@ -49,7 +49,7 @@ The escrow system provides trustless payment guarantees via a deployed Anchor pr
   <Step>
     **Gateway claims the actual cost**
 
-    After the response is sent, the gateway fires a fire-and-forget claim transaction to collect the actual token cost from the PDA vault. Any excess remains in the vault.
+    After the response is sent, the gateway fires a fire-and-forget claim transaction. In one transaction the escrow program pays the provider the actual token cost, refunds the remainder (`deposit − actual`) to the agent, and closes the vault and escrow accounts (rent returned to the agent). The agent's `refund` instruction is only needed for the fallback case where the gateway never claims before expiry.
   </Step>
 </Steps>
 
