@@ -11,15 +11,13 @@ Requests pass through the following limiting layers in order:
 
 | Layer | Scope | Description |
 |-------|-------|-------------|
-| Per-IP rate limiting | Client IP address | Prevents abuse from a single origin before wallet identity is established |
-| Per-wallet rate limiting | Solana wallet address | Primary limit for x402 users; each wallet has an independent request budget |
-| Per-key rate limiting | API key | Applied for enterprise users instead of per-wallet limits |
-| Global concurrency limiting | Gateway-wide | Caps total in-flight requests across all clients to prevent overload |
-| Request timeout | Per request | Hard timeout applied globally; long-running requests are terminated |
+| Per-client rate limiting | Payer wallet, falling back to client IP | Primary limit. The identity is the payer wallet derived from the signed transaction in the `PAYMENT-SIGNATURE` header; a request without a decodable payment falls back to its source IP. The fallback never trusts `X-Forwarded-For` (trivially spoofed) — set real client IPs at your proxy layer. |
+| Global concurrency limiting | Gateway-wide | Caps total in-flight requests across all clients to prevent overload. |
+| Request timeout | Per request | Hard timeout applied globally; long-running requests are terminated. |
 
 ## Rate Limit Headers
 
-Every response includes headers indicating the current limit state for your wallet or key:
+Every response includes headers indicating the current limit state for your client (wallet or IP):
 
 | Header | Description |
 |--------|-------------|
@@ -41,71 +39,44 @@ X-RateLimit-Reset: 1712345678
 Rate limit windows and exact thresholds are subject to change. Always read the headers from live responses rather than hardcoding expected values.
 </Note>
 
-## Enterprise Configuration
+## Spending Controls (Enterprise)
 
-Enterprise organizations using API keys can configure rate limits and spending controls through the dashboard:
+Separate from rate limiting, enterprise organizations can cap **spend** per team or per wallet. These limits are enforced at the gateway before a request is proxied to the provider, and are independent of the request-rate limits above.
 
-<Tabs items={["Team Budgets", "Session Budgets", "Model Restrictions"]}>
-  <Tab value="Team Budgets">
-    Set maximum spend limits per team on an hourly or daily basis. When a team reaches its budget, subsequent requests return `429` until the window resets.
+### Budgets
 
-    ```json
-    {
-      "team_id": "team_abc123",
-      "budget": {
-        "hourly_usdc": "10.00",
-        "daily_usdc": "100.00"
-      }
-    }
-    ```
-  </Tab>
-  <Tab value="Session Budgets">
-    Assign a spend cap to a session token so individual end-users or automated jobs cannot exceed a defined cost.
+Set hourly, daily, and/or monthly USDC spend limits:
 
-    ```typescript
-    const session = await client.sessions.create({
-      budget_usdc: "0.50", // This session cannot spend more than $0.50
-      ttl_seconds: 3600,
-    });
+- **Team budget** — `PUT /v1/orgs/{id}/teams/{tid}/budget`. Accepts a global admin token **or** an org-scoped API key with admin access to that org.
+- **Wallet budget** — `PUT /v1/wallets/{wallet}/budget`. **Admin token only** — the path is not org-scoped, so org API keys cannot be verified against an org and are rejected.
 
-    // Pass session token to end-user or automated job
-    const userClient = new SolvelaClient({ sessionToken: session.token });
-    ```
-  </Tab>
-  <Tab value="Model Restrictions">
-    Restrict which models a team or API key is permitted to call. Requests to restricted models return `403 Forbidden`.
+```bash
+curl -X PUT https://api.solvela.ai/v1/orgs/<org_id>/teams/<team_id>/budget \
+  -H "Authorization: Bearer solvela_k_your_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"hourly": 10.0, "daily": 100.0, "monthly": 2000.0}'
+```
 
-    ```json
-    {
-      "team_id": "team_abc123",
-      "allowed_models": ["eco", "gpt-4o-mini", "claude-haiku-4-5"],
-      "denied_models": ["premium", "claude-opus-4-6"]
-    }
-    ```
-  </Tab>
-</Tabs>
+All three fields are optional bare USDC numbers — omit one to leave that window uncapped. The matching `GET` returns the configured limits alongside current spend (`hourly_spend`, `daily_spend`, `monthly_spend`).
 
-<Tip>
-Use session budgets in SDKs when building user-facing products. Pass a session token to each user rather than your root API key. This prevents any single user from exhausting your organization's budget and isolates spend by user in the audit log.
-</Tip>
+When an estimated request cost would push a wallet over its limit, the gateway rejects the request with **`400 Bad Request`** (error type `bad_request`, message `budget exceeded for wallet ...`) before calling the provider. This is distinct from the `429` rate-limit response — a budget block is about *cost*, not request *rate*.
+
+See [Budgets](/docs/enterprise/budgets) for the full reference.
 
 ## Handling Rate Limit Errors
 
-When you receive a `429` response, back off until the reset window expires:
+When you receive a `429`, read `X-RateLimit-Reset` and wait until that timestamp before retrying:
 
 ```typescript
-async function chatWithBackoff(client: SolvelaClient, params: ChatParams) {
-  const res = await client.chatRaw(params);
-
-  if (res.status === 429) {
-    const resetAt = parseInt(res.headers.get("X-RateLimit-Reset") ?? "0", 10);
-    const waitMs = Math.max(0, resetAt * 1000 - Date.now());
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
-    return client.chatRaw(params); // retry once after window resets
-  }
-
-  return res;
+function retryDelayMs(res: Response): number {
+  const resetAt = parseInt(res.headers.get("X-RateLimit-Reset") ?? "0", 10);
+  return Math.max(0, resetAt * 1000 - Date.now());
 }
+
+// On a 429 from any HTTP call to the gateway:
+//   const waitMs = retryDelayMs(response);
+//   await new Promise((r) => setTimeout(r, waitMs));
+//   // ...then retry the request once.
 ```
 
 <Warning>
