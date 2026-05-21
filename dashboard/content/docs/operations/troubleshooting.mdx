@@ -40,19 +40,21 @@ The response includes:
 
 ```
 X-Solvela-Request-Id: 550e8400-e29b-41d4-a716-446655440000
-X-Solvela-Model-Requested: auto
-X-Solvela-Model-Resolved: google/gemini-2.5-flash
-X-Solvela-Route-Profile: auto
-X-Solvela-Route-Tier: simple
-X-Solvela-Route-Score: -0.3500
+X-Solvela-Model: google/gemini-2.5-flash
+X-Solvela-Profile: auto
+X-Solvela-Tier: simple
+X-Solvela-Score: -0.3500
 X-Solvela-Provider: google
-X-Solvela-Cache-Status: miss
+X-Solvela-Cache: miss
 X-Solvela-Payment-Status: verified
-X-Solvela-Token-Estimate: 10
-X-Solvela-Duration-Ms: 1247
+X-Solvela-Token-Estimate-In: 10
+X-Solvela-Token-Estimate-Out: 1000
+X-Solvela-Latency-Ms: 1247
 ```
 
-The legacy `X-RCR-*` header set (request flag + every response header) is still emitted for backward compatibility with pre-rebrand clients. `X-Solvela-Request-Id` (and its `X-RCR-Request-Id` mirror) is always returned, not gated by the debug flag.
+`X-Solvela-Model` is the model the request actually routed to (already resolved from an alias or a profile like `auto`); the routing decision is broken out across `X-Solvela-Profile`, `X-Solvela-Tier`, and `X-Solvela-Score`. Input and output token estimates are separate headers (`-In` / `-Out`).
+
+The legacy `X-RCR-*` header set (the `X-RCR-Debug` request flag plus an `X-RCR-` mirror of every response header above) is still emitted for backward compatibility with pre-rebrand clients. `X-Solvela-Request-Id` (and its `X-RCR-Request-Id` mirror) is always returned, not gated by the debug flag.
 
 ## Health Check Interpretation
 
