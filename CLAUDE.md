@@ -255,7 +255,7 @@ These skills contain patterns, checklists, and constraints specific to this proj
 
 ## Deployment
 
-- Dockerfile: 3-stage build with cargo-chef for dependency caching
+- Dockerfile: 2-stage build with dummy-source dependency caching (`rust:1.88-slim-bookworm` builder → `debian:bookworm-slim` runtime, non-root `solvela` user)
 - Fly.io config in `fly.toml` (app: `solvela-gateway`, port 8402, region ord)
 - Docker Compose for local dev: PostgreSQL 16 + Redis 7
 - Dashboard: Next.js on Vercel (`solvela.vercel.app`)
