@@ -6,12 +6,12 @@ import os
 from typing import TYPE_CHECKING
 
 from mnemonic import Mnemonic
-from solders.keypair import Keypair  # type: ignore[import-untyped]
+from solders.keypair import Keypair
 
 from solvela.errors import WalletError
 
 if TYPE_CHECKING:
-    from solders.pubkey import Pubkey  # type: ignore[import-untyped]
+    from solders.pubkey import Pubkey
 
 _BIP39 = Mnemonic("english")
 

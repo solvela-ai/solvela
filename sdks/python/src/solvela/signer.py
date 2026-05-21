@@ -16,7 +16,7 @@ from solvela.types import (
 )
 
 if TYPE_CHECKING:
-    from solders.pubkey import Pubkey  # type: ignore[import-untyped]
+    from solders.pubkey import Pubkey
 
     from solvela.wallet import Wallet
 

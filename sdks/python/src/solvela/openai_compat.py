@@ -9,6 +9,7 @@ from solvela.types import ChatMessage, ChatRequest, Role
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from solvela.client import SolvelaClient
     from solvela.types import ChatChunk, ChatResponse
 
 
@@ -20,17 +21,17 @@ class OpenAICompat:
         resp = await openai.chat.completions.create(model="gpt-4o", messages=[...])
     """
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: SolvelaClient) -> None:
         self.chat = _ChatNamespace(client)
 
 
 class _ChatNamespace:
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: SolvelaClient) -> None:
         self.completions = _CompletionsNamespace(client)
 
 
 class _CompletionsNamespace:
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: SolvelaClient) -> None:
         self._client = client
 
     async def create(

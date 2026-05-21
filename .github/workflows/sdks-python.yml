@@ -34,4 +34,5 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check src/ tests/
       - run: ruff format --check src/ tests/
+      - run: mypy src/
       - run: pytest tests/unit/ tests/integration/ -v --tb=short
