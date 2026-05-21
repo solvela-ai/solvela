@@ -44,7 +44,7 @@ const client = new SolvelaClient({
 });
 
 const response = await client.chat(
-  new ChatRequest('claude-sonnet-4-20250514', [
+  new ChatRequest('claude-sonnet-4-6', [
     new ChatMessage('user', 'Explain the x402 protocol.'),
   ]),
 );

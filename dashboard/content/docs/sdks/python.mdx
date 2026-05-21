@@ -46,13 +46,14 @@ Without a `Signer`, paid endpoints raise `PaymentRequiredError` on the first cal
   <Tab value="Dataclass">
     ```python
     from solvela import ClientConfig
+    from solvela.types import AtomicUsdc
 
     config = ClientConfig(
         gateway_url="http://localhost:8402",    # default: https://api.solvela.ai
         rpc_url="https://api.mainnet-beta.solana.com",
         prefer_escrow=False,                    # "exact" first, "escrow" fallback
         timeout=180.0,
-        max_payment_amount=10_000_000,          # cap per call (10 USDC = 10_000_000 atomic)
+        max_payment_amount=AtomicUsdc(10_000_000),  # cap per call (10 USDC = 10_000_000 atomic)
         expected_recipient=None,                # if set, gateway must pay-to this address
         enable_cache=False,                     # opt-in response caching
         enable_sessions=False,                  # opt-in three-strike session escalation
@@ -66,6 +67,7 @@ Without a `Signer`, paid endpoints raise `PaymentRequiredError` on the first cal
   <Tab value="Builder">
     ```python
     from solvela import ClientBuilder
+    from solvela.types import AtomicUsdc
 
     config = (
         ClientBuilder()
@@ -73,7 +75,7 @@ Without a `Signer`, paid endpoints raise `PaymentRequiredError` on the first cal
         .enable_cache(True)
         .enable_sessions(True)
         .free_fallback_model("openai/gpt-4o-mini")
-        .max_payment_amount(100_000)            # 0.10 USDC cap
+        .max_payment_amount(AtomicUsdc(100_000))  # 0.10 USDC cap
         .build()
     )
     ```
