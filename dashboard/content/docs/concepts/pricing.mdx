@@ -51,14 +51,10 @@ All prices are USDC per million tokens (provider cost before the 5% fee).
 
 | Model | Model ID | Input ($/M) | Output ($/M) | Context |
 |-------|----------|-------------|--------------|---------|
-| Claude Opus 4.6 | `anthropic/claude-opus-4-20250514` | $5.00 | $25.00 | 200K |
-| Claude Sonnet 4.6 | `anthropic/claude-sonnet-4-20250514` | $3.00 | $15.00 | 200K |
-| Claude Sonnet 4.5 | `anthropic-claude-sonnet-4-5` | $3.00 | $15.00 | 200K |
+| Claude Opus 4.6 | `anthropic/claude-opus-4-6` | $5.00 | $25.00 | 200K |
+| Claude Sonnet 4.6 | `anthropic/claude-sonnet-4-6` | $3.00 | $15.00 | 200K |
+| Claude Sonnet 4.5 | `anthropic/claude-sonnet-4-5-20250929` | $3.00 | $15.00 | 200K |
 | Claude Haiku 4.5 | `anthropic/claude-haiku-4-5-20251001` | $1.00 | $5.00 | 200K |
-
-<Note>
-  Sonnet 4.5 shares its upstream `model_id` with Sonnet 4.6 (`claude-sonnet-4-20250514`). The registry-key form `anthropic-claude-sonnet-4-5` is the unambiguous identifier; the `provider/model_id` slash form resolves to whichever entry is loaded last and is best avoided for Sonnet specifically.
-</Note>
 
 ### Google
 

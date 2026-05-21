@@ -11,7 +11,7 @@ Every request enters the system through the `gateway` binary. The path it takes 
 
 <Steps>
   <Step title="Parse and resolve the model">
-    The gateway parses the request body and resolves the `model` field. This accepts short aliases (`sonnet`, `gpt4o`), routing profile names (`auto`, `eco`, `premium`, `free`), or full model IDs (`claude-sonnet-4-20250514`). Profile names are handed to the smart router for tier classification.
+    The gateway parses the request body and resolves the `model` field. This accepts short aliases (`sonnet`, `gpt5`), routing profile names (`auto`, `eco`, `premium`, `free`), or full model IDs (`anthropic/claude-sonnet-4-6`). Profile names are handed to the smart router for tier classification.
   </Step>
   <Step title="Prompt guard checks">
     The request content is scanned for prompt injection attempts, jailbreak patterns, and PII. Requests that fail these checks are rejected before any payment logic runs.
@@ -104,10 +104,12 @@ Each routing profile then maps tiers to specific models:
 
 | Profile | Simple | Medium | Complex | Reasoning |
 |---------|--------|--------|---------|-----------|
-| `eco` | Gemini Flash | Gemini Flash | DeepSeek-V3 | DeepSeek-R1 |
-| `auto` | Gemini Flash | GPT-4o mini | Claude Sonnet | o3 |
-| `premium` | GPT-4o | GPT-4o | Claude Opus | o3 |
-| `free` | Free-tier only | Free-tier only | Free-tier only | Free-tier only |
+| `eco` | DeepSeek Chat | Gemini Flash Lite | DeepSeek Chat | DeepSeek Reasoner |
+| `auto` | Gemini Flash | Grok Code Fast | Gemini 3.1 Pro | Grok 4 Fast |
+| `premium` | GPT-4o | Claude Sonnet 4.6 | Claude Opus 4.6 | o3 |
+| `free` | gpt-oss-120b | gpt-oss-120b | gpt-oss-120b | gpt-oss-120b |
+
+See [Smart Router](/docs/concepts/smart-router#routing-table) for the authoritative `(profile, tier) → model ID` table.
 
 <Note>
 Scoring is pure rule-based and runs in under **1 microsecond** with zero external calls. There is no ML model involved — the scorer is a deterministic weighted sum over the 15 dimensions.
@@ -128,5 +130,5 @@ Every verified `PAYMENT-SIGNATURE` is written to Redis with a TTL that matches t
 </Accordion>
 
 <Warning>
-Replay protection requires Redis. Without it, the gateway skips the Redis check and relies solely on Facilitator-side nonce validation, which is slower and less reliable under high concurrency.
+Redis is the primary store for replay protection. Without it, the gateway falls back to an in-memory LRU set with per-entry TTL — bounded to ~10,000 signatures. Recent-blockhash transactions (≈90-second validity) are safe under this fallback; durable-nonce transactions carry a 24-hour replay window the LRU cannot reliably cover, so they are rejected outright when Redis is unavailable (GHSA-fq3f-c8p7-873f).
 </Warning>
