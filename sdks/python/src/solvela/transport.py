@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
@@ -116,14 +116,14 @@ class Transport:
                         break
                     yield ChatChunk.from_dict(json.loads(data_str))
 
-    async def fetch_models(self) -> list[dict]:
+    async def fetch_models(self) -> list[dict[str, Any]]:
         """Fetch model list from gateway."""
         url = self._build_url("/v1/models")
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
                 raise GatewayError(status=resp.status_code, message=resp.text)
-            return _decode_json(resp).get("data", [])
+            return cast("list[dict[str, Any]]", _decode_json(resp).get("data", []))
 
 
 # --- Module-level decode helpers ---------------------------------------------

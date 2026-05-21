@@ -34,8 +34,13 @@ _ERROR_PHRASES = [
 _TRUNCATION_MIN_LEN = 250
 
 
-def check_degraded(content: str) -> DegradedReason | None:
-    """Check if response content is degraded. Returns reason or None if OK."""
+def check_degraded(content: str | None) -> DegradedReason | None:
+    """Check if response content is degraded. Returns reason or None if OK.
+
+    A ``None`` content (an absent assistant message) is treated as
+    ``EMPTY_CONTENT`` — the empty/whitespace guard below short-circuits before
+    any string method runs.
+    """
     # 1. Empty/whitespace
     if not content or not content.strip():
         return DegradedReason.EMPTY_CONTENT
