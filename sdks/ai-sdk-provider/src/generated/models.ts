@@ -48,7 +48,7 @@ export const MODELS = [
   {
     id: "anthropic-claude-opus-4-6",
     provider: "anthropic",
-    modelId: "claude-opus-4-20250514",
+    modelId: "claude-opus-4-6",
     displayName: "Claude Opus 4.6",
     inputCostPerMillion: 5,
     outputCostPerMillion: 25,
@@ -62,7 +62,7 @@ export const MODELS = [
   {
     id: "anthropic-claude-sonnet-4-5",
     provider: "anthropic",
-    modelId: "claude-sonnet-4-20250514",
+    modelId: "claude-sonnet-4-5-20250929",
     displayName: "Claude Sonnet 4.5",
     inputCostPerMillion: 3,
     outputCostPerMillion: 15,
@@ -77,7 +77,7 @@ export const MODELS = [
   {
     id: "anthropic-claude-sonnet-4-6",
     provider: "anthropic",
-    modelId: "claude-sonnet-4-20250514",
+    modelId: "claude-sonnet-4-6",
     displayName: "Claude Sonnet 4.6",
     inputCostPerMillion: 3,
     outputCostPerMillion: 15,
