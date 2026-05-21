@@ -411,6 +411,45 @@ jobs:
               echo "$headers" | grep -qi "x-ratelimit-limit"
             ' "$BASE"
 
+          # 8. GET /v1/models exposes every corrected Anthropic model ID.
+          #    Catches registry collapses (two entries sharing a canonical
+          #    provider/model_id dedupe to one in /v1/models) and model_id
+          #    typos. See PR #358 — the prior duplicate sonnet entries would
+          #    have made one of these IDs absent here.
+          check "GET /v1/models exposes all Anthropic model IDs" \
+            bash -c '
+              body=$(curl -sf "$0/v1/models")
+              for id in \
+                "anthropic/claude-opus-4-6" \
+                "anthropic/claude-sonnet-4-6" \
+                "anthropic/claude-sonnet-4-5-20250929" \
+                "anthropic/claude-haiku-4-5-20251001"; do
+                if ! echo "$body" | grep -q "\"$id\""; then
+                  echo "  missing from /v1/models: $id"
+                  exit 1
+                fi
+              done
+            ' "$BASE"
+
+          # 9. Anthropic aliases resolve through the full HTTP path. A 404
+          #    (model_not_found) means the alias points at a model the
+          #    registry does not contain — the alias↔registry drift class.
+          #    Any non-404 (200 stub, 402, 429) means resolution succeeded.
+          check "Anthropic aliases resolve (not 404)" \
+            bash -c '
+              for alias in opus sonnet sonnet4.5 haiku; do
+                status=$(curl -s -o /dev/null -w "%{http_code}" \
+                  -X POST "$0/v1/chat/completions" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"model\":\"$alias\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+                echo "  $alias -> $status"
+                if [ "$status" = "404" ]; then
+                  echo "  alias $alias did not resolve (model_not_found)"
+                  exit 1
+                fi
+              done
+            ' "$BASE"
+
           echo ""
           echo "Results: $PASS passed, $FAIL failed"
           [ "$FAIL" -eq 0 ]
