@@ -16,7 +16,7 @@ Send a chat completion request. The endpoint is OpenAI-compatible and supports b
 | `payment-signature` | Conditional | Required to get a response. Omit to get a `402` with cost info. |
 | `X-Request-Id` | No | Request correlation ID — logged in usage records |
 | `X-Session-Id` | No | Session correlation ID |
-| `X-Debug-Payment` | No | Set to `true` to receive cost and routing info in response headers |
+| `X-Solvela-Debug` | No | Set to `true` to receive routing diagnostics (`X-Solvela-*`) in the response headers. Legacy `X-RCR-Debug` is also accepted. |
 
 ## Request body
 
@@ -30,7 +30,7 @@ Send a chat completion request. The endpoint is OpenAI-compatible and supports b
 | `messages[].tool_calls` | array | No | Tool calls made by the assistant |
 | `messages[].tool_call_id` | string | No | ID of the tool call this message responds to |
 | `stream` | boolean | No | Enable SSE streaming. Default: `false` |
-| `max_tokens` | integer | No | Maximum output tokens. Clamped to model limit (max 128,000). |
+| `max_tokens` | integer | No | Maximum output tokens. Clamped to the model's own max-output limit when it defines one. |
 | `temperature` | float | No | Sampling temperature 0–2 |
 | `top_p` | float | No | Nucleus sampling probability |
 | `tools` | array | No | Tool definitions (function calling) |
@@ -42,7 +42,7 @@ Pass any of the following as `model`:
 
 - **Routing profile**: `auto`, `eco`, `premium`, `free` — smart router picks the model
 - **Alias**: `gpt5`, `sonnet`, `opus`, `gemini`, `flash`, `grok`, `deepseek`
-- **Full model ID**: `openai/gpt-4o`, `anthropic/claude-opus-4-20250514`, etc.
+- **Full model ID**: `openai/gpt-4o`, `anthropic/claude-opus-4-6`, etc.
 
 See [Smart Router](/docs/concepts/smart-router) for how profiles work.
 
@@ -157,11 +157,16 @@ data: [DONE]
   </Tab>
   <Tab value="TypeScript">
     ```typescript
-    import { SolvelaClient, ChatRequest, ChatMessage } from '@solvela/sdk';
+    import { SolvelaClient, ChatRequest, ChatMessage, Wallet, KeypairSigner } from '@solvela/sdk';
 
+    // Construct the wallet + signer explicitly — the SDK does not read
+    // SOLANA_PRIVATE_KEY on its own.
+    const wallet = Wallet.fromEnv('SOLANA_PRIVATE_KEY');
+    const signer = new KeypairSigner(wallet);
     const client = new SolvelaClient({
+      wallet,
+      signer,
       config: { gatewayUrl: 'https://api.solvela.ai' },
-      // wallet + signer load from SOLANA_PRIVATE_KEY by default
     });
 
     // Simple one-shot
