@@ -10,6 +10,7 @@ homepage.workspace = true
 keywords.workspace = true
 description = "Solana-native AI agent payment client for Solvela"
 categories = ["api-bindings", "cryptography::cryptocurrencies"]
+readme = "README.md"
 
 [dependencies]
 solvela-protocol = { workspace = true }

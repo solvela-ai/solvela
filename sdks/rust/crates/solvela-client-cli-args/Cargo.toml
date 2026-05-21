@@ -10,6 +10,7 @@ homepage.workspace = true
 keywords.workspace = true
 description = "Shared CLI argument structs and wallet loading for Solvela binaries"
 categories = ["command-line-interface"]
+readme = "README.md"
 
 [dependencies]
 clap = { workspace = true }

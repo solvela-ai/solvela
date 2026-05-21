@@ -10,6 +10,7 @@ homepage.workspace = true
 keywords.workspace = true
 description = "solvela-client — Solvela agent-side payer CLI for Solana-paid AI from your terminal"
 categories = ["command-line-utilities"]
+readme = "README.md"
 
 [[bin]]
 name = "solvela-client"
