@@ -47,9 +47,10 @@ scrape_configs:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `solvela_payments_total` | Counter | `status` | Payment outcomes. Status values: `verified` (valid payment), `cached` (cached response), `free` (free model), `none` (402 returned), `failed` (verification failed). |
+| `solvela_payments_total` | Counter | `status` | Payment outcomes. Status values: `verified` (valid payment), `dev_bypass` (payment bypass enabled in dev), `none` (402 returned, no payment header), `failed` (verification failed). |
 | `solvela_payment_amount_usdc` | Histogram | -- | Distribution of payment amounts in USDC. |
 | `solvela_replay_rejections_total` | Counter | -- | Number of rejected replay attacks. |
+| `solvela_paid_stub_rejections_total` | Counter | -- | Paid requests that reached the fallback-stub path because every provider failed. The gateway returns an error instead of a stub so a paying caller never receives a fabricated response. |
 
 ### Provider Metrics
 

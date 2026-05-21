@@ -86,7 +86,7 @@ CORS is configured restrictively:
 
 - **Development** (`SOLVELA_ENV != "production"`): allows `localhost:3000`, `localhost:8080`, `127.0.0.1:3000`
 - **Production** (`SOLVELA_ENV=production`): only origins listed in `SOLVELA_CORS_ORIGINS`
-- **Allowed methods**: GET, POST, OPTIONS only
+- **Allowed methods**: GET, POST, PUT, PATCH, DELETE, OPTIONS (the enterprise org/team/budget endpoints use PUT and DELETE)
 - **Allowed headers**: `Content-Type`, `Authorization`, `PAYMENT-SIGNATURE`, `X-Request-Id`, `X-Session-Id`, `X-Solvela-Debug` (canonical) plus legacy `X-RCR-Debug` for pre-rebrand clients
 
 SDK and agent clients are unaffected by CORS since they do not run in browsers.
@@ -132,7 +132,7 @@ Flagged requests are rejected with 400 before any payment is processed.
 
 ## Input Validation
 
-- `max_tokens` capped at 128,000 (prevents unbounded cost)
+- Billed completion tokens are capped at `min(max_tokens, model max-output, 8192)` — the 8192 default ceiling prevents unbounded cost when a request omits `max_tokens`
 - Session IDs: max 128 characters, `[a-zA-Z0-9\-_]` only
 - Wallet addresses: base58 character set, 32-44 characters
 - Service IDs: alphanumeric + hyphens only
