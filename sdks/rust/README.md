@@ -140,4 +140,4 @@ published to crates.io. The Solvela monorepo uses a per-component license
 split: the gateway crate (`crates/gateway`) is BUSL-1.1; every other crate,
 the SDKs, and the dashboard are MIT. Client-side SDKs are kept MIT-only so
 agent authors can freely embed them. See the
-[root README License section](../../README.md#license) for the full table.
+[root README Licensing section](../../README.md#licensing) for the full table.
