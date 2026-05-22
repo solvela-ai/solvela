@@ -28,6 +28,9 @@ use tracing::{info, warn};
 /// connection handling) and the upcoming semantic tier lands as a sibling.
 mod exact;
 
+/// Prompt embedding backend for the semantic cache tier.
+pub mod embedder;
+
 /// Redis key prefix for response cache entries.
 ///
 /// Centralised here so a rename never requires hunting down inline literals.

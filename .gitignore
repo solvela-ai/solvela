@@ -60,3 +60,6 @@ docker-data/
 sdks/mcp/dist/
 sdks/mcp/node_modules/
 wallet.json
+
+# Local ONNX embedding model cache (fastembed) — never commit (~133MB)
+.fastembed_cache/
