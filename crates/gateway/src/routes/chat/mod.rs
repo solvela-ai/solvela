@@ -590,6 +590,7 @@ pub async fn chat_completions(
             mut response,
             usage,
             actual_provider,
+            cost_outcome,
         }) => {
             // Cap provider-reported token counts to what the gateway has
             // actually priced for (req.max_tokens, model context window).
@@ -618,7 +619,14 @@ pub async fn chat_completions(
 
             // Compute escrow claim amount: prefer actual usage, fall back to estimate
             // E2 FIX: Use minimum 1 atomic unit for streaming when estimation fails
-            let claim_atomic = if let Some(ref u) = usage {
+            let claim_atomic = if let Some(outcome) = cost_outcome {
+                // Semantic-cache hit: bill the discounted price. On the escrow
+                // scheme the gateway claims only this amount and the remainder
+                // refunds to the agent — this is how the Phase 1 cache discount
+                // is realised. (Direct-transfer "exact" scheme settled the full
+                // amount up front, so the discount does not apply there.)
+                Some(outcome.billable_atomic())
+            } else if let Some(ref u) = usage {
                 // `compute_actual_atomic_cost` returns `None` when the model
                 // registry pricing is non-finite/negative or the result would
                 // overflow u64. In those cases we skip the claim rather than

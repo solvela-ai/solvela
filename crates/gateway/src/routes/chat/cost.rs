@@ -249,36 +249,25 @@ fn usdc_atomic_amount(decimal_str: &str) -> String {
     usdc_atomic_amount_checked(decimal_str).unwrap_or_else(|_| "0".to_string())
 }
 
-/// The outcome of pricing a request: how much the agent is actually billed,
-/// in atomic USDC units.
+/// Pricing for a semantic-cache hit, in atomic USDC units.
 ///
-/// A `Full` outcome is the normal case (cache miss or exact-match hit — the
-/// agent pays the full computed cost). A `SemanticCacheHit` carries both the
-/// full price (what a miss would have cost — retained for receipts, metrics,
-/// and response headers) and the discounted price actually billed. Per the
+/// The normal path (cache miss / exact-match hit) is represented by the absence
+/// of this value (`Option::None`) — the agent pays the full computed cost. When
+/// present, `full_atomic` is what a miss would have cost (retained for receipts
+/// and metrics) and `discounted_atomic` is what's actually billed. Per the
 /// semantic-cache design, the discount is realised on the **escrow scheme** by
 /// claiming only `discounted_atomic`; the remainder refunds to the agent.
-// Wired into the chat handler's pricing/escrow-claim path in the next commit
-// (the "semantic discount seam"); allow dead_code only for this interim step.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CostOutcome {
-    /// Normal pricing — bill the full computed cost.
-    Full { atomic: u64 },
-    /// Semantic cache hit — bill `discounted_atomic`; `full_atomic` is what a
-    /// miss would have cost.
-    SemanticCacheHit {
-        full_atomic: u64,
-        discounted_atomic: u64,
-    },
+pub(crate) struct SemanticDiscount {
+    pub full_atomic: u64,
+    pub discounted_atomic: u64,
 }
 
-#[allow(dead_code)] // wired in the next commit (semantic discount seam)
-impl CostOutcome {
-    /// Build a semantic-hit outcome, computing the discounted price from the
-    /// full price and the percent-of-full to bill (e.g. `30` → bill 30%).
-    pub(crate) fn semantic_hit(full_atomic: u64, hit_price_percent: u8) -> Self {
-        CostOutcome::SemanticCacheHit {
+impl SemanticDiscount {
+    /// Build a semantic discount, computing the billed price from the full
+    /// price and the percent-of-full to bill (e.g. `30` → bill 30%).
+    pub(crate) fn new(full_atomic: u64, hit_price_percent: u8) -> Self {
+        SemanticDiscount {
             full_atomic,
             discounted_atomic: apply_hit_price(full_atomic, hit_price_percent),
         }
@@ -286,12 +275,7 @@ impl CostOutcome {
 
     /// Amount to actually charge / claim, in atomic USDC.
     pub(crate) fn billable_atomic(&self) -> u64 {
-        match *self {
-            CostOutcome::Full { atomic } => atomic,
-            CostOutcome::SemanticCacheHit {
-                discounted_atomic, ..
-            } => discounted_atomic,
-        }
+        self.discounted_atomic
     }
 }
 
@@ -302,7 +286,6 @@ impl CostOutcome {
 /// on a hit (e.g. `30` = pay 30%, a 70% discount). Clamped to `0..=100`, so the
 /// result is always `floor(full_atomic * pct / 100)` and never exceeds
 /// `full_atomic`.
-#[allow(dead_code)] // wired in the next commit (semantic discount seam)
 pub(crate) fn apply_hit_price(full_atomic: u64, hit_price_percent: u8) -> u64 {
     let pct = hit_price_percent.min(100) as u128;
     // u128 intermediate so `full_atomic * pct` cannot overflow u64; the result
@@ -929,20 +912,16 @@ supports_vision = false
     }
 
     #[test]
-    fn cost_outcome_full_bills_full() {
-        assert_eq!(CostOutcome::Full { atomic: 500 }.billable_atomic(), 500);
-    }
-
-    #[test]
-    fn cost_outcome_semantic_hit_bills_discounted() {
-        let outcome = CostOutcome::semantic_hit(1000, 30);
+    fn semantic_discount_bills_discounted_and_keeps_full() {
+        let outcome = SemanticDiscount::new(1000, 30);
         assert_eq!(
             outcome,
-            CostOutcome::SemanticCacheHit {
+            SemanticDiscount {
                 full_atomic: 1000,
                 discounted_atomic: 300,
             }
         );
         assert_eq!(outcome.billable_atomic(), 300);
+        assert_eq!(outcome.full_atomic, 1000);
     }
 }

@@ -23,8 +23,8 @@ use gateway::providers::{ChatStream, LLMProvider, ProviderRegistry};
 use gateway::services::ServiceRegistry;
 use gateway::{build_router, AppState};
 use solvela_protocol::{
-    ChatChoice, ChatChunk, ChatChunkChoice, ChatDelta, ChatMessage, ChatResponse, ModelInfo, Role,
-    Usage,
+    ChatChoice, ChatChunk, ChatChunkChoice, ChatDelta, ChatMessage, ChatRequest, ChatResponse,
+    ModelInfo, Role, Usage,
 };
 use solvela_router::models::ModelRegistry;
 use solvela_x402::traits::{Error as X402Error, PaymentVerifier};
@@ -413,6 +413,201 @@ fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
         RateLimiter::new(RateLimitConfig::default()),
     );
     (router, state)
+}
+
+// ---------------------------------------------------------------------------
+// Semantic cache (Tier 2) — end-to-end
+// ---------------------------------------------------------------------------
+
+/// Build a real `SemanticCache`, or `None` if redis-stack (with RediSearch) or
+/// the embedding model is unavailable — same graceful-skip pattern as the
+/// crate's unit tests, so this is a no-op in CI envs lacking those deps.
+async fn try_semantic_cache() -> Option<Arc<gateway::cache::semantic::SemanticCache>> {
+    use gateway::cache::embedder::{Embedder, LocalBge};
+    use gateway::cache::semantic::{SemanticCache, SemanticConfig};
+
+    let model_dir =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.fastembed_cache");
+    let embedder = match LocalBge::with_cache_dir(model_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("skipping semantic-cache test: model unavailable ({e})");
+            return None;
+        }
+    };
+    let config = SemanticConfig {
+        enabled: true,
+        threshold: 0.85,
+        ttl_secs: 600,
+        dim: embedder.dim(),
+    };
+    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
+    match SemanticCache::connect(&url, Arc::new(embedder), config).await {
+        Ok(c) => Some(Arc::new(c)),
+        Err(e) => {
+            eprintln!("skipping semantic-cache test: redis-stack unavailable ({e})");
+            None
+        }
+    }
+}
+
+/// Mock-provider app with the semantic cache wired in and dev-bypass enabled
+/// (so the request reaches the cache without a payment payload).
+fn app_with_semantic_cache(sem: Arc<gateway::cache::semantic::SemanticCache>) -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    config.cache.semantic.enabled = true;
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: Some(sem),
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: true,
+    });
+    build_router(state, RateLimiter::new(RateLimitConfig::default()))
+}
+
+/// A paraphrase of a previously-cached prompt is served from the semantic
+/// cache (not the provider), and the debug header reports `semantic-hit`.
+#[tokio::test]
+async fn semantic_cache_serves_paraphrase() {
+    let Some(sem) = try_semantic_cache().await else {
+        return;
+    };
+
+    // Seed deterministically (store() is read-after-write). A distinctive topic
+    // avoids collision with other tests sharing the redis index.
+    let seeded = ChatResponse {
+        id: "seeded-photosynthesis".to_string(),
+        object: "chat.completion".to_string(),
+        created: 0,
+        model: "openai/gpt-4o".to_string(),
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: Role::Assistant,
+                content: "Plants convert sunlight, water and CO2 into glucose.".to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            finish_reason: Some("stop".to_string()),
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 12,
+            completion_tokens: 20,
+            total_tokens: 32,
+        }),
+    };
+    let seed_req = ChatRequest {
+        model: "openai/gpt-4o".to_string(),
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: "Explain how photosynthesis works in plants.".to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }],
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        tools: None,
+        tool_choice: None,
+    };
+    sem.store(&seed_req, &seeded).await.expect("seed store");
+
+    let app = app_with_semantic_cache(Arc::clone(&sem));
+
+    // A paraphrase (not the exact prompt) should still hit the semantic tier.
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":"How does photosynthesis happen in plants?"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-solvela-debug", "true")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-cache")
+            .and_then(|v| v.to_str().ok()),
+        Some("semantic-hit"),
+        "paraphrase should be served from the semantic cache"
+    );
+
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        v["id"], "seeded-photosynthesis",
+        "response must be the seeded cache entry, not a fresh provider response"
+    );
+}
+
+/// An unrelated prompt must NOT hit the semantic cache — it falls through to
+/// the (mock) provider and returns a fresh response.
+#[tokio::test]
+async fn semantic_cache_misses_unrelated_prompt() {
+    let Some(sem) = try_semantic_cache().await else {
+        return;
+    };
+    let app = app_with_semantic_cache(sem);
+
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":"Write a haiku about the ocean at dawn, totally unrelated topic xyzzy."}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-solvela-debug", "true")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Either miss (no nearby entry) — must not be a semantic hit.
+    assert_ne!(
+        resp.headers()
+            .get("x-solvela-cache")
+            .and_then(|v| v.to_str().ok()),
+        Some("semantic-hit"),
+        "an unrelated prompt must not be served from the semantic cache"
+    );
 }
 
 /// Build a test app with mock providers and escrow support enabled.

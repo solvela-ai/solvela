@@ -22,7 +22,7 @@ use crate::providers::heartbeat::{HeartbeatConfig, HeartbeatItem, HeartbeatStrea
 use crate::routes::debug_headers::{attach_debug_headers, CacheStatus, PaymentStatus};
 use crate::AppState;
 
-use super::cost::estimate_input_tokens;
+use super::cost::{compute_actual_atomic_cost, estimate_input_tokens, SemanticDiscount};
 use super::response::{attach_session_id, build_debug_info};
 
 /// Classify a provider error into a bounded set of label values for metrics.
@@ -95,6 +95,10 @@ pub(crate) struct ProviderCallResult {
     pub usage: Option<solvela_protocol::Usage>,
     /// The provider that actually served the request (may differ from primary due to fallback).
     pub actual_provider: Option<String>,
+    /// Pricing override. `Some(..)` on a semantic-cache hit so the paid path
+    /// bills the discounted price (claims less from escrow); `None` for
+    /// normal/exact-hit/miss paths, which price from usage as before.
+    pub cost_outcome: Option<super::cost::SemanticDiscount>,
 }
 
 /// Execute the provider call pipeline: cache lookup, fallback chain,
@@ -119,12 +123,15 @@ pub(crate) async fn execute_provider_call(
         CacheStatus::Miss
     };
 
-    // Check cache first (only for non-streaming requests)
+    // Cache lookup (only for non-streaming requests): Tier 1 exact → Tier 2
+    // semantic → miss. The "miss" counter increments only when BOTH tiers miss,
+    // so it tracks actual upstream calls.
     if !ctx.req.stream {
+        // ── Tier 1: exact match ────────────────────────────────────────────
         if let Some(cache) = &ctx.state.cache {
             if let Some(cached) = cache.get(ctx.req).await {
                 counter!("solvela_cache_total", "result" => "hit").increment(1);
-                info!(model = %ctx.req.model, "serving from cache");
+                info!(model = %ctx.req.model, "serving from cache (exact)");
                 cache_status = CacheStatus::Hit;
                 let mut resp = Json(
                     serde_json::to_value(&cached)
@@ -153,12 +160,76 @@ pub(crate) async fn execute_provider_call(
                     response: resp,
                     usage: cached.usage.clone(),
                     actual_provider: None,
+                    cost_outcome: None,
                 });
             }
-            counter!("solvela_cache_total", "result" => "miss").increment(1);
-        } else {
-            counter!("solvela_cache_total", "result" => "miss").increment(1);
         }
+
+        // ── Tier 2: semantic match ─────────────────────────────────────────
+        if let Some(sem) = &ctx.state.semantic_cache {
+            if let Some(hit) = sem.get(ctx.req).await {
+                counter!("solvela_cache_total", "result" => "semantic_hit").increment(1);
+                cache_status = CacheStatus::SemanticHit;
+
+                // Price the discount: full = what a miss would cost for the
+                // cached usage; billed = hit_price_percent of that. Realised on
+                // the escrow scheme (the paid path claims `billable_atomic`).
+                let full_atomic = hit
+                    .response
+                    .usage
+                    .as_ref()
+                    .and_then(|u| {
+                        compute_actual_atomic_cost(
+                            u.prompt_tokens,
+                            u.completion_tokens,
+                            ctx.model_info,
+                        )
+                    })
+                    .unwrap_or(0);
+                let pct = ctx.state.config.cache.semantic.hit_price_percent;
+                let cost_outcome = SemanticDiscount::new(full_atomic, pct);
+                info!(
+                    model = %ctx.req.model,
+                    similarity = hit.similarity,
+                    billed_atomic = cost_outcome.billable_atomic(),
+                    "serving from cache (semantic)"
+                );
+
+                let usage = hit.response.usage.clone();
+                let mut resp = Json(
+                    serde_json::to_value(&hit.response)
+                        .map_err(|e| ProviderCallError::Internal(e.to_string()))?,
+                )
+                .into_response();
+                attach_session_id(&mut resp, ctx.session_id);
+                if ctx.debug_enabled {
+                    attach_debug_headers(
+                        &mut resp,
+                        &build_debug_info(
+                            &ctx.req.model,
+                            ctx.routing_tier,
+                            ctx.routing_score,
+                            ctx.routing_profile,
+                            provider_name,
+                            cache_status,
+                            ctx.request_start.elapsed().as_millis() as u64,
+                            ctx.payment_status,
+                            estimate_input_tokens(ctx.req),
+                            ctx.req.max_tokens.unwrap_or(1000),
+                        ),
+                    );
+                }
+                return Ok(ProviderCallResult {
+                    response: resp,
+                    usage,
+                    actual_provider: None,
+                    cost_outcome: Some(cost_outcome),
+                });
+            }
+        }
+
+        // Both tiers missed → real upstream call follows.
+        counter!("solvela_cache_total", "result" => "miss").increment(1);
     }
 
     // Check for agent-specified fallback preferences (accept both new and legacy headers)
@@ -174,6 +245,7 @@ pub(crate) async fn execute_provider_call(
             response: resp,
             usage: None, // streaming doesn't have usage data
             actual_provider: None,
+            cost_outcome: None,
         })
     } else {
         execute_non_streaming_call(ctx, provider_name, fallback_pref, cache_status).await
@@ -404,6 +476,7 @@ async fn execute_non_streaming_call(
                 response: resp,
                 usage: result.data.usage.clone(),
                 actual_provider: Some(result.actual_provider.clone()),
+                cost_outcome: None,
             })
         }
         Err(e) => {
