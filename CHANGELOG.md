@@ -2,6 +2,46 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-19 → 2026-05-21 — Documentation truth audit + Anthropic model-ID correction + cascade drift guards ([#337](https://github.com/solvela-ai/solvela/pull/337)–[#372](https://github.com/solvela-ai/solvela/pull/372))
+
+A full truth-audit of every public-facing surface — `dashboard/content/docs/**` (api, concepts, enterprise, operations, sdks), the landing-page components, every SDK README, and `CLAUDE.md` — verifying each statement against source and confirming each code example compiles. Most docs were well-maintained; the bugs clustered into three classes, and the audit also surfaced a real model-ID error in `config/models.toml` whose correction cascaded across the router, fallback chains, generated SDK code, and ~10 docs. Closed out with three new CI guards so the drift class can't ship silently again.
+
+### Anthropic model-ID correction ([#358](https://github.com/solvela-ai/solvela/pull/358), [#366](https://github.com/solvela-ai/solvela/pull/366))
+
+`config/models.toml` had three Anthropic entries pointing at the wrong upstream `model_id`: both `anthropic-claude-sonnet-4-5` and `anthropic-claude-sonnet-4-6` carried `claude-sonnet-4-20250514` (the deprecated Sonnet 4.0 snapshot), and `anthropic-claude-opus-4-6` carried `claude-opus-4-20250514` (Opus 4.0). The two Sonnets collapsed to one canonical key in `ModelRegistry`, so `/v1/models` returned **25** unique IDs while the registry had 26 entries and the docs said "26 models". Corrected per platform.claude.com to `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-sonnet-4-5-20250929` (Haiku 4.5 was already correct). All four Anthropic IDs are now distinct → `/v1/models` returns 26.
+
+Updated every load-bearing reference in lockstep: `crates/router/src/profiles.rs` (Premium-tier targets, the `sonnet`/`opus`/`sonnet4.5` aliases, the test), and `crates/gateway/src/providers/fallback.rs` (re-keyed the opus/sonnet chains as both primaries and cross-provider targets — without it, those models drop to primary-only failover). The same pass fixed a separate stale ID: the budget-tier fallback chains pointed at `claude-3-5-haiku-20241022`, which was never registered. **Live-verified** all four IDs against Anthropic's API (each returned 200 echoing its own resolved ID), and added a smoke-test step (`/v1/models` exposes all four + aliases resolve, not 404) to the CI smoke job. [#366](https://github.com/solvela-ai/solvela/pull/366) regenerated `sdks/ai-sdk-provider/src/generated/models.ts`, whose embedded `modelId`s had gone stale (the generator reads the TOML but wasn't re-run).
+
+### Model-ID cascade guards ([#371](https://github.com/solvela-ai/solvela/pull/371), [#372](https://github.com/solvela-ai/solvela/pull/372))
+
+A `config/models.toml` model_id change must propagate to four places; only one was test-enforced. Now all three code legs are:
+
+- **profiles.rs** — `every_alias_and_profile_tier_resolves_to_a_registered_model` (pre-existing) asserts every alias + profile-tier target is registered.
+- **fallback.rs** ([#371](https://github.com/solvela-ai/solvela/pull/371)) — new `every_fallback_chain_id_is_registered` loads the production `config/models.toml` and asserts every ID in every fallback chain (keyed primaries + cross-provider targets) is registered. Negative-tested against an injected stale ID.
+- **ai-sdk-provider `generated/models.ts`** ([#372](https://github.com/solvela-ai/solvela/pull/372)) — new `models-fresh` CI job regenerates and fails on `git diff`; `config/models.toml` added to the workflow's path triggers so the check fires on a TOML change even when no SDK file is touched.
+
+### Example functional verification + Python SDK type gate ([#369](https://github.com/solvela-ai/solvela/pull/369), [#370](https://github.com/solvela-ai/solvela/pull/370))
+
+Every language SDK example in the docs was compile/type-checked against the real in-repo SDKs (`tsc --noEmit`, `go build`, `cargo build`, `mypy`) — not just "do the referenced symbols exist," but "does it build." All examples build; [#369](https://github.com/solvela-ai/solvela/pull/369) made the Python ones strict-`mypy`-clean (wrapped `max_payment_amount` in `AtomicUsdc`, per the SDK's own convention) and fixed a stale TS README model ID. That pass revealed [#370](https://github.com/solvela-ai/solvela/pull/370): `sdks/python` declared `[tool.mypy] strict = true` but **CI never ran mypy**, so 8 strict errors had accumulated on main. Cleared all 8 (type-only; 181 tests still pass) and added `mypy src/` to `sdks-python.yml` so the declared gate is actually enforced.
+
+### Documentation corrections (the doc sweep, [#337](https://github.com/solvela-ai/solvela/pull/337)–[#368](https://github.com/solvela-ai/solvela/pull/368))
+
+Per-directory walk. The highest-yield finds, by failure class:
+
+- **Documented-but-unbuilt APIs.** `api/rate-limits.mdx` had an entire "Enterprise Configuration" section for `client.sessions.create`, `denied_models`, and a wrong budget JSON shape — none real (no `/sessions` route exists; sessions are gateway-issued via the `x-solvela-session` header). De-fictioned in [#360](https://github.com/solvela-ai/solvela/pull/360). `sdks/mcp.mdx` listed `health`/`get_cost` tools that aren't registered ([#365](https://github.com/solvela-ai/solvela/pull/365)).
+- **Stale data cascades.** Stale Anthropic model IDs corrected across `api/models.mdx` ([#359](https://github.com/solvela-ai/solvela/pull/359)), `concepts/{pricing,smart-router,request-flow}.mdx` ([#363](https://github.com/solvela-ai/solvela/pull/363)), `chat-completions.mdx` ([#361](https://github.com/solvela-ai/solvela/pull/361)), and the Rust CLI doc; pre-rebrand `rcr`/`X-RCR` credentials and debug-header names ([#343](https://github.com/solvela-ai/solvela/pull/343), [#357](https://github.com/solvela-ai/solvela/pull/357)).
+- **Factual mismatches against code.** `request-flow.mdx`'s routing table contradicted `profiles.rs` (claimed `auto/Medium`→GPT-4o-mini; real is `grok-code-fast-1`) — corrected and pointed at smart-router as the single source ([#363](https://github.com/solvela-ai/solvela/pull/363)); `operations/monitoring.mdx` listed two `solvela_payments_total` status values that are never emitted and missed `dev_bypass`/`paid_stub_rejections_total` ([#364](https://github.com/solvela-ai/solvela/pull/364)); `operations/security.mdx` mis-stated the CORS method list and the `max_tokens` cap (8192, not 128k) ([#364](https://github.com/solvela-ai/solvela/pull/364)); `concepts/escrow.mdx` said claim excess "remains in the vault" when the claim instruction atomically refunds it ([#368](https://github.com/solvela-ai/solvela/pull/368)); `CLAUDE.md`'s "3-stage cargo-chef" Dockerfile is actually a 2-stage dummy-source build ([#367](https://github.com/solvela-ai/solvela/pull/367)).
+- **Pre-publish honesty + cleanups.** Marked unpublished npm packages (`@solvela/ai-sdk-provider`, `@solvela/cli`, `@solvela/openclaw-provider`, `@solvela/mcp-server`) as not-yet-published with build-from-source instructions; fixed the broken landing SDK samples and enterprise endpoint citations ([#338](https://github.com/solvela-ai/solvela/pull/338)–[#342](https://github.com/solvela-ai/solvela/pull/342)); rewrote `sdks/rust/README.md` + added per-crate READMEs ([#355](https://github.com/solvela-ai/solvela/pull/355)); routed dead sponsor CTAs to `mailto:` until profiles exist ([#345](https://github.com/solvela-ai/solvela/pull/345)); rebuilt the pre-auth + EIP-712 safety arguments from first principles, dropping unverifiable third-party citations ([#337](https://github.com/solvela-ai/solvela/pull/337)).
+
+### Lesson
+
+The deepest bugs were never wrong prose — auditing prose is low-yield. They were **stale-data cascades** (one source change rippling into hand-maintained copies + generated code), **documented-but-unbuilt APIs** (samples using all-real symbols but describing surfaces that don't exist), and **declared-but-unenforced quality gates** (`strict = true` with no CI step running it). Future doc/example audits should grep duplicated-from-source data first, treat every documented endpoint/method as guilty until found in source, compile-check examples against the real SDKs, and verify each declared lint/type gate actually runs in CI.
+
+### Known follow-ups (not doc/code fixes)
+
+- **Polar.sh + GitHub Sponsors profiles** not set up; sponsor CTAs route to `mailto:partnerships@solvela.ai` as an honest interim ([#345](https://github.com/solvela-ai/solvela/pull/345)). Set up the profiles, then restore the live URLs.
+- **Git-email privacy** — the github.com "keep my email private" toggle is still off, so squash-merges leak `kd@sky64.io` in merge commits.
+
 ## 2026-05-16 (later) — Rust client SDK consolidated into the monorepo + CodeRabbit auto-review rolled back ([#316](https://github.com/solvela-ai/solvela/pull/316), [#319](https://github.com/solvela-ai/solvela/pull/319))
 
 The last cross-repo SDK got pulled into the monorepo, and a one-day CodeRabbit auto-review trial was reverted to opt-in mode. Two issues filed for legitimate inherited findings ([#322](https://github.com/solvela-ai/solvela/issues/322), [#323](https://github.com/solvela-ai/solvela/issues/323)).
