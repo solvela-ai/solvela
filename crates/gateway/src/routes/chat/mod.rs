@@ -33,7 +33,7 @@ use crate::AppState;
 
 use cost::{
     cap_usage_to_request_limits, compute_actual_atomic_cost, estimate_input_tokens,
-    estimated_atomic_cost, usdc_atomic_amount_checked,
+    estimated_atomic_cost, spend_cost_usdc, usdc_atomic_amount_checked,
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
@@ -677,9 +677,18 @@ pub async fn chat_completions(
                         })
                     }) {
                     Ok(cost) => {
+                        // On a semantic-cache hit the agent is billed the
+                        // discounted price, so the spend ledger must record that
+                        // — not the full computed `cost`. Keeping the full
+                        // `estimated_cost` as the reservation means the counter
+                        // delta `(billed − reserved)` settles the wallet's
+                        // budget down to the discounted amount, instead of
+                        // consuming it at 100% (which would deny the agent
+                        // service before its real spend warrants it).
+                        let billed_cost = spend_cost_usdc(cost_outcome, cost);
                         // Pass the estimated_cost that was committed to Redis
                         // counters in `check_budget` so log_spend can adjust
-                        // by the (actual − estimated) delta. Without this,
+                        // by the (billed − estimated) delta. Without this,
                         // counters would be double-incremented.
                         state.usage.log_spend(SpendLogEntry {
                             wallet_address: wallet_address.clone(),
@@ -687,7 +696,7 @@ pub async fn chat_completions(
                             provider: actual_provider.unwrap_or_else(|| provider_name.to_string()),
                             input_tokens: u.prompt_tokens,
                             output_tokens: u.completion_tokens,
-                            cost_usdc: cost,
+                            cost_usdc: billed_cost,
                             tx_signature: tx_signature.clone(),
                             request_id: request_id.clone(),
                             session_id: session_id.clone(),

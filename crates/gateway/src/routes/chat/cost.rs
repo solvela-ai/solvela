@@ -301,6 +301,20 @@ pub(crate) fn apply_hit_price(full_atomic: u64, hit_price_percent: u8) -> u64 {
     ((full_atomic as u128) * pct / 100) as u64
 }
 
+/// The USDC amount to record in the spend log / budget ledger for this request.
+///
+/// On a semantic-cache hit the agent is billed the **discounted** price, so the
+/// ledger must reflect that — not the full computed cost. Logging the full cost
+/// makes per-wallet budget counters consume at 100% while the escrow claim only
+/// took the discount, denying agents service before their real spend warrants
+/// it. `None` (normal path) records the full computed cost as before.
+pub(crate) fn spend_cost_usdc(cost_outcome: Option<SemanticDiscount>, full_cost_usdc: f64) -> f64 {
+    match cost_outcome {
+        Some(discount) => discount.billable_atomic() as f64 / 1_000_000.0,
+        None => full_cost_usdc,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,14 +936,19 @@ supports_vision = false
     #[test]
     fn semantic_discount_bills_discounted_and_keeps_full() {
         let outcome = SemanticDiscount::new(1000, 30);
-        assert_eq!(
-            outcome,
-            SemanticDiscount {
-                full_atomic: 1000,
-                discounted_atomic: 300,
-            }
-        );
         assert_eq!(outcome.billable_atomic(), 300);
         assert_eq!(outcome.full_atomic, 1000);
+    }
+
+    #[test]
+    fn spend_cost_uses_discounted_on_semantic_hit() {
+        // full $5.00 (5_000_000 atomic), 30% → discounted $1.50.
+        let outcome = Some(SemanticDiscount::new(5_000_000, 30));
+        assert_eq!(spend_cost_usdc(outcome, 5.0), 1.5);
+    }
+
+    #[test]
+    fn spend_cost_uses_full_when_no_discount() {
+        assert_eq!(spend_cost_usdc(None, 5.0), 5.0);
     }
 }
