@@ -16,6 +16,23 @@ warn_threshold_sol = 0.1
 critical_threshold_sol = 0.02
 check_interval_secs = 300
 
+# Tier 2 semantic (embedding-similarity) cache. OFF by default — enabling it is
+# the only behaviour change. Requires Redis with the RediSearch module
+# (redis-stack) and the local bge-small embedding model (auto-downloaded by
+# fastembed on first run, ~133 MB). See SECURITY.md for the embedding-privacy
+# note. Discount is realised on the escrow payment scheme.
+[cache.semantic]
+enabled = false
+# Minimum cosine similarity (0..1) for a hit. PoC data put paraphrases ≥0.89
+# and unrelated prompts ≤0.59, so 0.85 is a forgiving-but-safe default.
+threshold = 0.85
+# Percent of the full price billed on a hit (30 = pay 30%, a 70% discount).
+hit_price_percent = 30
+# TTL (seconds) for stored semantic entries.
+ttl_secs = 600
+# Optional explicit model cache dir; unset → fastembed's ./.fastembed_cache.
+# model_cache_dir = "/var/lib/solvela/fastembed"
+
 # Provider API keys are loaded from environment variables:
 #   OPENAI_API_KEY
 #   ANTHROPIC_API_KEY

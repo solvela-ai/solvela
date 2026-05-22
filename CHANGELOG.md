@@ -2,6 +2,19 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-22 — Semantic cache (Tier 2), Phase 1
+
+Added an optional embedding-similarity cache tier in front of the existing exact-match cache. A paraphrase of a previously-answered prompt can now hit the cache instead of calling the upstream LLM. **Off by default** (`[cache.semantic].enabled = false`) — enabling it is the only behaviour change.
+
+- **Cache module split** — `cache.rs` → `cache/{mod,exact,semantic,embedder}.rs`. The exact tier and shared infra (replay protection, raw KV) are unchanged.
+- **Embedder** — local `bge-small-en-v1.5` (384-dim) via `fastembed`/`ort`, behind an `Embedder` trait so an API-backed model can be swapped in. ~13 ms p50 on CPU; Mutex-guarded (≈75 emb/s per process — a model pool is future work).
+- **Semantic store** — RediSearch HNSW cosine index, model-scoped (a cached `openai/...` answer is never served to `anthropic/...`), threshold-gated (default cosine ≥ 0.85). Stays wallet-agnostic (rule #16). Writes are fully fire-and-forget (rule #9): embedding *and* the Redis write run off the hot path.
+- **Discount** — a semantic hit bills `hit_price_percent` of the full price (default 30 → 70% off), realised on the **escrow** scheme by claiming only the discounted amount (the remainder refunds to the agent). The direct-transfer (`exact`) scheme settles the full amount up front, so the discount does not apply there — by design (the cryptographic-commitment + on-chain bond that would make discounts trustless on every scheme are Phases 2–3).
+- **Config** — new `[cache.semantic]` section (`enabled`, `threshold`, `hit_price_percent`, `ttl_secs`, `model_cache_dir`). Requires Redis-with-RediSearch (compose now uses `redis/redis-stack-server:7.4.0-v3`); degrades gracefully to the exact cache if Redis/RediSearch or the model is unavailable (rule #12).
+- **Privacy** — embeddings are partially invertible; see `SECURITY.md` for the prompt-embedding note. The model is fetched from the Hugging Face hub on first run.
+
+Built test-first (RED→GREEN per unit) and reviewed by the `rust-reviewer` agent before wiring. New tests: embedder (10), semantic store (13, against live redis-stack), cost/discount math (integer-only), config parsing, and HTTP-level integration (paraphrase served from cache / unrelated misses). Model- and Redis-dependent tests skip gracefully where those deps are absent.
+
 ## 2026-05-19 → 2026-05-21 — Documentation truth audit + Anthropic model-ID correction + cascade drift guards ([#337](https://github.com/solvela-ai/solvela/pull/337)–[#372](https://github.com/solvela-ai/solvela/pull/372))
 
 A full truth-audit of every public-facing surface — `dashboard/content/docs/**` (api, concepts, enterprise, operations, sdks), the landing-page components, every SDK README, and `CLAUDE.md` — verifying each statement against source and confirming each code example compiles. Most docs were well-maintained; the bugs clustered into three classes, and the audit also surfaced a real model-ID error in `config/models.toml` whose correction cascaded across the router, fallback chains, generated SDK code, and ~10 docs. Closed out with three new CI guards so the drift class can't ship silently again.
