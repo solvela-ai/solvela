@@ -229,9 +229,10 @@ impl SemanticCache {
     }
 
     /// Awaitable store — embeds, writes, and returns only once the entry is
-    /// durable in Redis. Used by tests (and any caller needing read-after-write
-    /// determinism); production uses the fire-and-forget [`set`](Self::set).
-    pub(crate) async fn store(
+    /// durable in Redis. Used by tests and integration harnesses needing
+    /// read-after-write determinism; production uses the fire-and-forget
+    /// [`set`](Self::set) to keep writes off the hot path.
+    pub async fn store(
         &self,
         req: &ChatRequest,
         response: &ChatResponse,
