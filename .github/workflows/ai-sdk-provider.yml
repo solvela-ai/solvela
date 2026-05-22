@@ -11,12 +11,17 @@ on:
       # side?". Proper end-to-end wire-compat verification needs SDK
       # tests against a live gateway — tracked separately.
       - 'crates/protocol/**'
+      # The generated model registry (src/generated/models.ts) is derived from
+      # config/models.toml. Trigger here so the models-fresh job catches a TOML
+      # change that wasn't followed by `npm run generate-models`.
+      - 'config/models.toml'
       - '.github/workflows/ai-sdk-provider.yml'
   pull_request:
     paths:
       - 'sdks/ai-sdk-provider/**'
       - 'sdks/signer-core/**'
       - 'crates/protocol/**'
+      - 'config/models.toml'
       - '.github/workflows/ai-sdk-provider.yml'
 
 defaults:
@@ -228,3 +233,29 @@ jobs:
       # hard-deps reach this audit via signer-core's node_modules after
       # `npm ci` here builds it as a file: dep above.
       - run: npm audit --production --audit-level=critical
+
+  models-fresh:
+    name: Generated models up to date
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sdks/ai-sdk-provider/package-lock.json
+      - run: npm ci
+      # src/generated/models.ts is generated from config/models.toml. If the
+      # TOML changed but the generated file wasn't regenerated, the provider
+      # ships stale model_ids (the #358 → #366 drift). Regenerate and fail if
+      # the committed file differs.
+      - run: npm run generate-models
+      - name: Fail if src/generated/models.ts is stale vs config/models.toml
+        run: |
+          if ! git diff --quiet src/generated/models.ts; then
+            echo "::error::src/generated/models.ts is out of date with config/models.toml. Run 'npm run generate-models' in sdks/ai-sdk-provider and commit the result."
+            git --no-pager diff src/generated/models.ts
+            exit 1
+          fi
+          echo "OK: generated models are up to date with config/models.toml"
