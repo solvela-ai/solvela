@@ -39,6 +39,9 @@ metrics-exporter-prometheus = { workspace = true }
 sqlx = { workspace = true }
 redis = { workspace = true }
 
+# Semantic cache embedding (local ONNX model via fastembed → ort runtime)
+fastembed = "5"
+
 # Cache / crypto
 sha2 = { workspace = true }
 hmac = { workspace = true }
