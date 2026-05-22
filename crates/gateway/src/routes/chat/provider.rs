@@ -22,7 +22,9 @@ use crate::providers::heartbeat::{HeartbeatConfig, HeartbeatItem, HeartbeatStrea
 use crate::routes::debug_headers::{attach_debug_headers, CacheStatus, PaymentStatus};
 use crate::AppState;
 
-use super::cost::{estimate_input_tokens, semantic_hit_full_atomic, SemanticDiscount};
+use super::cost::{
+    cap_usage_to_request_limits, estimate_input_tokens, semantic_hit_full_atomic, SemanticDiscount,
+};
 use super::response::{attach_session_id, build_debug_info};
 
 /// Classify a provider error into a bounded set of label values for metrics.
@@ -168,13 +170,26 @@ pub(crate) async fn execute_provider_call(
         // ── Tier 2: semantic match ─────────────────────────────────────────
         if let Some(sem) = &ctx.state.semantic_cache {
             if let Some(hit) = sem.get(ctx.req).await {
+                // bug_004: the cached `usage` was stored on the original miss
+                // BEFORE `cap_usage_to_request_limits` ran (that capping happens
+                // post-response in chat/mod.rs), so it can exceed THIS request's
+                // priceable limits — a smaller `max_tokens` now, a different
+                // model's context window, etc. Cap it against the current request
+                // before pricing, exactly as the miss path does, or the discount
+                // (and the returned usage) over-bill from uncapped tokens.
+                let capped_usage = hit
+                    .response
+                    .usage
+                    .as_ref()
+                    .map(|u| cap_usage_to_request_limits(u, ctx.req, ctx.model_info));
+
                 // Price the discount: full = what a miss would cost (prefer the
                 // cached response's actual usage, fall back to the current
                 // request's estimate, reject zero). `None` ⇒ unpriceable, so we
                 // fall through to a normal upstream call rather than serve a
                 // discounted-from-nothing (free) response. See C2.
                 let full_atomic = semantic_hit_full_atomic(
-                    hit.response.usage.as_ref(),
+                    capped_usage.as_ref(),
                     &ctx.state.model_registry,
                     &ctx.req.model,
                     ctx.req,
@@ -205,7 +220,11 @@ pub(crate) async fn execute_provider_call(
                         "serving from cache (semantic)"
                     );
 
-                    let usage = hit.response.usage.clone();
+                    // Return the CAPPED usage so the spend log downstream prices
+                    // from the same bounded token counts (mod.rs caps again —
+                    // idempotent — but keeping them consistent here avoids any
+                    // drift between the discount base and the logged usage).
+                    let usage = capped_usage;
                     let mut resp = Json(
                         serde_json::to_value(&hit.response)
                             .map_err(|e| ProviderCallError::Internal(e.to_string()))?,

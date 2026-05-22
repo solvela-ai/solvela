@@ -44,9 +44,14 @@ services:
     image: redis/redis-stack-server:7.4.0-v3
     container_name: solvela_redis
     restart: unless-stopped
-    # LRU eviction when memory limit is hit; no RDB persistence (cache is ephemeral)
+    # LRU eviction when the memory limit is hit. We deliberately do NOT pass
+    # `--save ''` to disable RDB: Compose does not strip the quotes, so the
+    # literal two-character `''` reaches redis as the save spec and the server
+    # either rejects it (fatal) or fails to disable persistence. The default
+    # RDB snapshotting is harmless for an ephemeral local-dev cache, so we just
+    # leave it on rather than fight the quoting.
     environment:
-      REDIS_ARGS: "--maxmemory 256mb --maxmemory-policy allkeys-lru --save ''"
+      REDIS_ARGS: "--maxmemory 256mb --maxmemory-policy allkeys-lru"
     ports:
       - "127.0.0.1:6379:6379"
     healthcheck:

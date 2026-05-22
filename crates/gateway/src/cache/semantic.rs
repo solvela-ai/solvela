@@ -31,7 +31,24 @@ use super::embedder::Embedder;
 /// `solvela:cache:` so the two never collide in the keyspace).
 const SEMANTIC_PREFIX: &str = "solvela:scache";
 /// RediSearch index name over the semantic entries.
-const SEMANTIC_INDEX: &str = "solvela_scache_idx";
+///
+/// **Versioned** (`_v2`): the schema gained `temperature`/`top_p` TAG fields so
+/// sampling params hard-gate hits (a stored answer for `temperature=0` must
+/// never be served for `temperature=2`). `ensure_index` short-circuits on an
+/// existing index, so a schema change MUST bump this name — otherwise a
+/// deployment that already created `_v1` would keep the old field-less schema
+/// and the new TAG filters would match nothing. The old index/entries expire
+/// via TTL and are simply never matched by the new query.
+const SEMANTIC_INDEX: &str = "solvela_scache_idx_v2";
+
+/// Upper bound on prompt characters we will embed. `bge-small-en-v1.5` silently
+/// truncates inputs at 512 tokens (~4 chars/token ≈ 2048 chars). A prompt past
+/// that limit embeds only its truncated prefix, so two distinct long prompts
+/// that share a >512-token prefix (e.g. a long RAG context with the real
+/// question last) collide — and the cache could serve the *wrong* answer and
+/// bill for it. We refuse to cache or serve any prompt above this conservative
+/// char budget; it falls through to a normal upstream call instead.
+const MAX_EMBED_CHARS: usize = 2000;
 
 /// Upper bound on concurrent fire-and-forget [`SemanticCache::set`] writes. Each
 /// write runs a Mutex-serialised embedding (~75/s ceiling), so under a cache-miss
@@ -140,6 +157,13 @@ impl SemanticCache {
             .arg("SCHEMA")
             .arg("model")
             .arg("TAG")
+            // Sampling params are exact-match TAG predicates (see `param_tag`),
+            // hard-gating hits so an answer sampled at one temperature/top_p is
+            // never served for a request at another.
+            .arg("temperature")
+            .arg("TAG")
+            .arg("top_p")
+            .arg("TAG")
             // NOINDEX: the response JSON is retrieved by the KNN result, never
             // searched. Without NOINDEX, RediSearch full-text-indexes every
             // payload, wasting index memory proportional to response size.
@@ -169,13 +193,19 @@ impl SemanticCache {
             return None;
         }
 
-        let embedding = self.embed(req).await?;
+        let embedding = self.embed_checked(req).await?;
         let bytes = f32_slice_to_le_bytes(&embedding);
 
-        // Hybrid query: filter by model TAG, then KNN over the embedding.
+        // Hybrid query: filter by model + sampling-param TAGs, then KNN over the
+        // embedding. The TAG predicates hard-gate the candidate set so a hit can
+        // only come from the same model AND the same temperature/top_p — the
+        // KNN never sees an entry from a different sampling regime.
         let query = format!(
-            "(@model:{{{model}}})=>[KNN 1 @embedding $vec AS score]",
-            model = escape_tag(&req.model)
+            "(@model:{{{model}}} @temperature:{{{temp}}} @top_p:{{{top_p}}})\
+             =>[KNN 1 @embedding $vec AS score]",
+            model = escape_tag(&req.model),
+            temp = escape_tag(&param_tag(req.temperature)),
+            top_p = escape_tag(&param_tag(req.top_p)),
         );
 
         let mut conn = self.conn.clone();
@@ -250,6 +280,17 @@ impl SemanticCache {
         if !self.config.enabled || req.stream {
             return;
         }
+        // Don't store a prompt BGE would truncate (bug_002): its embedding would
+        // reflect only the truncated prefix, risking a later wrong cross-hit.
+        let text = prompt_text(req);
+        if !within_embed_budget(&text) {
+            debug!(
+                model = %req.model,
+                chars = text.chars().count(),
+                "semantic cache write skipped: prompt exceeds embed budget"
+            );
+            return;
+        }
         // Acquire a write slot before spawning; if none is free we're already
         // saturated, so drop this write (the response is unaffected).
         let permit = match Arc::clone(&self.write_slots).try_acquire_owned() {
@@ -271,8 +312,9 @@ impl SemanticCache {
             }
         };
         let embedder = Arc::clone(&self.embedder);
-        let text = prompt_text(req);
         let model = req.model.clone();
+        let temperature = param_tag(req.temperature);
+        let top_p = param_tag(req.top_p);
         let conn = self.conn.clone();
         let ttl = self.config.ttl_secs;
         tokio::spawn(async move {
@@ -282,7 +324,9 @@ impl SemanticCache {
                 Some(e) => e,
                 None => return,
             };
-            if let Err(e) = write_entry(conn, model, json, &embedding, ttl).await {
+            if let Err(e) =
+                write_entry(conn, model, temperature, top_p, json, &embedding, ttl).await
+            {
                 warn!(error = %e, "semantic cache write failed");
             }
         });
@@ -302,13 +346,16 @@ impl SemanticCache {
         }
         let json = serde_json::to_string(response)
             .map_err(|e| super::CacheError::Operation(e.to_string()))?;
-        let embedding = self
-            .embed(req)
-            .await
-            .ok_or_else(|| super::CacheError::Operation("embedding failed".to_string()))?;
+        let embedding = self.embed_checked(req).await.ok_or_else(|| {
+            super::CacheError::Operation(
+                "embedding skipped (oversized prompt) or failed".to_string(),
+            )
+        })?;
         write_entry(
             self.conn.clone(),
             req.model.clone(),
+            param_tag(req.temperature),
+            param_tag(req.top_p),
             json,
             &embedding,
             self.config.ttl_secs,
@@ -317,10 +364,21 @@ impl SemanticCache {
         .map_err(|e| super::CacheError::Operation(e.to_string()))
     }
 
-    /// Embed a request's canonical prompt off the async runtime threads
-    /// (the model call is CPU-bound and Mutex-serialised).
-    async fn embed(&self, req: &ChatRequest) -> Option<Vec<f32>> {
-        embed_text(&self.embedder, prompt_text(req)).await
+    /// Embed a request's canonical prompt off the async runtime threads (the
+    /// model call is CPU-bound and Mutex-serialised). Returns `None` — a miss —
+    /// when the prompt exceeds [`MAX_EMBED_CHARS`] (BGE would truncate it; see
+    /// bug_002) or when embedding fails.
+    async fn embed_checked(&self, req: &ChatRequest) -> Option<Vec<f32>> {
+        let text = prompt_text(req);
+        if !within_embed_budget(&text) {
+            debug!(
+                model = %req.model,
+                chars = text.chars().count(),
+                "semantic cache skip: prompt exceeds embed budget"
+            );
+            return None;
+        }
+        embed_text(&self.embedder, text).await
     }
 }
 
@@ -344,6 +402,8 @@ async fn embed_text(embedder: &Arc<dyn Embedder>, text: String) -> Option<Vec<f3
 async fn write_entry(
     mut conn: ConnectionManager,
     model: String,
+    temperature: String,
+    top_p: String,
     response_json: String,
     embedding: &[f32],
     ttl_secs: u64,
@@ -359,6 +419,10 @@ async fn write_entry(
         .arg(&key)
         .arg("model")
         .arg(&model)
+        .arg("temperature")
+        .arg(&temperature)
+        .arg("top_p")
+        .arg(&top_p)
         .arg("response")
         .arg(&response_json)
         .arg("embedding")
@@ -434,35 +498,41 @@ fn redis_value_to_string(v: &redis::Value) -> Option<String> {
 /// Deterministic and order-sensitive (message order changes meaning). Each
 /// message contributes a `role: content` line; ordering is preserved.
 ///
-/// Sampling params (`temperature` / `top_p`) are appended as a trailing
-/// `params:` line *only when set*, so two requests identical except for
-/// temperature/top_p embed to different text and never cross-hit. This mirrors
-/// the exact tier, which keys on `temperature`. Changing this line's format
-/// invalidates previously stored entries — acceptable given the 600s TTL.
+/// Sampling params (`temperature` / `top_p`) are **not** embedded here. An
+/// earlier attempt appended them as a trailing `params:` line, but that does
+/// not separate hits: two prompts identical except for temperature embed to
+/// near-identical vectors (cosine ≈ 0.99 ≫ the 0.85 threshold), so the param
+/// line is invisible to the KNN gate and the wrong sampling regime gets served.
+/// Sampling params are instead enforced as exact RediSearch TAG predicates (see
+/// [`param_tag`] and the `@temperature` / `@top_p` filters in [`SemanticCache::get`]).
 pub(crate) fn prompt_text(req: &ChatRequest) -> String {
-    let mut text = req
-        .messages
+    req.messages
         .iter()
         .map(|m| format!("{}: {}", role_str(&m.role), m.content))
         .collect::<Vec<_>>()
-        .join("\n");
-    // Deterministic, stable float formatting so the same params always embed
-    // to the same bytes. Only emit the segments that are actually set.
-    let mut params = String::new();
-    if let Some(t) = req.temperature {
-        params.push_str(&format!("temperature={t:.4}"));
+        .join("\n")
+}
+
+/// Whether a prompt is short enough to embed without BGE silently truncating it
+/// (see [`MAX_EMBED_CHARS`]). Counts `chars`, not bytes, to match the
+/// token-budget intent.
+fn within_embed_budget(text: &str) -> bool {
+    text.chars().count() <= MAX_EMBED_CHARS
+}
+
+/// Canonical RediSearch TAG value for a sampling parameter.
+///
+/// `None` (unset) and any set value map to distinct, stable strings, so the
+/// semantic tier hard-gates hits on the sampling regime — mirroring the exact
+/// tier, which keys on `temperature`. Set values are formatted to 4 decimal
+/// places for stable, collision-free string matching; an unset param is the
+/// literal `none`. The value is stored verbatim in the entry hash; the query
+/// side escapes it via [`escape_tag`] (the `.` in a float is TAG-special).
+fn param_tag(value: Option<f32>) -> String {
+    match value {
+        Some(v) => format!("{v:.4}"),
+        None => "none".to_string(),
     }
-    if let Some(p) = req.top_p {
-        if !params.is_empty() {
-            params.push(' ');
-        }
-        params.push_str(&format!("top_p={p:.4}"));
-    }
-    if !params.is_empty() {
-        text.push_str("\nparams: ");
-        text.push_str(&params);
-    }
-    text
 }
 
 /// Stable lowercase label for a role. Pinned here (not `Debug`) so the embedded
@@ -557,9 +627,30 @@ mod tests {
         }
     }
 
+    /// Serialises the redis-backed tests. They share one index name and key
+    /// prefix, and [`fresh_cache`] drops + recreates the index on entry, so
+    /// under cargo's default parallelism one test's `FT.DROPINDEX ... DD` can
+    /// wipe another test's just-stored entries mid-run. Each redis test holds
+    /// this lock (handed back by `fresh_cache`) for its whole body; the pure
+    /// no-infra tests never touch it.
+    fn semantic_test_lock() -> Arc<tokio::sync::Mutex<()>> {
+        static LOCK: std::sync::OnceLock<Arc<tokio::sync::Mutex<()>>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
     /// Build a SemanticCache against a fresh index, or skip if model/redis are
     /// unavailable (mirrors the redis-gated + model-gated patterns elsewhere).
-    async fn fresh_cache(threshold: f32) -> Option<SemanticCache> {
+    ///
+    /// Returns the cache **and** a held lock guard: callers bind the guard
+    /// (`let Some((cache, _guard)) = fresh_cache(..)`) so the shared index is
+    /// owned exclusively until the test ends, regardless of `--test-threads`.
+    async fn fresh_cache(
+        threshold: f32,
+    ) -> Option<(SemanticCache, tokio::sync::OwnedMutexGuard<()>)> {
+        // Acquire BEFORE touching the shared index so the drop/recreate and the
+        // test body are one critical section.
+        let guard = semantic_test_lock().lock_owned().await;
         let embedder = LocalBge::with_cache_dir(model_cache_dir()).ok()?;
         let config = SemanticConfig {
             enabled: true,
@@ -582,7 +673,7 @@ mod tests {
             .query_async(&mut conn)
             .await;
         cache.ensure_index().await.ok()?;
-        Some(cache)
+        Some((cache, guard))
     }
 
     // ---- pure helpers (no infra) ----
@@ -603,41 +694,44 @@ mod tests {
     }
 
     #[test]
-    fn prompt_text_differs_for_different_temperature() {
-        // Two requests identical except temperature must embed to DIFFERENT text,
-        // so the semantic tier never cross-hits across sampling params (the exact
-        // tier keys on temperature; the semantic tier must stay consistent).
+    fn prompt_text_ignores_sampling_params() {
+        // Sampling params are NO LONGER embedded — they are enforced as exact
+        // RediSearch TAG predicates instead (the embedded-suffix approach could
+        // not separate near-identical vectors under the cosine threshold). Two
+        // requests differing only in temperature/top_p must embed to the SAME
+        // text; separation happens at the TAG layer, asserted behaviourally in
+        // `different_temperature_misses`.
         let mut a = req("m", "hello");
         a.temperature = Some(0.2);
-        let mut b = req("m", "hello");
-        b.temperature = Some(0.9);
-        assert_ne!(
-            prompt_text(&a),
-            prompt_text(&b),
-            "temperature must change the embedded text"
-        );
-        // The params line must actually carry the value.
-        assert!(prompt_text(&a).contains("temperature=0.2000"));
-    }
-
-    #[test]
-    fn prompt_text_differs_for_different_top_p() {
-        let mut a = req("m", "hello");
         a.top_p = Some(0.5);
         let mut b = req("m", "hello");
+        b.temperature = Some(0.9);
         b.top_p = Some(0.95);
-        assert_ne!(prompt_text(&a), prompt_text(&b));
-        assert!(prompt_text(&a).contains("top_p=0.5000"));
+        assert_eq!(
+            prompt_text(&a),
+            prompt_text(&b),
+            "sampling params must NOT change the embedded text"
+        );
+        assert!(!prompt_text(&a).contains("temperature"));
+        assert!(!prompt_text(&a).contains("top_p"));
     }
 
     #[test]
-    fn prompt_text_omits_params_line_when_unset() {
-        // With neither sampling param set, no trailing `params:` line is appended.
-        let r = req("m", "hello");
-        assert!(
-            !prompt_text(&r).contains("params:"),
-            "no params line when temperature/top_p are unset"
-        );
+    fn param_tag_is_stable_and_separates_values() {
+        // Unset → "none"; set → 4-dp formatted, distinct per value.
+        assert_eq!(param_tag(None), "none");
+        assert_eq!(param_tag(Some(0.0)), "0.0000");
+        assert_eq!(param_tag(Some(0.2)), "0.2000");
+        assert_ne!(param_tag(Some(0.2)), param_tag(Some(0.9)));
+        // Unset and a set value must never collide.
+        assert_ne!(param_tag(None), param_tag(Some(0.0)));
+    }
+
+    #[test]
+    fn within_embed_budget_guards_oversized_prompts() {
+        assert!(within_embed_budget("short prompt"));
+        assert!(within_embed_budget(&"x".repeat(MAX_EMBED_CHARS)));
+        assert!(!within_embed_budget(&"x".repeat(MAX_EMBED_CHARS + 1)));
     }
 
     #[test]
@@ -737,7 +831,7 @@ mod tests {
 
     #[tokio::test]
     async fn exact_prompt_hits_with_high_similarity() {
-        let Some(cache) = fresh_cache(0.85).await else {
+        let Some((cache, _guard)) = fresh_cache(0.85).await else {
             return;
         };
         let r = req("openai/gpt-4o", "What is the capital of France?");
@@ -753,7 +847,7 @@ mod tests {
 
     #[tokio::test]
     async fn paraphrase_hits_above_threshold() {
-        let Some(cache) = fresh_cache(0.85).await else {
+        let Some((cache, _guard)) = fresh_cache(0.85).await else {
             return;
         };
         let stored = req("openai/gpt-4o", "What is the capital of France?");
@@ -766,7 +860,7 @@ mod tests {
 
     #[tokio::test]
     async fn unrelated_prompt_misses() {
-        let Some(cache) = fresh_cache(0.85).await else {
+        let Some((cache, _guard)) = fresh_cache(0.85).await else {
             return;
         };
         cache
@@ -784,7 +878,7 @@ mod tests {
 
     #[tokio::test]
     async fn different_model_misses() {
-        let Some(cache) = fresh_cache(0.85).await else {
+        let Some((cache, _guard)) = fresh_cache(0.85).await else {
             return;
         };
         cache
@@ -808,8 +902,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn different_temperature_misses() {
+        // bug_001 (behavioural): the C3 embedded-suffix fix asserted only string
+        // inequality, which passed while the feature stayed broken — a hit at a
+        // different temperature was still served because the suffix is invisible
+        // to the cosine gate. This test drives the REAL lookup: store at
+        // temperature 0.0, query the identical prompt at temperature 2.0, and
+        // require a MISS. It fails if the temperature TAG predicate is dropped.
+        let Some((cache, _guard)) = fresh_cache(0.85).await else {
+            return;
+        };
+        let mut stored = req("openai/gpt-4o", "What is the capital of France?");
+        stored.temperature = Some(0.0);
+        cache.store(&stored, &resp("paris")).await.unwrap();
+
+        let mut query = req("openai/gpt-4o", "What is the capital of France?");
+        query.temperature = Some(2.0);
+        let miss = cache.get(&query).await;
+        assert!(
+            miss.is_none(),
+            "a hit at a different temperature must MISS, got {miss:?}"
+        );
+
+        // Sanity: the same temperature still hits.
+        let hit = cache
+            .get(&stored)
+            .await
+            .expect("same temperature must still hit");
+        assert_eq!(hit.response.id, "resp-paris");
+    }
+
+    #[tokio::test]
+    async fn different_top_p_misses() {
+        let Some((cache, _guard)) = fresh_cache(0.85).await else {
+            return;
+        };
+        let mut stored = req("openai/gpt-4o", "What is the capital of France?");
+        stored.top_p = Some(0.1);
+        cache.store(&stored, &resp("paris")).await.unwrap();
+
+        let mut query = req("openai/gpt-4o", "What is the capital of France?");
+        query.top_p = Some(0.99);
+        assert!(
+            cache.get(&query).await.is_none(),
+            "a hit at a different top_p must MISS"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_prompt_is_not_cached_or_served() {
+        // bug_002: a prompt past the embed budget must neither be stored nor
+        // matched — it always falls through to a normal upstream call so BGE
+        // truncation can never serve a wrong cross-hit.
+        let Some((cache, _guard)) = fresh_cache(0.85).await else {
+            return;
+        };
+        let huge = "a ".repeat(MAX_EMBED_CHARS); // ~2x the char budget
+        let r = req("openai/gpt-4o", &huge);
+        // store() refuses an oversized prompt rather than embedding a truncation.
+        assert!(
+            cache.store(&r, &resp("huge")).await.is_err(),
+            "store must reject an oversized prompt"
+        );
+        // And a lookup of the same oversized prompt is a guaranteed miss.
+        assert!(
+            cache.get(&r).await.is_none(),
+            "oversized prompt lookup must miss"
+        );
+    }
+
+    #[tokio::test]
     async fn streaming_request_is_not_served_from_cache() {
-        let Some(cache) = fresh_cache(0.85).await else {
+        let Some((cache, _guard)) = fresh_cache(0.85).await else {
             return;
         };
         let mut r = req("openai/gpt-4o", "What is the capital of France?");
@@ -827,7 +991,7 @@ mod tests {
         // than MAX_INFLIGHT_WRITES must not panic, and a write that does land
         // becomes retrievable. Timing-sensitive saturation behaviour isn't
         // asserted here (it's racy); we only confirm set() still functions.
-        let Some(cache) = fresh_cache(0.85).await else {
+        let Some((cache, _guard)) = fresh_cache(0.85).await else {
             return;
         };
         for i in 0..(MAX_INFLIGHT_WRITES * 3) {

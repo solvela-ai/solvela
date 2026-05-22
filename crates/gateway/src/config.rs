@@ -182,6 +182,9 @@ impl SemanticSettings {
     /// - `hit_price_percent` must be in `1..=100`. `0` would bill nothing on a
     ///   hit → the escrow claim is skipped by the `amount == 0` guard → a free
     ///   response with no settlement. If you want free serving, disable the tier.
+    /// - `ttl_secs` must be `>= 1`. A `0` TTL makes the write-path `EXPIRE key 0`
+    ///   delete each entry the instant it is stored → a silent all-miss cache the
+    ///   operator believes is running. If you want no caching, disable the tier.
     pub fn validate(&self) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
@@ -197,6 +200,14 @@ impl SemanticSettings {
                 "cache.semantic.hit_price_percent must be in 1..=100, got {}",
                 self.hit_price_percent
             ));
+        }
+        if self.ttl_secs == 0 {
+            return Err(
+                "cache.semantic.ttl_secs must be >= 1 (got 0); a 0 TTL makes Redis EXPIRE \
+                 delete each entry on write, silently producing an all-miss cache. \
+                 Disable the tier instead if you want no caching."
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -407,6 +418,16 @@ model_cache_dir = "/models/bge"
     #[test]
     fn semantic_validate_rejects_out_of_range_hit_price_percent() {
         assert!(enabled_semantic(0.85, 101).validate().is_err());
+    }
+
+    #[test]
+    fn semantic_validate_rejects_zero_ttl_secs() {
+        // ttl_secs=0 → EXPIRE key 0 deletes the entry on write → silent all-miss
+        // cache. Must be fatal at startup, not silently degraded (bug_015).
+        let mut s = enabled_semantic(0.85, 30);
+        s.ttl_secs = 0;
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("ttl_secs"), "got: {err}");
     }
 
     #[test]

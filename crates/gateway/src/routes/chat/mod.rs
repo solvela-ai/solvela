@@ -33,7 +33,7 @@ use crate::AppState;
 
 use cost::{
     cap_usage_to_request_limits, compute_actual_atomic_cost, estimate_input_tokens,
-    estimated_atomic_cost, spend_cost_usdc, usdc_atomic_amount_checked,
+    estimated_atomic_cost, scheme_realized_discount, spend_cost_usdc, usdc_atomic_amount_checked,
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
@@ -617,17 +617,21 @@ pub async fn chat_completions(
                 }
             }
 
+            // merged_005: the semantic discount is only *realised* on the escrow
+            // scheme — the gateway claims the reduced amount and the remainder
+            // refunds to the agent. On the direct-transfer "exact" scheme the
+            // agent already settled the FULL amount on-chain before the cache was
+            // consulted, with no refund path, so the discount must NOT touch
+            // either the claim or the spend ledger there. Gate it by scheme once,
+            // here, and feed `realized_discount` to both the claim and the log.
+            let realized_discount = scheme_realized_discount(&payment_scheme, cost_outcome);
+
             // Compute escrow claim amount: prefer actual usage, fall back to estimate
             // E2 FIX: Use minimum 1 atomic unit for streaming when estimation fails
-            let claim_atomic = if let Some(outcome) = cost_outcome {
-                // Semantic-cache hit: bill the discounted price. On the escrow
-                // scheme the gateway claims only this amount and the remainder
-                // refunds to the agent — this is how the Phase 1 cache discount
-                // is realised. For the direct-transfer "exact" scheme the agent
-                // already settled the full amount up front; `fire_escrow_claim`
-                // below returns early for non-escrow schemes, so this discounted
-                // `claim_atomic` is computed but never used there. A future
-                // exact-scheme settlement must not blindly apply this value.
+            let claim_atomic = if let Some(outcome) = realized_discount {
+                // Escrow semantic-cache hit: claim only the discounted price; the
+                // remainder refunds to the agent. This is how the Phase 1 cache
+                // discount is realised on-chain.
                 Some(outcome.billable_atomic())
             } else if let Some(ref u) = usage {
                 // `compute_actual_atomic_cost` returns `None` when the model
@@ -666,7 +670,16 @@ pub async fn chat_completions(
                 );
             }
 
-            // Log spend with actual usage (non-streaming) or estimated (streaming)
+            // Log spend with actual usage (non-streaming) or estimated (streaming).
+            //
+            // Two cases must both reconcile the `estimated_cost` reservation that
+            // `check_budget` committed to the Redis counters (the H1 fix):
+            //   (a) usage present — price from the actual (capped) tokens.
+            //   (b) usage ABSENT but a semantic hit occurred (`cost_outcome` is
+            //       Some) — the cached response carried no `usage`. We MUST still
+            //       log, or the reservation is never settled down to the realised
+            //       price and the wallet's budget stays consumed at the full
+            //       reservation forever (merged_005 part 2 — ~70% over-consume).
             if let Some(ref u) = usage {
                 match state
                     .model_registry
@@ -677,15 +690,14 @@ pub async fn chat_completions(
                         })
                     }) {
                     Ok(cost) => {
-                        // On a semantic-cache hit the agent is billed the
-                        // discounted price, so the spend ledger must record that
-                        // — not the full computed `cost`. Keeping the full
-                        // `estimated_cost` as the reservation means the counter
-                        // delta `(billed − reserved)` settles the wallet's
-                        // budget down to the discounted amount, instead of
-                        // consuming it at 100% (which would deny the agent
-                        // service before its real spend warrants it).
-                        let billed_cost = spend_cost_usdc(cost_outcome, cost);
+                        // On an ESCROW semantic-cache hit the agent is billed the
+                        // discounted price, so the spend ledger must record that —
+                        // not the full computed `cost`. On the exact scheme
+                        // `realized_discount` is None, so the FULL cost is logged
+                        // (the agent paid it on-chain with no refund). The counter
+                        // delta `(billed − reserved)` then settles the wallet's
+                        // budget to the right amount.
+                        let billed_cost = spend_cost_usdc(realized_discount, cost);
                         // Pass the estimated_cost that was committed to Redis
                         // counters in `check_budget` so log_spend can adjust
                         // by the (billed − estimated) delta. Without this,
@@ -712,6 +724,26 @@ pub async fn chat_completions(
                         );
                     }
                 }
+            } else if cost_outcome.is_some() {
+                // Usage-less semantic hit: reconcile the reservation. On escrow,
+                // bill the discount; on exact, `realized_discount` is None so we
+                // bill the full reservation (`estimated_cost`) — a zero delta that
+                // correctly leaves the on-chain-settled full amount in the ledger.
+                // We have no token counts (the cached response omitted usage), so
+                // record the input estimate and zero output.
+                let billed_cost = spend_cost_usdc(realized_discount, estimated_cost);
+                state.usage.log_spend(SpendLogEntry {
+                    wallet_address: wallet_address.clone(),
+                    model: req.model.clone(),
+                    provider: actual_provider.unwrap_or_else(|| provider_name.to_string()),
+                    input_tokens: estimate_input_tokens(&req),
+                    output_tokens: 0,
+                    cost_usdc: billed_cost,
+                    tx_signature: tx_signature.clone(),
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    estimated_cost_usdc: Some(estimated_cost),
+                });
             }
 
             Ok(response)

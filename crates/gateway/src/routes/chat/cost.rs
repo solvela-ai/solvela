@@ -319,6 +319,27 @@ pub(crate) fn apply_hit_price(full_atomic: u64, hit_price_percent: u8) -> u64 {
     ((full_atomic as u128) * pct / 100) as u64
 }
 
+/// The semantic discount that is actually *realised* on-chain for a payment
+/// scheme.
+///
+/// The discount is only collectable on the **escrow** scheme, where the gateway
+/// claims the reduced amount and refunds the remainder. On the direct-transfer
+/// **exact** scheme the agent already settled the full amount up front with no
+/// refund path, so no discount applies — both the escrow claim and the spend
+/// ledger must use the full price there. Returns `None` (→ full price) for any
+/// non-escrow scheme. See merged_005: logging the discounted price on `exact`
+/// under-counts the wallet's real spend, since the agent was charged in full.
+pub(crate) fn scheme_realized_discount(
+    payment_scheme: &str,
+    cost_outcome: Option<SemanticDiscount>,
+) -> Option<SemanticDiscount> {
+    if payment_scheme == "escrow" {
+        cost_outcome
+    } else {
+        None
+    }
+}
+
 /// The USDC amount to record in the spend log / budget ledger for this request.
 ///
 /// On a semantic-cache hit the agent is billed the **discounted** price, so the
@@ -989,6 +1010,22 @@ supports_vision = false
     #[test]
     fn spend_cost_uses_full_when_no_discount() {
         assert_eq!(spend_cost_usdc(None, 5.0), 5.0);
+    }
+
+    #[test]
+    fn scheme_realized_discount_applies_only_to_escrow() {
+        // merged_005: the discount is realised (claim less + refund) only on the
+        // escrow scheme. On exact the agent paid full on-chain with no refund, so
+        // the discount must not reach the claim or the spend ledger.
+        let d = SemanticDiscount::new(1000, 30);
+        assert_eq!(scheme_realized_discount("escrow", Some(d)), Some(d));
+        assert_eq!(
+            scheme_realized_discount("exact", Some(d)),
+            None,
+            "exact scheme must NOT realise the discount (agent paid full on-chain)"
+        );
+        assert_eq!(scheme_realized_discount("exact", None), None);
+        assert_eq!(scheme_realized_discount("escrow", None), None);
     }
 
     // -------------------------------------------------------------------------
