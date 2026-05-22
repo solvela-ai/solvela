@@ -15,7 +15,9 @@ use super::{ResponseCache, CACHE_KEY_PREFIX};
 
 impl ResponseCache {
     /// Generate a cache key from a request.
-    /// Key = SHA256(model + sorted_messages_json + temperature)
+    /// Key = SHA256(model + messages_json + temperature). Message order is
+    /// significant (it's part of the conversation), so messages are NOT sorted —
+    /// see `cache_key_is_sensitive_to_message_order`.
     pub fn cache_key(req: &ChatRequest) -> String {
         let mut hasher = Sha256::new();
         hasher.update(req.model.as_bytes());
