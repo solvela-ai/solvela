@@ -22,9 +22,7 @@ use crate::providers::heartbeat::{HeartbeatConfig, HeartbeatItem, HeartbeatStrea
 use crate::routes::debug_headers::{attach_debug_headers, CacheStatus, PaymentStatus};
 use crate::AppState;
 
-use super::cost::{
-    compute_actual_atomic_cost, estimate_input_tokens, estimated_atomic_cost, SemanticDiscount,
-};
+use super::cost::{estimate_input_tokens, semantic_hit_full_atomic, SemanticDiscount};
 use super::response::{attach_session_id, build_debug_info};
 
 /// Classify a provider error into a bounded set of label values for metrics.
@@ -170,29 +168,18 @@ pub(crate) async fn execute_provider_call(
         // ── Tier 2: semantic match ─────────────────────────────────────────
         if let Some(sem) = &ctx.state.semantic_cache {
             if let Some(hit) = sem.get(ctx.req).await {
-                // Price the discount: full = what a miss would cost. Prefer the
-                // cached response's actual usage; fall back to an estimate when
-                // `usage` is absent (the OpenAI spec makes it optional and some
-                // providers omit it). If neither yields a positive cost we must
-                // NOT serve a free response — fall through to the upstream call
-                // so the request bills normally instead of claiming zero from
-                // escrow.
-                let full_atomic = hit
-                    .response
-                    .usage
-                    .as_ref()
-                    .and_then(|u| {
-                        compute_actual_atomic_cost(
-                            u.prompt_tokens,
-                            u.completion_tokens,
-                            ctx.model_info,
-                        )
-                    })
-                    .or_else(|| {
-                        estimated_atomic_cost(&ctx.state.model_registry, &ctx.req.model, ctx.req)
-                            .ok()
-                    })
-                    .filter(|&c| c > 0);
+                // Price the discount: full = what a miss would cost (prefer the
+                // cached response's actual usage, fall back to the current
+                // request's estimate, reject zero). `None` ⇒ unpriceable, so we
+                // fall through to a normal upstream call rather than serve a
+                // discounted-from-nothing (free) response. See C2.
+                let full_atomic = semantic_hit_full_atomic(
+                    hit.response.usage.as_ref(),
+                    &ctx.state.model_registry,
+                    &ctx.req.model,
+                    ctx.req,
+                    ctx.model_info,
+                );
 
                 if let Some(full_atomic) = full_atomic {
                     counter!("solvela_cache_total", "result" => "semantic_hit").increment(1);

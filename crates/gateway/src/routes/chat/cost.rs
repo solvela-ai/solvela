@@ -324,6 +324,27 @@ pub(crate) fn spend_cost_usdc(cost_outcome: Option<SemanticDiscount>, full_cost_
     }
 }
 
+/// The full (undiscounted) all-in price to charge for a semantic-cache hit, in
+/// atomic USDC, or `None` if no positive price can be derived.
+///
+/// `ChatResponse.usage` is optional and some providers omit it. We prefer the
+/// cached response's actual token cost, fall back to the current request's
+/// estimate, and **reject zero** so a usage-less hit can never settle free
+/// (the C2 bug): a `None` here signals the caller to fall through to a normal
+/// upstream call rather than serve a discounted-from-nothing response.
+pub(crate) fn semantic_hit_full_atomic(
+    usage: Option<&Usage>,
+    registry: &solvela_router::models::ModelRegistry,
+    model: &str,
+    req: &ChatRequest,
+    model_info: &ModelInfo,
+) -> Option<u64> {
+    usage
+        .and_then(|u| compute_actual_atomic_cost(u.prompt_tokens, u.completion_tokens, model_info))
+        .or_else(|| estimated_atomic_cost(registry, model, req).ok())
+        .filter(|&c| c > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -959,5 +980,60 @@ supports_vision = false
     #[test]
     fn spend_cost_uses_full_when_no_discount() {
         assert_eq!(spend_cost_usdc(None, 5.0), 5.0);
+    }
+
+    // -------------------------------------------------------------------------
+    // semantic_hit_full_atomic — C2 guard (a usage-less hit must never bill 0)
+    // -------------------------------------------------------------------------
+
+    fn priced_registry(cost_per_million: f64) -> solvela_router::models::ModelRegistry {
+        registry_with_cost(cost_per_million)
+    }
+
+    #[test]
+    fn semantic_full_price_uses_actual_usage_when_present() {
+        let reg = priced_registry(2.0);
+        let mi = reg.get("test/test-model").unwrap();
+        let usage = Usage {
+            prompt_tokens: 1000,
+            completion_tokens: 500,
+            total_tokens: 1500,
+        };
+        let req = make_request("test/test-model", vec![user_msg("hi")]);
+        let got = semantic_hit_full_atomic(Some(&usage), &reg, "test/test-model", &req, mi);
+        // 1000+500 tokens @ $2/M = $0.003 provider; ×1.05 fee = 3150 atomic.
+        assert_eq!(got, Some(3150));
+    }
+
+    #[test]
+    fn semantic_full_price_falls_back_to_estimate_when_usage_absent() {
+        let reg = priced_registry(2.0);
+        let mi = reg.get("test/test-model").unwrap();
+        let req = make_request("test/test-model", vec![user_msg("hello there")]);
+        let got = semantic_hit_full_atomic(None, &reg, "test/test-model", &req, mi);
+        assert!(
+            got.is_some() && got.unwrap() > 0,
+            "usage-less hit on a priced model must estimate a positive cost, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn semantic_full_price_returns_none_when_unpriceable_never_zero() {
+        // Zero-priced model: actual usage prices to 0 AND estimate prices to 0.
+        // The function must return None (→ caller falls through to upstream),
+        // NOT Some(0) (which would settle the hit free — the C2 regression).
+        let reg = priced_registry(0.0);
+        let mi = reg.get("test/test-model").unwrap();
+        let usage = Usage {
+            prompt_tokens: 1000,
+            completion_tokens: 500,
+            total_tokens: 1500,
+        };
+        let req = make_request("test/test-model", vec![user_msg("hi")]);
+        assert_eq!(
+            semantic_hit_full_atomic(Some(&usage), &reg, "test/test-model", &req, mi),
+            None,
+            "a zero-priceable hit must be None (fall through), never Some(0)"
+        );
     }
 }
