@@ -218,6 +218,63 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Semantic cache settings ([cache.semantic])
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn semantic_cache_defaults_off_and_conservative() {
+        let config = AppConfig::default();
+        assert!(
+            !config.cache.semantic.enabled,
+            "semantic cache MUST default off — zero behaviour change"
+        );
+        assert_eq!(config.cache.semantic.threshold, 0.85);
+        assert_eq!(config.cache.semantic.hit_price_percent, 30);
+        assert_eq!(config.cache.semantic.ttl_secs, 600);
+        assert!(config.cache.semantic.model_cache_dir.is_none());
+    }
+
+    #[test]
+    fn semantic_cache_parses_from_toml() {
+        let toml = r#"
+[server]
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+recipient_wallet = ""
+[providers]
+[cache.semantic]
+enabled = true
+threshold = 0.9
+hit_price_percent = 25
+ttl_secs = 1200
+model_cache_dir = "/models/bge"
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("valid config TOML");
+        assert!(config.cache.semantic.enabled);
+        assert_eq!(config.cache.semantic.threshold, 0.9);
+        assert_eq!(config.cache.semantic.hit_price_percent, 25);
+        assert_eq!(config.cache.semantic.ttl_secs, 1200);
+        assert_eq!(
+            config.cache.semantic.model_cache_dir.as_deref(),
+            Some("/models/bge")
+        );
+    }
+
+    #[test]
+    fn cache_section_absent_falls_back_to_defaults() {
+        let toml = r#"
+[server]
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+recipient_wallet = ""
+[providers]
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("valid config TOML");
+        assert!(!config.cache.semantic.enabled);
+        assert_eq!(config.cache.semantic.threshold, 0.85);
+    }
+
+    // -------------------------------------------------------------------------
     // Security: secret redaction in Debug output (100% coverage required)
     // -------------------------------------------------------------------------
 
