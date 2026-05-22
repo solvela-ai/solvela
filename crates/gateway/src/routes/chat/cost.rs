@@ -307,6 +307,11 @@ impl SemanticDiscount {
 /// on a hit (e.g. `30` = pay 30%, a 70% discount). Clamped to `0..=100`, so the
 /// result is always `floor(full_atomic * pct / 100)` and never exceeds
 /// `full_atomic`.
+///
+/// Floor division means a sub-cent `full_atomic` can yield `0` even at a valid
+/// non-zero percent (e.g. `full_atomic = 99`, `pct = 1` → `0`). That is benign:
+/// the escrow claim's `amount == 0` guard skips it and the spend ledger records
+/// `0`, correctly crediting the agent's budget for a near-free micro-request.
 pub(crate) fn apply_hit_price(full_atomic: u64, hit_price_percent: u8) -> u64 {
     let pct = hit_price_percent.min(100) as u128;
     // u128 intermediate so `full_atomic * pct` cannot overflow u64; the result
