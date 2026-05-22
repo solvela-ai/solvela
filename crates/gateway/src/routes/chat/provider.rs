@@ -13,7 +13,7 @@ use axum::response::{sse, IntoResponse, Response};
 use axum::Json;
 use futures::StreamExt;
 use metrics::{counter, histogram};
-use tracing::info;
+use tracing::{info, warn};
 
 use solvela_protocol::ChatRequest;
 
@@ -22,7 +22,9 @@ use crate::providers::heartbeat::{HeartbeatConfig, HeartbeatItem, HeartbeatStrea
 use crate::routes::debug_headers::{attach_debug_headers, CacheStatus, PaymentStatus};
 use crate::AppState;
 
-use super::cost::{compute_actual_atomic_cost, estimate_input_tokens, SemanticDiscount};
+use super::cost::{
+    compute_actual_atomic_cost, estimate_input_tokens, estimated_atomic_cost, SemanticDiscount,
+};
 use super::response::{attach_session_id, build_debug_info};
 
 /// Classify a provider error into a bounded set of label values for metrics.
@@ -168,12 +170,13 @@ pub(crate) async fn execute_provider_call(
         // ── Tier 2: semantic match ─────────────────────────────────────────
         if let Some(sem) = &ctx.state.semantic_cache {
             if let Some(hit) = sem.get(ctx.req).await {
-                counter!("solvela_cache_total", "result" => "semantic_hit").increment(1);
-                cache_status = CacheStatus::SemanticHit;
-
-                // Price the discount: full = what a miss would cost for the
-                // cached usage; billed = hit_price_percent of that. Realised on
-                // the escrow scheme (the paid path claims `billable_atomic`).
+                // Price the discount: full = what a miss would cost. Prefer the
+                // cached response's actual usage; fall back to an estimate when
+                // `usage` is absent (the OpenAI spec makes it optional and some
+                // providers omit it). If neither yields a positive cost we must
+                // NOT serve a free response — fall through to the upstream call
+                // so the request bills normally instead of claiming zero from
+                // escrow.
                 let full_atomic = hit
                     .response
                     .usage
@@ -185,46 +188,64 @@ pub(crate) async fn execute_provider_call(
                             ctx.model_info,
                         )
                     })
-                    .unwrap_or(0);
-                let pct = ctx.state.config.cache.semantic.hit_price_percent;
-                let cost_outcome = SemanticDiscount::new(full_atomic, pct);
-                info!(
+                    .or_else(|| {
+                        estimated_atomic_cost(&ctx.state.model_registry, &ctx.req.model, ctx.req)
+                            .ok()
+                    })
+                    .filter(|&c| c > 0);
+
+                if let Some(full_atomic) = full_atomic {
+                    counter!("solvela_cache_total", "result" => "semantic_hit").increment(1);
+                    cache_status = CacheStatus::SemanticHit;
+
+                    let pct = ctx.state.config.cache.semantic.hit_price_percent;
+                    let cost_outcome = SemanticDiscount::new(full_atomic, pct);
+                    info!(
+                        model = %ctx.req.model,
+                        similarity = hit.similarity,
+                        billed_atomic = cost_outcome.billable_atomic(),
+                        "serving from cache (semantic)"
+                    );
+
+                    let usage = hit.response.usage.clone();
+                    let mut resp = Json(
+                        serde_json::to_value(&hit.response)
+                            .map_err(|e| ProviderCallError::Internal(e.to_string()))?,
+                    )
+                    .into_response();
+                    attach_session_id(&mut resp, ctx.session_id);
+                    if ctx.debug_enabled {
+                        attach_debug_headers(
+                            &mut resp,
+                            &build_debug_info(
+                                &ctx.req.model,
+                                ctx.routing_tier,
+                                ctx.routing_score,
+                                ctx.routing_profile,
+                                provider_name,
+                                cache_status,
+                                ctx.request_start.elapsed().as_millis() as u64,
+                                ctx.payment_status,
+                                estimate_input_tokens(ctx.req),
+                                ctx.req.max_tokens.unwrap_or(1000),
+                            ),
+                        );
+                    }
+                    return Ok(ProviderCallResult {
+                        response: resp,
+                        usage,
+                        actual_provider: None,
+                        cost_outcome: Some(cost_outcome),
+                    });
+                }
+
+                // Unpriceable hit: refuse to serve it for free.
+                warn!(
                     model = %ctx.req.model,
                     similarity = hit.similarity,
-                    billed_atomic = cost_outcome.billable_atomic(),
-                    "serving from cache (semantic)"
+                    "semantic cache hit but discount could not be priced; \
+                     falling through to upstream so the request bills normally"
                 );
-
-                let usage = hit.response.usage.clone();
-                let mut resp = Json(
-                    serde_json::to_value(&hit.response)
-                        .map_err(|e| ProviderCallError::Internal(e.to_string()))?,
-                )
-                .into_response();
-                attach_session_id(&mut resp, ctx.session_id);
-                if ctx.debug_enabled {
-                    attach_debug_headers(
-                        &mut resp,
-                        &build_debug_info(
-                            &ctx.req.model,
-                            ctx.routing_tier,
-                            ctx.routing_score,
-                            ctx.routing_profile,
-                            provider_name,
-                            cache_status,
-                            ctx.request_start.elapsed().as_millis() as u64,
-                            ctx.payment_status,
-                            estimate_input_tokens(ctx.req),
-                            ctx.req.max_tokens.unwrap_or(1000),
-                        ),
-                    );
-                }
-                return Ok(ProviderCallResult {
-                    response: resp,
-                    usage,
-                    actual_provider: None,
-                    cost_outcome: Some(cost_outcome),
-                });
             }
         }
 
@@ -419,9 +440,15 @@ async fn execute_non_streaming_call(
 
     match result {
         Ok(result) => {
-            // Cache the response
+            // Cache the response (exact tier).
             if let Some(cache) = &ctx.state.cache {
                 cache.set(ctx.req, &result.data).await;
+            }
+            // Populate the semantic tier so paraphrases of this prompt can hit
+            // later. `set` spawns its own background task (fire-and-forget, rule
+            // #9) — the embedding and Redis write never touch the hot path.
+            if let Some(sem) = &ctx.state.semantic_cache {
+                sem.set(ctx.req, &result.data).await;
             }
 
             let response_json = serde_json::to_value(&result.data)

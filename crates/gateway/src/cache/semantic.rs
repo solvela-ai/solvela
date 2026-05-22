@@ -199,6 +199,13 @@ impl SemanticCache {
 
         let (response_json, distance) = parse_top_hit(&raw)?;
         let similarity = 1.0 - distance;
+        // Guard against NaN/∞ scores (e.g. a RediSearch reply parsed as "nan"/"inf").
+        // `NaN < threshold` is always false, so an unguarded comparison would let a
+        // garbage score slip past the gate and serve an arbitrary cached response.
+        if !similarity.is_finite() {
+            warn!(distance, model = %req.model, "semantic cache score non-finite; treating as miss");
+            return None;
+        }
         if similarity < self.config.threshold {
             return None;
         }
