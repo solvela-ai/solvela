@@ -80,24 +80,52 @@ impl LocalBge {
 }
 
 impl Embedder for LocalBge {
-    fn embed_one(&self, _text: &str) -> Result<Vec<f32>, EmbedderError> {
-        unimplemented!("RED: embed_one not yet implemented")
+    fn embed_one(&self, text: &str) -> Result<Vec<f32>, EmbedderError> {
+        let mut model = self
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut out = model
+            .embed(vec![text.to_string()], None)
+            .map_err(|e| EmbedderError::Embed(e.to_string()))?;
+        out.pop()
+            .ok_or_else(|| EmbedderError::Embed("fastembed returned no vectors".to_string()))
     }
 
-    fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedderError> {
-        unimplemented!("RED: embed_batch not yet implemented")
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedderError> {
+        let mut model = self
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
+        model
+            .embed(owned, None)
+            .map_err(|e| EmbedderError::Embed(e.to_string()))
     }
 
     fn dim(&self) -> usize {
-        0
+        self.dim
     }
 }
 
 /// Cosine similarity between two equal-length vectors. Returns a value in
 /// `[-1, 1]`; higher means more similar. Returns `0.0` if either vector has
 /// zero magnitude (avoids NaN from division by zero).
-pub fn cosine(_a: &[f32], _b: &[f32]) -> f32 {
-    0.0 // RED: real computation not yet implemented
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len(), "embedding dimension mismatch");
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for (x, y) in a.iter().zip(b) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom == 0.0 {
+        return 0.0;
+    }
+    dot / denom
 }
 
 #[cfg(test)]
