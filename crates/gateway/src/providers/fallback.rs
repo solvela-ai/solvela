@@ -627,9 +627,13 @@ mod tests {
         assert_ne!(result.original_model, result.actual_model);
     }
 
-    #[test]
-    fn test_model_fallback_chain_no_self_duplicates() {
-        let known_models: Vec<(&str, &str)> = vec![
+    /// Every `(provider, model_id)` primary that `model_fallback_chain` has a
+    /// dedicated match arm for. Single source for the fallback tests below.
+    ///
+    /// **When you add a new arm to `model_fallback_chain`, add its key here** so
+    /// `every_fallback_chain_id_is_registered` exercises it.
+    fn fallback_chain_keys() -> Vec<(&'static str, &'static str)> {
+        vec![
             ("anthropic", "claude-opus-4-6"),
             ("openai", "gpt-5.2"),
             ("google", "gemini-3.1-pro"),
@@ -647,7 +651,48 @@ mod tests {
             ("openai", "o3-mini"),
             ("openai", "o4-mini"),
             ("deepseek", "deepseek-reasoner"),
-        ];
+        ]
+    }
+
+    /// CI guard: every model ID referenced by `model_fallback_chain` — each
+    /// keyed primary AND every cross-provider fallback target it returns — must
+    /// be a model registered in the production `config/models.toml`.
+    ///
+    /// Without this, a model renamed in `config/models.toml` (but not here)
+    /// silently routes a fallback to an ID the gateway doesn't know, or — when
+    /// the primary itself goes stale — drops to the `_ => vec![primary]` arm and
+    /// loses cross-provider failover entirely. This is exactly the drift class
+    /// that left a never-registered `claude-3-5-haiku-20241022` and the
+    /// pre-#358 `claude-*-4-20250514` IDs lingering in these chains. Mirrors the
+    /// router's `every_alias_and_profile_tier_resolves_to_a_registered_model`.
+    #[test]
+    fn every_fallback_chain_id_is_registered() {
+        let toml_str = include_str!("../../../../config/models.toml");
+        let registry = solvela_router::models::ModelRegistry::from_toml(toml_str)
+            .expect("config/models.toml must parse");
+
+        for (provider, model) in fallback_chain_keys() {
+            let canonical = format!("{provider}/{model}");
+            assert!(
+                registry.get(&canonical).is_some(),
+                "fallback chain key {canonical:?} is not in config/models.toml — \
+                 a stale primary drops to primary-only failover"
+            );
+            for (p, m) in model_fallback_chain(provider, model) {
+                let target = format!("{p}/{m}");
+                assert!(
+                    registry.get(&target).is_some(),
+                    "fallback target {target:?} (in the chain for {canonical:?}) \
+                     is not in config/models.toml — a stale ID routes failover to \
+                     a model the gateway doesn't know"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_model_fallback_chain_no_self_duplicates() {
+        let known_models = fallback_chain_keys();
         for (provider, model) in &known_models {
             let chain = model_fallback_chain(provider, model);
             let mut seen = std::collections::HashSet::new();
