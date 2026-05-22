@@ -249,6 +249,54 @@ fn usdc_atomic_amount(decimal_str: &str) -> String {
     usdc_atomic_amount_checked(decimal_str).unwrap_or_else(|_| "0".to_string())
 }
 
+/// The outcome of pricing a request: how much the agent is actually billed,
+/// in atomic USDC units.
+///
+/// A `Full` outcome is the normal case (cache miss or exact-match hit — the
+/// agent pays the full computed cost). A `SemanticCacheHit` carries both the
+/// full price (what a miss would have cost — retained for receipts, metrics,
+/// and response headers) and the discounted price actually billed. Per the
+/// semantic-cache design, the discount is realised on the **escrow scheme** by
+/// claiming only `discounted_atomic`; the remainder refunds to the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CostOutcome {
+    /// Normal pricing — bill the full computed cost.
+    Full { atomic: u64 },
+    /// Semantic cache hit — bill `discounted_atomic`; `full_atomic` is what a
+    /// miss would have cost.
+    SemanticCacheHit {
+        full_atomic: u64,
+        discounted_atomic: u64,
+    },
+}
+
+impl CostOutcome {
+    /// Build a semantic-hit outcome, computing the discounted price from the
+    /// full price and the percent-of-full to bill (e.g. `30` → bill 30%).
+    pub(crate) fn semantic_hit(full_atomic: u64, hit_price_percent: u8) -> Self {
+        CostOutcome::SemanticCacheHit {
+            full_atomic,
+            discounted_atomic: apply_hit_price(full_atomic, hit_price_percent),
+        }
+    }
+
+    /// Amount to actually charge / claim, in atomic USDC.
+    pub(crate) fn billable_atomic(&self) -> u64 {
+        unimplemented!("RED: billable_atomic not yet implemented")
+    }
+}
+
+/// Apply a semantic-hit price to a full atomic cost using integer arithmetic
+/// (no f64 — financial math stays exact).
+///
+/// `hit_price_percent` is the percentage of the full price the agent still pays
+/// on a hit (e.g. `30` = pay 30%, a 70% discount). Clamped to `0..=100`, so the
+/// result is always `floor(full_atomic * pct / 100)` and never exceeds
+/// `full_atomic`.
+pub(crate) fn apply_hit_price(_full_atomic: u64, _hit_price_percent: u8) -> u64 {
+    0 // RED: not yet implemented
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -824,5 +872,63 @@ supports_vision = false
             result.is_err(),
             "unknown model must return Err, got: {result:?}"
         );
+    }
+
+    // =========================================================================
+    // CostOutcome + apply_hit_price — semantic-cache discount (integer math)
+    // =========================================================================
+
+    #[test]
+    fn apply_hit_price_charges_the_given_percent() {
+        assert_eq!(apply_hit_price(1000, 30), 300);
+        assert_eq!(apply_hit_price(2625, 30), 787); // floor(787.5)
+    }
+
+    #[test]
+    fn apply_hit_price_full_percent_is_no_discount() {
+        assert_eq!(apply_hit_price(1000, 100), 1000);
+    }
+
+    #[test]
+    fn apply_hit_price_zero_percent_is_free() {
+        assert_eq!(apply_hit_price(1000, 0), 0);
+    }
+
+    #[test]
+    fn apply_hit_price_clamps_above_100_to_full() {
+        // A misconfigured >100% must never bill more than the full price.
+        assert_eq!(apply_hit_price(1000, 200), 1000);
+    }
+
+    #[test]
+    fn apply_hit_price_floors_sub_unit_amounts() {
+        // floor(1 * 0.30) == 0; never rounds up to over-bill.
+        assert_eq!(apply_hit_price(1, 30), 0);
+    }
+
+    #[test]
+    fn apply_hit_price_never_exceeds_full_and_never_overflows() {
+        // Large value × percent must not overflow u64 (computed in u128).
+        let discounted = apply_hit_price(u64::MAX, 50);
+        assert!(discounted <= u64::MAX);
+        assert_eq!(discounted, u64::MAX / 2);
+    }
+
+    #[test]
+    fn cost_outcome_full_bills_full() {
+        assert_eq!(CostOutcome::Full { atomic: 500 }.billable_atomic(), 500);
+    }
+
+    #[test]
+    fn cost_outcome_semantic_hit_bills_discounted() {
+        let outcome = CostOutcome::semantic_hit(1000, 30);
+        assert_eq!(
+            outcome,
+            CostOutcome::SemanticCacheHit {
+                full_atomic: 1000,
+                discounted_atomic: 300,
+            }
+        );
+        assert_eq!(outcome.billable_atomic(), 300);
     }
 }
