@@ -258,6 +258,9 @@ fn usdc_atomic_amount(decimal_str: &str) -> String {
 /// and response headers) and the discounted price actually billed. Per the
 /// semantic-cache design, the discount is realised on the **escrow scheme** by
 /// claiming only `discounted_atomic`; the remainder refunds to the agent.
+// Wired into the chat handler's pricing/escrow-claim path in the next commit
+// (the "semantic discount seam"); allow dead_code only for this interim step.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CostOutcome {
     /// Normal pricing — bill the full computed cost.
@@ -270,6 +273,7 @@ pub(crate) enum CostOutcome {
     },
 }
 
+#[allow(dead_code)] // wired in the next commit (semantic discount seam)
 impl CostOutcome {
     /// Build a semantic-hit outcome, computing the discounted price from the
     /// full price and the percent-of-full to bill (e.g. `30` → bill 30%).
@@ -282,7 +286,12 @@ impl CostOutcome {
 
     /// Amount to actually charge / claim, in atomic USDC.
     pub(crate) fn billable_atomic(&self) -> u64 {
-        unimplemented!("RED: billable_atomic not yet implemented")
+        match *self {
+            CostOutcome::Full { atomic } => atomic,
+            CostOutcome::SemanticCacheHit {
+                discounted_atomic, ..
+            } => discounted_atomic,
+        }
     }
 }
 
@@ -293,8 +302,12 @@ impl CostOutcome {
 /// on a hit (e.g. `30` = pay 30%, a 70% discount). Clamped to `0..=100`, so the
 /// result is always `floor(full_atomic * pct / 100)` and never exceeds
 /// `full_atomic`.
-pub(crate) fn apply_hit_price(_full_atomic: u64, _hit_price_percent: u8) -> u64 {
-    0 // RED: not yet implemented
+#[allow(dead_code)] // wired in the next commit (semantic discount seam)
+pub(crate) fn apply_hit_price(full_atomic: u64, hit_price_percent: u8) -> u64 {
+    let pct = hit_price_percent.min(100) as u128;
+    // u128 intermediate so `full_atomic * pct` cannot overflow u64; the result
+    // is always ≤ full_atomic (pct ≤ 100), so the cast back is lossless.
+    ((full_atomic as u128) * pct / 100) as u64
 }
 
 #[cfg(test)]
