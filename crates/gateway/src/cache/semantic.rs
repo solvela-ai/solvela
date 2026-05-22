@@ -20,7 +20,8 @@
 use std::sync::Arc;
 
 use redis::aio::ConnectionManager;
-use tracing::{info, warn};
+use tokio::sync::Semaphore;
+use tracing::{debug, info, warn};
 
 use solvela_protocol::{ChatRequest, ChatResponse};
 
@@ -31,6 +32,13 @@ use super::embedder::Embedder;
 const SEMANTIC_PREFIX: &str = "solvela:scache";
 /// RediSearch index name over the semantic entries.
 const SEMANTIC_INDEX: &str = "solvela_scache_idx";
+
+/// Upper bound on concurrent fire-and-forget [`SemanticCache::set`] writes. Each
+/// write runs a Mutex-serialised embedding (~75/s ceiling), so under a cache-miss
+/// storm unbounded `tokio::spawn`s would pile up faster than they drain. We cap
+/// in-flight writes here and drop the overflow — dropping a cache *write* (not a
+/// response) is acceptable per the spirit of CLAUDE.md rule #9.
+const MAX_INFLIGHT_WRITES: usize = 8;
 
 /// Configuration for the semantic cache tier.
 #[derive(Debug, Clone)]
@@ -68,6 +76,8 @@ pub struct SemanticCache {
     conn: ConnectionManager,
     embedder: Arc<dyn Embedder>,
     config: SemanticConfig,
+    /// Bounds concurrent fire-and-forget writes (see [`MAX_INFLIGHT_WRITES`]).
+    write_slots: Arc<Semaphore>,
 }
 
 impl SemanticCache {
@@ -104,6 +114,7 @@ impl SemanticCache {
             conn,
             embedder,
             config,
+            write_slots: Arc::new(Semaphore::new(MAX_INFLIGHT_WRITES)),
         };
         cache.ensure_index().await?;
         Ok(cache)
@@ -226,13 +237,32 @@ impl SemanticCache {
     }
 
     /// Store a response under this request's prompt embedding. **Fire-and-forget**
-    /// (CLAUDE.md rule #9): the entire write — embedding *and* the Redis round-trips
-    /// — runs on a background task so nothing touches the hot path. Failures are
-    /// logged, never propagated. No-op when disabled or for streaming requests.
+    /// (CLAUDE.md rule #9): only the embedding *and* the Redis write run on a
+    /// background task and are kept off the hot path. The cheap caller-side prep
+    /// (`serde_json::to_string`, [`prompt_text`], and acquiring a write slot) does
+    /// run on the caller. Failures are logged, never propagated. No-op when
+    /// disabled or for streaming requests.
+    ///
+    /// Writes are bounded by a [`Semaphore`] ([`MAX_INFLIGHT_WRITES`]): under a
+    /// miss storm we drop the overflow rather than pile up unbounded background
+    /// embeddings. The response is still served — only the cache write is skipped.
     pub async fn set(&self, req: &ChatRequest, response: &ChatResponse) {
         if !self.config.enabled || req.stream {
             return;
         }
+        // Acquire a write slot before spawning; if none is free we're already
+        // saturated, so drop this write (the response is unaffected).
+        let permit = match Arc::clone(&self.write_slots).try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                metrics::counter!("solvela_semantic_cache_write_dropped_total").increment(1);
+                debug!(
+                    model = %req.model,
+                    "semantic cache write dropped: in-flight writes at capacity"
+                );
+                return;
+            }
+        };
         let json = match serde_json::to_string(response) {
             Ok(s) => s,
             Err(e) => {
@@ -246,6 +276,8 @@ impl SemanticCache {
         let conn = self.conn.clone();
         let ttl = self.config.ttl_secs;
         tokio::spawn(async move {
+            // Hold the permit for the task's lifetime; released on drop.
+            let _permit = permit;
             let embedding = match embed_text(&embedder, text).await {
                 Some(e) => e,
                 None => return,
@@ -355,18 +387,31 @@ fn parse_top_hit(value: &redis::Value) -> Option<(String, f32)> {
     };
     let mut response = None;
     let mut score = None;
-    let mut i = 0;
-    while i + 1 < fields.len() {
-        let name = redis_value_to_string(&fields[i]);
-        let val = redis_value_to_string(&fields[i + 1]);
-        if let (Some(name), Some(val)) = (name, val) {
-            match name.as_str() {
-                "response" => response = Some(val),
-                "score" => score = val.parse::<f32>().ok(),
-                _ => {}
+    for pair in fields.chunks(2) {
+        // A trailing odd element (no value) can't be a field/value pair; skip it.
+        let [name, val] = pair else { continue };
+        let (Some(name), Some(val)) = (redis_value_to_string(name), redis_value_to_string(val))
+        else {
+            continue;
+        };
+        match name.as_str() {
+            "response" => response = Some(val),
+            "score" => {
+                // Distinguish a present-but-unparseable score from an absent one:
+                // a malformed score is a silent cache miss with no signal, so we
+                // surface it via a warn + counter. An absent score field is the
+                // normal empty-result case and stays quiet.
+                match val.parse::<f32>() {
+                    Ok(parsed) => score = Some(parsed),
+                    Err(e) => {
+                        warn!(error = %e, raw = %val, "semantic cache score field unparseable as f32");
+                        metrics::counter!("solvela_semantic_cache_score_parse_error_total")
+                            .increment(1);
+                    }
+                }
             }
+            _ => {}
         }
-        i += 2;
     }
     Some((response?, score?))
 }
@@ -388,12 +433,36 @@ fn redis_value_to_string(v: &redis::Value) -> Option<String> {
 /// Canonicalise a chat request's messages into the single string we embed.
 /// Deterministic and order-sensitive (message order changes meaning). Each
 /// message contributes a `role: content` line; ordering is preserved.
+///
+/// Sampling params (`temperature` / `top_p`) are appended as a trailing
+/// `params:` line *only when set*, so two requests identical except for
+/// temperature/top_p embed to different text and never cross-hit. This mirrors
+/// the exact tier, which keys on `temperature`. Changing this line's format
+/// invalidates previously stored entries — acceptable given the 600s TTL.
 pub(crate) fn prompt_text(req: &ChatRequest) -> String {
-    req.messages
+    let mut text = req
+        .messages
         .iter()
         .map(|m| format!("{}: {}", role_str(&m.role), m.content))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    // Deterministic, stable float formatting so the same params always embed
+    // to the same bytes. Only emit the segments that are actually set.
+    let mut params = String::new();
+    if let Some(t) = req.temperature {
+        params.push_str(&format!("temperature={t:.4}"));
+    }
+    if let Some(p) = req.top_p {
+        if !params.is_empty() {
+            params.push(' ');
+        }
+        params.push_str(&format!("top_p={p:.4}"));
+    }
+    if !params.is_empty() {
+        text.push_str("\nparams: ");
+        text.push_str(&params);
+    }
+    text
 }
 
 /// Stable lowercase label for a role. Pinned here (not `Debug`) so the embedded
@@ -534,6 +603,44 @@ mod tests {
     }
 
     #[test]
+    fn prompt_text_differs_for_different_temperature() {
+        // Two requests identical except temperature must embed to DIFFERENT text,
+        // so the semantic tier never cross-hits across sampling params (the exact
+        // tier keys on temperature; the semantic tier must stay consistent).
+        let mut a = req("m", "hello");
+        a.temperature = Some(0.2);
+        let mut b = req("m", "hello");
+        b.temperature = Some(0.9);
+        assert_ne!(
+            prompt_text(&a),
+            prompt_text(&b),
+            "temperature must change the embedded text"
+        );
+        // The params line must actually carry the value.
+        assert!(prompt_text(&a).contains("temperature=0.2000"));
+    }
+
+    #[test]
+    fn prompt_text_differs_for_different_top_p() {
+        let mut a = req("m", "hello");
+        a.top_p = Some(0.5);
+        let mut b = req("m", "hello");
+        b.top_p = Some(0.95);
+        assert_ne!(prompt_text(&a), prompt_text(&b));
+        assert!(prompt_text(&a).contains("top_p=0.5000"));
+    }
+
+    #[test]
+    fn prompt_text_omits_params_line_when_unset() {
+        // With neither sampling param set, no trailing `params:` line is appended.
+        let r = req("m", "hello");
+        assert!(
+            !prompt_text(&r).contains("params:"),
+            "no params line when temperature/top_p are unset"
+        );
+    }
+
+    #[test]
     fn prompt_text_includes_message_content() {
         let r = req("m", "explain semaphores");
         assert!(
@@ -579,6 +686,51 @@ mod tests {
     fn parse_top_hit_returns_none_on_unexpected_shape() {
         assert!(parse_top_hit(&redis::Value::Nil).is_none());
         assert!(parse_top_hit(&redis::Value::Int(1)).is_none());
+    }
+
+    /// Build an `FT.SEARCH`-shaped reply `[count, key, [fields...]]` from a list
+    /// of (name, value) field pairs.
+    fn search_reply(fields: &[(&str, &str)]) -> redis::Value {
+        let bulk = |s: &str| redis::Value::BulkString(s.as_bytes().to_vec());
+        let mut field_arr = Vec::new();
+        for (name, val) in fields {
+            field_arr.push(bulk(name));
+            field_arr.push(bulk(val));
+        }
+        redis::Value::Array(vec![
+            redis::Value::Int(1),
+            bulk("solvela:scache:doc1"),
+            redis::Value::Array(field_arr),
+        ])
+    }
+
+    #[test]
+    fn parse_top_hit_well_formed_returns_response_and_score() {
+        // Sanity baseline: a numeric score parses and the response is extracted.
+        let reply = search_reply(&[("response", "{\"id\":\"x\"}"), ("score", "0.1234")]);
+        let (resp, distance) = parse_top_hit(&reply).expect("well-formed hit must parse");
+        assert_eq!(resp, "{\"id\":\"x\"}");
+        assert!((distance - 0.1234).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_top_hit_returns_none_for_unparseable_score() {
+        // A present-but-non-numeric `score` must NOT silently coerce to a hit;
+        // it returns None (distinguishable from absent via the warn + metric the
+        // parser emits — exercised here for the unparseable path).
+        let reply = search_reply(&[("response", "{\"id\":\"x\"}"), ("score", "not-a-float")]);
+        assert!(
+            parse_top_hit(&reply).is_none(),
+            "an unparseable score must yield a miss, not a coerced hit"
+        );
+    }
+
+    #[test]
+    fn parse_top_hit_returns_none_when_score_absent() {
+        // Distinct from the unparseable case: no `score` field at all is also a
+        // miss, but the quiet kind (no warn/metric).
+        let reply = search_reply(&[("response", "{\"id\":\"x\"}")]);
+        assert!(parse_top_hit(&reply).is_none());
     }
 
     // ---- model-backed + redis-backed (skip if unavailable) ----
@@ -667,6 +819,31 @@ mod tests {
             cache.get(&r).await.is_none(),
             "streaming requests must not hit the cache"
         );
+    }
+
+    #[tokio::test]
+    async fn set_works_under_write_semaphore() {
+        // The write semaphore must not break the happy path: firing more writes
+        // than MAX_INFLIGHT_WRITES must not panic, and a write that does land
+        // becomes retrievable. Timing-sensitive saturation behaviour isn't
+        // asserted here (it's racy); we only confirm set() still functions.
+        let Some(cache) = fresh_cache(0.85).await else {
+            return;
+        };
+        for i in 0..(MAX_INFLIGHT_WRITES * 3) {
+            cache
+                .set(&req("openai/gpt-4o", &format!("prompt {i}")), &resp("ok"))
+                .await;
+        }
+        // Use the awaitable path to guarantee at least one durable entry, then
+        // confirm it's retrievable — proving the semaphore didn't poison set().
+        let r = req("openai/gpt-4o", "a durable semaphore-test prompt");
+        cache.store(&r, &resp("durable")).await.unwrap();
+        let hit = cache
+            .get(&r)
+            .await
+            .expect("stored entry must be retrievable");
+        assert_eq!(hit.response.id, "resp-durable");
     }
 
     #[tokio::test]
