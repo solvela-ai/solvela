@@ -77,6 +77,23 @@ impl SemanticCache {
         embedder: Arc<dyn Embedder>,
         config: SemanticConfig,
     ) -> Result<Self, super::CacheError> {
+        // Fail fast on misconfiguration rather than degrade to a silent
+        // all-miss cache: a dim mismatch makes every FT.SEARCH error out, and an
+        // out-of-range threshold makes every comparison trivially true/false.
+        if config.dim != embedder.dim() {
+            return Err(super::CacheError::Operation(format!(
+                "semantic cache dim mismatch: config={}, embedder={}",
+                config.dim,
+                embedder.dim()
+            )));
+        }
+        if !(0.0..=1.0).contains(&config.threshold) {
+            return Err(super::CacheError::Operation(format!(
+                "semantic cache threshold {} is outside [0.0, 1.0]",
+                config.threshold
+            )));
+        }
+
         let client = redis::Client::open(redis_url)
             .map_err(|e| super::CacheError::Connection(e.to_string()))?;
         let conn = client
@@ -112,8 +129,12 @@ impl SemanticCache {
             .arg("SCHEMA")
             .arg("model")
             .arg("TAG")
+            // NOINDEX: the response JSON is retrieved by the KNN result, never
+            // searched. Without NOINDEX, RediSearch full-text-indexes every
+            // payload, wasting index memory proportional to response size.
             .arg("response")
             .arg("TEXT")
+            .arg("NOINDEX")
             .arg("embedding")
             .arg("VECTOR")
             .arg("HNSW")
@@ -246,9 +267,15 @@ impl SemanticCache {
             .embed(req)
             .await
             .ok_or_else(|| super::CacheError::Operation("embedding failed".to_string()))?;
-        write_entry(self.conn.clone(), req.model.clone(), json, &embedding, self.config.ttl_secs)
-            .await
-            .map_err(|e| super::CacheError::Operation(e.to_string()))
+        write_entry(
+            self.conn.clone(),
+            req.model.clone(),
+            json,
+            &embedding,
+            self.config.ttl_secs,
+        )
+        .await
+        .map_err(|e| super::CacheError::Operation(e.to_string()))
     }
 
     /// Embed a request's canonical prompt off the async runtime threads
@@ -284,7 +311,12 @@ async fn write_entry(
 ) -> redis::RedisResult<()> {
     let bytes = f32_slice_to_le_bytes(embedding);
     let key = format!("{SEMANTIC_PREFIX}:{}", uuid::Uuid::new_v4());
-    redis::cmd("HSET")
+    // HSET + EXPIRE in one MULTI/EXEC: HSET takes no EX, and applying them
+    // separately risks orphaning an entry with no TTL (indexed forever) if the
+    // second round-trip fails. The pipeline makes the pair atomic.
+    let mut pipe = redis::pipe();
+    pipe.atomic()
+        .cmd("HSET")
         .arg(&key)
         .arg("model")
         .arg(&model)
@@ -292,13 +324,12 @@ async fn write_entry(
         .arg(&response_json)
         .arg("embedding")
         .arg(&bytes[..])
-        .query_async::<()>(&mut conn)
-        .await?;
-    redis::cmd("EXPIRE")
+        .ignore()
+        .cmd("EXPIRE")
         .arg(&key)
         .arg(ttl_secs)
-        .query_async::<()>(&mut conn)
-        .await
+        .ignore();
+    pipe.query_async::<()>(&mut conn).await
 }
 
 /// Parse the first hit out of an `FT.SEARCH` reply, returning
@@ -337,6 +368,12 @@ fn redis_value_to_string(v: &redis::Value) -> Option<String> {
     match v {
         redis::Value::BulkString(b) => Some(String::from_utf8_lossy(b).to_string()),
         redis::Value::SimpleString(s) => Some(s.clone()),
+        // Under RESP2 (the ConnectionManager default) RediSearch returns the
+        // KNN score as a BulkString. These arms guard against a silent
+        // cache-wide blackout if a future redis/redis-stack negotiates RESP3,
+        // where numerics arrive as Double/Int. No-op under RESP2.
+        redis::Value::Double(f) => Some(f.to_string()),
+        redis::Value::Int(i) => Some(i.to_string()),
         _ => None,
     }
 }
@@ -347,9 +384,24 @@ fn redis_value_to_string(v: &redis::Value) -> Option<String> {
 pub(crate) fn prompt_text(req: &ChatRequest) -> String {
     req.messages
         .iter()
-        .map(|m| format!("{:?}: {}", m.role, m.content))
+        .map(|m| format!("{}: {}", role_str(&m.role), m.content))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Stable lowercase label for a role. Pinned here (not `Debug`) so the embedded
+/// text — and therefore stored-embedding compatibility — never shifts if the
+/// `Role` derive or wire representation changes.
+fn role_str(role: &solvela_protocol::Role) -> &'static str {
+    use solvela_protocol::Role;
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+        Role::Developer => "developer",
+        Role::Unknown => "unknown",
+    }
 }
 
 /// Escape a value for safe use inside a RediSearch TAG filter (`@model:{...}`).
@@ -467,7 +519,10 @@ mod tests {
         b.messages.push(user_msg("first"));
         let ta = prompt_text(&a);
         let tb = prompt_text(&b);
-        assert!(!ta.is_empty(), "prompt_text must not be empty for non-empty messages");
+        assert!(
+            !ta.is_empty(),
+            "prompt_text must not be empty for non-empty messages"
+        );
         assert_ne!(ta, tb, "message order must change the embedded text");
     }
 
@@ -492,23 +547,56 @@ mod tests {
     #[test]
     fn escape_tag_leaves_alphanumerics() {
         assert_eq!(escape_tag("gpt4o"), "gpt4o");
+        assert_eq!(escape_tag("gpt_4o"), "gpt_4o"); // underscore is safe
+    }
+
+    #[test]
+    fn escape_tag_escapes_all_redisearch_metachars() {
+        // RediSearch TAG metacharacters must all be escaped to avoid a malformed
+        // (or injectable) filter via the model field.
+        for ch in ['{', '}', '[', ']', '(', ')', '|', '@', ':', '*', ' ', '"'] {
+            let input = format!("a{ch}b");
+            let escaped = escape_tag(&input);
+            assert_eq!(escaped, format!("a\\{ch}b"), "char {ch:?} not escaped");
+        }
+    }
+
+    #[test]
+    fn parse_top_hit_returns_none_on_empty_result_set() {
+        // FT.SEARCH with no matches replies `[0]` (count only, no documents).
+        let empty = redis::Value::Array(vec![redis::Value::Int(0)]);
+        assert!(parse_top_hit(&empty).is_none());
+    }
+
+    #[test]
+    fn parse_top_hit_returns_none_on_unexpected_shape() {
+        assert!(parse_top_hit(&redis::Value::Nil).is_none());
+        assert!(parse_top_hit(&redis::Value::Int(1)).is_none());
     }
 
     // ---- model-backed + redis-backed (skip if unavailable) ----
 
     #[tokio::test]
     async fn exact_prompt_hits_with_high_similarity() {
-        let Some(cache) = fresh_cache(0.85).await else { return };
+        let Some(cache) = fresh_cache(0.85).await else {
+            return;
+        };
         let r = req("openai/gpt-4o", "What is the capital of France?");
         cache.store(&r, &resp("paris")).await.unwrap();
         let hit = cache.get(&r).await.expect("identical prompt should hit");
         assert_eq!(hit.response.id, "resp-paris");
-        assert!(hit.similarity > 0.99, "identical prompt similarity {} too low", hit.similarity);
+        assert!(
+            hit.similarity > 0.99,
+            "identical prompt similarity {} too low",
+            hit.similarity
+        );
     }
 
     #[tokio::test]
     async fn paraphrase_hits_above_threshold() {
-        let Some(cache) = fresh_cache(0.85).await else { return };
+        let Some(cache) = fresh_cache(0.85).await else {
+            return;
+        };
         let stored = req("openai/gpt-4o", "What is the capital of France?");
         cache.store(&stored, &resp("paris")).await.unwrap();
         let query = req("openai/gpt-4o", "What's France's capital?");
@@ -519,9 +607,14 @@ mod tests {
 
     #[tokio::test]
     async fn unrelated_prompt_misses() {
-        let Some(cache) = fresh_cache(0.85).await else { return };
+        let Some(cache) = fresh_cache(0.85).await else {
+            return;
+        };
         cache
-            .store(&req("openai/gpt-4o", "What is the capital of France?"), &resp("paris"))
+            .store(
+                &req("openai/gpt-4o", "What is the capital of France?"),
+                &resp("paris"),
+            )
             .await
             .unwrap();
         let miss = cache
@@ -532,25 +625,41 @@ mod tests {
 
     #[tokio::test]
     async fn different_model_misses() {
-        let Some(cache) = fresh_cache(0.85).await else { return };
+        let Some(cache) = fresh_cache(0.85).await else {
+            return;
+        };
         cache
-            .store(&req("openai/gpt-4o", "What is the capital of France?"), &resp("paris"))
+            .store(
+                &req("openai/gpt-4o", "What is the capital of France?"),
+                &resp("paris"),
+            )
             .await
             .unwrap();
         // Same prompt, different model — must not hit (response/pricing differ).
         let miss = cache
-            .get(&req("anthropic/claude-3.5-sonnet", "What is the capital of France?"))
+            .get(&req(
+                "anthropic/claude-3.5-sonnet",
+                "What is the capital of France?",
+            ))
             .await;
-        assert!(miss.is_none(), "cross-model hit must not happen, got {miss:?}");
+        assert!(
+            miss.is_none(),
+            "cross-model hit must not happen, got {miss:?}"
+        );
     }
 
     #[tokio::test]
     async fn streaming_request_is_not_served_from_cache() {
-        let Some(cache) = fresh_cache(0.85).await else { return };
+        let Some(cache) = fresh_cache(0.85).await else {
+            return;
+        };
         let mut r = req("openai/gpt-4o", "What is the capital of France?");
         cache.store(&r, &resp("paris")).await.unwrap();
         r.stream = true;
-        assert!(cache.get(&r).await.is_none(), "streaming requests must not hit the cache");
+        assert!(
+            cache.get(&r).await.is_none(),
+            "streaming requests must not hit the cache"
+        );
     }
 
     #[tokio::test]
@@ -569,6 +678,9 @@ mod tests {
         };
         let r = req("openai/gpt-4o", "What is the capital of France?");
         cache.set(&r, &resp("paris")).await;
-        assert!(cache.get(&r).await.is_none(), "disabled cache must return None");
+        assert!(
+            cache.get(&r).await.is_none(),
+            "disabled cache must return None"
+        );
     }
 }

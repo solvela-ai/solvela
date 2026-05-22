@@ -56,7 +56,9 @@ impl LocalBge {
     /// (`./.fastembed_cache` relative to the process working directory). The
     /// first call downloads ~133 MB; subsequent constructions reuse the cache.
     pub fn new() -> Result<Self, EmbedderError> {
-        Self::init(InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false))
+        Self::init(
+            InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false),
+        )
     }
 
     /// Initialise the model from an explicit cache directory. Used by tests
@@ -162,7 +164,11 @@ mod tests {
     #[test]
     fn cosine_identical_unit_vectors_is_one() {
         let v = vec![0.6, 0.8]; // unit length
-        assert!((cosine(&v, &v) - 1.0).abs() < 1e-6, "got {}", cosine(&v, &v));
+        assert!(
+            (cosine(&v, &v) - 1.0).abs() < 1e-6,
+            "got {}",
+            cosine(&v, &v)
+        );
     }
 
     #[test]
@@ -176,7 +182,11 @@ mod tests {
     fn cosine_opposite_is_negative_one() {
         let a = vec![1.0, 0.0];
         let b = vec![-1.0, 0.0];
-        assert!((cosine(&a, &b) + 1.0).abs() < 1e-6, "got {}", cosine(&a, &b));
+        assert!(
+            (cosine(&a, &b) + 1.0).abs() < 1e-6,
+            "got {}",
+            cosine(&a, &b)
+        );
     }
 
     #[test]

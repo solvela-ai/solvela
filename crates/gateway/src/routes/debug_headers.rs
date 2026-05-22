@@ -57,7 +57,10 @@ pub struct DebugInfo {
 /// Cache lookup result for the debug header.
 #[derive(Debug, Clone, Copy)]
 pub enum CacheStatus {
+    /// Tier 1 exact-match hit.
     Hit,
+    /// Tier 2 semantic (embedding-similarity) hit.
+    SemanticHit,
     Miss,
     /// Streaming requests skip cache entirely.
     Skip,
@@ -67,6 +70,7 @@ impl CacheStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Hit => "hit",
+            Self::SemanticHit => "semantic-hit",
             Self::Miss => "miss",
             Self::Skip => "skip",
         }

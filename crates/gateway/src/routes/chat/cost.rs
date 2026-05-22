@@ -922,8 +922,9 @@ supports_vision = false
     #[test]
     fn apply_hit_price_never_exceeds_full_and_never_overflows() {
         // Large value × percent must not overflow u64 (computed in u128).
+        // u64::MAX * 50 / 100 == u64::MAX / 2; a u64-domain multiply would have
+        // wrapped to a tiny value, so this exact-equality is the overflow proof.
         let discounted = apply_hit_price(u64::MAX, 50);
-        assert!(discounted <= u64::MAX);
         assert_eq!(discounted, u64::MAX / 2);
     }
 
