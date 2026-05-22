@@ -264,7 +264,11 @@ fn usdc_atomic_amount(decimal_str: &str) -> String {
 /// `discounted_atomic` is gateway revenue minus the sub-cent embedding cost.
 ///
 /// The discount is realised on the **escrow scheme** by claiming only
-/// `discounted_atomic`; the remainder refunds to the agent.
+/// `discounted_atomic`; the remainder refunds to the agent. On the
+/// direct-transfer (`exact`) scheme the full amount has already settled on-chain
+/// before the cache is consulted, so no discount applies — `discounted_atomic`
+/// is only actionable for escrow payments. (Trustless per-scheme discounts need
+/// the Phase 2/3 commitment + on-chain bond.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SemanticDiscount {
     // Private so the only construction path is `new`, which guarantees the
