@@ -253,10 +253,18 @@ fn usdc_atomic_amount(decimal_str: &str) -> String {
 ///
 /// The normal path (cache miss / exact-match hit) is represented by the absence
 /// of this value (`Option::None`) — the agent pays the full computed cost. When
-/// present, `full_atomic` is what a miss would have cost (retained for receipts
-/// and metrics) and `discounted_atomic` is what's actually billed. Per the
-/// semantic-cache design, the discount is realised on the **escrow scheme** by
-/// claiming only `discounted_atomic`; the remainder refunds to the agent.
+/// present, `full_atomic` is what a miss would have cost (the **all-in** price:
+/// provider cost + 5% platform fee; retained for receipts and metrics) and
+/// `discounted_atomic` is what's actually billed.
+///
+/// The discount is a flat fraction of that all-in price, so the 5% fee scales
+/// down with it — this mirrors how provider prompt caching prices a hit (a flat
+/// fraction of the all-in rate, not "compute discount + full margin"). It is not
+/// a fee loss: a cache hit pays the upstream provider nothing, so the entire
+/// `discounted_atomic` is gateway revenue minus the sub-cent embedding cost.
+///
+/// The discount is realised on the **escrow scheme** by claiming only
+/// `discounted_atomic`; the remainder refunds to the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SemanticDiscount {
     pub full_atomic: u64,

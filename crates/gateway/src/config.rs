@@ -134,7 +134,17 @@ pub struct SemanticSettings {
     #[serde(default = "default_semantic_threshold")]
     pub threshold: f32,
     /// Percent of the full price billed on a semantic hit (e.g. `30` = pay 30%,
-    /// a 70% discount). Realised on the escrow scheme. Default `30`.
+    /// a 70% discount). Default `30`, which sits in the 10–50% band used by
+    /// provider prompt caching (DeepSeek ~10%, OpenAI 25–50%, Anthropic ~10%).
+    ///
+    /// This is a flat fraction of the **all-in** miss price (provider cost +
+    /// 5% platform fee), so the fee scales down proportionally — matching how
+    /// those services discount the all-in rate. Note this is *not* a loss on
+    /// the fee: a cache hit pays the upstream provider nothing, so the entire
+    /// claimed amount is gateway revenue (minus the sub-cent embedding cost).
+    /// Realised on the escrow scheme (the gateway claims only this fraction and
+    /// refunds the remainder); the direct-transfer `exact` scheme settled the
+    /// full amount up front, so no discount applies there. Clamped to `0..=100`.
     #[serde(default = "default_semantic_hit_price_percent")]
     pub hit_price_percent: u8,
     /// TTL (seconds) for stored semantic entries. Default `600` (10 min).

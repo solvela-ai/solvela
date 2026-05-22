@@ -623,8 +623,11 @@ pub async fn chat_completions(
                 // Semantic-cache hit: bill the discounted price. On the escrow
                 // scheme the gateway claims only this amount and the remainder
                 // refunds to the agent — this is how the Phase 1 cache discount
-                // is realised. (Direct-transfer "exact" scheme settled the full
-                // amount up front, so the discount does not apply there.)
+                // is realised. For the direct-transfer "exact" scheme the agent
+                // already settled the full amount up front; `fire_escrow_claim`
+                // below returns early for non-escrow schemes, so this discounted
+                // `claim_atomic` is computed but never used there. A future
+                // exact-scheme settlement must not blindly apply this value.
                 Some(outcome.billable_atomic())
             } else if let Some(ref u) = usage {
                 // `compute_actual_atomic_cost` returns `None` when the model
