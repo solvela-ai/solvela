@@ -427,6 +427,12 @@ async fn main() -> anyhow::Result<()> {
     // Requires Redis-with-RediSearch and the local embedding model. Degrades
     // gracefully to `None` (Tier 1 exact cache still works) on any failure —
     // consistent with rule #12 (both Redis and PostgreSQL are optional).
+    // Operator misconfiguration of the semantic cache is fatal — fail fast
+    // rather than silently disabling the tier (which `build_semantic_cache`
+    // does for genuine infra failures like Redis being down).
+    if let Err(e) = app_config.cache.semantic.validate() {
+        anyhow::bail!("invalid [cache.semantic] configuration: {e}");
+    }
     let semantic_cache = build_semantic_cache(&app_config, redis_url.as_str()).await;
 
     // Initialize provider health tracker

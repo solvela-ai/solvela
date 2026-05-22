@@ -168,6 +168,40 @@ impl Default for SemanticSettings {
     }
 }
 
+impl SemanticSettings {
+    /// Validate operator-supplied semantic-cache settings. Only checked when
+    /// the tier is enabled — a disabled cache's values are inert.
+    ///
+    /// These must be **fatal at startup**, not silently degraded to a disabled
+    /// cache: a misconfigured `threshold` or `hit_price_percent` is an operator
+    /// error (the operator believes the cache is running), distinct from
+    /// infrastructure being unavailable (Redis down → graceful disable).
+    ///
+    /// - `threshold` must be in `(0.0, 1.0]`. `0.0` makes `similarity >= 0`
+    ///   vacuously true (every query a hit); `> 1.0` makes it vacuously false.
+    /// - `hit_price_percent` must be in `1..=100`. `0` would bill nothing on a
+    ///   hit → the escrow claim is skipped by the `amount == 0` guard → a free
+    ///   response with no settlement. If you want free serving, disable the tier.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if !(self.threshold > 0.0 && self.threshold <= 1.0) {
+            return Err(format!(
+                "cache.semantic.threshold must be in (0.0, 1.0], got {}",
+                self.threshold
+            ));
+        }
+        if !(1..=100).contains(&self.hit_price_percent) {
+            return Err(format!(
+                "cache.semantic.hit_price_percent must be in 1..=100, got {}",
+                self.hit_price_percent
+            ));
+        }
+        Ok(())
+    }
+}
+
 // `SemanticSettings` carries no secrets, so the derived `Debug` is fine — but we
 // implement it explicitly to keep the field set obvious alongside the redacted
 // configs above.
@@ -344,6 +378,50 @@ model_cache_dir = "/models/bge"
             config.cache.semantic.model_cache_dir.as_deref(),
             Some("/models/bge")
         );
+    }
+
+    fn enabled_semantic(threshold: f32, hit_price_percent: u8) -> SemanticSettings {
+        SemanticSettings {
+            enabled: true,
+            threshold,
+            hit_price_percent,
+            ttl_secs: 600,
+            model_cache_dir: None,
+        }
+    }
+
+    #[test]
+    fn semantic_validate_accepts_sane_values() {
+        assert!(enabled_semantic(0.85, 30).validate().is_ok());
+        assert!(enabled_semantic(1.0, 100).validate().is_ok()); // boundaries
+        assert!(enabled_semantic(0.0001, 1).validate().is_ok());
+    }
+
+    #[test]
+    fn semantic_validate_rejects_zero_hit_price_percent() {
+        // 0% → zero claim → escrow skip → free serve. Must be fatal, not silent.
+        let err = enabled_semantic(0.85, 0).validate().unwrap_err();
+        assert!(err.contains("hit_price_percent"), "got: {err}");
+    }
+
+    #[test]
+    fn semantic_validate_rejects_out_of_range_hit_price_percent() {
+        assert!(enabled_semantic(0.85, 101).validate().is_err());
+    }
+
+    #[test]
+    fn semantic_validate_rejects_out_of_range_threshold() {
+        // 0.0 makes every query a vacuous hit; >1.0 makes every query a miss.
+        assert!(enabled_semantic(0.0, 30).validate().is_err());
+        assert!(enabled_semantic(1.5, 30).validate().is_err());
+    }
+
+    #[test]
+    fn semantic_validate_skips_when_disabled() {
+        // A disabled cache's values are inert — never block startup on them.
+        let mut s = enabled_semantic(0.0, 0);
+        s.enabled = false;
+        assert!(s.validate().is_ok());
     }
 
     #[test]
