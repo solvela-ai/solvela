@@ -31,6 +31,9 @@ mod exact;
 /// Prompt embedding backend for the semantic cache tier.
 pub mod embedder;
 
+/// Tier 2 — semantic (embedding-similarity) cache over RediSearch.
+pub mod semantic;
+
 /// Redis key prefix for response cache entries.
 ///
 /// Centralised here so a rename never requires hunting down inline literals.
