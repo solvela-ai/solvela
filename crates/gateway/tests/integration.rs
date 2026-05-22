@@ -610,6 +610,120 @@ async fn semantic_cache_misses_unrelated_prompt() {
     );
 }
 
+/// Regression test for the semantic write-back (review finding C1): a POST that
+/// misses the cache must populate the semantic tier from the provider response,
+/// so a later identical request is served from cache instead of the provider.
+/// Before the fix, `set()` was never called on the hot path and the tier stayed
+/// empty forever.
+#[tokio::test]
+async fn semantic_cache_populates_on_miss() {
+    let Some(sem) = try_semantic_cache().await else {
+        return;
+    };
+
+    // Unique per-run topic so the entry never pre-exists (ttl is 600s) and never
+    // collides with the other semantic tests sharing the redis index.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let prompt = format!("Summarise the plot of an obscure novel codenamed wbk-{nonce}.");
+    let probe_req = ChatRequest {
+        model: "openai/gpt-4o".to_string(),
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: prompt.clone(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }],
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        tools: None,
+        tool_choice: None,
+    };
+
+    // Sanity: nothing cached for this prompt yet.
+    assert!(
+        sem.get(&probe_req).await.is_none(),
+        "fresh per-run prompt must not pre-exist in the cache"
+    );
+
+    let app = app_with_semantic_cache(Arc::clone(&sem));
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": prompt}],
+    })
+    .to_string();
+
+    // First request misses → served by the mock provider, then written back.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-solvela-debug", "true")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_ne!(
+        resp.headers()
+            .get("x-solvela-cache")
+            .and_then(|v| v.to_str().ok()),
+        Some("semantic-hit"),
+        "first request must be a miss, not a semantic hit"
+    );
+
+    // The write-back is fire-and-forget (rule #9) — poll until it lands.
+    let mut populated = false;
+    for _ in 0..50 {
+        if sem.get(&probe_req).await.is_some() {
+            populated = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        populated,
+        "semantic tier was never populated after a cache miss — write-back missing"
+    );
+
+    // Second identical request must now be served from the semantic tier.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-solvela-debug", "true")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-cache")
+            .and_then(|v| v.to_str().ok()),
+        Some("semantic-hit"),
+        "repeat request must be served from the semantic cache after write-back"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        v["id"], "mock-chatcmpl-001",
+        "cached response must be the one the mock provider produced on the miss"
+    );
+}
+
 /// Build a test app with mock providers and escrow support enabled.
 fn test_app_with_mock_provider_and_escrow() -> axum::Router {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();

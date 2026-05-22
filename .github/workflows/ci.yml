@@ -462,6 +462,60 @@ jobs:
             wait "$GATEWAY_PID" 2>/dev/null || true
           fi
 
+  semantic-cache:
+    name: Semantic cache (redis-stack + embedding model)
+    runs-on: ubuntu-latest
+    # The main `rust` job uses plain `redis:7`, which lacks the RediSearch
+    # module, so every semantic-cache test skips gracefully there (see the
+    # `try_semantic_cache` / `fresh_cache` / `embedder` guards). This job
+    # provides redis-stack (RediSearch) AND the bge-small embedding model so
+    # those tests actually execute — without it, the Tier-2 read/write path,
+    # the discount pricing, and the write-back regression test are never
+    # exercised in CI. Blocking and green from day one: the only external
+    # dependency is the one-time model download, which is cached below.
+
+    services:
+      redis-stack:
+        image: redis/redis-stack-server:7.4.0-v3
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c676846f29d98ff6b0106d3608c7ffd4048af17b  # v2
+
+      - name: Cache embedding model
+        # bge-small-en-v1.5 (~133 MB) is downloaded from the Hugging Face hub by
+        # `fastembed` on first run, then reused. Caching it keeps the job fast
+        # and resilient to hub hiccups. Path matches the workspace-root dir the
+        # tests resolve via `CARGO_MANIFEST_DIR/../../.fastembed_cache`.
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: .fastembed_cache
+          # Bump the suffix to force a fresh model download.
+          key: ${{ runner.os }}-fastembed-bge-small-en-v15-v1
+
+      - name: Run semantic-cache tests
+        env:
+          REDIS_URL: redis://localhost:6379
+        # Scope to the cache module + the semantic integration tests. The first
+        # invocation populates `.fastembed_cache` (downloading the model if the
+        # cache missed); both then run against live redis-stack.
+        run: |
+          cargo test -p gateway --lib cache::
+          cargo test -p gateway --test integration semantic
+
   docker-build:
     name: Docker build
     runs-on: ubuntu-latest
