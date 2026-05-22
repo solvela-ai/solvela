@@ -267,8 +267,11 @@ fn usdc_atomic_amount(decimal_str: &str) -> String {
 /// `discounted_atomic`; the remainder refunds to the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SemanticDiscount {
-    pub full_atomic: u64,
-    pub discounted_atomic: u64,
+    // Private so the only construction path is `new`, which guarantees the
+    // invariant `discounted_atomic <= full_atomic`. A struct literal could
+    // otherwise set `discounted > full` and over-claim from escrow.
+    full_atomic: u64,
+    discounted_atomic: u64,
 }
 
 impl SemanticDiscount {
@@ -284,6 +287,12 @@ impl SemanticDiscount {
     /// Amount to actually charge / claim, in atomic USDC.
     pub(crate) fn billable_atomic(&self) -> u64 {
         self.discounted_atomic
+    }
+
+    /// The full (undiscounted) all-in price a miss would have cost, in atomic
+    /// USDC. Used for the discount-ratio metric.
+    pub(crate) fn full_atomic(&self) -> u64 {
+        self.full_atomic
     }
 }
 
@@ -937,7 +946,7 @@ supports_vision = false
     fn semantic_discount_bills_discounted_and_keeps_full() {
         let outcome = SemanticDiscount::new(1000, 30);
         assert_eq!(outcome.billable_atomic(), 300);
-        assert_eq!(outcome.full_atomic, 1000);
+        assert_eq!(outcome.full_atomic(), 1000);
     }
 
     #[test]

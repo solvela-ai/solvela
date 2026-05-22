@@ -200,6 +200,14 @@ pub(crate) async fn execute_provider_call(
 
                     let pct = ctx.state.config.cache.semantic.hit_price_percent;
                     let cost_outcome = SemanticDiscount::new(full_atomic, pct);
+                    // Discount-ratio observability: the fraction of the full
+                    // all-in price actually billed on this hit.
+                    if cost_outcome.full_atomic() > 0 {
+                        histogram!("solvela_semantic_discount_ratio").record(
+                            cost_outcome.billable_atomic() as f64
+                                / cost_outcome.full_atomic() as f64,
+                        );
+                    }
                     info!(
                         model = %ctx.req.model,
                         similarity = hit.similarity,
