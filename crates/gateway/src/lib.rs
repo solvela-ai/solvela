@@ -57,6 +57,11 @@ pub struct AppState {
     pub facilitator: Facilitator,
     pub usage: usage::UsageTracker,
     pub cache: Option<cache::ResponseCache>,
+    /// Tier 2 semantic (embedding-similarity) cache. `None` unless
+    /// `[cache.semantic].enabled` is set and both Redis (with RediSearch) and
+    /// the embedding model are available. `Arc` so it can be cheaply cloned
+    /// into the fire-and-forget store task.
+    pub semantic_cache: Option<Arc<cache::semantic::SemanticCache>>,
     pub provider_health: providers::health::ProviderHealthTracker,
     pub escrow_claimer: Option<Arc<solvela_x402::escrow::EscrowClaimer>>,
     /// Hot wallet pool for fee payer rotation. `None` when no fee payer keys are configured.

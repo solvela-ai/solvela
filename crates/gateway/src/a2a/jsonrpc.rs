@@ -108,6 +108,7 @@ supports_vision = false
             facilitator: Facilitator::new(vec![]),
             usage: UsageTracker::noop(),
             cache: None,
+            semantic_cache: None,
             provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
             escrow_claimer: None,
             fee_payer_pool: None,
