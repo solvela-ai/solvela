@@ -13,6 +13,9 @@ pub struct AppConfig {
     /// Balance monitoring configuration.
     #[serde(default)]
     pub monitor: MonitorConfig,
+    /// Caching configuration (response/semantic cache).
+    #[serde(default)]
+    pub cache: CacheSettings,
 }
 
 /// HTTP server settings.
@@ -110,6 +113,66 @@ pub struct ProvidersConfig {
     pub deepseek_api_key: Option<String>,
 }
 
+/// Caching configuration (`[cache]`).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CacheSettings {
+    /// Semantic (embedding-similarity) cache tier (`[cache.semantic]`).
+    #[serde(default)]
+    pub semantic: SemanticSettings,
+}
+
+/// Semantic cache tier settings (`[cache.semantic]`).
+///
+/// Defaults are deliberately conservative: the tier is **off** unless an
+/// operator opts in, so enabling the feature in code is zero behaviour change.
+#[derive(Clone, Deserialize)]
+pub struct SemanticSettings {
+    /// Enable the semantic cache tier. Default `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Minimum cosine similarity for a hit, in `[0, 1]`. Default `0.85`.
+    #[serde(default = "default_semantic_threshold")]
+    pub threshold: f32,
+    /// Percent of the full price billed on a semantic hit (e.g. `30` = pay 30%,
+    /// a 70% discount). Realised on the escrow scheme. Default `30`.
+    #[serde(default = "default_semantic_hit_price_percent")]
+    pub hit_price_percent: u8,
+    /// TTL (seconds) for stored semantic entries. Default `600` (10 min).
+    #[serde(default = "default_semantic_ttl_secs")]
+    pub ttl_secs: u64,
+    /// Explicit on-disk directory for the embedding model. `None` → `fastembed`'s
+    /// default (`./.fastembed_cache` relative to the process working dir).
+    #[serde(default)]
+    pub model_cache_dir: Option<String>,
+}
+
+impl Default for SemanticSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: default_semantic_threshold(),
+            hit_price_percent: default_semantic_hit_price_percent(),
+            ttl_secs: default_semantic_ttl_secs(),
+            model_cache_dir: None,
+        }
+    }
+}
+
+// `SemanticSettings` carries no secrets, so the derived `Debug` is fine — but we
+// implement it explicitly to keep the field set obvious alongside the redacted
+// configs above.
+impl fmt::Debug for SemanticSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SemanticSettings")
+            .field("enabled", &self.enabled)
+            .field("threshold", &self.threshold)
+            .field("hit_price_percent", &self.hit_price_percent)
+            .field("ttl_secs", &self.ttl_secs)
+            .field("model_cache_dir", &self.model_cache_dir)
+            .finish()
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -133,12 +196,25 @@ impl Default for AppConfig {
                 deepseek_api_key: None,
             },
             monitor: MonitorConfig::default(),
+            cache: CacheSettings::default(),
         }
     }
 }
 
 fn default_host() -> String {
     "0.0.0.0".to_string()
+}
+
+fn default_semantic_threshold() -> f32 {
+    0.85
+}
+
+fn default_semantic_hit_price_percent() -> u8 {
+    30
+}
+
+fn default_semantic_ttl_secs() -> u64 {
+    600
 }
 
 fn default_port() -> u16 {
