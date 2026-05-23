@@ -361,10 +361,21 @@ async fn execute_streaming_call(
 
             // S3 FIX: Generic error message instead of raw provider errors
             let sse_stream = heartbeat_stream.map(|item| match item {
-                HeartbeatItem::Chunk(Ok(chunk)) => {
-                    let json = serde_json::to_string(&chunk).unwrap_or_default();
-                    Ok::<_, Infallible>(sse::Event::default().data(json))
-                }
+                HeartbeatItem::Chunk(Ok(chunk)) => match serde_json::to_string(&chunk) {
+                    Ok(json) => Ok::<_, Infallible>(sse::Event::default().data(json)),
+                    // A serialise failure here is essentially impossible
+                    // (`ChatChunk` is plain strings + numbers), but if it ever
+                    // happens we must NOT emit `data:` with an empty body —
+                    // that frame is structurally valid SSE and the agent would
+                    // bill on close having received zero content. Emit a
+                    // typed error frame instead so the client can distinguish
+                    // it from a normal chunk and surface a failure upstream.
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to serialise chat chunk for SSE");
+                        Ok(sse::Event::default()
+                            .data("{\"error\": \"stream serialisation error\"}"))
+                    }
+                },
                 HeartbeatItem::Chunk(Err(e)) => {
                     tracing::error!(error = %e, "stream chunk error (details redacted from client)");
                     Ok(sse::Event::default()

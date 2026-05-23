@@ -18,18 +18,31 @@ impl ResponseCache {
     /// Key = SHA256(model + messages_json + temperature). Message order is
     /// significant (it's part of the conversation), so messages are NOT sorted —
     /// see `cache_key_is_sensitive_to_message_order`.
-    pub fn cache_key(req: &ChatRequest) -> String {
+    ///
+    /// Returns `None` if `messages` cannot be serialised. **This must never
+    /// be coerced to a default key**: silently omitting messages from the
+    /// hash would collapse the key to `SHA-256(model ‖ temperature)`, making
+    /// every prompt sharing those two fields collide — a wallet A request
+    /// served wallet B's response. Callers treat `None` as a guaranteed cache
+    /// miss and fall through to the upstream provider. In practice
+    /// `serde_json::to_string` on `Vec<ChatMessage>` (plain `String` content +
+    /// scalars) does not fail, so this branch is defence-in-depth.
+    pub fn cache_key(req: &ChatRequest) -> Option<String> {
+        let msgs_json = match serde_json::to_string(&req.messages) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, model = %req.model, "cache_key: failed to serialise messages; treating as guaranteed miss");
+                return None;
+            }
+        };
         let mut hasher = Sha256::new();
         hasher.update(req.model.as_bytes());
-        // Serialize messages deterministically
-        if let Ok(msgs_json) = serde_json::to_string(&req.messages) {
-            hasher.update(msgs_json.as_bytes());
-        }
+        hasher.update(msgs_json.as_bytes());
         if let Some(temp) = req.temperature {
             hasher.update(temp.to_le_bytes());
         }
         let hash = hasher.finalize();
-        format!("{}{}", CACHE_KEY_PREFIX, hex::encode(hash))
+        Some(format!("{}{}", CACHE_KEY_PREFIX, hex::encode(hash)))
     }
 
     /// Try to get a cached response.
@@ -37,7 +50,7 @@ impl ResponseCache {
         if !self.config.enabled || req.stream {
             return None;
         }
-        let key = Self::cache_key(req);
+        let key = Self::cache_key(req)?;
 
         let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
         let cached: Option<String> = redis::cmd("GET")
@@ -66,7 +79,10 @@ impl ResponseCache {
         if !self.config.enabled || req.stream {
             return;
         }
-        let key = Self::cache_key(req);
+        let key = match Self::cache_key(req) {
+            Some(k) => k,
+            None => return, // serialisation failure already logged inside `cache_key`
+        };
 
         let json_str = match serde_json::to_string(response) {
             Ok(s) => s,
@@ -140,8 +156,8 @@ mod tests {
     #[test]
     fn test_cache_key_deterministic() {
         let req = make_request("openai/gpt-4o", vec![user_message("Hello")], Some(0.7));
-        let key1 = ResponseCache::cache_key(&req);
-        let key2 = ResponseCache::cache_key(&req);
+        let key1 = ResponseCache::cache_key(&req).expect("test request must serialise");
+        let key2 = ResponseCache::cache_key(&req).expect("test request must serialise");
         assert_eq!(key1, key2);
         assert!(key1.starts_with("solvela:cache:"));
     }
@@ -155,8 +171,8 @@ mod tests {
             Some(0.7),
         );
         assert_ne!(
-            ResponseCache::cache_key(&req_a),
-            ResponseCache::cache_key(&req_b),
+            ResponseCache::cache_key(&req_a).expect("test request must serialise"),
+            ResponseCache::cache_key(&req_b).expect("test request must serialise"),
         );
     }
 
@@ -165,8 +181,8 @@ mod tests {
         let req_a = make_request("openai/gpt-4o", vec![user_message("Hello")], Some(0.7));
         let req_b = make_request("openai/gpt-4o", vec![user_message("Goodbye")], Some(0.7));
         assert_ne!(
-            ResponseCache::cache_key(&req_a),
-            ResponseCache::cache_key(&req_b),
+            ResponseCache::cache_key(&req_a).expect("test request must serialise"),
+            ResponseCache::cache_key(&req_b).expect("test request must serialise"),
         );
     }
 
@@ -175,9 +191,9 @@ mod tests {
         let req_a = make_request("openai/gpt-4o", vec![user_message("Hello")], Some(0.7));
         let req_b = make_request("openai/gpt-4o", vec![user_message("Hello")], Some(1.0));
         let req_c = make_request("openai/gpt-4o", vec![user_message("Hello")], None);
-        let key_a = ResponseCache::cache_key(&req_a);
-        let key_b = ResponseCache::cache_key(&req_b);
-        let key_c = ResponseCache::cache_key(&req_c);
+        let key_a = ResponseCache::cache_key(&req_a).expect("test request must serialise");
+        let key_b = ResponseCache::cache_key(&req_b).expect("test request must serialise");
+        let key_c = ResponseCache::cache_key(&req_c).expect("test request must serialise");
         assert_ne!(key_a, key_b);
         assert_ne!(key_a, key_c);
         assert_ne!(key_b, key_c);
@@ -223,13 +239,13 @@ mod tests {
     #[test]
     fn cache_key_ignores_non_key_request_fields() {
         let base = make_request("openai/gpt-4o", vec![user_message("Hello")], Some(0.7));
-        let key_base = ResponseCache::cache_key(&base);
+        let key_base = ResponseCache::cache_key(&base).expect("test request must serialise");
 
         // max_tokens differs — must not affect the key.
         let mut variant = base.clone();
         variant.max_tokens = Some(2048);
         assert_eq!(
-            ResponseCache::cache_key(&variant),
+            ResponseCache::cache_key(&variant).expect("test request must serialise"),
             key_base,
             "max_tokens must not be part of the cache key"
         );
@@ -238,7 +254,7 @@ mod tests {
         let mut variant = base.clone();
         variant.top_p = Some(0.9);
         assert_eq!(
-            ResponseCache::cache_key(&variant),
+            ResponseCache::cache_key(&variant).expect("test request must serialise"),
             key_base,
             "top_p must not be part of the cache key"
         );
@@ -248,7 +264,7 @@ mod tests {
         let mut variant = base.clone();
         variant.stream = true;
         assert_eq!(
-            ResponseCache::cache_key(&variant),
+            ResponseCache::cache_key(&variant).expect("test request must serialise"),
             key_base,
             "stream flag must not be part of the cache key"
         );
@@ -269,8 +285,8 @@ mod tests {
             Some(0.7),
         );
         assert_ne!(
-            ResponseCache::cache_key(&req_a),
-            ResponseCache::cache_key(&req_b),
+            ResponseCache::cache_key(&req_a).expect("test request must serialise"),
+            ResponseCache::cache_key(&req_b).expect("test request must serialise"),
             "message order must affect the cache key"
         );
     }
@@ -285,8 +301,8 @@ mod tests {
             Some(0.7),
         );
         assert_ne!(
-            ResponseCache::cache_key(&req_a),
-            ResponseCache::cache_key(&req_b),
+            ResponseCache::cache_key(&req_a).expect("test request must serialise"),
+            ResponseCache::cache_key(&req_b).expect("test request must serialise"),
             "additional messages must affect the cache key"
         );
     }
