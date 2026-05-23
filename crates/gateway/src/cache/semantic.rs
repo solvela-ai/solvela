@@ -42,12 +42,13 @@ const SEMANTIC_PREFIX: &str = "solvela:scache";
 const SEMANTIC_INDEX: &str = "solvela_scache_idx_v2";
 
 /// Upper bound on prompt characters we will embed. `bge-small-en-v1.5` silently
-/// truncates inputs at 512 tokens (~4 chars/token ≈ 2048 chars). A prompt past
-/// that limit embeds only its truncated prefix, so two distinct long prompts
-/// that share a >512-token prefix (e.g. a long RAG context with the real
-/// question last) collide — and the cache could serve the *wrong* answer and
-/// bill for it. We refuse to cache or serve any prompt above this conservative
-/// char budget; it falls through to a normal upstream call instead.
+/// truncates inputs at 512 tokens; at the model's typical ~4 chars/token that's
+/// roughly 2 KB, and we sit a hair below that at 2000 chars to leave headroom
+/// for short tokens. A prompt past that limit embeds only its truncated prefix,
+/// so two distinct long prompts that share a >512-token prefix (e.g. a long
+/// RAG context with the real question last) collide — and the cache could
+/// serve the *wrong* answer and bill for it. We refuse to cache or serve any
+/// prompt above this budget; it falls through to a normal upstream call.
 const MAX_EMBED_CHARS: usize = 2000;
 
 /// Upper bound on concurrent fire-and-forget [`SemanticCache::set`] writes. Each
@@ -138,16 +139,17 @@ impl SemanticCache {
     }
 
     /// Idempotently create the RediSearch index. No-op if it already exists.
+    ///
+    /// **EAFP, not LBYL:** we skip the FT.INFO pre-check and rely on FT.CREATE's
+    /// own "Index already exists" error. The check-then-create pattern races on
+    /// simultaneous multi-replica startup against a fresh Redis — both replicas
+    /// see FT.INFO miss, both call FT.CREATE, and the loser would silently run
+    /// cache-disabled for its whole lifetime because the bubbled-up error
+    /// triggers `build_semantic_cache` to return `None`. Treating the
+    /// already-exists error as success closes that window.
     pub async fn ensure_index(&self) -> Result<(), super::CacheError> {
         let mut conn = self.conn.clone();
-        let info: redis::RedisResult<redis::Value> = redis::cmd("FT.INFO")
-            .arg(SEMANTIC_INDEX)
-            .query_async(&mut conn)
-            .await;
-        if info.is_ok() {
-            return Ok(());
-        }
-        redis::cmd("FT.CREATE")
+        let result: redis::RedisResult<()> = redis::cmd("FT.CREATE")
             .arg(SEMANTIC_INDEX)
             .arg("ON")
             .arg("HASH")
@@ -180,10 +182,20 @@ impl SemanticCache {
             .arg(self.config.dim as i64)
             .arg("DISTANCE_METRIC")
             .arg("COSINE")
-            .query_async::<()>(&mut conn)
-            .await
-            .map_err(|e| super::CacheError::Operation(e.to_string()))?;
-        Ok(())
+            .query_async(&mut conn)
+            .await;
+        match result {
+            Ok(()) => Ok(()),
+            // RediSearch returns "Index already exists" when the index is
+            // present. The phrasing has drifted slightly across redis-stack
+            // versions (capitalisation/whitespace), so we lowercase + check
+            // the stable substring "already exists" — robust without false
+            // positives, since no other FT.CREATE failure carries that
+            // phrase. Anything else is a real failure (auth, OOM, unreachable
+            // module, schema-incompatible re-create attempt) and propagates.
+            Err(e) if e.to_string().to_lowercase().contains("already exists") => Ok(()),
+            Err(e) => Err(super::CacheError::Operation(e.to_string())),
+        }
     }
 
     /// Look up a semantically-similar cached response for this request.
@@ -903,12 +915,13 @@ mod tests {
 
     #[tokio::test]
     async fn different_temperature_misses() {
-        // bug_001 (behavioural): the C3 embedded-suffix fix asserted only string
-        // inequality, which passed while the feature stayed broken — a hit at a
-        // different temperature was still served because the suffix is invisible
-        // to the cosine gate. This test drives the REAL lookup: store at
-        // temperature 0.0, query the identical prompt at temperature 2.0, and
-        // require a MISS. It fails if the temperature TAG predicate is dropped.
+        // Behavioural regression guard: an earlier attempt appended sampling
+        // params as a trailing line in the embedded text, which only changed
+        // the string and not the cosine score (the suffix is invisible to the
+        // gate), so a hit at a different temperature was still served. This
+        // test drives the REAL lookup: store at temperature 0.0, query the
+        // identical prompt at temperature 2.0, and require a MISS. It fails
+        // if the temperature TAG predicate is dropped.
         let Some((cache, _guard)) = fresh_cache(0.85).await else {
             return;
         };

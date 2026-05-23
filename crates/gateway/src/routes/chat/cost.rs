@@ -327,8 +327,8 @@ pub(crate) fn apply_hit_price(full_atomic: u64, hit_price_percent: u8) -> u64 {
 /// **exact** scheme the agent already settled the full amount up front with no
 /// refund path, so no discount applies — both the escrow claim and the spend
 /// ledger must use the full price there. Returns `None` (→ full price) for any
-/// non-escrow scheme. See merged_005: logging the discounted price on `exact`
-/// under-counts the wallet's real spend, since the agent was charged in full.
+/// non-escrow scheme. Logging the discounted price on `exact` would under-count
+/// the wallet's real spend, since the agent was charged in full.
 pub(crate) fn scheme_realized_discount(
     payment_scheme: &str,
     cost_outcome: Option<SemanticDiscount>,
@@ -359,9 +359,9 @@ pub(crate) fn spend_cost_usdc(cost_outcome: Option<SemanticDiscount>, full_cost_
 ///
 /// `ChatResponse.usage` is optional and some providers omit it. We prefer the
 /// cached response's actual token cost, fall back to the current request's
-/// estimate, and **reject zero** so a usage-less hit can never settle free
-/// (the C2 bug): a `None` here signals the caller to fall through to a normal
-/// upstream call rather than serve a discounted-from-nothing response.
+/// estimate, and **reject zero** so a usage-less hit can never settle free: a
+/// `None` here signals the caller to fall through to a normal upstream call
+/// rather than serve a discounted-from-nothing response.
 pub(crate) fn semantic_hit_full_atomic(
     usage: Option<&Usage>,
     registry: &solvela_router::models::ModelRegistry,
@@ -1014,9 +1014,9 @@ supports_vision = false
 
     #[test]
     fn scheme_realized_discount_applies_only_to_escrow() {
-        // merged_005: the discount is realised (claim less + refund) only on the
-        // escrow scheme. On exact the agent paid full on-chain with no refund, so
-        // the discount must not reach the claim or the spend ledger.
+        // The discount is realised (claim less + refund) only on the escrow
+        // scheme. On exact the agent paid full on-chain with no refund, so the
+        // discount must not reach the claim or the spend ledger.
         let d = SemanticDiscount::new(1000, 30);
         assert_eq!(scheme_realized_discount("escrow", Some(d)), Some(d));
         assert_eq!(
@@ -1029,7 +1029,8 @@ supports_vision = false
     }
 
     // -------------------------------------------------------------------------
-    // semantic_hit_full_atomic — C2 guard (a usage-less hit must never bill 0)
+    // semantic_hit_full_atomic — anti-free-hit guard (a usage-less hit, or a
+    // zero-priced model, must fall through to upstream rather than settle $0)
     // -------------------------------------------------------------------------
 
     fn priced_registry(cost_per_million: f64) -> solvela_router::models::ModelRegistry {
@@ -1067,7 +1068,7 @@ supports_vision = false
     fn semantic_full_price_returns_none_when_unpriceable_never_zero() {
         // Zero-priced model: actual usage prices to 0 AND estimate prices to 0.
         // The function must return None (→ caller falls through to upstream),
-        // NOT Some(0) (which would settle the hit free — the C2 regression).
+        // NOT Some(0) (which would settle the hit free).
         let reg = priced_registry(0.0);
         let mi = reg.get("test/test-model").unwrap();
         let usage = Usage {
