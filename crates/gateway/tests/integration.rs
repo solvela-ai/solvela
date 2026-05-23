@@ -724,6 +724,192 @@ async fn semantic_cache_populates_on_miss() {
     );
 }
 
+/// Mock-provider app with BOTH the semantic cache AND escrow_claimer wired in,
+/// with `dev_bypass_payment: false` so paid requests actually flow through the
+/// scheme branch in `routes/chat/mod.rs` — the only combination under which the
+/// discount-billing path (`scheme_realized_discount` → `billable_atomic()` →
+/// `fire_escrow_claim` / `spend_cost_usdc`) is reachable.
+///
+/// `app_with_semantic_cache` (above) uses `dev_bypass_payment: true`, which
+/// short-circuits before the escrow scheme is consulted, so its three tests
+/// cannot catch a billing-wiring regression — the very gap this builder closes.
+fn app_with_semantic_cache_and_escrow(
+    sem: Arc<gateway::cache::semantic::SemanticCache>,
+) -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![
+        Arc::new(AlwaysPassVerifier),
+        Arc::new(AlwaysPassEscrowVerifier),
+    ]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    config.solana.escrow_program_id =
+        Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
+    config.cache.semantic.enabled = true;
+
+    let test_keypair = {
+        use ed25519_dalek::SigningKey;
+        let sk = SigningKey::from_bytes(&[1u8; 32]);
+        let mut kp = [0u8; 64];
+        kp[..32].copy_from_slice(&[1u8; 32]);
+        kp[32..].copy_from_slice(sk.verifying_key().as_bytes());
+        bs58::encode(&kp).into_string()
+    };
+    let test_fee_payer_pool = Arc::new(
+        solvela_x402::fee_payer::FeePayerPool::from_keys(&[test_keypair])
+            .expect("test pool must load"),
+    );
+    let escrow_claimer = solvela_x402::escrow::EscrowClaimer::new(
+        "https://api.devnet.solana.com".to_string(),
+        test_fee_payer_pool.clone(),
+        "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
+        "11111111111111111111111111111111",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        None,
+    )
+    .expect("test claimer must be valid");
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: Some(sem),
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: Some(Arc::new(escrow_claimer)),
+        fee_payer_pool: Some(test_fee_payer_pool),
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+    });
+    build_router(state, RateLimiter::new(RateLimitConfig::default()))
+}
+
+/// Closes the test gap flagged in review: an escrow-paid request that hits the
+/// semantic cache must reach the discount-billing branch in `chat/mod.rs`
+/// (lines 631-734) rather than the dev-bypass short-circuit covered by
+/// `semantic_cache_serves_paraphrase`. This is the only path that exercises the
+/// real wiring of `scheme_realized_discount`, `billable_atomic()`, and the
+/// escrow `fire_escrow_claim` call together on a cache hit.
+///
+/// Assertion model: the cost-math is fully unit-tested in `routes/chat/cost.rs`
+/// (see `scheme_realized_discount_applies_only_to_escrow`,
+/// `apply_hit_price_never_exceeds_full_and_never_overflows`, etc.). This test's
+/// job is to prove the WIRING — that an escrow-paid hit returns the cached
+/// response (200 + `semantic-hit` header + matching body id) end-to-end through
+/// the same code path billing reads from. A wiring regression that bypasses
+/// `scheme_realized_discount` or short-circuits before the escrow branch would
+/// manifest here as a non-200, a missing `semantic-hit` header, or a fresh
+/// provider response id — none of which the dev-bypass tests can catch.
+#[tokio::test]
+async fn semantic_cache_hit_on_escrow_paid_request() {
+    let Some(sem) = try_semantic_cache().await else {
+        return;
+    };
+
+    // Distinctive topic prevents collision with the other semantic tests that
+    // share the redis index, and lets us assert the seeded id on hit.
+    let seeded = ChatResponse {
+        id: "seeded-escrow-billing".to_string(),
+        object: "chat.completion".to_string(),
+        created: 0,
+        model: "openai/gpt-4o".to_string(),
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: Role::Assistant,
+                content: "Mitochondria are the cell's energy organelles.".to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            finish_reason: Some("stop".to_string()),
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 14,
+            completion_tokens: 18,
+            total_tokens: 32,
+        }),
+    };
+    let seed_req = ChatRequest {
+        model: "openai/gpt-4o".to_string(),
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: "What is the role of mitochondria in animal cells?".to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }],
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        tools: None,
+        tool_choice: None,
+    };
+    sem.store(&seed_req, &seeded).await.expect("seed store");
+
+    let app = app_with_semantic_cache_and_escrow(Arc::clone(&sem));
+
+    // Escrow-paid request with a paraphrase of the seed. dev_bypass is OFF, so
+    // the request must carry a valid escrow PAYMENT-SIGNATURE to reach the
+    // chat handler — the same path production uses.
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":"What do mitochondria do inside an animal cell?"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-solvela-debug", "true")
+                .header(
+                    "PAYMENT-SIGNATURE",
+                    valid_escrow_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "escrow-paid request with a semantic-cache paraphrase must return 200"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-cache")
+            .and_then(|v| v.to_str().ok()),
+        Some("semantic-hit"),
+        "escrow-paid paraphrase must be served from the semantic cache, \
+         not a fresh provider response"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        v["id"], "seeded-escrow-billing",
+        "response must be the seeded cache entry (the discount-billing branch \
+         is the only path that returns this on an escrow scheme)"
+    );
+}
+
 /// Build a test app with mock providers and escrow support enabled.
 fn test_app_with_mock_provider_and_escrow() -> axum::Router {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
