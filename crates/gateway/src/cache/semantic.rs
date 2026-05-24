@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use redis::aio::ConnectionManager;
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
@@ -410,6 +411,26 @@ async fn embed_text(embedder: &Arc<dyn Embedder>, text: String) -> Option<Vec<f3
     }
 }
 
+/// Build a deterministic, content-derived Redis key for a semantic-cache entry.
+///
+/// Hashing `model ‖ temperature ‖ top_p ‖ embedding` makes the write idempotent:
+/// retries, fire-and-forget races, and storm-time duplicate writes all collapse
+/// onto the same key, so `HSET` becomes an upsert and `EXPIRE` refreshes the TTL
+/// without accreting near-duplicate HNSW nodes (index bloat → memory + KNN
+/// latency over long-running deploys). Fields are null-separated to avoid
+/// collisions between e.g. `model="a"` and a 1-char-shorter neighbour.
+fn content_key(model: &str, temperature: &str, top_p: &str, embedding_bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(model.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(temperature.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(top_p.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(embedding_bytes);
+    format!("{SEMANTIC_PREFIX}:{}", hex::encode(hasher.finalize()))
+}
+
 /// HSET the entry then set its TTL (HSET takes no EX). Returns once durable.
 async fn write_entry(
     mut conn: ConnectionManager,
@@ -421,7 +442,7 @@ async fn write_entry(
     ttl_secs: u64,
 ) -> redis::RedisResult<()> {
     let bytes = f32_slice_to_le_bytes(embedding);
-    let key = format!("{SEMANTIC_PREFIX}:{}", uuid::Uuid::new_v4());
+    let key = content_key(&model, &temperature, &top_p, &bytes);
     // HSET + EXPIRE in one MULTI/EXEC: HSET takes no EX, and applying them
     // separately risks orphaning an entry with no TTL (indexed forever) if the
     // second round-trip fails. The pipeline makes the pair atomic.
