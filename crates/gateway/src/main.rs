@@ -422,6 +422,19 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // ── Semantic cache (Tier 2) — opt-in via [cache.semantic].enabled ──────────
+    //
+    // Requires Redis-with-RediSearch and the local embedding model. Degrades
+    // gracefully to `None` (Tier 1 exact cache still works) on any failure —
+    // consistent with rule #12 (both Redis and PostgreSQL are optional).
+    // Operator misconfiguration of the semantic cache is fatal — fail fast
+    // rather than silently disabling the tier (which `build_semantic_cache`
+    // does for genuine infra failures like Redis being down).
+    if let Err(e) = app_config.cache.semantic.validate() {
+        anyhow::bail!("invalid [cache.semantic] configuration: {e}");
+    }
+    let semantic_cache = build_semantic_cache(&app_config, redis_url.as_str()).await;
+
     // Initialize provider health tracker
     let provider_health = gateway::providers::health::ProviderHealthTracker::new(
         gateway::providers::health::CircuitBreakerConfig::default(),
@@ -506,6 +519,7 @@ async fn main() -> anyhow::Result<()> {
         facilitator,
         usage,
         cache: response_cache,
+        semantic_cache,
         provider_health,
         escrow_claimer,
         fee_payer_pool,
@@ -775,4 +789,63 @@ fn generate_random_secret() -> Vec<u8> {
     secret.extend_from_slice(a.as_bytes());
     secret.extend_from_slice(b.as_bytes());
     secret
+}
+
+/// Build the Tier 2 semantic cache if `[cache.semantic].enabled`.
+///
+/// Returns `None` (with a logged warning) on any failure — a missing model or a
+/// Redis without RediSearch must not take the gateway down; the exact cache and
+/// the rest of the pipeline keep working. The embedding model is loaded on a
+/// blocking thread (the load is CPU-bound and can take ~1s).
+async fn build_semantic_cache(
+    config: &config::AppConfig,
+    redis_url: &str,
+) -> Option<Arc<cache::semantic::SemanticCache>> {
+    use cache::embedder::{Embedder, LocalBge};
+    use cache::semantic::{SemanticCache, SemanticConfig};
+
+    let settings = &config.cache.semantic;
+    if !settings.enabled {
+        return None;
+    }
+
+    let model_dir = settings.model_cache_dir.clone();
+    let embedder = match tokio::task::spawn_blocking(move || match model_dir {
+        Some(dir) => LocalBge::with_cache_dir(dir),
+        None => LocalBge::new(),
+    })
+    .await
+    {
+        Ok(Ok(e)) => e,
+        Ok(Err(e)) => {
+            warn!(error = %e, "semantic cache disabled: embedding model failed to load");
+            return None;
+        }
+        Err(e) => {
+            warn!(error = %e, "semantic cache disabled: embedder load task panicked");
+            return None;
+        }
+    };
+
+    let sem_config = SemanticConfig {
+        enabled: true,
+        threshold: settings.threshold,
+        ttl_secs: settings.ttl_secs,
+        dim: embedder.dim(),
+    };
+
+    match SemanticCache::connect(redis_url, Arc::new(embedder), sem_config).await {
+        Ok(cache) => {
+            info!(
+                threshold = settings.threshold,
+                hit_price_percent = settings.hit_price_percent,
+                "semantic cache enabled"
+            );
+            Some(Arc::new(cache))
+        }
+        Err(e) => {
+            warn!(error = %e, "semantic cache disabled: Redis/RediSearch unavailable");
+            None
+        }
+    }
 }

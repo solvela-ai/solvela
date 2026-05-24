@@ -105,14 +105,14 @@ fn cap_claim_amount(claim_atomic: u64, deposited: Option<u64>, client_amount: u6
 /// `client_amount` (the gateway-advertised amount) as a defense-in-depth bound.
 pub(crate) fn fire_escrow_claim(
     state: &Arc<AppState>,
-    payment_scheme: &str,
+    scheme: super::cost::PaymentScheme,
     escrow_service_id: &Option<String>,
     escrow_agent_pubkey: &Option<String>,
     escrow_deposited_amount: Option<u64>,
     claim_atomic: u64,
     client_amount: u64,
 ) {
-    if payment_scheme != "escrow" {
+    if !matches!(scheme, super::cost::PaymentScheme::Escrow) {
         return;
     }
     if let (Some(ref sid_b64), Some(ref agent_b58)) = (escrow_service_id, escrow_agent_pubkey) {

@@ -13,6 +13,9 @@ pub struct AppConfig {
     /// Balance monitoring configuration.
     #[serde(default)]
     pub monitor: MonitorConfig,
+    /// Caching configuration (response/semantic cache).
+    #[serde(default)]
+    pub cache: CacheSettings,
 }
 
 /// HTTP server settings.
@@ -110,6 +113,121 @@ pub struct ProvidersConfig {
     pub deepseek_api_key: Option<String>,
 }
 
+/// Caching configuration (`[cache]`).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CacheSettings {
+    /// Semantic (embedding-similarity) cache tier (`[cache.semantic]`).
+    #[serde(default)]
+    pub semantic: SemanticSettings,
+}
+
+/// Semantic cache tier settings (`[cache.semantic]`).
+///
+/// Defaults are deliberately conservative: the tier is **off** unless an
+/// operator opts in, so enabling the feature in code is zero behaviour change.
+#[derive(Clone, Deserialize)]
+pub struct SemanticSettings {
+    /// Enable the semantic cache tier. Default `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Minimum cosine similarity for a hit, in `[0, 1]`. Default `0.85`.
+    #[serde(default = "default_semantic_threshold")]
+    pub threshold: f32,
+    /// Percent of the full price billed on a semantic hit (e.g. `30` = pay 30%,
+    /// a 70% discount). Default `30`, which sits in the 10–50% band used by
+    /// provider prompt caching (DeepSeek ~10%, OpenAI 25–50%, Anthropic ~10%).
+    ///
+    /// This is a flat fraction of the **all-in** miss price (provider cost +
+    /// 5% platform fee), so the fee scales down proportionally — matching how
+    /// those services discount the all-in rate. Note this is *not* a loss on
+    /// the fee: a cache hit pays the upstream provider nothing, so the entire
+    /// claimed amount is gateway revenue (minus the sub-cent embedding cost).
+    /// Realised on the escrow scheme (the gateway claims only this fraction and
+    /// refunds the remainder); the direct-transfer `exact` scheme settled the
+    /// full amount up front, so no discount applies there. Clamped to `0..=100`.
+    #[serde(default = "default_semantic_hit_price_percent")]
+    pub hit_price_percent: u8,
+    /// TTL (seconds) for stored semantic entries. Default `600` (10 min).
+    #[serde(default = "default_semantic_ttl_secs")]
+    pub ttl_secs: u64,
+    /// Explicit on-disk directory for the embedding model. `None` → `fastembed`'s
+    /// default (`./.fastembed_cache` relative to the process working dir).
+    #[serde(default)]
+    pub model_cache_dir: Option<String>,
+}
+
+impl Default for SemanticSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: default_semantic_threshold(),
+            hit_price_percent: default_semantic_hit_price_percent(),
+            ttl_secs: default_semantic_ttl_secs(),
+            model_cache_dir: None,
+        }
+    }
+}
+
+impl SemanticSettings {
+    /// Validate operator-supplied semantic-cache settings. Only checked when
+    /// the tier is enabled — a disabled cache's values are inert.
+    ///
+    /// These must be **fatal at startup**, not silently degraded to a disabled
+    /// cache: a misconfigured `threshold` or `hit_price_percent` is an operator
+    /// error (the operator believes the cache is running), distinct from
+    /// infrastructure being unavailable (Redis down → graceful disable).
+    ///
+    /// - `threshold` must be in `(0.0, 1.0]`. `0.0` makes `similarity >= 0`
+    ///   vacuously true (every query a hit); `> 1.0` makes it vacuously false.
+    /// - `hit_price_percent` must be in `1..=100`. `0` would bill nothing on a
+    ///   hit → the escrow claim is skipped by the `amount == 0` guard → a free
+    ///   response with no settlement. If you want free serving, disable the tier.
+    /// - `ttl_secs` must be `>= 1`. A `0` TTL makes the write-path `EXPIRE key 0`
+    ///   delete each entry the instant it is stored → a silent all-miss cache the
+    ///   operator believes is running. If you want no caching, disable the tier.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if !(self.threshold > 0.0 && self.threshold <= 1.0) {
+            return Err(format!(
+                "cache.semantic.threshold must be in (0.0, 1.0], got {}",
+                self.threshold
+            ));
+        }
+        if !(1..=100).contains(&self.hit_price_percent) {
+            return Err(format!(
+                "cache.semantic.hit_price_percent must be in 1..=100, got {}",
+                self.hit_price_percent
+            ));
+        }
+        if self.ttl_secs == 0 {
+            return Err(
+                "cache.semantic.ttl_secs must be >= 1 (got 0); a 0 TTL makes Redis EXPIRE \
+                 delete each entry on write, silently producing an all-miss cache. \
+                 Disable the tier instead if you want no caching."
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+// `SemanticSettings` carries no secrets, so the derived `Debug` is fine — but we
+// implement it explicitly to keep the field set obvious alongside the redacted
+// configs above.
+impl fmt::Debug for SemanticSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SemanticSettings")
+            .field("enabled", &self.enabled)
+            .field("threshold", &self.threshold)
+            .field("hit_price_percent", &self.hit_price_percent)
+            .field("ttl_secs", &self.ttl_secs)
+            .field("model_cache_dir", &self.model_cache_dir)
+            .finish()
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -133,12 +251,25 @@ impl Default for AppConfig {
                 deepseek_api_key: None,
             },
             monitor: MonitorConfig::default(),
+            cache: CacheSettings::default(),
         }
     }
 }
 
 fn default_host() -> String {
     "0.0.0.0".to_string()
+}
+
+fn default_semantic_threshold() -> f32 {
+    0.85
+}
+
+fn default_semantic_hit_price_percent() -> u8 {
+    30
+}
+
+fn default_semantic_ttl_secs() -> u64 {
+    600
 }
 
 fn default_port() -> u16 {
@@ -215,6 +346,117 @@ mod tests {
         assert!(config.providers.google_api_key.is_none());
         assert!(config.providers.xai_api_key.is_none());
         assert!(config.providers.deepseek_api_key.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Semantic cache settings ([cache.semantic])
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn semantic_cache_defaults_off_and_conservative() {
+        let config = AppConfig::default();
+        assert!(
+            !config.cache.semantic.enabled,
+            "semantic cache MUST default off — zero behaviour change"
+        );
+        assert_eq!(config.cache.semantic.threshold, 0.85);
+        assert_eq!(config.cache.semantic.hit_price_percent, 30);
+        assert_eq!(config.cache.semantic.ttl_secs, 600);
+        assert!(config.cache.semantic.model_cache_dir.is_none());
+    }
+
+    #[test]
+    fn semantic_cache_parses_from_toml() {
+        let toml = r#"
+[server]
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+recipient_wallet = ""
+[providers]
+[cache.semantic]
+enabled = true
+threshold = 0.9
+hit_price_percent = 25
+ttl_secs = 1200
+model_cache_dir = "/models/bge"
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("valid config TOML");
+        assert!(config.cache.semantic.enabled);
+        assert_eq!(config.cache.semantic.threshold, 0.9);
+        assert_eq!(config.cache.semantic.hit_price_percent, 25);
+        assert_eq!(config.cache.semantic.ttl_secs, 1200);
+        assert_eq!(
+            config.cache.semantic.model_cache_dir.as_deref(),
+            Some("/models/bge")
+        );
+    }
+
+    fn enabled_semantic(threshold: f32, hit_price_percent: u8) -> SemanticSettings {
+        SemanticSettings {
+            enabled: true,
+            threshold,
+            hit_price_percent,
+            ttl_secs: 600,
+            model_cache_dir: None,
+        }
+    }
+
+    #[test]
+    fn semantic_validate_accepts_sane_values() {
+        assert!(enabled_semantic(0.85, 30).validate().is_ok());
+        assert!(enabled_semantic(1.0, 100).validate().is_ok()); // boundaries
+        assert!(enabled_semantic(0.0001, 1).validate().is_ok());
+    }
+
+    #[test]
+    fn semantic_validate_rejects_zero_hit_price_percent() {
+        // 0% → zero claim → escrow skip → free serve. Must be fatal, not silent.
+        let err = enabled_semantic(0.85, 0).validate().unwrap_err();
+        assert!(err.contains("hit_price_percent"), "got: {err}");
+    }
+
+    #[test]
+    fn semantic_validate_rejects_out_of_range_hit_price_percent() {
+        assert!(enabled_semantic(0.85, 101).validate().is_err());
+    }
+
+    #[test]
+    fn semantic_validate_rejects_zero_ttl_secs() {
+        // ttl_secs=0 → EXPIRE key 0 deletes the entry on write → silent all-miss
+        // cache. Must be fatal at startup, not silently degraded (bug_015).
+        let mut s = enabled_semantic(0.85, 30);
+        s.ttl_secs = 0;
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("ttl_secs"), "got: {err}");
+    }
+
+    #[test]
+    fn semantic_validate_rejects_out_of_range_threshold() {
+        // 0.0 makes every query a vacuous hit; >1.0 makes every query a miss.
+        assert!(enabled_semantic(0.0, 30).validate().is_err());
+        assert!(enabled_semantic(1.5, 30).validate().is_err());
+    }
+
+    #[test]
+    fn semantic_validate_skips_when_disabled() {
+        // A disabled cache's values are inert — never block startup on them.
+        let mut s = enabled_semantic(0.0, 0);
+        s.enabled = false;
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn cache_section_absent_falls_back_to_defaults() {
+        let toml = r#"
+[server]
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+recipient_wallet = ""
+[providers]
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("valid config TOML");
+        assert!(!config.cache.semantic.enabled);
+        assert_eq!(config.cache.semantic.threshold, 0.85);
     }
 
     // -------------------------------------------------------------------------

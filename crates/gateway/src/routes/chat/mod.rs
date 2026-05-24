@@ -33,7 +33,8 @@ use crate::AppState;
 
 use cost::{
     cap_usage_to_request_limits, compute_actual_atomic_cost, estimate_input_tokens,
-    estimated_atomic_cost, usdc_atomic_amount_checked,
+    estimated_atomic_cost, scheme_realized_discount, spend_cost_usdc, usdc_atomic_amount_checked,
+    PaymentScheme,
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
@@ -245,7 +246,7 @@ pub async fn chat_completions(
     let payment_payload = decode_payment_from_header(payment_header.unwrap());
 
     // Track escrow-specific info for post-response claim
-    let payment_scheme: String;
+    let payment_scheme: PaymentScheme;
     let mut escrow_service_id: Option<String> = None;
     let mut escrow_agent_pubkey: Option<String> = None;
     // FIX 3: Track the verified deposit amount to cap claim amounts
@@ -387,8 +388,16 @@ pub async fn chat_completions(
                 _ => {}
             }
 
-            // Track scheme and escrow info
-            payment_scheme = payload.accepted.scheme.clone();
+            // Track scheme and escrow info. Parse the scheme at the boundary so
+            // every downstream financial branch (discount gate, escrow claim,
+            // spend ledger) operates on an exhaustive enum, not a free string:
+            // a typo or future scheme becomes a 400 here rather than silently
+            // mis-routing through the financial path.
+            payment_scheme =
+                PaymentScheme::from_accepted_str(&payload.accepted.scheme).map_err(|e| {
+                    warn!(scheme = %payload.accepted.scheme, "unknown payment scheme");
+                    GatewayError::BadRequest(e)
+                })?;
             if let solvela_x402::types::PayloadData::Escrow(ref ep) = payload.payload {
                 escrow_service_id = Some(ep.service_id.clone());
                 escrow_agent_pubkey = Some(ep.agent_pubkey.clone());
@@ -590,6 +599,7 @@ pub async fn chat_completions(
             mut response,
             usage,
             actual_provider,
+            cost_outcome,
         }) => {
             // Cap provider-reported token counts to what the gateway has
             // actually priced for (req.max_tokens, model context window).
@@ -616,9 +626,23 @@ pub async fn chat_completions(
                 }
             }
 
+            // merged_005: the semantic discount is only *realised* on the escrow
+            // scheme — the gateway claims the reduced amount and the remainder
+            // refunds to the agent. On the direct-transfer "exact" scheme the
+            // agent already settled the FULL amount on-chain before the cache was
+            // consulted, with no refund path, so the discount must NOT touch
+            // either the claim or the spend ledger there. Gate it by scheme once,
+            // here, and feed `realized_discount` to both the claim and the log.
+            let realized_discount = scheme_realized_discount(payment_scheme, cost_outcome);
+
             // Compute escrow claim amount: prefer actual usage, fall back to estimate
             // E2 FIX: Use minimum 1 atomic unit for streaming when estimation fails
-            let claim_atomic = if let Some(ref u) = usage {
+            let claim_atomic = if let Some(outcome) = realized_discount {
+                // Escrow semantic-cache hit: claim only the discounted price; the
+                // remainder refunds to the agent. This is how the Phase 1 cache
+                // discount is realised on-chain.
+                Some(outcome.billable_atomic())
+            } else if let Some(ref u) = usage {
                 // `compute_actual_atomic_cost` returns `None` when the model
                 // registry pricing is non-finite/negative or the result would
                 // overflow u64. In those cases we skip the claim rather than
@@ -641,7 +665,7 @@ pub async fn chat_completions(
             if let Some(amount) = claim_atomic {
                 fire_escrow_claim(
                     &state,
-                    &payment_scheme,
+                    payment_scheme,
                     &escrow_service_id,
                     &escrow_agent_pubkey,
                     escrow_deposited_amount,
@@ -655,7 +679,16 @@ pub async fn chat_completions(
                 );
             }
 
-            // Log spend with actual usage (non-streaming) or estimated (streaming)
+            // Log spend with actual usage (non-streaming) or estimated (streaming).
+            //
+            // Two cases must both reconcile the `estimated_cost` reservation that
+            // `check_budget` committed to the Redis counters (the H1 fix):
+            //   (a) usage present — price from the actual (capped) tokens.
+            //   (b) usage ABSENT but a semantic hit occurred (`cost_outcome` is
+            //       Some) — the cached response carried no `usage`. We MUST still
+            //       log, or the reservation is never settled down to the realised
+            //       price and the wallet's budget stays consumed at the full
+            //       reservation forever (merged_005 part 2 — ~70% over-consume).
             if let Some(ref u) = usage {
                 match state
                     .model_registry
@@ -666,9 +699,17 @@ pub async fn chat_completions(
                         })
                     }) {
                     Ok(cost) => {
+                        // On an ESCROW semantic-cache hit the agent is billed the
+                        // discounted price, so the spend ledger must record that —
+                        // not the full computed `cost`. On the exact scheme
+                        // `realized_discount` is None, so the FULL cost is logged
+                        // (the agent paid it on-chain with no refund). The counter
+                        // delta `(billed − reserved)` then settles the wallet's
+                        // budget to the right amount.
+                        let billed_cost = spend_cost_usdc(realized_discount, cost);
                         // Pass the estimated_cost that was committed to Redis
                         // counters in `check_budget` so log_spend can adjust
-                        // by the (actual − estimated) delta. Without this,
+                        // by the (billed − estimated) delta. Without this,
                         // counters would be double-incremented.
                         state.usage.log_spend(SpendLogEntry {
                             wallet_address: wallet_address.clone(),
@@ -676,7 +717,7 @@ pub async fn chat_completions(
                             provider: actual_provider.unwrap_or_else(|| provider_name.to_string()),
                             input_tokens: u.prompt_tokens,
                             output_tokens: u.completion_tokens,
-                            cost_usdc: cost,
+                            cost_usdc: billed_cost,
                             tx_signature: tx_signature.clone(),
                             request_id: request_id.clone(),
                             session_id: session_id.clone(),
@@ -692,6 +733,26 @@ pub async fn chat_completions(
                         );
                     }
                 }
+            } else if cost_outcome.is_some() {
+                // Usage-less semantic hit: reconcile the reservation. On escrow,
+                // bill the discount; on exact, `realized_discount` is None so we
+                // bill the full reservation (`estimated_cost`) — a zero delta that
+                // correctly leaves the on-chain-settled full amount in the ledger.
+                // We have no token counts (the cached response omitted usage), so
+                // record the input estimate and zero output.
+                let billed_cost = spend_cost_usdc(realized_discount, estimated_cost);
+                state.usage.log_spend(SpendLogEntry {
+                    wallet_address: wallet_address.clone(),
+                    model: req.model.clone(),
+                    provider: actual_provider.unwrap_or_else(|| provider_name.to_string()),
+                    input_tokens: estimate_input_tokens(&req),
+                    output_tokens: 0,
+                    cost_usdc: billed_cost,
+                    tx_signature: tx_signature.clone(),
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    estimated_cost_usdc: Some(estimated_cost),
+                });
             }
 
             Ok(response)

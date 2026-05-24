@@ -12,6 +12,10 @@ The gateway (`api.solvela.ai`) and dashboard (`solvela.ai`, `app.solvela.ai`, `d
 
 The escrow program is deployed to Solana mainnet at `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`. Upgrade authority is held at `EDM9pao5miQdJYfzCtZii9cVn5ZHTBJq84Y9yyqZbsr4` (single-sig, stored on the operator workstation, not air-gapped). Authority was migrated on 2026-05-08 from the gateway's hot-wallet keypair (`B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A`) so a runtime compromise of the gateway can no longer escalate to upgrade rights over the deployed program. Migration to a Squads multisig (or hardware-wallet-backed authority) is the next planned step.
 
+### Semantic cache — prompt-embedding privacy
+
+The optional Tier 2 semantic cache (`[cache.semantic].enabled`, **off by default**) stores a dense embedding of each cached prompt in Redis (RediSearch) alongside the cached response. Embeddings are *partially invertible* — an attacker with read access to Redis can recover more about prompt content than the exact cache's opaque SHA-256 keys expose. This does not change the cache's wallet-agnosticism (no payer identity is stored; CLAUDE.md rule #16 holds), but operators enabling the tier should treat the Redis instance as holding prompt-derived data and secure it accordingly (network isolation, auth, encryption at rest). The embedding model (`bge-small-en-v1.5`) is downloaded from the Hugging Face hub by `fastembed` on first run — a first-run outbound network dependency; pin `model_cache_dir` and pre-stage the model for air-gapped deploys.
+
 ## Known transitive advisories — accepted with reason
 
 A small set of advisories cannot be cleared without a major ecosystem migration. These are accepted for the reasons given below, tracked, and re-evaluated on every dependency review.

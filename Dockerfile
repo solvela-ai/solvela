@@ -1,7 +1,10 @@
 # Stage 1: Build
-FROM rust:1.88-slim-bookworm AS builder
+FROM rust:1.88-slim-trixie AS builder
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+# g++ is required so the linker can resolve -lstdc++ — the fastembed
+# dep pulls in the ONNX Runtime C++ bindings (via `ort` / `ort-sys`),
+# which the final link step needs to satisfy.
+RUN apt-get update && apt-get install -y pkg-config libssl-dev g++ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -38,9 +41,11 @@ RUN touch crates/protocol/src/lib.rs crates/x402/src/lib.rs crates/router/src/li
 RUN cargo build --release --bin solvela-gateway
 
 # Stage 2: Runtime
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+# libstdc++6 is the runtime counterpart to the builder's g++ — fastembed's
+# ONNX Runtime layer dynamically links against libstdc++.so.6.
+RUN apt-get update && apt-get install -y ca-certificates libstdc++6 && rm -rf /var/lib/apt/lists/*
 
 # Create non-root runtime user (no home, no login shell)
 RUN useradd --uid 1001 --no-create-home --shell /usr/sbin/nologin solvela

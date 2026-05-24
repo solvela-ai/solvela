@@ -30,7 +30,14 @@ feature-depth = 1
 # ----------------------------------------------------------------------
 [advisories]
 yanked = "deny"
-ignore = []
+ignore = [
+    # paste v1.0.15 — maintainer archived the repo; no upstream fix available.
+    # Pulled transitively via fastembed → tokenizers → macro_rules_attribute,
+    # and via rav1e → ravif (image decode path used by the embedder model
+    # cache). RustSec's suggested replacement (`pastey`) requires upstream
+    # migration in tokenizers; we'll drop this entry when that lands.
+    "RUSTSEC-2024-0436",
+]
 
 # ----------------------------------------------------------------------
 # Licenses — list reflects what's actually in the dependency graph
@@ -51,6 +58,11 @@ allow = [
     "ISC",
     "MIT",
     "MIT-0",
+    # MPL-2.0 is weak (file-level) copyleft, not viral. Pulled in transitively
+    # via fastembed → hf-hub → dirs → dirs-sys → option-ext for the semantic
+    # cache embedder; we link the unmodified crate, which the MPL explicitly
+    # permits under the same terms as MIT/Apache deps.
+    "MPL-2.0",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",

@@ -7,6 +7,34 @@ use tracing::warn;
 
 use solvela_protocol::{ChatRequest, ModelInfo, Usage};
 
+/// Payment scheme parsed off the `X-PAYMENT` header at the request boundary.
+///
+/// Carries a financial invariant: only `Escrow` realises the semantic-cache
+/// discount on-chain (the gateway claims the reduced amount; the remainder
+/// refunds to the agent). `Exact` settles full up front with no refund path,
+/// so the discount must not touch its claim or its spend ledger. Encoding
+/// this as an enum (rather than gating on the literal string `"escrow"`) makes
+/// the financial branch exhaustive: a typo or a newly-added scheme is a
+/// compile error at the gate site, not a silent mis-route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaymentScheme {
+    Exact,
+    Escrow,
+}
+
+impl PaymentScheme {
+    /// Parse a scheme as received in `payload.accepted.scheme`. Unknown schemes
+    /// are rejected: silently coercing to a default would let a future scheme
+    /// flow through the financial branches under the wrong invariant.
+    pub(crate) fn from_accepted_str(s: &str) -> Result<Self, String> {
+        match s {
+            "exact" => Ok(Self::Exact),
+            "escrow" => Ok(Self::Escrow),
+            other => Err(format!("unknown payment scheme: {other}")),
+        }
+    }
+}
+
 /// Hard ceiling on `completion_tokens` when neither the request nor the model
 /// registry declares a tighter cap. Prevents a misbehaving / compromised
 /// provider from inflating `usage.completion_tokens` to something the
@@ -247,6 +275,131 @@ pub(crate) fn usdc_atomic_amount_checked(decimal_str: &str) -> Result<String, St
 #[cfg(test)]
 fn usdc_atomic_amount(decimal_str: &str) -> String {
     usdc_atomic_amount_checked(decimal_str).unwrap_or_else(|_| "0".to_string())
+}
+
+/// Pricing for a semantic-cache hit, in atomic USDC units.
+///
+/// The normal path (cache miss / exact-match hit) is represented by the absence
+/// of this value (`Option::None`) — the agent pays the full computed cost. When
+/// present, `full_atomic` is what a miss would have cost (the **all-in** price:
+/// provider cost + 5% platform fee; retained for receipts and metrics) and
+/// `discounted_atomic` is what's actually billed.
+///
+/// The discount is a flat fraction of that all-in price, so the 5% fee scales
+/// down with it — this mirrors how provider prompt caching prices a hit (a flat
+/// fraction of the all-in rate, not "compute discount + full margin"). It is not
+/// a fee loss: a cache hit pays the upstream provider nothing, so the entire
+/// `discounted_atomic` is gateway revenue minus the sub-cent embedding cost.
+///
+/// The discount is realised on the **escrow scheme** by claiming only
+/// `discounted_atomic`; the remainder refunds to the agent. On the
+/// direct-transfer (`exact`) scheme the full amount has already settled on-chain
+/// before the cache is consulted, so no discount applies — `discounted_atomic`
+/// is only actionable for escrow payments. (Trustless per-scheme discounts need
+/// the Phase 2/3 commitment + on-chain bond.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SemanticDiscount {
+    // Private so the only construction path is `new`, which guarantees the
+    // invariant `discounted_atomic <= full_atomic`. A struct literal could
+    // otherwise set `discounted > full` and over-claim from escrow.
+    full_atomic: u64,
+    discounted_atomic: u64,
+}
+
+impl SemanticDiscount {
+    /// Build a semantic discount, computing the billed price from the full
+    /// price and the percent-of-full to bill (e.g. `30` → bill 30%).
+    pub(crate) fn new(full_atomic: u64, hit_price_percent: u8) -> Self {
+        SemanticDiscount {
+            full_atomic,
+            discounted_atomic: apply_hit_price(full_atomic, hit_price_percent),
+        }
+    }
+
+    /// Amount to actually charge / claim, in atomic USDC.
+    pub(crate) fn billable_atomic(&self) -> u64 {
+        self.discounted_atomic
+    }
+
+    /// The full (undiscounted) all-in price a miss would have cost, in atomic
+    /// USDC. Used for the discount-ratio metric.
+    pub(crate) fn full_atomic(&self) -> u64 {
+        self.full_atomic
+    }
+}
+
+/// Apply a semantic-hit price to a full atomic cost using integer arithmetic
+/// (no f64 — financial math stays exact).
+///
+/// `hit_price_percent` is the percentage of the full price the agent still pays
+/// on a hit (e.g. `30` = pay 30%, a 70% discount). Clamped to `0..=100`, so the
+/// result is always `floor(full_atomic * pct / 100)` and never exceeds
+/// `full_atomic`.
+///
+/// Floor division means a sub-cent `full_atomic` can yield `0` even at a valid
+/// non-zero percent (e.g. `full_atomic = 99`, `pct = 1` → `0`). That is benign:
+/// the escrow claim's `amount == 0` guard skips it and the spend ledger records
+/// `0`, correctly crediting the agent's budget for a near-free micro-request.
+pub(crate) fn apply_hit_price(full_atomic: u64, hit_price_percent: u8) -> u64 {
+    let pct = hit_price_percent.min(100) as u128;
+    // u128 intermediate so `full_atomic * pct` cannot overflow u64; the result
+    // is always ≤ full_atomic (pct ≤ 100), so the cast back is lossless.
+    ((full_atomic as u128) * pct / 100) as u64
+}
+
+/// The semantic discount that is actually *realised* on-chain for a payment
+/// scheme.
+///
+/// The discount is only collectable on the **escrow** scheme, where the gateway
+/// claims the reduced amount and refunds the remainder. On the direct-transfer
+/// **exact** scheme the agent already settled the full amount up front with no
+/// refund path, so no discount applies — both the escrow claim and the spend
+/// ledger must use the full price there. Returns `None` (→ full price) for any
+/// non-escrow scheme. Logging the discounted price on `exact` would under-count
+/// the wallet's real spend, since the agent was charged in full.
+pub(crate) fn scheme_realized_discount(
+    scheme: PaymentScheme,
+    cost_outcome: Option<SemanticDiscount>,
+) -> Option<SemanticDiscount> {
+    match scheme {
+        PaymentScheme::Escrow => cost_outcome,
+        PaymentScheme::Exact => None,
+    }
+}
+
+/// The USDC amount to record in the spend log / budget ledger for this request.
+///
+/// On a semantic-cache hit the agent is billed the **discounted** price, so the
+/// ledger must reflect that — not the full computed cost. Logging the full cost
+/// makes per-wallet budget counters consume at 100% while the escrow claim only
+/// took the discount, denying agents service before their real spend warrants
+/// it. `None` (normal path) records the full computed cost as before.
+pub(crate) fn spend_cost_usdc(cost_outcome: Option<SemanticDiscount>, full_cost_usdc: f64) -> f64 {
+    match cost_outcome {
+        Some(discount) => discount.billable_atomic() as f64 / 1_000_000.0,
+        None => full_cost_usdc,
+    }
+}
+
+/// The full (undiscounted) all-in price to charge for a semantic-cache hit, in
+/// atomic USDC, or `None` if no positive price can be derived.
+///
+/// `ChatResponse.usage` is optional and some providers omit it. We prefer the
+/// cached response's actual token cost, fall back to the current request's
+/// estimate, and **reject zero** so a usage-less hit can never settle free: a
+/// `None` here signals the caller to fall through to a normal upstream call
+/// rather than serve a discounted-from-nothing response.
+pub(crate) fn semantic_hit_full_atomic(
+    usage: Option<&Usage>,
+    registry: &solvela_router::models::ModelRegistry,
+    model: &str,
+    req: &ChatRequest,
+    model_info: &ModelInfo,
+) -> Option<u64> {
+    usage
+        .and_then(|u| compute_actual_atomic_cost(u.prompt_tokens, u.completion_tokens, model_info))
+        .or_else(|| estimated_atomic_cost(registry, model, req).ok())
+        .filter(|&c| c > 0)
 }
 
 #[cfg(test)]
@@ -823,6 +976,160 @@ supports_vision = false
         assert!(
             result.is_err(),
             "unknown model must return Err, got: {result:?}"
+        );
+    }
+
+    // =========================================================================
+    // CostOutcome + apply_hit_price — semantic-cache discount (integer math)
+    // =========================================================================
+
+    #[test]
+    fn apply_hit_price_charges_the_given_percent() {
+        assert_eq!(apply_hit_price(1000, 30), 300);
+        assert_eq!(apply_hit_price(2625, 30), 787); // floor(787.5)
+    }
+
+    #[test]
+    fn apply_hit_price_full_percent_is_no_discount() {
+        assert_eq!(apply_hit_price(1000, 100), 1000);
+    }
+
+    #[test]
+    fn apply_hit_price_zero_percent_is_free() {
+        assert_eq!(apply_hit_price(1000, 0), 0);
+    }
+
+    #[test]
+    fn apply_hit_price_clamps_above_100_to_full() {
+        // A misconfigured >100% must never bill more than the full price.
+        assert_eq!(apply_hit_price(1000, 200), 1000);
+    }
+
+    #[test]
+    fn apply_hit_price_floors_sub_unit_amounts() {
+        // floor(1 * 0.30) == 0; never rounds up to over-bill.
+        assert_eq!(apply_hit_price(1, 30), 0);
+    }
+
+    #[test]
+    fn apply_hit_price_never_exceeds_full_and_never_overflows() {
+        // Large value × percent must not overflow u64 (computed in u128).
+        // u64::MAX * 50 / 100 == u64::MAX / 2; a u64-domain multiply would have
+        // wrapped to a tiny value, so this exact-equality is the overflow proof.
+        let discounted = apply_hit_price(u64::MAX, 50);
+        assert_eq!(discounted, u64::MAX / 2);
+    }
+
+    #[test]
+    fn semantic_discount_bills_discounted_and_keeps_full() {
+        let outcome = SemanticDiscount::new(1000, 30);
+        assert_eq!(outcome.billable_atomic(), 300);
+        assert_eq!(outcome.full_atomic(), 1000);
+    }
+
+    #[test]
+    fn spend_cost_uses_discounted_on_semantic_hit() {
+        // full $5.00 (5_000_000 atomic), 30% → discounted $1.50.
+        let outcome = Some(SemanticDiscount::new(5_000_000, 30));
+        assert_eq!(spend_cost_usdc(outcome, 5.0), 1.5);
+    }
+
+    #[test]
+    fn spend_cost_uses_full_when_no_discount() {
+        assert_eq!(spend_cost_usdc(None, 5.0), 5.0);
+    }
+
+    #[test]
+    fn scheme_realized_discount_applies_only_to_escrow() {
+        // The discount is realised (claim less + refund) only on the escrow
+        // scheme. On exact the agent paid full on-chain with no refund, so the
+        // discount must not reach the claim or the spend ledger.
+        let d = SemanticDiscount::new(1000, 30);
+        assert_eq!(
+            scheme_realized_discount(PaymentScheme::Escrow, Some(d)),
+            Some(d)
+        );
+        assert_eq!(
+            scheme_realized_discount(PaymentScheme::Exact, Some(d)),
+            None,
+            "exact scheme must NOT realise the discount (agent paid full on-chain)"
+        );
+        assert_eq!(scheme_realized_discount(PaymentScheme::Exact, None), None);
+        assert_eq!(scheme_realized_discount(PaymentScheme::Escrow, None), None);
+    }
+
+    #[test]
+    fn payment_scheme_parses_known_strings_and_rejects_unknown() {
+        assert_eq!(
+            PaymentScheme::from_accepted_str("exact"),
+            Ok(PaymentScheme::Exact)
+        );
+        assert_eq!(
+            PaymentScheme::from_accepted_str("escrow"),
+            Ok(PaymentScheme::Escrow)
+        );
+        // Unknown schemes MUST NOT default-route — silent coercion would let a
+        // future scheme flow through the financial branches under the wrong
+        // invariant. The boundary parser is the single gate.
+        assert!(PaymentScheme::from_accepted_str("").is_err());
+        assert!(PaymentScheme::from_accepted_str("Escrow").is_err());
+        assert!(PaymentScheme::from_accepted_str("escrow ").is_err());
+        assert!(PaymentScheme::from_accepted_str("escr0w").is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // semantic_hit_full_atomic — anti-free-hit guard (a usage-less hit, or a
+    // zero-priced model, must fall through to upstream rather than settle $0)
+    // -------------------------------------------------------------------------
+
+    fn priced_registry(cost_per_million: f64) -> solvela_router::models::ModelRegistry {
+        registry_with_cost(cost_per_million)
+    }
+
+    #[test]
+    fn semantic_full_price_uses_actual_usage_when_present() {
+        let reg = priced_registry(2.0);
+        let mi = reg.get("test/test-model").unwrap();
+        let usage = Usage {
+            prompt_tokens: 1000,
+            completion_tokens: 500,
+            total_tokens: 1500,
+        };
+        let req = make_request("test/test-model", vec![user_msg("hi")]);
+        let got = semantic_hit_full_atomic(Some(&usage), &reg, "test/test-model", &req, mi);
+        // 1000+500 tokens @ $2/M = $0.003 provider; ×1.05 fee = 3150 atomic.
+        assert_eq!(got, Some(3150));
+    }
+
+    #[test]
+    fn semantic_full_price_falls_back_to_estimate_when_usage_absent() {
+        let reg = priced_registry(2.0);
+        let mi = reg.get("test/test-model").unwrap();
+        let req = make_request("test/test-model", vec![user_msg("hello there")]);
+        let got = semantic_hit_full_atomic(None, &reg, "test/test-model", &req, mi);
+        assert!(
+            got.is_some() && got.unwrap() > 0,
+            "usage-less hit on a priced model must estimate a positive cost, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn semantic_full_price_returns_none_when_unpriceable_never_zero() {
+        // Zero-priced model: actual usage prices to 0 AND estimate prices to 0.
+        // The function must return None (→ caller falls through to upstream),
+        // NOT Some(0) (which would settle the hit free).
+        let reg = priced_registry(0.0);
+        let mi = reg.get("test/test-model").unwrap();
+        let usage = Usage {
+            prompt_tokens: 1000,
+            completion_tokens: 500,
+            total_tokens: 1500,
+        };
+        let req = make_request("test/test-model", vec![user_msg("hi")]);
+        assert_eq!(
+            semantic_hit_full_atomic(Some(&usage), &reg, "test/test-model", &req, mi),
+            None,
+            "a zero-priceable hit must be None (fall through), never Some(0)"
         );
     }
 }

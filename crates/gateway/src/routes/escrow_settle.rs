@@ -164,7 +164,7 @@ pub async fn handle_settle(
     // bound. Today's flow leans on the chain layer to reject over-claims.
     fire_escrow_claim(
         &state,
-        "escrow",
+        crate::routes::chat::cost::PaymentScheme::Escrow,
         &Some(req.service_id.clone()),
         &Some(req.agent_pubkey.clone()),
         None, // deposit amount unknown at this layer

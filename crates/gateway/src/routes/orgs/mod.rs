@@ -385,6 +385,7 @@ supports_vision = true
             facilitator,
             usage: crate::usage::UsageTracker::noop(),
             cache: None,
+            semantic_cache: None,
             provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
             escrow_claimer: None,
             fee_payer_pool: None,
@@ -544,6 +545,7 @@ mod tests {
             facilitator: solvela_x402::facilitator::Facilitator::new(vec![]),
             usage: crate::usage::UsageTracker::noop(),
             cache: None,
+            semantic_cache: None,
             provider_health: crate::providers::health::ProviderHealthTracker::new(
                 crate::providers::health::CircuitBreakerConfig::default(),
             ),
@@ -588,6 +590,7 @@ mod tests {
             facilitator: solvela_x402::facilitator::Facilitator::new(vec![]),
             usage: crate::usage::UsageTracker::noop(),
             cache: None,
+            semantic_cache: None,
             provider_health: crate::providers::health::ProviderHealthTracker::new(
                 crate::providers::health::CircuitBreakerConfig::default(),
             ),
@@ -635,6 +638,7 @@ mod tests {
             facilitator: solvela_x402::facilitator::Facilitator::new(vec![]),
             usage: crate::usage::UsageTracker::noop(),
             cache: None,
+            semantic_cache: None,
             provider_health: crate::providers::health::ProviderHealthTracker::new(
                 crate::providers::health::CircuitBreakerConfig::default(),
             ),

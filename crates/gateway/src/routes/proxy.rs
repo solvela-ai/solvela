@@ -906,6 +906,7 @@ mod tests {
             facilitator: Facilitator::new(vec![]),
             usage: UsageTracker::noop(),
             cache: None, // no Redis — triggers the LRU fallback path
+            semantic_cache: None,
             provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
             escrow_claimer: None,
             fee_payer_pool: None,
@@ -1036,6 +1037,7 @@ mod tests {
             facilitator: Facilitator::new(vec![]),
             usage: UsageTracker::noop(),
             cache: None,
+            semantic_cache: None,
             provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
             escrow_claimer: None,
             fee_payer_pool: None,

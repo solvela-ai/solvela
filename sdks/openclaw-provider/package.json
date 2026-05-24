@@ -1,13 +1,15 @@
 {
   "name": "@solvela/openclaw-provider",
-  "version": "1.0.0-draft",
-  "private": true,
+  "version": "0.1.0",
   "description": "OpenClaw Provider Plugin — registers Solvela as a first-class LLM provider with per-call x402 signing",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
   "scripts": {
     "generate:models": "node --import tsx/esm scripts/generate-models.ts",
@@ -16,7 +18,8 @@
     "test": "node --import tsx/esm --test tests/index.test.ts tests/signer.test.ts tests/manifest.test.ts tests/models.test.ts tests/registry.test.ts tests/f4-wrapper.test.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
-    "pretest": "node ../signer-core/scripts/ensure-built.mjs"
+    "pretest": "node ../signer-core/scripts/ensure-built.mjs",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "openclaw",
@@ -29,11 +32,11 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@solvela/signer-core": "file:../signer-core",
-    "@solana/web3.js": "^1.87.0",
     "@solana/spl-token": "^0.4.0",
+    "@solana/web3.js": "^1.87.0",
+    "@solvela/signer-core": "^0.1.0",
     "async-mutex": "^0.5.0",
-    "bs58": "^5.0.0"
+    "bs58": "^6.0.0"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.74.0",
@@ -45,5 +48,10 @@
   },
   "overrides": {
     "uuid": "^11.1.1"
-  }
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md"
+  ]
 }

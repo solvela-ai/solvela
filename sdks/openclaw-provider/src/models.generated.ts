@@ -100,7 +100,7 @@ export const SOLVELA_MODELS: SolvelaModel[] = [
     "reasoning": false
   },
   {
-    "id": "solvela/claude-opus-4-20250514",
+    "id": "solvela/claude-opus-4-6",
     "name": "Claude Opus 4.6",
     "provider": "anthropic",
     "contextWindow": 200000,
@@ -114,7 +114,7 @@ export const SOLVELA_MODELS: SolvelaModel[] = [
     "reasoning": true
   },
   {
-    "id": "solvela/claude-sonnet-4-20250514",
+    "id": "solvela/claude-sonnet-4-6",
     "name": "Claude Sonnet 4.6",
     "provider": "anthropic",
     "contextWindow": 200000,
@@ -310,6 +310,20 @@ export const SOLVELA_MODELS: SolvelaModel[] = [
     "reasoning": false
   },
   {
+    "id": "solvela/claude-sonnet-4-5-20250929",
+    "name": "Claude Sonnet 4.5",
+    "provider": "anthropic",
+    "contextWindow": 200000,
+    "maxTokens": 16384,
+    "inputCostPerMillion": 3,
+    "outputCostPerMillion": 15,
+    "supportsStreaming": true,
+    "supportsTools": true,
+    "supportsVision": true,
+    "supportsStructuredOutput": false,
+    "reasoning": false
+  },
+  {
     "id": "solvela/gemini-2.0-flash",
     "name": "Gemini 2.0 Flash",
     "provider": "google",
@@ -381,4 +395,4 @@ export const SOLVELA_MODELS: SolvelaModel[] = [
   }
 ];
 
-export const MODEL_COUNT = 25;
+export const MODEL_COUNT = 26;
