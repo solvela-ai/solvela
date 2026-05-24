@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM rust:1.88-slim-bookworm AS builder
+FROM rust:1.88-slim-trixie AS builder
 
 # g++ is required so the linker can resolve -lstdc++ — the fastembed
 # dep pulls in the ONNX Runtime C++ bindings (via `ort` / `ort-sys`),
@@ -41,7 +41,7 @@ RUN touch crates/protocol/src/lib.rs crates/x402/src/lib.rs crates/router/src/li
 RUN cargo build --release --bin solvela-gateway
 
 # Stage 2: Runtime
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # libstdc++6 is the runtime counterpart to the builder's g++ — fastembed's
 # ONNX Runtime layer dynamically links against libstdc++.so.6.
