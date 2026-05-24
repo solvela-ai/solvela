@@ -7,6 +7,34 @@ use tracing::warn;
 
 use solvela_protocol::{ChatRequest, ModelInfo, Usage};
 
+/// Payment scheme parsed off the `X-PAYMENT` header at the request boundary.
+///
+/// Carries a financial invariant: only `Escrow` realises the semantic-cache
+/// discount on-chain (the gateway claims the reduced amount; the remainder
+/// refunds to the agent). `Exact` settles full up front with no refund path,
+/// so the discount must not touch its claim or its spend ledger. Encoding
+/// this as an enum (rather than gating on the literal string `"escrow"`) makes
+/// the financial branch exhaustive: a typo or a newly-added scheme is a
+/// compile error at the gate site, not a silent mis-route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaymentScheme {
+    Exact,
+    Escrow,
+}
+
+impl PaymentScheme {
+    /// Parse a scheme as received in `payload.accepted.scheme`. Unknown schemes
+    /// are rejected: silently coercing to a default would let a future scheme
+    /// flow through the financial branches under the wrong invariant.
+    pub(crate) fn from_accepted_str(s: &str) -> Result<Self, String> {
+        match s {
+            "exact" => Ok(Self::Exact),
+            "escrow" => Ok(Self::Escrow),
+            other => Err(format!("unknown payment scheme: {other}")),
+        }
+    }
+}
+
 /// Hard ceiling on `completion_tokens` when neither the request nor the model
 /// registry declares a tighter cap. Prevents a misbehaving / compromised
 /// provider from inflating `usage.completion_tokens` to something the
@@ -330,13 +358,12 @@ pub(crate) fn apply_hit_price(full_atomic: u64, hit_price_percent: u8) -> u64 {
 /// non-escrow scheme. Logging the discounted price on `exact` would under-count
 /// the wallet's real spend, since the agent was charged in full.
 pub(crate) fn scheme_realized_discount(
-    payment_scheme: &str,
+    scheme: PaymentScheme,
     cost_outcome: Option<SemanticDiscount>,
 ) -> Option<SemanticDiscount> {
-    if payment_scheme == "escrow" {
-        cost_outcome
-    } else {
-        None
+    match scheme {
+        PaymentScheme::Escrow => cost_outcome,
+        PaymentScheme::Exact => None,
     }
 }
 
@@ -1018,14 +1045,36 @@ supports_vision = false
         // scheme. On exact the agent paid full on-chain with no refund, so the
         // discount must not reach the claim or the spend ledger.
         let d = SemanticDiscount::new(1000, 30);
-        assert_eq!(scheme_realized_discount("escrow", Some(d)), Some(d));
         assert_eq!(
-            scheme_realized_discount("exact", Some(d)),
+            scheme_realized_discount(PaymentScheme::Escrow, Some(d)),
+            Some(d)
+        );
+        assert_eq!(
+            scheme_realized_discount(PaymentScheme::Exact, Some(d)),
             None,
             "exact scheme must NOT realise the discount (agent paid full on-chain)"
         );
-        assert_eq!(scheme_realized_discount("exact", None), None);
-        assert_eq!(scheme_realized_discount("escrow", None), None);
+        assert_eq!(scheme_realized_discount(PaymentScheme::Exact, None), None);
+        assert_eq!(scheme_realized_discount(PaymentScheme::Escrow, None), None);
+    }
+
+    #[test]
+    fn payment_scheme_parses_known_strings_and_rejects_unknown() {
+        assert_eq!(
+            PaymentScheme::from_accepted_str("exact"),
+            Ok(PaymentScheme::Exact)
+        );
+        assert_eq!(
+            PaymentScheme::from_accepted_str("escrow"),
+            Ok(PaymentScheme::Escrow)
+        );
+        // Unknown schemes MUST NOT default-route — silent coercion would let a
+        // future scheme flow through the financial branches under the wrong
+        // invariant. The boundary parser is the single gate.
+        assert!(PaymentScheme::from_accepted_str("").is_err());
+        assert!(PaymentScheme::from_accepted_str("Escrow").is_err());
+        assert!(PaymentScheme::from_accepted_str("escrow ").is_err());
+        assert!(PaymentScheme::from_accepted_str("escr0w").is_err());
     }
 
     // -------------------------------------------------------------------------

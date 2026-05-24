@@ -34,6 +34,7 @@ use crate::AppState;
 use cost::{
     cap_usage_to_request_limits, compute_actual_atomic_cost, estimate_input_tokens,
     estimated_atomic_cost, scheme_realized_discount, spend_cost_usdc, usdc_atomic_amount_checked,
+    PaymentScheme,
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
@@ -245,7 +246,7 @@ pub async fn chat_completions(
     let payment_payload = decode_payment_from_header(payment_header.unwrap());
 
     // Track escrow-specific info for post-response claim
-    let payment_scheme: String;
+    let payment_scheme: PaymentScheme;
     let mut escrow_service_id: Option<String> = None;
     let mut escrow_agent_pubkey: Option<String> = None;
     // FIX 3: Track the verified deposit amount to cap claim amounts
@@ -387,8 +388,16 @@ pub async fn chat_completions(
                 _ => {}
             }
 
-            // Track scheme and escrow info
-            payment_scheme = payload.accepted.scheme.clone();
+            // Track scheme and escrow info. Parse the scheme at the boundary so
+            // every downstream financial branch (discount gate, escrow claim,
+            // spend ledger) operates on an exhaustive enum, not a free string:
+            // a typo or future scheme becomes a 400 here rather than silently
+            // mis-routing through the financial path.
+            payment_scheme =
+                PaymentScheme::from_accepted_str(&payload.accepted.scheme).map_err(|e| {
+                    warn!(scheme = %payload.accepted.scheme, "unknown payment scheme");
+                    GatewayError::BadRequest(e)
+                })?;
             if let solvela_x402::types::PayloadData::Escrow(ref ep) = payload.payload {
                 escrow_service_id = Some(ep.service_id.clone());
                 escrow_agent_pubkey = Some(ep.agent_pubkey.clone());
@@ -624,7 +633,7 @@ pub async fn chat_completions(
             // consulted, with no refund path, so the discount must NOT touch
             // either the claim or the spend ledger there. Gate it by scheme once,
             // here, and feed `realized_discount` to both the claim and the log.
-            let realized_discount = scheme_realized_discount(&payment_scheme, cost_outcome);
+            let realized_discount = scheme_realized_discount(payment_scheme, cost_outcome);
 
             // Compute escrow claim amount: prefer actual usage, fall back to estimate
             // E2 FIX: Use minimum 1 atomic unit for streaming when estimation fails
@@ -656,7 +665,7 @@ pub async fn chat_completions(
             if let Some(amount) = claim_atomic {
                 fire_escrow_claim(
                     &state,
-                    &payment_scheme,
+                    payment_scheme,
                     &escrow_service_id,
                     &escrow_agent_pubkey,
                     escrow_deposited_amount,
