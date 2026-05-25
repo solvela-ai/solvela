@@ -825,8 +825,8 @@ async fn build_semantic_cache(
         // alerting separate "model file gone" from "task panic".
         Ok(Err(e)) => {
             metrics::counter!(
-                "solvela_semantic_cache_startup_failure_total",
-                "reason" => "model_load"
+                SEMANTIC_CACHE_STARTUP_FAILURE_METRIC,
+                "reason" => STARTUP_FAILURE_REASON_MODEL_LOAD
             )
             .increment(1);
             error!(error = %e, "semantic cache disabled: embedding model failed to load");
@@ -834,8 +834,8 @@ async fn build_semantic_cache(
         }
         Err(e) => {
             metrics::counter!(
-                "solvela_semantic_cache_startup_failure_total",
-                "reason" => "task_panic"
+                SEMANTIC_CACHE_STARTUP_FAILURE_METRIC,
+                "reason" => STARTUP_FAILURE_REASON_TASK_PANIC
             )
             .increment(1);
             error!(error = %e, "semantic cache disabled: embedder load task panicked");
@@ -860,8 +860,8 @@ async fn build_semantic_cache(
         }
         Err(e) => {
             metrics::counter!(
-                "solvela_semantic_cache_startup_failure_total",
-                "reason" => "redis_connect"
+                SEMANTIC_CACHE_STARTUP_FAILURE_METRIC,
+                "reason" => STARTUP_FAILURE_REASON_REDIS_CONNECT
             )
             .increment(1);
             error!(error = %e, "semantic cache disabled: Redis/RediSearch unavailable");
@@ -869,6 +869,15 @@ async fn build_semantic_cache(
         }
     }
 }
+
+/// Metric and label-value constants for `build_semantic_cache` startup
+/// failures. Production and tests reference these same consts so a typo can
+/// only happen in one place — keeps alerting and the test counter assertions
+/// from silently drifting apart.
+const SEMANTIC_CACHE_STARTUP_FAILURE_METRIC: &str = "solvela_semantic_cache_startup_failure_total";
+const STARTUP_FAILURE_REASON_MODEL_LOAD: &str = "model_load";
+const STARTUP_FAILURE_REASON_TASK_PANIC: &str = "task_panic";
+const STARTUP_FAILURE_REASON_REDIS_CONNECT: &str = "redis_connect";
 
 #[cfg(test)]
 mod tests {
@@ -904,15 +913,13 @@ mod tests {
     /// F1 startup-failure counter must actually increment when
     /// `build_semantic_cache` cannot reach Redis. A typo in the metric name or
     /// a refactor that drops the `metrics::counter!` call would make alerting
-    /// silently lose this signal — this test catches both.
+    /// silently lose this signal — this test catches both. References the
+    /// production consts directly so they cannot drift apart.
     #[tokio::test]
     async fn build_semantic_cache_increments_failure_counter_on_unreachable_redis() {
         let handle = install_test_recorder();
-        let before = counter_sum(
-            &handle,
-            "solvela_semantic_cache_startup_failure_total",
-            "reason=\"redis_connect\"",
-        );
+        let label_match = format!("reason=\"{}\"", STARTUP_FAILURE_REASON_REDIS_CONNECT);
+        let before = counter_sum(&handle, SEMANTIC_CACHE_STARTUP_FAILURE_METRIC, &label_match);
 
         let mut config = config::AppConfig::default();
         config.cache.semantic.enabled = true;
@@ -941,16 +948,31 @@ mod tests {
             "build_semantic_cache must return None on Redis failure"
         );
 
-        let after = counter_sum(
-            &handle,
-            "solvela_semantic_cache_startup_failure_total",
-            "reason=\"redis_connect\"",
-        );
+        let after = counter_sum(&handle, SEMANTIC_CACHE_STARTUP_FAILURE_METRIC, &label_match);
         assert_eq!(
             after,
             before + 1,
             "redis_connect failure path must increment the startup-failure counter; \
              a typo in the metric name or a missing counter! call would slip past this test"
+        );
+    }
+
+    /// Lock the exhaustive set of reason labels for the startup-failure
+    /// counter. The production code emits exactly these three values; if a new
+    /// failure branch is added without extending this list, alert rules built
+    /// against the known set will silently miss the new reason. Acts as a
+    /// schema test for the operator-facing metric.
+    #[test]
+    fn startup_failure_reason_labels_are_the_expected_three() {
+        let reasons = [
+            STARTUP_FAILURE_REASON_MODEL_LOAD,
+            STARTUP_FAILURE_REASON_TASK_PANIC,
+            STARTUP_FAILURE_REASON_REDIS_CONNECT,
+        ];
+        assert_eq!(reasons, ["model_load", "task_panic", "redis_connect"]);
+        assert_eq!(
+            SEMANTIC_CACHE_STARTUP_FAILURE_METRIC,
+            "solvela_semantic_cache_startup_failure_total"
         );
     }
 }

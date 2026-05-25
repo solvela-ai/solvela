@@ -74,9 +74,26 @@ impl ResponseCache {
                             .increment(1);
                         warn!(
                             key = %key,
-                            "cached response has no usage block; treating as miss \
-                             so the wallet's budget reservation can settle"
+                            "cached response has no usage block; evicting and \
+                             treating as miss so the wallet's budget reservation \
+                             can settle"
                         );
+                        // Fire-and-forget DEL: without this, the stale entry
+                        // survives until TTL (default 600s) and every read in
+                        // that window re-fires the counter, re-emits the warn,
+                        // and re-calls upstream. The counter is named
+                        // `..._evicted_..._total` to communicate one-shot
+                        // remediation to on-call — the DEL makes that honest.
+                        let client = self.client.clone();
+                        let evict_key = key.clone();
+                        tokio::spawn(async move {
+                            if let Ok(mut conn) = client.get_multiplexed_async_connection().await {
+                                let _: Result<(), redis::RedisError> = redis::cmd("DEL")
+                                    .arg(&evict_key)
+                                    .query_async(&mut conn)
+                                    .await;
+                            }
+                        });
                         return None;
                     }
                     info!(key = %key, "cache hit");

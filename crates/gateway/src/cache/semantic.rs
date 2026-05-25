@@ -115,10 +115,15 @@ impl SemanticCache {
         config: SemanticConfig,
     ) -> Result<Self, super::CacheError> {
         // Fail fast on a bad threshold rather than degrade to a silent all-hit
-        // (threshold ≤ 0) or all-miss (threshold > 1) cache.
-        if !(0.0..=1.0).contains(&config.threshold) {
+        // (threshold ≤ 0: similarity ≥ 0 is always true → every query is a hit
+        // → serves wrong cached response to paying agent) or all-miss
+        // (threshold > 1) cache. Matches `SemanticSettings::validate` in
+        // config.rs — the bounds MUST stay in sync; this guard exists because
+        // `connect` is `pub` and can be called by tests or future code that
+        // bypasses startup config validation.
+        if !(config.threshold > 0.0 && config.threshold <= 1.0) {
             return Err(super::CacheError::Operation(format!(
-                "semantic cache threshold {} is outside [0.0, 1.0]",
+                "semantic cache threshold {} is outside (0.0, 1.0]",
                 config.threshold
             )));
         }
@@ -434,7 +439,12 @@ async fn embed_text(embedder: &Arc<dyn Embedder>, text: String) -> Option<Vec<f3
                 "reason" => "task_panic"
             )
             .increment(1);
-            warn!(error = %e, "semantic cache embed task panicked");
+            // `error!`, not `warn!`: a panic inside the spawn_blocking task
+            // means fastembed/ONNX state is suspect under load — at least as
+            // severe as the startup `task_panic` arm in `build_semantic_cache`
+            // (main.rs), which also logs `error!`. Operators reading logs
+            // during an incident must see this at the same severity.
+            tracing::error!(error = %e, "semantic cache embed task panicked");
             None
         }
     }

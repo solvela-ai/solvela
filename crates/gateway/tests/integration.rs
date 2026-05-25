@@ -932,6 +932,11 @@ async fn semantic_cache_hit_on_exact_paid_request() {
         return;
     };
 
+    // Distinct semantic domain from `semantic_cache_serves_paraphrase`
+    // (photosynthesis) — both tests share the same Redis HNSW index without a
+    // cross-test lock, so prompts must not cosine-collide above the 0.85
+    // threshold or whichever seeds first wins and the other test gets the
+    // wrong cache id.
     let seeded = ChatResponse {
         id: "seeded-exact-billing".to_string(),
         object: "chat.completion".to_string(),
@@ -941,7 +946,8 @@ async fn semantic_cache_hit_on_exact_paid_request() {
             index: 0,
             message: ChatMessage {
                 role: Role::Assistant,
-                content: "Photosynthesis converts light into chemical energy.".to_string(),
+                content: "The universe began roughly 13.8 billion years ago in a hot, dense state."
+                    .to_string(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -958,7 +964,7 @@ async fn semantic_cache_hit_on_exact_paid_request() {
         model: "openai/gpt-4o".to_string(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: "How does photosynthesis work in plants?".to_string(),
+            content: "What is the Big Bang theory in cosmology?".to_string(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -977,7 +983,7 @@ async fn semantic_cache_hit_on_exact_paid_request() {
     // Exact-scheme paid request with a paraphrase. dev_bypass is OFF, so the
     // exact PAYMENT-SIGNATURE must verify through AlwaysPassVerifier (which is
     // also wired into the facilitator on this app) to reach the chat handler.
-    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":"Explain how plants make food from sunlight."}]}"#;
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":"Explain the Big Bang origin of the universe."}]}"#;
     let resp = app
         .oneshot(
             Request::builder()
