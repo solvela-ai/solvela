@@ -32,6 +32,14 @@ pub enum EmbedderError {
     /// An embedding call failed at runtime.
     #[error("embedding failed: {0}")]
     Embed(String),
+    /// The embedder's internal `Mutex` was poisoned by a panic during a
+    /// previous embed call. Distinct from [`EmbedderError::Embed`] because it
+    /// is a permanent process-state failure (not a retryable runtime error):
+    /// every subsequent call sees the same poisoned lock and the model state
+    /// is indeterminate. Surface this separately so alerting can distinguish
+    /// "process needs restart" from "transient embed retry".
+    #[error("embedder mutex poisoned (process-state corruption from a prior panic)")]
+    MutexPoisoned,
 }
 
 /// Abstraction over an embedding backend. `Send + Sync` so it can live in
@@ -92,7 +100,7 @@ impl Embedder for LocalBge {
         let mut model = self
             .model
             .lock()
-            .map_err(|_| EmbedderError::Embed("embedder mutex poisoned".to_string()))?;
+            .map_err(|_| EmbedderError::MutexPoisoned)?;
         let mut out = model
             .embed(vec![text.to_string()], None)
             .map_err(|e| EmbedderError::Embed(e.to_string()))?;
@@ -104,7 +112,7 @@ impl Embedder for LocalBge {
         let mut model = self
             .model
             .lock()
-            .map_err(|_| EmbedderError::Embed("embedder mutex poisoned".to_string()))?;
+            .map_err(|_| EmbedderError::MutexPoisoned)?;
         let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
         model
             .embed(owned, None)
@@ -140,6 +148,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::Instant;
 
     /// Workspace-root `.fastembed_cache` (cargo runs tests with CWD = crate dir,
@@ -250,6 +259,73 @@ mod tests {
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0], one, "batch[0] != embed_one");
         assert_eq!(batch[1], two, "batch[1] != embed_one");
+    }
+
+    /// Real Mutex-poison test for the F2 fix: a panic while holding the model
+    /// lock must cause subsequent embed calls to return
+    /// `EmbedderError::MutexPoisoned`, NOT silently recover via `into_inner`
+    /// and risk serving wrong embeddings.
+    ///
+    /// Why this is the only honest test for F2: the prior
+    /// `failing_embedder_yields_miss_not_panic` uses a custom `Embedder` impl
+    /// that returns `Err` directly — it never holds a `Mutex` at all, so
+    /// reverting the F2 fix (`map_err` → `unwrap_or_else(into_inner)`) would
+    /// not change its outcome. This test actually pokes a thread that panics
+    /// while holding `LocalBge::model.lock()`, poisons the lock for real, and
+    /// asserts the next `embed_one` returns the dedicated `MutexPoisoned`
+    /// variant. Reverting the F2 fix would surface here as a wrong-vector
+    /// `Ok(...)` or a different variant — a definitive regression signal.
+    #[test]
+    fn mutex_poison_in_localbge_returns_mutex_poisoned_variant() {
+        let Some(bge) = embedder() else { return };
+        let bge = Arc::new(bge);
+
+        // Spawn a thread, take the lock, panic. The Mutex is poisoned the
+        // instant the thread unwinds out of the lock guard.
+        let bge_for_poison = Arc::clone(&bge);
+        let join_handle = std::thread::spawn(move || {
+            let _guard = bge_for_poison
+                .model
+                .lock()
+                .expect("test thread sees the lock pristine");
+            panic!("intentional panic to poison the embedder mutex");
+        });
+        // Join MUST report the panic — that confirms the poison actually
+        // occurred, not that the thread completed normally.
+        let join_result = join_handle.join();
+        assert!(
+            join_result.is_err(),
+            "test thread should have panicked to poison the lock"
+        );
+
+        // The next embed_one MUST surface MutexPoisoned. Anything else means
+        // F2 has regressed: either the code silently recovered via into_inner
+        // (returning a possibly-corrupt vector), or it surfaced the wrong
+        // variant (preventing alerting from distinguishing poison from
+        // transient embed failure).
+        match bge.embed_one("hello world") {
+            Err(EmbedderError::MutexPoisoned) => {}
+            Ok(v) => panic!(
+                "poisoned-Mutex embed_one returned Ok({} dims) — F2 regressed; \
+                 the lock was silently recovered and a possibly-corrupt embedding \
+                 would have been served",
+                v.len()
+            ),
+            Err(other) => panic!(
+                "poisoned-Mutex embed_one returned {other:?} — expected \
+                 EmbedderError::MutexPoisoned so alerting can distinguish \
+                 process-state corruption from transient embed errors"
+            ),
+        }
+
+        // embed_batch must behave the same way — poison is mutex-wide.
+        match bge.embed_batch(&["hello", "world"]) {
+            Err(EmbedderError::MutexPoisoned) => {}
+            other => panic!(
+                "poisoned-Mutex embed_batch returned {other:?} — must match \
+                 the embed_one behavior"
+            ),
+        }
     }
 
     // Performance characteristic, not a correctness gate. Wall-clock embedding

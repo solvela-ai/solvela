@@ -869,3 +869,88 @@ async fn build_semantic_cache(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::OnceLock;
+
+    /// Process-wide Prometheus recorder for counter assertions. Mirrors the
+    /// pattern in `cache::exact::tests` — `install_recorder` can only succeed
+    /// once per process, so the OnceLock makes repeated calls idempotent.
+    fn install_test_recorder() -> metrics_exporter_prometheus::PrometheusHandle {
+        static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+        HANDLE
+            .get_or_init(|| {
+                metrics_exporter_prometheus::PrometheusBuilder::new()
+                    .install_recorder()
+                    .expect("failed to install test Prometheus recorder")
+            })
+            .clone()
+    }
+
+    fn counter_sum(
+        handle: &metrics_exporter_prometheus::PrometheusHandle,
+        name: &str,
+        label_match: &str,
+    ) -> u64 {
+        let body = handle.render();
+        body.lines()
+            .filter(|l| l.starts_with(name) && l.contains(label_match))
+            .filter_map(|l| l.rsplit_once(' ').and_then(|(_, v)| v.parse::<u64>().ok()))
+            .sum()
+    }
+
+    /// F1 startup-failure counter must actually increment when
+    /// `build_semantic_cache` cannot reach Redis. A typo in the metric name or
+    /// a refactor that drops the `metrics::counter!` call would make alerting
+    /// silently lose this signal — this test catches both.
+    #[tokio::test]
+    async fn build_semantic_cache_increments_failure_counter_on_unreachable_redis() {
+        let handle = install_test_recorder();
+        let before = counter_sum(
+            &handle,
+            "solvela_semantic_cache_startup_failure_total",
+            "reason=\"redis_connect\"",
+        );
+
+        let mut config = config::AppConfig::default();
+        config.cache.semantic.enabled = true;
+        // Point at a closed port so connect() must fail. We also try to skip
+        // out if the model isn't available, because build_semantic_cache loads
+        // the embedder before touching Redis — without the model the test
+        // would short-circuit on a different failure mode.
+        if !std::path::Path::new(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.fastembed_cache"),
+        )
+        .exists()
+        {
+            eprintln!("skipping: fastembed cache not present");
+            return;
+        }
+        config.cache.semantic.model_cache_dir = Some(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../.fastembed_cache")
+                .to_string_lossy()
+                .into_owned(),
+        );
+
+        let result = build_semantic_cache(&config, "redis://127.0.0.1:1").await;
+        assert!(
+            result.is_none(),
+            "build_semantic_cache must return None on Redis failure"
+        );
+
+        let after = counter_sum(
+            &handle,
+            "solvela_semantic_cache_startup_failure_total",
+            "reason=\"redis_connect\"",
+        );
+        assert_eq!(
+            after,
+            before + 1,
+            "redis_connect failure path must increment the startup-failure counter; \
+             a typo in the metric name or a missing counter! call would slip past this test"
+        );
+    }
+}

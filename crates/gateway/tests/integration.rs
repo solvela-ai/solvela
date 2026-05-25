@@ -911,16 +911,21 @@ async fn semantic_cache_hit_on_escrow_paid_request() {
 
 /// Counterpart to `semantic_cache_hit_on_escrow_paid_request`: closes the
 /// review-flagged gap that NO integration test exercised the exact-scheme +
-/// semantic-cache-hit combination, where `scheme_realized_discount` MUST
-/// return `None` and the wallet bills the full reservation (no discount).
+/// semantic-cache-hit wiring at all.
 ///
-/// The cost-math is unit-tested
-/// (`scheme_realized_discount_applies_only_to_escrow` proves
-/// `PaymentScheme::Exact, Some(d) -> None`); this test proves the WIRING is
-/// reached on an exact-paid cache hit. A regression that incorrectly applied
-/// the discount on exact-scheme would still return 200 and `semantic-hit`,
-/// but the spend log would under-bill — keeping this test paired with the
-/// escrow one makes the asymmetry explicit and CI-enforced.
+/// What this test enforces: response was served from the semantic cache (HTTP
+/// 200 + `x-solvela-cache: semantic-hit` header + seeded body id roundtrip).
+/// That proves the exact-scheme path REACHED the cache-hit branch.
+///
+/// What this test does NOT enforce: the actual billing amount. The spend log
+/// is a fire-and-forget DB write (CLAUDE.md rule #9) not visible to
+/// `oneshot`, so an integration test cannot read it back. The cost-math
+/// asymmetry — `PaymentScheme::Exact, Some(d) → None` in
+/// `scheme_realized_discount` — is enforced by the unit test
+/// `scheme_realized_discount_applies_only_to_escrow` in `routes/chat/cost.rs`,
+/// NOT by this end-to-end path. A regression that wrongly applied the
+/// semantic discount on an exact-scheme hit would still return 200 +
+/// `semantic-hit` here; the unit test is the authoritative gate.
 #[tokio::test]
 async fn semantic_cache_hit_on_exact_paid_request() {
     let Some(sem) = try_semantic_cache().await else {

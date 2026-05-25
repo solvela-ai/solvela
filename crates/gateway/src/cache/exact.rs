@@ -70,6 +70,8 @@ impl ResponseCache {
                     // `check_budget` reservation. Treat as a miss → upstream
                     // call, real settlement.
                     if response.usage.is_none() {
+                        metrics::counter!("solvela_exact_cache_read_evicted_no_usage_total")
+                            .increment(1);
                         warn!(
                             key = %key,
                             "cached response has no usage block; treating as miss \
@@ -102,6 +104,7 @@ impl ResponseCache {
             return;
         }
         if response.usage.is_none() {
+            metrics::counter!("solvela_exact_cache_write_skipped_no_usage_total").increment(1);
             warn!(
                 model = %req.model,
                 "refusing to cache response with no usage block; \
@@ -154,6 +157,34 @@ mod tests {
     use super::*;
     use crate::cache::CacheConfig;
     use solvela_protocol::{ChatMessage, Role};
+
+    /// Lazily install a process-wide Prometheus recorder for counter assertions.
+    /// `install_recorder` can only succeed once per process, so we cache the
+    /// handle and reuse it across every test in this module.
+    fn install_test_recorder() -> metrics_exporter_prometheus::PrometheusHandle {
+        use std::sync::OnceLock;
+        static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+        HANDLE
+            .get_or_init(|| {
+                metrics_exporter_prometheus::PrometheusBuilder::new()
+                    .install_recorder()
+                    .expect("failed to install test Prometheus recorder")
+            })
+            .clone()
+    }
+
+    /// Parse a single counter's current value from the Prometheus text rendering.
+    /// Returns 0 if the counter has never been incremented (no line yet emitted).
+    fn counter_value(handle: &metrics_exporter_prometheus::PrometheusHandle, name: &str) -> u64 {
+        let body = handle.render();
+        // Counter exposition lines look like `name 5` or `name{label="x"} 5`.
+        // We sum every line starting with the metric name to handle both
+        // unlabeled and labeled counter families.
+        body.lines()
+            .filter(|l| l.starts_with(&format!("{name} ")) || l.starts_with(&format!("{name}{{")))
+            .filter_map(|l| l.rsplit_once(' ').and_then(|(_, v)| v.parse::<u64>().ok()))
+            .sum()
+    }
 
     /// Helper to build a ChatRequest for testing.
     fn make_request(
@@ -372,8 +403,18 @@ mod tests {
     /// `chat/mod.rs` (one needs `usage`, the other needs a semantic
     /// `cost_outcome`), permanently stranding the `check_budget` reservation
     /// and draining the wallet's budget by `estimated_cost` per repeat.
+    ///
+    /// Falsifiability: asserts the `solvela_exact_cache_write_skipped_no_usage_total`
+    /// counter incremented. A regression that deletes the guard would let
+    /// execution continue past the counter call into the Redis path — the
+    /// counter would NOT increment and this test would fail. (Earlier draft
+    /// of this test passed vacuously because the bad-port Redis connection
+    /// failed at step 2, observationally identical to the guard firing.)
     #[tokio::test]
     async fn set_refuses_to_cache_response_without_usage() {
+        let handle = install_test_recorder();
+        let before = counter_value(&handle, "solvela_exact_cache_write_skipped_no_usage_total");
+
         let cache = ResponseCache::new("redis://127.0.0.1:1", CacheConfig::default())
             .expect("client creation should not connect");
         let req = make_request("openai/gpt-4o", vec![user_message("Hello")], None);
@@ -385,8 +426,15 @@ mod tests {
             choices: vec![],
             usage: None,
         };
-        // No panic, no Redis connection attempt — early-exit on the usage guard.
         cache.set(&req, &response).await;
+
+        let after = counter_value(&handle, "solvela_exact_cache_write_skipped_no_usage_total");
+        assert_eq!(
+            after,
+            before + 1,
+            "guard must increment the skip counter; otherwise a regression \
+             that removed the guard would slip past this test"
+        );
     }
 
     /// `set` early-exits when caching is disabled.
@@ -409,5 +457,91 @@ mod tests {
             usage: None,
         };
         cache.set(&req, &response).await;
+    }
+
+    /// Read-side defense-in-depth: `get` must evict any cached entry whose
+    /// `usage` is `None`, even though the write-side guard now prevents new
+    /// such entries from being stored. Verifies the read-side branch via a
+    /// direct `SET` of a malformed entry that the write guard would have
+    /// rejected — simulating either a pre-guard legacy entry or a future
+    /// bypass.
+    ///
+    /// Gated on a reachable Redis (any Redis works; this test does not need
+    /// RediSearch). The counter assertion makes this falsifiable: removing
+    /// the read-side `usage.is_none()` check would surface as a non-incremented
+    /// `solvela_exact_cache_read_evicted_no_usage_total` and a returned
+    /// `Some(_)` instead of `None`.
+    #[tokio::test]
+    async fn get_evicts_cached_response_without_usage() {
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
+
+        // Probe the connection first so we can skip cleanly if Redis is down.
+        let client = match redis::Client::open(redis_url.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: cannot open Redis client ({e})");
+                return;
+            }
+        };
+        let mut conn = match client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: Redis unreachable ({e})");
+                return;
+            }
+        };
+
+        let cache = ResponseCache::new(&redis_url, CacheConfig::default())
+            .expect("client creation should not connect");
+
+        // Build a request whose key we can compute, then SET a usage-less
+        // ChatResponse JSON under that key — bypassing the write guard.
+        let req = make_request(
+            "openai/gpt-4o",
+            vec![user_message("read-side guard probe — usage-less seed")],
+            None,
+        );
+        let key = ResponseCache::cache_key(&req).expect("test request must serialise");
+        let usage_less = ChatResponse {
+            id: "legacy-no-usage".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "gpt-4o".to_string(),
+            choices: vec![],
+            usage: None,
+        };
+        let json = serde_json::to_string(&usage_less).unwrap();
+        let _: () = redis::cmd("SETEX")
+            .arg(&key)
+            .arg(60_u64)
+            .arg(&json)
+            .query_async(&mut conn)
+            .await
+            .expect("seed write must succeed");
+
+        let handle = install_test_recorder();
+        let before = counter_value(&handle, "solvela_exact_cache_read_evicted_no_usage_total");
+
+        let result = cache.get(&req).await;
+        assert!(
+            result.is_none(),
+            "cached entry with usage:None must be treated as miss; got {result:?}"
+        );
+
+        let after = counter_value(&handle, "solvela_exact_cache_read_evicted_no_usage_total");
+        assert_eq!(
+            after,
+            before + 1,
+            "read-side guard must increment the eviction counter; otherwise \
+             a regression that removed the guard would slip past this test"
+        );
+
+        // Clean up the seeded key so a second run of this test starts clean.
+        let _: () = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(());
     }
 }

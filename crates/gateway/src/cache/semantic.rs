@@ -396,15 +396,44 @@ impl SemanticCache {
 }
 
 /// Embed an owned prompt string on a blocking thread (CPU-bound, Mutex-serialised).
+///
+/// Increments distinct counters for the three failure modes so alerting can
+/// separate them: `mutex_poisoned` is a permanent process-state corruption
+/// (restart needed); `embed` is a transient runtime error; `task_panic` is a
+/// `spawn_blocking` join failure (also indicates panic, but distinct from the
+/// poison-recovery case which is on a subsequent call).
 async fn embed_text(embedder: &Arc<dyn Embedder>, text: String) -> Option<Vec<f32>> {
     let embedder = Arc::clone(embedder);
     match tokio::task::spawn_blocking(move || embedder.embed_one(&text)).await {
         Ok(Ok(v)) => Some(v),
+        Ok(Err(crate::cache::embedder::EmbedderError::MutexPoisoned)) => {
+            metrics::counter!(
+                "solvela_semantic_cache_embed_failure_total",
+                "reason" => "mutex_poisoned"
+            )
+            .increment(1);
+            // `error!`, not `warn!`: poison is permanent for the process.
+            tracing::error!(
+                "semantic cache embedder mutex poisoned — process needs restart \
+                 to recover the model state"
+            );
+            None
+        }
         Ok(Err(e)) => {
+            metrics::counter!(
+                "solvela_semantic_cache_embed_failure_total",
+                "reason" => "embed"
+            )
+            .increment(1);
             warn!(error = %e, "semantic cache embedding failed");
             None
         }
         Err(e) => {
+            metrics::counter!(
+                "solvela_semantic_cache_embed_failure_total",
+                "reason" => "task_panic"
+            )
+            .increment(1);
             warn!(error = %e, "semantic cache embed task panicked");
             None
         }
@@ -1082,11 +1111,20 @@ mod tests {
         );
     }
 
-    /// Failing-embedder behavior: `get` must return `None` (miss → fall through
-    /// to provider) and `store` must return `Err` — never panic, never return
-    /// a corrupt-hit. Closes the review-flagged gap that no test installed a
-    /// deliberately failing embedder behind a real `SemanticCache`. Holds the
-    /// shared-index lock because `connect` calls `ensure_index`.
+    /// Failing-embedder behavior at the `SemanticCache` layer: `get` must
+    /// return `None` (miss → fall through to provider) and `store` must
+    /// return `Err` — never panic, never return a corrupt-hit. This is the
+    /// general `EmbedderError` propagation contract.
+    ///
+    /// SCOPE: this test does NOT exercise the F2 fix's actual Mutex-poison
+    /// recovery path (a `FailingEmbedder` never holds a Mutex). For that, see
+    /// `cache::embedder::tests::mutex_poison_in_localbge_returns_mutex_poisoned_variant`
+    /// which pokes a real thread panic to poison a `LocalBge`'s lock and
+    /// asserts the dedicated `EmbedderError::MutexPoisoned` variant.
+    ///
+    /// This test also intentionally does NOT exercise the fire-and-forget
+    /// `set` path — only the synchronous `store` and `get` entry points.
+    /// Holds the shared-index lock because `connect` calls `ensure_index`.
     #[tokio::test]
     async fn failing_embedder_yields_miss_not_panic() {
         // Honour the shared-redis-index lock (mirror of fresh_cache's pattern).
