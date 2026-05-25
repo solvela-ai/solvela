@@ -367,17 +367,53 @@ pub(crate) fn scheme_realized_discount(
     }
 }
 
-/// The USDC amount to record in the spend log / budget ledger for this request.
+/// Convert a USDC f64 amount to atomic units (×1_000_000) with fail-closed
+/// range and finiteness guards.
 ///
-/// On a semantic-cache hit the agent is billed the **discounted** price, so the
-/// ledger must reflect that — not the full computed cost. Logging the full cost
-/// makes per-wallet budget counters consume at 100% while the escrow claim only
-/// took the discount, denying agents service before their real spend warrants
-/// it. `None` (normal path) records the full computed cost as before.
-pub(crate) fn spend_cost_usdc(cost_outcome: Option<SemanticDiscount>, full_cost_usdc: f64) -> f64 {
+/// Returns `None` for NaN, ±∞, negative, or any value whose ×1e6 scaling
+/// would overflow `u64`. The bounds match [`usdc_atomic_amount_checked`]'s
+/// integer-domain checks so f64→atomic and string→atomic share one fail-closed
+/// envelope.
+///
+/// This is the **only** sanctioned f64→atomic conversion on the spend path.
+/// Callers downstream of the cost-estimation layer should reach for this
+/// rather than open-coding `(x * 1_000_000.0) as u64`, which saturates NaN to
+/// `0` and silently wraps overflow.
+pub(crate) fn usdc_f64_to_atomic_safe(usdc: f64) -> Option<u64> {
+    // is_finite() must come first: NaN comparisons short-circuit to false, so
+    // `RangeInclusive::contains(&NaN)` returns false anyway — but routing
+    // through `is_finite` makes the NaN/∞ rejection explicit at the call site
+    // for future readers.
+    if !usdc.is_finite() || !(0.0..=ESTIMATED_COST_MAX_USDC).contains(&usdc) {
+        return None;
+    }
+    // Guard re-verified above: `usdc.is_finite() && 0.0 <= usdc <= u64::MAX/1e6`
+    // makes `usdc * 1_000_000.0` finite and within u64, so the cast is lossless.
+    Some((usdc * 1_000_000.0) as u64)
+}
+
+/// The atomic-USDC amount to record on the spend ledger for this request.
+///
+/// Both arms operate in `u64` atomic units, so the value the ledger sees is
+/// computed by the same arithmetic regardless of whether the discount fired.
+/// On a semantic-cache hit the agent is billed the **discounted** price, so
+/// the ledger must reflect that — not the full computed cost. Logging the
+/// full cost makes per-wallet budget counters consume at 100% while the
+/// escrow claim only took the discount, denying agents service before their
+/// real spend warrants it. `None` (normal path) records `full_cost_atomic`
+/// as the full computed cost.
+///
+/// Callers convert back to the legacy f64-USDC `SpendLogEntry.cost_usdc`
+/// shape with a single `as f64 / 1_000_000.0` at the ledger boundary —
+/// keeping every intermediate value in integer atomic units so NaN / ±∞ can
+/// never reach billing.
+pub(crate) fn spend_cost_atomic(
+    cost_outcome: Option<SemanticDiscount>,
+    full_cost_atomic: u64,
+) -> u64 {
     match cost_outcome {
-        Some(discount) => discount.billable_atomic() as f64 / 1_000_000.0,
-        None => full_cost_usdc,
+        Some(discount) => discount.billable_atomic(),
+        None => full_cost_atomic,
     }
 }
 
@@ -1029,14 +1065,74 @@ supports_vision = false
 
     #[test]
     fn spend_cost_uses_discounted_on_semantic_hit() {
-        // full $5.00 (5_000_000 atomic), 30% → discounted $1.50.
+        // full $5.00 (5_000_000 atomic), 30% → discounted $1.50 (1_500_000 atomic).
         let outcome = Some(SemanticDiscount::new(5_000_000, 30));
-        assert_eq!(spend_cost_usdc(outcome, 5.0), 1.5);
+        assert_eq!(spend_cost_atomic(outcome, 5_000_000), 1_500_000);
     }
 
     #[test]
     fn spend_cost_uses_full_when_no_discount() {
-        assert_eq!(spend_cost_usdc(None, 5.0), 5.0);
+        // No discount → returns the full atomic input unchanged.
+        assert_eq!(spend_cost_atomic(None, 5_000_000), 5_000_000);
+    }
+
+    /// `spend_cost_atomic` must operate purely in integer atomic units across
+    /// both match arms — no f64 path, no precision loss. Regression for the
+    /// previous mixed-unit signature where the hit arm divided atomic by 1e6
+    /// to f64 and the miss arm passed through an f64 from a different
+    /// derivation path, producing values that disagreed at the
+    /// least-significant-bit. Falsifiability: any change that reintroduces an
+    /// f64 intermediate would surface here as a non-`u64` return type
+    /// (compile error) or as a discrepancy with the integer-only computation.
+    #[test]
+    fn spend_cost_atomic_is_path_invariant_for_identical_atomic_values() {
+        // Same atomic amount; one path goes through SemanticDiscount::new with
+        // a 100% hit price (no discount), the other passes None. Both must
+        // return the same u64.
+        let atomic_value = 3_150_001_u64; // a value not divisible by 1_000_000
+        let no_discount = SemanticDiscount::new(atomic_value, 100);
+        let billed_via_discount = spend_cost_atomic(Some(no_discount), atomic_value);
+        let billed_via_miss = spend_cost_atomic(None, atomic_value);
+        assert_eq!(
+            billed_via_discount, billed_via_miss,
+            "atomic-domain billing must be path-invariant when the discount is a no-op"
+        );
+        assert_eq!(
+            billed_via_miss, atomic_value,
+            "miss-path billing must pass through the atomic input unchanged"
+        );
+    }
+
+    // =========================================================================
+    // usdc_f64_to_atomic_safe — fail-closed f64→atomic conversion
+    // =========================================================================
+
+    #[test]
+    fn usdc_f64_to_atomic_safe_converts_valid_amounts() {
+        assert_eq!(usdc_f64_to_atomic_safe(1.5), Some(1_500_000));
+        assert_eq!(usdc_f64_to_atomic_safe(0.0), Some(0));
+        assert_eq!(usdc_f64_to_atomic_safe(0.000001), Some(1));
+    }
+
+    #[test]
+    fn usdc_f64_to_atomic_safe_rejects_non_finite() {
+        assert_eq!(usdc_f64_to_atomic_safe(f64::NAN), None);
+        assert_eq!(usdc_f64_to_atomic_safe(f64::INFINITY), None);
+        assert_eq!(usdc_f64_to_atomic_safe(f64::NEG_INFINITY), None);
+    }
+
+    #[test]
+    fn usdc_f64_to_atomic_safe_rejects_negative() {
+        assert_eq!(usdc_f64_to_atomic_safe(-0.000001), None);
+        assert_eq!(usdc_f64_to_atomic_safe(-5.0), None);
+    }
+
+    #[test]
+    fn usdc_f64_to_atomic_safe_rejects_overflow() {
+        // u64::MAX / 1e6 ≈ 1.84e13. A value above that must reject so the
+        // ×1e6 scaling cannot wrap a huge USDC to a tiny atomic value.
+        let just_over_cap = (u64::MAX / 1_000_000) as f64 * 2.0;
+        assert_eq!(usdc_f64_to_atomic_safe(just_over_cap), None);
     }
 
     #[test]

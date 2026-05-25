@@ -60,6 +60,14 @@ const MAX_EMBED_CHARS: usize = 2000;
 const MAX_INFLIGHT_WRITES: usize = 8;
 
 /// Configuration for the semantic cache tier.
+///
+/// Vector dimension is intentionally NOT a field here: it is derived from
+/// `embedder.dim()` inside [`SemanticCache::connect`]. A separate config-level
+/// `dim` invited the failure mode where a caller passed a stale value (e.g.
+/// from a previous embedder), `FT.CREATE` built the HNSW index at the wrong
+/// width, and every subsequent `FT.SEARCH` failed at query time rather than
+/// startup. Owning the dim on the embedder side makes that class structurally
+/// impossible.
 #[derive(Debug, Clone)]
 pub struct SemanticConfig {
     /// Whether the semantic tier is enabled. Default off → zero behaviour change.
@@ -68,8 +76,6 @@ pub struct SemanticConfig {
     pub threshold: f32,
     /// TTL (seconds) for stored semantic entries.
     pub ttl_secs: u64,
-    /// Embedding dimension (must match the embedder).
-    pub dim: usize,
 }
 
 impl Default for SemanticConfig {
@@ -78,7 +84,6 @@ impl Default for SemanticConfig {
             enabled: false,
             threshold: 0.85,
             ttl_secs: 600,
-            dim: super::embedder::BGE_SMALL_DIM,
         }
     }
 }
@@ -101,24 +106,24 @@ pub struct SemanticCache {
 
 impl SemanticCache {
     /// Connect to Redis and ensure the vector index exists.
+    ///
+    /// Vector dimension comes from `embedder.dim()` — there is no separate
+    /// `config.dim` to drift from it.
     pub async fn connect(
         redis_url: &str,
         embedder: Arc<dyn Embedder>,
         config: SemanticConfig,
     ) -> Result<Self, super::CacheError> {
-        // Fail fast on misconfiguration rather than degrade to a silent
-        // all-miss cache: a dim mismatch makes every FT.SEARCH error out, and an
-        // out-of-range threshold makes every comparison trivially true/false.
-        if config.dim != embedder.dim() {
+        // Fail fast on a bad threshold rather than degrade to a silent all-hit
+        // (threshold ≤ 0: similarity ≥ 0 is always true → every query is a hit
+        // → serves wrong cached response to paying agent) or all-miss
+        // (threshold > 1) cache. Matches `SemanticSettings::validate` in
+        // config.rs — the bounds MUST stay in sync; this guard exists because
+        // `connect` is `pub` and can be called by tests or future code that
+        // bypasses startup config validation.
+        if !(config.threshold > 0.0 && config.threshold <= 1.0) {
             return Err(super::CacheError::Operation(format!(
-                "semantic cache dim mismatch: config={}, embedder={}",
-                config.dim,
-                embedder.dim()
-            )));
-        }
-        if !(0.0..=1.0).contains(&config.threshold) {
-            return Err(super::CacheError::Operation(format!(
-                "semantic cache threshold {} is outside [0.0, 1.0]",
+                "semantic cache threshold {} is outside (0.0, 1.0]",
                 config.threshold
             )));
         }
@@ -180,7 +185,7 @@ impl SemanticCache {
             .arg("TYPE")
             .arg("FLOAT32")
             .arg("DIM")
-            .arg(self.config.dim as i64)
+            .arg(self.embedder.dim() as i64)
             .arg("DISTANCE_METRIC")
             .arg("COSINE")
             .query_async(&mut conn)
@@ -293,6 +298,29 @@ impl SemanticCache {
         if !self.config.enabled || req.stream {
             return;
         }
+        // Mirror the exact-tier write guard (`cache/exact.rs::set`): refusing
+        // to cache a usage-less response. The downstream
+        // `semantic_hit_full_atomic` fallback estimates a cost on a usage-less
+        // hit so the spend ledger can still settle, but every usage-less entry
+        // accepted into this tier is a request that will bill the *estimate*
+        // (typically the input bound + a 1000-token output assumption) rather
+        // than the true token cost. The exact tier already refuses these to
+        // keep the `log_spend` reconciliation honest; the semantic tier was
+        // asymmetrically permissive, and a later semantic hit on such an
+        // entry routes through the lowest-tested billing branch
+        // (`mod.rs:743 +/- 30`). Skip-and-counter is fail-closed: the response
+        // is still served, but the wallet does not store a future-billable
+        // entry whose cost can only be estimated, not measured.
+        if response.usage.is_none() {
+            metrics::counter!("solvela_semantic_cache_write_skipped_no_usage_total").increment(1);
+            debug!(
+                model = %req.model,
+                "semantic cache write skipped: response has no usage block; \
+                 a future hit would bill the request's input estimate \
+                 instead of the cached response's true token cost"
+            );
+            return;
+        }
         // Don't store a prompt BGE would truncate (bug_002): its embedding would
         // reflect only the truncated prefix, risking a later wrong cross-hit.
         let text = prompt_text(req);
@@ -396,16 +424,50 @@ impl SemanticCache {
 }
 
 /// Embed an owned prompt string on a blocking thread (CPU-bound, Mutex-serialised).
+///
+/// Increments distinct counters for the three failure modes so alerting can
+/// separate them: `mutex_poisoned` is a permanent process-state corruption
+/// (restart needed); `embed` is a transient runtime error; `task_panic` is a
+/// `spawn_blocking` join failure (also indicates panic, but distinct from the
+/// poison-recovery case which is on a subsequent call).
 async fn embed_text(embedder: &Arc<dyn Embedder>, text: String) -> Option<Vec<f32>> {
     let embedder = Arc::clone(embedder);
     match tokio::task::spawn_blocking(move || embedder.embed_one(&text)).await {
         Ok(Ok(v)) => Some(v),
+        Ok(Err(crate::cache::embedder::EmbedderError::MutexPoisoned)) => {
+            metrics::counter!(
+                "solvela_semantic_cache_embed_failure_total",
+                "reason" => "mutex_poisoned"
+            )
+            .increment(1);
+            // `error!`, not `warn!`: poison is permanent for the process.
+            tracing::error!(
+                "semantic cache embedder mutex poisoned — process needs restart \
+                 to recover the model state"
+            );
+            None
+        }
         Ok(Err(e)) => {
+            metrics::counter!(
+                "solvela_semantic_cache_embed_failure_total",
+                "reason" => "embed"
+            )
+            .increment(1);
             warn!(error = %e, "semantic cache embedding failed");
             None
         }
         Err(e) => {
-            warn!(error = %e, "semantic cache embed task panicked");
+            metrics::counter!(
+                "solvela_semantic_cache_embed_failure_total",
+                "reason" => "task_panic"
+            )
+            .increment(1);
+            // `error!`, not `warn!`: a panic inside the spawn_blocking task
+            // means fastembed/ONNX state is suspect under load — at least as
+            // severe as the startup `task_panic` arm in `build_semantic_cache`
+            // (main.rs), which also logs `error!`. Operators reading logs
+            // during an incident must see this at the same severity.
+            tracing::error!(error = %e, "semantic cache embed task panicked");
             None
         }
     }
@@ -541,7 +603,32 @@ fn redis_value_to_string(v: &redis::Value) -> Option<String> {
 pub(crate) fn prompt_text(req: &ChatRequest) -> String {
     req.messages
         .iter()
-        .map(|m| format!("{}: {}", role_str(&m.role), m.content))
+        .map(|m| {
+            // Base line: `role: content`. For an assistant turn carrying
+            // `tool_calls`, or a tool turn carrying `tool_call_id`, we append
+            // a deterministic suffix so two conversation histories that
+            // differ only in their tool-call payloads embed to distinct
+            // vectors. Without this, an assistant turn `tool_calls=[get_weather("NYC")]`
+            // and `tool_calls=[get_weather("Boston")]` produce identical
+            // `prompt_text` (content is typically empty on tool-call turns)
+            // and collide above the similarity threshold — wrong tool result
+            // served from cache. The suffix is JSON to preserve structure;
+            // missing fields are simply omitted (no `null` noise).
+            let base = format!("{}: {}", role_str(&m.role), m.content);
+            let tool_calls_suffix = m
+                .tool_calls
+                .as_ref()
+                .and_then(|tc| serde_json::to_string(tc).ok())
+                .filter(|s| s != "null")
+                .map(|s| format!(" tool_calls={s}"))
+                .unwrap_or_default();
+            let tool_call_id_suffix = m
+                .tool_call_id
+                .as_ref()
+                .map(|id| format!(" tool_call_id={id}"))
+                .unwrap_or_default();
+            format!("{base}{tool_calls_suffix}{tool_call_id_suffix}")
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -610,9 +697,26 @@ fn f32_slice_to_le_bytes(v: &[f32]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::embedder::LocalBge;
+    use crate::cache::embedder::{Embedder, EmbedderError, LocalBge, BGE_SMALL_DIM};
     use solvela_protocol::{ChatMessage, Role, Usage};
     use std::path::PathBuf;
+
+    /// Embedder that always returns `Err` — used to verify `get`/`set` treat
+    /// embedder failure as a miss + dropped write, never as a panic or a
+    /// corrupt-hit. Closes the test gap that no test installed a deliberately
+    /// failing embedder behind a real `SemanticCache`.
+    struct FailingEmbedder;
+    impl Embedder for FailingEmbedder {
+        fn embed_one(&self, _text: &str) -> Result<Vec<f32>, EmbedderError> {
+            Err(EmbedderError::Embed("forced failure".to_string()))
+        }
+        fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedderError> {
+            Err(EmbedderError::Embed("forced failure".to_string()))
+        }
+        fn dim(&self) -> usize {
+            BGE_SMALL_DIM
+        }
+    }
 
     fn model_cache_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.fastembed_cache")
@@ -689,7 +793,6 @@ mod tests {
             enabled: true,
             threshold,
             ttl_secs: 600,
-            dim: embedder.dim(),
         };
         let cache = match SemanticCache::connect(&redis_url(), Arc::new(embedder), config).await {
             Ok(c) => c,
@@ -747,6 +850,64 @@ mod tests {
         );
         assert!(!prompt_text(&a).contains("temperature"));
         assert!(!prompt_text(&a).contains("top_p"));
+    }
+
+    /// Two conversation histories differing only in their assistant
+    /// `tool_calls` payloads must embed to distinct prompt texts; without this
+    /// the embeddings collide above the similarity threshold and a tool-call
+    /// for `get_weather("NYC")` can serve a cached completion that called
+    /// `get_weather("Boston")` — wrong tool result returned to the agent.
+    /// Falsifiability: removing the tool-calls suffix from `prompt_text` would
+    /// make this test fail (the two texts collapse to `"assistant: "` lines).
+    #[test]
+    fn prompt_text_distinguishes_tool_calls() {
+        use solvela_protocol::{FunctionCall, ToolCall};
+        let make = |args: &str| {
+            let mut r = req("m", "what's the weather?");
+            r.messages.push(ChatMessage {
+                role: Role::Assistant,
+                content: String::new(),
+                name: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".to_string(),
+                    r#type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "get_weather".to_string(),
+                        arguments: args.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+            });
+            r
+        };
+        let nyc = make(r#"{"location":"NYC"}"#);
+        let boston = make(r#"{"location":"Boston"}"#);
+        assert_ne!(
+            prompt_text(&nyc),
+            prompt_text(&boston),
+            "tool-call arguments must change the embedded text; otherwise a \
+             cached response for NYC could serve a request for Boston"
+        );
+        // A message with no tool_calls must NOT carry a suffix (regression
+        // guard against accidentally embedding `null`/empty markers that would
+        // shift the vector of every plain conversation).
+        let mut plain = req("m", "what's the weather?");
+        plain.messages.push(ChatMessage {
+            role: Role::Assistant,
+            content: "It's sunny.".to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        let text = prompt_text(&plain);
+        assert!(
+            !text.contains("tool_calls"),
+            "plain (no tool_calls) message must not embed a tool_calls suffix; got: {text:?}"
+        );
+        assert!(
+            !text.contains("tool_call_id"),
+            "plain (no tool_call_id) message must not embed a tool_call_id suffix; got: {text:?}"
+        );
     }
 
     #[test]
@@ -1019,6 +1180,60 @@ mod tests {
         );
     }
 
+    use crate::cache::test_metrics::{counter_value, install_test_recorder};
+
+    /// Mirror of `exact::set_refuses_to_cache_response_without_usage`: the
+    /// semantic tier must refuse to cache a `usage: None` response, parallel
+    /// to the exact tier. Without this guard the spend ledger on a later
+    /// usage-less hit routes through the lowest-tested billing branch
+    /// (`mod.rs:743` ± 30), billing the request's input estimate instead of
+    /// the cached response's true token cost.
+    ///
+    /// Falsifiability: asserts `solvela_semantic_cache_write_skipped_no_usage_total`
+    /// incremented. Removing the guard would let execution continue past the
+    /// counter call into the (embed + Redis) path — the counter would not
+    /// fire and this test would fail.
+    #[tokio::test]
+    async fn set_refuses_to_cache_response_without_usage() {
+        let Some((cache, _guard)) = fresh_cache(0.85).await else {
+            return;
+        };
+        let handle = install_test_recorder();
+        let before = counter_value(
+            &handle,
+            "solvela_semantic_cache_write_skipped_no_usage_total",
+        );
+
+        let r = req("openai/gpt-4o", "usage-less guard probe");
+        let usage_less = ChatResponse {
+            id: "no-usage".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            choices: vec![],
+            usage: None,
+        };
+        cache.set(&r, &usage_less).await;
+
+        let after = counter_value(
+            &handle,
+            "solvela_semantic_cache_write_skipped_no_usage_total",
+        );
+        assert_eq!(
+            after,
+            before + 1,
+            "semantic tier must refuse to cache usage-less responses; \
+             without the guard a later hit would bill the wallet's input \
+             estimate rather than the response's true cost"
+        );
+        // And the entry must not be retrievable — the guard short-circuits
+        // before embedding/writing.
+        assert!(
+            cache.get(&r).await.is_none(),
+            "guarded write must not produce a retrievable entry"
+        );
+    }
+
     #[tokio::test]
     async fn set_works_under_write_semaphore() {
         // The write semaphore must not break the happy path: firing more writes
@@ -1063,6 +1278,57 @@ mod tests {
         assert!(
             cache.get(&r).await.is_none(),
             "disabled cache must return None"
+        );
+    }
+
+    /// Failing-embedder behavior at the `SemanticCache` layer: `get` must
+    /// return `None` (miss → fall through to provider) and `store` must
+    /// return `Err` — never panic, never return a corrupt-hit. This is the
+    /// general `EmbedderError` propagation contract.
+    ///
+    /// SCOPE: this test does NOT exercise the F2 fix's actual Mutex-poison
+    /// recovery path (a `FailingEmbedder` never holds a Mutex). For that, see
+    /// `cache::embedder::tests::mutex_poison_in_localbge_returns_mutex_poisoned_variant`
+    /// which pokes a real thread panic to poison a `LocalBge`'s lock and
+    /// asserts the dedicated `EmbedderError::MutexPoisoned` variant.
+    ///
+    /// This test also intentionally does NOT exercise the fire-and-forget
+    /// `set` path — only the synchronous `store` and `get` entry points.
+    /// Holds the shared-index lock because `connect` calls `ensure_index`.
+    #[tokio::test]
+    async fn failing_embedder_yields_miss_not_panic() {
+        // Honour the shared-redis-index lock (mirror of fresh_cache's pattern).
+        let _guard = semantic_test_lock().lock_owned().await;
+        let config = SemanticConfig {
+            enabled: true,
+            threshold: 0.85,
+            ttl_secs: 600,
+        };
+        let cache =
+            match SemanticCache::connect(&redis_url(), Arc::new(FailingEmbedder), config).await {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("skipping: redis-stack unreachable ({e})");
+                    return;
+                }
+            };
+        let r = req("openai/gpt-4o", "What is the capital of France?");
+
+        // `store` MUST surface the embedder failure as Err — the documented
+        // contract that callers (the provider write-back path) use to count
+        // dropped writes and avoid cache pollution.
+        let store_result = cache.store(&r, &resp("paris")).await;
+        assert!(
+            store_result.is_err(),
+            "store with a failing embedder must return Err, not silently succeed"
+        );
+
+        // `get` MUST return None on embedder failure — fall through to upstream
+        // is the documented behavior, NOT a panic or a corrupt SemanticHit.
+        let hit = cache.get(&r).await;
+        assert!(
+            hit.is_none(),
+            "get with a failing embedder must return None (miss), not a corrupt hit"
         );
     }
 }

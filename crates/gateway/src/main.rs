@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// Read an environment variable with dual-prefix support.
 ///
@@ -801,7 +801,7 @@ async fn build_semantic_cache(
     config: &config::AppConfig,
     redis_url: &str,
 ) -> Option<Arc<cache::semantic::SemanticCache>> {
-    use cache::embedder::{Embedder, LocalBge};
+    use cache::embedder::LocalBge;
     use cache::semantic::{SemanticCache, SemanticConfig};
 
     let settings = &config.cache.semantic;
@@ -817,12 +817,28 @@ async fn build_semantic_cache(
     .await
     {
         Ok(Ok(e)) => e,
+        // `error!` + counter, not `warn!`: the operator explicitly opted in
+        // to the semantic tier (`[cache.semantic].enabled = true`). Silently
+        // degrading to all-miss on a corrupt/missing model is the same failure
+        // mode that caused the original "silent off" gap — ops sees zero hit
+        // rate, no alert. Failure here is loud, and the `reason` label lets
+        // alerting separate "model file gone" from "task panic".
         Ok(Err(e)) => {
-            warn!(error = %e, "semantic cache disabled: embedding model failed to load");
+            metrics::counter!(
+                SEMANTIC_CACHE_STARTUP_FAILURE_METRIC,
+                "reason" => STARTUP_FAILURE_REASON_MODEL_LOAD
+            )
+            .increment(1);
+            error!(error = %e, "semantic cache disabled: embedding model failed to load");
             return None;
         }
         Err(e) => {
-            warn!(error = %e, "semantic cache disabled: embedder load task panicked");
+            metrics::counter!(
+                SEMANTIC_CACHE_STARTUP_FAILURE_METRIC,
+                "reason" => STARTUP_FAILURE_REASON_TASK_PANIC
+            )
+            .increment(1);
+            error!(error = %e, "semantic cache disabled: embedder load task panicked");
             return None;
         }
     };
@@ -831,7 +847,6 @@ async fn build_semantic_cache(
         enabled: true,
         threshold: settings.threshold,
         ttl_secs: settings.ttl_secs,
-        dim: embedder.dim(),
     };
 
     match SemanticCache::connect(redis_url, Arc::new(embedder), sem_config).await {
@@ -844,8 +859,120 @@ async fn build_semantic_cache(
             Some(Arc::new(cache))
         }
         Err(e) => {
-            warn!(error = %e, "semantic cache disabled: Redis/RediSearch unavailable");
+            metrics::counter!(
+                SEMANTIC_CACHE_STARTUP_FAILURE_METRIC,
+                "reason" => STARTUP_FAILURE_REASON_REDIS_CONNECT
+            )
+            .increment(1);
+            error!(error = %e, "semantic cache disabled: Redis/RediSearch unavailable");
             None
         }
+    }
+}
+
+/// Metric and label-value constants for `build_semantic_cache` startup
+/// failures. Production and tests reference these same consts so a typo can
+/// only happen in one place — keeps alerting and the test counter assertions
+/// from silently drifting apart.
+const SEMANTIC_CACHE_STARTUP_FAILURE_METRIC: &str = "solvela_semantic_cache_startup_failure_total";
+const STARTUP_FAILURE_REASON_MODEL_LOAD: &str = "model_load";
+const STARTUP_FAILURE_REASON_TASK_PANIC: &str = "task_panic";
+const STARTUP_FAILURE_REASON_REDIS_CONNECT: &str = "redis_connect";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::OnceLock;
+
+    /// Process-wide Prometheus recorder for counter assertions. Mirrors the
+    /// pattern in `cache::exact::tests` — `install_recorder` can only succeed
+    /// once per process, so the OnceLock makes repeated calls idempotent.
+    fn install_test_recorder() -> metrics_exporter_prometheus::PrometheusHandle {
+        static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+        HANDLE
+            .get_or_init(|| {
+                metrics_exporter_prometheus::PrometheusBuilder::new()
+                    .install_recorder()
+                    .expect("failed to install test Prometheus recorder")
+            })
+            .clone()
+    }
+
+    fn counter_sum(
+        handle: &metrics_exporter_prometheus::PrometheusHandle,
+        name: &str,
+        label_match: &str,
+    ) -> u64 {
+        let body = handle.render();
+        body.lines()
+            .filter(|l| l.starts_with(name) && l.contains(label_match))
+            .filter_map(|l| l.rsplit_once(' ').and_then(|(_, v)| v.parse::<u64>().ok()))
+            .sum()
+    }
+
+    /// F1 startup-failure counter must actually increment when
+    /// `build_semantic_cache` cannot reach Redis. A typo in the metric name or
+    /// a refactor that drops the `metrics::counter!` call would make alerting
+    /// silently lose this signal — this test catches both. References the
+    /// production consts directly so they cannot drift apart.
+    #[tokio::test]
+    async fn build_semantic_cache_increments_failure_counter_on_unreachable_redis() {
+        let handle = install_test_recorder();
+        let label_match = format!("reason=\"{}\"", STARTUP_FAILURE_REASON_REDIS_CONNECT);
+        let before = counter_sum(&handle, SEMANTIC_CACHE_STARTUP_FAILURE_METRIC, &label_match);
+
+        let mut config = config::AppConfig::default();
+        config.cache.semantic.enabled = true;
+        // Point at a closed port so connect() must fail. We also try to skip
+        // out if the model isn't available, because build_semantic_cache loads
+        // the embedder before touching Redis — without the model the test
+        // would short-circuit on a different failure mode.
+        if !std::path::Path::new(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.fastembed_cache"),
+        )
+        .exists()
+        {
+            eprintln!("skipping: fastembed cache not present");
+            return;
+        }
+        config.cache.semantic.model_cache_dir = Some(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../.fastembed_cache")
+                .to_string_lossy()
+                .into_owned(),
+        );
+
+        let result = build_semantic_cache(&config, "redis://127.0.0.1:1").await;
+        assert!(
+            result.is_none(),
+            "build_semantic_cache must return None on Redis failure"
+        );
+
+        let after = counter_sum(&handle, SEMANTIC_CACHE_STARTUP_FAILURE_METRIC, &label_match);
+        assert_eq!(
+            after,
+            before + 1,
+            "redis_connect failure path must increment the startup-failure counter; \
+             a typo in the metric name or a missing counter! call would slip past this test"
+        );
+    }
+
+    /// Lock the exhaustive set of reason labels for the startup-failure
+    /// counter. The production code emits exactly these three values; if a new
+    /// failure branch is added without extending this list, alert rules built
+    /// against the known set will silently miss the new reason. Acts as a
+    /// schema test for the operator-facing metric.
+    #[test]
+    fn startup_failure_reason_labels_are_the_expected_three() {
+        let reasons = [
+            STARTUP_FAILURE_REASON_MODEL_LOAD,
+            STARTUP_FAILURE_REASON_TASK_PANIC,
+            STARTUP_FAILURE_REASON_REDIS_CONNECT,
+        ];
+        assert_eq!(reasons, ["model_load", "task_panic", "redis_connect"]);
+        assert_eq!(
+            SEMANTIC_CACHE_STARTUP_FAILURE_METRIC,
+            "solvela_semantic_cache_startup_failure_total"
+        );
     }
 }

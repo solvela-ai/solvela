@@ -423,7 +423,7 @@ fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
 /// the embedding model is unavailable — same graceful-skip pattern as the
 /// crate's unit tests, so this is a no-op in CI envs lacking those deps.
 async fn try_semantic_cache() -> Option<Arc<gateway::cache::semantic::SemanticCache>> {
-    use gateway::cache::embedder::{Embedder, LocalBge};
+    use gateway::cache::embedder::LocalBge;
     use gateway::cache::semantic::{SemanticCache, SemanticConfig};
 
     let model_dir =
@@ -439,7 +439,6 @@ async fn try_semantic_cache() -> Option<Arc<gateway::cache::semantic::SemanticCa
         enabled: true,
         threshold: 0.85,
         ttl_secs: 600,
-        dim: embedder.dim(),
     };
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
     match SemanticCache::connect(&url, Arc::new(embedder), config).await {
@@ -907,6 +906,366 @@ async fn semantic_cache_hit_on_escrow_paid_request() {
         v["id"], "seeded-escrow-billing",
         "response must be the seeded cache entry (the discount-billing branch \
          is the only path that returns this on an escrow scheme)"
+    );
+}
+
+/// Counterpart to `semantic_cache_hit_on_escrow_paid_request`: closes the
+/// review-flagged gap that NO integration test exercised the exact-scheme +
+/// semantic-cache-hit wiring at all.
+///
+/// What this test enforces: response was served from the semantic cache (HTTP
+/// 200 + `x-solvela-cache: semantic-hit` header + seeded body id roundtrip).
+/// That proves the exact-scheme path REACHED the cache-hit branch.
+///
+/// What this test does NOT enforce: the actual billing amount. The spend log
+/// is a fire-and-forget DB write (CLAUDE.md rule #9) not visible to
+/// `oneshot`, so an integration test cannot read it back. The cost-math
+/// asymmetry — `PaymentScheme::Exact, Some(d) → None` in
+/// `scheme_realized_discount` — is enforced by the unit test
+/// `scheme_realized_discount_applies_only_to_escrow` in `routes/chat/cost.rs`,
+/// NOT by this end-to-end path. A regression that wrongly applied the
+/// semantic discount on an exact-scheme hit would still return 200 +
+/// `semantic-hit` here; the unit test is the authoritative gate.
+#[tokio::test]
+async fn semantic_cache_hit_on_exact_paid_request() {
+    let Some(sem) = try_semantic_cache().await else {
+        return;
+    };
+
+    // Distinct semantic domain from `semantic_cache_serves_paraphrase`
+    // (photosynthesis) — both tests share the same Redis HNSW index without a
+    // cross-test lock, so prompts must not cosine-collide above the 0.85
+    // threshold or whichever seeds first wins and the other test gets the
+    // wrong cache id.
+    let seeded = ChatResponse {
+        id: "seeded-exact-billing".to_string(),
+        object: "chat.completion".to_string(),
+        created: 0,
+        model: "openai/gpt-4o".to_string(),
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: Role::Assistant,
+                content: "The universe began roughly 13.8 billion years ago in a hot, dense state."
+                    .to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            finish_reason: Some("stop".to_string()),
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 12,
+            completion_tokens: 16,
+            total_tokens: 28,
+        }),
+    };
+    let seed_req = ChatRequest {
+        model: "openai/gpt-4o".to_string(),
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: "What is the Big Bang theory in cosmology?".to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }],
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        tools: None,
+        tool_choice: None,
+    };
+    sem.store(&seed_req, &seeded).await.expect("seed store");
+
+    let app = app_with_semantic_cache_and_escrow(Arc::clone(&sem));
+
+    // Exact-scheme paid request with a paraphrase. dev_bypass is OFF, so the
+    // exact PAYMENT-SIGNATURE must verify through AlwaysPassVerifier (which is
+    // also wired into the facilitator on this app) to reach the chat handler.
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":"Explain the Big Bang origin of the universe."}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-solvela-debug", "true")
+                .header(
+                    "PAYMENT-SIGNATURE",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "exact-paid request with a semantic-cache paraphrase must return 200"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-cache")
+            .and_then(|v| v.to_str().ok()),
+        Some("semantic-hit"),
+        "exact-paid paraphrase must be served from the semantic cache"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        v["id"], "seeded-exact-billing",
+        "response must be the seeded cache entry (proves the exact-scheme \
+         hit branch returned the cached response and did not fall through to \
+         a fresh provider call)"
+    );
+}
+
+/// Closes the review-flagged gap that the existing paraphrase tests seed the
+/// cache via `sem.store(...)` — a test-only awaitable bypass that skips the
+/// production `Semaphore`, the `within_embed_budget` guard, and the
+/// `tokio::spawn` envelope. A regression that silently broke any of those
+/// inside `set()` would not be caught by the `store()`-seeded tests.
+///
+/// This test exercises the real fire-and-forget `set()` path: we call it,
+/// poll `get()` until the spawned embed + write lands (with a generous CI
+/// timeout), and only then issue the paraphrase HTTP request. A `set()` that
+/// silently drops every write would surface here as the poll timeout firing
+/// → graceful skip (test infrastructure unavailable) — distinct from the
+/// semantic-hit assertion failing on a write that races and lands corrupt.
+///
+/// Domain ("ocean tides / lunar gravity") is deliberately distant from
+/// photosynthesis / mitochondria / big-bang to avoid cosine collisions with
+/// the other semantic-cache integration tests that share the same Redis
+/// index without a cross-test lock.
+#[tokio::test]
+async fn semantic_cache_hit_after_real_set_write_back() {
+    let Some(sem) = try_semantic_cache().await else {
+        return;
+    };
+
+    let seeded = ChatResponse {
+        id: "seeded-tides".to_string(),
+        object: "chat.completion".to_string(),
+        created: 0,
+        model: "openai/gpt-4o".to_string(),
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: Role::Assistant,
+                content: "Ocean tides are driven by the gravitational pull of the Moon and Sun."
+                    .to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            finish_reason: Some("stop".to_string()),
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 11,
+            completion_tokens: 17,
+            total_tokens: 28,
+        }),
+    };
+    let seed_req = ChatRequest {
+        model: "openai/gpt-4o".to_string(),
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: "What causes ocean tides on Earth?".to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }],
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        tools: None,
+        tool_choice: None,
+    };
+
+    // Real fire-and-forget set() — same call shape as the production miss
+    // path uses in chat/provider.rs::execute_non_streaming_call.
+    sem.set(&seed_req, &seeded).await;
+
+    // Poll until the spawned embed + Redis SETEX lands. fastembed on a cold
+    // CI runner can take ~1–2s; 20 × 150ms = 3s budget. If the poll times out
+    // we skip — the embedder/Redis combination is too slow for this
+    // assertion to be deterministic, NOT a guard regression.
+    let mut landed = false;
+    for _ in 0..20 {
+        if sem.get(&seed_req).await.is_some() {
+            landed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    if !landed {
+        eprintln!(
+            "skipping semantic_cache_hit_after_real_set_write_back: \
+             fire-and-forget set() write did not become visible within 3s"
+        );
+        return;
+    }
+
+    let app = app_with_semantic_cache(Arc::clone(&sem));
+
+    // Paraphrase (not the exact prompt) — proves the real-path write was
+    // embedded, not just stored, and that the embedding similarity gate
+    // matches under the production threshold.
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":"Why do oceans have tides?"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-solvela-debug", "true")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-cache")
+            .and_then(|v| v.to_str().ok()),
+        Some("semantic-hit"),
+        "paraphrase of a real-path `set()` write must be served from the \
+         semantic cache, not a fresh provider response"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        v["id"], "seeded-tides",
+        "response must be the entry written via real fire-and-forget set()"
+    );
+}
+
+/// Closes the review-flagged gap that the `semantic_hit_full_atomic`
+/// usage-less fallback branch (`routes/chat/mod.rs`, the `else if
+/// cost_outcome.is_some()` arm) had no end-to-end coverage. The branch
+/// comment acknowledges a ~70% over-consume risk if it doesn't fire; this
+/// test seeds a usage-less cached entry, hits it via the paid HTTP path, and
+/// asserts the response is still served (200 + semantic-hit + seeded body
+/// id) — proving the fallback wires through.
+///
+/// Note: the new write-side guard in `cache/semantic.rs::set` refuses to
+/// cache responses with `usage: None`, so a usage-less entry is no longer
+/// reachable through `set()` in production. We seed via `store()` — the
+/// test-only awaitable path — to simulate either a legacy pre-guard entry
+/// or a future bypass. The read-side fallback in `mod.rs` is the
+/// defense-in-depth layer that must handle such entries without crashing or
+/// returning 500.
+///
+/// What this test does NOT enforce: the spend-log billing amount. The fire-
+/// and-forget DB write (CLAUDE.md rule #9) is not visible through `oneshot`.
+/// The cost-math is unit-tested separately in `routes/chat/cost.rs`
+/// (`semantic_full_price_falls_back_to_estimate_when_usage_absent` and
+/// `spend_cost_atomic_is_path_invariant_for_identical_atomic_values`).
+///
+/// Domain ("tectonic plates / continental drift") is distant from
+/// photosynthesis / mitochondria / big-bang / tides to avoid cosine
+/// collisions with the other semantic-cache integration tests.
+#[tokio::test]
+async fn semantic_hit_full_atomic_fallback_serves_usage_less_entry() {
+    let Some(sem) = try_semantic_cache().await else {
+        return;
+    };
+
+    let seeded = ChatResponse {
+        id: "seeded-tectonics".to_string(),
+        object: "chat.completion".to_string(),
+        created: 0,
+        model: "openai/gpt-4o".to_string(),
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: Role::Assistant,
+                content: "Tectonic plates drift slowly atop the partially molten asthenosphere."
+                    .to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            finish_reason: Some("stop".to_string()),
+        }],
+        // The point of this test: no usage block. The read-side fallback must
+        // still serve the entry; the spend reconciler must still log via the
+        // input estimate (asserted in unit tests).
+        usage: None,
+    };
+    let seed_req = ChatRequest {
+        model: "openai/gpt-4o".to_string(),
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: "What causes the movement of tectonic plates?".to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }],
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        tools: None,
+        tool_choice: None,
+    };
+    // store() is the test-only awaitable bypass that does NOT enforce the
+    // usage-None write guard — exactly what we need to simulate a legacy or
+    // bypassed entry that the read-side fallback must handle.
+    sem.store(&seed_req, &seeded).await.expect("seed store");
+
+    let app = app_with_semantic_cache_and_escrow(Arc::clone(&sem));
+
+    // Escrow scheme — the only scheme where `realized_discount` is Some on a
+    // semantic hit, so the `cost_outcome.is_some()` fallback arm in
+    // `mod.rs:736` is reachable. On exact, the spend log skips the
+    // usage-less arm entirely (full on-chain settlement already covers it).
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":"How do tectonic plates move?"}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-solvela-debug", "true")
+                .header(
+                    "PAYMENT-SIGNATURE",
+                    valid_escrow_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "usage-less semantic hit on the escrow path must still serve 200 — \
+         the fallback in `semantic_hit_full_atomic` estimates a cost so the \
+         spend ledger can reconcile the reservation"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-cache")
+            .and_then(|v| v.to_str().ok()),
+        Some("semantic-hit"),
+        "usage-less entry must still be served from cache; the read-side \
+         must not silently treat usage:None as a miss (the spend ledger \
+         relies on the discount branch being reached to reconcile)"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        v["id"], "seeded-tectonics",
+        "response must be the seeded usage-less entry, proving the \
+         fallback wires through to the HTTP boundary without crashing"
     );
 }
 

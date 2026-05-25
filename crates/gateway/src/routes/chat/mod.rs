@@ -33,8 +33,8 @@ use crate::AppState;
 
 use cost::{
     cap_usage_to_request_limits, compute_actual_atomic_cost, estimate_input_tokens,
-    estimated_atomic_cost, scheme_realized_discount, spend_cost_usdc, usdc_atomic_amount_checked,
-    PaymentScheme,
+    estimated_atomic_cost, scheme_realized_discount, spend_cost_atomic, usdc_atomic_amount_checked,
+    usdc_f64_to_atomic_safe, PaymentScheme,
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
@@ -706,7 +706,26 @@ pub async fn chat_completions(
                         // (the agent paid it on-chain with no refund). The counter
                         // delta `(billed − reserved)` then settles the wallet's
                         // budget to the right amount.
-                        let billed_cost = spend_cost_usdc(realized_discount, cost);
+                        //
+                        // Bill in atomic units end-to-end: `cost` is the f64
+                        // estimate from the registry, which we convert through
+                        // `usdc_f64_to_atomic_safe` (NaN/∞/negative/overflow
+                        // fail-closed → `None`). Both branches of
+                        // `spend_cost_atomic` then operate in `u64`, so the
+                        // ledger value is path-invariant. The legacy
+                        // `SpendLogEntry.cost_usdc: f64` shape gets the single
+                        // `/1_000_000.0` conversion right at the write site.
+                        let Some(cost_atomic) = usdc_f64_to_atomic_safe(cost) else {
+                            warn!(
+                                model = %req.model,
+                                wallet = %wallet_address,
+                                raw_cost = cost,
+                                "skipping spend log: computed cost is NaN/∞/negative/overflow — refusing to write a corrupt ledger entry"
+                            );
+                            return Ok(response);
+                        };
+                        let billed_atomic = spend_cost_atomic(realized_discount, cost_atomic);
+                        let billed_cost = billed_atomic as f64 / 1_000_000.0;
                         // Pass the estimated_cost that was committed to Redis
                         // counters in `check_budget` so log_spend can adjust
                         // by the (billed − estimated) delta. Without this,
@@ -740,7 +759,24 @@ pub async fn chat_completions(
                 // correctly leaves the on-chain-settled full amount in the ledger.
                 // We have no token counts (the cached response omitted usage), so
                 // record the input estimate and zero output.
-                let billed_cost = spend_cost_usdc(realized_discount, estimated_cost);
+                //
+                // Same atomic-domain billing as the usage-present arm. The pre-
+                // provider validator at line 561 already gated `estimated_cost`
+                // as finite + non-negative, but we still route through
+                // `usdc_f64_to_atomic_safe` so a corrupted re-derivation (or a
+                // future refactor that drops the early guard) cannot write a
+                // NaN/∞ entry to the spend ledger.
+                let Some(estimated_atomic) = usdc_f64_to_atomic_safe(estimated_cost) else {
+                    warn!(
+                        model = %req.model,
+                        wallet = %wallet_address,
+                        raw_estimated = estimated_cost,
+                        "skipping spend log: estimated_cost is NaN/∞/negative/overflow on usage-less semantic-hit fallback"
+                    );
+                    return Ok(response);
+                };
+                let billed_atomic = spend_cost_atomic(realized_discount, estimated_atomic);
+                let billed_cost = billed_atomic as f64 / 1_000_000.0;
                 state.usage.log_spend(SpendLogEntry {
                     wallet_address: wallet_address.clone(),
                     model: req.model.clone(),
