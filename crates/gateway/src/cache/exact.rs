@@ -15,18 +15,28 @@ use super::{ResponseCache, CACHE_KEY_PREFIX};
 
 impl ResponseCache {
     /// Generate a cache key from a request.
-    /// Key = SHA256(model + messages_json + temperature). Message order is
-    /// significant (it's part of the conversation), so messages are NOT sorted —
-    /// see `cache_key_is_sensitive_to_message_order`.
+    /// Key = SHA256(model ‖ messages_json ‖ temperature ‖ tools_json ‖
+    /// tool_choice_json). Message order is significant (it's part of the
+    /// conversation), so messages are NOT sorted — see
+    /// `cache_key_is_sensitive_to_message_order`.
     ///
-    /// Returns `None` if `messages` cannot be serialised. **This must never
-    /// be coerced to a default key**: silently omitting messages from the
-    /// hash would collapse the key to `SHA-256(model ‖ temperature)`, making
-    /// every prompt sharing those two fields collide — a wallet A request
+    /// `tools` and `tool_choice` are part of the key because they materially
+    /// change the response shape: with tools available the model may emit a
+    /// `tool_calls` completion instead of prose, and `tool_choice` can force
+    /// or forbid a specific function. Two otherwise-identical requests that
+    /// differ only in their tool spec would otherwise collide on the same
+    /// SHA-256 key and serve each other's responses — a wrong-answer money
+    /// loss for the agent that paid for a tool-capable response and received
+    /// prose from cache. The fields are serialised on a stable, sorted-key
+    /// JSON form to make `Some(...)` distinct from `None` regardless of map
+    /// ordering quirks.
+    ///
+    /// Returns `None` if any of the JSON-serialised inputs cannot be
+    /// serialised. **This must never be coerced to a default key**: silently
+    /// omitting any field from the hash would collapse the key, making every
+    /// prompt sharing the remaining fields collide — a wallet A request
     /// served wallet B's response. Callers treat `None` as a guaranteed cache
-    /// miss and fall through to the upstream provider. In practice
-    /// `serde_json::to_string` on `Vec<ChatMessage>` (plain `String` content +
-    /// scalars) does not fail, so this branch is defence-in-depth.
+    /// miss and fall through to the upstream provider.
     pub fn cache_key(req: &ChatRequest) -> Option<String> {
         let msgs_json = match serde_json::to_string(&req.messages) {
             Ok(s) => s,
@@ -35,10 +45,37 @@ impl ResponseCache {
                 return None;
             }
         };
+        // Tool spec affects response shape (`tool_calls` vs prose). Serialise
+        // `Option` directly so `None` and `Some([])` produce distinct bytes.
+        let tools_json = match serde_json::to_string(&req.tools) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, model = %req.model, "cache_key: failed to serialise tools; treating as guaranteed miss");
+                return None;
+            }
+        };
+        let tool_choice_json = match serde_json::to_string(&req.tool_choice) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, model = %req.model, "cache_key: failed to serialise tool_choice; treating as guaranteed miss");
+                return None;
+            }
+        };
         let mut hasher = Sha256::new();
         hasher.update(req.model.as_bytes());
+        // Domain-separator bytes guard against the (theoretical) collision
+        // where one field's serialised tail concatenates with the next field's
+        // head into an identical byte stream as a different split. SHA-256
+        // doesn't need this for security, but it makes the encoding
+        // unambiguous and the test-side reasoning trivial.
+        hasher.update(b"|msgs|");
         hasher.update(msgs_json.as_bytes());
+        hasher.update(b"|tools|");
+        hasher.update(tools_json.as_bytes());
+        hasher.update(b"|tool_choice|");
+        hasher.update(tool_choice_json.as_bytes());
         if let Some(temp) = req.temperature {
+            hasher.update(b"|temp|");
             hasher.update(temp.to_le_bytes());
         }
         let hash = hasher.finalize();
@@ -175,33 +212,7 @@ mod tests {
     use crate::cache::CacheConfig;
     use solvela_protocol::{ChatMessage, Role};
 
-    /// Lazily install a process-wide Prometheus recorder for counter assertions.
-    /// `install_recorder` can only succeed once per process, so we cache the
-    /// handle and reuse it across every test in this module.
-    fn install_test_recorder() -> metrics_exporter_prometheus::PrometheusHandle {
-        use std::sync::OnceLock;
-        static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
-        HANDLE
-            .get_or_init(|| {
-                metrics_exporter_prometheus::PrometheusBuilder::new()
-                    .install_recorder()
-                    .expect("failed to install test Prometheus recorder")
-            })
-            .clone()
-    }
-
-    /// Parse a single counter's current value from the Prometheus text rendering.
-    /// Returns 0 if the counter has never been incremented (no line yet emitted).
-    fn counter_value(handle: &metrics_exporter_prometheus::PrometheusHandle, name: &str) -> u64 {
-        let body = handle.render();
-        // Counter exposition lines look like `name 5` or `name{label="x"} 5`.
-        // We sum every line starting with the metric name to handle both
-        // unlabeled and labeled counter families.
-        body.lines()
-            .filter(|l| l.starts_with(&format!("{name} ")) || l.starts_with(&format!("{name}{{")))
-            .filter_map(|l| l.rsplit_once(' ').and_then(|(_, v)| v.parse::<u64>().ok()))
-            .sum()
-    }
+    use crate::cache::test_metrics::{counter_value, install_test_recorder};
 
     /// Helper to build a ChatRequest for testing.
     fn make_request(
@@ -367,6 +378,77 @@ mod tests {
             ResponseCache::cache_key(&req_b).expect("test request must serialise"),
             "message order must affect the cache key"
         );
+    }
+
+    /// Tool spec is part of the response shape (`tool_calls` vs prose). Two
+    /// requests with the same prompt + temperature but different tools MUST
+    /// produce different keys; otherwise an agent that paid for a tool-capable
+    /// response would receive a prose response cached by a tool-less peer
+    /// (a wrong-answer money loss). Falsifiability: removing `req.tools` from
+    /// `cache_key` would make this test fail.
+    #[test]
+    fn cache_key_is_sensitive_to_tools() {
+        use solvela_protocol::{FunctionDefinitionInner, ToolDefinition};
+        let base = make_request("openai/gpt-4o", vec![user_message("Hello")], Some(0.7));
+        let with_tools = {
+            let mut r = base.clone();
+            r.tools = Some(vec![ToolDefinition {
+                r#type: "function".to_string(),
+                function: FunctionDefinitionInner {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                },
+            }]);
+            r
+        };
+        let with_other_tools = {
+            let mut r = base.clone();
+            r.tools = Some(vec![ToolDefinition {
+                r#type: "function".to_string(),
+                function: FunctionDefinitionInner {
+                    name: "search_web".to_string(),
+                    description: Some("Search the web".to_string()),
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                },
+            }]);
+            r
+        };
+        let key_base = ResponseCache::cache_key(&base).expect("must serialise");
+        let key_tools = ResponseCache::cache_key(&with_tools).expect("must serialise");
+        let key_other = ResponseCache::cache_key(&with_other_tools).expect("must serialise");
+        assert_ne!(
+            key_base, key_tools,
+            "request with tools must hash differently from request with no tools"
+        );
+        assert_ne!(
+            key_tools, key_other,
+            "different tool definitions must produce different keys"
+        );
+    }
+
+    /// `tool_choice` (auto vs none vs a specific function) forces the response
+    /// shape. Two requests with identical prompts + tools but different
+    /// `tool_choice` MUST produce different keys.
+    #[test]
+    fn cache_key_is_sensitive_to_tool_choice() {
+        let base = make_request("openai/gpt-4o", vec![user_message("Hello")], Some(0.7));
+        let auto = {
+            let mut r = base.clone();
+            r.tool_choice = Some(serde_json::json!("auto"));
+            r
+        };
+        let none = {
+            let mut r = base.clone();
+            r.tool_choice = Some(serde_json::json!("none"));
+            r
+        };
+        let key_base = ResponseCache::cache_key(&base).expect("must serialise");
+        let key_auto = ResponseCache::cache_key(&auto).expect("must serialise");
+        let key_none = ResponseCache::cache_key(&none).expect("must serialise");
+        assert_ne!(key_base, key_auto);
+        assert_ne!(key_auto, key_none);
+        assert_ne!(key_base, key_none);
     }
 
     /// Adding a message must produce a different key.

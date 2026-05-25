@@ -309,6 +309,54 @@ pub enum CacheError {
     Unavailable,
 }
 
+/// Test-only metrics helpers shared by the exact and semantic tier test
+/// modules.
+///
+/// The `metrics` crate enforces a single process-wide recorder: the first
+/// `install_recorder()` call wins, and every subsequent install fails with
+/// `FailedToSetGlobalRecorder`. The exact-tier and semantic-tier `#[cfg(test)]`
+/// modules both need to read counter values, so they MUST share one handle —
+/// otherwise the second module's install panics, and a per-module `OnceLock`
+/// holding the install result cannot be reached from the other module.
+///
+/// Both tier modules import `install_test_recorder` and `counter_value` from
+/// here; the static `OnceLock` here is the single source of truth for the
+/// handle, so order-of-invocation between modules no longer matters.
+#[cfg(test)]
+pub(super) mod test_metrics {
+    pub(crate) fn install_test_recorder() -> metrics_exporter_prometheus::PrometheusHandle {
+        use std::sync::OnceLock;
+        static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+        HANDLE
+            .get_or_init(|| {
+                metrics_exporter_prometheus::PrometheusBuilder::new()
+                    .install_recorder()
+                    .expect(
+                        "first install_test_recorder caller must succeed; \
+                         later callers reuse this handle via OnceLock",
+                    )
+            })
+            .clone()
+    }
+
+    /// Parse a single counter's current value from the Prometheus text
+    /// rendering. Returns 0 if the counter has never been incremented (no
+    /// exposition line emitted yet).
+    pub(crate) fn counter_value(
+        handle: &metrics_exporter_prometheus::PrometheusHandle,
+        name: &str,
+    ) -> u64 {
+        let body = handle.render();
+        // Counter exposition lines look like `name 5` or `name{label="x"} 5`.
+        // Sum every line starting with the metric name to handle both
+        // unlabeled and labeled counter families.
+        body.lines()
+            .filter(|l| l.starts_with(&format!("{name} ")) || l.starts_with(&format!("{name}{{")))
+            .filter_map(|l| l.rsplit_once(' ').and_then(|(_, v)| v.parse::<u64>().ok()))
+            .sum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Tests here cover the shared infra owned by `ResponseCache`: config

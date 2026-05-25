@@ -298,6 +298,29 @@ impl SemanticCache {
         if !self.config.enabled || req.stream {
             return;
         }
+        // Mirror the exact-tier write guard (`cache/exact.rs::set`): refusing
+        // to cache a usage-less response. The downstream
+        // `semantic_hit_full_atomic` fallback estimates a cost on a usage-less
+        // hit so the spend ledger can still settle, but every usage-less entry
+        // accepted into this tier is a request that will bill the *estimate*
+        // (typically the input bound + a 1000-token output assumption) rather
+        // than the true token cost. The exact tier already refuses these to
+        // keep the `log_spend` reconciliation honest; the semantic tier was
+        // asymmetrically permissive, and a later semantic hit on such an
+        // entry routes through the lowest-tested billing branch
+        // (`mod.rs:743 +/- 30`). Skip-and-counter is fail-closed: the response
+        // is still served, but the wallet does not store a future-billable
+        // entry whose cost can only be estimated, not measured.
+        if response.usage.is_none() {
+            metrics::counter!("solvela_semantic_cache_write_skipped_no_usage_total").increment(1);
+            debug!(
+                model = %req.model,
+                "semantic cache write skipped: response has no usage block; \
+                 a future hit would bill the request's input estimate \
+                 instead of the cached response's true token cost"
+            );
+            return;
+        }
         // Don't store a prompt BGE would truncate (bug_002): its embedding would
         // reflect only the truncated prefix, risking a later wrong cross-hit.
         let text = prompt_text(req);
@@ -580,7 +603,32 @@ fn redis_value_to_string(v: &redis::Value) -> Option<String> {
 pub(crate) fn prompt_text(req: &ChatRequest) -> String {
     req.messages
         .iter()
-        .map(|m| format!("{}: {}", role_str(&m.role), m.content))
+        .map(|m| {
+            // Base line: `role: content`. For an assistant turn carrying
+            // `tool_calls`, or a tool turn carrying `tool_call_id`, we append
+            // a deterministic suffix so two conversation histories that
+            // differ only in their tool-call payloads embed to distinct
+            // vectors. Without this, an assistant turn `tool_calls=[get_weather("NYC")]`
+            // and `tool_calls=[get_weather("Boston")]` produce identical
+            // `prompt_text` (content is typically empty on tool-call turns)
+            // and collide above the similarity threshold — wrong tool result
+            // served from cache. The suffix is JSON to preserve structure;
+            // missing fields are simply omitted (no `null` noise).
+            let base = format!("{}: {}", role_str(&m.role), m.content);
+            let tool_calls_suffix = m
+                .tool_calls
+                .as_ref()
+                .and_then(|tc| serde_json::to_string(tc).ok())
+                .filter(|s| s != "null")
+                .map(|s| format!(" tool_calls={s}"))
+                .unwrap_or_default();
+            let tool_call_id_suffix = m
+                .tool_call_id
+                .as_ref()
+                .map(|id| format!(" tool_call_id={id}"))
+                .unwrap_or_default();
+            format!("{base}{tool_calls_suffix}{tool_call_id_suffix}")
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -802,6 +850,64 @@ mod tests {
         );
         assert!(!prompt_text(&a).contains("temperature"));
         assert!(!prompt_text(&a).contains("top_p"));
+    }
+
+    /// Two conversation histories differing only in their assistant
+    /// `tool_calls` payloads must embed to distinct prompt texts; without this
+    /// the embeddings collide above the similarity threshold and a tool-call
+    /// for `get_weather("NYC")` can serve a cached completion that called
+    /// `get_weather("Boston")` — wrong tool result returned to the agent.
+    /// Falsifiability: removing the tool-calls suffix from `prompt_text` would
+    /// make this test fail (the two texts collapse to `"assistant: "` lines).
+    #[test]
+    fn prompt_text_distinguishes_tool_calls() {
+        use solvela_protocol::{FunctionCall, ToolCall};
+        let make = |args: &str| {
+            let mut r = req("m", "what's the weather?");
+            r.messages.push(ChatMessage {
+                role: Role::Assistant,
+                content: String::new(),
+                name: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".to_string(),
+                    r#type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "get_weather".to_string(),
+                        arguments: args.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+            });
+            r
+        };
+        let nyc = make(r#"{"location":"NYC"}"#);
+        let boston = make(r#"{"location":"Boston"}"#);
+        assert_ne!(
+            prompt_text(&nyc),
+            prompt_text(&boston),
+            "tool-call arguments must change the embedded text; otherwise a \
+             cached response for NYC could serve a request for Boston"
+        );
+        // A message with no tool_calls must NOT carry a suffix (regression
+        // guard against accidentally embedding `null`/empty markers that would
+        // shift the vector of every plain conversation).
+        let mut plain = req("m", "what's the weather?");
+        plain.messages.push(ChatMessage {
+            role: Role::Assistant,
+            content: "It's sunny.".to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        let text = prompt_text(&plain);
+        assert!(
+            !text.contains("tool_calls"),
+            "plain (no tool_calls) message must not embed a tool_calls suffix; got: {text:?}"
+        );
+        assert!(
+            !text.contains("tool_call_id"),
+            "plain (no tool_call_id) message must not embed a tool_call_id suffix; got: {text:?}"
+        );
     }
 
     #[test]
@@ -1071,6 +1177,60 @@ mod tests {
         assert!(
             cache.get(&r).await.is_none(),
             "streaming requests must not hit the cache"
+        );
+    }
+
+    use crate::cache::test_metrics::{counter_value, install_test_recorder};
+
+    /// Mirror of `exact::set_refuses_to_cache_response_without_usage`: the
+    /// semantic tier must refuse to cache a `usage: None` response, parallel
+    /// to the exact tier. Without this guard the spend ledger on a later
+    /// usage-less hit routes through the lowest-tested billing branch
+    /// (`mod.rs:743` ± 30), billing the request's input estimate instead of
+    /// the cached response's true token cost.
+    ///
+    /// Falsifiability: asserts `solvela_semantic_cache_write_skipped_no_usage_total`
+    /// incremented. Removing the guard would let execution continue past the
+    /// counter call into the (embed + Redis) path — the counter would not
+    /// fire and this test would fail.
+    #[tokio::test]
+    async fn set_refuses_to_cache_response_without_usage() {
+        let Some((cache, _guard)) = fresh_cache(0.85).await else {
+            return;
+        };
+        let handle = install_test_recorder();
+        let before = counter_value(
+            &handle,
+            "solvela_semantic_cache_write_skipped_no_usage_total",
+        );
+
+        let r = req("openai/gpt-4o", "usage-less guard probe");
+        let usage_less = ChatResponse {
+            id: "no-usage".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            choices: vec![],
+            usage: None,
+        };
+        cache.set(&r, &usage_less).await;
+
+        let after = counter_value(
+            &handle,
+            "solvela_semantic_cache_write_skipped_no_usage_total",
+        );
+        assert_eq!(
+            after,
+            before + 1,
+            "semantic tier must refuse to cache usage-less responses; \
+             without the guard a later hit would bill the wallet's input \
+             estimate rather than the response's true cost"
+        );
+        // And the entry must not be retrievable — the guard short-circuits
+        // before embedding/writing.
+        assert!(
+            cache.get(&r).await.is_none(),
+            "guarded write must not produce a retrievable entry"
         );
     }
 
