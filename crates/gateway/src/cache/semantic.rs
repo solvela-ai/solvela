@@ -60,6 +60,14 @@ const MAX_EMBED_CHARS: usize = 2000;
 const MAX_INFLIGHT_WRITES: usize = 8;
 
 /// Configuration for the semantic cache tier.
+///
+/// Vector dimension is intentionally NOT a field here: it is derived from
+/// `embedder.dim()` inside [`SemanticCache::connect`]. A separate config-level
+/// `dim` invited the failure mode where a caller passed a stale value (e.g.
+/// from a previous embedder), `FT.CREATE` built the HNSW index at the wrong
+/// width, and every subsequent `FT.SEARCH` failed at query time rather than
+/// startup. Owning the dim on the embedder side makes that class structurally
+/// impossible.
 #[derive(Debug, Clone)]
 pub struct SemanticConfig {
     /// Whether the semantic tier is enabled. Default off → zero behaviour change.
@@ -68,8 +76,6 @@ pub struct SemanticConfig {
     pub threshold: f32,
     /// TTL (seconds) for stored semantic entries.
     pub ttl_secs: u64,
-    /// Embedding dimension (must match the embedder).
-    pub dim: usize,
 }
 
 impl Default for SemanticConfig {
@@ -78,7 +84,6 @@ impl Default for SemanticConfig {
             enabled: false,
             threshold: 0.85,
             ttl_secs: 600,
-            dim: super::embedder::BGE_SMALL_DIM,
         }
     }
 }
@@ -101,21 +106,16 @@ pub struct SemanticCache {
 
 impl SemanticCache {
     /// Connect to Redis and ensure the vector index exists.
+    ///
+    /// Vector dimension comes from `embedder.dim()` — there is no separate
+    /// `config.dim` to drift from it.
     pub async fn connect(
         redis_url: &str,
         embedder: Arc<dyn Embedder>,
         config: SemanticConfig,
     ) -> Result<Self, super::CacheError> {
-        // Fail fast on misconfiguration rather than degrade to a silent
-        // all-miss cache: a dim mismatch makes every FT.SEARCH error out, and an
-        // out-of-range threshold makes every comparison trivially true/false.
-        if config.dim != embedder.dim() {
-            return Err(super::CacheError::Operation(format!(
-                "semantic cache dim mismatch: config={}, embedder={}",
-                config.dim,
-                embedder.dim()
-            )));
-        }
+        // Fail fast on a bad threshold rather than degrade to a silent all-hit
+        // (threshold ≤ 0) or all-miss (threshold > 1) cache.
         if !(0.0..=1.0).contains(&config.threshold) {
             return Err(super::CacheError::Operation(format!(
                 "semantic cache threshold {} is outside [0.0, 1.0]",
@@ -180,7 +180,7 @@ impl SemanticCache {
             .arg("TYPE")
             .arg("FLOAT32")
             .arg("DIM")
-            .arg(self.config.dim as i64)
+            .arg(self.embedder.dim() as i64)
             .arg("DISTANCE_METRIC")
             .arg("COSINE")
             .query_async(&mut conn)
@@ -610,9 +610,26 @@ fn f32_slice_to_le_bytes(v: &[f32]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::embedder::LocalBge;
+    use crate::cache::embedder::{Embedder, EmbedderError, LocalBge, BGE_SMALL_DIM};
     use solvela_protocol::{ChatMessage, Role, Usage};
     use std::path::PathBuf;
+
+    /// Embedder that always returns `Err` — used to verify `get`/`set` treat
+    /// embedder failure as a miss + dropped write, never as a panic or a
+    /// corrupt-hit. Closes the test gap that no test installed a deliberately
+    /// failing embedder behind a real `SemanticCache`.
+    struct FailingEmbedder;
+    impl Embedder for FailingEmbedder {
+        fn embed_one(&self, _text: &str) -> Result<Vec<f32>, EmbedderError> {
+            Err(EmbedderError::Embed("forced failure".to_string()))
+        }
+        fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedderError> {
+            Err(EmbedderError::Embed("forced failure".to_string()))
+        }
+        fn dim(&self) -> usize {
+            BGE_SMALL_DIM
+        }
+    }
 
     fn model_cache_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.fastembed_cache")
@@ -689,7 +706,6 @@ mod tests {
             enabled: true,
             threshold,
             ttl_secs: 600,
-            dim: embedder.dim(),
         };
         let cache = match SemanticCache::connect(&redis_url(), Arc::new(embedder), config).await {
             Ok(c) => c,
@@ -1063,6 +1079,48 @@ mod tests {
         assert!(
             cache.get(&r).await.is_none(),
             "disabled cache must return None"
+        );
+    }
+
+    /// Failing-embedder behavior: `get` must return `None` (miss → fall through
+    /// to provider) and `store` must return `Err` — never panic, never return
+    /// a corrupt-hit. Closes the review-flagged gap that no test installed a
+    /// deliberately failing embedder behind a real `SemanticCache`. Holds the
+    /// shared-index lock because `connect` calls `ensure_index`.
+    #[tokio::test]
+    async fn failing_embedder_yields_miss_not_panic() {
+        // Honour the shared-redis-index lock (mirror of fresh_cache's pattern).
+        let _guard = semantic_test_lock().lock_owned().await;
+        let config = SemanticConfig {
+            enabled: true,
+            threshold: 0.85,
+            ttl_secs: 600,
+        };
+        let cache =
+            match SemanticCache::connect(&redis_url(), Arc::new(FailingEmbedder), config).await {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("skipping: redis-stack unreachable ({e})");
+                    return;
+                }
+            };
+        let r = req("openai/gpt-4o", "What is the capital of France?");
+
+        // `store` MUST surface the embedder failure as Err — the documented
+        // contract that callers (the provider write-back path) use to count
+        // dropped writes and avoid cache pollution.
+        let store_result = cache.store(&r, &resp("paris")).await;
+        assert!(
+            store_result.is_err(),
+            "store with a failing embedder must return Err, not silently succeed"
+        );
+
+        // `get` MUST return None on embedder failure — fall through to upstream
+        // is the documented behavior, NOT a panic or a corrupt SemanticHit.
+        let hit = cache.get(&r).await;
+        assert!(
+            hit.is_none(),
+            "get with a failing embedder must return None (miss), not a corrupt hit"
         );
     }
 }

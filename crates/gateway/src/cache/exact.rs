@@ -62,6 +62,21 @@ impl ResponseCache {
         match cached {
             Some(json_str) => match serde_json::from_str::<ChatResponse>(&json_str) {
                 Ok(response) => {
+                    // Defense-in-depth: the write-side guard in `set` blocks
+                    // new caching of usage-less responses, but entries written
+                    // before this guard (or via a future bypass) could still
+                    // be in Redis. Serving them would skip both `log_spend`
+                    // reconciliation branches in `chat/mod.rs` and strand the
+                    // `check_budget` reservation. Treat as a miss → upstream
+                    // call, real settlement.
+                    if response.usage.is_none() {
+                        warn!(
+                            key = %key,
+                            "cached response has no usage block; treating as miss \
+                             so the wallet's budget reservation can settle"
+                        );
+                        return None;
+                    }
                     info!(key = %key, "cache hit");
                     Some(response)
                 }
@@ -75,8 +90,23 @@ impl ResponseCache {
     }
 
     /// Store a response in the cache.
+    ///
+    /// Refuses to cache responses that lack a `usage` block. On a future hit
+    /// the downstream `log_spend` reconciliation branches both require either
+    /// `usage` or a semantic discount; an exact hit returns `cost_outcome: None`
+    /// and threads `cached.usage` through, so a `None` usage would skip
+    /// settlement and permanently strand the `check_budget` reservation on the
+    /// wallet's counter (drains budget by `estimated_cost` per repeat).
     pub async fn set(&self, req: &ChatRequest, response: &ChatResponse) {
         if !self.config.enabled || req.stream {
+            return;
+        }
+        if response.usage.is_none() {
+            warn!(
+                model = %req.model,
+                "refusing to cache response with no usage block; \
+                 settlement requires usage to reconcile the budget reservation"
+            );
             return;
         }
         let key = match Self::cache_key(req) {
@@ -334,6 +364,28 @@ mod tests {
             usage: None,
         };
         // Should return without panic; nothing to assert besides "doesn't try to connect".
+        cache.set(&req, &response).await;
+    }
+
+    /// `set` refuses to cache a response with no `usage` block — serving it on a
+    /// future hit would skip both `log_spend` reconciliation branches in
+    /// `chat/mod.rs` (one needs `usage`, the other needs a semantic
+    /// `cost_outcome`), permanently stranding the `check_budget` reservation
+    /// and draining the wallet's budget by `estimated_cost` per repeat.
+    #[tokio::test]
+    async fn set_refuses_to_cache_response_without_usage() {
+        let cache = ResponseCache::new("redis://127.0.0.1:1", CacheConfig::default())
+            .expect("client creation should not connect");
+        let req = make_request("openai/gpt-4o", vec![user_message("Hello")], None);
+        let response = ChatResponse {
+            id: "test".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "gpt-4o".to_string(),
+            choices: vec![],
+            usage: None,
+        };
+        // No panic, no Redis connection attempt — early-exit on the usage guard.
         cache.set(&req, &response).await;
     }
 

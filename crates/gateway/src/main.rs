@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// Read an environment variable with dual-prefix support.
 ///
@@ -801,7 +801,7 @@ async fn build_semantic_cache(
     config: &config::AppConfig,
     redis_url: &str,
 ) -> Option<Arc<cache::semantic::SemanticCache>> {
-    use cache::embedder::{Embedder, LocalBge};
+    use cache::embedder::LocalBge;
     use cache::semantic::{SemanticCache, SemanticConfig};
 
     let settings = &config.cache.semantic;
@@ -817,12 +817,28 @@ async fn build_semantic_cache(
     .await
     {
         Ok(Ok(e)) => e,
+        // `error!` + counter, not `warn!`: the operator explicitly opted in
+        // to the semantic tier (`[cache.semantic].enabled = true`). Silently
+        // degrading to all-miss on a corrupt/missing model is the same failure
+        // mode that caused the original "silent off" gap — ops sees zero hit
+        // rate, no alert. Failure here is loud, and the `reason` label lets
+        // alerting separate "model file gone" from "task panic".
         Ok(Err(e)) => {
-            warn!(error = %e, "semantic cache disabled: embedding model failed to load");
+            metrics::counter!(
+                "solvela_semantic_cache_startup_failure_total",
+                "reason" => "model_load"
+            )
+            .increment(1);
+            error!(error = %e, "semantic cache disabled: embedding model failed to load");
             return None;
         }
         Err(e) => {
-            warn!(error = %e, "semantic cache disabled: embedder load task panicked");
+            metrics::counter!(
+                "solvela_semantic_cache_startup_failure_total",
+                "reason" => "task_panic"
+            )
+            .increment(1);
+            error!(error = %e, "semantic cache disabled: embedder load task panicked");
             return None;
         }
     };
@@ -831,7 +847,6 @@ async fn build_semantic_cache(
         enabled: true,
         threshold: settings.threshold,
         ttl_secs: settings.ttl_secs,
-        dim: embedder.dim(),
     };
 
     match SemanticCache::connect(redis_url, Arc::new(embedder), sem_config).await {
@@ -844,7 +859,12 @@ async fn build_semantic_cache(
             Some(Arc::new(cache))
         }
         Err(e) => {
-            warn!(error = %e, "semantic cache disabled: Redis/RediSearch unavailable");
+            metrics::counter!(
+                "solvela_semantic_cache_startup_failure_total",
+                "reason" => "redis_connect"
+            )
+            .increment(1);
+            error!(error = %e, "semantic cache disabled: Redis/RediSearch unavailable");
             None
         }
     }

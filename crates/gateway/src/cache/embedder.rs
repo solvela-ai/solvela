@@ -83,10 +83,16 @@ impl LocalBge {
 
 impl Embedder for LocalBge {
     fn embed_one(&self, text: &str) -> Result<Vec<f32>, EmbedderError> {
+        // Fail closed on a poisoned mutex. A `spawn_blocking` panic mid-embed
+        // leaves the ONNX session in an indeterminate state; reusing it via
+        // `PoisonError::into_inner` can yield silently-corrupt embeddings that
+        // hash into the wrong KNN bucket and serve wrong cached responses to
+        // paying agents. Returning an error here makes the caller treat it as
+        // a miss (fall through to the provider) instead of a corrupt hit.
         let mut model = self
             .model
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .map_err(|_| EmbedderError::Embed("embedder mutex poisoned".to_string()))?;
         let mut out = model
             .embed(vec![text.to_string()], None)
             .map_err(|e| EmbedderError::Embed(e.to_string()))?;
@@ -98,7 +104,7 @@ impl Embedder for LocalBge {
         let mut model = self
             .model
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .map_err(|_| EmbedderError::Embed("embedder mutex poisoned".to_string()))?;
         let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
         model
             .embed(owned, None)

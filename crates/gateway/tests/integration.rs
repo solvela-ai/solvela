@@ -423,7 +423,7 @@ fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
 /// the embedding model is unavailable — same graceful-skip pattern as the
 /// crate's unit tests, so this is a no-op in CI envs lacking those deps.
 async fn try_semantic_cache() -> Option<Arc<gateway::cache::semantic::SemanticCache>> {
-    use gateway::cache::embedder::{Embedder, LocalBge};
+    use gateway::cache::embedder::LocalBge;
     use gateway::cache::semantic::{SemanticCache, SemanticConfig};
 
     let model_dir =
@@ -439,7 +439,6 @@ async fn try_semantic_cache() -> Option<Arc<gateway::cache::semantic::SemanticCa
         enabled: true,
         threshold: 0.85,
         ttl_secs: 600,
-        dim: embedder.dim(),
     };
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
     match SemanticCache::connect(&url, Arc::new(embedder), config).await {
@@ -907,6 +906,109 @@ async fn semantic_cache_hit_on_escrow_paid_request() {
         v["id"], "seeded-escrow-billing",
         "response must be the seeded cache entry (the discount-billing branch \
          is the only path that returns this on an escrow scheme)"
+    );
+}
+
+/// Counterpart to `semantic_cache_hit_on_escrow_paid_request`: closes the
+/// review-flagged gap that NO integration test exercised the exact-scheme +
+/// semantic-cache-hit combination, where `scheme_realized_discount` MUST
+/// return `None` and the wallet bills the full reservation (no discount).
+///
+/// The cost-math is unit-tested
+/// (`scheme_realized_discount_applies_only_to_escrow` proves
+/// `PaymentScheme::Exact, Some(d) -> None`); this test proves the WIRING is
+/// reached on an exact-paid cache hit. A regression that incorrectly applied
+/// the discount on exact-scheme would still return 200 and `semantic-hit`,
+/// but the spend log would under-bill — keeping this test paired with the
+/// escrow one makes the asymmetry explicit and CI-enforced.
+#[tokio::test]
+async fn semantic_cache_hit_on_exact_paid_request() {
+    let Some(sem) = try_semantic_cache().await else {
+        return;
+    };
+
+    let seeded = ChatResponse {
+        id: "seeded-exact-billing".to_string(),
+        object: "chat.completion".to_string(),
+        created: 0,
+        model: "openai/gpt-4o".to_string(),
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: Role::Assistant,
+                content: "Photosynthesis converts light into chemical energy.".to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            finish_reason: Some("stop".to_string()),
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 12,
+            completion_tokens: 16,
+            total_tokens: 28,
+        }),
+    };
+    let seed_req = ChatRequest {
+        model: "openai/gpt-4o".to_string(),
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: "How does photosynthesis work in plants?".to_string(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }],
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        tools: None,
+        tool_choice: None,
+    };
+    sem.store(&seed_req, &seeded).await.expect("seed store");
+
+    let app = app_with_semantic_cache_and_escrow(Arc::clone(&sem));
+
+    // Exact-scheme paid request with a paraphrase. dev_bypass is OFF, so the
+    // exact PAYMENT-SIGNATURE must verify through AlwaysPassVerifier (which is
+    // also wired into the facilitator on this app) to reach the chat handler.
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":"Explain how plants make food from sunlight."}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-solvela-debug", "true")
+                .header(
+                    "PAYMENT-SIGNATURE",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "exact-paid request with a semantic-cache paraphrase must return 200"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-cache")
+            .and_then(|v| v.to_str().ok()),
+        Some("semantic-hit"),
+        "exact-paid paraphrase must be served from the semantic cache"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        v["id"], "seeded-exact-billing",
+        "response must be the seeded cache entry (proves the exact-scheme \
+         hit branch returned the cached response and did not fall through to \
+         a fresh provider call)"
     );
 }
 
