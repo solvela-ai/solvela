@@ -38,6 +38,7 @@
 *~
 .DS_Store
 .claude/
+.codegraph/
 .env*
 .env*.local
 .idea/
@@ -48,6 +49,8 @@
 .vscode/
 .worktrees/
 /target/
+# Per-PR review notes — session artifacts; keep local or move to private notes
+pr-*-review.md
 GEMINI.md
 Thumbs.db
 __pycache__/
