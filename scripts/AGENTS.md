@@ -10,6 +10,7 @@ Developer and operational helper scripts. Small, self-contained shell/POSIX scri
 | File | Description |
 |------|-------------|
 | `load-test.sh` | Drives a local or remote gateway with concurrent chat requests for load testing |
+| `wallet-balances.sh` | Snapshots SOL + USDC balances for every operator wallet (keypair files in `~/.config/solana/` + gateway recipient from `.env`) in one pass |
 
 ## Subdirectories
 _(none)_
