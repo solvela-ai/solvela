@@ -1521,10 +1521,36 @@ async fn test_models_endpoint() {
     let data = json["data"].as_array().unwrap();
     assert_eq!(data.len(), 3);
 
-    // Check that pricing includes the 5% fee
+    // Lock in the full wire shape. The route serializes
+    // `solvela_protocol::ModelInfo`, whose nested layout is the contract the
+    // sibling SDKs (Python, Go, TypeScript, Rust) parse against. Drift here
+    // is the failure mode that #229 fixed and the SDK-side `ModelInfo`
+    // round-trip tests are meant to mirror.
     let gpt4o = data.iter().find(|m| m["id"] == "openai/gpt-4o").unwrap();
-    assert_eq!(gpt4o["pricing"]["fee_percent"], 5);
+
+    assert_eq!(gpt4o["object"], "model");
+    assert_eq!(gpt4o["provider"], "openai");
+    assert!(gpt4o["display_name"].is_string());
+    assert!(gpt4o["context_window"].is_number());
+
+    assert!(gpt4o["pricing"]["input_per_million"].is_number());
+    assert!(gpt4o["pricing"]["output_per_million"].is_number());
     assert_eq!(gpt4o["pricing"]["currency"], "USDC");
+    assert_eq!(gpt4o["pricing"]["fee_percent"], 5);
+
+    assert!(gpt4o["capabilities"]["streaming"].is_boolean());
+    assert!(gpt4o["capabilities"]["tools"].is_boolean());
+    assert!(gpt4o["capabilities"]["vision"].is_boolean());
+    assert!(gpt4o["capabilities"]["reasoning"].is_boolean());
+
+    // Internal-only fields must never leak onto the wire.
+    assert!(gpt4o.get("model_id").is_none());
+    assert!(gpt4o.get("input_cost_per_million").is_none());
+    assert!(gpt4o.get("output_cost_per_million").is_none());
+    assert!(gpt4o.get("supports_streaming").is_none());
+    assert!(gpt4o.get("supports_structured_output").is_none());
+    assert!(gpt4o.get("supports_batch").is_none());
+    assert!(gpt4o.get("max_output_tokens").is_none());
 }
 
 // ---------------------------------------------------------------------------
