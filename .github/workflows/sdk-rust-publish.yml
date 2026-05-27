@@ -1,0 +1,487 @@
+name: sdk-rust publish
+
+# Tag-triggered publish for the Rust payment SDK at sdks/rust/.
+#
+# This SDK is a 4-crate workspace that ships clients which sign and
+# broadcast real USDC-SPL transactions on Solana mainnet. A mis-publish
+# (wrong dep version, partial publish, leaked token) puts user wallets
+# at risk, so every guardrail in the payment-sdk-publisher charter
+# applies here:
+#   - verify-tag-matches-manifest BEFORE any publish step
+#   - re-run the SDK's CI test suite at the tagged commit
+#   - one workspace-wide `cargo publish --dry-run` BEFORE any live publish
+#   - one workspace-wide `cargo publish` for the live step (cargo 1.90+
+#     registry overlay handles in-process dep ordering)
+#   - final visibility check via crates.io JSON API
+#
+# Why workspace-wide instead of per-layer? Layer-3 crates here depend
+# directly on layer-1 (solvela-client) AND layer-2 (solvela-client-cli-args),
+# and transitively on the previously-published layer-1
+# (solvela-client@0.2.1 -> solvela-protocol ^0.1) which conflicts with
+# the workspace's direct pin on solvela-protocol 0.2.x. Per-crate dry-run
+# + per-layer live publish therefore fails verification on the layer-3
+# crates with stale transitive deps from the registry. Cargo 1.90 (Sept 2025) stabilized
+# multi-`-p` publish, which uses an in-process registry overlay that
+# grafts the unpublished local packages on top of crates.io and verifies
+# in dep order against the overlay — exactly the semantics this SDK
+# shape needs. See:
+#   https://github.com/rust-lang/cargo/issues/14347  (1.90 stabilization)
+#   https://www.tweag.io/blog/2025-07-10-cargo-package-workspace/  (overlay writeup)
+#   https://github.com/rust-lang/cargo/issues/14789  (dry-run-vs-already-published limitation)
+#
+# Mirrors the shape of .github/workflows/sdk-typescript-publish.yml
+# (tag-trigger, concurrency, environment, dry-run-first, post-publish
+# verification) and the toolchain/cache choices from sdks-rust.yml.
+
+on:
+  push:
+    tags:
+      - 'sdks/rust/v*'
+  # workflow_dispatch lets operators rehearse the full pipeline end-to-end
+  # (verify + test + dry-run) in real CI before the first production tag,
+  # without actually touching the registry. The charter's anti-pattern
+  # catalog explicitly endorses this over env-flag bypasses, because the
+  # dry_run input is an auditable, declarative property of the run rather
+  # than a mutable workflow file edit.
+  #
+  # NOTE on the cargo #14789 gotcha: the dry-run step uses cargo 1.90's
+  # registry overlay, which refuses to graft a `name@version` over an
+  # already-published `name@version`. That means a workflow_dispatch
+  # rehearsal only works if the workspace version on the branch is
+  # BUMPED past what is live on crates.io. If the operator forgets to
+  # bump, cargo will fail with "crate X is already uploaded at Y" — that
+  # is the correct behavior (the same condition would block a real tag
+  # publish), not a workflow bug.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run verify + test + dry-run jobs only; skip live publish. Used for CI rehearsal before the first real tag. NOTE: workspace version must be bumped past the latest published version on crates.io for dry-run to succeed (cargo #14789)."
+        # Default to true so an accidental "Run workflow" click does NOT
+        # publish to crates.io. The operator has to explicitly flip this
+        # off to fire a manual live publish — see the publish-job `if:`
+        # below for how that path is wired.
+        default: true
+        required: false
+        type: boolean
+
+# Never cancel a publish mid-run. A cancelled publish can leave the
+# registry in a partial state (some crates published, later ones still
+# local), which is exactly the failure mode the topo-ordered overlay
+# publish exists to avoid.
+concurrency:
+  group: sdk-rust-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ----------------------------------------------------------------------
+  # Verify the tag matches the workspace version declared in
+  # sdks/rust/Cargo.toml. This is the single most important guardrail —
+  # it stops the workflow before any test, dry-run, or publish step if
+  # someone tagged the wrong commit or forgot to bump the manifest.
+  # ----------------------------------------------------------------------
+  verify:
+    name: Verify tag matches manifest
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - name: Checkout (full history so tag is reachable)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # Enforce the invariant the verify job relies on: every member
+      # crate in the publish set MUST inherit its version from
+      # [workspace.package] via `version.workspace = true`. If any
+      # member declared an inline `version = "..."` in its [package]
+      # section, the workspace-version we extract below would no longer
+      # be authoritative for that crate — a mismatched publish could
+      # land silently. Grep each member's [package] section for the
+      # inherited form and fail loudly otherwise.
+      - name: Verify each member inherits version from workspace
+        run: |
+          set -euo pipefail
+          for CRATE in solvela-client solvela-client-cli-args solvela-client-cli solvela-client-proxy; do
+            MANIFEST="sdks/rust/crates/${CRATE}/Cargo.toml"
+            # Extract the [package] section only (until the next top-level
+            # [section] header) so we don't accidentally match a
+            # `version = "..."` inside a [dependencies.<x>] table.
+            PACKAGE_SECTION=$(awk '
+              /^\[package\]/ { in_section = 1; next }
+              /^\[/ && in_section { exit }
+              in_section { print }
+            ' "$MANIFEST")
+            if ! echo "$PACKAGE_SECTION" | grep -qE '^[[:space:]]*version\.workspace[[:space:]]*=[[:space:]]*true'; then
+              echo "ERROR: ${MANIFEST} [package] section does not declare 'version.workspace = true'."
+              echo "Every member of the Rust SDK publish set must inherit its version"
+              echo "from [workspace.package]. The verify job's tag-vs-manifest check"
+              echo "trusts that invariant; an inline version override would let a"
+              echo "mismatched version publish silently. Restore version.workspace = true"
+              echo "on this crate, or update the publish workflow to extract the version"
+              echo "from this manifest directly."
+              exit 1
+            fi
+            if echo "$PACKAGE_SECTION" | grep -qE '^[[:space:]]*version[[:space:]]*=[[:space:]]*"'; then
+              echo "ERROR: ${MANIFEST} [package] section declares an inline 'version = \"...\"' override."
+              echo "Remove it and use 'version.workspace = true' instead, so the"
+              echo "workspace.package.version in sdks/rust/Cargo.toml remains the"
+              echo "single source of truth for the publish set."
+              exit 1
+            fi
+            echo "OK: ${MANIFEST} inherits version from [workspace.package]"
+          done
+
+      - name: Extract tag version and compare to Cargo.toml
+        id: extract
+        run: |
+          set -euo pipefail
+
+          # Read workspace.package.version from sdks/rust/Cargo.toml first.
+          # All four member crates inherit via version.workspace = true,
+          # so this single value is authoritative for the publish set.
+          # We resolve it unconditionally so the `version` job output is
+          # populated on both tag-push and workflow_dispatch invocations —
+          # downstream jobs can rely on it for symmetry / future use even
+          # though the publish job is skipped on dry-run dispatch.
+          MANIFEST_VERSION=$(awk '
+            /^\[workspace\.package\]/ { in_section = 1; next }
+            /^\[/ { in_section = 0 }
+            in_section && /^version[[:space:]]*=/ {
+              gsub(/.*"|".*/, "")
+              print
+              exit
+            }
+          ' sdks/rust/Cargo.toml)
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            # Manual rehearsal path: there is no tag to compare against,
+            # so we cannot enforce tag-vs-manifest equality here. Relaxing
+            # this check is SAFE because workflow_dispatch with the
+            # default dry_run=true never reaches the publish job, and
+            # dry_run=false is an explicit operator override that already
+            # signals "I know what I'm doing." The real-publish guardrail
+            # on the tag-push path below is unchanged.
+            echo "workflow_dispatch invocation — skipping tag-vs-manifest check"
+            echo "Manifest version: $MANIFEST_VERSION"
+            echo "version=$MANIFEST_VERSION" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TAG_NAME="${GITHUB_REF_NAME}"
+          # Tag format: sdks/rust/v0.2.2  →  TAG_VERSION=0.2.2
+          TAG_VERSION="${TAG_NAME#sdks/rust/v}"
+          if [ "$TAG_VERSION" = "$TAG_NAME" ]; then
+            echo "ERROR: tag '$TAG_NAME' does not match expected pattern 'sdks/rust/v<version>'"
+            exit 1
+          fi
+
+          echo "Tag version:      $TAG_VERSION"
+          echo "Manifest version: $MANIFEST_VERSION"
+
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "ERROR: tag version ($TAG_VERSION) does not match workspace.package.version ($MANIFEST_VERSION)"
+            echo "Refusing to proceed. Bump sdks/rust/Cargo.toml or retag at the correct commit."
+            exit 1
+          fi
+
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+      # Fail fast if the exact version is already published. crates.io
+      # would reject the live publish later anyway, but catching it here
+      # avoids burning a test + dry-run cycle on a doomed run.
+      #
+      # Skipped on workflow_dispatch: rehearsing the verify + test +
+      # dry-run chain in CI is a legitimate exercise. Note that dry-run
+      # itself will still fail (correctly) if the operator did not bump
+      # the workspace version past what is live — cargo's registry
+      # overlay refuses to graft over an existing version (cargo #14789).
+      - name: Confirm version is not already published on crates.io
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.extract.outputs.version }}"
+
+          # Probe crates.io for each crate, separating curl transport
+          # errors from HTTP status codes. The previous form
+          # (`HTTP_CODE=$(curl ... || echo "404")`) collapsed every non-
+          # zero curl exit — including DNS failures, TLS errors,
+          # connection resets, 5xx, and 429s — into a synthetic "404",
+          # which would let the workflow PROCEED past a transient
+          # crates.io outage and risk a doomed-or-duplicate live publish.
+          #
+          # New behavior:
+          #   HTTP 200            -> already published, halt.
+          #   HTTP 404            -> not yet published, OK.
+          #   curl exit != 0      -> transport error, halt with the
+          #                          actual exit code surfaced.
+          #   HTTP 5xx or 429     -> ambiguous (crates.io degraded);
+          #                          retry once after 5s, then halt if
+          #                          still ambiguous.
+          # Anything else is treated as ambiguous and halts.
+          probe_crate() {
+            local crate="$1"
+            local url="https://crates.io/api/v1/crates/${crate}/${VERSION}"
+            local http_code
+            local curl_exit
+            # `-f` is intentionally OMITTED so 4xx/5xx don't make curl
+            # exit non-zero — we want to inspect the status code
+            # ourselves. `-s -S` keeps stderr quiet on success but
+            # surfaces real transport errors to the log.
+            http_code=$(curl -sS -o /dev/null -w "%{http_code}" \
+              -H "User-Agent: solvela-publish-ci" \
+              --max-time 30 \
+              "$url") || curl_exit=$?
+            curl_exit=${curl_exit:-0}
+            if [ "$curl_exit" -ne 0 ]; then
+              echo "TRANSPORT_ERROR:${curl_exit}"
+              return
+            fi
+            echo "HTTP:${http_code}"
+          }
+
+          for CRATE in solvela-client solvela-client-cli-args solvela-client-cli solvela-client-proxy; do
+            RESULT=$(probe_crate "$CRATE")
+            # Retry once on ambiguous responses (transport error, 429, 5xx).
+            case "$RESULT" in
+              HTTP:200|HTTP:404)
+                ;;
+              *)
+                echo "Ambiguous response for ${CRATE} (${RESULT}); retrying in 5s..."
+                sleep 5
+                RESULT=$(probe_crate "$CRATE")
+                ;;
+            esac
+
+            case "$RESULT" in
+              HTTP:200)
+                echo "ERROR: ${CRATE} v${VERSION} is already published on crates.io"
+                echo "This workflow does not republish existing versions. Bump the workspace version and retag."
+                exit 1
+                ;;
+              HTTP:404)
+                echo "OK: ${CRATE} v${VERSION} is not yet on crates.io"
+                ;;
+              TRANSPORT_ERROR:*)
+                echo "ERROR: could not verify ${CRATE} v${VERSION} against crates.io (${RESULT})"
+                echo "curl exited non-zero — DNS, TLS, connection reset, or timeout."
+                echo "Refusing to proceed because we cannot prove the version is not already published."
+                exit 1
+                ;;
+              HTTP:5*|HTTP:429)
+                echo "ERROR: could not verify ${CRATE} v${VERSION} against crates.io (${RESULT})"
+                echo "crates.io returned a transient/server error on both attempts."
+                echo "Refusing to proceed because we cannot prove the version is not already published."
+                exit 1
+                ;;
+              *)
+                echo "ERROR: unexpected response for ${CRATE} v${VERSION} (${RESULT})"
+                echo "Refusing to proceed; investigate manually."
+                exit 1
+                ;;
+            esac
+          done
+
+  # ----------------------------------------------------------------------
+  # Re-run the SDK's test suite at the tagged commit. Mirrors the
+  # toolchain + cache config from sdks-rust.yml so we do not silently
+  # downgrade what CI exercised on the PR.
+  # ----------------------------------------------------------------------
+  test:
+    name: cargo test (at tagged commit)
+    runs-on: ubuntu-latest
+    needs: verify
+    defaults:
+      run:
+        working-directory: sdks/rust
+    steps:
+      - uses: actions/checkout@v6
+      # cargo ≥1.90 required for `cargo publish` multi-`-p` overlay-verified
+      # workspace publish — earlier toolchains use the broken per-package
+      # model. `stable` on GitHub-hosted ubuntu-latest runners resolves to
+      # a recent 1.9x as of 2026-05, and the workspace's `rust-version =
+      # "1.91"` in sdks/rust/Cargo.toml further enforces the floor at the
+      # resolver level. The test job uses the same toolchain pin so the
+      # test environment matches the publish environment exactly.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdks/rust
+      - run: cargo test --workspace
+
+  # ----------------------------------------------------------------------
+  # Dry-run the entire publish set as a SINGLE cargo invocation. Cargo
+  # 1.90's registry overlay walks the supplied crates in the order given,
+  # using the unpublished local versions to satisfy intra-workspace deps
+  # instead of pulling stale matches from crates.io. This is the only
+  # pattern that works for our SDK shape, where layer-3 crates depend
+  # transitively on a layer-1 crate that is already published with
+  # different transitive pins (see workflow header for the full
+  # rationale and links to cargo #14347 / #14789).
+  #
+  # Crates are passed with explicit `-p` rather than `--workspace`
+  # because `--workspace` would also try to publish any future non-
+  # publishable workspace member (helper crate, example, internal
+  # binary). The explicit list documents what the publish set is and
+  # forces a deliberate edit when it changes.
+  #
+  # Topological order: solvela-client (layer 1) ->
+  # solvela-client-cli-args (layer 2) -> solvela-client-cli /
+  # solvela-client-proxy (layer 3). The overlay respects this order
+  # during verification.
+  #
+  # cargo #14789 limitation: this dry-run can only run against a NOT-
+  # YET-PUBLISHED version of the workspace. On the tag-push path the
+  # verify job's already-published guard above ensures that. On
+  # workflow_dispatch with dry_run=true the operator MUST have already
+  # bumped the workspace version on the branch — otherwise this step
+  # will fail with cargo's "crate already uploaded" error. That is the
+  # correct behavior, not a bug; the same condition would block a real
+  # tag publish.
+  #
+  # --locked is included because sdks/rust/Cargo.lock pins
+  # solvela-protocol at exactly 0.2.2, which is the latest published
+  # version on crates.io. If a future operator bumps the in-repo
+  # crates/protocol version past what's published WITHOUT publishing
+  # solvela-protocol first, --locked will fail here (correctly) instead
+  # of silently re-resolving to an older registry version. If that
+  # happens, the right fix is to publish solvela-protocol first, not to
+  # drop --locked.
+  # ----------------------------------------------------------------------
+  dry-run:
+    name: cargo publish --dry-run (workspace)
+    runs-on: ubuntu-latest
+    # Test-before-dry-run: the test suite fails faster than a full
+    # publish dry-run (no overlay verification, no tarball build) and
+    # exposes regressions earlier. Charter requires test to gate
+    # dry-run, not just verify.
+    needs: [verify, test]
+    defaults:
+      run:
+        working-directory: sdks/rust
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdks/rust
+
+      - name: cargo publish --dry-run (all four crates, topological order)
+        run: cargo publish -p solvela-client -p solvela-client-cli-args -p solvela-client-cli -p solvela-client-proxy --dry-run --locked
+
+  # ----------------------------------------------------------------------
+  # Live publish to crates.io as a SINGLE cargo invocation. Same crate
+  # list and same topological order as the dry-run job. Cargo's overlay
+  # handles in-process dep resolution between layers, so no per-layer
+  # index-propagation polls are needed — the final visibility check
+  # below confirms every crate landed on the registry.
+  #
+  # Environment: crates-publish (created on solvela-ai/solvela, no
+  # protection rules — matches npm-publish).
+  #
+  # Secret: CARGO_REGISTRY_TOKEN is set at the REPO level rather than
+  # being env-scoped. Repo-level secrets resolve as a fallback inside
+  # env-targeted jobs, so the env declaration above still scopes the
+  # job to the crates-publish environment for audit / branch-protection
+  # purposes while the token resolves through the repo-level fallback.
+  # This mirrors how NPM_TOKEN is consumed by sdk-typescript-publish.yml.
+  # Do NOT inline the token in this file; do NOT add a "fallback if
+  # missing" branch — there is no fallback for a missing publish token.
+  # ----------------------------------------------------------------------
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: [verify, test, dry-run]
+    # Tag-push events ALWAYS publish — there's no dry-run option on the
+    # tag path, which preserves the existing real-publish semantics
+    # byte-identically. workflow_dispatch publishes only when the operator
+    # explicitly flips dry_run to false; the default (true) skips this
+    # job entirely. The dry_run=false path exists as a manual fallback
+    # for the rare case where a tag-push misfires and we need to publish
+    # a known-good commit without inventing new flags or one-off
+    # workflows.
+    #
+    # `!inputs.dry_run` is the documented-safe negation form. GitHub
+    # Actions' literal `== false` boolean compare has had coercion
+    # bugs (string "false" matching unexpectedly, etc.) and is brittle
+    # on the manual-fallback live-publish path. Silent breakage here
+    # is the worst possible regression on the money path — either a
+    # rehearsal would unexpectedly publish, or a planned manual
+    # publish would silently no-op. `!inputs.dry_run` is the form
+    # recommended by GitHub's docs for typed boolean inputs.
+    if: github.event_name == 'push' || !inputs.dry_run
+    environment: crates-publish
+    defaults:
+      run:
+        working-directory: sdks/rust
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdks/rust
+
+      - name: cargo publish (all four crates, topological order)
+        run: cargo publish -p solvela-client -p solvela-client-cli-args -p solvela-client-cli -p solvela-client-proxy --locked
+
+      # ----- Final visibility check -----
+      # Confirm all four crates are visible at the tagged version via
+      # the JSON API. The overlay uploaded each crate in topological
+      # order from a single cargo invocation, but the public
+      # index can still take a few seconds to surface every entry — poll
+      # the four crates in parallel within a shared ~5 minute budget
+      # rather than budgeting per-crate, since they all propagate
+      # roughly together after the single publish call returns success.
+      #
+      # Unlike sdk-typescript-publish.yml we do NOT do a local-vs-
+      # registry tarball SHA-256 comparison: `cargo publish` does not
+      # expose the tarball it uploaded in a way that lets us reproduce
+      # the exact bytes deterministically (build metadata, filesystem
+      # timestamps, target/package staging directory) — the signed
+      # manifest + index entry are the integrity surface here. If a
+      # future cargo release adds reproducible tarballs or a post-
+      # publish digest endpoint, add the comparison.
+      - name: Final crates.io visibility check
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify.outputs.version }}"
+          CRATES="solvela-client solvela-client-cli-args solvela-client-cli solvela-client-proxy"
+
+          # Up to ~5 minutes shared across all four crates (30 attempts
+          # x 10s). Each attempt re-checks any crate that has not yet
+          # surfaced; we stop as soon as all four resolve to the
+          # expected version.
+          for i in $(seq 1 30); do
+            ALL_OK=1
+            for CRATE in $CRATES; do
+              URL="https://crates.io/api/v1/crates/${CRATE}/${VERSION}"
+              RESPONSE=$(curl -fsSL -H "User-Agent: solvela-publish-ci" "$URL" 2>/dev/null || echo "")
+              if [ -z "$RESPONSE" ]; then
+                echo "Attempt $i/30: ${CRATE} v${VERSION} not yet visible on crates.io"
+                ALL_OK=0
+                continue
+              fi
+              FOUND_VERSION=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['version']['num'])" 2>/dev/null || echo "")
+              if [ "$FOUND_VERSION" != "$VERSION" ]; then
+                echo "Attempt $i/30: ${CRATE} on crates.io reports version '${FOUND_VERSION}', expected '${VERSION}'"
+                ALL_OK=0
+                continue
+              fi
+              echo "Attempt $i/30: OK ${CRATE} v${VERSION} confirmed live on crates.io"
+            done
+            if [ "$ALL_OK" = "1" ]; then
+              echo "All four SDK crates published and visible at v${VERSION}."
+              exit 0
+            fi
+            sleep 10
+          done
+
+          echo "ERROR: not all four crates surfaced at v${VERSION} on crates.io within 5 minutes"
+          exit 1
