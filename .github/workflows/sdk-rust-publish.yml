@@ -149,15 +149,30 @@ jobs:
           # populated on both tag-push and workflow_dispatch invocations —
           # downstream jobs can rely on it for symmetry / future use even
           # though the publish job is skipped on dry-run dispatch.
+          # Extract the value between the first pair of double quotes
+          # on the `version = "..."` line inside [workspace.package].
+          #
+          # NB: the previous form used `gsub(/.*"|".*/, "")` which
+          # produced the empty string — the greedy `.*"` matched the
+          # whole line through the LAST quote, leaving nothing. POSIX
+          # `match()` + `substr()` is portable across gawk and mawk
+          # (ubuntu-latest ships mawk) and gives the exact substring.
           MANIFEST_VERSION=$(awk '
             /^\[workspace\.package\]/ { in_section = 1; next }
             /^\[/ { in_section = 0 }
             in_section && /^version[[:space:]]*=/ {
-              gsub(/.*"|".*/, "")
-              print
-              exit
+              if (match($0, /"[^"]*"/) > 0) {
+                print substr($0, RSTART + 1, RLENGTH - 2)
+                exit
+              }
             }
           ' sdks/rust/Cargo.toml)
+
+          if [ -z "$MANIFEST_VERSION" ]; then
+            echo "ERROR: failed to extract version from sdks/rust/Cargo.toml [workspace.package]"
+            echo "Halting — refusing to compare a tag against an empty manifest version."
+            exit 1
+          fi
 
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             # Manual rehearsal path: there is no tag to compare against,
