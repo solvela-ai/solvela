@@ -1,0 +1,319 @@
+name: sdk-rust publish
+
+# Tag-triggered publish for the Rust payment SDK at sdks/rust/.
+#
+# This SDK is a 4-crate workspace that ships clients which sign and
+# broadcast real USDC-SPL transactions on Solana mainnet. A mis-publish
+# (wrong dep version, partial publish, leaked token) puts user wallets
+# at risk, so every guardrail in the payment-sdk-publisher charter
+# applies here:
+#   - verify-tag-matches-manifest BEFORE any publish step
+#   - re-run the SDK's CI test suite at the tagged commit
+#   - cargo publish --dry-run for every crate BEFORE any live publish
+#   - live publishes in topological dep order with crates.io index-
+#     propagation polls between layers
+#   - final visibility check via crates.io JSON API
+#
+# Mirrors the shape of .github/workflows/sdk-typescript-publish.yml
+# (tag-trigger, concurrency, environment, dry-run-everything-first,
+# post-publish verification) and the toolchain/cache choices from
+# .github/workflows/sdks-rust.yml.
+
+on:
+  push:
+    tags:
+      - 'sdks/rust/v*'
+
+# Never cancel a publish mid-run. A cancelled publish can leave the
+# registry in a partial state (layer 1 published, layer 2 still local),
+# which is exactly the failure mode the topo-ordered publish exists to
+# avoid.
+concurrency:
+  group: sdk-rust-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ----------------------------------------------------------------------
+  # Verify the tag matches the workspace version declared in
+  # sdks/rust/Cargo.toml. This is the single most important guardrail —
+  # it stops the workflow before any test, dry-run, or publish step if
+  # someone tagged the wrong commit or forgot to bump the manifest.
+  # ----------------------------------------------------------------------
+  verify:
+    name: Verify tag matches manifest
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - name: Checkout (full history so tag is reachable)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Extract tag version and compare to Cargo.toml
+        id: extract
+        run: |
+          set -euo pipefail
+          TAG_NAME="${GITHUB_REF_NAME}"
+          # Tag format: sdks/rust/v0.2.2  →  TAG_VERSION=0.2.2
+          TAG_VERSION="${TAG_NAME#sdks/rust/v}"
+          if [ "$TAG_VERSION" = "$TAG_NAME" ]; then
+            echo "ERROR: tag '$TAG_NAME' does not match expected pattern 'sdks/rust/v<version>'"
+            exit 1
+          fi
+
+          # Read workspace.package.version from sdks/rust/Cargo.toml.
+          # All four member crates inherit via version.workspace = true,
+          # so this single value is authoritative for the publish set.
+          MANIFEST_VERSION=$(awk '
+            /^\[workspace\.package\]/ { in_section = 1; next }
+            /^\[/ { in_section = 0 }
+            in_section && /^version[[:space:]]*=/ {
+              gsub(/.*"|".*/, "")
+              print
+              exit
+            }
+          ' sdks/rust/Cargo.toml)
+
+          echo "Tag version:      $TAG_VERSION"
+          echo "Manifest version: $MANIFEST_VERSION"
+
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "ERROR: tag version ($TAG_VERSION) does not match workspace.package.version ($MANIFEST_VERSION)"
+            echo "Refusing to proceed. Bump sdks/rust/Cargo.toml or retag at the correct commit."
+            exit 1
+          fi
+
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+      # Fail fast if the exact version is already published. crates.io
+      # would reject the live publish later anyway, but catching it here
+      # avoids burning a test + dry-run cycle on a doomed run.
+      - name: Confirm version is not already published on crates.io
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.extract.outputs.version }}"
+          for CRATE in solvela-client solvela-client-cli-args solvela-client-cli solvela-client-proxy; do
+            URL="https://crates.io/api/v1/crates/${CRATE}/${VERSION}"
+            # 200 = already published (halt). 404 = not yet published (good).
+            HTTP_CODE=$(curl -fsS -o /dev/null -w "%{http_code}" -H "User-Agent: solvela-publish-ci" "$URL" || echo "404")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "ERROR: ${CRATE} v${VERSION} is already published on crates.io"
+              echo "This workflow does not republish existing versions. Bump the workspace version and retag."
+              exit 1
+            fi
+            echo "OK: ${CRATE} v${VERSION} is not yet on crates.io"
+          done
+
+  # ----------------------------------------------------------------------
+  # Re-run the SDK's test suite at the tagged commit. Mirrors the
+  # toolchain + cache config from sdks-rust.yml so we do not silently
+  # downgrade what CI exercised on the PR.
+  # ----------------------------------------------------------------------
+  test:
+    name: cargo test (at tagged commit)
+    runs-on: ubuntu-latest
+    needs: verify
+    defaults:
+      run:
+        working-directory: sdks/rust
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdks/rust
+      - run: cargo test --workspace
+
+  # ----------------------------------------------------------------------
+  # Dry-run every crate BEFORE any live publish. If any dry-run fails,
+  # the live publish job will not run, which keeps crates.io from
+  # entering a partial-publish state (e.g. layer 1 live, layer 2 broken).
+  #
+  # --locked is included because sdks/rust/Cargo.lock pins solvela-protocol
+  # at exactly 0.2.2, which is the latest published version on crates.io.
+  # If a future operator bumps the in-repo crates/protocol version past
+  # what's published on crates.io WITHOUT publishing solvela-protocol
+  # first, --locked will fail here (correctly) instead of silently
+  # re-resolving to an older registry version. If that happens, the
+  # right fix is to publish solvela-protocol first, not to drop --locked.
+  # ----------------------------------------------------------------------
+  dry-run:
+    name: cargo publish --dry-run (all crates)
+    runs-on: ubuntu-latest
+    needs: verify
+    defaults:
+      run:
+        working-directory: sdks/rust
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdks/rust
+
+      # Order matches the live-publish topology so any path-dep version
+      # mismatch surfaces at the same point it would for a real publish.
+      - name: Dry-run solvela-client (layer 1)
+        run: cargo publish --dry-run --locked -p solvela-client
+
+      - name: Dry-run solvela-client-cli-args (layer 2)
+        run: cargo publish --dry-run --locked -p solvela-client-cli-args
+
+      - name: Dry-run solvela-client-cli (layer 3)
+        run: cargo publish --dry-run --locked -p solvela-client-cli
+
+      - name: Dry-run solvela-client-proxy (layer 3)
+        run: cargo publish --dry-run --locked -p solvela-client-proxy
+
+  # ----------------------------------------------------------------------
+  # Live publish to crates.io, in topological dep order, with index-
+  # propagation polls between layers.
+  #
+  # Environment: crates-publish (created on solvela-ai/solvela, no
+  # protection rules — matches npm-publish).
+  #
+  # Secret: CARGO_REGISTRY_TOKEN is set at the REPO level rather than
+  # being env-scoped. Repo-level secrets resolve as a fallback inside
+  # env-targeted jobs, so the env declaration above still scopes the
+  # job to the crates-publish environment for audit / branch-protection
+  # purposes while the token resolves through the repo-level fallback.
+  # This mirrors how NPM_TOKEN is consumed by sdk-typescript-publish.yml.
+  # Do NOT inline the token in this file; do NOT add a "fallback if
+  # missing" branch — there is no fallback for a missing publish token.
+  # ----------------------------------------------------------------------
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: [verify, test, dry-run]
+    environment: crates-publish
+    defaults:
+      run:
+        working-directory: sdks/rust
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdks/rust
+
+      # ----- Layer 1 -----
+      - name: Publish solvela-client (layer 1)
+        run: cargo publish --locked -p solvela-client
+
+      - name: Wait for solvela-client to appear on crates.io index
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify.outputs.version }}"
+          URL="https://crates.io/api/v1/crates/solvela-client/${VERSION}"
+          # Poll for up to ~5 minutes (30 attempts x 10s). crates.io
+          # index propagation is usually a few seconds but can spike.
+          for i in $(seq 1 30); do
+            if curl -fsI -H "User-Agent: solvela-publish-ci" "$URL" >/dev/null 2>&1; then
+              echo "solvela-client v${VERSION} visible on crates.io (attempt $i)"
+              exit 0
+            fi
+            echo "Waiting for solvela-client v${VERSION} on crates.io (attempt $i/30)..."
+            sleep 10
+          done
+          echo "ERROR: solvela-client v${VERSION} did not appear on crates.io within 5 minutes"
+          exit 1
+
+      # ----- Layer 2 -----
+      - name: Publish solvela-client-cli-args (layer 2)
+        run: cargo publish --locked -p solvela-client-cli-args
+
+      - name: Wait for solvela-client-cli-args to appear on crates.io index
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify.outputs.version }}"
+          URL="https://crates.io/api/v1/crates/solvela-client-cli-args/${VERSION}"
+          for i in $(seq 1 30); do
+            if curl -fsI -H "User-Agent: solvela-publish-ci" "$URL" >/dev/null 2>&1; then
+              echo "solvela-client-cli-args v${VERSION} visible on crates.io (attempt $i)"
+              exit 0
+            fi
+            echo "Waiting for solvela-client-cli-args v${VERSION} on crates.io (attempt $i/30)..."
+            sleep 10
+          done
+          echo "ERROR: solvela-client-cli-args v${VERSION} did not appear on crates.io within 5 minutes"
+          exit 1
+
+      # ----- Layer 3 -----
+      # Both layer-3 crates depend only on layer-1 and layer-2, which are
+      # already live by this point. Publish them sequentially rather than
+      # in parallel to keep the failure mode crisp: if -cli fails, -proxy
+      # is not attempted, which avoids confusing partial-publish reports.
+      # The wall-clock cost of sequential here is small (one extra
+      # propagation poll), and the operator-clarity win is worth it.
+      - name: Publish solvela-client-cli (layer 3)
+        run: cargo publish --locked -p solvela-client-cli
+
+      - name: Wait for solvela-client-cli to appear on crates.io index
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify.outputs.version }}"
+          URL="https://crates.io/api/v1/crates/solvela-client-cli/${VERSION}"
+          for i in $(seq 1 30); do
+            if curl -fsI -H "User-Agent: solvela-publish-ci" "$URL" >/dev/null 2>&1; then
+              echo "solvela-client-cli v${VERSION} visible on crates.io (attempt $i)"
+              exit 0
+            fi
+            echo "Waiting for solvela-client-cli v${VERSION} on crates.io (attempt $i/30)..."
+            sleep 10
+          done
+          echo "ERROR: solvela-client-cli v${VERSION} did not appear on crates.io within 5 minutes"
+          exit 1
+
+      - name: Publish solvela-client-proxy (layer 3)
+        run: cargo publish --locked -p solvela-client-proxy
+
+      - name: Wait for solvela-client-proxy to appear on crates.io index
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify.outputs.version }}"
+          URL="https://crates.io/api/v1/crates/solvela-client-proxy/${VERSION}"
+          for i in $(seq 1 30); do
+            if curl -fsI -H "User-Agent: solvela-publish-ci" "$URL" >/dev/null 2>&1; then
+              echo "solvela-client-proxy v${VERSION} visible on crates.io (attempt $i)"
+              exit 0
+            fi
+            echo "Waiting for solvela-client-proxy v${VERSION} on crates.io (attempt $i/30)..."
+            sleep 10
+          done
+          echo "ERROR: solvela-client-proxy v${VERSION} did not appear on crates.io within 5 minutes"
+          exit 1
+
+      # ----- Final visibility check -----
+      # Confirm all four crates are visible at the tagged version via
+      # the JSON API. Unlike sdk-typescript-publish.yml we do NOT do a
+      # local-vs-registry tarball SHA-256 comparison: `cargo publish`
+      # does not expose the tarball it uploaded in a way that lets us
+      # reproduce the exact bytes deterministically (build metadata,
+      # filesystem timestamps, target/package staging directory) — the
+      # signed manifest + index entry are the integrity surface here.
+      # If a future cargo release adds reproducible tarballs or a
+      # post-publish digest endpoint, add the comparison.
+      - name: Final crates.io visibility check
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify.outputs.version }}"
+          for CRATE in solvela-client solvela-client-cli-args solvela-client-cli solvela-client-proxy; do
+            URL="https://crates.io/api/v1/crates/${CRATE}/${VERSION}"
+            RESPONSE=$(curl -fsSL -H "User-Agent: solvela-publish-ci" "$URL")
+            FOUND_VERSION=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['version']['num'])")
+            if [ "$FOUND_VERSION" != "$VERSION" ]; then
+              echo "ERROR: ${CRATE} on crates.io reports version ${FOUND_VERSION}, expected ${VERSION}"
+              exit 1
+            fi
+            echo "OK: ${CRATE} v${VERSION} confirmed live on crates.io"
+          done
+          echo "All four SDK crates published and visible at v${VERSION}."
