@@ -54,8 +54,9 @@ import type {
   CatalogContext,
   DynamicModelContext,
 } from './openclaw-types.js';
-import { parse402, sanitizeGatewayError } from '@solvela/signer-core';
+import { decodePaymentHeader, parse402, sanitizeGatewayError } from '@solvela/signer-core';
 import type { PaymentRequired } from '@solvela/signer-core';
+import { wrapStreamForF4, type ResultableStream } from './f4-wrapper.js';
 
 export { SOLVELA_MODELS } from './models.generated.js';
 export { ROUTING_PROFILES } from './registry.js';
@@ -493,8 +494,44 @@ export default function register(api: OpenClawApi, opts: RegisterOptions = {}): 
           },
         };
 
+        // F4 — extract escrow metadata from the just-built header. Best-effort:
+        // if the signer chose a non-escrow scheme (direct/exact), there's no
+        // escrow PDA to settle and `escrowMeta` stays null. Any decode failure
+        // is treated as "no F4 this call" rather than blocking the request;
+        // F4 is a fire-and-forget reconciliation hook, never on the hot path.
+        let escrowMeta: { serviceId: string; agentPubkey: string } | null = null;
         try {
-          return await inner(model, context, wrappedOptions);
+          const decoded = decodePaymentHeader(paymentHeader) as {
+            accepted?: { scheme?: string };
+            payload?: { service_id?: string; agent_pubkey?: string };
+          };
+          if (
+            decoded?.accepted?.scheme === 'escrow' &&
+            typeof decoded?.payload?.service_id === 'string' &&
+            typeof decoded?.payload?.agent_pubkey === 'string'
+          ) {
+            escrowMeta = {
+              serviceId: decoded.payload.service_id,
+              agentPubkey: decoded.payload.agent_pubkey,
+            };
+          }
+        } catch {
+          // Decode failure is a signer-core defect, not a user-facing error.
+          // Skip F4 for this call; the gateway's on-chain auto-timeout refund
+          // remains the fallback reconciliation path.
+        }
+
+        try {
+          const stream = await inner(model, context, wrappedOptions);
+          if (escrowMeta) {
+            wrapStreamForF4(stream as unknown as ResultableStream, {
+              serviceId: escrowMeta.serviceId,
+              agentPubkey: escrowMeta.agentPubkey,
+              modelId: model.id,
+              gatewayUrl: apiUrl,
+            });
+          }
+          return stream;
         } catch (err) {
           await signer.refundBudget(cost);
           throw err;

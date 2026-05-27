@@ -53,16 +53,16 @@ export interface SignerOptions {
  * Create one instance per plugin registration; reuse across calls.
  * The budget mutex serialises concurrent access to sessionSpent.
  *
- * Default signing mode is 'direct'. Escrow mode works but relies on gateway
- * auto-claim after max_timeout_seconds; direct mode is recommended until
- * the F4 escrow-claim hook lands.
+ * Default signing mode is 'direct'. Escrow mode is now fully wired: when
+ * the gateway offers an escrow scheme and signing succeeds, the wrapped
+ * streamFn schedules a fire-and-forget F4 settle POST to /v1/escrow/settle
+ * on stream completion. The gateway claims the actual usage-priced amount
+ * instead of waiting for the auto-timeout refund.
  */
 export class SolvelaSigner {
   private readonly sessionBudget?: number;
   private readonly signingMode: 'auto' | 'escrow' | 'direct';
   private sessionSpent = 0;
-  /** Count of escrow/auto deposits — emits a WARN every 10 (HF-P3-H6). */
-  private escrowDepositCount = 0;
   /** Mutex ensures budget check + increment is atomic across parallel calls. */
   private readonly budgetMutex = new Mutex();
   /** DI override for createPaymentHeader — tests only (HF-P3-H3). */
@@ -165,21 +165,6 @@ export class SolvelaSigner {
         'Payment signing returned a stub transaction. Reinstall @solvela/openclaw-provider ' +
           'and ensure @solana/web3.js peer deps are resolvable at runtime.',
       );
-    }
-
-    // Step 7 — Escrow deposit counter WARN (HF-P3-H6)
-    // Emit a warning every 10 escrow/auto deposits to remind users that the
-    // claim path relies on gateway auto-claim until both halves of F4 ship
-    // (client wrapper landed; gateway /v1/escrow/settle endpoint pending).
-    if (this.signingMode === 'escrow' || this.signingMode === 'auto') {
-      this.escrowDepositCount++;
-      if (this.escrowDepositCount % 10 === 0) {
-        process.stderr.write(
-          `[solvela-openclaw] WARN: ${this.escrowDepositCount} escrow deposits made; ` +
-            'gateway auto-claim still handles reconciliation (F4 settle endpoint not yet deployed). ' +
-            'See README.md "Escrow accounting (F4)".\n',
-        );
-      }
     }
 
     return paymentHeader;

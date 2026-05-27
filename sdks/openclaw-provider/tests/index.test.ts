@@ -39,6 +39,22 @@ const REAL_LOOKING_HEADER = Buffer.from(
   'utf-8',
 ).toString('base64');
 
+// Escrow-scheme variant — used by the F4 wire-up test below. Carries the
+// service_id + agent_pubkey that index.ts decodes to schedule the settle POST.
+const REAL_LOOKING_ESCROW_HEADER = Buffer.from(
+  JSON.stringify({
+    x402_version: 2,
+    resource: { url: 'https://api.solvela.ai/v1/chat/completions', method: 'POST' },
+    accepted: { scheme: 'escrow', network: 'solana' },
+    payload: {
+      deposit_tx: 'REAL_ESCROW_TX_NOT_STUB_xABCDEF1234567890',
+      service_id: 'svc-abc-base64-test-fixture',
+      agent_pubkey: 'AgentPubkey11111111111111111111111111111111',
+    },
+  }),
+  'utf-8',
+).toString('base64');
+
 /** Create a SolvelaSigner with DI that returns a non-stub header. */
 function makeDISigner(opts: ConstructorParameters<typeof SolvelaSigner>[0] = {}): SolvelaSigner {
   return new SolvelaSigner({
@@ -102,6 +118,47 @@ async function startMock200Server(): Promise<{ server: Server; port: number }> {
   return startMockServer((res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ id: 'test', object: 'chat.completion', created: 0, model: 'auto', choices: [] }));
+  });
+}
+
+const mock402Escrow = JSON.parse(
+  readFileSync(resolve(__dirname, 'fixtures/mock-402-escrow.json'), 'utf-8'),
+);
+
+/**
+ * Mock server that serves a 402-escrow envelope on `/v1/chat/completions`
+ * AND a capturing 200 on `/v1/escrow/settle`. Used by the F4 wire-up test.
+ */
+async function startMock402EscrowPlusSettleServer(): Promise<{
+  server: Server;
+  port: number;
+  settleCalls: () => Array<{ body: string }>;
+}> {
+  const settleCalls: Array<{ body: string }> = [];
+  return new Promise((resolveReady, reject) => {
+    const server = createServer((req, res) => {
+      if (req.url === '/v1/escrow/settle' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (chunk: Buffer) => (body += chunk.toString('utf-8')));
+        req.on('end', () => {
+          settleCalls.push({ body });
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end('{"ok":true}');
+        });
+        return;
+      }
+      res.writeHead(402, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(mock402Escrow));
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      if (!addr || typeof addr === 'string') {
+        reject(new Error('could not get server port'));
+        return;
+      }
+      resolveReady({ server, port: addr.port, settleCalls: () => settleCalls });
+    });
+    server.on('error', reject);
   });
 }
 
@@ -509,6 +566,91 @@ describe('wrapStreamFn', () => {
       !opts?.headers || !('payment-signature' in opts.headers),
       'payment-signature must NOT be injected in dev_bypass mode',
     );
+  });
+
+  it('schedules F4 settle POST when signer chose an escrow scheme', async () => {
+    const { server, port, settleCalls } = await startMock402EscrowPlusSettleServer();
+    process.env['SOLVELA_API_URL'] = `http://127.0.0.1:${port}`;
+    process.env['SOLANA_WALLET_KEY'] = 'fake_wallet_key_for_test';
+    process.env['SOLVELA_SIGNING_MODE'] = 'escrow';
+
+    const { api, config } = makeMockApi();
+    register(api, {
+      _signer: new SolvelaSigner({
+        signingMode: 'escrow',
+        _createPaymentHeaderFn: async () => REAL_LOOKING_ESCROW_HEADER,
+      } as ConstructorParameters<typeof SolvelaSigner>[0] & {
+        _createPaymentHeaderFn: () => Promise<string>;
+      }),
+    });
+    const cfg = (config as unknown as { config: ProviderConfig }).config;
+
+    // Inner streamFn returns a ResultableStream whose .result() resolves with
+    // a mock AssistantMessage. F4 awaits .result() before firing the settle.
+    const innerFn = (() => ({
+      result: async () => ({
+        stopReason: 'stop' as const,
+        usage: { input: 42, output: 17 },
+      }),
+    })) as unknown as NonNullable<StreamFnContext['streamFn']>;
+    const ctx: StreamFnContext = { streamFn: innerFn };
+    const wrapped = cfg.wrapStreamFn!(ctx)!;
+
+    try {
+      await callWrapped(wrapped);
+      // F4 is fire-and-forget — give scheduleSettle a tick to await result()
+      // and post to the mock server.
+      for (let i = 0; i < 50 && settleCalls().length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    } finally {
+      server.close();
+    }
+
+    const calls = settleCalls();
+    assert.strictEqual(calls.length, 1, 'F4 must POST exactly once to /v1/escrow/settle');
+    const body = JSON.parse(calls[0].body) as Record<string, unknown>;
+    assert.strictEqual(body.service_id, 'svc-abc-base64-test-fixture');
+    assert.strictEqual(body.agent_pubkey, 'AgentPubkey11111111111111111111111111111111');
+    assert.strictEqual(body.status, 'completed');
+    assert.strictEqual(body.actual_prompt_tokens, 42);
+    assert.strictEqual(body.actual_completion_tokens, 17);
+  });
+
+  it('does NOT schedule F4 when signer chose a direct (exact) scheme', async () => {
+    const { server, port } = await startMockServer((res) => {
+      res.writeHead(402, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(mock402));
+    });
+    process.env['SOLVELA_API_URL'] = `http://127.0.0.1:${port}`;
+    process.env['SOLANA_WALLET_KEY'] = 'fake_wallet_key_for_test';
+
+    const { api, config } = makeMockApi();
+    register(api, { _signer: makeDISigner() });
+    const cfg = (config as unknown as { config: ProviderConfig }).config;
+
+    // Track whether the stream's result() ever gets called — F4 only calls it
+    // when escrow scheme is detected. With the direct REAL_LOOKING_HEADER
+    // fixture, F4 must not fire.
+    let resultCalled = false;
+    const innerFn = (() => ({
+      result: async () => {
+        resultCalled = true;
+        return { stopReason: 'stop' as const };
+      },
+    })) as unknown as NonNullable<StreamFnContext['streamFn']>;
+    const ctx: StreamFnContext = { streamFn: innerFn };
+    const wrapped = cfg.wrapStreamFn!(ctx)!;
+
+    try {
+      await callWrapped(wrapped);
+      // Give any background work a tick to run.
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      server.close();
+    }
+
+    assert.strictEqual(resultCalled, false, 'F4 must not invoke .result() on direct-scheme calls');
   });
 });
 

@@ -99,12 +99,10 @@ describe('SolvelaSigner', () => {
   });
 
   it('default signingMode is direct (HF-P3-H6)', () => {
-    // Constructed with no options — signingMode defaults to direct
+    // Constructed with no options — signingMode defaults to direct.
+    // The canonical assertion is in index.test.ts via getSigningMode().
     const signer = new SolvelaSigner();
     assert.strictEqual(signer.getSessionSpent(), 0, 'initial spend should be 0');
-    // Verify via escrow-mode check: auto and escrow would increment escrowDepositCount
-    // We can only observe the default indirectly via no WARN on direct mode builds.
-    // The canonical assertion is in index.test.ts via getSigningMode() which defaults 'direct'.
   });
 
   it('stub-header guard: rejects STUB_BASE64_TX (HF-P3-H3 — direct stub check)', async () => {
@@ -326,39 +324,6 @@ describe('SolvelaSigner', () => {
       spentBefore,
       'budget must not be reserved when filterAccepts throws',
     );
-  });
-
-  it('escrow deposit counter: WARN emitted at every 10th deposit (HF-P3-H6)', async () => {
-    // Use an escrow-scheme mock402 fixture so filterAccepts passes in escrow mode.
-    const mock402Escrow = JSON.parse(
-      readFileSync(resolve(__dirname, 'fixtures/mock-402-escrow.json'), 'utf-8'),
-    ) as PaymentRequired;
-
-    const warnings: string[] = [];
-    const origWrite = process.stderr.write.bind(process.stderr);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (process.stderr as any).write = (chunk: string | Uint8Array, cb?: (err?: Error | null) => void): boolean => {
-      if (typeof chunk === 'string') warnings.push(chunk);
-      return origWrite(chunk, cb as (err?: Error | null) => void);
-    };
-
-    try {
-      const signer = new SolvelaSigner({
-        signingMode: 'escrow',
-        _createPaymentHeaderFn: async () => REAL_LOOKING_HEADER,
-      } as ConstructorParameters<typeof SolvelaSigner>[0] & { _createPaymentHeaderFn: () => Promise<string> });
-
-      // Make 10 calls — WARN should fire on the 10th
-      for (let i = 0; i < 10; i++) {
-        await signer.buildHeader(mock402Escrow, 'https://api.solvela.ai/v1/chat/completions', '{}');
-      }
-    } finally {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (process.stderr as any).write = origWrite;
-    }
-
-    const warnLine = warnings.find((l) => l.includes('10 escrow deposits made'));
-    assert.ok(warnLine, `expected escrow deposit WARN at 10th deposit, got: ${warnings.join('')}`);
   });
 
   it('filterAccepts: direct mode filters escrow accepts', async () => {
