@@ -37,7 +37,11 @@
 *:Zone.Identifier
 *~
 .DS_Store
-.claude/
+.claude/*
+# Team-shared agent definitions are version-controlled; operator-local
+# state (plans, scheduled task locks, settings, skills, worktrees) stays
+# ignored.
+!.claude/agents/
 .codegraph/
 .env*
 .env*.local
