@@ -15,11 +15,12 @@ name: sdk-rust publish
 #   - final visibility check via crates.io JSON API
 #
 # Why workspace-wide instead of per-layer? Layer-3 crates here depend
-# transitively on the previously-published layer-1 (solvela-client@0.2.1
-# -> solvela-protocol ^0.1) which conflicts with the workspace's direct
-# pin on solvela-protocol 0.2.x. Per-crate dry-run + per-layer live
-# publish therefore fails verification on the layer-3 crates with stale
-# transitive deps from the registry. Cargo 1.90 (Sept 2025) stabilized
+# directly on layer-1 (solvela-client) AND layer-2 (solvela-client-cli-args),
+# and transitively on the previously-published layer-1
+# (solvela-client@0.2.1 -> solvela-protocol ^0.1) which conflicts with
+# the workspace's direct pin on solvela-protocol 0.2.x. Per-crate dry-run
+# + per-layer live publish therefore fails verification on the layer-3
+# crates with stale transitive deps from the registry. Cargo 1.90 (Sept 2025) stabilized
 # multi-`-p` publish, which uses an in-process registry overlay that
 # grafts the unpublished local packages on top of crates.io and verifies
 # in dep order against the overlay — exactly the semantics this SDK
@@ -95,6 +96,47 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Enforce the invariant the verify job relies on: every member
+      # crate in the publish set MUST inherit its version from
+      # [workspace.package] via `version.workspace = true`. If any
+      # member declared an inline `version = "..."` in its [package]
+      # section, the workspace-version we extract below would no longer
+      # be authoritative for that crate — a mismatched publish could
+      # land silently. Grep each member's [package] section for the
+      # inherited form and fail loudly otherwise.
+      - name: Verify each member inherits version from workspace
+        run: |
+          set -euo pipefail
+          for CRATE in solvela-client solvela-client-cli-args solvela-client-cli solvela-client-proxy; do
+            MANIFEST="sdks/rust/crates/${CRATE}/Cargo.toml"
+            # Extract the [package] section only (until the next top-level
+            # [section] header) so we don't accidentally match a
+            # `version = "..."` inside a [dependencies.<x>] table.
+            PACKAGE_SECTION=$(awk '
+              /^\[package\]/ { in_section = 1; next }
+              /^\[/ && in_section { exit }
+              in_section { print }
+            ' "$MANIFEST")
+            if ! echo "$PACKAGE_SECTION" | grep -qE '^[[:space:]]*version\.workspace[[:space:]]*=[[:space:]]*true'; then
+              echo "ERROR: ${MANIFEST} [package] section does not declare 'version.workspace = true'."
+              echo "Every member of the Rust SDK publish set must inherit its version"
+              echo "from [workspace.package]. The verify job's tag-vs-manifest check"
+              echo "trusts that invariant; an inline version override would let a"
+              echo "mismatched version publish silently. Restore version.workspace = true"
+              echo "on this crate, or update the publish workflow to extract the version"
+              echo "from this manifest directly."
+              exit 1
+            fi
+            if echo "$PACKAGE_SECTION" | grep -qE '^[[:space:]]*version[[:space:]]*=[[:space:]]*"'; then
+              echo "ERROR: ${MANIFEST} [package] section declares an inline 'version = \"...\"' override."
+              echo "Remove it and use 'version.workspace = true' instead, so the"
+              echo "workspace.package.version in sdks/rust/Cargo.toml remains the"
+              echo "single source of truth for the publish set."
+              exit 1
+            fi
+            echo "OK: ${MANIFEST} inherits version from [workspace.package]"
+          done
+
       - name: Extract tag version and compare to Cargo.toml
         id: extract
         run: |
@@ -164,16 +206,85 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.extract.outputs.version }}"
-          for CRATE in solvela-client solvela-client-cli-args solvela-client-cli solvela-client-proxy; do
-            URL="https://crates.io/api/v1/crates/${CRATE}/${VERSION}"
-            # 200 = already published (halt). 404 = not yet published (good).
-            HTTP_CODE=$(curl -fsS -o /dev/null -w "%{http_code}" -H "User-Agent: solvela-publish-ci" "$URL" || echo "404")
-            if [ "$HTTP_CODE" = "200" ]; then
-              echo "ERROR: ${CRATE} v${VERSION} is already published on crates.io"
-              echo "This workflow does not republish existing versions. Bump the workspace version and retag."
-              exit 1
+
+          # Probe crates.io for each crate, separating curl transport
+          # errors from HTTP status codes. The previous form
+          # (`HTTP_CODE=$(curl ... || echo "404")`) collapsed every non-
+          # zero curl exit — including DNS failures, TLS errors,
+          # connection resets, 5xx, and 429s — into a synthetic "404",
+          # which would let the workflow PROCEED past a transient
+          # crates.io outage and risk a doomed-or-duplicate live publish.
+          #
+          # New behavior:
+          #   HTTP 200            -> already published, halt.
+          #   HTTP 404            -> not yet published, OK.
+          #   curl exit != 0      -> transport error, halt with the
+          #                          actual exit code surfaced.
+          #   HTTP 5xx or 429     -> ambiguous (crates.io degraded);
+          #                          retry once after 5s, then halt if
+          #                          still ambiguous.
+          # Anything else is treated as ambiguous and halts.
+          probe_crate() {
+            local crate="$1"
+            local url="https://crates.io/api/v1/crates/${crate}/${VERSION}"
+            local http_code
+            local curl_exit
+            # `-f` is intentionally OMITTED so 4xx/5xx don't make curl
+            # exit non-zero — we want to inspect the status code
+            # ourselves. `-s -S` keeps stderr quiet on success but
+            # surfaces real transport errors to the log.
+            http_code=$(curl -sS -o /dev/null -w "%{http_code}" \
+              -H "User-Agent: solvela-publish-ci" \
+              --max-time 30 \
+              "$url") || curl_exit=$?
+            curl_exit=${curl_exit:-0}
+            if [ "$curl_exit" -ne 0 ]; then
+              echo "TRANSPORT_ERROR:${curl_exit}"
+              return
             fi
-            echo "OK: ${CRATE} v${VERSION} is not yet on crates.io"
+            echo "HTTP:${http_code}"
+          }
+
+          for CRATE in solvela-client solvela-client-cli-args solvela-client-cli solvela-client-proxy; do
+            RESULT=$(probe_crate "$CRATE")
+            # Retry once on ambiguous responses (transport error, 429, 5xx).
+            case "$RESULT" in
+              HTTP:200|HTTP:404)
+                ;;
+              *)
+                echo "Ambiguous response for ${CRATE} (${RESULT}); retrying in 5s..."
+                sleep 5
+                RESULT=$(probe_crate "$CRATE")
+                ;;
+            esac
+
+            case "$RESULT" in
+              HTTP:200)
+                echo "ERROR: ${CRATE} v${VERSION} is already published on crates.io"
+                echo "This workflow does not republish existing versions. Bump the workspace version and retag."
+                exit 1
+                ;;
+              HTTP:404)
+                echo "OK: ${CRATE} v${VERSION} is not yet on crates.io"
+                ;;
+              TRANSPORT_ERROR:*)
+                echo "ERROR: could not verify ${CRATE} v${VERSION} against crates.io (${RESULT})"
+                echo "curl exited non-zero — DNS, TLS, connection reset, or timeout."
+                echo "Refusing to proceed because we cannot prove the version is not already published."
+                exit 1
+                ;;
+              HTTP:5*|HTTP:429)
+                echo "ERROR: could not verify ${CRATE} v${VERSION} against crates.io (${RESULT})"
+                echo "crates.io returned a transient/server error on both attempts."
+                echo "Refusing to proceed because we cannot prove the version is not already published."
+                exit 1
+                ;;
+              *)
+                echo "ERROR: unexpected response for ${CRATE} v${VERSION} (${RESULT})"
+                echo "Refusing to proceed; investigate manually."
+                exit 1
+                ;;
+            esac
           done
 
   # ----------------------------------------------------------------------
@@ -245,7 +356,11 @@ jobs:
   dry-run:
     name: cargo publish --dry-run (workspace)
     runs-on: ubuntu-latest
-    needs: verify
+    # Test-before-dry-run: the test suite fails faster than a full
+    # publish dry-run (no overlay verification, no tarball build) and
+    # exposes regressions earlier. Charter requires test to gate
+    # dry-run, not just verify.
+    needs: [verify, test]
     defaults:
       run:
         working-directory: sdks/rust
@@ -290,7 +405,16 @@ jobs:
     # for the rare case where a tag-push misfires and we need to publish
     # a known-good commit without inventing new flags or one-off
     # workflows.
-    if: github.event_name == 'push' || inputs.dry_run == false
+    #
+    # `!inputs.dry_run` is the documented-safe negation form. GitHub
+    # Actions' literal `== false` boolean compare has had coercion
+    # bugs (string "false" matching unexpectedly, etc.) and is brittle
+    # on the manual-fallback live-publish path. Silent breakage here
+    # is the worst possible regression on the money path — either a
+    # rehearsal would unexpectedly publish, or a planned manual
+    # publish would silently no-op. `!inputs.dry_run` is the form
+    # recommended by GitHub's docs for typed boolean inputs.
+    if: github.event_name == 'push' || !inputs.dry_run
     environment: crates-publish
     defaults:
       run:
@@ -309,8 +433,8 @@ jobs:
 
       # ----- Final visibility check -----
       # Confirm all four crates are visible at the tagged version via
-      # the JSON API. The overlay publishes uploaded each crate in
-      # topological order in a single cargo invocation, but the public
+      # the JSON API. The overlay uploaded each crate in topological
+      # order from a single cargo invocation, but the public
       # index can still take a few seconds to surface every entry — poll
       # the four crates in parallel within a shared ~5 minute budget
       # rather than budgeting per-crate, since they all propagate
