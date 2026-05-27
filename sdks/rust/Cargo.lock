@@ -3302,7 +3302,7 @@ dependencies = [
 
 [[package]]
 name = "solvela-client"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ahash",
  "base64",
@@ -3328,7 +3328,7 @@ dependencies = [
 
 [[package]]
 name = "solvela-client-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "clap",
  "futures",
@@ -3345,7 +3345,7 @@ dependencies = [
 
 [[package]]
 name = "solvela-client-cli-args"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bs58",
  "clap",
@@ -3358,7 +3358,7 @@ dependencies = [
 
 [[package]]
 name = "solvela-client-proxy"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "clap",
