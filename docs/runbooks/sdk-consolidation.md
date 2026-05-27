@@ -310,7 +310,7 @@ jobs:
 
 **Same commit / PR / bot-approve / squash-merge / post-merge tag-and-archive sequence.** Tag: `sdks/rust/v0.2.1`. Archive: `gh repo archive solvela-ai/solvela-client --yes`.
 
-**One subtle follow-up specific to Rust:** `solvela-client` has its own `release-crates.yml` workflow that publishes to crates.io. The published crate name (`solvela-client`) doesn't change with the move, but the publishing workflow needs to be re-created in the monorepo (or just ported from the external repo's `.github/workflows/release-crates.yml`) before the next crates.io publish. Defer this until the consolidation PR merges — it's a separate decision.
+**Crates.io publish workflow:** ported into the monorepo as [`.github/workflows/sdk-rust-publish.yml`](../../.github/workflows/sdk-rust-publish.yml). Triggers on `sdks/rust/vX.Y.Z` tags, verifies the tag against `[workspace.package].version` in `sdks/rust/Cargo.toml`, dry-runs all four crates, then publishes in dep order (`solvela-client` → `solvela-client-cli-args` → `solvela-client-cli` + `solvela-client-proxy`) with index-propagation waits between steps. Requires the `crates-publish` GitHub environment and a `CARGO_REGISTRY_TOKEN` secret scoped to the `solvela-*` crate prefix (publish-new + publish-update).
 
 ---
 

@@ -1,0 +1,170 @@
+name: sdk-rust publish
+
+# Monorepo-native crates.io publish for sdks/rust/.
+#
+# Trigger: push of a `sdks/rust/vX.Y.Z` tag. The tag version is
+# cross-checked against [workspace.package].version in sdks/rust/Cargo.toml
+# before any publish runs, so a mistyped tag fails fast.
+#
+# Crates publish in dependency order with index-propagation waits between
+# steps:
+#   1. solvela-client         (leaf — depends only on solvela-protocol)
+#   2. solvela-client-cli-args (depends on solvela-client)
+#   3. solvela-client-cli + solvela-client-proxy (parallel — both depend on
+#      solvela-client + solvela-client-cli-args)
+#
+# `solvela-protocol` is owned by crates/protocol/ and is published
+# separately; the SDK consumes it via a workspace dep that already pins
+# a published version range, so cargo publish drops the path entry
+# automatically.
+
+on:
+  push:
+    tags:
+      - 'sdks/rust/v*'
+
+concurrency:
+  group: sdk-rust-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: sdks/rust
+
+jobs:
+  verify:
+    name: Verify tag matches workspace version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Parse tag and compare to Cargo.toml
+        id: check
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${REF_NAME#sdks/rust/v}"
+          MANIFEST_VERSION=$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' Cargo.toml)
+          echo "Tag version:      $TAG_VERSION"
+          echo "Manifest version: $MANIFEST_VERSION"
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "ERROR: tag $REF_NAME does not match Cargo.toml version $MANIFEST_VERSION"
+            exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: cargo test (pre-publish)
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdks/rust
+      - run: cargo test --workspace
+
+  publish:
+    name: Publish to crates.io
+    needs: [verify, test]
+    runs-on: ubuntu-latest
+    environment: crates-publish
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdks/rust
+
+      # Dry-run each crate first so a missing field / metadata problem
+      # surfaces before any partial publish leaves the registry in a
+      # half-published state.
+      - name: Dry-run publish (all four crates)
+        run: |
+          set -euo pipefail
+          for crate in solvela-client solvela-client-cli-args solvela-client-cli solvela-client-proxy; do
+            echo "::group::dry-run $crate"
+            cargo publish --dry-run -p "$crate"
+            echo "::endgroup::"
+          done
+
+      # NOTE: --locked is intentionally omitted from publish steps.
+      # sdks/rust/Cargo.lock resolves solvela-protocol via path dep to whatever
+      # version lives in crates/protocol/, which can outpace the published
+      # crates.io version. cargo publish strips the `path = "..."` entry and
+      # re-resolves against the registry; --locked would refuse that
+      # re-resolution and fail.
+      - name: Publish solvela-client
+        run: cargo publish -p solvela-client
+
+      - name: Wait for solvela-client index propagation
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -fsSL "https://crates.io/api/v1/crates/solvela-client/${VERSION}" >/dev/null 2>&1; then
+              echo "solvela-client@${VERSION} visible on index"
+              exit 0
+            fi
+            echo "attempt $i: not yet visible, sleeping 10s"
+            sleep 10
+          done
+          echo "ERROR: solvela-client@${VERSION} did not appear within 5min"
+          exit 1
+
+      - name: Publish solvela-client-cli-args
+        run: cargo publish -p solvela-client-cli-args
+
+      - name: Wait for solvela-client-cli-args index propagation
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -fsSL "https://crates.io/api/v1/crates/solvela-client-cli-args/${VERSION}" >/dev/null 2>&1; then
+              echo "solvela-client-cli-args@${VERSION} visible on index"
+              exit 0
+            fi
+            echo "attempt $i: not yet visible, sleeping 10s"
+            sleep 10
+          done
+          echo "ERROR: solvela-client-cli-args@${VERSION} did not appear within 5min"
+          exit 1
+
+      # The two top-level binaries have the same dep set so order between
+      # them does not matter; publishing sequentially keeps the log linear.
+      - name: Publish solvela-client-cli
+        run: cargo publish -p solvela-client-cli
+
+      - name: Publish solvela-client-proxy
+        run: cargo publish -p solvela-client-proxy
+
+      - name: Verify all four crates visible at ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          for crate in solvela-client solvela-client-cli-args solvela-client-cli solvela-client-proxy; do
+            for i in $(seq 1 30); do
+              if curl -fsSL "https://crates.io/api/v1/crates/${crate}/${VERSION}" >/dev/null 2>&1; then
+                echo "${crate}@${VERSION} confirmed on crates.io"
+                break
+              fi
+              if [ "$i" -eq 30 ]; then
+                echo "ERROR: ${crate}@${VERSION} not found after 5min"
+                exit 1
+              fi
+              sleep 10
+            done
+          done
