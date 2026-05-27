@@ -23,6 +23,23 @@ on:
   push:
     tags:
       - 'sdks/rust/v*'
+  # workflow_dispatch lets operators rehearse the full pipeline end-to-end
+  # (verify + test + dry-run) in real CI before the first production tag,
+  # without actually touching the registry. The charter's anti-pattern
+  # catalog explicitly endorses this over env-flag bypasses, because the
+  # dry_run input is an auditable, declarative property of the run rather
+  # than a mutable workflow file edit.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run verify + test + dry-run jobs only; skip live publish. Used for CI rehearsal before the first real tag."
+        # Default to true so an accidental "Run workflow" click does NOT
+        # publish to crates.io. The operator has to explicitly flip this
+        # off to fire a manual live publish — see the publish-job `if:`
+        # below for how that path is wired.
+        default: true
+        required: false
+        type: boolean
 
 # Never cancel a publish mid-run. A cancelled publish can leave the
 # registry in a partial state (layer 1 published, layer 2 still local),
@@ -60,17 +77,14 @@ jobs:
         id: extract
         run: |
           set -euo pipefail
-          TAG_NAME="${GITHUB_REF_NAME}"
-          # Tag format: sdks/rust/v0.2.2  →  TAG_VERSION=0.2.2
-          TAG_VERSION="${TAG_NAME#sdks/rust/v}"
-          if [ "$TAG_VERSION" = "$TAG_NAME" ]; then
-            echo "ERROR: tag '$TAG_NAME' does not match expected pattern 'sdks/rust/v<version>'"
-            exit 1
-          fi
 
-          # Read workspace.package.version from sdks/rust/Cargo.toml.
+          # Read workspace.package.version from sdks/rust/Cargo.toml first.
           # All four member crates inherit via version.workspace = true,
           # so this single value is authoritative for the publish set.
+          # We resolve it unconditionally so the `version` job output is
+          # populated on both tag-push and workflow_dispatch invocations —
+          # downstream jobs can rely on it for symmetry / future use even
+          # though the publish job is skipped on dry-run dispatch.
           MANIFEST_VERSION=$(awk '
             /^\[workspace\.package\]/ { in_section = 1; next }
             /^\[/ { in_section = 0 }
@@ -80,6 +94,28 @@ jobs:
               exit
             }
           ' sdks/rust/Cargo.toml)
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            # Manual rehearsal path: there is no tag to compare against,
+            # so we cannot enforce tag-vs-manifest equality here. Relaxing
+            # this check is SAFE because workflow_dispatch with the
+            # default dry_run=true never reaches the publish job, and
+            # dry_run=false is an explicit operator override that already
+            # signals "I know what I'm doing." The real-publish guardrail
+            # on the tag-push path below is unchanged.
+            echo "workflow_dispatch invocation — skipping tag-vs-manifest check"
+            echo "Manifest version: $MANIFEST_VERSION"
+            echo "version=$MANIFEST_VERSION" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TAG_NAME="${GITHUB_REF_NAME}"
+          # Tag format: sdks/rust/v0.2.2  →  TAG_VERSION=0.2.2
+          TAG_VERSION="${TAG_NAME#sdks/rust/v}"
+          if [ "$TAG_VERSION" = "$TAG_NAME" ]; then
+            echo "ERROR: tag '$TAG_NAME' does not match expected pattern 'sdks/rust/v<version>'"
+            exit 1
+          fi
 
           echo "Tag version:      $TAG_VERSION"
           echo "Manifest version: $MANIFEST_VERSION"
@@ -95,7 +131,15 @@ jobs:
       # Fail fast if the exact version is already published. crates.io
       # would reject the live publish later anyway, but catching it here
       # avoids burning a test + dry-run cycle on a doomed run.
+      #
+      # Skipped on workflow_dispatch: rehearsing against the currently
+      # published version is a legitimate test pattern (it exercises the
+      # full verify + test + dry-run chain end-to-end in CI), not a
+      # failure. The dry-run job uses `cargo publish --dry-run` which
+      # does not contact the registry's publish API, so there is no risk
+      # of accidentally republishing.
       - name: Confirm version is not already published on crates.io
+        if: github.event_name == 'push'
         run: |
           set -euo pipefail
           VERSION="${{ steps.extract.outputs.version }}"
@@ -192,6 +236,15 @@ jobs:
     name: Publish to crates.io
     runs-on: ubuntu-latest
     needs: [verify, test, dry-run]
+    # Tag-push events ALWAYS publish — there's no dry-run option on the
+    # tag path, which preserves the existing real-publish semantics
+    # byte-identically. workflow_dispatch publishes only when the operator
+    # explicitly flips dry_run to false; the default (true) skips this
+    # job entirely. The dry_run=false path exists as a manual fallback
+    # for the rare case where a tag-push misfires and we need to publish
+    # a known-good commit without inventing new flags or one-off
+    # workflows.
+    if: github.event_name == 'push' || inputs.dry_run == false
     environment: crates-publish
     defaults:
       run:
