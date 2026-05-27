@@ -62,23 +62,22 @@ completes. There are two ways the claim can be triggered:
 1. **Gateway auto-claim after `max_timeout_seconds`** — works today; the
    deposit is reconciled on a timer, so refunds for over-deposits arrive
    asynchronously.
-2. **Client-side `wrapStreamForF4`** — the plugin exports a `wrapStreamForF4`
-   helper that observes the stream's `result()` Promise and POSTs the actual
-   token usage to the gateway's `/v1/escrow/settle` endpoint as soon as the
-   stream finishes. Reduces reconciliation latency from minutes to
-   milliseconds.
+2. **Client-side `wrapStreamForF4` (the default in escrow mode)** — the
+   plugin's wrapped `streamFn` observes the inner stream's `result()`
+   Promise and fire-and-forget POSTs the actual token usage to the
+   gateway's `/v1/escrow/settle` endpoint as soon as the stream finishes.
+   Reduces reconciliation latency from `max_timeout_seconds` (minutes) to
+   milliseconds. Settle failures are logged to stderr but never block the
+   stream consumer; auto-claim remains the fallback.
 
-The `wrapStreamForF4` wrapper is fully implemented and unit-tested
-(`tests/f4-wrapper.test.ts`). The matching gateway endpoint at
-`/v1/escrow/settle` is planned but not yet deployed — until it lands, settle
-POSTs return 404 and the wrapper logs a warning (the stream consumer is
-unaffected). Until the endpoint is live, you can still safely use escrow mode
-and rely on the auto-claim timer.
+The helper is also exported (`wrapStreamForF4`) for advanced wiring
+outside the bundled `wrapStreamFn` path. Both the client side and the
+gateway-side endpoint (`POST /v1/escrow/settle`) are live in production
+as of 2026-05-26.
 
 **Security note on `direct` mode:** Direct-transfer payments are
 non-refundable if the stream fails mid-response. If recovery from
-partial-stream failures matters for your workload, prefer escrow mode (with
-F4 once the gateway endpoint ships, or auto-claim today).
+partial-stream failures matters for your workload, prefer escrow mode.
 
 ## Dev bypass
 
