@@ -193,17 +193,26 @@ The `accepts` array may contain one or both payment schemes. Choose based on you
 
 ---
 
-## Session Budgets
+## Spend Caps
 
-All official SDKs support a `sessionBudget` option that caps total spending for the lifetime of a client instance. Once the budget is reached, the SDK throws rather than signing another payment.
+The official SDKs expose a **per-call** payment cap (the maximum amount they will sign for in one chat call) rather than a session-wide budget. The cap rejects the payment client-side before signing if the gateway's quoted amount exceeds it, preventing a misconfigured or attacker-controlled 402 from charging more than expected.
 
 <Tabs items={["TypeScript", "Python", "Rust", "Go"]}>
   <Tab value="TypeScript">
     ```typescript
+    import { SolvelaClient, Wallet, KeypairSigner } from '@solvela/sdk';
+
+    // @solvela/sdk caps spend per call, not per session.
+    // Track lifetime spend yourself if you need a session-wide budget.
+    const wallet = Wallet.fromEnv('SOLANA_PRIVATE_KEY');
+    const signer = new KeypairSigner(wallet);
     const client = new SolvelaClient({
-      endpoint: "https://api.solvela.ai",
-      walletKey: process.env.SOLANA_PRIVATE_KEY,
-      sessionBudget: "0.10", // max $0.10 USDC this session
+      wallet,
+      signer,
+      config: {
+        gatewayUrl: 'https://api.solvela.ai',
+        // No per-session budget knob — see the Warning below.
+      },
     });
     ```
   </Tab>
@@ -226,11 +235,15 @@ All official SDKs support a `sessionBudget` option that caps total spending for 
   </Tab>
   <Tab value="Rust">
     ```rust
-    let client = SolvelaClient::builder()
-        .endpoint("https://api.solvela.ai")
-        .wallet_key(&env::var("SOLANA_PRIVATE_KEY")?)
-        .session_budget("0.10")
-        .build()?;
+    use solvela_client::{ClientConfig, SolvelaClient, Wallet};
+
+    // solvela-client caps spend per call, not per session.
+    // Track lifetime spend yourself if you need a session-wide budget.
+    let wallet = Wallet::from_env("SOLANA_PRIVATE_KEY")?;
+    let config = ClientConfig::new()
+        .gateway_url("https://api.solvela.ai")
+        .max_payment_amount(100_000); // per-call cap: 0.10 USDC atomic
+    let client = SolvelaClient::new(wallet, config)?;
     ```
   </Tab>
   <Tab value="Go">
@@ -249,7 +262,7 @@ All official SDKs support a `sessionBudget` option that caps total spending for 
 </Tabs>
 
 <Warning>
-**Important:** `sessionBudget` is a client-side guard only and does not communicate a limit to the server. For server-enforced limits, use enterprise team budgets. The SDK accumulates `cost_breakdown.total` values across all signed payments and stops signing once the sum exceeds the budget.
+**Important:** `max_payment_amount` / `maxPaymentAmount` is a client-side per-call guard only and does not communicate a limit to the server. For session-wide caps, track lifetime spend in your own code; for server-enforced spend ceilings, use enterprise team or wallet budgets (see [Budgets](/docs/enterprise/budgets)).
 </Warning>
 
 ---
