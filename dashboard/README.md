@@ -55,7 +55,7 @@ deployments set these in Vercel.
 |---|---|---|
 | `NEXT_PUBLIC_GATEWAY_URL` | `src/lib/api.ts` | Solvela gateway base URL. Defaults to `http://localhost:8402` for local dev. |
 | `NEXT_PUBLIC_SITE_URL` | `src/lib/theme-config.ts` | Canonical site URL for OG / Twitter card metadata. Falls back through `VERCEL_PROJECT_PRODUCTION_URL` → `VERCEL_URL` → `http://localhost:3000`. |
-| `GATEWAY_ADMIN_KEY` | `src/lib/api.ts` | Server-only admin bearer token used for privileged gateway calls (Overview / Models pages). Never exposed to the browser. |
+| `GATEWAY_ADMIN_KEY` | `src/lib/api.ts` | Server-only admin bearer token used for privileged gateway calls (Overview, Models, and Metrics pages). Never exposed to the browser. |
 | `SOLVELA_SOLANA_RECIPIENT_WALLET` | `src/app/dashboard/wallet/page.tsx` | Public recipient wallet shown on the Wallet page. Legacy `RCR_SOLANA_RECIPIENT_WALLET` is also accepted as a fallback. |
 | `VERCEL_PROJECT_PRODUCTION_URL`, `VERCEL_URL` | `src/lib/theme-config.ts` | Set automatically by Vercel; consumed for canonical URL detection. |
 
