@@ -1,36 +1,72 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Solvela dashboard
 
-## Getting Started
+The product web app at [solvela.vercel.app](https://solvela.vercel.app). A
+Next.js 16 App Router project that combines the Solvela dashboard pages
+(Overview / Usage / Models / Wallet / Settings) with the public docs site
+powered by Fumadocs. Styled with Tailwind and a serif / terminal-card
+design system.
 
-First, run the development server:
+For deeper context on the directory layout, design system, and module
+conventions, read [`AGENTS.md`](./AGENTS.md) and the nested `AGENTS.md`
+files under `src/`.
+
+## Local development
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# One-time install (from repo root or any directory).
+npm --prefix dashboard install
+
+# Dev server — opens on http://localhost:3000
+npm --prefix dashboard run dev
+
+# Vitest unit tests
+npm --prefix dashboard test
+
+# ESLint
+npm --prefix dashboard run lint
+
+# Production build
+npm --prefix dashboard run build
+
+# Serve the production build locally
+npm --prefix dashboard run start
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Or from inside `dashboard/`:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+cd dashboard
+npm install
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The page entry point lives at `src/app/page.tsx` (the project uses the
+`src/` layout, not the bare `app/` layout). Dashboard pages live under
+`src/app/dashboard/`; the docs site is under `src/app/docs/` with MDX
+content under `content/docs/`.
 
-## Learn More
+## Environment variables
 
-To learn more about Next.js, take a look at the following resources:
+All env vars are optional locally — the dashboard falls back to a localhost
+gateway and to inert values for missing wallets / admin keys. Production
+deployments set these in Vercel.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+| Variable | Where read | Description |
+|---|---|---|
+| `NEXT_PUBLIC_GATEWAY_URL` | `src/lib/api.ts` | Solvela gateway base URL. Defaults to `http://localhost:8402` for local dev. |
+| `NEXT_PUBLIC_SITE_URL` | `src/lib/theme-config.ts` | Canonical site URL for OG / Twitter card metadata. Falls back through `VERCEL_PROJECT_PRODUCTION_URL` → `VERCEL_URL` → `http://localhost:3000`. |
+| `GATEWAY_ADMIN_KEY` | `src/lib/api.ts` | Server-only admin bearer token used for privileged gateway calls (Overview, Models, and Metrics pages). Never exposed to the browser. |
+| `SOLVELA_SOLANA_RECIPIENT_WALLET` | `src/app/dashboard/wallet/page.tsx` | Public recipient wallet shown on the Wallet page. Legacy `RCR_SOLANA_RECIPIENT_WALLET` is also accepted as a fallback. |
+| `VERCEL_PROJECT_PRODUCTION_URL`, `VERCEL_URL` | `src/lib/theme-config.ts` | Set automatically by Vercel; consumed for canonical URL detection. |
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+`next.config.mjs` itself reads no custom env vars — it only declares the
+MDX rewrites and Fumadocs config. Env wiring lives in
+`src/lib/*` and a small number of server-rendered pages.
 
-## Deploy on Vercel
+## Deployment
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Deployed to Vercel from `main`. Production URL: `solvela.vercel.app`.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+See the operator notes in [`AGENTS.md`](./AGENTS.md) for design-system
+guardrails and the project's "exercise the change in a browser before
+claiming done" rule.
