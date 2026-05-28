@@ -272,7 +272,7 @@ The official SDKs expose a **per-call** payment cap (the maximum amount they wil
 <Accordion title="Payment invalid — signature cannot be verified">
   **HTTP status:** `402 Payment Required` (new 402, not 200)
 
-  The gateway could not verify the signature. Common causes: wrong `pay_to` address, wrong `amount`, or a malformed base58 encoding in the header. Parse the new 402 response and re-sign with the updated parameters.
+  The gateway could not verify the signature. Common causes: wrong `pay_to` address, wrong `amount`, or a malformed `payment-signature` header (the header itself must be base64-encoded JSON, and the inner `payload` field must be the base64-encoded signed Solana versioned transaction). Parse the new 402 response and re-sign with the updated parameters.
 </Accordion>
 
 <Accordion title="Payment insufficient — amount too low">
