@@ -178,10 +178,10 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 | OpenAI | `o3-mini` | $1.10 | $4.40 | 200K |
 | OpenAI | `o4-mini` | $1.10 | $4.40 | 200K |
 | OpenAI | `gpt-oss-120b` | Free | Free | 128K |
-| Anthropic | `claude-opus-4.6` | $5.00 | $25.00 | 200K |
-| Anthropic | `claude-sonnet-4.6` | $3.00 | $15.00 | 200K |
-| Anthropic | `claude-sonnet-4.5` | $3.00 | $15.00 | 200K |
-| Anthropic | `claude-haiku-4.5` | $1.00 | $5.00 | 200K |
+| Anthropic | `claude-opus-4-6` | $5.00 | $25.00 | 200K |
+| Anthropic | `claude-sonnet-4-6` | $3.00 | $15.00 | 200K |
+| Anthropic | `claude-sonnet-4-5-20250929` | $3.00 | $15.00 | 200K |
+| Anthropic | `claude-haiku-4-5-20251001` | $1.00 | $5.00 | 200K |
 | Google | `gemini-3.1-pro` | $2.00 | $12.00 | 1M |
 | Google | `gemini-2.5-flash` | $0.30 | $2.50 | 1M |
 | Google | `gemini-2.5-flash-lite` | $0.10 | $0.40 | 1M |
@@ -275,9 +275,24 @@ go get github.com/solvela-ai/solvela/sdks/go
 ```
 
 ```go
-client, _ := solvela.NewClient()
-response, _ := client.Chat(ctx, "openai/gpt-4o", "Hello!")
+import (
+    "context"
+    solvela "github.com/solvela-ai/solvela/sdks/go"
+)
+
+wallet, _, _ := solvela.CreateWallet()
+client, _ := solvela.NewClient(wallet, nil,
+    solvela.WithGatewayURL("https://api.solvela.ai"),
+)
+resp, _ := client.Chat(context.Background(), &solvela.ChatRequest{
+    Model: "openai/gpt-4o",
+    Messages: []solvela.ChatMessage{
+        {Role: solvela.RoleUser, Content: "Hello!"},
+    },
+})
 ```
+
+The bundled `UnimplementedSigner` is a placeholder — supply a custom `Signer` (or use the Python / TypeScript SDK) to actually settle payments. See [`sdks/go/README.md`](./sdks/go/README.md).
 
 ### MCP (Claude Code)
 
@@ -323,8 +338,8 @@ cargo build --release                 # Release build
 # Rust workspace — run `cargo test` for current counts; suites are growing
 cargo test                            # All workspace tests
 cargo test -p gateway                 # gateway unit + integration
-cargo test -p x402                    # x402 protocol
-cargo test -p router                  # smart router
+cargo test -p solvela-x402            # x402 protocol
+cargo test -p solvela-router          # smart router
 cargo test -p solvela-protocol        # wire-format types
 
 # Single test
@@ -431,8 +446,8 @@ Solvela is deployed on Fly.io:
 | Redis | `solvela-cache` (Upstash, ord + iad) |
 
 ```bash
-# Deploy
-cd crates/gateway && fly deploy -a solvela-gateway
+# Deploy (fly.toml lives at the repo root)
+fly deploy -a solvela-gateway
 
 # Set provider keys
 fly secrets set -a solvela-gateway OPENAI_API_KEY=... ANTHROPIC_API_KEY=...

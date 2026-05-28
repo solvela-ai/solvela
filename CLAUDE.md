@@ -20,8 +20,8 @@ cargo build --release             # release build
 # Test — run `cargo test` for current counts (don't trust hardcoded numbers)
 cargo test                        # all workspace tests
 cargo test -p gateway             # gateway (unit + integration)
-cargo test -p x402                # x402 protocol
-cargo test -p router              # smart router
+cargo test -p solvela-x402        # x402 protocol
+cargo test -p solvela-router      # smart router
 cargo test -p solvela-protocol    # wire-format types
 cargo test -p solvela-cli         # CLI
 
@@ -34,7 +34,7 @@ cargo test scorer                 # all tests matching "scorer"
 # Scoped test runs
 cargo test -p gateway --test integration  # integration tests only
 cargo test -p gateway --lib               # unit tests only
-cargo test -p x402 -- --nocapture         # show stdout/tracing output
+cargo test -p solvela-x402 -- --nocapture # show stdout/tracing output
 
 # Escrow program (standalone — NOT in workspace)
 # Default: runs only unit tests in tests/unit.rs (no on-chain artifact required).
@@ -255,7 +255,7 @@ These skills contain patterns, checklists, and constraints specific to this proj
 
 ## Deployment
 
-- Dockerfile: 2-stage build with dummy-source dependency caching (`rust:1.88-slim-bookworm` builder → `debian:bookworm-slim` runtime, non-root `solvela` user)
+- Dockerfile: 2-stage build with dummy-source dependency caching (`rust:1.88-slim-trixie` builder → `debian:trixie-slim` runtime, non-root `solvela` user)
 - Fly.io config in `fly.toml` (app: `solvela-gateway`, port 8402, region ord)
 - Docker Compose for local dev: PostgreSQL 16 + Redis 7
 - Dashboard: Next.js on Vercel (`solvela.vercel.app`)
