@@ -28,22 +28,22 @@ A small set of advisories cannot be cleared without a major ecosystem migration.
 
 ### Rust (escrow program — `programs/escrow/Cargo.lock`)
 
-The escrow program is built against the Solana 1.18 / Anchor 0.30 toolchain (matches the deployed mainnet bytecode). Solana 1.x pins a number of legacy transitive dependencies that cannot be upgraded individually:
+The escrow program is built against the Anchor 0.31.1 / Solana SDK 2.2 toolchain (matches the deployed mainnet bytecode). A number of legacy transitive dependencies are still pulled in by the Anchor 0.31 / `solana-sdk` 2.x graph and cannot be upgraded individually:
 
 | Crate | Advisory | Status |
 |---|---|---|
-| `curve25519-dalek` 3.2.0 | RUSTSEC-2024-0344 | Pinned by Solana 1.18 SDK. Resolves on Solana 2.x migration. |
-| `ed25519-dalek` 1.0.1 | RUSTSEC-2022-0093 | Pinned by Solana 1.18 SDK. Resolves on Solana 2.x migration. |
-| `rustls-webpki` 0.101.7 | RUSTSEC-2026-0098, 0099, 0104 | Pinned via legacy `rustls` major in Solana 1.x dep tree. |
-| `bincode` 1.3.3 | RUSTSEC-2025-0141 | Pinned by Solana 1.x; bincode 2.x is a major-API break. |
-| `rand` 0.7.3 | RUSTSEC-2026-0097 | Transitive via `solana-sdk` 1.x. |
-| `libsecp256k1` 0.6.0 | RUSTSEC-2025-0161 | Anchor 0.30 transitive. |
-| `rustls-pemfile` 1.0.4 | RUSTSEC-2025-0134 | Solana 1.x transitive. |
-| `ansi_term`, `atty`, `derivative`, `paste` | various unmaintained | All Solana 1.x build-time transitives. |
+| `curve25519-dalek` 3.2.0 | RUSTSEC-2024-0344 | Pulled in by `ed25519-dalek` 1.0.1 via `solana-keypair` 2.2.1. Resolves on the broader Solana 3.x / `@solana/kit` migration. |
+| `ed25519-dalek` 1.0.1 | RUSTSEC-2022-0093 | Pulled in by `solana-keypair` 2.2.1 (Solana SDK 2.x). Resolves on the Solana 3.x / `@solana/kit` migration. |
+| `rustls-webpki` 0.101.7 | RUSTSEC-2026-0098, 0099, 0104 | Pulled in via the legacy `rustls` major still in the Solana 2.x dep tree. |
+| `bincode` 1.3.3 | RUSTSEC-2025-0141 | Pulled in by the Solana SDK; bincode 2.x is a major-API break. |
+| `rand` 0.7.3 | RUSTSEC-2026-0097 | Transitive via `solana-sdk` 2.x. |
+| `libsecp256k1` 0.6.0 | RUSTSEC-2025-0161 | Anchor 0.31 transitive. |
+| `rustls-pemfile` 1.0.4 | RUSTSEC-2025-0134 | Solana 2.x transitive. |
+| `ansi_term`, `atty`, `derivative`, `paste` | various unmaintained | Anchor 0.31 / Solana SDK 2.x build-time transitives. |
 
-**Risk evaluation:** The deployed program bytecode is fixed at deploy time and is not affected by these advisories at runtime — the vulnerable code paths live in build-time transitives, not in the on-chain bytecode. The 2026-05-08 redeploy (slot 418438627) used the same Anchor 0.31.1 / Solana 1.x toolchain, so the transitive-advisory profile is unchanged.
+**Risk evaluation:** The deployed program bytecode is fixed at deploy time and is not affected by these advisories at runtime — the vulnerable code paths live in build-time transitives, not in the on-chain bytecode. The 2026-05-10 redeploy (slot 418832804) used the same Anchor 0.31.1 / Solana SDK 2.2 toolchain, so the transitive-advisory profile is unchanged.
 
-**Resolution path:** Solana 2.x / `@solana/kit` migration is the next planned escrow redeploy. Tracking issues [#155](https://github.com/solvela-ai/solvela/issues/155) and [#156](https://github.com/solvela-ai/solvela/issues/156); no fixed target date — the deployed program is stable on mainnet and the migration will be coordinated with the broader ecosystem move.
+**Resolution path:** Solana 3.x / `@solana/kit` migration is the next planned escrow redeploy. Tracking issues [#155](https://github.com/solvela-ai/solvela/issues/155) and [#156](https://github.com/solvela-ai/solvela/issues/156) are closed-as-blocked (see [`STATUS.md`](./STATUS.md) — Anchor 1.0 drags Solana 3.x back in but still leaves cfg-hygiene warnings unfixed); revisit once the broader Solana 2.x → `@solana/kit` ecosystem migration is unblocked.
 
 ### npm (Solana web3.js 1.x ecosystem — `sdks/mcp`, `sdks/openclaw-provider`, `integrations/openclaw`)
 
