@@ -1,7 +1,8 @@
 //! Organization and team management REST API.
 //!
 //! Endpoints accept **either** a global admin token (`Authorization: Bearer <admin_token>`)
-//! or an org-scoped API key (`Authorization: Bearer rcr_k_...`).
+//! or an org-scoped API key (`Authorization: Bearer solvela_k_...`; legacy
+//! `rcr_k_...` keys are still accepted for backward compatibility).
 //! Database (`db_pool`) must be configured — returns 503 otherwise.
 
 mod analytics;
