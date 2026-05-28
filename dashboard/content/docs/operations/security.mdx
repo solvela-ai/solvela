@@ -78,7 +78,7 @@ The following endpoints require `Authorization: Bearer <SOLVELA_ADMIN_TOKEN>`:
 
 Token comparison uses constant-time equality (`subtle::ConstantTimeEq` equivalent) to prevent timing attacks.
 
-If `SOLVELA_ADMIN_TOKEN` is not set, admin endpoints return 403.
+When `SOLVELA_ADMIN_TOKEN` is not set, the metrics endpoint is hidden and returns **404 Not Found** (rather than advertising its existence). Org-management endpoints that need an admin token return **503 Service Unavailable** with `"admin endpoint not configured"`. A request that supplies a wrong/missing token to a configured admin endpoint returns **401 Unauthorized**.
 
 ## CORS
 
@@ -104,7 +104,7 @@ SDK and agent clients are unaffected by CORS since they do not run in browsers.
 
 Fee payer keys support rotation:
 
-- Primary key: `SOLVELA_SOLANA_FEE_PAYER_KEY`
+- Primary key: `SOLVELA_SOLANA__FEE_PAYER_KEY`
 - Additional keys: `SOLVELA_SOLANA__FEE_PAYER_KEY_2` through `_8`
 - The `FeePayerPool` rotates across healthy keys automatically
 - Failed keys enter a 60-second cooldown before reuse

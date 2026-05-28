@@ -38,7 +38,7 @@ All endpoints accept and return `application/json`. Streaming responses use SSE 
 | `payment-signature: <value>` | Required for paid endpoints (chat completions) |
 | `X-Request-Id: <uuid>` | Optional — tracked in usage logs |
 | `X-Session-Id: <string>` | Optional — correlates requests in a session |
-| `X-Debug-Payment: true` | Optional — returns cost breakdown in response headers |
+| `X-Solvela-Debug: true` | Optional — attaches routing diagnostics (`X-Solvela-Model`, `-Tier`, `-Score`, `-Provider`, `-Cache`, `-Payment-Status`, etc.) to the response. Legacy `X-RCR-Debug` is also accepted. |
 
 ## Endpoints
 
@@ -64,21 +64,22 @@ All endpoints accept and return `application/json`. Streaming responses use SSE 
 
 ## Rate limiting
 
-The gateway enforces per-IP and per-wallet rate limits. The default is **60 requests per 60-second sliding window** per wallet (and the same per IP, before wallet identity is established). Always read `X-RateLimit-Limit` and `X-RateLimit-Reset` from response headers rather than hardcoding expected values. Exceeding the limit returns `429 Too Many Requests`. Enterprise API keys can override these limits — see [Rate Limits](/docs/api/rate-limits).
+The gateway enforces a per-client rate limit, identifying the client as the payer wallet derived from the signed transaction first, then falling back to the TCP peer IP, then to a stricter shared "unknown" bucket. The default is **60 requests per 60-second fixed window** per identified client (10 for the shared unknown bucket). Always read `X-RateLimit-Limit` and `X-RateLimit-Reset` from response headers rather than hardcoding expected values. Exceeding the limit returns `429 Too Many Requests`. See [Rate Limits](/docs/api/rate-limits).
 
 ## Error format
 
-All errors use the OpenAI error envelope:
+Most errors use the OpenAI-style envelope with `type` and `message`:
 
 ```json
 {
   "error": {
+    "type": "bad_request",
     "message": "human-readable description"
   }
 }
 ```
 
-For `402` responses, `error.message` contains a JSON-encoded `PaymentRequired` object. See [Error Reference](/docs/api/errors) for the full list of status codes.
+**Exception:** a 402 returned because no `payment-signature` header was supplied emits the `PaymentRequired` object at the **top level** of the response body — not wrapped in an envelope. See [Error Reference](/docs/api/errors) for the full list of status codes and shapes.
 
 <Note>
   The gateway degrades gracefully when Redis or PostgreSQL are unavailable. Redis absence disables response caching and falls back to in-memory replay protection. PostgreSQL absence disables spend logging and budget enforcement.

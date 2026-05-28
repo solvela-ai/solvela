@@ -45,17 +45,7 @@ Solvela uses x402 to enable AI agents to pay for LLM API calls with USDC-SPL on 
 
 ## The 402 response
 
-When no `payment-signature` header is present, the gateway responds with `HTTP 402`. The body uses OpenAI error envelope format — the `PaymentRequired` JSON is inside `error.message` as a string.
-
-```json
-{
-  "error": {
-    "message": "<JSON-encoded PaymentRequired>"
-  }
-}
-```
-
-The decoded `PaymentRequired` object looks like:
+When no `payment-signature` header is present, the gateway responds with `HTTP 402` and emits the `PaymentRequired` body **at the top level** of the response — not wrapped in the OpenAI `{ "error": { ... } }` envelope. (Gateway behavior locked by `GatewayError::PaymentChallenge`; see issue #217.)
 
 ```json
 {
@@ -93,6 +83,8 @@ The decoded `PaymentRequired` object looks like:
   "error": "Payment required"
 }
 ```
+
+The trailing `error` field is a plain string banner, not the OpenAI error object. A 402 returned for an **invalid** payment header (malformed, replayed, expired) does use the OpenAI envelope with `error.type = "invalid_payment"` and a plain-text `error.message`. Distinguish the two shapes by checking for the top-level `x402_version` field.
 
 ### Fields
 

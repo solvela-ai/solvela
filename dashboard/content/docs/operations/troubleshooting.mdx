@@ -7,18 +7,19 @@ description: Common issues, debug headers, and diagnostics
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Gateway returns 503 for all chat requests | No provider API key configured | Set at least one provider key in `.env` (e.g., `OPENAI_API_KEY`) |
-| 402 response but SDK does not auto-pay | Wallet key not configured | Set `SOLANA_WALLET_KEY` environment variable |
+| Paid chat requests return 500 with `error.type = "internal_error"` and `"all providers failed"` | No upstream provider API key configured for the resolved model's provider | Set at least one matching provider key in `.env` (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`) and restart the gateway |
+| 402 response but SDK does not auto-pay | Wallet key env var not set, or read under the wrong name (the CLI reads `SOLANA_WALLET_KEY`; the TypeScript/Python SDK examples read `SOLANA_PRIVATE_KEY` — the env var name is whatever you pass to `Wallet.fromEnv()` / `Wallet.from_env()`) | Set the env var your code reads and verify the value is a base58-encoded Solana keypair |
 | 402 returned with `accepts[0].amount: "0"` | Using a free model (`gpt-oss-120b`) | Free models do not require payment; remove the `PAYMENT-SIGNATURE` header |
 | Redis connection refused | Redis not running | Run `docker compose up -d redis` |
-| "replay detected" error | Same transaction signature sent twice | Generate a new transaction for each request |
-| "insufficient amount" error | Payment amount less than quoted price | Use `accepts[0].amount` from the 402 response (atomic units: 1 USDC = 1,000,000) |
-| "recipient mismatch" error | Payment sent to wrong wallet | Send to `accepts[0].pay_to` from the 402 response |
-| 429 Too Many Requests | Per-wallet rate limit exceeded | Wait for the `Retry-After` period, then retry |
-| 500 Internal Server Error on chat | Provider returned unexpected response | Check `RUST_LOG=gateway=debug` for details |
-| "unknown model" error | Model ID not in registry | Use `GET /v1/models` to list valid model IDs |
+| 402 `"transaction has already been used; each payment signature may only be submitted once"` | Same transaction signature submitted twice | Generate a new transaction for each request |
+| 400 `"payment amount insufficient: paid N but cost is M atomic USDC"` | Signed amount less than the quoted price | Fetch a fresh 402, use `accepts[0].amount` exactly (atomic units: 1 USDC = 1,000,000) |
+| 400 `"Payment recipient does not match. Use the pay_to advertised in the 402 response."` | Payment sent to wrong wallet | Send to `accepts[0].pay_to` from the 402 response |
+| 429 Too Many Requests | Per-client rate limit exceeded (payer wallet → IP fallback) | Wait until `X-RateLimit-Reset` (also surfaced as `Retry-After`), then retry |
+| 502 Bad Gateway with `error.type = "provider_error"` | Upstream LLM provider returned an error | Check `RUST_LOG=gateway=debug` for sanitised details (raw provider errors are redacted from the response) |
+| 404 `model not found: …` (`error.type = "model_not_found"`) | Model ID not in registry | Use `GET /v1/models` to list valid model IDs |
 | Escrow claim failures | Fee payer SOL balance too low | Fund fee payer wallets; check `GET /v1/escrow/health` |
-| Metrics endpoint returns 403 | `SOLVELA_ADMIN_TOKEN` not set or wrong token | Set `SOLVELA_ADMIN_TOKEN` (or `RCR_ADMIN_TOKEN` for backward compat) and use `Authorization: Bearer <token>` |
+| Metrics endpoint returns 404 | `SOLVELA_ADMIN_TOKEN` not set — endpoint is hidden when no token is configured | Set `SOLVELA_ADMIN_TOKEN` (or `RCR_ADMIN_TOKEN` for backward compat) and use `Authorization: Bearer <token>` |
+| Metrics endpoint returns 401 | Token configured but request omitted/sent wrong `Authorization: Bearer …` header | Send `Authorization: Bearer $SOLVELA_ADMIN_TOKEN` |
 | Wallet stats returns 503 | PostgreSQL not configured | Set `DATABASE_URL` in `.env` |
 | CORS errors in browser | Origin not in allowlist | Add your domain to `SOLVELA_CORS_ORIGINS` (or `RCR_CORS_ORIGINS` for backward compat) |
 | Slow responses (>10s) | Provider latency or network issues | Check `solvela_provider_request_duration_seconds` metric; try a different provider |

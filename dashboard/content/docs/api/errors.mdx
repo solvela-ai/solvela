@@ -6,47 +6,62 @@ description: HTTP status codes, error shapes, and how to handle common failures
 
 ## Error format
 
-All errors use the OpenAI error envelope. The `message` field contains a human-readable description.
+Most errors use the OpenAI-style envelope with `type` and `message`:
 
 ```json
 {
   "error": {
+    "type": "bad_request",
     "message": "description of what went wrong"
   }
 }
 ```
 
-For `402` responses specifically, `error.message` is a **JSON-encoded string** containing the full `PaymentRequired` object. You must parse it twice:
+**Exception: 402 without a payment header.** When the client has not supplied a `payment-signature` header, the gateway emits the x402-spec `PaymentRequired` object at the **top level** of the response body — not wrapped in `error.message`. Parse the body as JSON directly:
 
 ```typescript
 const body = await response.json();
-const paymentRequired = JSON.parse(body.error.message);
+if (response.status === 402 && body.x402_version) {
+  // Cost-quote 402 — body IS the PaymentRequired object
+  const cost = body.cost_breakdown;
+  const accepts = body.accepts;
+}
 ```
+
+**Other 402 cases** — invalid signature, replay, expired transaction, amount mismatch — use the OpenAI envelope with `type: "invalid_payment"` and a plain-text `message`. Distinguish the two shapes by checking for the top-level `x402_version` field.
 
 ## HTTP status codes
 
 | Code | Name | When it occurs |
 |------|------|----------------|
 | `200` | OK | Request succeeded |
-| `400` | Bad Request | Invalid parameters, unsupported model, message limit exceeded |
+| `400` | Bad Request | Invalid parameters, message limit exceeded, payment field validation (amount, network, asset, pay_to mismatch) |
+| `401` | Unauthorized | Missing or invalid admin token / API key on enterprise endpoints |
 | `402` | Payment Required | No `payment-signature` header, or payment verification failed |
-| `404` | Not Found | Unknown endpoint |
+| `403` | Forbidden | Authenticated but lacking permission (e.g. member role calling admin-only org endpoints) |
+| `404` | Not Found | Unknown endpoint, or `model` ID not in the registry (`type: model_not_found`) |
 | `429` | Too Many Requests | Rate limit exceeded |
-| `500` | Internal Server Error | Gateway error (bug or misconfiguration) |
-| `502` | Bad Gateway | Upstream provider returned an error |
-| `503` | Service Unavailable | Gateway temporarily unavailable |
+| `500` | Internal Server Error | Gateway error (bug or misconfiguration), or all configured providers failed |
+| `502` | Bad Gateway | Upstream provider returned an error (`type: provider_error`) |
+| `503` | Service Unavailable | Required dependency unavailable (e.g. Prometheus recorder, database, or marketplace target marked unhealthy) |
 
 ## Common errors and fixes
 
 ### 402 — No payment
 
 ```json
-{ "error": { "message": "<json-encoded PaymentRequired>" } }
+{
+  "x402_version": 2,
+  "resource": { "url": "/v1/chat/completions", "method": "POST" },
+  "accepts": [ { "scheme": "exact", "amount": "...", "pay_to": "...", "...": "..." } ],
+  "cost_breakdown": { "total": "...", "currency": "USDC", "fee_percent": 5, "...": "..." },
+  "error": "Payment required"
+}
 ```
 
 **Cause:** No `payment-signature` header was included.
 
-**Fix:** Parse the `PaymentRequired` from `error.message`, build and sign a Solana USDC-SPL transaction for the `amount` to the `pay_to` address, encode it as a `PaymentPayload`, base64-encode, and resend with the `payment-signature` header.
+**Fix:** The body **is** the `PaymentRequired` object (top-level fields, no OpenAI envelope). Read `accepts[0].amount` and `accepts[0].pay_to`, build and sign a Solana USDC-SPL transaction, wrap the signed bytes in a `PaymentPayload`, base64-encode the JSON, and resend with the `payment-signature` header.
 
 See [x402 Protocol](/docs/concepts/x402) for the full flow.
 
@@ -55,17 +70,22 @@ See [x402 Protocol](/docs/concepts/x402) for the full flow.
 ### 402 — Payment verification failed
 
 ```json
-{ "error": { "message": "payment verification failed: ..." } }
+{
+  "error": {
+    "type": "invalid_payment",
+    "message": "Payment verification failed. Check your transaction and retry."
+  }
+}
 ```
 
-**Cause:** The `payment-signature` header was present but the transaction could not be verified on Solana.
+**Cause:** The `payment-signature` header was present but the transaction could not be verified on Solana. The gateway intentionally returns a generic message — server-side detail (RPC errors, signer mismatch) is in the gateway logs, not the response.
 
 **Common reasons:**
 - Transaction not yet confirmed — retry after a few seconds
-- Wrong recipient address (`pay_to` mismatch)
-- Wrong asset (not USDC-SPL mint)
-- Wrong network (not Solana mainnet)
-- Amount below the required minimum
+- Wrong recipient address (`pay_to` mismatch) — separate error: `"Payment recipient does not match. Use the pay_to advertised in the 402 response."` (returned as 400 Bad Request)
+- Wrong asset (not USDC-SPL mint) — separate 400: `"Payment asset is unsupported. Use the asset advertised in the 402 response."`
+- Wrong network (not Solana mainnet) — separate 400: `"Payment network is unsupported. Use the network advertised in the 402 response."`
+- Settlement not confirmed: `"Payment transaction could not be confirmed. Please retry."`
 
 ---
 
@@ -81,11 +101,18 @@ See [x402 Protocol](/docs/concepts/x402) for the full flow.
 
 ---
 
-### 400 — Model not found
+### 404 — Model not found
 
 ```json
-{ "error": { "message": "model not found: 'my-custom-model'" } }
+{
+  "error": {
+    "type": "model_not_found",
+    "message": "model not found: my-custom-model"
+  }
+}
 ```
+
+**Status code:** `404 Not Found` (the model-not-found path returns 404, not 400 — see `GatewayError::ModelNotFound` in `crates/gateway/src/error.rs`).
 
 **Cause:** The `model` field contains an ID that isn't in the registry.
 
@@ -148,9 +175,14 @@ See [x402 Protocol](/docs/concepts/x402) for the full flow.
 ### 429 — Rate limited
 
 ```json
-{ "error": { "message": "rate limit exceeded" } }
+{
+  "error": {
+    "type": "rate_limit_exceeded",
+    "message": "Too many requests. Please slow down."
+  }
+}
 ```
 
-**Cause:** Too many requests from this IP or wallet within the rate limit window.
+**Cause:** Too many requests from this client (payer wallet, falling back to source IP) within the rate-limit window.
 
-**Fix:** Back off and retry. The default ceiling is **60 requests per 60-second sliding window** per wallet/IP — use the `X-RateLimit-Reset` header to time retries rather than a fixed backoff. See [Rate Limits](/docs/api/rate-limits).
+**Fix:** Back off and retry. The default ceiling is **60 requests per 60-second fixed window** per identified client (10 for the shared "unknown" bucket when neither a wallet nor a source IP can be derived) — use the `X-RateLimit-Reset` header or the `Retry-After` header to time retries rather than a fixed backoff. See [Rate Limits](/docs/api/rate-limits).
