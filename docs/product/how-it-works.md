@@ -36,7 +36,7 @@ This is like walking up to a vending machine and seeing the price on the display
 
 ### Step 2: Sign the Payment
 
-The agent sees the price (say, $0.002625 in USDC) and signs a payment transaction on Solana. This is a cryptographic signature -- the agent authorizes the transfer from its wallet but the money moves on the Solana blockchain, not through RCR's servers.
+The agent sees the price (say, $0.002625 in USDC) and signs a payment transaction on Solana. This is a cryptographic signature -- the agent authorizes the transfer from its wallet but the money moves on the Solana blockchain, not through Solvela's servers.
 
 The agent sends the signed payment back to Solvela along with the original request.
 
@@ -58,7 +58,7 @@ This means any HTTP client (including AI agents) can pay for API calls using a s
 
 Not every question needs the most expensive model. Asking "what's 2+2?" doesn't require the same horsepower as "write me a compiler."
 
-RCR's smart router analyzes each request across 15 dimensions -- things like whether the request contains code, requires reasoning, uses technical terminology, or needs creative writing. Based on this analysis, it picks the best model from five providers (OpenAI, Anthropic, Google, xAI, DeepSeek) for the job.
+Solvela's smart router analyzes each request across 15 dimensions -- things like whether the request contains code, requires reasoning, uses technical terminology, or needs creative writing. Based on this analysis, it picks the best model from five providers (OpenAI, Anthropic, Google, xAI, DeepSeek) for the job.
 
 The agent sends one request and gets the optimal response. No need to know which provider to call or which model to pick.
 
@@ -81,7 +81,7 @@ For expensive operations -- long multi-turn conversations, batch processing, or 
 
 Solvela offers a trustless escrow option:
 
-1. **Deposit**: The agent deposits the maximum estimated cost into an escrow account on Solana. This account is controlled by a smart contract (an on-chain program), not by RCR.
+1. **Deposit**: The agent deposits the maximum estimated cost into an escrow account on Solana. This account is controlled by a smart contract (an on-chain program), not by Solvela.
 2. **Service delivery**: Solvela processes the request and tracks the actual cost.
 3. **Settlement**: After service delivery, the smart contract releases the actual cost to the gateway operator and automatically refunds the remainder to the agent.
 4. **Timeout protection**: If the gateway never claims the funds (say, the server goes down), the agent can reclaim the full deposit after a timeout period. No trust required.
@@ -90,7 +90,7 @@ The escrow is entirely on-chain. The gateway software can claim only what was ea
 
 ## Enterprise Features
 
-Organizations can manage multiple agents and team members through RCR's enterprise features:
+Organizations can manage multiple agents and team members through Solvela's enterprise features:
 
 - **Teams**: Group agents and team members. Set spend limits per team or per hour.
 - **API keys**: Authenticate programmatically instead of with wallet signatures.
