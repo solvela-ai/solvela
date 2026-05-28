@@ -7,7 +7,7 @@ for unmodified OpenAI-format clients.
 
 ## Crates
 
-All four are published to crates.io at `0.2.1`.
+All four are published to crates.io at `0.2.3`.
 
 | Crate | crates.io | Purpose |
 |---|---|---|
@@ -121,17 +121,17 @@ was consolidated into the monorepo (PR
 
 ## Releases
 
-The four crates are published to crates.io at **`0.2.1`**:
+The four crates are published to crates.io at **`0.2.3`**:
 [`solvela-client`](https://crates.io/crates/solvela-client),
 [`solvela-client-cli`](https://crates.io/crates/solvela-client-cli),
 [`solvela-client-cli-args`](https://crates.io/crates/solvela-client-cli-args),
 [`solvela-client-proxy`](https://crates.io/crates/solvela-client-proxy).
 
-A monorepo-native publish workflow (tag-triggered on `sdks/rust/v*`) is a
-pending runbook step — the crates.io credentials are already in place, but
-until the workflow lands the publish step is run manually. The previous
-tag-triggered workflow lived in the now-archived `solvela-ai/solvela-client`
-repo.
+Releases are cut by pushing a `sdks/rust/v*` tag, which triggers
+[`.github/workflows/sdk-rust-publish.yml`](../../.github/workflows/sdk-rust-publish.yml)
+to publish all four crates in dependency order with cargo's
+`--token $CARGO_REGISTRY_TOKEN`. The previous tag-triggered workflow lived in
+the now-archived `solvela-ai/solvela-client` repo.
 
 ## License
 
