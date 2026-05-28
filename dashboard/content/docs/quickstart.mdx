@@ -138,13 +138,30 @@ First, send a request without any payment header. The gateway will respond with 
       }'
     ```
 
-    You will get a `402` response. The body looks like:
+    You will get a `402` response. The body is the `PaymentRequired` object at the top level (x402-spec compliant — not wrapped in an OpenAI error envelope):
 
     ```json
     {
-      "error": {
-        "message": "{\"x402_version\":2,\"resource\":{\"url\":\"/v1/chat/completions\",\"method\":\"POST\"},\"accepts\":[{\"scheme\":\"exact\",\"network\":\"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp\",\"amount\":\"315\",\"asset\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"pay_to\":\"<gateway-wallet>\",\"max_timeout_seconds\":300}],\"cost_breakdown\":{\"provider_cost\":\"0.000300\",\"platform_fee\":\"0.000015\",\"total\":\"0.000315\",\"currency\":\"USDC\",\"fee_percent\":5},\"error\":\"Payment required\"}"
-      }
+      "x402_version": 2,
+      "resource": { "url": "/v1/chat/completions", "method": "POST" },
+      "accepts": [
+        {
+          "scheme": "exact",
+          "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          "amount": "315",
+          "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "pay_to": "<gateway-wallet>",
+          "max_timeout_seconds": 300
+        }
+      ],
+      "cost_breakdown": {
+        "provider_cost": "0.000300",
+        "platform_fee": "0.000015",
+        "total": "0.000315",
+        "currency": "USDC",
+        "fee_percent": 5
+      },
+      "error": "Payment required"
     }
     ```
   </Tab>
@@ -156,7 +173,7 @@ First, send a request without any payment header. The gateway will respond with 
 
 ## Parse the 402 response
 
-The `error.message` field contains a JSON-encoded `PaymentRequired` object. Parse it to get the cost and the accepted payment schemes.
+The body **is** the `PaymentRequired` object — parse it directly to get the cost and the accepted payment schemes:
 
 ```json
 {
@@ -183,7 +200,7 @@ The `error.message` field contains a JSON-encoded `PaymentRequired` object. Pars
 }
 ```
 
-The `amount` field is in **atomic USDC units** (6 decimal places). `315` means `$0.000315 USDC`.
+The `amount` field is in **atomic USDC units** (6 decimal places). `315` means `$0.000315 USDC`. The trailing `error` field is a plain string banner — not the OpenAI `{ error: { ... } }` envelope.
 
 </Step>
 

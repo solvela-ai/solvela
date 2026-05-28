@@ -78,7 +78,7 @@ The following endpoints require `Authorization: Bearer <SOLVELA_ADMIN_TOKEN>`:
 
 Token comparison uses constant-time equality (`subtle::ConstantTimeEq` equivalent) to prevent timing attacks.
 
-If `SOLVELA_ADMIN_TOKEN` is not set, admin endpoints return 403.
+When `SOLVELA_ADMIN_TOKEN` is not set, the metrics endpoint is hidden and returns **404 Not Found** (rather than advertising its existence). Org-management endpoints that need an admin token return **503 Service Unavailable** with `"admin endpoint not configured"`. A request that supplies a wrong/missing token to a configured admin endpoint returns **401 Unauthorized**.
 
 ## CORS
 

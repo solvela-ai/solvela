@@ -28,20 +28,9 @@ If you are using the TypeScript, Python, Rust, or Go SDK, you never need to impl
   </Step>
 
   <Step title="Parse the 402 response">
-    The 402 body wraps the `PaymentRequired` object inside an OpenAI-style `error.message` field as a JSON string. Parse `error.message` as JSON to access the fields.
+    The 402 body **is** the `PaymentRequired` object at the top level — not wrapped in the OpenAI `{ "error": { ... } }` envelope. Parse the response body directly as JSON.
 
     ```json title="402 response body (wire shape)"
-    {
-      "error": {
-        "type": "invalid_payment",
-        "message": "{\"x402_version\":2,\"resource\":{\"url\":\"/v1/chat/completions\",\"method\":\"POST\"},\"accepts\":[{\"scheme\":\"exact\",\"network\":\"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp\",\"amount\":\"2625\",\"asset\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"pay_to\":\"<gateway-recipient-wallet>\",\"max_timeout_seconds\":300},{\"scheme\":\"escrow\",\"network\":\"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp\",\"amount\":\"2625\",\"asset\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"pay_to\":\"<gateway-recipient-wallet>\",\"max_timeout_seconds\":300,\"escrow_program_id\":\"9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU\"}],\"cost_breakdown\":{\"provider_cost\":\"0.002500\",\"platform_fee\":\"0.000125\",\"total\":\"0.002625\",\"currency\":\"USDC\",\"fee_percent\":5},\"error\":\"Payment required\"}"
-      }
-    }
-    ```
-
-    Once you `JSON.parse(error.message)`, the inner `PaymentRequired` looks like:
-
-    ```json title="Parsed PaymentRequired"
     {
       "x402_version": 2,
       "resource": { "url": "/v1/chat/completions", "method": "POST" },
@@ -75,6 +64,21 @@ If you are using the TypeScript, Python, Rust, or Go SDK, you never need to impl
     }
     ```
 
+    The trailing `error` field is a plain string banner, not an OpenAI error object. A second `accepts` entry (with `escrow_program_id`) only appears when the gateway has an escrow program configured.
+
+    A 402 returned for an **invalid** payment header (malformed, replayed, expired, amount-insufficient, etc.) uses the conventional OpenAI envelope instead:
+
+    ```json title="Invalid-payment 402 (distinct shape)"
+    {
+      "error": {
+        "type": "invalid_payment",
+        "message": "transaction has already been used; each payment signature may only be submitted once"
+      }
+    }
+    ```
+
+    Distinguish the two shapes by checking for the top-level `x402_version` field.
+
     <Warning>
     The `asset` field is the **SPL mint address** of the token being requested, not a symbolic name. For mainnet USDC this is always `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`. Verify this byte-for-byte in your client before signing — older drafts of the protocol used the literal string `"USDC-SPL"` and clients hardcoded against that will silently skip mint validation. The `network` field uses CAIP-2 form (`solana:<cluster-genesis-hash>`); the trailing identifier is the mainnet cluster genesis hash.
     </Warning>
@@ -105,7 +109,7 @@ If you are using the TypeScript, Python, Rust, or Go SDK, you never need to impl
       }'
     ```
 
-    The `PaymentPayload` envelope itself contains `scheme`, `network`, and a `payload` field with the base58-encoded signed transaction bytes. The outer header value is base64-encoded JSON; the inner signed transaction is base58. See [x402 Protocol](/docs/concepts/x402) for the exact shape.
+    The `PaymentPayload` envelope itself contains `x402_version`, `resource`, an `accepted` block (one entry from the 402 `accepts` array), and a `payload` field with the **base64**-encoded signed Solana versioned transaction bytes. The outer header value is base64-encoded JSON; the inner signed transaction is also base64 (Solana versioned-tx wire bytes). See [x402 Protocol](/docs/concepts/x402) for the exact shape.
   </Step>
 
   <Step title="Receive the LLM response">
@@ -259,9 +263,9 @@ All official SDKs support a `sessionBudget` option that caps total spending for 
 </Accordion>
 
 <Accordion title="Payment insufficient — amount too low">
-  **HTTP status:** `402 Payment Required` (new 402)
+  **HTTP status:** `400 Bad Request` with `error.type = "bad_request"` and message `"payment amount insufficient: paid {N} but cost is {M} atomic USDC"`.
 
-  The signed amount is less than the required `amount` in the accepts object. This can happen if prices change between your first 402 and your retry. The new 402 will contain the current required amount — re-sign and retry.
+  The signed amount is less than the required `amount` in the accepts object. This can happen if prices change between your first 402 and your retry. Resend the request without `payment-signature` to fetch a fresh quote, then re-sign for the new amount and retry.
 </Accordion>
 
 <Accordion title="Payment expired — max_timeout_seconds exceeded">
@@ -277,9 +281,7 @@ All official SDKs support a `sessionBudget` option that caps total spending for 
 </Accordion>
 
 <Accordion title="Wallet balance too low">
-  **HTTP status:** `402 Payment Required` (new 402, with an additional `error` field)
-
-  The gateway detected that your wallet does not hold enough USDC-SPL to cover the payment. Top up your wallet and retry. The 402 payload will include `"error": "insufficient_balance"` to distinguish this from other 402 reasons.
+  The gateway does not pre-check your wallet balance — it submits the signed transaction and surfaces the on-chain failure. If your wallet is short of USDC-SPL (or short of SOL for the signature fee), the transfer fails at the cluster, the gateway's facilitator reports settlement failure, and you receive a generic `402 invalid_payment` with `message: "Payment verification failed. Check your transaction and retry."`. Top up the wallet and re-sign with a fresh blockhash.
 </Accordion>
 
 <Warning>

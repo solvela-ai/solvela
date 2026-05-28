@@ -50,17 +50,7 @@ See [Smart Router](/docs/concepts/smart-router) for how profiles work.
 
 ### 402 Payment Required — no payment header
 
-When no `payment-signature` header is present, the gateway returns `402`. Parse `error.message` as JSON to get cost and payment instructions.
-
-```json
-{
-  "error": {
-    "message": "{\"x402_version\":2,\"resource\":{\"url\":\"/v1/chat/completions\",\"method\":\"POST\"},\"accepts\":[{\"scheme\":\"exact\",\"network\":\"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp\",\"amount\":\"2625\",\"asset\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"pay_to\":\"<gateway-wallet>\",\"max_timeout_seconds\":300},{\"scheme\":\"escrow\",\"network\":\"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp\",\"amount\":\"2625\",\"asset\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"pay_to\":\"<gateway-wallet>\",\"max_timeout_seconds\":300,\"escrow_program_id\":\"9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU\"}],\"cost_breakdown\":{\"provider_cost\":\"0.002500\",\"platform_fee\":\"0.000125\",\"total\":\"0.002625\",\"currency\":\"USDC\",\"fee_percent\":5},\"error\":\"Payment required\"}"
-  }
-}
-```
-
-The decoded `PaymentRequired` object has this structure:
+When no `payment-signature` header is present, the gateway returns `402` with the `PaymentRequired` object at the **top level** of the response body (x402-spec compliant — not wrapped in the OpenAI `{ "error": { ... } }` envelope). Parse the body as JSON directly:
 
 ```json
 {
@@ -74,6 +64,15 @@ The decoded `PaymentRequired` object has this structure:
       "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
       "pay_to": "<gateway-recipient-wallet>",
       "max_timeout_seconds": 300
+    },
+    {
+      "scheme": "escrow",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "amount": "2625",
+      "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "pay_to": "<gateway-recipient-wallet>",
+      "max_timeout_seconds": 300,
+      "escrow_program_id": "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
     }
   ],
   "cost_breakdown": {
@@ -86,6 +85,23 @@ The decoded `PaymentRequired` object has this structure:
   "error": "Payment required"
 }
 ```
+
+The trailing `error` field is a plain string banner. The second `accepts` entry (`escrow_program_id` present) is only included when the gateway has an escrow program configured.
+
+### 402 Payment Required — invalid payment header
+
+A `payment-signature` header that fails to decode, replays a previous transaction, or fails on-chain verification returns `402` with the **OpenAI error envelope** (distinct from the no-payment shape above):
+
+```json
+{
+  "error": {
+    "type": "invalid_payment",
+    "message": "transaction has already been used; each payment signature may only be submitted once"
+  }
+}
+```
+
+`error.type` for this 402 is always `"invalid_payment"`; `error.message` is a plain-text reason string, never a JSON-encoded payload.
 
 ### 200 OK — successful completion
 

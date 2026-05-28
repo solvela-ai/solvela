@@ -100,10 +100,12 @@ Run:
 ```bash
 docker run -p 8402:8402 \
   -e OPENAI_API_KEY=sk-... \
-  -e SOLVELA_SOLANA_RPC_URL=https://api.devnet.solana.com \
-  -e SOLVELA_SOLANA_RECIPIENT_WALLET=your-wallet \
+  -e SOLVELA_SOLANA__RPC_URL=https://api.devnet.solana.com \
+  -e SOLVELA_SOLANA__RECIPIENT_WALLET=your-wallet \
   solvela
 ```
+
+The canonical env-var separator is **double underscore** (Fly.io convention; see `crates/gateway/src/main.rs:70`). The legacy single-underscore form (`SOLVELA_SOLANA_RPC_URL`) is also accepted as a fallback so existing deployments keep working.
 
 ## Fly.io Deployment
 
@@ -155,9 +157,9 @@ fly deploy
 ```bash
 fly secrets set OPENAI_API_KEY=sk-...
 fly secrets set ANTHROPIC_API_KEY=sk-ant-...
-fly secrets set SOLVELA_SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
-fly secrets set SOLVELA_SOLANA_RECIPIENT_WALLET=your-wallet-pubkey
-fly secrets set SOLVELA_SOLANA_FEE_PAYER_KEY=your-fee-payer-key
+fly secrets set SOLVELA_SOLANA__RPC_URL=https://api.mainnet-beta.solana.com
+fly secrets set SOLVELA_SOLANA__RECIPIENT_WALLET=your-wallet-pubkey
+fly secrets set SOLVELA_SOLANA__FEE_PAYER_KEY=your-fee-payer-key
 fly secrets set SOLVELA_ADMIN_TOKEN=your-admin-token
 fly secrets set DATABASE_URL=postgres://...
 fly secrets set REDIS_URL=redis://...
@@ -173,14 +175,14 @@ Fly.io probes `GET /health` every 15 seconds with a 5-second timeout and 10-seco
 Before deploying to production:
 
 - [ ] Set `SOLVELA_ENV=production` (disables localhost CORS origins)
-- [ ] Set `SOLVELA_ADMIN_TOKEN` (protects `/metrics` and `/v1/escrow/health`)
+- [ ] Set `SOLVELA_ADMIN_TOKEN` (protects `/metrics`, `/v1/escrow/health`, and the org-management endpoints)
 - [ ] Set `SOLVELA_SESSION_SECRET` to a stable value (auto-generated secret changes on restart)
-- [ ] Set `SOLVELA_SOLANA_RPC_URL` to a mainnet-beta endpoint
+- [ ] Set `SOLVELA_SOLANA__RPC_URL` to a mainnet-beta endpoint
 - [ ] Configure `DATABASE_URL` with production PostgreSQL credentials
 - [ ] Configure `REDIS_URL` with production Redis
 - [ ] Set `SOLVELA_CORS_ORIGINS` to your dashboard domain
 - [ ] Verify all provider API keys are set
-- [ ] Set `SOLVELA_SOLANA_RECIPIENT_WALLET` to your production wallet
-- [ ] Configure fee payer keys if using escrow
+- [ ] Set `SOLVELA_SOLANA__RECIPIENT_WALLET` to your production wallet
+- [ ] Configure fee payer keys if using escrow (`SOLVELA_SOLANA__FEE_PAYER_KEY` plus optional `_2` through `_8` for rotation)
 - [ ] Run `cargo test` and `cargo clippy` before deploying
 - [ ] Review `RUST_LOG` level (avoid `debug` in production)
