@@ -160,7 +160,7 @@ There is no data-subject-access workflow because there is no data subject under 
 **Question**: Could the PDA escrow account be classified as a "custodial wallet" by regulators?
 
 **Relevant facts**:
-- The escrow program has been **deployed to Solana mainnet** (program ID: `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`, tx: `XGtZf6KHWnis6bY8T8NCULsngdC2kqy3GkuppVriyFFqJ8ud2NiBkAgcBRsYjvUMmMZcLUmYBw9RhhUnNNRYnZx`) with a 20-test suite (14 LiteSVM integration tests in `programs/escrow/tests/integration.rs` + 6 unit tests in `programs/escrow/tests/unit.rs`).
+- The escrow program has been **deployed to Solana mainnet** (program ID: `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`, tx: `XGtZf6KHWnis6bY8T8NCULsngdC2kqy3GkuppVriyFFqJ8ud2NiBkAgcBRsYjvUMmMZcLUmYBw9RhhUnNNRYnZx`) with a 33-test suite (24 LiteSVM integration tests in `programs/escrow/tests/integration.rs` + 9 unit tests in `programs/escrow/tests/unit.rs`).
 - The PDA is controlled by the on-chain program logic, not by the gateway operator. No one holds a private key to the PDA.
 - The program logic enforces: claim amounts cannot exceed deposited amount, claims must occur before expiry slot, agent can unilaterally reclaim after timeout.
 - **Upgrade authority is currently retained** by the deployer (`B7reP7rzzYsKwteQqCgwfx76xQmNTL4bQ7yk4tQTxL1A`). This allows bug fixes but regulators could argue de facto control. Authority can be revoked at any time via `solana program set-upgrade-authority --final` to make the program immutable. **Pre-acquisition action item**: verify current authority on-chain (`solana program show 9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`) and decide whether to finalize before any due diligence cycle.

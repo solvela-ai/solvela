@@ -12,7 +12,7 @@ In an escrow payment, USDC is held by a smart contract on Solana -- a program wi
 
 ## What happens if the payment fails?
 
-If the payment signature is invalid, the amount is wrong, or the transaction didn't settle on Solana, RCR rejects the request immediately with a clear error message. The agent is not charged. No partial charges, no pending states. Either the payment is verified and the request proceeds, or it doesn't.
+If the payment signature is invalid, the amount is wrong, or the transaction didn't settle on Solana, Solvela rejects the request immediately with a clear error message. The agent is not charged. No partial charges, no pending states. Either the payment is verified and the request proceeds, or it doesn't.
 
 ## What happens if the LLM provider is down after payment?
 
@@ -34,7 +34,7 @@ Not today. Solvela currently supports only Solana with USDC-SPL. The architectur
 
 ## How much does it cost?
 
-The cost per request depends on the model used and the number of tokens consumed. RCR adds a **5% platform fee** on top of the provider's cost. Every response includes a cost breakdown:
+The cost per request depends on the model used and the number of tokens consumed. Solvela adds a **5% platform fee** on top of the provider's cost. Every response includes a cost breakdown:
 
 - **Provider cost**: What the LLM provider charges (e.g., $0.0025)
 - **Platform fee**: 5% of the provider cost (e.g., $0.000125)
@@ -57,7 +57,7 @@ The escrow is a smart contract on Solana that holds funds in a neutral account u
 
 **How it works:**
 1. You deposit the maximum estimated cost into the escrow (a program-controlled account on Solana).
-2. RCR processes your request.
+2. Solvela processes your request.
 3. The smart contract releases the actual cost to the gateway operator and refunds the rest to you.
 4. If the gateway never claims (server crash, network issue), you reclaim everything after the timeout.
 

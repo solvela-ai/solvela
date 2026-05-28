@@ -35,9 +35,9 @@ solvela/
 │   └── escrow/           (Anchor program, USDC-SPL escrow)
 │
 ├── dashboard/            (Next.js 16 frontend)
-├── sdks/                 (TypeScript, Python, Go, MCP, providers)
+├── sdks/                 (typescript, python, go, rust, ai-sdk-provider, openclaw-provider, signer-core, mcp, cli-npm)
 ├── config/               (models.toml, services.toml, default.toml)
-├── migrations/           (PostgreSQL schema, 7 files)
+├── migrations/           (PostgreSQL schema, 9 files)
 └── docs/CODEMAPS/        (This documentation)
 ```
 
@@ -133,7 +133,7 @@ See [dependencies.md](dependencies.md)
 ### Add Database Schema
 1. Create migration SQL file in `migrations/`
 2. Use idempotent `CREATE TABLE IF NOT EXISTS`
-3. Run `cargo sqlx prepare --database-url=$DATABASE_URL`
+3. (sqlx is used in runtime-checked mode — no offline `sqlx prepare` step is required)
 4. Add queries to `crates/gateway/src/` (sqlx checked)
 See [data.md](data.md)
 
@@ -163,14 +163,15 @@ See [architecture.md](architecture.md) + [dependencies.md](dependencies.md)
 | router | Yes (scorer, profiles) | Yes (routing decisions) | N/A |
 | protocol | Yes (serialization, types) | Yes (wire format) | N/A |
 | cli | Yes (commands, parsing) | Yes (integration) | No |
-| dashboard | Yes (Vitest) | Yes (RTL) | Yes (Playwright) |
+| dashboard | Yes (Vitest) | N/A | No |
 
 Run tests:
 ```bash
 cargo test                              # All Rust tests
-npm --prefix dashboard test             # Frontend unit tests
-npm --prefix dashboard run e2e          # E2E tests (Playwright)
+npm --prefix dashboard test             # Frontend unit tests (vitest)
 ```
+
+The dashboard has no `e2e` npm script — Playwright is pulled in only as a transitive `@vitest/browser-playwright` dep. End-to-end testing is not yet wired up.
 
 ---
 
@@ -183,7 +184,7 @@ npm --prefix dashboard run e2e          # E2E tests (Playwright)
 
 ### Environment Variables
 - Provider API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.
-- Solana: `SOLVELA_SOLANA_RPC_URL`, `SOLVELA_SOLANA_RECIPIENT_WALLET`
+- Solana: `SOLVELA_SOLANA__RPC_URL`, `SOLVELA_SOLANA__RECIPIENT_WALLET` (Fly.io double-underscore is canonical; legacy single-underscore form is also accepted as a fallback)
 - Database (optional): `DATABASE_URL`, `REDIS_URL`
 - Admin: `SOLVELA_ADMIN_TOKEN`, `SOLVELA_DEV_BYPASS_PAYMENT`
 
@@ -207,8 +208,8 @@ See [dependencies.md](dependencies.md) for full env var list.
 
 ### Resource Usage
 - **In-memory replay protection** — 10k entries max (120s TTL, LRU eviction)
-- **Response cache** — 24-hour TTL per response
-- **Binary size** — ~15MB (release build, 3-stage Docker)
+- **Response cache** — 10-minute TTL per response (default; see `cache::ResponseCacheConfig::default_ttl_secs = 600`)
+- **Binary size** — ~15MB (release build, 2-stage Docker)
 
 ---
 

@@ -1,6 +1,12 @@
 # Runbook: SDK consolidation into the monorepo
 
-> Status as of 2026-05-12: Go SDK done ([#252](https://github.com/solvela-ai/solvela/pull/252), [#257](https://github.com/solvela-ai/solvela/pull/257)). TypeScript, Python, and Rust client remaining.
+> **Status as of 2026-05-28: COMPLETE.** All four SDKs are in-tree at `sdks/<lang>/` and have shipped `.github/workflows/sdks-<lang>.yml`:
+> - Go — `sdks/go/` (tag `sdks/go/v0.1.0`)
+> - TypeScript — `sdks/typescript/` (tag `sdks/typescript/v0.2.2`)
+> - Python — `sdks/python/` (tag `sdks/python/v0.2.0`)
+> - Rust client — `sdks/rust/` (tag `sdks/rust/v0.2.3`, with monorepo-native crates.io publish via `release-crates.yml`)
+>
+> This runbook is preserved as a reference pattern for any future SDK pulls. The per-language sections below describe the procedure that was used; do not re-run them against repos that have already been archived.
 
 ## Why this exists
 

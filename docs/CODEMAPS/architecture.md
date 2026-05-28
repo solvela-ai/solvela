@@ -95,18 +95,20 @@ Return Task (completed) with artifacts + receipt
 
 ### routes/
 - **chat/** — Chat completions; handlers in mod.rs, cost.rs, payment.rs, provider.rs, response.rs
-- **orgs/** — Org CRUD, teams, API keys, audit logs, budget enforcement, analytics
+- **orgs/** — Org CRUD, teams, API keys, audit logs, budget enforcement, analytics, stats
 - **models.rs** — List available models
-- **services.rs** — Service marketplace registry
-- **escrow.rs** — Escrow config, claim status
+- **services.rs** — Service marketplace registry (loads `config/services.toml`)
+- **escrow.rs** — Escrow config + health
+- **escrow_settle.rs** — Escrow claim/settle endpoint
 - **health.rs** — Health check (returns 200 OK)
-- **metrics.rs** — Prometheus `/metrics` endpoint (if configured)
-- **pricing.rs** — Model pricing endpoint
+- **metrics.rs** — Prometheus `/metrics` endpoint
+- **pricing.rs** — Model pricing endpoint (served at `/pricing`)
 - **nonce.rs** — Nonce account status
 - **images.rs** — Image proxy (for vision models)
 - **admin_stats.rs** — Admin-only system statistics
-- **proxy.rs** — Generic provider proxy helper
+- **proxy.rs** — Generic per-service x402 proxy
 - **debug_headers.rs** — Debug request headers
+- **stats.rs** — Wallet-scoped usage stats
 - **supported.rs** — List supported models/providers
 
 ### middleware/
@@ -143,11 +145,12 @@ Return Task (completed) with artifacts + receipt
 - **config.rs** — `AppConfig` (Solana RPC, recipient wallet, USDC mint, server port)
 - **error.rs** — `GatewayError` enum with HTTP status mapping
 - **payment_util.rs** — Cost calculation helpers
+- **secret.rs** — Redacted secret-string wrapper
 - **usage.rs** — `UsageTracker` (PostgreSQL spend logs, budget checks)
-- **cache.rs** — `ResponseCache` (Redis); wallet-agnostic by model+messages+temp
+- **cache/** — `ResponseCache` (Redis + LRU fallback); wallet-agnostic by model+messages+temp; submodules `exact`, `semantic`, `embedder`
 - **audit.rs** — Fire-and-forget audit log writer (async, no .await on hot path)
 - **security.rs** — Secret redaction, API key verification
-- **balance_monitor.rs** — Background task: monitor fee payer USDC balance
+- **balance_monitor.rs** — Background task: monitor fee-payer SOL balance (not USDC)
 - **services.rs** — `ServiceRegistry` (loads config/services.toml)
 - **service_health.rs** — Health tracking for external services
 - **session.rs** — Session token generation/verification (HMAC)
@@ -156,18 +159,18 @@ Return Task (completed) with artifacts + receipt
 
 | Table | Purpose | Key Fields |
 |-------|---------|-----------|
-| `spend_logs` | One row per LLM request | wallet_address, model, cost_usdc, input/output_tokens, tx_signature, created_at |
-| `wallet_budgets` | Per-wallet spend limits | wallet_address (PK), daily_limit_usdc, monthly_limit_usdc, total_spent_usdc |
+| `spend_logs` | One row per LLM request | wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, request_id, session_id, created_at |
+| `wallet_budgets` | Per-wallet spend limits | wallet_address (PK), hourly/daily/monthly_limit_usdc, total_spent_usdc |
 | `organizations` | Billing entity | id (UUID), name, slug (unique), owner_wallet |
 | `teams` | Org sub-division | id, org_id (FK), name |
 | `org_members` | Wallet→Org mapping | id, org_id (FK), wallet_address, role (owner/admin/member) |
 | `team_wallets` | Team→Wallet mapping | id, team_id (FK), wallet_address |
-| `api_keys` | Org-scoped API credentials | id, org_id (FK), key_hash (unique), key_prefix, expires_at, revoked_at |
-| `audit_logs` | Action tracking | id, org_id (FK), wallet_address, action, details, created_at |
-| `escrow_claim_queue` | Pending USDC claims | id, agent_address, service_id, amount_usdc, tx_signature, status, next_retry_at |
-| `hourly_spend_limits` | Per-org hourly caps | org_id (FK), hour_start, spent_usdc |
+| `team_budgets` | Per-team spend caps | team_id (PK/FK), hourly/daily/monthly_limit_usdc |
+| `api_keys` | Org-scoped API credentials | id, org_id (FK), key_hash (unique), key_prefix, role, expires_at, revoked_at |
+| `audit_logs` | Action tracking | id, org_id (FK), actor_wallet, actor_api_key (FK), action, resource_type, resource_id, details, ip_address, created_at |
+| `escrow_claim_queue` | Pending USDC claims | id, agent_pubkey, service_id (BYTEA), claim_amount (BIGINT atomic), deposited_amount, status, attempts, tx_signature, next_retry_at, updated_at |
 
-Migrations in `migrations/`: 001 (spend_logs, budgets) → 007 (hourly limits).
+Migrations in `migrations/`: 001 (spend_logs, budgets) → 009 (audit actor admin); see [data.md](data.md) for the per-migration breakdown.
 
 ## x402 Crate (Protocol)
 
@@ -211,20 +214,23 @@ Migrations in `migrations/`: 001 (spend_logs, budgets) → 007 (hourly limits).
 | Route | Component | Purpose |
 |-------|-----------|---------|
 | `/` | `page.tsx` | Public landing page |
-| `/dashboard` | `dashboard/page.tsx` | Overview (connected wallet, recent requests) |
+| `/dashboard` | `dashboard/page.tsx` | Dashboard root |
+| `/dashboard/overview` | `dashboard/overview/page.tsx` | Overview (recent requests) |
 | `/dashboard/usage` | `dashboard/usage/page.tsx` | Spend analytics, charts |
 | `/dashboard/models` | `dashboard/models/page.tsx` | Available models, pricing, info |
 | `/dashboard/wallet` | `dashboard/wallet/page.tsx` | Wallet balances, transaction history |
 | `/dashboard/settings` | `dashboard/settings/page.tsx` | Org/team settings, API keys, budget limits |
 | `/metrics` | `metrics/page.tsx` | Public metrics, system stats |
-| `/docs/*` | `docs/layout.tsx` | Markdown documentation (via Source) |
+| `/sponsor` | `sponsor/page.tsx` | Sponsors / backers page |
+| `/docs/[[...slug]]` | `docs/[[...slug]]/page.tsx` | Markdown documentation (Fumadocs) |
 
 Key files:
-- `lib/api.ts` — API client wrapper (gateway proxy)
-- `lib/auth.ts` — Wallet connection, session tokens
+- `lib/api.ts` — Flat async helpers (`fetchHealth`, `fetchModels`, `fetchOrgs`, `createApiKey`, etc.)
+- `lib/auth.ts` — API-key getter/setter helpers backed by `localStorage`
 - `lib/mock-data.ts` — Mock data for dev (when API unavailable)
 - `lib/theme-config.ts` — Design tokens
 - `lib/metrics-aggregator.ts` — Aggregates usage data (hourly, daily, monthly)
+- `src/proxy.ts` — Server-side gateway proxy helper
 
 ## SDKs
 
@@ -259,26 +265,32 @@ Key files:
 | `redis` | 1.2 | Cache layer (optional) |
 | `reqwest` | 0.12 | HTTP client |
 | `tracing` | 0.1 | Structured logging |
-| `metrics` + `prometheus` | 0.24/0.18 | Metrics export |
+| `metrics` + `metrics-exporter-prometheus` | 0.24/0.18 | Metrics export |
 | `ed25519-dalek` + `curve25519-dalek` | 2/4 | Solana sig verification |
 | `thiserror` | 2 | Error macro (libraries) |
 | `anyhow` | 1 | Error context (binaries) |
-| `tower-http` | 0.6 | Middleware layers |
+| `tower` + `tower-http` | 0.5/0.6 | Middleware layers |
 
 ## Environment Variables (SOLVELA_ prefix, RCR_ deprecated fallback)
+
+Double-underscore (Fly.io convention) is the canonical separator; single-underscore form is also accepted as a fallback. Legacy `RCR_` prefix still works with a deprecation warning.
 
 | Variable | Required | Purpose | Example |
 |----------|----------|---------|---------|
 | `SOLVELA_HOST` | No (default 0.0.0.0) | Listen address | 127.0.0.1 |
 | `SOLVELA_PORT` | No (default 8402) | Listen port | 8080 |
-| `SOLVELA_SOLANA_RPC_URL` | Yes | Solana RPC endpoint | https://api.mainnet-beta.solana.com |
-| `SOLVELA_SOLANA_RECIPIENT_WALLET` | Yes | USDC recipient | Hpq... (wallet addr) |
-| `SOLVELA_SOLANA_USDC_MINT` | No (default) | USDC mint | EPjFWaJY... |
+| `SOLVELA_SOLANA__RPC_URL` | Yes | Solana RPC endpoint | https://api.mainnet-beta.solana.com |
+| `SOLVELA_SOLANA__RECIPIENT_WALLET` | Yes | USDC recipient | Hpq... (wallet addr) |
+| `SOLVELA_SOLANA__USDC_MINT` | No (defaults to mainnet USDC) | USDC mint | EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v |
+| `SOLVELA_SOLANA__FEE_PAYER_KEY` | No | Fee payer hot wallet | base64/JSON private key |
+| `SOLVELA_SOLANA__ESCROW_PROGRAM_ID` | No | Escrow program ID | 9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU |
 | `DATABASE_URL` | No | PostgreSQL conn (optional) | postgres://user:pass@localhost/solvela |
 | `REDIS_URL` | No | Redis conn (optional) | redis://localhost:6379 |
 | `OPENAI_API_KEY` | No | OpenAI API key | sk-... |
 | `ANTHROPIC_API_KEY` | No | Anthropic API key | sk-ant-... |
 | `GOOGLE_API_KEY` | No | Google Gemini key | ... |
+| `XAI_API_KEY` | No | xAI Grok key | xai-... |
+| `DEEPSEEK_API_KEY` | No | DeepSeek key | sk-... |
 | `SOLVELA_DEV_BYPASS_PAYMENT` | No | Skip payment (dev only) | true |
 | `SOLVELA_ADMIN_TOKEN` | No | Admin endpoints access token | secret |
 | `RUST_LOG` | No (default gateway=info) | Log level filter | debug,tower_http=debug |
@@ -301,7 +313,7 @@ No need for a running server; all tests are isolated and fast.
 
 ## Deployment
 
-- **Dockerfile** — 3-stage Cargo build; binary at `/app/solvela-gateway`
+- **Dockerfile** — 2-stage build (`rust:1.88-slim-trixie` builder → `debian:trixie-slim` runtime, non-root `solvela` user); binary at `/app/solvela-gateway`
 - **fly.toml** — Fly.io config; port 8402, region ord (Chicago)
 - **docker-compose.yml** — Local dev: PostgreSQL 16, Redis 7
 - **Dashboard** — Next.js on Vercel (`solvela.vercel.app`)
