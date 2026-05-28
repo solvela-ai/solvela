@@ -19,13 +19,15 @@ MDX content for the public docs site at `/docs`. Fumadocs traverses this tree, r
 | `api/` | HTTP API reference — endpoints, 402 shape, headers |
 | `concepts/` | Conceptual docs — x402, Solvela vs traditional APIs, pricing, escrow |
 | `sdks/` | Per-SDK quickstarts (Python, TypeScript, Go, MCP) |
+| `enterprise/` | Enterprise / org-tier docs — orgs, teams, API keys, audit log, budgets |
+| `operations/` | Operator docs — deploy, observability, runbooks |
 
 ## For AI Agents
 
 ### Working In This Directory
 - Every new MDX file needs to appear in the relevant `meta.json` — Fumadocs does not auto-list files.
 - Keep pages focused on one task; split long docs into a folder with its own `meta.json`.
-- Use Fumadocs callouts / tabs via the components exposed in `src/app/components/docs/` or `src/components/mdx.tsx`.
+- Use Fumadocs callouts / tabs via the MDX components exposed in `src/app/components/docs/mdx/`.
 - Code blocks: include a language tag so Shiki highlights correctly.
 
 ### Testing Requirements

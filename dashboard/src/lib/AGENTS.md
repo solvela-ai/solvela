@@ -12,10 +12,11 @@ Non-component library code — data access, helpers, content source, theme/icon 
 | `api.ts` | HTTP client for the Solvela gateway (server-side fetch wrappers) |
 | `auth.ts` | Auth session helpers (client-side) |
 | `mock-data.ts` | Deterministic mock datasets for local dev / demos |
+| `metrics-aggregator.ts` | Aggregates the gateway's Prometheus / admin stats into shapes the dashboard pages render |
+| `diagram-colors.ts` | Shared colour tokens used by landing-page diagrams (escrow flow, etc.) |
 | `source.ts` | Fumadocs content source — exposes the `content/docs` tree |
 | `utils.ts` | General helpers — `cn()`, formatters, number/time utilities |
 | `icons.tsx` | Central icon exports |
-| `layout.shared.tsx` | Shared layout fragments used by both dashboard + docs |
 | `theme-config.ts` | Colour palette, typography tokens, per-theme overrides |
 
 ## Subdirectories

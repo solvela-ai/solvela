@@ -7,7 +7,9 @@
 All application code for the dashboard + docs site. Routing lives under `app/`; shared UI lives under `components/`; library code and data access live under `lib/`; tests live under `__tests__/`.
 
 ## Key Files
-_(no loose files — see subdirectories)_
+| File | Description |
+|------|-------------|
+| `proxy.ts` | Host-based proxy/rewrite logic exported for Next.js middleware — keeps `/_next/`, search API, and common static paths on canonical routes |
 
 ## Subdirectories
 | Directory | Purpose |
@@ -16,7 +18,6 @@ _(no loose files — see subdirectories)_
 | `components/` | Shared React components (see `components/AGENTS.md`) |
 | `lib/` | Helpers, API client, theme config, data mocks (see `lib/AGENTS.md`) |
 | `__tests__/` | Vitest unit tests (see `__tests__/AGENTS.md`) |
-| `shims/` | Local shims for third-party packages (e.g., `fumadocs-ui`) |
 | `test/` | Test setup helpers |
 | `types/` | Ambient type declarations |
 

@@ -4,12 +4,10 @@
 # components
 
 ## Purpose
-Shared React components used across the dashboard and (where appropriate) the docs site. Split into: `charts` (Recharts wrappers), `layout` (shell/sidebar/topbar), `ui` (primitives like cards/badges), plus `mdx.tsx` for docs prose rendering.
+Shared React components used across the dashboard and (where appropriate) the docs site. Split into: `charts` (Recharts wrappers), `layout` (shell/sidebar/topbar), `landing` (marketing-page panels), and `ui` (primitives like cards/badges). MDX component mapping for the docs site lives at `src/app/components/docs/mdx/`, not here.
 
 ## Key Files
-| File | Description |
-|------|-------------|
-| `mdx.tsx` | MDX component mapping (H1/H2/links/code blocks) used by Fumadocs |
+_(no loose files — see subdirectories)_
 
 ## Subdirectories
 | Directory | Purpose |
@@ -17,6 +15,7 @@ Shared React components used across the dashboard and (where appropriate) the do
 | `charts/` | Recharts-based visualizations (see `charts/AGENTS.md`) |
 | `layout/` | App shell — sidebar, topbar, Shell wrapper (see `layout/AGENTS.md`) |
 | `ui/` | Primitive UI components — card, badge, stat, status dot (see `ui/AGENTS.md`) |
+| `landing/` | Marketing landing page panels — hero, escrow diagram, provider row, SDK CTAs, ticker (no AGENTS.md yet) |
 
 ## For AI Agents
 

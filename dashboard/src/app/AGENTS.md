@@ -13,6 +13,7 @@ Next.js App Router entry. `layout.tsx` is the root layout (html/body, font, prov
 | `page.tsx` | Marketing landing page |
 | `globals.css` | Tailwind directives + global CSS variables (design tokens) |
 | `favicon.ico` | Tab icon |
+| `sitemap.ts` | Next.js `MetadataRoute.Sitemap` — emits the public `/sitemap.xml` |
 
 ## Subdirectories
 | Directory | Purpose |
@@ -22,6 +23,8 @@ Next.js App Router entry. `layout.tsx` is the root layout (html/body, font, prov
 | `docs/` | Fumadocs-backed docs site at `/docs/*` (see `docs/AGENTS.md`) |
 | `providers/` | Client-side React providers (theme, etc.) (see `providers/AGENTS.md`) |
 | `components/` | Route-scoped components (e.g., docs MDX helpers) (see `components/AGENTS.md`) |
+| `metrics/` | Public trust-evidence page at `/metrics` — on-chain IDs, gateway health, license posture; SSR, no analytics (single `page.tsx`) |
+| `sponsor/` | Sponsorship / backers landing page (single `page.tsx`) |
 
 ## For AI Agents
 

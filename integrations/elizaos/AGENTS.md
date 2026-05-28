@@ -26,12 +26,12 @@ ElizaOS plugin that lets ElizaOS agents pay for LLM calls via Solvela. Exposes a
 
 ### Testing Requirements
 ```bash
-cd integrations/elizaos && npm install && npm test
+cd integrations/elizaos && npm install && npm run build
 ```
-(Use whatever script `package.json` actually defines; add one if missing.)
+There is no test suite yet — `npm test` is a placeholder that prints `no tests yet`. The README's Limitations section tracks this.
 
 ### Common Patterns
-- Thin action wrapper around a Solvela HTTP call — handle 402 by asking ElizaOS to sign, then retry with `PAYMENT-SIGNATURE` header.
+- Thin action wrapper around a Solvela HTTP call. Today the 402 path returns a cost summary; when wallet signing lands, the action should ask ElizaOS to sign and retry with the `PAYMENT-SIGNATURE` header.
 
 ## Dependencies
 

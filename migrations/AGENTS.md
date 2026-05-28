@@ -16,6 +16,8 @@ PostgreSQL SQL migrations. Applied automatically on gateway startup via `run_mig
 | `005_organizations.sql` | Enterprise org/team/member tables + API-key table |
 | `006_audit_logs.sql` | Per-org audit-log table |
 | `007_hourly_spend_limits.sql` | Adds hourly spend limits alongside existing monthly budgets |
+| `008_escrow_claim_queue_updated_at.sql` | Adds `updated_at` to `escrow_claim_queue` so the worker can recover stale `in_progress` claims |
+| `009_audit_actor_admin.sql` | Records actor identity for audit entries written through the global admin token (G5 H6) |
 
 ## Subdirectories
 _(none)_

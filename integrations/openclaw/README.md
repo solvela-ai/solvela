@@ -9,7 +9,7 @@ The Solvela monorepo ships **two** OpenClaw plugins with different shapes. Pick 
 | Plugin | Path | OpenClaw hook | Status |
 |---|---|---|---|
 | **`@solvela/router`** (this package) | `integrations/openclaw/` | `intercept` / `interceptStream` | Stable v0.1.0 OSS plugin. Works against older OpenClaw versions and supports the classic intercept pattern. |
-| **`@solvela/openclaw-provider`** | `sdks/openclaw-provider/` | `wrapStreamFn` | Newer first-class **provider** plugin — registers Solvela in OpenClaw's model picker so users select it like any other LLM. Built on OpenClaw's post-refactor `wrapStreamFn` contract. `1.0.0-draft`, not yet on npm; publish gated on the OpenClaw LTS announcement. |
+| **`@solvela/openclaw-provider`** | `sdks/openclaw-provider/` | `wrapStreamFn` + `catalog` + `resolveDynamicModel` | Newer first-class **provider** plugin — registers Solvela in OpenClaw's model picker so users select it like any other LLM. Built on OpenClaw's post-refactor `wrapStreamFn` contract. `0.1.0`, not yet on npm; publish gated on the OpenClaw LTS announcement. |
 
 If you're on a recent OpenClaw and want users to see "Solvela" in the model picker, use **`@solvela/openclaw-provider`** (once it ships). If you want a drop-in plugin that intercepts existing LLM calls without UI changes, use this package.
 

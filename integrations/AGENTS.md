@@ -17,9 +17,9 @@ _(no loose files — see subdirectories)_
 
 > **Two OpenClaw plugins coexist on purpose.** This directory ships
 > `@solvela/router` (intercept-style, v0.1.0, stable). The newer
-> `@solvela/openclaw-provider` (wrapStreamFn-style, v1.0.0-draft, not yet
-> published) lives at `../sdks/openclaw-provider/`. Don't merge them —
-> they target different OpenClaw plugin contracts. See
+> `@solvela/openclaw-provider` (wrapStreamFn / catalog / resolveDynamicModel
+> surface, v0.1.0, not yet published) lives at `../sdks/openclaw-provider/`.
+> Don't merge them — they target different OpenClaw plugin contracts. See
 > `openclaw/README.md` for the user-facing "which one to install"
 > decision matrix.
 

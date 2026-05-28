@@ -10,6 +10,7 @@ The authenticated product dashboard. One subdirectory per top-level page: Overvi
 | File | Description |
 |------|-------------|
 | `layout.tsx` | Shell layout — renders `Shell`/`Sidebar`/`Topbar` around `{children}` |
+| `page.tsx` | `/dashboard` index — redirects to `/dashboard/overview` |
 
 ## Subdirectories
 | Directory | Purpose |
