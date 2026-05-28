@@ -34,7 +34,7 @@ async def main():
         print(f"  {m.id} — {m.display_name}")
 
     # Estimate cost (triggers 402)
-    cost = await client.estimate_cost("gpt-4o")
+    cost = await client.estimate_cost("openai/gpt-4o")
     print(f"Cost: {cost.cost_breakdown.total} {cost.cost_breakdown.currency}")
 
 asyncio.run(main())
@@ -51,7 +51,7 @@ openai = OpenAICompat(client)
 
 # Same interface as the OpenAI Python SDK
 response = await openai.chat.completions.create(
-    model="gpt-4o",
+    model="openai/gpt-4o",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 ```

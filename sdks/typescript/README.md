@@ -59,7 +59,7 @@ const client = new SolvelaClient();
 const openai = new OpenAICompat(client);
 
 const response = await openai.chat.completions.create({
-  model: 'gpt-4',
+  model: 'openai/gpt-4o',
   messages: [{ role: 'user', content: 'Hello!' }],
 });
 ```
@@ -67,7 +67,7 @@ const response = await openai.chat.completions.create({
 ## Streaming
 
 ```typescript
-const request = new ChatRequest('gpt-4', [
+const request = new ChatRequest('openai/gpt-4o', [
   new ChatMessage('user', 'Tell me a story.'),
 ]);
 

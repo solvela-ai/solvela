@@ -6,17 +6,18 @@ transparently via the x402 protocol using USDC on Solana.
 
 ## Install
 
-> **⚠️ Not yet published to npm.** `@solvela/openclaw-provider` is at `1.0.0-draft`
-> and `"private": true` in `package.json`. Until first publish, install from a
-> local checkout:
+> **⚠️ Not yet published to npm.** `@solvela/openclaw-provider` is at `0.1.0`
+> in `package.json` (not published; intended to ship under
+> `@solvela/openclaw-provider` when distribution is greenlit). Until first
+> publish, install from a local checkout:
 >
 > ```bash
 > npm install /path/to/sdks/openclaw-provider
 > ```
 >
-> The `@solvela/sdk` dependency is wired as `file:../typescript` during
-> development; it switches to a real npm version range when this package is
-> published.
+> The `@solvela/signer-core` dependency (shared x402 primitives) is wired as
+> `file:../signer-core` in the lockfile during development; the manifest
+> declares `^0.1.0`, which will resolve from npm once `signer-core` ships.
 
 Once published, the canonical install will be:
 
@@ -100,8 +101,8 @@ header into every outbound inference request **before** the stream fires:
 1. Before each call, the plugin probes the gateway with the request body to
    obtain a 402 PaymentRequired response containing the cost and accepted
    payment schemes.
-2. The plugin calls `createPaymentHeader` from `@solvela/sdk` to produce a
-   base64-encoded signed USDC transaction.
+2. The plugin calls `createPaymentHeader` from `@solvela/signer-core` to
+   produce a base64-encoded signed USDC transaction.
 3. The `payment-signature` header is injected into the outbound request.
 4. The original stream function executes with the signed header.
 
@@ -147,8 +148,8 @@ npm test                  # Run all tests
 ## Publishing
 
 **Do not publish** until Phase 4 approval. The `package.json` version is
-`1.0.0-draft` to signal pre-release status. Publishing is gated on private
-user testing (Phase 3) and a go/no-go from the user before Phase 4 distribution.
+`0.1.0` and publishing is gated on private user testing (Phase 3) plus a
+go/no-go from the user before Phase 4 distribution.
 
 ## Documentation
 

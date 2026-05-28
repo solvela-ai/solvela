@@ -14,7 +14,7 @@ Tests in this repo split into three tiers, each catching a different class of bu
 | **Integration** | `tests/integration/` | seconds | HTTP shape, header names, JSON encoding (via mocked transport) | Whether the real gateway agrees with your fixture |
 | **Live** | `tests/live/` | depends | The actual wire contract against a running gateway | Performance under load, real-user concurrency |
 
-CI (GitHub Actions) runs Unit + Integration on every push for Python 3.10, 3.11, 3.12. Live tests are gated by `SOLVELA_LIVE_TESTS=1` and never run in CI — you run them yourself.
+CI (GitHub Actions) runs Unit + Integration on every push for Python 3.10 and 3.12 (oldest-supported + current, per `.github/workflows/sdks-python.yml`). Live tests are gated by `SOLVELA_LIVE_TESTS=1` and never run in CI — you run them yourself.
 
 ---
 
@@ -60,7 +60,7 @@ gh pr checks <PR-number>
 ```
 
 **What CI catches that local doesn't:**
-- Differences between Python 3.10, 3.11, 3.12 (you have one local Python; CI has all three)
+- Differences between Python 3.10 and 3.12 (you have one local Python; CI runs both)
 - Forgotten files (`git add` missed something) — CI installs from a fresh clone, so anything not committed breaks the build
 
 **Doesn't catch:** anything live or wallet-related.
@@ -166,36 +166,44 @@ SOLVELA_GATEWAY_URL=https://your-staging-gateway .venv/bin/python scripts/smoke.
 
 ## Cycle 5 — Tag a release
 
-The release pipeline (`.github/workflows/release-pypi.yml`) fires when you push a `v*` tag. It:
+> **Status (2026-05):** There is no tag-triggered PyPI publish workflow in the
+> monorepo yet — `.github/workflows/sdks-python.yml` only runs lint + tests.
+> Until that workflow lands, releases are cut by manually running `python -m
+> build && python -m twine upload dist/*` after bumping `pyproject.toml`. The
+> steps below describe the target automated flow (mirrors the tag-triggered
+> publish workflows already in place for `sdks/rust/` and `sdks/typescript/`).
 
-1. Verifies the git tag matches `pyproject.toml`'s `version` (refuses to publish if they disagree).
-2. Builds the wheel + sdist.
-3. Publishes to PyPI via OIDC Trusted Publishing (no API token needed).
-4. Emits PEP 740 attestations (cryptographic proof the release came from this repo).
-5. Creates a GitHub Release.
+When the publish workflow is wired up, it will fire on a `sdks/python/v*` tag and:
+
+1. Verify the git tag matches `pyproject.toml`'s `version` (refuses to publish if they disagree).
+2. Build the wheel + sdist.
+3. Publish to PyPI via OIDC Trusted Publishing (no API token needed).
+4. Emit PEP 740 attestations (cryptographic proof the release came from this repo).
+5. Create a GitHub Release.
 
 ### Steps
 
 ```bash
 # 1. Bump the version in pyproject.toml. Use semver:
-#    - 0.1.3 -> 0.1.4 for bug fixes
-#    - 0.1.4 -> 0.2.0 for new features (breaking is OK pre-1.0)
+#    - 0.2.0 -> 0.2.1 for bug fixes
+#    - 0.2.x -> 0.3.0 for new features (breaking is OK pre-1.0)
 #    - 0.x   -> 1.0.0 when you're ready to commit to API stability
-$EDITOR pyproject.toml   # change `version = "0.1.3"` to whatever
+$EDITOR sdks/python/pyproject.toml   # change `version = "0.2.0"` to whatever
 
 # 2. Commit the bump on its own.
-git add pyproject.toml
-git commit -m "chore(release): bump to 0.1.4"
-git push origin main
+git add sdks/python/pyproject.toml
+git commit -m "chore(release): bump solvela-sdk to 0.2.1"
+# push branch + open PR; merge after CI is green
 
 # 3. Tag it (annotated, with a message).
-git tag -a v0.1.4 -m "Release 0.1.4: review fixes for #7, #8, #11, #12"
-git push origin v0.1.4
+git tag -a sdks/python/v0.2.1 -m "solvela-sdk 0.2.1"
+git push origin sdks/python/v0.2.1
 
-# 4. Watch the release workflow.
-gh run watch
-# or
-gh run list --workflow=release-pypi.yml --limit 1
+# 4. (Today, while no publish workflow exists) cut the release manually:
+cd sdks/python
+.venv/bin/python -m pip install build twine
+.venv/bin/python -m build
+.venv/bin/python -m twine upload dist/*
 ```
 
 **Pass criteria:** the workflow finishes green, and the package shows up on https://pypi.org/project/solvela-sdk/.
@@ -243,16 +251,16 @@ For a week after a release, watch:
 
 ---
 
-## What I would do for THIS release
+## What I would do for any release
 
-You just merged 4 PRs (#7, #8, #11, #12). My honest recommendation in priority order:
+Priority order:
 
 1. **Cycle 1** locally on `main`. (~30 sec) — sanity check the merged result.
 2. **Cycle 4** — manual smoke test against any reachable gateway, even a local docker-compose dev gateway. (~1 min)
 3. If a staging gateway exists, **Cycle 3** live tests. (~30 sec)
-4. **Cycle 5** — bump to `0.1.4`, tag, push. The post-release Cycle 6 watching is automatic if you check email for GitHub notifications.
+4. **Cycle 5** — bump the patch/minor in `pyproject.toml`, tag, push. The post-release Cycle 6 watching is automatic if you check email for GitHub notifications.
 
-If no gateway is reachable at all, you can ship to PyPI as `0.1.4-rc1` (release candidate), let yourself or a friend pip-install it, run the smoke test, and only then promote to `0.1.4`. That's the lowest-risk path that doesn't require infrastructure.
+If no gateway is reachable at all, you can ship to PyPI as a release candidate (e.g. `0.2.1-rc1`), let yourself or a friend pip-install it, run the smoke test, and only then promote to the real version. That's the lowest-risk path that doesn't require infrastructure.
 
 ---
 

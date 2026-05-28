@@ -47,8 +47,9 @@ Send a chat completion request.
 ```bash
 solvela chat "Explain Solana in one sentence."
 
-# Specify a model
-solvela chat --model gpt-4o "Explain Solana in one sentence."
+# Specify a model (use the canonical provider/model_id form, or a known alias)
+solvela chat --model openai/gpt-4o "Explain Solana in one sentence."
+solvela chat --model sonnet "Explain Solana in one sentence."
 
 # Use a routing profile (eco, auto, premium, free)
 solvela chat --model auto "Complex analysis task..."

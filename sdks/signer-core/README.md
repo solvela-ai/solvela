@@ -4,7 +4,7 @@ Shared x402 protocol primitives for the Solvela ecosystem — payment signing, 4
 
 ## Status
 
-**Internal package (`private: true` in `package.json`)**. Used by `sdks/mcp/`, `sdks/openclaw-provider/`, and `sdks/ai-sdk-provider/` as a workspace dependency. Not published to npm. If you need to sign x402 payments from your own application, depend on [`@solvela/sdk`](../typescript) instead — it bundles a `KeypairSigner` built on these primitives.
+**Internal package — not published to npm**. Used by `sdks/mcp/`, `sdks/openclaw-provider/`, and `sdks/ai-sdk-provider/` via a `file:../signer-core` workspace dependency (the `^0.1.0` semver range in some manifests is forward-looking; today it resolves locally). If you need to sign x402 payments from your own application, depend on [`@solvela/sdk`](../typescript) instead — it bundles a `KeypairSigner` built on these primitives.
 
 ## What's inside
 
