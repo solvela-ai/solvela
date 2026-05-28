@@ -8,59 +8,60 @@
 
 ## Route Tree
 
+Routes as registered in `crates/gateway/src/lib.rs::build_router`.
+
 ```
-GET  /
 GET  /.well-known/agent.json
 GET  /health
 POST /a2a
 
 GET  /v1/models
-GET  /v1/models/{model_id}
+GET  /v1/supported
 POST /v1/chat/completions         [x402 payment required]
 POST /v1/images/generations       [x402 payment required]
 
-GET  /v1/pricing
+GET  /pricing
 GET  /v1/services
+POST /v1/services/register
+POST /v1/services/{service_id}/proxy
+
 GET  /v1/escrow/config
-GET  /v1/escrow/claim/{tx_sig}
+GET  /v1/escrow/health
+POST /v1/escrow/settle
 
 GET  /v1/nonce
-POST /v1/nonce/reserve
-
-GET  /debug/headers
+GET  /v1/wallet/{address}/stats
 
 GET  /metrics
-GET  /admin/stats
+GET  /v1/admin/stats
 
-POST /orgs
-GET  /orgs/{org_id}
-PATCH /orgs/{org_id}
-DELETE /orgs/{org_id}                                    [RequireOrgAdmin]
+POST /v1/orgs                                           [requires OrgContext or admin token]
+GET  /v1/orgs                                           [list]
+GET  /v1/orgs/{id}
 
-POST /orgs/{org_id}/teams
-GET  /orgs/{org_id}/teams
-POST /orgs/{org_id}/teams/{team_id}/wallets             [RequireOrgAdmin]
+POST /v1/orgs/{id}/teams
+GET  /v1/orgs/{id}/teams
+POST /v1/orgs/{id}/teams/{tid}/wallets
+GET  /v1/orgs/{id}/teams/{tid}/wallets
 
-POST /orgs/{org_id}/members
-GET  /orgs/{org_id}/members
-DELETE /orgs/{org_id}/members/{member_id}               [RequireOrgAdmin]
+POST /v1/orgs/{id}/members
+GET  /v1/orgs/{id}/members
 
-POST /orgs/{org_id}/api-keys                            [RequireOrgAdmin]
-GET  /orgs/{org_id}/api-keys
-DELETE /orgs/{org_id}/api-keys/{key_id}                 [RequireOrgAdmin]
+POST /v1/orgs/{id}/api-keys
+GET  /v1/orgs/{id}/api-keys
+DELETE /v1/orgs/{id}/api-keys/{kid}
 
-POST /orgs/{org_id}/budgets
-GET  /orgs/{org_id}/budgets
-PUT  /orgs/{org_id}/budgets/{wallet}                    [RequireOrgAdmin]
+PUT  /v1/orgs/{id}/teams/{tid}/budget
+GET  /v1/orgs/{id}/teams/{tid}/budget
+PUT  /v1/wallets/{wallet}/budget
+GET  /v1/wallets/{wallet}/budget
 
-GET  /orgs/{org_id}/analytics
-GET  /orgs/{org_id}/audit-logs                          [RequireOrgAdmin]
+GET  /v1/orgs/{id}/stats
+GET  /v1/orgs/{id}/teams/{tid}/stats
+GET  /v1/orgs/{id}/audit-logs
 ```
 
 ## Public Routes
-
-### GET /
-Landing page (redirect or static content).
 
 ### GET /.well-known/agent.json
 **Handler:** `a2a/agent_card.rs`  
@@ -92,15 +93,12 @@ Landing page (redirect or static content).
 ## Chat Completions (x402 Payment Required)
 
 ### POST /v1/chat/completions
-**Handler:** `routes/chat/mod.rs` (~776 lines)  
-**Middleware:**
-1. TraceLayer (request/response logging)
-2. CorsLayer (CORS headers)
-3. RateLimitLayer (per-wallet/org sliding window)
-4. PromptGuardLayer (injection/jailbreak/PII detection)
-5. RequestIdLayer (generates X-Request-ID)
-6. X402Layer (extracts PAYMENT-SIGNATURE header)
-7. MetricsLayer (Prometheus request count/latency)
+**Handler:** `routes/chat/mod.rs` (~890 lines)  
+**Middleware (see "Middleware Chain" section below for the full router-level stack):**
+- `rate_limit::rate_limit` — per-wallet token bucket
+- `api_key::extract_api_key` — sets `OrgContext` when a `solvela_k_` bearer is present (additive)
+- `x402::extract_payment` — decodes the `payment-signature` request header into `PaymentInfo` extension (additive; never returns 402)
+- `TraceLayer`, `metrics::record_metrics`, `CorsLayer`, security headers
 
 **Request:**
 ```json
@@ -152,15 +150,15 @@ Landing page (redirect or static content).
 
 ### GET /v1/models
 **Handler:** `routes/models.rs`  
-**Response:** List all available models from ModelRegistry.
+**Response:** List all available models from ModelRegistry (OpenAI-compatible `data: [...]` shape).
 
-### GET /v1/models/{model_id}
-**Handler:** `routes/models.rs`  
-**Response:** Detailed model info (pricing, capabilities, context window).
+### GET /v1/supported
+**Handler:** `routes/supported.rs`  
+**Response:** List of supported model IDs/providers (lighter shape, no pricing).
 
-### GET /v1/pricing
+### GET /pricing
 **Handler:** `routes/pricing.rs`  
-**Response:** Per-token pricing table (input/output costs by model).
+**Response:** Per-token pricing table (input/output costs by model). Note: this endpoint is mounted at `/pricing`, not `/v1/pricing`.
 
 ---
 
@@ -175,12 +173,16 @@ Landing page (redirect or static content).
 ## Escrow Integration
 
 ### GET /v1/escrow/config
-**Handler:** `routes/escrow.rs`  
-**Response:** Escrow program config (PDA, fee payer, nonce accounts).
+**Handler:** `routes/escrow.rs::escrow_config`  
+**Response:** Escrow program config (program ID, USDC mint, fee payer, recipient).
 
-### GET /v1/escrow/claim/{tx_sig}
-**Handler:** `routes/escrow.rs`  
-**Response:** Claim status for a given transaction signature.
+### GET /v1/escrow/health
+**Handler:** `routes/escrow.rs::escrow_health`  
+**Response:** Health of the escrow claim worker (queue depth, recent failures).
+
+### POST /v1/escrow/settle
+**Handler:** `routes/escrow_settle.rs::handle_settle`  
+**Purpose:** Submit/settle a pending claim (operator/admin).
 
 ---
 
@@ -188,19 +190,7 @@ Landing page (redirect or static content).
 
 ### GET /v1/nonce
 **Handler:** `routes/nonce.rs`  
-**Response:** Current nonce account state (for durable transactions).
-
-### POST /v1/nonce/reserve
-**Handler:** `routes/nonce.rs`  
-**Response:** Reserve a nonce account for a client transaction.
-
----
-
-## Debug Routes
-
-### GET /debug/headers
-**Handler:** `routes/debug_headers.rs`  
-**Response:** Echo back request headers (for debugging payment encoding).
+**Response:** Current durable-nonce account state. There is no `POST /v1/nonce/reserve` route — nonce reservation happens internally during claim submission.
 
 ---
 
@@ -219,17 +209,23 @@ Landing page (redirect or static content).
 - `provider_requests{provider, status}` — Provider call counts
 - `escrow_claims{status}` — Escrow claim submissions
 
-### GET /admin/stats
+### GET /v1/admin/stats
 **Handler:** `routes/admin_stats.rs`  
-**Requires:** `SOLVELA_ADMIN_TOKEN` header  
+**Requires:** `Authorization: Bearer <SOLVELA_ADMIN_TOKEN>`  
 **Response:** System-wide statistics (uptime, memory, connections).
+
+### GET /v1/wallet/{address}/stats
+**Handler:** `routes/stats.rs::wallet_stats`  
+**Response:** Per-wallet aggregated usage stats.
 
 ---
 
-## Organization Management (API Key or Wallet Auth)
+## Organization Management (API Key or Admin Token Auth)
 
-### POST /orgs
-**Handler:** `routes/orgs/crud.rs`  
+Org-scoped routes use the additive `extract_api_key` middleware that populates an `OrgContext` from a `solvela_k_…` / `rcr_k_…` bearer token (legacy prefix). Handlers themselves do per-route auth — there are not currently any `RequireOrg` / `RequireOrgAdmin` extractors gating these routes at the router layer; instead the handler reads `Option<Extension<OrgContext>>` and falls back to the `SOLVELA_ADMIN_TOKEN` path. Mutating routes accept admin-token auth as a superuser bypass.
+
+### POST /v1/orgs
+**Handler:** `routes/orgs/crud.rs::create_org`  
 **Request:**
 ```json
 {
@@ -239,26 +235,20 @@ Landing page (redirect or static content).
 ```
 **Response:** Organization object with ID, owner_wallet.
 
-### GET /orgs/{org_id}
-**Handler:** `routes/orgs/crud.rs`  
-**Response:** Org details.
+### GET /v1/orgs
+**Handler:** `routes/orgs/crud.rs::list_orgs`  
+**Response:** List of orgs visible to the caller.
 
-### PATCH /orgs/{org_id}
-**Handler:** `routes/orgs/crud.rs`  
-**Requires:** `RequireOrgAdmin` extractor  
-**Request:** Partial org update (name, slug)
-
-### DELETE /orgs/{org_id}
-**Handler:** `routes/orgs/crud.rs`  
-**Requires:** `RequireOrgAdmin`
+### GET /v1/orgs/{id}
+**Handler:** `routes/orgs/crud.rs::get_org`  
+**Response:** Org details. Note: no `PATCH` or `DELETE` route is currently registered.
 
 ---
 
 ## Teams
 
-### POST /orgs/{org_id}/teams
-**Handler:** `routes/orgs/teams.rs`  
-**Requires:** `RequireOrgAdmin`  
+### POST /v1/orgs/{id}/teams
+**Handler:** `routes/orgs/teams.rs::create_team`  
 **Request:**
 ```json
 {
@@ -266,13 +256,12 @@ Landing page (redirect or static content).
 }
 ```
 
-### GET /orgs/{org_id}/teams
-**Handler:** `routes/orgs/teams.rs`  
+### GET /v1/orgs/{id}/teams
+**Handler:** `routes/orgs/teams.rs::list_teams`  
 **Response:** List all teams in org.
 
-### POST /orgs/{org_id}/teams/{team_id}/wallets
-**Handler:** `routes/orgs/teams.rs`  
-**Requires:** `RequireOrgAdmin`  
+### POST /v1/orgs/{id}/teams/{tid}/wallets
+**Handler:** `routes/orgs/teams.rs::assign_wallet`  
 **Request:**
 ```json
 {
@@ -281,13 +270,16 @@ Landing page (redirect or static content).
 ```
 **Purpose:** Associate wallet with team (for team-scoped budgets/usage).
 
+### GET /v1/orgs/{id}/teams/{tid}/wallets
+**Handler:** `routes/orgs/teams.rs::list_team_wallets`  
+**Response:** List wallets assigned to the team.
+
 ---
 
 ## Members
 
-### POST /orgs/{org_id}/members
-**Handler:** `routes/orgs/crud.rs`  
-**Requires:** `RequireOrgAdmin`  
+### POST /v1/orgs/{id}/members
+**Handler:** `routes/orgs/teams.rs::add_member`  
 **Request:**
 ```json
 {
@@ -296,21 +288,16 @@ Landing page (redirect or static content).
 }
 ```
 
-### GET /orgs/{org_id}/members
-**Handler:** `routes/orgs/crud.rs`  
-**Response:** List all members (wallet, role, created_at).
-
-### DELETE /orgs/{org_id}/members/{member_id}
-**Handler:** `routes/orgs/crud.rs`  
-**Requires:** `RequireOrgAdmin`
+### GET /v1/orgs/{id}/members
+**Handler:** `routes/orgs/teams.rs::list_members`  
+**Response:** List all members (wallet, role, created_at). No DELETE route is currently registered.
 
 ---
 
 ## API Keys
 
-### POST /orgs/{org_id}/api-keys
-**Handler:** `routes/orgs/api_keys.rs`  
-**Requires:** `RequireOrgAdmin`  
+### POST /v1/orgs/{id}/api-keys
+**Handler:** `routes/orgs/api_keys.rs::create_api_key`  
 **Request:**
 ```json
 {
@@ -323,133 +310,109 @@ Landing page (redirect or static content).
 ```json
 {
   "id": "uuid",
-  "key": "solv_...",
-  "key_prefix": "solv_1a2b3c...",
+  "key": "solvela_k_...",
+  "key_prefix": "solvela_k_1a2b3c...",
   "name": "...",
   "created_at": "..."
 }
 ```
-Note: Full key only shown once; store securely.
+Note: Full key only shown once; store securely. The literal prefix is `solvela_k_` (the legacy `rcr_k_` prefix is still accepted on the auth side).
 
-### GET /orgs/{org_id}/api-keys
-**Handler:** `routes/orgs/api_keys.rs`  
+### GET /v1/orgs/{id}/api-keys
+**Handler:** `routes/orgs/api_keys.rs::list_api_keys`  
 **Response:** List API keys (without full key value).
 
-### DELETE /orgs/{org_id}/api-keys/{key_id}
-**Handler:** `routes/orgs/api_keys.rs`  
-**Requires:** `RequireOrgAdmin`
+### DELETE /v1/orgs/{id}/api-keys/{kid}
+**Handler:** `routes/orgs/api_keys.rs::revoke_api_key`
 
 ---
 
 ## Budgets
 
-### POST /orgs/{org_id}/budgets
-**Handler:** `routes/orgs/budget.rs`  
+Budgets are scoped per-team or per-wallet (not per-org-collection as a flat list).
+
+### PUT /v1/orgs/{id}/teams/{tid}/budget
+**Handler:** `routes/orgs/budget.rs::set_team_budget`  
 **Request:**
 ```json
 {
-  "wallet_address": "Hpq...",
+  "hourly_limit_usdc": 25.0,
   "daily_limit_usdc": 100.0,
   "monthly_limit_usdc": 2000.0
 }
 ```
 
-### GET /orgs/{org_id}/budgets
-**Handler:** `routes/orgs/budget.rs`  
-**Response:** List all budgets for org.
+### GET /v1/orgs/{id}/teams/{tid}/budget
+**Handler:** `routes/orgs/budget.rs::get_team_budget`
 
-### PUT /orgs/{org_id}/budgets/{wallet}
-**Handler:** `routes/orgs/budget.rs`  
-**Requires:** `RequireOrgAdmin`
+### PUT /v1/wallets/{wallet}/budget
+**Handler:** `routes/orgs/budget.rs::set_wallet_budget`
+
+### GET /v1/wallets/{wallet}/budget
+**Handler:** `routes/orgs/budget.rs::get_wallet_budget`
 
 ---
 
-## Analytics
+## Analytics / Stats
 
-### GET /orgs/{org_id}/analytics
-**Handler:** `routes/orgs/analytics.rs`  
-**Response:** Aggregated spend data (daily, hourly trends).
-```json
-{
-  "period": "2026-05-27T00:00:00Z",
-  "total_spend_usdc": 123.45,
-  "request_count": 456,
-  "top_models": ["gpt-4o", "claude-opus"],
-  "hourly_breakdown": [...]
-}
-```
+### GET /v1/orgs/{id}/stats
+**Handler:** `routes/orgs/analytics.rs::get_org_stats`  
+**Response:** Aggregated org spend data (totals, top models, by-period breakdowns).
+
+### GET /v1/orgs/{id}/teams/{tid}/stats
+**Handler:** `routes/orgs/analytics.rs::get_team_stats`  
+**Response:** Team-scoped spend stats.
 
 ---
 
 ## Audit Logs
 
-### GET /orgs/{org_id}/audit-logs
-**Handler:** `routes/orgs/audit.rs`  
-**Requires:** `RequireOrgAdmin`  
+### GET /v1/orgs/{id}/audit-logs
+**Handler:** `routes/orgs/audit.rs::list_audit_logs`  
 **Response:** Paginated list of org actions (team created, member added, budget updated, etc.).
 
 ---
 
 ## Middleware Chain (lib.rs, build_router())
 
-Layers applied **bottom-up** (innermost runs last):
+Layers applied to the router via `.layer(...)`. In Axum each `.layer()` wraps the layers below it (outer layers run first), so the order in code reads top-down as outer→inner:
 
 ```
-1. TraceLayer
-   └─ Logs every request/response with structured fields
-
-2. CorsLayer
-   └─ Adds CORS headers (Access-Control-Allow-Origin, etc.)
-
-3. RequestBodyLimitLayer (max 1MB)
-   └─ Protects against unbounded uploads
-
-4. TimeoutLayer (30s request timeout)
-   └─ Kills slow requests
-
-5. ConcurrencyLimitLayer (configurable max)
-   └─ Bounds in-flight request count
-
-6. RateLimitLayer
-   └─ Per-wallet/org sliding window (defaults from config)
-
-7. RequestIdLayer
-   └─ Generates/tracks X-Request-ID header
-
-8. PromptGuardLayer
-   └─ Checks for prompt injection, jailbreaks, PII
-
-9. X402Layer (payment extraction)
-   └─ Decodes PAYMENT-SIGNATURE header
-   └─ Returns 402 if missing (for protected routes)
-
-10. MetricsLayer
-    └─ Emits Prometheus metrics
-
-11. Router (actual handler)
-    └─ Routes request to handler function
+rate_limit::rate_limit        (token-bucket per wallet/IP; skips /health, /v1/models, /metrics)
+Extension(rate_limiter)       (shared limiter state)
+api_key::extract_api_key      (additive — sets OrgContext when a solvela_k_ bearer token is present)
+x402::extract_payment         (additive — decodes payment-signature header, never returns 402)
+RequestBodyLimitLayer(10 MiB)
+TraceLayer::new_for_http
+metrics::record_metrics
+CorsLayer
+SetResponseHeaderLayer × N    (x-content-type-options, etc.)
 ```
+
+Note: `x402::extract_payment` is intentionally additive — it never returns 402 from the middleware. Routes (notably `routes/chat/mod.rs`) return 402 themselves when they require payment and `PaymentInfo` is absent from extensions. This matches CLAUDE.md architectural rule #8 ("Payment middleware extracts, routes enforce").
+
+The default request-body cap is 10 MiB, not 1 MB. There is no separate `PromptGuardLayer` or `RequestIdLayer` mounted at the router level today (helpers exist as modules but are not wired as Tower layers).
 
 ---
 
 ## Extractors (Axum Patterns)
 
 ### RequireOrg
-Extracts `OrgContext` from request extensions. Populated by `api_key` middleware.
-- Requires: Valid API key (in Authorization header) or wallet signature
-- Provides: `org_id`, `wallet_address`, `role`
+Defined in `middleware/api_key.rs`. Extracts `OrgContext` from request extensions; errors `401` if absent. The current router does **not** wrap individual routes with this extractor — handlers consume `Option<Extension<OrgContext>>` directly and pair it with the admin-token bypass. The extractor is available for future tightening.
 
 ### RequireOrgAdmin
-Like `RequireOrg`, but requires role `admin` or `owner`.
+Like `RequireOrg`, but additionally requires role `admin` or `owner`.
 
 ### OrgContext
 ```rust
 pub struct OrgContext {
     pub org_id: Uuid,
-    pub wallet_address: String,
-    pub role: String,  // "owner", "admin", "member"
+    pub api_key_id: Uuid,
+    pub role: OrgRole,  // OrgRole::{Owner, Admin, Member}
 }
 ```
+
+`OrgContext` does **not** carry a wallet address — it is keyed off the API key that authenticated the request.
 
 ---
 

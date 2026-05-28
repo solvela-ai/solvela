@@ -20,7 +20,8 @@ src/app/
 │
 ├── dashboard/
 │   ├── layout.tsx                      (dashboard layout, sidebar nav)
-│   ├── page.tsx                        (overview: wallet, recent requests)
+│   ├── page.tsx                        (dashboard root)
+│   ├── overview/page.tsx               (overview: recent requests)
 │   ├── usage/page.tsx                  (spend analytics, trends)
 │   ├── models/page.tsx                 (model catalog, pricing)
 │   ├── wallet/page.tsx                 (wallet balances, transaction history)
@@ -31,7 +32,7 @@ src/app/
 │
 └── docs/
     ├── layout.tsx                      (docs layout with sidebar)
-    └── [...slug]/page.tsx              (markdown docs (via Source))
+    └── [[...slug]]/page.tsx            (Fumadocs catch-all route)
 ```
 
 ## Core Components
@@ -108,40 +109,42 @@ Uses **Recharts** for charting.
 ## Utilities
 
 ### lib/api.ts
-HTTP client wrapper for gateway API.
+Flat collection of async helpers calling the gateway directly (no nested `api` object). Each helper is an exported `async function`.
 ```typescript
-export const api = {
-  chat: {
-    completions(req: ChatRequest): Promise<ChatResponse>,
-    stream(req: ChatRequest): ReadableStream,
-  },
-  models: {
-    list(): Promise<Model[]>,
-    get(id: string): Promise<Model>,
-  },
-  orgs: {
-    get(id: string): Promise<Org>,
-    update(id, data),
-    members: { list(), add(), remove() },
-    teams: { list(), create() },
-    apiKeys: { list(), create(), revoke() },
-    budgets: { list(), set() },
-  },
-  wallet: {
-    balance(): Promise<Decimal>,
-    history(): Promise<Transaction[]>,
-  },
-};
+// Public read endpoints
+export async function fetchHealth(): Promise<HealthResponse>;
+export async function fetchPricing(): Promise<PricingResponse>;
+export async function fetchModels(): Promise<{ data: PricingResponse["models"] }>;
+export async function fetchServices(): Promise<ServicesResponse | null>;
+export async function fetchEscrowConfig(): Promise<EscrowConfig | null>;
+export async function fetchEscrowHealth(): Promise<EscrowHealth | null>;
+export async function fetchPublicMetrics(): Promise<PublicMetricsResponse>;
+
+// Admin (require Authorization: Bearer <admin-token>)
+export async function fetchAdminStats(token: string): Promise<AdminStatsResponse>;
+
+// Org-scoped (require Authorization: Bearer <solvela_k_...>)
+export async function fetchOrgs(): Promise<ApiResult<OrgEntry[]>>;
+export async function fetchTeams(orgId: string): Promise<ApiResult<TeamEntry[]>>;
+export async function fetchMembers(orgId: string): Promise<ApiResult<MemberEntry[]>>;
+export async function fetchApiKeys(orgId: string): Promise<ApiResult<ApiKeyEntry[]>>;
+export async function createApiKey(...): Promise<ApiResult<CreateApiKeyResponse>>;
+export async function revokeApiKey(...): Promise<ApiResult<void>>;
+export async function fetchAuditLogs(orgId: string): Promise<ApiResult<AuditLogEntry[]>>;
+export async function fetchOrgStats(orgId: string): Promise<ApiResult<OrgStats>>;
+export async function createTeam(orgId: string, name: string): Promise<ApiResult<TeamEntry>>;
+export async function setTeamBudget(...): Promise<ApiResult<TeamBudget>>;
+export async function fetchTeamBudget(...): Promise<ApiResult<TeamBudget>>;
 ```
+The dashboard does not call `/v1/chat/completions` directly from the client — chat is exercised through the gateway only.
 
 ### lib/auth.ts
-Wallet connection + session management.
+Thin `localStorage`-backed API-key helpers. The dashboard authenticates via API key, not a Solana wallet adapter.
 ```typescript
-export const useAuth = () => {
-  const wallet = useWallet();  // Solana wallet adapter
-  const [session, setSession] = useState(null);
-  // ... connect, sign message, verify signature
-};
+export function getApiKey(): string | null;
+export function setApiKey(key: string): void;
+export function clearApiKey(): void;
+export function hasApiKey(): boolean;
 ```
 
 ### lib/mock-data.ts
@@ -202,40 +205,17 @@ Responsive breakpoints: `sm` (640px), `md` (768px), `lg` (1024px), `xl` (1280px)
 
 ## API Integration
 
-**Proxy-based access:**
-- Dashboard sends requests to `/api/proxy/*`
-- Proxy forwards to `http://localhost:8402/v1/*`
-- Handles auth headers, request/response transformation
+The dashboard calls the gateway over HTTP directly from client components using `lib/api.ts` helpers; the gateway base URL comes from `NEXT_PUBLIC_GATEWAY_URL`. A server-side helper at `src/proxy.ts` exists for cases where the request must be forwarded with a server-only token.
 
-See `src/proxy.ts`:
-```typescript
-export default async function handler(req, res) {
-  const { path, method, body } = req;
-  const response = await fetch(`http://localhost:8402${path}`, {
-    method,
-    headers: { "Authorization": `Bearer ${process.env.GATEWAY_API_KEY}` },
-    body,
-  });
-  return res.json(response.json());
-}
-```
+The literal route `/api/proxy/*` does **not** exist — the only server route under `app/api/` is `app/api/search/route.ts` (the Fumadocs search endpoint).
 
 ## Testing
 
-- **Vitest** — Unit tests for utils, hooks
-- **React Testing Library** — Component tests
+- **Vitest** — Unit tests for utils and `lib/` helpers
 - **Config:** `vitest.config.ts`
-- **Test files:** `src/__tests__/*.test.ts` (or `.tsx`)
+- **Test files:** `dashboard/src/__tests__/*.test.ts` (currently `mock-data.test.ts`, `api.test.ts`, `utils.test.ts`, `metrics-aggregator.test.ts`)
 
-```typescript
-import { render, screen } from '@testing-library/react';
-import { Dashboard } from './dashboard/page';
-
-test('displays welcome message', () => {
-  render(<Dashboard />);
-  expect(screen.getByText(/welcome/i)).toBeInTheDocument();
-});
-```
+Run with `npm --prefix dashboard test`. The dashboard does not currently bundle React component tests or an end-to-end Playwright suite — there is no `e2e` npm script in `dashboard/package.json`.
 
 ## Build & Deployment
 

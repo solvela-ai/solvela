@@ -22,7 +22,7 @@ AI agents are becoming autonomous. They run 24/7, make decisions, and call APIs 
 - **API keys** require an account, and if the key leaks, someone else runs up the bill.
 - **Monthly subscriptions** don't make sense for agents that might make 3 calls or 3 million.
 
-Solvela (RCR) solves this. An AI agent just needs a Solana wallet with some USDC (a dollar-pegged stablecoin), and it can pay for any LLM API call instantly, with no account and no human in the loop.
+Solvela solves this. An AI agent just needs a Solana wallet with some USDC (a dollar-pegged stablecoin), and it can pay for any LLM API call instantly, with no account and no human in the loop.
 
 ## The Payment Flow
 
@@ -30,7 +30,7 @@ Every request follows three steps:
 
 ### Step 1: Ask the Price
 
-The agent sends a request to RCR -- for example, "I want to ask Claude a question about quantum physics." RCR looks at the request, figures out which model to use and how much it will cost, and responds with the price.
+The agent sends a request to Solvela -- for example, "I want to ask Claude a question about quantum physics." Solvela looks at the request, figures out which model to use and how much it will cost, and responds with the price.
 
 This is like walking up to a vending machine and seeing the price on the display before you insert your coins.
 
@@ -38,17 +38,17 @@ This is like walking up to a vending machine and seeing the price on the display
 
 The agent sees the price (say, $0.002625 in USDC) and signs a payment transaction on Solana. This is a cryptographic signature -- the agent authorizes the transfer from its wallet but the money moves on the Solana blockchain, not through RCR's servers.
 
-The agent sends the signed payment back to RCR along with the original request.
+The agent sends the signed payment back to Solvela along with the original request.
 
 ### Step 3: Verify and Deliver
 
-RCR verifies that the payment is valid and settled on Solana. If everything checks out, RCR forwards the request to the LLM provider (OpenAI, Anthropic, Google, etc.), gets the response, and sends it back to the agent.
+Solvela verifies that the payment is valid and settled on Solana. If everything checks out, Solvela forwards the request to the LLM provider (OpenAI, Anthropic, Google, etc.), gets the response, and sends it back to the agent.
 
 The whole process takes under a second.
 
 ## What Is x402?
 
-RCR uses a protocol called **x402**. The name comes from HTTP status code 402 -- "Payment Required" -- which was reserved in the original HTTP spec for future use but never standardized.
+Solvela uses a protocol called **x402**. The name comes from HTTP status code 402 -- "Payment Required" -- which was reserved in the original HTTP spec for future use but never standardized.
 
 x402 adds a payment layer to HTTP, the same protocol that powers every website. Think of it like how HTTPS added encryption to HTTP -- x402 adds payments. When a server needs payment, it returns a 402 response with the price and accepted payment methods. The client pays and retries the request. The server verifies and serves the resource.
 
@@ -64,7 +64,7 @@ The agent sends one request and gets the optimal response. No need to know which
 
 ## The 5% Fee
 
-RCR charges a 5% platform fee on every request. If the LLM provider charges $0.0025, the total cost to the agent is $0.002625.
+Solvela charges a 5% platform fee on every request. If the LLM provider charges $0.0025, the total cost to the agent is $0.002625.
 
 This fee covers:
 
@@ -79,10 +79,10 @@ Every response includes a cost breakdown showing the provider cost, the platform
 
 For expensive operations -- long multi-turn conversations, batch processing, or image generation -- paying upfront for the maximum possible cost is wasteful. What if the conversation ends early?
 
-RCR offers a trustless escrow option:
+Solvela offers a trustless escrow option:
 
 1. **Deposit**: The agent deposits the maximum estimated cost into an escrow account on Solana. This account is controlled by a smart contract (an on-chain program), not by RCR.
-2. **Service delivery**: RCR processes the request and tracks the actual cost.
+2. **Service delivery**: Solvela processes the request and tracks the actual cost.
 3. **Settlement**: After service delivery, the smart contract releases the actual cost to the gateway operator and automatically refunds the remainder to the agent.
 4. **Timeout protection**: If the gateway never claims the funds (say, the server goes down), the agent can reclaim the full deposit after a timeout period. No trust required.
 

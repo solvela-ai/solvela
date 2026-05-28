@@ -128,7 +128,7 @@ pub struct ProviderHealth {
 }
 ```
 
-**Health endpoint exposed at:** `GET /v1/health` (returns health status for each provider).
+Provider health is reported indirectly through `GET /health` and provider-specific metrics on `/metrics`. There is no dedicated `/v1/health` endpoint; the public liveness endpoint is `/health`.
 
 Used by:
 - **Router scorer** — Deprioritize slow providers
@@ -140,7 +140,7 @@ Used by:
 ## Solana Integration (x402 Crate)
 
 ### Solana RPC (solana_rpc.rs)
-**Endpoint:** From `SOLVELA_SOLANA_RPC_URL` (default: https://api.mainnet-beta.solana.com)  
+**Endpoint:** From `SOLVELA_SOLANA__RPC_URL` (or the legacy single-underscore `SOLVELA_SOLANA_RPC_URL`). `config/default.toml` ships with `https://api.devnet.solana.com` — production deployments must override to a mainnet-beta endpoint.  
 **Client:** `reqwest::Client`
 
 **Calls made:**
@@ -170,8 +170,8 @@ pub async fn get_latest_blockhash(
 ---
 
 ### USDC-SPL Token (spl_transfer.rs)
-**Mint Address:** `EPjFWaJY48sPHP1AY1jP5eUZNQxmögKYQ1nHSroM3zF` (mainnet)  
-**Decimals:** 6 (1 USDC = 1,000,000 lamports)
+**Mint Address:** `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` (mainnet; hard-coded in `crates/protocol/src/constants.rs::USDC_MINT`)  
+**Decimals:** 6 (1 USDC = 1,000,000 atomic units)
 
 **Operations:**
 - **Transfer** — SPL token transfer instruction (agent wallet → Solvela recipient)
@@ -194,7 +194,7 @@ pub fn verify_spl_transfer(
 ---
 
 ### Escrow Program (programs/escrow/ - Anchor)
-**Program ID:** From `SOLVELA_SOLANA_ESCROW_PROGRAM_ID`  
+**Program ID:** From `SOLVELA_SOLANA__ESCROW_PROGRAM_ID` (legacy `SOLVELA_SOLANA_ESCROW_PROGRAM_ID` also accepted). Mainnet deployment: `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`.  
 **Chain:** Mainnet-Beta (Solana)  
 **Language:** Anchor (Solana Rust framework)
 
@@ -254,7 +254,7 @@ pub fn verify_signature(
 **Purpose:** Rotate hot wallets for Solana fee payment (to avoid nonce conflicts).
 
 **State:**
-- Load private keys from env (SOLVELA_SOLANA_FEE_PAYER_KEY)
+- Load private keys from env (`SOLVELA_SOLANA__FEE_PAYER_KEY` plus `_2`…`_8` for the rotation pool)
 - Maintain pool of `Fee Payer` structs (wallet address + balance)
 - Round-robin selection on each claim
 
@@ -325,11 +325,11 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uu
 
 **Usage:**
 - **Response Cache** — Cache chat completions by (model, messages, temperature) hash
-- **Replay Protection** — Track PAYMENT-SIGNATURE nonces to prevent replay attacks
+- **Replay Protection** — Track `payment-signature` nonces to prevent replay attacks
 
 **Cache TTL:**
-- Response cache: 24 hours (configurable)
-- Replay protection: 120 seconds (matches Solana blockhash lifetime)
+- Response cache: 600 seconds / 10 minutes (default; see `cache::ResponseCacheConfig::default_ttl_secs`)
+- Replay protection: ~120 seconds (matches Solana blockhash lifetime)
 
 ```rust
 // cache.rs
@@ -355,7 +355,8 @@ pub async fn set(&self, key: &str, value: &str, ttl_secs: usize) -> Result<()> {
 |-------|---------|---------|---------|
 | **axum** | 0.8 | Web framework | gateway (routes, middleware) |
 | **tokio** | 1 (full) | Async runtime | All binaries |
-| **tower** + **tower-http** | 0.5/0.6 | Middleware layers | gateway |
+| **tower** | 0.5 | Tower service traits | gateway |
+| **tower-http** | 0.6 | HTTP middleware (cors, trace, timeout, limit, set-header, catch-panic) | gateway |
 | **reqwest** | 0.12 | HTTP client | Provider adapters, Solana RPC |
 | **serde** + **serde_json** | 1 | Serialization | All crates |
 | **sqlx** | 0.8 | PostgreSQL driver | gateway (optional) |
@@ -364,23 +365,23 @@ pub async fn set(&self, key: &str, value: &str, ttl_secs: usize) -> Result<()> {
 | **bs58** | 0.5 | Base58 encoding (Solana addrs) | x402 |
 | **sha2** + **hmac** | 0.11/0.13 | Hashing, HMAC | gateway (session tokens, cache keys) |
 | **base64** | 0.22 | Base64 encoding | Payment header decoding |
-| **tracing** + **tracing-subscriber** | 0.1 | Structured logging | All crates |
-| **metrics** + **metrics-exporter-prometheus** | 0.24/0.18 | Prometheus metrics | gateway |
+| **tracing** + **tracing-subscriber** | 0.1 / 0.3 | Structured logging | All crates |
+| **metrics** + **metrics-exporter-prometheus** | 0.24 / 0.18 | Prometheus metrics | gateway |
 | **clap** | 4 | CLI parsing | cli (derive macros) |
 | **thiserror** | 2 | Error macros | Libraries |
 | **anyhow** | 1 | Error context | Binaries |
-| **uuid** + **chrono** | 1 | UUIDs, timestamps | All crates |
+| **uuid** + **chrono** | 1 / 0.4 | UUIDs, timestamps | All crates |
 | **toml** | 1.1 | Config parsing | gateway |
 | **dotenvy** | 0.15 | .env file loading | gateway |
 | **zeroize** | 1 | Secure key cleanup | x402 (secret material) |
-| **lru** | 0.17 | LRU cache | gateway (replay protection fallback) |
+| **lru** | 0.18 | LRU cache | gateway (replay protection fallback) |
 
 ---
 
 ## Configuration Files Integration
 
 ### config/default.toml
-Loaded on startup; env vars override.
+Loaded on startup; env vars override. The shipped defaults point at devnet — production deploys override via env.
 
 ```toml
 [server]
@@ -388,19 +389,26 @@ host = "0.0.0.0"
 port = 8402
 
 [solana]
-rpc_url = "https://api.mainnet-beta.solana.com"
-recipient_wallet = "Hpq..."  # USDC recipient address
-usdc_mint = "EPjFWaJY..."
+rpc_url = "https://api.devnet.solana.com"
+recipient_wallet = ""
+usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
-[logging]
-level = "info"
+[monitor]
+warn_threshold_sol = 0.1
+critical_threshold_sol = 0.02
+check_interval_secs = 300
 
-[cache]
-ttl_seconds = 86400  # 24 hours
+[cache.semantic]
+enabled = false
+threshold = 0.85
+hit_price_percent = 30
+ttl_secs = 600
 
-[rate_limit]
-requests_per_minute = 60
+[providers]
+# Provider API keys come from env: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, XAI_API_KEY, DEEPSEEK_API_KEY.
 ```
+
+There are no `[logging]` or `[rate_limit]` sections in `config/default.toml`; log level is set via `RUST_LOG` and rate-limit defaults live in `crates/gateway/src/middleware/rate_limit.rs` (60 req / 60 s per wallet, hard-coded).
 
 ### config/models.toml
 Model registry; 26+ models with per-token pricing.
@@ -425,39 +433,17 @@ Service marketplace registry (external LLM service metadata).
 
 ## SDK Integrations
 
-### TypeScript SDK (sdks/typescript/)
-Wraps gateway API for Node.js/browser.
-```typescript
-const solvela = new SolvelaClient({ gatewayUrl: "..." });
-const response = await solvela.chat.completions({
-  model: "gpt-4o",
-  messages: [...],
-});
-```
+All SDKs live in-tree under `sdks/` (see `docs/runbooks/sdk-consolidation.md` for the consolidation history). The illustrative snippets below show the shape of each SDK's published API — consult each SDK's README for exact import paths and constructor signatures.
 
-### Python SDK (sdks/python/)
-Wraps gateway API for Python.
-```python
-client = SolvelaClient(gateway_url="...")
-response = client.chat.completions(model="gpt-4o", messages=[...])
-```
-
-### Go SDK (sdks/go/)
-Wraps gateway API for Go.
-```go
-client := solvela.NewClient(solvelaURL)
-resp, err := client.ChatCompletions(ctx, &solvela.ChatRequest{...})
-```
-
-### Vercel AI SDK Provider (sdks/ai-sdk-provider/)
-Integrates Solvela with Vercel AI SDK.
-```typescript
-import { solvela } from "@solvela/ai-sdk";
-const model = solvela("gpt-4o");
-```
-
-### Claude MCP Server (sdks/mcp/)
-Adds Solvela as a Claude desktop tool.
+- **TypeScript** (`sdks/typescript/`) — published as `@solvela/sdk` on npm
+- **Python** (`sdks/python/`) — published as `solvela-sdk` on PyPI
+- **Go** (`sdks/go/`) — module `github.com/solvela-ai/solvela/sdks/go`
+- **Rust** (`sdks/rust/`) — `solvela-client` family on crates.io (non-workspace member, like `programs/escrow/`)
+- **Vercel AI SDK provider** (`sdks/ai-sdk-provider/`)
+- **OpenClaw provider** (`sdks/openclaw-provider/`)
+- **Signer core** (`sdks/signer-core/`)
+- **MCP server** (`sdks/mcp/`) — Claude Desktop / MCP host integration
+- **CLI distribution shim** (`sdks/cli-npm/`)
 
 ---
 
@@ -470,12 +456,12 @@ Adds Solvela as a Claude desktop tool.
 - `DEEPSEEK_API_KEY` — DeepSeek API key
 - `XAI_API_KEY` — xAI API key
 
-**Solana Configuration:**
-- `SOLVELA_SOLANA_RPC_URL` — Solana RPC endpoint
-- `SOLVELA_SOLANA_RECIPIENT_WALLET` — USDC recipient address
-- `SOLVELA_SOLANA_USDC_MINT` — USDC mint (default mainnet)
-- `SOLVELA_SOLANA_ESCROW_PROGRAM_ID` — Escrow program ID
-- `SOLVELA_SOLANA_FEE_PAYER_KEY` — Fee payer private key (base64 or JSON)
+**Solana Configuration** (double-underscore is canonical; single-underscore form accepted as fallback):
+- `SOLVELA_SOLANA__RPC_URL` — Solana RPC endpoint
+- `SOLVELA_SOLANA__RECIPIENT_WALLET` — USDC recipient address
+- `SOLVELA_SOLANA__USDC_MINT` — USDC mint (default mainnet)
+- `SOLVELA_SOLANA__ESCROW_PROGRAM_ID` — Escrow program ID
+- `SOLVELA_SOLANA__FEE_PAYER_KEY` (plus `_2`…`_8`) — Fee payer private key(s) (base64 or JSON byte array)
 
 **Data Storage:**
 - `DATABASE_URL` — PostgreSQL connection string (optional)

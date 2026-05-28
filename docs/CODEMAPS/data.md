@@ -4,8 +4,8 @@
 
 **Last Updated:** 2026-05-27  
 **Provider:** PostgreSQL 16 (optional; gateway degrades gracefully without it)  
-**Migrations:** `migrations/` (7 files, idempotent, auto-run on startup)  
-**ORM:** sqlx (compile-time checked SQL)
+**Migrations:** `migrations/` (9 files, idempotent, auto-run on startup)  
+**ORM:** sqlx (runtime-checked SQL via `sqlx::query`/`query_as`; no compile-time `query!` macros)
 
 ## Schema Overview
 
@@ -45,6 +45,7 @@ Optional per-wallet spending limits. Absence = unlimited.
 | Column | Type | Constraints | Notes |
 |--------|------|-----------|-------|
 | wallet_address | TEXT | PK | Solana wallet address |
+| hourly_limit_usdc | DECIMAL(18, 6) | NULLABLE | Hourly spend cap (added in migration 007) |
 | daily_limit_usdc | DECIMAL(18, 6) | NULLABLE | Daily spend cap (NULL = unlimited) |
 | monthly_limit_usdc | DECIMAL(18, 6) | NULLABLE | Monthly spend cap (NULL = unlimited) |
 | total_spent_usdc | DECIMAL(18, 6) | NOT NULL, DEFAULT 0, CHECK >= 0 | Cumulative spend (metadata) |
@@ -191,27 +192,33 @@ Org-scoped API credentials for programmatic access.
 - Support revocation (check `revoked_at IS NULL`)
 - Monitor usage via `last_used_at`
 
-**Key Format:** `solv_[random_24_chars]` (prefixed for automatic Tresorit/vault detection)
+**Key Format:** `solvela_k_[random]` — the canonical prefix used by `extract_api_key` (the legacy `rcr_k_` prefix is still accepted for back-compat).
 
 ---
 
 ### Audit & Compliance
 
-#### audit_logs (migration 006)
+#### audit_logs (migration 006, hardened in 009)
 Action tracking for compliance and debugging.
 
 | Column | Type | Constraints | Notes |
 |--------|------|-----------|-------|
 | id | UUID | PK, default gen_random_uuid() | Log entry ID |
-| org_id | UUID | FK → organizations(id) ON DELETE CASCADE | Org affected |
-| wallet_address | TEXT | NOT NULL | Actor wallet |
+| org_id | UUID | FK → organizations(id) ON DELETE SET NULL | Org affected |
+| actor_wallet | TEXT | NULLABLE | Actor wallet (NULL when admin token acted) |
+| actor_api_key | UUID | FK → api_keys(id) ON DELETE SET NULL | Actor API key id |
 | action | TEXT | NOT NULL | Action type (e.g., "team_created", "member_added") |
+| resource_type | TEXT | NOT NULL | Resource kind (org, team, member, …) |
+| resource_id | TEXT | NULLABLE | Resource identifier |
 | details | JSONB | NULLABLE | Action details (team name, role, etc.) |
+| ip_address | TEXT | NULLABLE | Originating IP for the admin action |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Action timestamp |
 
 **Indexes:**
 - `idx_audit_org` — Find logs for org
+- `idx_audit_action` — Find logs by action
 - `idx_audit_created` — Find logs by timestamp
+- `idx_audit_actor` — Find logs by actor wallet (partial index, WHERE actor_wallet IS NOT NULL)
 
 **Usage:**
 - Compliance audit trail (SOC 2 Type II)
@@ -228,56 +235,56 @@ Action tracking for compliance and debugging.
 
 ---
 
-#### escrow_claim_queue (migration 002)
+#### escrow_claim_queue (migration 002, extended in 004 & 008)
 Pending USDC-SPL escrow claims (async processing).
 
 | Column | Type | Constraints | Notes |
 |--------|------|-----------|-------|
 | id | UUID | PK, default gen_random_uuid() | Queue entry ID |
-| agent_address | TEXT | NOT NULL | Agent wallet (claimer) |
-| service_id | BYTES | NOT NULL | Service ID (used in PDA seed) |
-| amount_usdc | DECIMAL(18, 6) | NOT NULL, CHECK > 0 | Amount to claim (in USDC) |
-| tx_signature | TEXT | NOT NULL | Solana transaction signature (unique) |
-| status | TEXT | NOT NULL, DEFAULT 'pending' | 'pending', 'submitted', 'confirmed', 'failed' |
-| retry_count | INTEGER | NOT NULL, DEFAULT 0 | Number of retry attempts |
-| next_retry_at | TIMESTAMPTZ | NOT NULL (migration 004) | When to retry next (exponential backoff) |
+| service_id | BYTEA | NOT NULL | 32-byte service ID (used in PDA seed) |
+| agent_pubkey | TEXT | NOT NULL | Base58 agent wallet (claimer) |
+| claim_amount | BIGINT | NOT NULL | Amount to claim in **atomic USDC units** (6 decimals) |
+| deposited_amount | BIGINT | NULLABLE | Verified deposit ceiling (atomic units) |
+| status | TEXT | NOT NULL, DEFAULT 'pending' | 'pending', 'in_progress', 'completed', 'failed' |
+| attempts | INTEGER | NOT NULL, DEFAULT 0 | Number of retry attempts |
+| last_attempt_at | TIMESTAMPTZ | NULLABLE | Timestamp of last attempt |
+| next_retry_at | TIMESTAMPTZ | NULLABLE (added in migration 004) | When to retry next (exponential backoff) |
+| tx_signature | TEXT | NULLABLE | Solana transaction signature (filled on success) |
 | error_message | TEXT | NULLABLE | Last error message (if failed) |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Claim queued date |
-| updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Last status update |
-
-**Unique:** `tx_signature` — Each claim signed once
+| completed_at | TIMESTAMPTZ | NULLABLE | When claim finished |
+| updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Added in migration 008 (drives stale-claim recovery) |
 
 **Indexes:**
-- `idx_claim_status` — Find pending claims
-- `idx_claim_agent` — Find claims for agent
-- `idx_claim_retry` — Find claims due for retry
+- `idx_claim_queue_status` — Find pending claims by status
+- `idx_claim_queue_created` — Find claims by submission time
 
 **Usage:**
 - Background processor (`escrow/claim_processor.rs`) polls pending claims
-- Retries failed claims with exponential backoff (5s, 30s, 2m, 10m)
+- Retries failed claims with exponential backoff
 - Tracks claim lifecycle from submission to confirmation
+- Stale `in_progress` claims older than 5 minutes (by `updated_at`) are reclaimed by `fetch_pending_claims`
 
 ---
 
-#### hourly_spend_limits (migration 007)
-Per-org hourly spend tracking (for rate limiting).
+#### team_budgets (migration 007)
+Per-team spend caps. (Migration 007 is named `007_hourly_spend_limits.sql` but actually creates `team_budgets` and adds `hourly_limit_usdc` to `wallet_budgets`; there is no `hourly_spend_limits` table.)
 
 | Column | Type | Constraints | Notes |
 |--------|------|-----------|-------|
-| org_id | UUID | FK → organizations(id) ON DELETE CASCADE | Org |
-| hour_start | TIMESTAMPTZ | NOT NULL | Hour boundary (e.g., 2026-05-27 14:00:00 UTC) |
-| spent_usdc | DECIMAL(18, 6) | NOT NULL, DEFAULT 0, CHECK >= 0 | Amount spent in that hour |
+| team_id | UUID | PK, FK → teams(id) ON DELETE CASCADE | Team |
+| hourly_limit_usdc | DECIMAL(18, 6) | NULLABLE | Hourly spend cap |
+| daily_limit_usdc | DECIMAL(18, 6) | NULLABLE | Daily spend cap |
+| monthly_limit_usdc | DECIMAL(18, 6) | NULLABLE | Monthly spend cap |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Record created |
+| updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Last modified (auto-updated by trigger) |
 
-**Composite PK:** (org_id, hour_start)
-
-**Indexes:**
-- `idx_hourly_org_hour` — Fast lookups by org + hour
+**Triggers:**
+- `trg_team_budgets_updated_at` — Auto-update `updated_at` on any row change
 
 **Usage:**
-- Enforce hourly spend caps (future)
-- Detect spend spikes / anomalies
-- Rate limit expensive requests per org per hour
+- Enforce per-team spend caps
+- Rate limit expensive requests per team per period
 
 ---
 
@@ -287,11 +294,13 @@ Per-org hourly spend tracking (for rate limiting).
 |---|------|--------|---------|
 | 1 | `001_initial_schema.sql` | spend_logs, wallet_budgets | Initial payment tracking |
 | 2 | `002_escrow_claim_queue.sql` | escrow_claim_queue | Async escrow claim processing |
-| 3 | `003_phase_g_request_session_ids.sql` | spend_logs.session_id | Add session tracking to requests |
+| 3 | `003_phase_g_request_session_ids.sql` | spend_logs.request_id, spend_logs.session_id | Add request/session tracking |
 | 4 | `004_claim_queue_next_retry_at.sql` | escrow_claim_queue.next_retry_at | Backoff scheduling |
 | 5 | `005_organizations.sql` | organizations, teams, org_members, team_wallets, api_keys | Multi-tenant RBAC |
 | 6 | `006_audit_logs.sql` | audit_logs | Compliance audit trail |
-| 7 | `007_hourly_spend_limits.sql` | hourly_spend_limits | Rate limit tracking |
+| 7 | `007_hourly_spend_limits.sql` | wallet_budgets.hourly_limit_usdc, team_budgets | Team budgets + hourly caps |
+| 8 | `008_escrow_claim_queue_updated_at.sql` | escrow_claim_queue.updated_at | Stale-claim recovery |
+| 9 | `009_audit_actor_admin.sql` | audit_logs admin-actor backfill | Track admin-token actions |
 
 All migrations are **idempotent** (use `CREATE TABLE IF NOT EXISTS`). Applied automatically on gateway startup via `run_migrations()` (from `main.rs`). If migration fails and `DATABASE_URL` is set, gateway exits with non-zero status (fatal error).
 
@@ -346,9 +355,9 @@ let record = sqlx::query_as::<_, ApiKeyRecord>(
 
 If `REDIS_URL` is set, gateway caches chat responses:
 
-**Key:** SHA256(model + messages + temperature)  
+**Key:** SHA-256(model ‖ serialised messages ‖ temperature)  
 **Value:** JSON response  
-**TTL:** 24 hours (configurable)
+**TTL:** 600 seconds (10 minutes) default; configurable via `ResponseCacheConfig::default_ttl_secs`
 
 Enables:
 - Wallet-agnostic response cache (two agents with identical prompts share cached response)
