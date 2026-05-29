@@ -8,19 +8,19 @@
 
 ## What Solvela Is
 
-Solvela (RCR) is **software infrastructure** -- a protocol adapter and API proxy written in Rust. It sits between AI agents and LLM providers (OpenAI, Anthropic, Google, xAI, DeepSeek) and does three things:
+Solvela (formerly RCR) is **software infrastructure** -- a protocol adapter and API proxy written in Rust. It sits between AI agents and LLM providers (OpenAI, Anthropic, Google, xAI, DeepSeek) and does three things:
 
 1. **Routes HTTP requests** from agents to the appropriate LLM provider.
 2. **Verifies on-chain payment signatures** on the Solana blockchain before proxying requests.
 3. **Returns LLM responses** to the requesting agent.
 
-RCR is comparable to a reverse proxy (like Nginx or Cloudflare) that checks for a valid payment receipt before forwarding a request. The payment itself happens on the Solana blockchain, not through RCR.
+Solvela is comparable to a reverse proxy (like Nginx or Cloudflare) that checks for a valid payment receipt before forwarding a request. The payment itself happens on the Solana blockchain, not through Solvela.
 
 ## What Solvela Is Not
 
-- **Not a money transmitter.** RCR does not move, hold, or control funds. It reads blockchain state to verify that a transfer occurred.
-- **Not a custodian.** RCR never has access to private keys or the ability to move funds on behalf of users.
-- **Not a currency exchange.** RCR does not convert between currencies, fiat or crypto.
+- **Not a money transmitter.** Solvela does not move, hold, or control funds. It reads blockchain state to verify that a transfer occurred.
+- **Not a custodian.** Solvela never has access to private keys or the ability to move funds on behalf of users.
+- **Not a currency exchange.** Solvela does not convert between currencies, fiat or crypto.
 - **Not a payment processor** in the traditional sense (Stripe, Square). It does not initiate, settle, or reverse transactions. It verifies that a transaction already happened on-chain.
 
 ## How Money Flows
@@ -32,15 +32,15 @@ Agent Wallet ──[USDC transfer on Solana]──> Recipient Wallet (gateway op
                         │
                         │  (Solana blockchain settles this transfer)
                         │
-                  RCR software reads the transaction signature
+                  Solvela software reads the transaction signature
                   and verifies it matches the expected amount,
                   recipient, and token mint.
 ```
 
 - The agent constructs and signs a Solana transaction that transfers USDC-SPL from its wallet to the gateway operator's wallet.
-- The agent sends the signed transaction (or its signature) to RCR in an HTTP header.
-- RCR calls Solana RPC to verify the transaction: correct amount, correct recipient, correct token, not a replay.
-- **RCR never touches the funds.** The transfer is wallet-to-wallet on Solana. RCR is a read-only observer of the blockchain.
+- The agent sends the signed transaction (or its signature) to Solvela in an HTTP header.
+- Solvela calls Solana RPC to verify the transaction: correct amount, correct recipient, correct token, not a replay.
+- **Solvela never touches the funds.** The transfer is wallet-to-wallet on Solana. Solvela is a read-only observer of the blockchain.
 
 ### Escrow Payment (scheme: "escrow")
 
@@ -65,11 +65,11 @@ Agent Wallet ──[deposit USDC]──> PDA Escrow Account (on-chain program)
 
 ### Revenue
 
-RCR charges a **5% platform fee** on every request. This fee is included in the payment amount the agent is asked to pay. The payment goes to the gateway operator's wallet. There is no separate fee collection mechanism -- the fee is simply part of the price.
+Solvela charges a **5% platform fee** on every request. This fee is included in the payment amount the agent is asked to pay. The payment goes to the gateway operator's wallet. There is no separate fee collection mechanism -- the fee is simply part of the price.
 
 ### Optional Gas Sponsorship (Fee Payer)
 
-RCR includes an optional mode in which the gateway acts as the Solana **fee payer** for the agent's transaction -- meaning the gateway pays the small SOL network fee (typically ~5,000 lamports / ~$0.0005) so that an agent without SOL in its wallet can still transact in USDC. This is configured per deployment and is off by default.
+Solvela includes an optional mode in which the gateway acts as the Solana **fee payer** for the agent's transaction -- meaning the gateway pays the small SOL network fee (typically ~5,000 lamports / ~$0.0005) so that an agent without SOL in its wallet can still transact in USDC. This is configured per deployment and is off by default.
 
 - The fee payer signature **only authorizes paying the network's transaction fee**. It does not authorize any token transfer, account creation outside of the fee payer's own SOL deduction, or movement of agent funds.
 - The gateway does not receive USDC by acting as fee payer; it pays a tiny amount of SOL out of its own operator wallet on the agent's behalf as a UX convenience.
@@ -81,19 +81,19 @@ RCR includes an optional mode in which the gateway acts as the Solana **fee paye
 ### No Custody of Funds
 
 - The gateway software **never holds private keys** to any wallet other than its own operator wallet.
-- In the direct payment flow, funds move wallet-to-wallet on Solana. RCR verifies the transaction signature (a read operation) but cannot initiate, reverse, or redirect the transfer.
+- In the direct payment flow, funds move wallet-to-wallet on Solana. Solvela verifies the transaction signature (a read operation) but cannot initiate, reverse, or redirect the transfer.
 - In the escrow flow, funds are held by a PDA controlled by on-chain program logic. The gateway submits claim transactions, but the on-chain program validates and executes them. The gateway cannot withdraw more than the actual cost, and the agent can always reclaim unclaimed funds after timeout.
 
 ### No Fiat Currency Involvement
 
-- RCR operates exclusively in **USDC-SPL** (a dollar-pegged stablecoin) on the **Solana blockchain**.
-- There is no fiat on-ramp or off-ramp. Agents must already hold USDC-SPL in a Solana wallet before using RCR.
-- RCR does not accept credit cards, bank transfers, ACH, wire transfers, or any fiat payment method.
+- Solvela operates exclusively in **USDC-SPL** (a dollar-pegged stablecoin) on the **Solana blockchain**.
+- There is no fiat on-ramp or off-ramp. Agents must already hold USDC-SPL in a Solana wallet before using Solvela.
+- Solvela does not accept credit cards, bank transfers, ACH, wire transfers, or any fiat payment method.
 
 ### No Account Creation or Identity Collection
 
 - Agents are identified solely by their Solana wallet address (a public key).
-- RCR does not collect names, emails, phone numbers, or any personally identifiable information.
+- Solvela does not collect names, emails, phone numbers, or any personally identifiable information.
 - There is no sign-up process, no KYC/AML collection, and no user database in the traditional sense.
 - Enterprise features (teams, API keys) are opt-in organizational tools -- they do not involve identity verification.
 
@@ -124,15 +124,15 @@ For acquirer due diligence, the persisted data surface is small and intentionall
 | PostgreSQL — `audit_logs` (admin-action trail) | Action name, resource type, actor wallet, actor API key id, optional `details` JSONB describing the admin action, originating IP, timestamp | Prompts, responses, request/response bodies, LLM traffic of any kind |
 | PostgreSQL — `escrow_claim_queue` (claim-job durability) | Pending escrow-claim transaction parameters (deposit pubkey, amount, retry counters) | Wallet keys, prompt content |
 | Redis (Upstash) | Transient rate-limit counters keyed by IP or wallet, x402 nonce-replay window | Long-term user data, prompts, responses |
-| Solana RPC (read-only) | No persistence; RCR is a client | — |
+| Solana RPC (read-only) | No persistence; Solvela is a client | — |
 
-There is no data-subject-access workflow because there is no data subject under GDPR/CCPA -- a Solana public key is not personal data on its own and RCR does not link it to identity attributes. Wallet usage history can be wiped by deleting the corresponding rows; this requires no third-party coordination.
+There is no data-subject-access workflow because there is no data subject under GDPR/CCPA -- a Solana public key is not personal data on its own and Solvela does not link it to identity attributes. Wallet usage history can be wiped by deleting the corresponding rows; this requires no third-party coordination.
 
 ### On-Chain Settlement Only
 
 - All payment settlement occurs on the Solana blockchain.
-- Transaction finality is determined by Solana consensus, not by RCR.
-- RCR uses Solana RPC calls to read transaction status. It does not run a validator node or participate in consensus.
+- Transaction finality is determined by Solana consensus, not by Solvela.
+- Solvela uses Solana RPC calls to read transaction status. It does not run a validator node or participate in consensus.
 
 ## Regulations to Discuss
 
@@ -141,19 +141,19 @@ There is no data-subject-access workflow because there is no data subject under 
 **Question**: Does verifying payment signatures and operating a gateway constitute "money transmission" under the Bank Secrecy Act?
 
 **Relevant facts**:
-- RCR verifies that a Solana transaction has occurred. It does not initiate, execute, or settle the transaction.
-- In the direct payment flow, RCR is a read-only observer. The agent and the blockchain handle the transfer.
-- In the escrow flow, the on-chain program (not RCR) controls fund custody and settlement logic.
-- RCR does charge a 5% fee, but this fee is collected as part of the payment to the operator's wallet -- there is no separate money movement.
+- Solvela verifies that a Solana transaction has occurred. It does not initiate, execute, or settle the transaction.
+- In the direct payment flow, Solvela is a read-only observer. The agent and the blockchain handle the transfer.
+- In the escrow flow, the on-chain program (not Solvela) controls fund custody and settlement logic.
+- Solvela does charge a 5% fee, but this fee is collected as part of the payment to the operator's wallet -- there is no separate money movement.
 
 ### State Money Transmitter Licenses
 
-**Question**: Do individual state definitions of "money transmission" capture RCR's signature-verification role?
+**Question**: Do individual state definitions of "money transmission" capture Solvela's signature-verification role?
 
 **Relevant facts**:
 - 49 states have varying definitions of money transmission.
 - Some states define transmission broadly (any involvement in transferring value); others focus on receiving and transmitting funds.
-- RCR does not receive funds in transit. In direct payment, funds go from agent wallet to operator wallet. In escrow, funds go from agent wallet to a PDA.
+- Solvela does not receive funds in transit. In direct payment, funds go from agent wallet to operator wallet. In escrow, funds go from agent wallet to a PDA.
 
 ### Escrow PDA -- Custodial Wallet Considerations
 
@@ -168,11 +168,11 @@ There is no data-subject-access workflow because there is no data subject under 
 
 ### California Digital Financial Assets Law (DFAL)
 
-**Question**: Does DFAL, effective July 2026, create new obligations for RCR?
+**Question**: Does DFAL, effective July 2026, create new obligations for Solvela?
 
 **Relevant facts**:
 - DFAL regulates "digital financial asset business activity" including exchanging, transferring, or storing digital financial assets.
-- RCR does not exchange or store digital assets. The question is whether signature verification constitutes "transferring."
+- Solvela does not exchange or store digital assets. The question is whether signature verification constitutes "transferring."
 - DFAL includes exemptions for software providers and technology platforms that do not control customer funds.
 - **Action item**: As of this document's date (May 2026), DFAL goes live in roughly 8 weeks. Schedule attorney review before July 2026 to confirm the software-provider exemption applies and whether any disclosure or registration is required if California users are routed.
 
@@ -180,18 +180,18 @@ There is no data-subject-access workflow because there is no data subject under 
 
 **Relevant facts**:
 - USDC is a stablecoin issued by Circle and is generally not classified as a security.
-- RCR does not issue, sell, or create any tokens or digital assets.
-- RCR does not operate an exchange or trading platform: it does not match buyers and sellers, does not custody assets between counterparties, does not set prices for third-party services, and does not take a financial position in any service it routes to.
+- Solvela does not issue, sell, or create any tokens or digital assets.
+- Solvela does not operate an exchange or trading platform: it does not match buyers and sellers, does not custody assets between counterparties, does not set prices for third-party services, and does not take a financial position in any service it routes to.
 - The escrow program facilitates payment for services, not investment or speculation.
 
 ### x402 Service Registry
 
-RCR exposes a `GET /v1/services` endpoint that returns a directory of x402-compatible services that have opted into discovery through the gateway. This is a routing aid, not a marketplace in the regulated sense:
+Solvela exposes a `GET /v1/services` endpoint that returns a directory of x402-compatible services that have opted into discovery through the gateway. This is a routing aid, not a marketplace in the regulated sense:
 
 - **What it is**: a directory of HTTP endpoints (each provider's own URL, x402 metadata, and a per-request price set by that provider). Comparable to a DNS record or an OpenAPI catalog. Data is loaded from `config/services.toml` and an admin-only runtime registration API.
-- **What it is not**: RCR does not custody payments to third-party services, does not guarantee delivery, does not handle disputes, does not pool fees across providers, and does not enable provider-to-provider trading.
+- **What it is not**: Solvela does not custody payments to third-party services, does not guarantee delivery, does not handle disputes, does not pool fees across providers, and does not enable provider-to-provider trading.
 - **Current production state**: the registry ships with no third-party services enabled (`config/services.toml` is committed with all entries commented out under a `Phase 6 is NOT YET IMPLEMENTED` header). Until a third-party provider is registered, the directory is empty in production.
-- **When third-party services are added**: payments to those services follow the same x402 verification flow described above — agent wallet to provider wallet on Solana, with RCR as a read-only verifier of the payment signature. RCR does not sit in the funds path.
+- **When third-party services are added**: payments to those services follow the same x402 verification flow described above — agent wallet to provider wallet on Solana, with Solvela as a read-only verifier of the payment signature. Solvela does not sit in the funds path.
 
 ## What We Deliberately Do Not Do
 
@@ -208,14 +208,14 @@ These boundaries are architectural decisions made to avoid regulatory exposure:
 
 ### A2A and AP2 Compatibility
 
-RCR implements compatibility with Google's **Agent-to-Agent (A2A)** protocol and the **Agentic Payments (AP2)** specification, but only the parts that do not involve fiat:
+Solvela implements compatibility with Google's **Agent-to-Agent (A2A)** protocol and the **Agentic Payments (AP2)** specification, but only the parts that do not involve fiat:
 
 - **Implemented**: Agent discovery via `AgentCard` (`.well-known/agent.json`), x402 payment settlement flow within the A2A `message/send` lifecycle.
 - **Explicitly excluded**: The AP2 specification includes a Managed Payment Provider (MPP) flow for card-based payments. Implementing MPP would require acting as a payment facilitator, which triggers MSB registration and state licensing. We do not implement MPP.
 
 ## Summary of Money Flow
 
-| Flow | Who moves the money | Who holds the money | RCR's role |
+| Flow | Who moves the money | Who holds the money | Solvela's role |
 |---|---|---|---|
 | Direct payment | Agent (signs tx) + Solana (settles) | Agent wallet, then operator wallet | Verifies tx signature (read-only) |
 | Escrow deposit | Agent (signs tx) + Solana (settles) | PDA (program-controlled) | Verifies deposit tx signature |
