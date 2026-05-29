@@ -87,6 +87,10 @@ updates:
         versions: ["<14.0.0"]
       - dependency-name: "@solana/web3.js"
         versions: ["<2"]
+      # OpenClaw plugin contract: pi-* peer deps must stay exactly pinned.
+      # See memory project_openclaw_direction_2026_05; PRs #389 and #391
+      # were closed for this reason.
+      - dependency-name: "@earendil-works/pi-*"
 
   - package-ecosystem: npm
     directory: /integrations/openclaw
