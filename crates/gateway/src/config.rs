@@ -277,7 +277,7 @@ fn default_port() -> u16 {
 }
 
 fn default_usdc_mint() -> String {
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string()
+    solvela_protocol::constants::USDC_MINT.to_string()
 }
 
 /// Custom Debug impl for ProvidersConfig that redacts all API key values.
