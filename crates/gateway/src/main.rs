@@ -608,9 +608,11 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Balance monitor (fire-and-forget background task) ─────────────────────
     //
-    // Monitors SOL balances of the fee-payer wallet(s) and emits structured
-    // tracing events when balances drop below configured thresholds.
-    // Uses the RPC URL from monitor config, falling back to the Solana config RPC URL.
+    // Polls SOL + USDC for the recipient wallet, every fee-payer pool key,
+    // and any wallets passed via `SOLVELA_OPERATOR_WALLETS`. Emits
+    // structured tracing events + Prometheus gauges on every check, and
+    // dispatches `AlertSink` events on level transitions. The OSS gateway
+    // installs `NoopSink`; enterprise distributions plug in their own.
     {
         let mut wallet_pubkeys: Vec<String> = Vec::new();
 
@@ -629,6 +631,34 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        // Operator wallets (id.json / ops / upgrade-authority) — comma-separated.
+        // These aren't on the gateway's hot path, but if they run dry, ops can't
+        // pay tx fees for redeploys/multisigs. Monitor them alongside.
+        //
+        // Capped at MAX_OPERATOR_WALLETS to prevent a malformed/injected env
+        // var from spawning hundreds of RPC calls per check interval and
+        // saturating the RPC connection pool.
+        const MAX_OPERATOR_WALLETS: usize = 50;
+        if let Ok(raw) = env_with_fallback("SOLVELA_OPERATOR_WALLETS", "RCR_OPERATOR_WALLETS") {
+            let mut added = 0usize;
+            for entry in raw.split(',') {
+                let pubkey = entry.trim().to_string();
+                if pubkey.is_empty() || wallet_pubkeys.contains(&pubkey) {
+                    continue;
+                }
+                if added >= MAX_OPERATOR_WALLETS {
+                    warn!(
+                        cap = MAX_OPERATOR_WALLETS,
+                        "SOLVELA_OPERATOR_WALLETS truncated — too many entries; \
+                         additional pubkeys ignored"
+                    );
+                    break;
+                }
+                wallet_pubkeys.push(pubkey);
+                added += 1;
+            }
+        }
+
         if wallet_pubkeys.is_empty() {
             info!("balance monitor disabled — no wallet pubkeys configured");
         } else {
@@ -640,6 +670,15 @@ async fn main() -> anyhow::Result<()> {
             {
                 monitor_config.rpc_url = app_config.solana.rpc_url.clone();
             }
+            // Thread the gateway's configured USDC mint through to the monitor so
+            // testnet/devnet operators don't accidentally poll the mainnet mint.
+            monitor_config.usdc_mint = app_config.solana.usdc_mint.clone();
+            if monitor_config.usdc_mint.is_empty() {
+                warn!(
+                    "SOLVELA_SOLANA__USDC_MINT is empty — USDC balance monitoring is DISABLED. \
+                     Set the mint to re-enable USDC alerts."
+                );
+            }
 
             let monitor = Arc::new(
                 BalanceMonitor::new(monitor_config, wallet_pubkeys)
@@ -650,6 +689,10 @@ async fn main() -> anyhow::Result<()> {
                 interval_secs = app_config.monitor.check_interval_secs,
                 warn_sol = %app_config.monitor.warn_threshold_sol,
                 critical_sol = %app_config.monitor.critical_threshold_sol,
+                warn_usdc = %app_config.monitor.warn_threshold_usdc,
+                critical_usdc = %app_config.monitor.critical_threshold_usdc,
+                stale_after = %app_config.monitor.stale_after_failures,
+                usdc_mint = %app_config.solana.usdc_mint,
                 "balance monitor started"
             );
             // Fire-and-forget — we intentionally drop the handle so the background
