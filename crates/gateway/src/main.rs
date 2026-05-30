@@ -680,6 +680,13 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
 
+            // Fail fast on a config that would invert the monitor into noise
+            // (e.g. stale_after_failures = 0) or silence a tier — see arch
+            // rule #15: a broken core safety subsystem should not serve.
+            monitor_config
+                .validate()
+                .map_err(|e| anyhow::anyhow!("invalid balance monitor config: {e}"))?;
+
             let monitor = Arc::new(
                 BalanceMonitor::new(monitor_config, wallet_pubkeys)
                     .context("failed to build balance monitor HTTP client")?,
@@ -695,11 +702,26 @@ async fn main() -> anyhow::Result<()> {
                 usdc_mint = %app_config.solana.usdc_mint,
                 "balance monitor started"
             );
-            // Fire-and-forget — we intentionally drop the handle so the background
-            // task runs independently for the lifetime of the process.
-            // Shutdown signal ensures clean exit on SIGTERM/Ctrl+C.
+            // Fire-and-forget for the hot path, but supervised: if the monitor
+            // task panics we must NOT lose alerting silently. Tokio absorbs a
+            // dropped handle's panic to stderr only (no tracing, no metric),
+            // which is invisible in aggregated log sinks (Fly.io). Await the
+            // handle in a tiny supervisor that escalates on unexpected exit.
             let monitor_shutdown_rx = shutdown_rx.clone();
-            drop(BalanceMonitor::spawn(monitor, monitor_shutdown_rx));
+            let monitor_handle = BalanceMonitor::spawn(monitor, monitor_shutdown_rx);
+            tokio::spawn(async move {
+                match monitor_handle.await {
+                    Ok(()) => info!("balance monitor task exited (graceful shutdown)"),
+                    Err(e) if e.is_cancelled() => {
+                        info!("balance monitor task cancelled")
+                    }
+                    Err(e) => error!(
+                        error = %e,
+                        "balance monitor task terminated unexpectedly — \
+                         wallet balance alerting is DISABLED until restart"
+                    ),
+                }
+            });
         }
     }
 

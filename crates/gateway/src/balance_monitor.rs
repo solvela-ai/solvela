@@ -206,6 +206,45 @@ fn default_stale_after_failures() -> u32 {
     DEFAULT_STALE_AFTER_FAILURES
 }
 
+impl MonitorConfig {
+    /// Validate cross-field invariants that serde defaults can't express.
+    ///
+    /// Returns `Err` with an operator-facing message when the config would
+    /// invert the monitor into noise or silence a tier:
+    /// - `stale_after_failures == 0` would fire a synthetic Critical for
+    ///   every wallet on every check (a fresh `WalletState` has
+    ///   `consecutive_failures == 0`, so `0 >= 0` trips immediately).
+    /// - `critical >= warn` for either asset makes the Warning tier
+    ///   unreachable — every sub-warn balance classifies as Critical.
+    ///
+    /// Called fatally at startup (see arch rule #15: misconfig that breaks a
+    /// core safety subsystem should fail fast, not serve in a broken state).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.stale_after_failures == 0 {
+            return Err(
+                "monitor.stale_after_failures must be >= 1 (0 fires a synthetic \
+                 Critical for every wallet on every check)"
+                    .to_string(),
+            );
+        }
+        if self.critical_threshold_sol >= self.warn_threshold_sol {
+            return Err(format!(
+                "monitor.critical_threshold_sol ({}) must be < warn_threshold_sol ({}) \
+                 — otherwise the Warning tier is unreachable",
+                self.critical_threshold_sol, self.warn_threshold_sol
+            ));
+        }
+        if self.critical_threshold_usdc >= self.warn_threshold_usdc {
+            return Err(format!(
+                "monitor.critical_threshold_usdc ({}) must be < warn_threshold_usdc ({}) \
+                 — otherwise the Warning tier is unreachable",
+                self.critical_threshold_usdc, self.warn_threshold_usdc
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for MonitorConfig {
     fn default() -> Self {
         Self {
@@ -591,6 +630,13 @@ impl BalanceMonitor {
                         is_stale: true,
                     });
                     state.stale_event_emitted = true;
+                    // Record the synthetic Critical as the last-seen level so the
+                    // dedup map reflects what the sink actually observed. Without
+                    // this, a wallet that was Healthy before the outage and
+                    // recovers to Healthy fires no recovery transition (the sink
+                    // never auto-resolves the stale Critical), and a real recovery
+                    // carries a wrong `previous_level`.
+                    state.last_level = Some(AlertLevel::Critical);
                     error!(
                         wallet = %pubkey,
                         asset = asset.label(),
@@ -1442,11 +1488,13 @@ mod tests {
             .await;
         let recovery = vec![result("w1", Asset::Sol, AlertLevel::Healthy, 1.0)];
         let recovery_fired = monitor.dispatch_transitions(&recovery).await;
-        // The wallet was already Critical (set when stale fired); recovering
-        // to Healthy is a transition that should fire a non-stale event.
+        // The stale event recorded `last_level = Critical`; recovering to
+        // Healthy is a Critical→Healthy transition that fires a non-stale
+        // event carrying the correct `previous_level` so sinks can auto-resolve.
         assert_eq!(recovery_fired.len(), 1);
         assert!(!recovery_fired[0].is_stale);
         assert_eq!(recovery_fired[0].current_level, AlertLevel::Healthy);
+        assert_eq!(recovery_fired[0].previous_level, Some(AlertLevel::Critical));
         // Outage again — stale must fire again on the new streak.
         monitor.record_failure("w1", Asset::Sol).await;
         let second_outage = monitor.dispatch_transitions(&[]).await;
@@ -1475,6 +1523,117 @@ mod tests {
         assert_eq!(stale[0].atomic_units, 500_000_000);
         // previous_level must be the Healthy from the dispatch above.
         assert_eq!(stale[0].previous_level, Some(AlertLevel::Healthy));
+    }
+
+    // -------------------------------------------------------------------------
+    // Real-path coverage: drive the actual check_balances → record_failure →
+    // stale chain against an unreachable RPC. The other stale tests call
+    // record_failure directly, which can't catch a missing record_failure call
+    // in the check_balances error branches.
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_check_balances_failure_arms_stale_for_both_assets() {
+        let sink = Arc::new(RecordingSink::new());
+        // Port 1 → connection refused immediately (no 10s timeout wait).
+        let config = MonitorConfig {
+            rpc_url: "http://127.0.0.1:1".to_string(),
+            stale_after_failures: 1,
+            ..MonitorConfig::default()
+        };
+        let monitor = BalanceMonitor::with_sink(config, vec!["w1".to_string()], sink.clone())
+            .expect("test client builds");
+
+        // First check: both SOL and USDC fetches fail (RPC unreachable). The
+        // default USDC mint is non-empty, so the USDC branch is attempted, not
+        // skipped — both (w1, Sol) and (w1, Usdc) must record a failure.
+        let results = monitor.check_balances().await;
+        assert!(
+            results.is_empty(),
+            "no balances should be reported when RPC is unreachable"
+        );
+
+        // dispatch_transitions must now synthesize a stale Critical for each
+        // asset purely from the failure counters set by check_balances.
+        let fired = monitor.dispatch_transitions(&[]).await;
+        assert_eq!(
+            fired.len(),
+            2,
+            "both SOL and USDC should fire a stale event"
+        );
+        assert!(fired.iter().all(|e| e.is_stale));
+        assert!(fired
+            .iter()
+            .all(|e| e.current_level == AlertLevel::Critical));
+        let assets: std::collections::HashSet<_> = fired.iter().map(|e| e.asset).collect();
+        assert!(assets.contains(&Asset::Sol));
+        assert!(assets.contains(&Asset::Usdc));
+        assert_eq!(sink.snapshot().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_check_balances_empty_mint_does_not_arm_usdc_stale() {
+        let sink = Arc::new(RecordingSink::new());
+        // Empty mint → USDC branch is skipped without recording a failure, so
+        // only SOL should ever arm the stale path.
+        let config = MonitorConfig {
+            rpc_url: "http://127.0.0.1:1".to_string(),
+            usdc_mint: String::new(),
+            stale_after_failures: 1,
+            ..MonitorConfig::default()
+        };
+        let monitor = BalanceMonitor::with_sink(config, vec!["w1".to_string()], sink.clone())
+            .expect("test client builds");
+
+        let results = monitor.check_balances().await;
+        assert!(results.is_empty());
+
+        let fired = monitor.dispatch_transitions(&[]).await;
+        assert_eq!(
+            fired.len(),
+            1,
+            "only SOL should fire — USDC was disabled, not failing"
+        );
+        assert_eq!(fired[0].asset, Asset::Sol);
+        assert!(fired[0].is_stale);
+    }
+
+    // -------------------------------------------------------------------------
+    // Config validation — reject configs that would invert the monitor.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_rejects_zero_stale_after_failures() {
+        let config = MonitorConfig {
+            stale_after_failures: 0,
+            ..MonitorConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_inverted_sol_thresholds() {
+        let config = MonitorConfig {
+            warn_threshold_sol: 0.02,
+            critical_threshold_sol: 0.1,
+            ..MonitorConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_inverted_usdc_thresholds() {
+        let config = MonitorConfig {
+            warn_threshold_usdc: 5.0,
+            critical_threshold_usdc: 50.0,
+            ..MonitorConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_defaults() {
+        assert!(MonitorConfig::default().validate().is_ok());
     }
 
     #[tokio::test]
