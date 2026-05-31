@@ -55,4 +55,4 @@ and the full picture see the
 
 ## License
 
-[MIT](https://github.com/solvela-ai/solvela/blob/main/LICENSE-MIT).
+[Apache-2.0](https://github.com/solvela-ai/solvela/blob/main/LICENSE-APACHE).

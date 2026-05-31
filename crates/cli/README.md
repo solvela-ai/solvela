@@ -38,4 +38,4 @@ breakdown, sign the USDC-SPL payment, retry with the
 - Docs: <https://docs.solvela.ai>
 - Source: [solvela-ai/solvela `crates/cli/`](https://github.com/solvela-ai/solvela/tree/main/crates/cli)
 
-License: MIT
+License: Apache-2.0

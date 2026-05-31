@@ -27,4 +27,4 @@ solvela-protocol = "0.2"
 - Docs: <https://docs.solvela.ai>
 - Source: [solvela-ai/solvela `crates/protocol/`](https://github.com/solvela-ai/solvela/tree/main/crates/protocol)
 
-License: MIT
+License: Apache-2.0

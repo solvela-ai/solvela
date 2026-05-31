@@ -51,6 +51,6 @@ Aggregate sponsorship received and aggregate infra spend by line item are publis
 
 ## A note from the maintainer
 
-Solvela exists because the BSL on the gateway and the MIT split on everything else make it possible for one person to maintain it without subsidizing megacap re-hosters. Sponsorship from individuals, indie devs, and small AI teams is what keeps the public gateway free for everyone below the BSL revenue threshold. Every name on this list is a reason the lights stay on.
+Solvela exists because the BSL on the gateway and the Apache-2.0 split on everything else make it possible for one person to maintain it without subsidizing megacap re-hosters. Sponsorship from individuals, indie devs, and small AI teams is what keeps the public gateway free for everyone below the BSL revenue threshold. Every name on this list is a reason the lights stay on.
 
 Thank you.

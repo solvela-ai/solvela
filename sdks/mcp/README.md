@@ -428,4 +428,4 @@ node --test tests/server.test.ts
 
 ## License
 
-MIT
+Apache-2.0

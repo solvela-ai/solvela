@@ -136,4 +136,4 @@ go test ./... -v -tags=live
 
 ## License
 
-MIT
+Apache-2.0

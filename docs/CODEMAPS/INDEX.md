@@ -237,10 +237,11 @@ See [dependencies.md](dependencies.md) for full env var list.
 | Component | License | Scope |
 |-----------|---------|-------|
 | Gateway (server) | BUSL-1.1 | `crates/gateway/` (commercial use restricted) |
-| x402, router, protocol, cli | MIT | `crates/{x402,router,protocol,cli}/` (reusable) |
-| SDKs | MIT | `sdks/` (client libraries) |
-| Dashboard | BUSL-1.1 | `dashboard/` (commercial use restricted) |
-| Change date | 2030-05-02 | BUSL-1.1 becomes Apache-2.0 after this date |
+| x402, router, protocol, cli | Apache-2.0 | `crates/{x402,router,protocol,cli}/` (reusable) |
+| Escrow program | Apache-2.0 | `programs/escrow/` (on-chain, reusable) |
+| SDKs | Apache-2.0 | `sdks/` (client libraries) |
+| Dashboard | Apache-2.0 | `dashboard/` (front-end) |
+| Change date | 2030-05-02 | BUSL-1.1 (gateway) becomes MIT after this date |
 
 ---
 

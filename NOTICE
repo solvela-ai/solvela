@@ -1,0 +1,18 @@
+Solvela
+Copyright 2026 Solvela Contributors
+
+This product includes software developed by the Solvela Contributors.
+
+The Solvela project uses a per-component license split:
+
+  - The gateway (the `gateway` crate and the `solvela-gateway` binary) is
+    licensed under the Business Source License 1.1 (see LICENSE), which
+    converts to the MIT License on its Change Date.
+
+  - All other components — the `solvela-protocol`, `solvela-x402`,
+    `solvela-router`, and `solvela-cli` crates, the on-chain escrow
+    program, the SDKs, and the dashboard — are licensed under the
+    Apache License, Version 2.0 (see LICENSE-APACHE).
+
+This NOTICE file applies to the Apache-2.0-licensed components. See
+the LICENSING section of README.md for the authoritative breakdown.

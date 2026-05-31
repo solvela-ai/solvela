@@ -71,4 +71,4 @@ See the docs for retry guidance and `isRetryable` checks.
 
 ## License
 
-MIT
+Apache-2.0

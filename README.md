@@ -6,8 +6,7 @@ No API keys, no accounts -- just wallets.
 
 ![Rust](https://img.shields.io/badge/rust-stable-F97316?style=flat&logo=rust&logoColor=white)
 ![Gateway License](https://img.shields.io/badge/gateway-BUSL--1.1-F97316?style=flat)
-![Libraries License](https://img.shields.io/badge/libraries-MIT-F97316?style=flat)
-![SDKs License](https://img.shields.io/badge/sdks-MIT-F97316?style=flat)
+![Libraries & SDKs License](https://img.shields.io/badge/libraries%20%26%20sdks-Apache--2.0-F97316?style=flat)
 [![CI](https://github.com/solvela-ai/solvela/actions/workflows/ci.yml/badge.svg)](https://github.com/solvela-ai/solvela/actions/workflows/ci.yml)
 ![Solana](https://img.shields.io/badge/solana-mainnet-F97316?style=flat&logo=solana&logoColor=white)
 
@@ -466,13 +465,13 @@ Solvela uses a **per-component license split**. Pick the license of the piece yo
 | Component | License | Why |
 |---|---|---|
 | **Gateway** (`crates/gateway`, `solvela-gateway` binary) | [BUSL-1.1](./LICENSE) → MIT on 2030-05-02 | The hosted product. Free for non-production, internal first-party production, and small commercial use (under $1M annual revenue derived from the Licensed Work). Re-hosting it as a managed service to third parties requires a commercial license. Becomes MIT four years after each release. |
-| **Protocol crate** (`solvela-protocol`) | [MIT](./LICENSE-MIT) | Wire-format types. Reuse encouraged. |
-| **x402 crate** (`solvela-x402`) | [MIT](./LICENSE-MIT) | Reference x402 implementation for Solana. Reuse encouraged. |
-| **Router crate** (`solvela-router`) | [MIT](./LICENSE-MIT) | Routing primitives and 15-dim scorer. |
-| **CLI crate** (`solvela-cli`) | [MIT](./LICENSE-MIT) | End-user tooling. |
-| **Escrow program** (`programs/escrow`) | [MIT](./LICENSE-MIT) | On-chain Anchor program. Permissive license signals broad reuse. |
-| **SDKs** (`sdks/*`) | [MIT](./LICENSE-MIT) | Client libraries. Trivial license = maximum adoption. |
-| **Dashboard / docs site** (`dashboard/`) | [MIT](./LICENSE-MIT) | Front-end. |
+| **Protocol crate** (`solvela-protocol`) | [Apache-2.0](./LICENSE-APACHE) | Wire-format types. Reuse encouraged; Apache's explicit patent grant covers the protocol surface. |
+| **x402 crate** (`solvela-x402`) | [Apache-2.0](./LICENSE-APACHE) | Reference x402 implementation for Solana. Reuse encouraged. |
+| **Router crate** (`solvela-router`) | [Apache-2.0](./LICENSE-APACHE) | Routing primitives and 15-dim scorer. |
+| **CLI crate** (`solvela-cli`) | [Apache-2.0](./LICENSE-APACHE) | End-user tooling. |
+| **Escrow program** (`programs/escrow`) | [Apache-2.0](./LICENSE-APACHE) | On-chain Anchor program. Permissive license + patent grant signals broad, safe reuse. |
+| **SDKs** (`sdks/*`) | [Apache-2.0](./LICENSE-APACHE) | Client libraries. The patent grant matters here — the SDKs build and broadcast USDC transactions. |
+| **Dashboard / docs site** (`dashboard/`) | [Apache-2.0](./LICENSE-APACHE) | Front-end. |
 
 ### Quick reference
 
@@ -480,7 +479,7 @@ Solvela uses a **per-component license split**. Pick the license of the piece yo
 - **You're self-hosting the gateway internally for your own product** → free under the Additional Use Grant if your gross annual revenue attributable to the gateway is under USD $1M.
 - **You're building a competing managed gateway service from this code** → you need a commercial license. Contact `partnerships@solvela.ai`.
 - **Your annual revenue derived from the gateway will exceed USD $1M** → you need a commercial license. Contact `partnerships@solvela.ai`.
-- **You're embedding the SDK or building on top of the protocol/router crates** → standard MIT obligations apply (preserve the copyright notice, no warranty). No payment to Solvela required.
+- **You're embedding the SDK or building on top of the protocol/router crates** → standard Apache-2.0 obligations apply (preserve copyright/NOTICE attribution, state significant changes, no warranty). You receive an explicit patent grant. No payment to Solvela required.
 
 ### Trademark
 

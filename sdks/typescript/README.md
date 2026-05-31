@@ -104,4 +104,4 @@ const client = new SolvelaClient({
 
 ## License
 
-MIT
+Apache-2.0
