@@ -45,6 +45,12 @@ updates:
       - dependency-name: atty       # unmaintained, no fix exists
       - dependency-name: derivative # unmaintained, no fix exists
       - dependency-name: paste      # unmaintained, no fix exists
+      # litesvm >=0.7 pulls solana-keypair/solana-signature 3.x, which fail
+      # to compile against the escrow's pinned stack (DecodeError: Error trait
+      # bound). Same blocker class as the Anchor 0.31 -> 1.0 migration. Held at
+      # 0.6.x until the Solana 3.x line unblocks. PR #350 closed for this reason.
+      - dependency-name: litesvm
+        versions: [">=0.7"]
 
   # ── Dashboard (Next.js, Vercel prod) ────────────────────────────────────
   - package-ecosystem: npm
