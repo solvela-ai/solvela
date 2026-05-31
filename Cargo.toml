@@ -13,15 +13,15 @@ version = "0.2.0"
 edition = "2021"
 # Minimum supported Rust version. Driven by sqlx 0.9, which requires rustc 1.94.
 # Only the gateway binary opts in (`rust-version.workspace = true`); the published
-# MIT libs (protocol/x402/router/cli) deliberately do not, so their crates.io MSRV
-# isn't over-claimed. Keep this <= the Docker builder pin in ../Dockerfile so a
+# Apache-2.0 libs (protocol/x402/router/cli) deliberately do not, so their crates.io
+# MSRV isn't over-claimed. Keep this <= the Docker builder pin in ../Dockerfile so a
 # future dep MSRV bump fails consistently in CI and Docker rather than slipping
 # through as a Docker-only failure.
 rust-version = "1.94"
 # Note: each crate declares its own `license = "..."` explicitly. The gateway is
 # BUSL-1.1 (commercial use restricted, see ../LICENSE). The protocol, x402, router,
-# and cli crates are MIT (../LICENSE-MIT) so the rest of the ecosystem can reuse
-# them freely. SDKs (sdks/*) are also MIT (../LICENSE-MIT).
+# and cli crates are Apache-2.0 (../LICENSE-APACHE) so the rest of the ecosystem can
+# reuse them freely, with an explicit patent grant. SDKs (sdks/*) are also Apache-2.0.
 repository = "https://github.com/solvela-ai/solvela"
 
 [workspace.dependencies]
