@@ -16,12 +16,14 @@ Solvela (formerly RCR) is **software infrastructure** -- a protocol adapter and 
 
 Solvela is comparable to a reverse proxy (like Nginx or Cloudflare) that checks for a valid payment receipt before forwarding a request. The payment itself happens on the Solana blockchain, not through Solvela.
 
-## What Solvela Is Not
+## What Solvela Does Not Do
 
-- **Not a money transmitter.** Solvela does not move, hold, or control funds. It reads blockchain state to verify that a transfer occurred.
-- **Not a custodian.** Solvela never has access to private keys or the ability to move funds on behalf of users.
-- **Not a currency exchange.** Solvela does not convert between currencies, fiat or crypto.
-- **Not a payment processor** in the traditional sense (Stripe, Square). It does not initiate, settle, or reverse transactions. It verifies that a transaction already happened on-chain.
+The behaviors below are stated as facts about the system. Whether they place Solvela inside or outside any particular regulatory category is a determination for counsel, not a conclusion asserted here.
+
+- **Does not move, hold, or control funds.** Solvela reads blockchain state to verify that a transfer occurred. We therefore believe the money-transmitter question turns on this read-only posture, which is a matter for legal review.
+- **Does not custody assets.** Solvela never has access to private keys, nor the ability to move funds on behalf of users.
+- **Does not exchange currency.** Solvela does not convert between currencies, fiat or crypto.
+- **Does not process payments** in the traditional sense (Stripe, Square). It does not initiate, settle, or reverse transactions; it verifies that a transaction already happened on-chain. Whether this differs from a regulated payment processor is a question for counsel.
 
 ## How Money Flows
 
