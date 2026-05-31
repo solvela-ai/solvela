@@ -61,8 +61,8 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full architecture overview, build matrix,
 Solvela uses a **per-component license split**. By contributing, you agree that your contribution is licensed under the license of the component you modify, as declared in that component's `Cargo.toml` / `package.json` / file headers. See the [Licensing table in README.md](./README.md#licensing) for the full breakdown:
 
 - Gateway (`crates/gateway`) — **BUSL-1.1** (transitions to MIT on the Change Date)
-- Protocol / x402 / router / cli crates and the escrow program — **MIT**
-- SDKs and the dashboard — **MIT**
+- Protocol / x402 / router / cli crates and the escrow program — **Apache-2.0**
+- SDKs and the dashboard — **Apache-2.0**
 
 ### Sign-off (DCO) is required
 
@@ -82,4 +82,6 @@ A `Signed-off-by: Your Name <your.email@example.com>` line at the end of the com
 
 ### Relicensing notice
 
-Solvela may, at its sole discretion, relicense any component under a different open-source license that is **at least as permissive** as the current one. By signing off on your commits via the DCO, you authorize the project to do this without further consent. The project will not relicense your contribution under a *more restrictive* license without your agreement.
+Solvela may, at its sole discretion, relicense any component under another **OSI-approved permissive open-source license** (for example, moving between the MIT and Apache-2.0 licenses, or to a successor permissive license). By signing off on your commits via the DCO, you authorize the project to do this without further consent. The project will not relicense your contribution under a proprietary or copyleft license, or otherwise materially more restrictive terms, without your agreement.
+
+> The protocol/x402/router/cli crates, the escrow program, the SDKs, and the dashboard moved from MIT to Apache-2.0 under this provision (2026-05). The gateway remains BUSL-1.1.

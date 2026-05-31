@@ -24,7 +24,7 @@
     "llm",
     "ai-agent"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@solvela/signer-core": "file:../signer-core",

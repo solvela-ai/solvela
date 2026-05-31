@@ -157,4 +157,4 @@ go/no-go from the user before Phase 4 distribution.
 
 ## License
 
-MIT
+Apache-2.0

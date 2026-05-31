@@ -36,4 +36,4 @@ npm run typecheck     # tsc --noEmit
 
 ## License
 
-MIT
+Apache-2.0

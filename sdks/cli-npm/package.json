@@ -26,5 +26,5 @@
     "url": "https://github.com/solvela-ai/solvela.git",
     "directory": "sdks/cli-npm"
   },
-  "license": "MIT"
+  "license": "Apache-2.0"
 }

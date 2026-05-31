@@ -32,4 +32,4 @@ solvela-x402 = { version = "0.2", features = ["postgres"] }
 - Docs: <https://docs.solvela.ai>
 - Source: [solvela-ai/solvela `crates/x402/`](https://github.com/solvela-ai/solvela/tree/main/crates/x402)
 
-License: MIT
+License: Apache-2.0

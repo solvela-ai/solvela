@@ -16,4 +16,4 @@ Part of the Solvela Rust client SDK workspace — see the
 
 ## License
 
-[MIT](https://github.com/solvela-ai/solvela/blob/main/LICENSE-MIT).
+[Apache-2.0](https://github.com/solvela-ai/solvela/blob/main/LICENSE-APACHE).

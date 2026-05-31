@@ -113,4 +113,4 @@ If touching the SVGs:
 
 ## Trademark
 
-`SOLVELA` is the subject of a planned USPTO trademark application (classes 9 + 42). The marks in this directory are © Solvela Contributors and are licensed under MIT for code-form uses; the **wordmark and stylized S logo** are not licensed under MIT and may not be used to represent products that are not Solvela. See the project `README.md` Licensing section.
+`SOLVELA` is the subject of a planned USPTO trademark application (classes 9 + 42). The marks in this directory are © Solvela Contributors and are licensed under Apache-2.0 for code-form uses; the **wordmark and stylized S logo** are not licensed under Apache-2.0 and may not be used to represent products that are not Solvela. See the project `README.md` Licensing section.

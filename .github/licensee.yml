@@ -3,8 +3,8 @@
 # The Solvela monorepo is governed by Business Source License 1.1 at the root.
 # Per-component licensing is documented in README.md (LICENSING section):
 #   - gateway crate / solvela-gateway binary: BUSL-1.1 (this LICENSE)
-#   - protocol, x402, router, cli crates:     Apache-2.0 (LICENSE-APACHE)
-#   - SDK repos (solvela-python/-ts/-go):     MIT (separate repos)
+#   - protocol, x402, router, cli crates,
+#     escrow program, SDKs, dashboard:        Apache-2.0 (LICENSE-APACHE)
 #
 # This file exists because our LICENSE includes an expanded Additional Use
 # Grant (SaaS restriction + $1M revenue cap), which can cause licensee's

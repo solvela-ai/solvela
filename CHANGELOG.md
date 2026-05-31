@@ -2,6 +2,16 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-31 — Libraries & SDKs relicensed MIT → Apache-2.0
+
+Relicensed every non-gateway component from MIT to **Apache-2.0**. The gateway is unchanged — it stays **BUSL-1.1** (the source-available license that protects the hosted/enterprise offering and converts to MIT on its 2030-05-02 Change Date). The result is a clean two-license story: **gateway is BUSL-1.1, everything else is Apache-2.0**.
+
+- **Why Apache-2.0 over MIT** — Apache-2.0 adds an explicit patent grant and patent-retaliation clause. That matters for a payments protocol: the protocol crate, the x402/escrow implementation, and the SDKs that build and broadcast USDC transactions are exactly the surface where uniform patent coverage is worth having. Straight Apache-2.0 (not `MIT OR Apache-2.0` dual) binds every downstream to that clause.
+- **Components relicensed** — `solvela-protocol`, `solvela-x402`, `solvela-router`, `solvela-cli`, the `programs/escrow` Anchor program, all SDKs (`sdks/*`), and the dashboard.
+- **Mechanics** — added `LICENSE-APACHE` + a `NOTICE` file; flipped `license` fields across 5 crates, the Rust SDK workspace, 12 `package.json`, and `pyproject.toml`; swapped nested SDK `LICENSE` files; updated the README LICENSING table/badges, `CONTRIBUTING.md` (including the relicensing-authorization clause), `.github/licensee.yml`, and codemaps. `LICENSE-MIT` stays in the tree — it remains the gateway's BUSL Change License. `deny.toml` already allowed both.
+- **Doc drift fixed** — `docs/CODEMAPS/INDEX.md` had listed the dashboard as BUSL-1.1 and claimed the gateway converts to Apache-2.0; both corrected to match the authoritative `LICENSE`/README (dashboard is a library-tier license; the gateway's Change License is MIT).
+- **Authorization** — Solvela is the sole copyright holder, so no contributor consent was required; the relicense is also covered by the `CONTRIBUTING.md` relicensing provision (reworded here to explicitly permit moves between OSI-approved permissive licenses). Already-published crates.io/npm/PyPI artifacts keep their original MIT metadata; the next release carries Apache-2.0.
+
 ## 2026-05-22 — Semantic cache (Tier 2), Phase 1
 
 Added an optional embedding-similarity cache tier in front of the existing exact-match cache. A paraphrase of a previously-answered prompt can now hit the cache instead of calling the upstream LLM. **Off by default** (`[cache.semantic].enabled = false`) — enabling it is the only behaviour change.

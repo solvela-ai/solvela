@@ -77,4 +77,4 @@ cargo install solvela-cli
 
 ## License
 
-MIT
+Apache-2.0

@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Solana-native payment gateway for AI agents — pay for LLM calls with USDC, no API keys"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = "Apache-2.0"
 authors = [
     { name = "Solvela", email = "dev@solvela.ai" },
 ]
@@ -12,7 +12,7 @@ keywords = ["solana", "x402", "ai", "payment-gateway", "usdc", "agents"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
