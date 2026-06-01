@@ -82,13 +82,17 @@ jobs:
       # reject all mainnet USDC deposits (`mint mismatch`). Only the
       # actual deploy uses this flag, so without this job a mainnet-only
       # compile error would go unnoticed until release day.
-      - run: cargo check --lib --features mainnet
-      # Guard the *value* of USDC_MINT, not just that it compiles. A default
+      #
+      # Run the *full* unit suite under `--features mainnet` (not just the
+      # one mint-guard test): it both compiles the lib — subsuming a bare
+      # `cargo check --lib` — and exercises every unit test under the
+      # mainnet feature, so any test that regressed only under that flag is
+      # caught here. The mint-value guard
+      # (`test_usdc_mint_matches_active_feature`) asserts the mainnet mint in
+      # this job; the default `unit` job asserts the devnet mint. A default
       # build (devnet mint) once shipped to mainnet and rejected every real
       # deposit with ConstraintAddress 2012 — see CHANGELOG 2026-05-31, #436.
-      # `test_usdc_mint_matches_active_feature` asserts the mainnet mint here;
-      # the `unit` job asserts the devnet mint on the default build.
-      - run: cargo test --test unit --features mainnet test_usdc_mint_matches_active_feature
+      - run: cargo test --test unit --features mainnet
 
   sbf-build:
     name: cargo build-sbf
