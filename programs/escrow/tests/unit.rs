@@ -9,6 +9,7 @@
 
 #[cfg(test)]
 mod tests {
+    use anchor_lang::prelude::pubkey;
     use anchor_lang::Space;
     use solana_sdk::pubkey::Pubkey;
     use solvela_escrow::state::Escrow;
@@ -133,6 +134,40 @@ mod tests {
         // form so a bad bump fails the build, not a single test.
         const _: () = assert!(solvela_escrow::MAX_ESCROW_SLOTS >= 100_000);
         const _: () = assert!(solvela_escrow::MAX_ESCROW_SLOTS <= 1_000_000);
+    }
+
+    #[test]
+    fn test_usdc_mint_matches_active_build_feature() {
+        // Release guard for #436. The deployed mainnet bytecode MUST be built
+        // with `--features mainnet`, which swaps USDC_MINT from the devnet mint
+        // to the mainnet mint (see lib.rs). A default-feature .so silently
+        // deployed to mainnet rejects every real-USDC deposit with
+        // ConstraintAddress (the 2026-05-31 incident, #435), and a naive
+        // byte-grep of the .so can't detect it because the mint isn't a
+        // contiguous 32-byte run in the artifact — so assert the *compiled*
+        // constant here instead.
+        //
+        // This test is feature-aware so it guards both directions: the
+        // escrow.yml `mainnet-build` CI job runs it with `--features mainnet`
+        // (pinning the mainnet mint) while the default `unit` job pins devnet.
+        // A mint that doesn't match the active build fails CI either way.
+        // Compare raw 32-byte Pubkeys (not Display strings) so the guard
+        // doesn't depend on base58 formatting staying stable.
+        const MAINNET_USDC_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        const DEVNET_USDC_MINT: Pubkey = pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+
+        let expected = if cfg!(feature = "mainnet") {
+            MAINNET_USDC_MINT
+        } else {
+            DEVNET_USDC_MINT
+        };
+
+        assert_eq!(
+            solvela_escrow::USDC_MINT,
+            expected,
+            "USDC_MINT does not match the active build feature — a mainnet \
+             deploy MUST be built with `--features mainnet` (#436)."
+        );
     }
 
     #[test]

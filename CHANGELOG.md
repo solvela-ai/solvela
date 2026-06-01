@@ -2,6 +2,13 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-31 — Escrow USDC-mint release guard in CI ([#436](https://github.com/solvela-ai/solvela/issues/436))
+
+Closes the gap that let a **devnet-mint** escrow build reach mainnet unnoticed (the incident below). Added `test_usdc_mint_matches_active_build_feature` to `programs/escrow/tests/unit.rs`: a feature-aware assertion that the compiled `USDC_MINT` equals the **mainnet** mint when built with `--features mainnet`, else the **devnet** mint. The `escrow.yml` `mainnet-build` job now runs `cargo test --test unit --features mainnet` (was a bare `cargo check --lib`), so the assertion executes in CI; the default `unit` job pins the devnet mint. A mint that doesn't match its build feature now fails CI in either direction.
+
+- **Why a test, not a byte-grep** — the mint constant isn't a contiguous 32-byte run in the `.so`, so grepping the artifact can't catch the wrong mint. Asserting the *compiled* constant per feature is the reliable check (raw `Pubkey` comparison, not a base58 string, so the guard doesn't ride on `Display` stability).
+- **Scope** — this guards the source→feature mapping at CI time. Deploy-time enforcement (build-then-assert-then-`solana program deploy` as a scripted step) and a post-deploy deposit-simulation smoke remain the larger follow-ups proposed in #436.
+
 ## 2026-05-31 — Escrow mainnet program rebuilt with the correct USDC mint
 
 The on-chain escrow program (`9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`) had been deployed from a **default-feature build**, baking in the **devnet** USDC mint (`4zMMC9…`) instead of mainnet (`EPjFW…`). Because `deposit`/`claim` pin `address = USDC_MINT`, every real-USDC escrow payment was rejected on-chain with `AnchorError ConstraintAddress 2012` (`0x7dc`) — the entire escrow scheme was non-functional on mainnet (the `exact` scheme was unaffected). No funds were ever at risk: deposits reverted atomically.
