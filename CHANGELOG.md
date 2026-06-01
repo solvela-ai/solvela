@@ -2,6 +2,15 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-05-31 — Escrow mainnet program rebuilt with the correct USDC mint
+
+The on-chain escrow program (`9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`) had been deployed from a **default-feature build**, baking in the **devnet** USDC mint (`4zMMC9…`) instead of mainnet (`EPjFW…`). Because `deposit`/`claim` pin `address = USDC_MINT`, every real-USDC escrow payment was rejected on-chain with `AnchorError ConstraintAddress 2012` (`0x7dc`) — the entire escrow scheme was non-functional on mainnet (the `exact` scheme was unaffected). No funds were ever at risk: deposits reverted atomically.
+
+- **Root cause** — the mainnet bytecode must be built with `--features mainnet` (`programs/escrow/src/lib.rs:46-49`); a default `anchor build` had been deployed. Confirmed by simulating a real deposit against mainnet.
+- **Fix** — rebuilt `cargo build-sbf --features mainnet` (verified the compiled `USDC_MINT` constant resolves to the mainnet mint) and upgraded the program via the buffer flow (upgrade authority `EDM9pao5…`). Upgrade signature `5wZ2UM8fdg9bhESc2nQST8qsDYDBoS5mCBzTSH81ivUNsDGmdLh9DTwKqzJDCdxaL4TX9ppidWugxRpiy43VLZ4e`.
+- **Verification** — a live escrow payment now settles end-to-end; the gateway-signed `Claim` transaction (`3tkaPbGi…`) succeeded on-chain.
+- **Follow-ups filed** — the gateway reported this deterministic rejection as a retryable "could not be confirmed, please retry" error ([#435](https://github.com/solvela-ai/solvela/issues/435)), and nothing in CI/release caught the devnet-mint build reaching mainnet ([#436](https://github.com/solvela-ai/solvela/issues/436)).
+
 ## 2026-05-31 — Libraries & SDKs relicensed MIT → Apache-2.0
 
 Relicensed every non-gateway component from MIT to **Apache-2.0**. The gateway is unchanged — it stays **BUSL-1.1** (the source-available license that protects the hosted/enterprise offering and converts to MIT on its 2030-05-02 Change Date). The result is a clean two-license story: **gateway is BUSL-1.1, everything else is Apache-2.0**.
