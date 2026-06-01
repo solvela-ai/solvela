@@ -52,7 +52,8 @@ add_keypair() {
     [[ -n "$addr" ]] && ROWS+=("$label|$addr")
   fi
 }
-add_keypair "operator / payer (id.json)"      "$SOLANA_DIR/id.json"
+add_keypair "operator / payer (prod-payer)"   "$SOLANA_DIR/solvela-prod-payer.json"
+add_keypair "retired hot wallet (id.json)"    "$SOLANA_DIR/id.json"
 add_keypair "ops (solvela-ops.json)"          "$SOLANA_DIR/solvela-ops.json"
 add_keypair "upgrade authority"               "$SOLANA_DIR/solvela-upgrade-authority.json"
 [[ -n "$recipient" ]] && ROWS+=("gateway recipient (.env)|$recipient")
