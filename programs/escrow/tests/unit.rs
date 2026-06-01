@@ -144,4 +144,35 @@ mod tests {
         // `cargo test` surface so a regression that removes it is loud.
         let _err = solvela_escrow::errors::EscrowError::DuplicateClaimAccounts;
     }
+
+    #[test]
+    fn test_usdc_mint_matches_active_feature() {
+        // Release guard (issue #436): assert the *value* of USDC_MINT for the
+        // active build, not just that it compiles. The deployed mainnet program
+        // MUST be built with `--features mainnet`; a default build bakes in the
+        // devnet mint and the `address = USDC_MINT` constraint on deposit/claim
+        // then rejects every real-USDC payment with ConstraintAddress 2012
+        // (0x7dc) — exactly the bug that shipped to mainnet (CHANGELOG
+        // 2026-05-31). CI runs this under both feature configurations: the
+        // `unit` job (default → devnet) and the mainnet job (`--features
+        // mainnet` → mainnet).
+        use std::str::FromStr;
+        let mainnet = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap();
+        let devnet = Pubkey::from_str("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU").unwrap();
+
+        #[cfg(feature = "mainnet")]
+        assert_eq!(
+            solvela_escrow::USDC_MINT,
+            mainnet,
+            "USDC_MINT must be the mainnet USDC mint when built with --features mainnet"
+        );
+        #[cfg(not(feature = "mainnet"))]
+        assert_eq!(
+            solvela_escrow::USDC_MINT, devnet,
+            "default build must target the devnet USDC mint; build with --features mainnet for mainnet deploys"
+        );
+
+        // Reference both in every config so neither binding warns as unused.
+        let _ = (mainnet, devnet);
+    }
 }

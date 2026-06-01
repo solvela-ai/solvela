@@ -72,7 +72,7 @@ jobs:
       - run: cargo test --test unit
 
   mainnet-build:
-    name: cargo check --features mainnet
+    name: mainnet build + USDC-mint guard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -83,6 +83,12 @@ jobs:
       # actual deploy uses this flag, so without this job a mainnet-only
       # compile error would go unnoticed until release day.
       - run: cargo check --lib --features mainnet
+      # Guard the *value* of USDC_MINT, not just that it compiles. A default
+      # build (devnet mint) once shipped to mainnet and rejected every real
+      # deposit with ConstraintAddress 2012 — see CHANGELOG 2026-05-31, #436.
+      # `test_usdc_mint_matches_active_feature` asserts the mainnet mint here;
+      # the `unit` job asserts the devnet mint on the default build.
+      - run: cargo test --test unit --features mainnet test_usdc_mint_matches_active_feature
 
   sbf-build:
     name: cargo build-sbf
