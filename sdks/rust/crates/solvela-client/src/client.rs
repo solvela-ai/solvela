@@ -688,7 +688,43 @@ impl SolvelaClient {
             )));
         }
 
-        let ui_amount = json["result"]["value"]["uiAmount"].as_f64().unwrap_or(0.0);
+        // At this point the response carried no `error` object, so the account
+        // exists and the body must contain `result.value`. A missing
+        // `result`/`value` means a structurally unexpected response (proxy
+        // error page, truncated body, wrong RPC method) — surface it as an
+        // error rather than silently reporting a 0 balance, which would
+        // wrongly trip the free-tier fallback and suppress payments.
+        let value = json
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .ok_or_else(|| {
+                ClientError::BalanceError(
+                    "RPC response missing result.value (unexpected shape)".to_string(),
+                )
+            })?;
+
+        // Prefer the deprecated `uiAmount` float when present, but it may be
+        // `null`; fall back to the authoritative `amount` (atomic string) +
+        // `decimals`, which `getTokenAccountBalance` always returns for an
+        // existing account. Only a response missing BOTH is treated as an
+        // error — a real zero balance still parses as 0.0 here.
+        let ui_amount = if let Some(n) = value.get("uiAmount").and_then(serde_json::Value::as_f64) {
+            n
+        } else if let (Some(amount), Some(decimals)) = (
+            value.get("amount").and_then(serde_json::Value::as_str),
+            value.get("decimals").and_then(serde_json::Value::as_u64),
+        ) {
+            let raw: u64 = amount.parse().map_err(|e| {
+                ClientError::BalanceError(format!("invalid token amount '{amount}': {e}"))
+            })?;
+            #[allow(clippy::cast_precision_loss)] // USDC amounts fit within the f64 mantissa
+            let ui = raw as f64 / 10f64.powi(i32::try_from(decimals).unwrap_or(6));
+            ui
+        } else {
+            return Err(ClientError::BalanceError(
+                "RPC response missing balance fields (uiAmount/amount)".to_string(),
+            ));
+        };
 
         Ok(ui_amount)
     }
@@ -1062,6 +1098,82 @@ mod tests {
             .await
             .unwrap();
         assert!((balance - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_usdc_balance_falls_back_to_amount_when_ui_amount_null() {
+        // `uiAmount` is a deprecated field that can be `null`; the balance must
+        // be computed from the authoritative `amount` + `decimals`, NOT treated
+        // as 0.0. 2_500_000 atomic / 10^6 = 2.5 USDC.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "context": { "slot": 1 },
+                    "value": {
+                        "amount": "2500000",
+                        "decimals": 6,
+                        "uiAmount": serde_json::Value::Null,
+                        "uiAmountString": "2.5"
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: "http://unused".to_string(),
+                rpc_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let balance = client
+            .usdc_balance_of(&client.wallet.address())
+            .await
+            .unwrap();
+        assert!((balance - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_usdc_balance_errors_on_malformed_response_not_silent_zero() {
+        // No `error` object and no `result.value` — a structurally unexpected
+        // body (e.g. a proxy error page). This MUST be an error, not a silent
+        // 0.0 that would trip the free-tier fallback and suppress payments.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "context": { "slot": 1 } }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: "http://unused".to_string(),
+                rpc_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let result = client.usdc_balance_of(&client.wallet.address()).await;
+        assert!(
+            matches!(result, Err(ClientError::BalanceError(_))),
+            "malformed RPC response must error, got {result:?}"
+        );
     }
 
     #[tokio::test]
