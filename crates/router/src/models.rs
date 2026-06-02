@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use thiserror::Error;
 
-use solvela_protocol::{CostBreakdown, ModelInfo, PLATFORM_FEE_MULTIPLIER, PLATFORM_FEE_PERCENT};
+use solvela_protocol::{
+    CostBreakdown, ModelRegistration, PLATFORM_FEE_MULTIPLIER, PLATFORM_FEE_PERCENT,
+};
 
 /// Errors from the model registry.
 #[derive(Debug, Error)]
@@ -55,7 +57,7 @@ pub struct ModelsConfig {
 /// In-memory model registry loaded from TOML config.
 #[derive(Debug)]
 pub struct ModelRegistry {
-    models: HashMap<String, ModelInfo>,
+    models: HashMap<String, ModelRegistration>,
 }
 
 impl ModelRegistry {
@@ -98,10 +100,10 @@ impl ModelRegistry {
         // reduce to the same canonical key are tolerated only when their
         // pricing matches — otherwise the silent last-write-wins behavior
         // of `HashMap::collect` would non-deterministically pick one.
-        let mut models: HashMap<String, ModelInfo> = HashMap::new();
+        let mut models: HashMap<String, ModelRegistration> = HashMap::new();
         for (key, entry) in config.models {
             let id = format!("{}/{}", entry.provider, entry.model_id);
-            let info = ModelInfo {
+            let info = ModelRegistration {
                 id: id.clone(),
                 provider: entry.provider,
                 model_id: entry.model_id,
@@ -150,12 +152,12 @@ impl ModelRegistry {
     }
 
     /// Look up a model by its ID (e.g., "openai/gpt-4o" or "openai-gpt-4o").
-    pub fn get(&self, model_id: &str) -> Option<&ModelInfo> {
+    pub fn get(&self, model_id: &str) -> Option<&ModelRegistration> {
         self.models.get(model_id)
     }
 
     /// Return all registered models.
-    pub fn all(&self) -> Vec<&ModelInfo> {
+    pub fn all(&self) -> Vec<&ModelRegistration> {
         // Deduplicate — each model is stored under two keys
         let mut seen = std::collections::HashSet::new();
         self.models
@@ -230,7 +232,7 @@ supports_streaming = true
     fn test_registry_stores_raw_provider_rates() {
         // ModelRegistry stores raw provider rates as-loaded from TOML.
         // The 5% platform fee is applied at the boundary by estimate_cost
-        // and compute_actual_atomic_cost — never baked into ModelInfo.
+        // and compute_actual_atomic_cost — never baked into ModelRegistration.
         let registry = ModelRegistry::from_toml(TEST_TOML).unwrap();
         let model = registry.get("openai/gpt-4o").unwrap();
         assert!(

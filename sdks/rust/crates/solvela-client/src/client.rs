@@ -924,7 +924,6 @@ mod tests {
         let models = vec![ModelInfo {
             id: "openai/gpt-4o".to_string(),
             provider: "openai".to_string(),
-            model_id: "gpt-4o".to_string(),
             display_name: "GPT-4o".to_string(),
             input_cost_per_million: 2.5,
             output_cost_per_million: 10.0,
@@ -933,9 +932,6 @@ mod tests {
             supports_tools: true,
             supports_vision: true,
             reasoning: false,
-            supports_structured_output: true,
-            supports_batch: false,
-            max_output_tokens: Some(16384),
         }];
 
         Mock::given(method("GET"))

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use solvela_protocol::{ChatRequest, ChatResponse, ModelInfo};
+use solvela_protocol::{ChatRequest, ChatResponse, ModelRegistration};
 
 use super::{ChatStream, LLMProvider, ProviderError};
 
@@ -47,7 +47,7 @@ impl LLMProvider for DeepSeekProvider {
         "deepseek"
     }
 
-    fn supported_models(&self) -> Vec<ModelInfo> {
+    fn supported_models(&self) -> Vec<ModelRegistration> {
         vec![]
     }
 

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use solvela_protocol::{
-    ChatChoice, ChatMessage, ChatRequest, ChatResponse, ModelInfo, Role, Usage,
+    ChatChoice, ChatMessage, ChatRequest, ChatResponse, ModelRegistration, Role, Usage,
 };
 
 use super::LLMProvider;
@@ -256,7 +256,7 @@ impl LLMProvider for GoogleProvider {
         "google"
     }
 
-    fn supported_models(&self) -> Vec<ModelInfo> {
+    fn supported_models(&self) -> Vec<ModelRegistration> {
         vec![]
     }
 

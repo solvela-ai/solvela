@@ -76,7 +76,7 @@ pub(crate) fn parse_fallback_preference(header: &str) -> Vec<(&str, &str)> {
 pub(crate) struct ProviderCallContext<'a> {
     pub state: &'a Arc<AppState>,
     pub req: &'a ChatRequest,
-    pub model_info: &'a solvela_protocol::ModelInfo,
+    pub model_info: &'a solvela_protocol::ModelRegistration,
     pub headers: &'a HeaderMap,
     pub debug_enabled: bool,
     pub request_start: Instant,

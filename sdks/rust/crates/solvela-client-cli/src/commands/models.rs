@@ -106,7 +106,6 @@ mod tests {
         ModelInfo {
             id: id.to_string(),
             provider: provider.to_string(),
-            model_id: id.to_string(),
             display_name: id.to_string(),
             input_cost_per_million: 1.0,
             output_cost_per_million: 2.0,
@@ -115,9 +114,6 @@ mod tests {
             supports_tools: false,
             supports_vision: false,
             reasoning: false,
-            supports_structured_output: false,
-            supports_batch: false,
-            max_output_tokens: None,
         }
     }
 
