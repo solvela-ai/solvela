@@ -523,6 +523,10 @@ pub async fn chat_completions(
                     model = %req.model,
                     "model registry produced a non-finite or negative cost; refusing"
                 );
+                // No reservation committed yet — this guard fires BEFORE
+                // `check_budget`, so there is nothing to release here. Keep this
+                // guard ahead of the reserve: moving it after would turn this
+                // early return into a budget leak.
                 return Err(GatewayError::Internal(
                     "estimated cost is not a valid finite non-negative number".to_string(),
                 ));
