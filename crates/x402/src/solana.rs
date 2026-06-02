@@ -415,11 +415,27 @@ impl PaymentVerifier for SolanaVerifier {
         // Validate the transaction can be decoded
         let _tx = self.decode_and_validate_transaction(&solana_payload.transaction)?;
 
-        // Broadcast the transaction
-        let signature = self
-            .send_transaction(&solana_payload.transaction)
-            .await
-            .map_err(|e| Error::SettlementFailed(format!("send failed: {e}")))?;
+        // Broadcast the transaction. A send-time failure is returned as a
+        // classified `Ok(SettlementResult { success: false })` rather than an
+        // `Err` so the gateway can distinguish a deterministic preflight
+        // rejection (non-retryable) from a transient send failure (retryable) —
+        // mirrors the escrow path and closes the direct-scheme half of #435.
+        let signature = match self.send_transaction(&solana_payload.transaction).await {
+            Ok(sig) => sig,
+            Err(e) => {
+                let raw = format!("send failed: {e}");
+                let failure_kind = crate::solana_rpc::classify_settlement_error(&raw);
+                warn!(error = %e, ?failure_kind, "solana payment send failed");
+                return Ok(SettlementResult {
+                    success: false,
+                    tx_signature: None,
+                    network: SOLANA_NETWORK.to_string(),
+                    error: Some(raw),
+                    verified_amount: None,
+                    failure_kind: Some(failure_kind),
+                });
+            }
+        };
 
         info!(signature = %signature, "transaction sent, waiting for confirmation");
 
@@ -444,6 +460,7 @@ impl PaymentVerifier for SolanaVerifier {
                     network: SOLANA_NETWORK.to_string(),
                     error: None,
                     verified_amount: None,
+                    failure_kind: None,
                 })
             }
             Err(e) => {
@@ -452,12 +469,15 @@ impl PaymentVerifier for SolanaVerifier {
                     error = %e,
                     "settlement confirmation failed"
                 );
+                let raw = e.to_string();
+                let failure_kind = crate::solana_rpc::classify_settlement_error(&raw);
                 Ok(SettlementResult {
                     success: false,
                     tx_signature: Some(signature),
                     network: SOLANA_NETWORK.to_string(),
-                    error: Some(e.to_string()),
+                    error: Some(raw),
                     verified_amount: None,
+                    failure_kind: Some(failure_kind),
                 })
             }
         }
@@ -498,6 +518,7 @@ fn validate_nonce_account(
 mod tests {
     use super::*;
     use crate::solana_types::{ParsedMessage, Pubkey};
+    use crate::types::{PaymentAccept, Resource, SettlementFailureKind, SolanaPayload};
 
     // -----------------------------------------------------------------------
     // Helpers for building test transactions
@@ -1028,5 +1049,65 @@ mod tests {
             }
             other => panic!("expected InvalidTransaction, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Settlement failure classification (issue #435, direct/exact scheme)
+    // -----------------------------------------------------------------------
+
+    /// Build a valid, signed direct PaymentPayload that passes
+    /// `decode_and_validate_transaction` (real ed25519 signature over the
+    /// message), so `settle_payment` proceeds to the broadcast step.
+    fn signed_direct_payload() -> PaymentPayload {
+        let signer = test_signer_pubkey();
+        let recipient = Pubkey::from_str(TEST_RECIPIENT).unwrap();
+        let msg = build_spl_transfer_message(&signer, &recipient, 5000);
+        let tx = encode_base64(&wrap_in_transaction(&msg));
+        PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "exact".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "5000".to_string(),
+                asset: TEST_USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Direct(SolanaPayload { transaction: tx }),
+        }
+    }
+
+    #[tokio::test]
+    async fn settle_send_failure_returns_classified_ok_not_err() {
+        // Regression for the direct-scheme half of #435: a send-time RPC failure
+        // must surface as `Ok(SettlementResult { success: false, failure_kind })`
+        // so the gateway can classify it — NOT propagate as `Err`, which the
+        // route flattens into a generic "retry" message. Point at an unroutable
+        // local address so the send fails instantly with no network egress.
+        let verifier = SolanaVerifier::new(
+            "http://127.0.0.1:1",
+            TEST_RECIPIENT,
+            TEST_USDC_MINT,
+            reqwest::Client::new(),
+        )
+        .expect("verifier");
+
+        let result = verifier
+            .settle_payment(&signed_direct_payload())
+            .await
+            .expect("send failure must be Ok(success=false), not Err");
+
+        assert!(!result.success);
+        // A transport failure (connection refused) is transient → Submission,
+        // which the gateway maps to the retryable message. A deterministic
+        // program rejection would instead classify as Rejected (covered by the
+        // classifier unit tests in solana_rpc.rs).
+        assert_eq!(result.failure_kind, Some(SettlementFailureKind::Submission));
+        assert!(result.error.is_some());
     }
 }

@@ -436,12 +436,15 @@ impl PaymentVerifier for EscrowVerifier {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "escrow deposit submission failed");
+                let raw = format!("submission failed: {e}");
+                let failure_kind = crate::solana_rpc::classify_settlement_error(&raw);
                 return Ok(SettlementResult {
                     success: false,
                     tx_signature: Some(sig_b58),
                     network: SOLANA_NETWORK.to_string(),
-                    error: Some(format!("submission failed: {e}")),
+                    error: Some(raw),
                     verified_amount,
+                    failure_kind: Some(failure_kind),
                 });
             }
         }
@@ -462,14 +465,26 @@ impl PaymentVerifier for EscrowVerifier {
                 network: SOLANA_NETWORK.to_string(),
                 error: None,
                 verified_amount,
+                failure_kind: None,
             }),
-            Err(e) => Ok(SettlementResult {
-                success: false,
-                tx_signature: Some(sig_b58),
-                network: SOLANA_NETWORK.to_string(),
-                error: Some(e.to_string()),
-                verified_amount,
-            }),
+            Err(e) => {
+                let raw = e.to_string();
+                let failure_kind = crate::solana_rpc::classify_settlement_error(&raw);
+                tracing::warn!(
+                    error = %e,
+                    signature = %sig_b58,
+                    ?failure_kind,
+                    "escrow deposit confirmation failed"
+                );
+                Ok(SettlementResult {
+                    success: false,
+                    tx_signature: Some(sig_b58),
+                    network: SOLANA_NETWORK.to_string(),
+                    error: Some(raw),
+                    verified_amount,
+                    failure_kind: Some(failure_kind),
+                })
+            }
         }
     }
 }
