@@ -205,6 +205,13 @@ struct ModelInfoWire {
     pricing: Pricing,
 }
 
+// WIRE-SHAPE SOURCE OF TRUTH. Do NOT replace this hand-written impl (and its
+// `Deserialize` sibling below) with `#[derive(Serialize, Deserialize)]` on
+// `ModelInfo`: a derive would emit/expect flat top-level fields instead of the
+// nested `pricing.*` / `capabilities.*` shape, silently reintroducing the #229
+// SDK drift. The `serializes_nested_wire_shape` test guards the JSON layout at
+// runtime; the `compile_fail` doctest on `ModelInfo` guards against stacking a
+// derive on top of this impl.
 impl Serialize for ModelInfo {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -275,12 +282,16 @@ mod tests {
             input_cost_per_million: 2.5,
             output_cost_per_million: 10.0,
             context_window: 128_000,
+            // Capability bools use a mixed pattern (not all-true) so that an
+            // accidental field swap in `From<&ModelRegistration>` changes at
+            // least one observed value rather than coincidentally matching.
+            // `reasoning: true` also exercises the non-default projection path.
             supports_streaming: true,
-            supports_tools: true,
+            supports_tools: false,
             supports_vision: true,
-            reasoning: false,
+            reasoning: true,
             supports_structured_output: true,
-            supports_batch: true,
+            supports_batch: false,
             max_output_tokens: Some(16_384),
         }
     }
@@ -326,11 +337,12 @@ mod tests {
         assert_eq!(v["pricing"]["currency"], "USDC");
         assert_eq!(v["pricing"]["fee_percent"], PLATFORM_FEE_PERCENT);
 
-        // Capabilities is nested, NOT flat.
+        // Capabilities is nested, NOT flat. Values mirror the mixed pattern
+        // in `registration()` so a swapped capability would change the JSON.
         assert_eq!(v["capabilities"]["streaming"], true);
-        assert_eq!(v["capabilities"]["tools"], true);
+        assert_eq!(v["capabilities"]["tools"], false);
         assert_eq!(v["capabilities"]["vision"], true);
-        assert_eq!(v["capabilities"]["reasoning"], false);
+        assert_eq!(v["capabilities"]["reasoning"], true);
 
         // Internal-only fields are not even present on the wire type, so they
         // categorically cannot appear in the JSON.

@@ -1646,20 +1646,28 @@ async fn test_models_endpoint() {
     // round-trip tests are meant to mirror.
     let gpt4o = data.iter().find(|m| m["id"] == "openai/gpt-4o").unwrap();
 
+    // Assert exact values, not just types: this is the only test that runs
+    // the full TOML → ModelRegistry → ModelInfo::from → serialize → HTTP body
+    // pipeline, so it is where a value-corrupting bug in the projection (the
+    // #229 zero-fill class) would surface end-to-end. Values mirror the
+    // `openai-gpt-4o` entry in TEST_MODELS_TOML.
     assert_eq!(gpt4o["object"], "model");
     assert_eq!(gpt4o["provider"], "openai");
-    assert!(gpt4o["display_name"].is_string());
-    assert!(gpt4o["context_window"].is_number());
+    assert_eq!(gpt4o["display_name"], "GPT-4o");
+    assert_eq!(gpt4o["context_window"], 128_000);
 
-    assert!(gpt4o["pricing"]["input_per_million"].is_number());
-    assert!(gpt4o["pricing"]["output_per_million"].is_number());
+    assert_eq!(gpt4o["pricing"]["input_per_million"], 2.5);
+    assert_eq!(gpt4o["pricing"]["output_per_million"], 10.0);
     assert_eq!(gpt4o["pricing"]["currency"], "USDC");
     assert_eq!(gpt4o["pricing"]["fee_percent"], 5);
 
-    assert!(gpt4o["capabilities"]["streaming"].is_boolean());
-    assert!(gpt4o["capabilities"]["tools"].is_boolean());
-    assert!(gpt4o["capabilities"]["vision"].is_boolean());
-    assert!(gpt4o["capabilities"]["reasoning"].is_boolean());
+    // gpt-4o declares streaming/tools/vision = true and omits reasoning
+    // (defaults false) in TEST_MODELS_TOML — pin each so a capability that
+    // silently flips would fail here.
+    assert_eq!(gpt4o["capabilities"]["streaming"], true);
+    assert_eq!(gpt4o["capabilities"]["tools"], true);
+    assert_eq!(gpt4o["capabilities"]["vision"], true);
+    assert_eq!(gpt4o["capabilities"]["reasoning"], false);
 
     // Internal-only fields must never leak onto the wire.
     assert!(gpt4o.get("model_id").is_none());

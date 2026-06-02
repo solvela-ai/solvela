@@ -1,0 +1,58 @@
+Solvela — Codemap diff report
+Generated: 2026-05-15
+=================================
+
+MODE: initial creation (no previous codemaps detected)
+
+Files written
+-------------
+docs/CODEMAPS/architecture.md   (new)  ~700 tokens
+docs/CODEMAPS/backend.md        (new)  ~950 tokens
+docs/CODEMAPS/frontend.md       (new)  ~550 tokens
+docs/CODEMAPS/data.md           (new)  ~650 tokens
+docs/CODEMAPS/dependencies.md   (new)  ~600 tokens
+
+Scope snapshot at generation time
+---------------------------------
+- Workspace crates: gateway, x402, router, protocol (solvela-protocol),
+                    cli (solvela-cli)
+- Standalone Anchor program: programs/escrow (mainnet 9neDH...HLU)
+- SDKs: typescript (0.2.2), python (0.2.0), go (sdks/go/v0.1.0),
+        mcp (0.1.0), signer-core (0.1.0), ai-sdk-provider (0.2.1),
+        cli-npm (1.0.0-draft),
+        openclaw-provider (1.0.0-draft, publish gated on OpenClaw LTS)
+- Dashboard: Next.js 16, App Router, deployed Vercel
+- Migrations: 9 (001 through 009)
+- Active routes: 31 in crates/gateway/src/lib.rs:206-282
+
+New dependencies surfaced vs. CLAUDE.md baseline
+------------------------------------------------
+None - codemaps document existing dependencies; no new third-party
+services introduced by this generation.
+
+Architecture changes since last commit on main (9eedad73)
+---------------------------------------------------------
+- 2026-05-15 #306: dedicated escrow CI workflow (programs/escrow/) -
+  captured in dependencies.md CI section.
+- 2026-05-14/15 #302-#305: valibot adoption in signer-core +
+  ai-sdk-provider; 402 PaymentRequired top-level envelope.
+- 2026-05-13/14 #294-#297: agentic docs-audit pipeline (sticky PR
+  comments, SDK parity sweep, journey simulator) - not represented
+  as code, lives in scripts/audit-docs/.
+
+Staleness warnings
+------------------
+None applicable on initial creation. On next run:
+- Codemaps older than 90 days will be flagged here.
+- Routes added/removed in crates/gateway/src/lib.rs since last
+  generation will be enumerated.
+- New migration files will be listed; deprecated tables flagged.
+
+Notes
+-----
+- All five codemaps are kept under ~1000 tokens each per skill spec.
+- Schema details cite existing public migration files; no production
+  data.
+- Codemaps are intended as token-lean context loaders for future AI
+  sessions; CLAUDE.md remains the authoritative human-facing
+  instruction file.
