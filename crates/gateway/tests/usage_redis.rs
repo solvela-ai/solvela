@@ -737,7 +737,8 @@ async fn check_budget_serializes_concurrent_callers(pool: PgPool) {
     let mut exceeded = 0usize;
     for h in handles {
         match h.await.expect("join") {
-            Ok(()) => ok += 1,
+            // M3: `check_budget` now returns a `BudgetReservation` on success.
+            Ok(_) => ok += 1,
             Err(UsageError::BudgetExceeded { .. }) => exceeded += 1,
             Err(other) => panic!("unexpected error: {other:?}"),
         }

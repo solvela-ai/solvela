@@ -108,6 +108,57 @@ impl PaymentVerifier for AlwaysPassVerifier {
     }
 }
 
+/// An `exact`-scheme verifier whose `verify_payment` always passes and whose
+/// `settle_payment` records that it was reached by flipping a shared
+/// `AtomicBool` before returning success. It never panics — the test inspects
+/// the flag after the request to prove whether on-chain settlement was reached.
+///
+/// Used by the M3 regression tests: an over-budget request must be rejected
+/// (HTTP 400) BEFORE settlement, so the flag must stay `false`; a within-budget
+/// request must settle, so the flag must become `true`.
+struct SettleRecordingVerifier {
+    settled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl PaymentVerifier for SettleRecordingVerifier {
+    fn network(&self) -> &str {
+        SOLANA_NETWORK
+    }
+
+    fn scheme(&self) -> &str {
+        "exact"
+    }
+
+    async fn verify_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<VerificationResult, X402Error> {
+        Ok(VerificationResult {
+            valid: true,
+            reason: None,
+            verified_amount: Some(2625),
+        })
+    }
+
+    async fn settle_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<SettlementResult, X402Error> {
+        // Record that settlement was reached — the core observable for M3.
+        self.settled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(SettlementResult {
+            success: true,
+            tx_signature: Some("MockRecordedSettledTxSig".to_string()),
+            network: SOLANA_NETWORK.to_string(),
+            error: None,
+            verified_amount: None,
+            failure_kind: None,
+        })
+    }
+}
+
 /// A mock verifier for the escrow scheme.
 struct AlwaysPassEscrowVerifier;
 
@@ -423,10 +474,20 @@ fn test_app_with_mock_provider() -> axum::Router {
 
 /// Build a test app with mock providers and return both the router and state.
 fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
+    test_app_with_mock_provider_and_exact_verifier(Arc::new(AlwaysPassVerifier))
+}
+
+/// Like [`test_app_with_mock_provider_and_state`] but lets the caller inject the
+/// `exact`-scheme verifier, so settlement-observing paths (e.g. proving that an
+/// over-budget request never reaches settlement — M3) can be exercised
+/// end-to-end. Mirrors how [`test_app_with_mock_provider_and_escrow_verifier`]
+/// parameterizes the escrow builder.
+fn test_app_with_mock_provider_and_exact_verifier(
+    exact_verifier: Arc<dyn PaymentVerifier>,
+) -> (axum::Router, Arc<AppState>) {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
-    let facilitator =
-        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![exact_verifier]);
 
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
@@ -4135,6 +4196,116 @@ async fn test_payment_verified_reaches_provider_path() {
             .to_str()
             .unwrap(),
         "verified"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M3 regression (#173): budget check + reserve runs BEFORE on-chain settlement
+// ---------------------------------------------------------------------------
+
+/// M3 primary regression: an over-budget request must NEVER reach on-chain
+/// settlement.
+///
+/// Before the fix, the wallet budget check ran AFTER `verify_and_settle`, so an
+/// over-budget request settled on-chain (funds taken) and was THEN rejected with
+/// a 4xx — the agent paid and got no service. The fix moves the
+/// check + reserve ahead of settlement.
+///
+/// The `UsageTracker::noop()` tracker (no Redis) applies a $1.00 per-request hard
+/// cap. The test model `openai/gpt-4o` costs $10.00/M output tokens, so
+/// `max_tokens: 128000` estimates ~$1.28 — over the cap → `check_budget` returns
+/// `BudgetExceeded` → the route maps it to `BadRequest` → HTTP 400.
+///
+/// We inject a `SettleRecordingVerifier` that flips a shared `AtomicBool` if (and
+/// only if) `settle_payment` is reached. We assert the response is 400 AND the
+/// flag is still `false` — i.e. settlement was never reached, so no funds were
+/// taken. (Were the ordering reversed — settlement before the budget gate — the
+/// flag would be `true`, failing this test.)
+#[tokio::test]
+async fn test_over_budget_request_never_settles() {
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (app, _state) =
+        test_app_with_mock_provider_and_exact_verifier(Arc::new(SettleRecordingVerifier {
+            settled: Arc::clone(&settled),
+        }));
+
+    // ~$1.28 estimated — over the $1.00 no-Redis hard cap.
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+        "max_tokens": 128000,
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "over-budget request must be rejected with 400"
+    );
+    assert!(
+        !settled.load(std::sync::atomic::Ordering::SeqCst),
+        "settlement must NOT be reached for an over-budget request — funds must not be taken"
+    );
+}
+
+/// M3 counterpart: a within-budget request must still settle and succeed.
+///
+/// Same app/verifier as the over-budget test, but a request that stays under the
+/// $1.00 cap (small/no `max_tokens`). Confirms the reorder didn't break the
+/// happy path: response is 200 and `settle_payment` WAS reached (flag `true`).
+#[tokio::test]
+async fn test_within_budget_request_settles_and_succeeds() {
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (app, _state) =
+        test_app_with_mock_provider_and_exact_verifier(Arc::new(SettleRecordingVerifier {
+            settled: Arc::clone(&settled),
+        }));
+
+    // No max_tokens → well under the $1.00 cap.
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "within-budget request must succeed"
+    );
+    assert!(
+        settled.load(std::sync::atomic::Ordering::SeqCst),
+        "settlement must be reached for a within-budget request"
     );
 }
 
