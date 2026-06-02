@@ -634,8 +634,11 @@ impl SolvelaClient {
     ///
     /// # Errors
     ///
-    /// Returns `ClientError::BalanceError` if the address is invalid or the
-    /// RPC call fails for a reason other than "account not found".
+    /// Returns `ClientError::BalanceError` if the address is invalid, the RPC
+    /// call fails for a reason other than "account not found", or the RPC
+    /// returns an HTTP 200 with a structurally unexpected body (missing
+    /// `result.value`, no usable balance fields, or a negative balance) —
+    /// these surface as errors rather than a silent `0.0`.
     pub async fn usdc_balance_of(&self, address: &str) -> Result<f64, ClientError> {
         let owner: Pubkey = address
             .parse()
@@ -688,45 +691,12 @@ impl SolvelaClient {
             )));
         }
 
-        // At this point the response carried no `error` object, so the account
-        // exists and the body must contain `result.value`. A missing
-        // `result`/`value` means a structurally unexpected response (proxy
-        // error page, truncated body, wrong RPC method) — surface it as an
-        // error rather than silently reporting a 0 balance, which would
-        // wrongly trip the free-tier fallback and suppress payments.
-        let value = json
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .ok_or_else(|| {
-                ClientError::BalanceError(
-                    "RPC response missing result.value (unexpected shape)".to_string(),
-                )
-            })?;
-
-        // Prefer the deprecated `uiAmount` float when present, but it may be
-        // `null`; fall back to the authoritative `amount` (atomic string) +
-        // `decimals`, which `getTokenAccountBalance` always returns for an
-        // existing account. Only a response missing BOTH is treated as an
-        // error — a real zero balance still parses as 0.0 here.
-        let ui_amount = if let Some(n) = value.get("uiAmount").and_then(serde_json::Value::as_f64) {
-            n
-        } else if let (Some(amount), Some(decimals)) = (
-            value.get("amount").and_then(serde_json::Value::as_str),
-            value.get("decimals").and_then(serde_json::Value::as_u64),
-        ) {
-            let raw: u64 = amount.parse().map_err(|e| {
-                ClientError::BalanceError(format!("invalid token amount '{amount}': {e}"))
-            })?;
-            #[allow(clippy::cast_precision_loss)] // USDC amounts fit within the f64 mantissa
-            let ui = raw as f64 / 10f64.powi(i32::try_from(decimals).unwrap_or(6));
-            ui
-        } else {
-            return Err(ClientError::BalanceError(
-                "RPC response missing balance fields (uiAmount/amount)".to_string(),
-            ));
-        };
-
-        Ok(ui_amount)
+        // The error-object case is handled above; parse the balance via the
+        // shared helper so this and `BalanceMonitor` behave identically. The
+        // helper errors (never silently returns 0.0) on a structurally
+        // unexpected body, which would otherwise trip the free-tier fallback
+        // and suppress payments. A real zero balance still parses as Ok(0.0).
+        crate::rpc_error::parse_token_balance(&json).map_err(ClientError::BalanceError)
     }
 
     /// Return the last known USDC balance, or `None` if it has never been polled.
