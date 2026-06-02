@@ -57,7 +57,11 @@ solvela chat --model auto "Complex analysis task..."
 # Skip the cost-confirmation prompt (for scripted use)
 solvela chat --yes "Write a short story about a Rust programmer."
 
-# Force a specific payment scheme (default: prefer escrow over exact)
+# Force a specific payment scheme. The `solvela` CLI defaults to escrow when
+# the gateway advertises it, falling back to exact. (Note: the `solvela-client`
+# Rust SDK library is the opposite — it defaults to `exact` and treats escrow as
+# opt-in via `ClientBuilder::prefer_escrow(true)`, since escrow adds a per-call
+# claim fee.)
 solvela chat --scheme exact "Quick one-shot question."
 ```
 

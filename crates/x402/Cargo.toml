@@ -13,6 +13,7 @@ categories = ["api-bindings", "cryptography"]
 
 [dependencies]
 solvela-protocol = { workspace = true }
+solvela-escrow-tx = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

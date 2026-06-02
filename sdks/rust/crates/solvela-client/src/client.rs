@@ -61,6 +61,19 @@ impl SolvelaClient {
             );
         }
 
+        // FIX-3: the escrow program is pinned to the known mainnet deployment by
+        // default. If a caller explicitly disabled the pin, warn that a
+        // malicious gateway could redirect escrow deposits to an attacker's
+        // program.
+        if config.expected_escrow_program_id.is_none() {
+            warn!(
+                "SolvelaClient created with the escrow-program pin disabled; \
+                 a malicious gateway could redirect escrow deposits to an \
+                 attacker-controlled program. Set \
+                 ClientBuilder::expected_escrow_program_id to re-enable the pin."
+            );
+        }
+
         let cache = if config.enable_cache {
             Some(crate::cache::ResponseCache::new())
         } else {
@@ -565,17 +578,57 @@ impl SolvelaClient {
             }
         }
 
-        let signed_tx = signer::sign_exact_payment(
-            &self.wallet,
-            &self.config.rpc_url,
-            &self.http,
-            &accept.pay_to,
-            amount_atomic,
-        )
-        .await?;
-
-        let payload = signer::build_payment_payload(&payment_required.resource, accept, &signed_tx);
-        Ok((signer::encode_payment_header(&payload), amount_atomic))
+        // Branch on the chosen scheme. `expected_recipient` (pay_to) and
+        // `max_payment_amount` checks above apply to BOTH paths.
+        let payload = match accept.scheme.as_str() {
+            "exact" => {
+                let signed_tx = signer::sign_exact_payment(
+                    &self.wallet,
+                    &self.config.rpc_url,
+                    &self.http,
+                    &accept.pay_to,
+                    amount_atomic,
+                )
+                .await?;
+                signer::build_payment_payload(&payment_required.resource, accept, &signed_tx)
+            }
+            "escrow" => {
+                // Security: validate the escrow program ID matches the expected
+                // one (prevents a malicious gateway redirecting the deposit to
+                // an attacker's program). Mirrors the `expected_recipient` check.
+                if let Some(ref expected) = self.config.expected_escrow_program_id {
+                    let actual = accept.escrow_program_id.as_deref().unwrap_or("");
+                    if actual != expected {
+                        return Err(ClientError::EscrowProgramMismatch {
+                            expected: expected.clone(),
+                            actual: actual.to_string(),
+                        });
+                    }
+                }
+                let (deposit_tx, service_id) = signer::sign_escrow_payment(
+                    &self.wallet,
+                    &self.config.rpc_url,
+                    &self.http,
+                    accept,
+                    amount_atomic,
+                )
+                .await?;
+                let agent_pubkey = self.wallet.pubkey().to_string();
+                signer::build_escrow_payment_payload(
+                    &payment_required.resource,
+                    accept,
+                    &deposit_tx,
+                    &service_id,
+                    &agent_pubkey,
+                )
+            }
+            other => {
+                return Err(ClientError::PaymentRejected(format!(
+                    "unsupported payment scheme: {other}"
+                )));
+            }
+        };
+        Ok((signer::encode_payment_header(&payload)?, amount_atomic))
     }
 
     /// Sign a payment for `payment_required`, send the paid request, and
@@ -726,26 +779,59 @@ impl SolvelaClient {
 
     /// Pick the best compatible payment scheme from the 402 accepts list.
     ///
-    /// Currently only "exact" (direct transfer) is supported. Escrow signing
-    /// is not yet implemented — escrow schemes are filtered out even when
-    /// `prefer_escrow` is true. Once `sign_escrow_payment` is added, this
-    /// method should respect `config.prefer_escrow` ordering.
+    /// Both "exact" (direct USDC-SPL transfer) and "escrow" (deposit to a PDA
+    /// vault) are supported. Ordering is controlled by `config.prefer_escrow`:
+    /// - `false` (default): prefer exact, fall back to escrow only if no exact
+    ///   scheme is advertised. Escrow incurs a claim fee, so exact is cheaper
+    ///   for micro-calls.
+    /// - `true`: prefer escrow, fall back to exact.
     ///
-    /// Security: validates `network` and `asset` in addition to `scheme` so
-    /// that a malicious gateway cannot trick the client into signing a
-    /// payment on an unexpected chain or in an unexpected token (HIGH-1).
+    /// Security: validates `network` and `asset` (and, for escrow,
+    /// `escrow_program_id.is_some()`) in addition to `scheme` so a malicious
+    /// gateway cannot trick the client into signing on an unexpected chain or
+    /// in an unexpected token (HIGH-1). The caller branches on the returned
+    /// `accept.scheme`.
     fn pick_scheme<'a>(
         &self,
         accepts: &'a [solvela_protocol::PaymentAccept],
     ) -> Option<&'a solvela_protocol::PaymentAccept> {
-        // TODO: respect self.config.prefer_escrow once escrow signing is implemented
-        let _ = self.config.prefer_escrow;
-        // Only exact scheme is implemented; escrow signing is not yet available.
-        // Reject any accept whose network or asset doesn't match Solana mainnet
-        // USDC-SPL — the only combination this client can sign for.
-        accepts
-            .iter()
-            .find(|a| a.scheme == "exact" && a.network == SOLANA_NETWORK && a.asset == USDC_MINT)
+        let is_exact = |a: &solvela_protocol::PaymentAccept| {
+            a.scheme == "exact" && a.network == SOLANA_NETWORK && a.asset == USDC_MINT
+        };
+        let is_escrow = |a: &solvela_protocol::PaymentAccept| {
+            a.scheme == "escrow"
+                && a.network == SOLANA_NETWORK
+                && a.asset == USDC_MINT
+                && a.escrow_program_id.is_some()
+        };
+
+        if self.config.prefer_escrow {
+            // FIX-1: no silent escrow→exact downgrade. If the gateway advertised
+            // a valid escrow scheme, use it. If it advertised an escrow scheme
+            // that fails validation (wrong network/asset, or missing program
+            // id), return None so the caller surfaces an error rather than
+            // silently paying via the cheaper-but-unwanted exact transfer. Only
+            // fall back to exact when NO escrow scheme was advertised at all.
+            if let Some(escrow) = accepts.iter().find(|a| is_escrow(a)) {
+                return Some(escrow);
+            }
+            let escrow_advertised = accepts.iter().any(|a| a.scheme == "escrow");
+            if escrow_advertised {
+                warn!(
+                    "prefer_escrow is set and the gateway advertised an escrow \
+                     scheme, but none passed validation (network/asset/program \
+                     id); refusing to downgrade to exact"
+                );
+                return None;
+            }
+            warn!("prefer_escrow is set but the gateway advertised no escrow scheme; falling back to exact");
+            accepts.iter().find(|a| is_exact(a))
+        } else {
+            accepts
+                .iter()
+                .find(|a| is_exact(a))
+                .or_else(|| accepts.iter().find(|a| is_escrow(a)))
+        }
     }
 }
 
@@ -763,6 +849,7 @@ impl std::fmt::Debug for SolvelaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use futures::StreamExt;
     use solvela_protocol::*;
     use wiremock::matchers::{method, path};
@@ -841,6 +928,246 @@ mod tests {
                 completion_tokens: 8,
                 total_tokens: 18,
             }),
+        }
+    }
+
+    /// A valid (well-formed base58) escrow program ID for tests.
+    const TEST_ESCROW_PROGRAM: &str = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU";
+
+    /// A 402 whose only accept is an escrow scheme.
+    fn escrow_payment_required() -> PaymentRequired {
+        let mut pr = sample_payment_required();
+        pr.accepts[0].scheme = "escrow".to_string();
+        pr.accepts[0].escrow_program_id = Some(TEST_ESCROW_PROGRAM.to_string());
+        pr
+    }
+
+    /// Mount a Solana RPC mock at `/` serving both `getLatestBlockhash` and
+    /// `getSlot` (the two calls `sign_escrow_payment` makes concurrently).
+    async fn mount_solana_rpc(server: &MockServer) {
+        // The escrow signer posts JSON-RPC to the RPC root; respond based on
+        // the `method` field. wiremock can't body-match easily here, so we
+        // serve a combined responder that satisfies either method by including
+        // both result shapes is not valid JSON-RPC. Instead, key on method via
+        // a body matcher.
+        use wiremock::matchers::body_partial_json;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_partial_json(serde_json::json!({"method": "getSlot"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": 1_000_000_u64
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_partial_json(
+                serde_json::json!({"method": "getLatestBlockhash"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "context": {"slot": 1_000_000_u64},
+                    "value": {
+                        // 32 zero bytes base58-encoded.
+                        "blockhash": "11111111111111111111111111111111",
+                        "lastValidBlockHeight": 1_000_300_u64
+                    }
+                }
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[test]
+    fn pick_scheme_prefers_escrow_when_configured() {
+        let config = ClientConfig {
+            prefer_escrow: true,
+            ..ClientConfig::default()
+        };
+        let client = SolvelaClient::new(test_wallet(), config).unwrap();
+
+        // Advertise both exact and escrow.
+        let mut pr = sample_payment_required();
+        pr.accepts.push(PaymentAccept {
+            scheme: "escrow".to_string(),
+            network: SOLANA_NETWORK.to_string(),
+            amount: "2625".to_string(),
+            asset: USDC_MINT.to_string(),
+            pay_to: pr.accepts[0].pay_to.clone(),
+            max_timeout_seconds: MAX_TIMEOUT_SECONDS,
+            escrow_program_id: Some(TEST_ESCROW_PROGRAM.to_string()),
+        });
+
+        let chosen = client.pick_scheme(&pr.accepts).unwrap();
+        assert_eq!(chosen.scheme, "escrow");
+    }
+
+    #[test]
+    fn pick_scheme_defaults_to_exact() {
+        // Default config (prefer_escrow = false): exact wins even when escrow
+        // is also advertised.
+        let client = SolvelaClient::new(test_wallet(), ClientConfig::default()).unwrap();
+        let mut pr = sample_payment_required();
+        pr.accepts.push(PaymentAccept {
+            scheme: "escrow".to_string(),
+            network: SOLANA_NETWORK.to_string(),
+            amount: "2625".to_string(),
+            asset: USDC_MINT.to_string(),
+            pay_to: pr.accepts[0].pay_to.clone(),
+            max_timeout_seconds: MAX_TIMEOUT_SECONDS,
+            escrow_program_id: Some(TEST_ESCROW_PROGRAM.to_string()),
+        });
+        let chosen = client.pick_scheme(&pr.accepts).unwrap();
+        assert_eq!(chosen.scheme, "exact");
+    }
+
+    #[test]
+    fn pick_scheme_escrow_fallback_when_no_exact() {
+        // Default config but only escrow advertised → falls back to escrow.
+        let client = SolvelaClient::new(test_wallet(), ClientConfig::default()).unwrap();
+        let pr = escrow_payment_required();
+        let chosen = client.pick_scheme(&pr.accepts).unwrap();
+        assert_eq!(chosen.scheme, "escrow");
+    }
+
+    #[test]
+    fn pick_scheme_rejects_escrow_without_program_id() {
+        let config = ClientConfig {
+            prefer_escrow: true,
+            ..ClientConfig::default()
+        };
+        let client = SolvelaClient::new(test_wallet(), config).unwrap();
+        let mut pr = escrow_payment_required();
+        pr.accepts[0].escrow_program_id = None; // no program id → not pickable
+        assert!(client.pick_scheme(&pr.accepts).is_none());
+    }
+
+    #[test]
+    fn pick_scheme_rejects_escrow_wrong_network_or_asset() {
+        let config = ClientConfig {
+            prefer_escrow: true,
+            ..ClientConfig::default()
+        };
+        let client = SolvelaClient::new(test_wallet(), config).unwrap();
+
+        let mut pr = escrow_payment_required();
+        pr.accepts[0].network = "ethereum:1".to_string();
+        assert!(client.pick_scheme(&pr.accepts).is_none());
+
+        let mut pr2 = escrow_payment_required();
+        pr2.accepts[0].asset = solana_sdk::pubkey::Pubkey::new_unique().to_string();
+        assert!(client.pick_scheme(&pr2.accepts).is_none());
+    }
+
+    #[test]
+    fn prefer_escrow_does_not_silently_downgrade_to_exact_when_escrow_invalid() {
+        // FIX-1: prefer_escrow=true, gateway advertises BOTH an exact scheme and
+        // an escrow scheme — but the escrow accept fails validation (here:
+        // missing program id). The client must NOT silently downgrade to the
+        // advertised exact scheme; pick_scheme returns None so the caller
+        // surfaces NoCompatibleScheme.
+        let config = ClientConfig {
+            prefer_escrow: true,
+            ..ClientConfig::default()
+        };
+        let client = SolvelaClient::new(test_wallet(), config).unwrap();
+
+        // accepts[0] is a valid exact scheme (from sample_payment_required).
+        let mut pr = sample_payment_required();
+        // Add an escrow scheme that is advertised but invalid (no program id).
+        pr.accepts.push(PaymentAccept {
+            scheme: "escrow".to_string(),
+            network: SOLANA_NETWORK.to_string(),
+            amount: "2625".to_string(),
+            asset: USDC_MINT.to_string(),
+            pay_to: pr.accepts[0].pay_to.clone(),
+            max_timeout_seconds: MAX_TIMEOUT_SECONDS,
+            escrow_program_id: None, // invalid → fails is_escrow validation
+        });
+
+        assert!(
+            client.pick_scheme(&pr.accepts).is_none(),
+            "must not downgrade to exact when an escrow scheme was advertised but invalid"
+        );
+
+        // Contrast: when NO escrow scheme is advertised at all, falling back to
+        // exact is allowed.
+        let exact_only = sample_payment_required();
+        let chosen = client.pick_scheme(&exact_only.accepts).unwrap();
+        assert_eq!(chosen.scheme, "exact");
+    }
+
+    #[tokio::test]
+    async fn escrow_program_mismatch_errors() {
+        let mock_server = MockServer::start().await;
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                prefer_escrow: true,
+                expected_escrow_program_id: Some(
+                    "EscRowExpected1111111111111111111111111111".to_string(),
+                ),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        // Advertised escrow program differs from the expected one.
+        let pr = escrow_payment_required();
+        let result = client.sign_payment_for_402(&pr).await;
+        match result.unwrap_err() {
+            ClientError::EscrowProgramMismatch { expected, actual } => {
+                assert_eq!(expected, "EscRowExpected1111111111111111111111111111");
+                assert_eq!(actual, TEST_ESCROW_PROGRAM);
+            }
+            other => panic!("expected EscrowProgramMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn escrow_402_produces_escrow_payment_header() {
+        let mock_server = MockServer::start().await;
+        mount_solana_rpc(&mock_server).await;
+
+        let wallet = test_wallet();
+        let expected_agent = wallet.pubkey().to_string();
+
+        let client = SolvelaClient::new(
+            wallet,
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                rpc_url: format!("{}/", mock_server.uri()),
+                prefer_escrow: true,
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let pr = escrow_payment_required();
+        let header = client.sign_payment_for_402(&pr).await.unwrap();
+
+        // The header base64-decodes to a PaymentPayload with an Escrow variant.
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&header)
+            .unwrap();
+        let payload: PaymentPayload = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(payload.accepted.scheme, "escrow");
+        match payload.payload {
+            PayloadData::Escrow(p) => {
+                assert!(!p.deposit_tx.is_empty());
+                assert_eq!(p.agent_pubkey, expected_agent);
+                // service_id is base64 of 32 bytes.
+                let sid = base64::engine::general_purpose::STANDARD
+                    .decode(&p.service_id)
+                    .unwrap();
+                assert_eq!(sid.len(), 32);
+            }
+            PayloadData::Direct(_) => panic!("expected Escrow payload variant"),
         }
     }
 

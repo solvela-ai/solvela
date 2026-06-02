@@ -1,0 +1,22 @@
+[package]
+name = "solvela-escrow-tx"
+version = "0.2.0"
+edition.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+description = "No-deps escrow deposit transaction builder for Solvela client SDKs — PDA/ATA derivation, Anchor discriminator, signed Solana legacy transaction construction. Pure crypto, no solana-sdk or HTTP."
+authors = ["Solvela Contributors"]
+homepage = "https://solvela.ai"
+readme = "README.md"
+keywords = ["x402", "solana", "usdc", "escrow", "anchor"]
+categories = ["api-bindings", "cryptography"]
+# MSRV deliberately not declared so crates.io MSRV isn't over-claimed; this crate
+# must stay buildable on the SDK's rust-version (1.91) and the monorepo's 1.94.
+
+[dependencies]
+thiserror = { workspace = true }
+base64 = { workspace = true }
+bs58 = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+curve25519-dalek = { workspace = true }

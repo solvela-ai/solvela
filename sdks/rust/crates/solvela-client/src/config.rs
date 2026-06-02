@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use solvela_protocol::MAINNET_ESCROW_PROGRAM_ID;
+
 /// Default maximum payment amount in atomic USDC units (10 USDC).
 ///
 /// This is a conservative default to bound exposure to overcharge attacks
@@ -16,8 +18,12 @@ pub struct ClientConfig {
     pub gateway_url: String,
     /// Solana RPC URL.
     pub rpc_url: String,
-    /// Prefer escrow payment scheme over exact (safer for agents).
-    /// Currently defaults to `false` because escrow signing is not yet implemented.
+    /// Prefer the escrow payment scheme over exact when the gateway advertises
+    /// both. Escrow signing IS implemented, but this is opt-in (default `false`):
+    /// escrow incurs an on-chain claim fee, so for micro-calls the exact
+    /// transfer is cheaper. Set `true` for agents that want the escrow
+    /// dispute/refund guarantees. When `false` the client uses exact and only
+    /// falls back to escrow if the gateway advertises no exact scheme.
     pub prefer_escrow: bool,
     /// Request timeout.
     pub timeout: Duration,
@@ -43,6 +49,11 @@ pub struct ClientConfig {
     /// Optional free tier fallback model. When set and wallet balance is zero,
     /// requests are routed to this model instead of paying.
     pub free_fallback_model: Option<String>,
+    /// Optional expected escrow program ID. If set, the client will reject 402
+    /// responses whose escrow `escrow_program_id` differs, preventing a
+    /// malicious gateway from redirecting an escrow deposit to an attacker's
+    /// program. Mirrors `expected_recipient` for the escrow path.
+    pub expected_escrow_program_id: Option<String>,
 }
 
 impl Default for ClientConfig {
@@ -62,6 +73,12 @@ impl Default for ClientConfig {
             enable_quality_check: false,
             max_quality_retries: 1,
             free_fallback_model: None,
+            // Pin the escrow program to the known mainnet deployment by default,
+            // mirroring the hardcoded `USDC_MINT`/`SOLANA_NETWORK`. A malicious
+            // gateway advertising a different escrow program is rejected without
+            // the caller having to configure anything. Override (or disable via
+            // `None`) through the builder if needed.
+            expected_escrow_program_id: Some(MAINNET_ESCROW_PROGRAM_ID.to_string()),
         }
     }
 }
@@ -81,6 +98,13 @@ pub struct ClientBuilder {
     enable_quality_check: Option<bool>,
     max_quality_retries: Option<u32>,
     free_fallback_model: Option<String>,
+    /// `None` = not set (inherit the default pin); `Some(inner)` = explicit
+    /// override, where `inner` may itself be `None` to disable the pin. The
+    /// three states (unset / override / explicitly-disabled) are intentional —
+    /// we must distinguish "inherit the default mainnet pin" from "the caller
+    /// deliberately turned the pin off".
+    #[allow(clippy::option_option)]
+    expected_escrow_program_id: Option<Option<String>>,
 }
 
 impl ClientBuilder {
@@ -99,6 +123,7 @@ impl ClientBuilder {
             enable_quality_check: None,
             max_quality_retries: None,
             free_fallback_model: None,
+            expected_escrow_program_id: None,
         }
     }
 
@@ -174,6 +199,24 @@ impl ClientBuilder {
         self
     }
 
+    /// Override the expected escrow program ID. By default the client pins the
+    /// known mainnet escrow program (see [`ClientConfig::default`]); use this to
+    /// point at a different deployment.
+    #[must_use]
+    pub fn expected_escrow_program_id(mut self, id: &str) -> Self {
+        self.expected_escrow_program_id = Some(Some(id.to_string()));
+        self
+    }
+
+    /// Explicitly disable the escrow-program pin, allowing any advertised escrow
+    /// program. This removes a security guarantee — the client construction will
+    /// emit a warning. Prefer [`Self::expected_escrow_program_id`] instead.
+    #[must_use]
+    pub fn disable_escrow_program_pin(mut self) -> Self {
+        self.expected_escrow_program_id = Some(None);
+        self
+    }
+
     /// Build a `ClientConfig` from the builder state, using defaults for unset values.
     #[must_use]
     pub fn build_config(self) -> ClientConfig {
@@ -195,6 +238,11 @@ impl ClientBuilder {
                 .max_quality_retries
                 .unwrap_or(defaults.max_quality_retries),
             free_fallback_model: self.free_fallback_model.or(defaults.free_fallback_model),
+            // `Some(inner)` = explicit override (possibly `None` to disable);
+            // `None` = inherit the default pin.
+            expected_escrow_program_id: self
+                .expected_escrow_program_id
+                .unwrap_or(defaults.expected_escrow_program_id),
         }
     }
 }
@@ -278,6 +326,42 @@ mod tests {
             config.max_payment_amount,
             Some(DEFAULT_MAX_PAYMENT_AMOUNT_ATOMIC)
         );
+        // The escrow program is pinned to the known mainnet deployment by
+        // default, mirroring the hardcoded USDC_MINT / SOLANA_NETWORK.
+        assert_eq!(
+            config.expected_escrow_program_id.as_deref(),
+            Some(MAINNET_ESCROW_PROGRAM_ID)
+        );
+    }
+
+    #[test]
+    fn test_builder_defaults_pin_escrow_program() {
+        // The builder inherits the default escrow-program pin when not set.
+        let config = ClientBuilder::new().build_config();
+        assert_eq!(
+            config.expected_escrow_program_id.as_deref(),
+            Some(MAINNET_ESCROW_PROGRAM_ID)
+        );
+    }
+
+    #[test]
+    fn test_builder_override_escrow_program_id() {
+        let config = ClientBuilder::new()
+            .expected_escrow_program_id("EscRowOverride11111111111111111111111111111")
+            .build_config();
+        assert_eq!(
+            config.expected_escrow_program_id.as_deref(),
+            Some("EscRowOverride11111111111111111111111111111")
+        );
+    }
+
+    #[test]
+    fn test_builder_disable_escrow_program_pin() {
+        // Explicitly disabling the pin must yield None (not the default pin).
+        let config = ClientBuilder::new()
+            .disable_escrow_program_pin()
+            .build_config();
+        assert!(config.expected_escrow_program_id.is_none());
     }
 
     #[test]

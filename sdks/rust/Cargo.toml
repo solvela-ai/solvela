@@ -22,6 +22,11 @@ keywords = ["solana", "x402", "usdc", "payments", "llm"]
 # fails CI in the same PR. Version pin matches the monorepo's crates/protocol.
 solvela-protocol = { path = "../../crates/protocol", version = "0.2" }
 
+# Escrow deposit-tx builder — shared no-deps crate from the monorepo. Local path
+# dep so the on-chain-verified deposit byte layout stays in lockstep with the
+# gateway/CLI; a golden-vector test pins it identically in both crates.
+solvela-escrow-tx = { path = "../../crates/escrow-tx", version = "0.2" }
+
 # Solana
 solana-sdk = "~4.0"
 spl-token = "9"
@@ -40,6 +45,8 @@ bs58 = "0.5"
 ed25519-dalek = "2"
 bip39 = { version = "2", features = ["rand"] }
 bincode = "1"
+sha2 = "0.10"
+getrandom = "0.2"
 
 # Async
 tokio = { version = "1", features = ["full"] }
