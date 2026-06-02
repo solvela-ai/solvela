@@ -1,0 +1,75 @@
+# Guards against drift between the `REQUIRED` list hard-coded in
+# `auto-approve.yml` and the checks that actually run on `main`.
+#
+# Scope & limits (read before extending):
+# - This is a ZERO-SECRET assert. It cannot read branch-protection settings
+#   (that needs an admin-read token), so it checks the direction it CAN see:
+#   every name in `REQUIRED` must correspond to a check that actually ran on
+#   the previous `main` commit. This catches a renamed/removed/typo'd entry
+#   (which would otherwise make the auto-approver wait forever for a check
+#   that never reports).
+# - It does NOT detect the opposite drift (branch protection gains a required
+#   check not in `REQUIRED`). That direction is safe anyway: branch protection
+#   enforces required checks at MERGE time regardless of the bot's approval, so
+#   a stale `REQUIRED` can at worst cause a cosmetically-early approval — the
+#   merge itself stays blocked until the real required checks pass.
+# - Runs on push to `main` (post-merge, when drift lands) and on demand. Not on
+#   PRs, so it never blocks contributors and can't be red on its own PR.
+name: Required-checks sync
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  checks: read
+  contents: read
+
+jobs:
+  assert-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+
+            // Parse the REQUIRED list straight out of auto-approve.yml so there
+            // is a single source of truth (no second copy to drift).
+            const wf = fs.readFileSync('.github/workflows/auto-approve.yml', 'utf8');
+            const block = wf.match(/const REQUIRED = \[([\s\S]*?)\];/);
+            if (!block) {
+              core.setFailed('Could not locate `const REQUIRED = [...]` in auto-approve.yml');
+              return;
+            }
+            const required = [...block[1].matchAll(/'([^']+)'/g)].map(m => m[1]);
+            if (required.length === 0) {
+              core.setFailed('auto-approve.yml REQUIRED list parsed as empty');
+              return;
+            }
+
+            // Compare against checks that ran on the commit BEFORE this push —
+            // a fully-built commit, so no race with in-flight runs.
+            const before = context.payload.before;
+            if (!before || /^0+$/.test(before)) {
+              core.notice('No prior commit (new branch / force-push); skipping.');
+              return;
+            }
+
+            const runs = await github.paginate(github.rest.checks.listForRef,
+              { owner, repo, ref: before, per_page: 100 });
+            const ran = new Set(runs.map(r => r.name));
+
+            const missing = required.filter(n => !ran.has(n));
+            if (missing.length) {
+              core.setFailed(
+                `auto-approve.yml REQUIRED lists check(s) that did not run on ${before.slice(0, 7)}: `
+                + `${missing.map(n => `"${n}"`).join(', ')}. `
+                + 'A required check was renamed/removed — update the REQUIRED list in '
+                + '.github/workflows/auto-approve.yml (and branch protection) to match.');
+              return;
+            }
+            core.notice(`OK — all ${required.length} REQUIRED checks ran on ${before.slice(0, 7)}.`);

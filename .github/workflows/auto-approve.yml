@@ -51,6 +51,23 @@ jobs:
             ];
             const ALLOW = ['sky64'];
 
+            // Money-path surfaces: code that signs / verifies / settles payments,
+            // computes cost, or touches escrow / USDC. A PR touching ANY of these
+            // is NOT auto-approved — it requires a human review even on green CI,
+            // because here CI is not a sufficient gate (funds move).
+            const MONEY_PATH = [
+              /^crates\/x402\//,
+              /^crates\/escrow-tx\//,
+              /^programs\/escrow\//,
+              /^crates\/protocol\/src\/(payment|settlement|cost|constants)\.rs$/,
+              /^crates\/gateway\/src\/routes\/chat\/(cost|payment)\.rs$/,
+              /^crates\/gateway\/src\/escrow\//,
+              /^crates\/gateway\/src\/a2a\//,
+              /^crates\/gateway\/src\/usage\.rs$/,
+              /(^|\/)signer\.(rs|ts|py|go)$/, // SDK signing modules (any language)
+              /^sdks\/.*\/escrow/,            // SDK escrow paths
+            ];
+
             const prs = (await github.rest.repos.listPullRequestsAssociatedWithCommit(
               { owner, repo, commit_sha: sha })).data;
 
@@ -60,6 +77,16 @@ jobs:
               if (pr.base.ref !== 'main') continue;
               if (pr.head.repo.full_name !== pr.base.repo.full_name) continue; // no forks
               if (!ALLOW.includes(pr.user.login)) continue;
+
+              // --- money-path exclusion: never auto-approve; needs human review ---
+              const files = await github.paginate(github.rest.pulls.listFiles,
+                { owner, repo, pull_number: pr.number, per_page: 100 });
+              const moneyHit = files.find(f => MONEY_PATH.some(re => re.test(f.filename)));
+              if (moneyHit) {
+                core.notice(`PR #${pr.number} touches money-path (${moneyHit.filename}); `
+                  + 'skipping auto-approve — human review required');
+                continue;
+              }
 
               // --- all required checks green for this exact SHA ---
               const runs = await github.paginate(github.rest.checks.listForRef,
