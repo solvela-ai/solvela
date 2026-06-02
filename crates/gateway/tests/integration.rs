@@ -103,6 +103,7 @@ impl PaymentVerifier for AlwaysPassVerifier {
             network: SOLANA_NETWORK.to_string(),
             error: None,
             verified_amount: None,
+            failure_kind: None,
         })
     }
 }
@@ -141,6 +142,54 @@ impl PaymentVerifier for AlwaysPassEscrowVerifier {
             network: SOLANA_NETWORK.to_string(),
             error: None,
             verified_amount: Some(2625),
+            failure_kind: None,
+        })
+    }
+}
+
+/// An escrow verifier that passes verification but fails settlement, returning
+/// a `SettlementResult` whose `failure_kind` is derived from a caller-supplied
+/// raw error string by the *real* `classify_settlement_error`. This exercises
+/// classification + the route's failure-message mapping together, rather than
+/// hand-stamping a `failure_kind` the production path might never produce.
+struct SettleFailsEscrowVerifier {
+    raw_error: String,
+}
+
+#[async_trait::async_trait]
+impl PaymentVerifier for SettleFailsEscrowVerifier {
+    fn network(&self) -> &str {
+        SOLANA_NETWORK
+    }
+
+    fn scheme(&self) -> &str {
+        "escrow"
+    }
+
+    async fn verify_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<VerificationResult, X402Error> {
+        Ok(VerificationResult {
+            valid: true,
+            reason: None,
+            verified_amount: Some(2625),
+        })
+    }
+
+    async fn settle_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<SettlementResult, X402Error> {
+        Ok(SettlementResult {
+            success: false,
+            tx_signature: Some("MockFailedTxSig".to_string()),
+            network: SOLANA_NETWORK.to_string(),
+            error: Some(self.raw_error.clone()),
+            verified_amount: Some(2625),
+            failure_kind: Some(solvela_x402::solana_rpc::classify_settlement_error(
+                &self.raw_error,
+            )),
         })
     }
 }
@@ -1271,12 +1320,20 @@ async fn semantic_hit_full_atomic_fallback_serves_usage_less_entry() {
 
 /// Build a test app with mock providers and escrow support enabled.
 fn test_app_with_mock_provider_and_escrow() -> axum::Router {
+    test_app_with_mock_provider_and_escrow_verifier(Arc::new(AlwaysPassEscrowVerifier))
+}
+
+/// Like [`test_app_with_mock_provider_and_escrow`] but lets the caller inject the
+/// escrow verifier, so settlement-failure paths can be exercised end-to-end.
+fn test_app_with_mock_provider_and_escrow_verifier(
+    escrow_verifier: Arc<dyn PaymentVerifier>,
+) -> axum::Router {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
 
     let facilitator = solvela_x402::facilitator::Facilitator::new(vec![
         Arc::new(AlwaysPassVerifier),
-        Arc::new(AlwaysPassEscrowVerifier),
+        escrow_verifier,
     ]);
 
     let mut config = AppConfig::default();
@@ -2414,6 +2471,103 @@ async fn test_escrow_payment_header_accepted() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["object"], "chat.completion");
     assert_eq!(json["choices"][0]["message"]["content"], "[mock response]");
+}
+
+#[tokio::test]
+async fn test_deterministic_escrow_rejection_is_not_retryable() {
+    // Issue #435: a hard on-chain program rejection (ConstraintAddress 2012,
+    // surfaced as a preflight error) must NOT tell the agent to retry, and must
+    // include the program error code. Drives the real classify + route mapping.
+    let raw = r#"submission failed: rpc error: {"code":-32002,"message":"Transaction simulation failed: Error processing Instruction 0: custom program error: 0x7dc","data":{"err":{"InstructionError":[0,{"Custom":2012}]}}}"#;
+    let app =
+        test_app_with_mock_provider_and_escrow_verifier(Arc::new(SettleFailsEscrowVerifier {
+            raw_error: raw.to_string(),
+        }));
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_escrow_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let message = json["error"]["message"].as_str().unwrap();
+    // Must surface the program error code and must NOT suggest a retry.
+    assert!(
+        message.contains("2012"),
+        "expected program error code 2012 in message, got: {message}"
+    );
+    assert!(
+        message.to_lowercase().contains("should not be retried"),
+        "expected a non-retryable message, got: {message}"
+    );
+    assert!(
+        !message.to_lowercase().contains("please retry"),
+        "deterministic rejection must not say 'please retry', got: {message}"
+    );
+    // The raw RPC blob must never leak to the client (GHSA-cgqx-mg48-949v).
+    assert!(
+        !message.contains("InstructionError") && !message.contains("-32002"),
+        "raw RPC internals leaked to client: {message}"
+    );
+}
+
+#[tokio::test]
+async fn test_transient_escrow_timeout_is_retryable() {
+    // Counterpart to the rejection test: a genuine confirmation timeout (no
+    // on-chain error) keeps the retryable message.
+    let raw = "settlement failed: transaction not confirmed within 30s";
+    let app =
+        test_app_with_mock_provider_and_escrow_verifier(Arc::new(SettleFailsEscrowVerifier {
+            raw_error: raw.to_string(),
+        }));
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_escrow_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(
+        message.to_lowercase().contains("please retry"),
+        "transient timeout should remain retryable, got: {message}"
+    );
 }
 
 #[tokio::test]

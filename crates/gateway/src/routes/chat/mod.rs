@@ -21,7 +21,7 @@ use axum::Json;
 use metrics::{counter, histogram};
 use tracing::{info, warn};
 
-use solvela_protocol::ChatRequest;
+use solvela_protocol::{ChatRequest, SettlementFailureKind};
 use solvela_router::profiles::{self, Profile};
 use solvela_router::scorer;
 
@@ -491,16 +491,45 @@ pub async fn chat_completions(
             // R1 FIX: Check settlement.success flag
             match state.facilitator.verify_and_settle(&payload).await {
                 Ok(settlement) if !settlement.success => {
-                    // Settlement returned Ok but the transaction was not confirmed
+                    // Settlement returned Ok but the transaction did not succeed.
+                    // Distinguish a deterministic on-chain rejection (a dead end —
+                    // retrying the same signed tx can never confirm) from a
+                    // transient timeout/transport failure (issue #435). The full
+                    // error detail stays server-side; the client only ever sees the
+                    // numeric program error code, never raw RPC internals
+                    // (GHSA-cgqx-mg48-949v).
                     counter!("solvela_payments_total", "status" => "failed").increment(1);
                     tracing::warn!(
                         tx_signature = %settlement.tx_signature.as_deref().unwrap_or("unknown"),
                         error = ?settlement.error,
-                        "payment settlement failed: transaction not confirmed"
+                        failure_kind = ?settlement.failure_kind,
+                        "payment settlement failed"
                     );
-                    return Err(GatewayError::InvalidPayment(
-                        "Payment transaction could not be confirmed. Please retry.".to_string(),
-                    ));
+                    // Exhaustive on purpose — no `_` wildcard, so a future
+                    // `SettlementFailureKind` variant can't be silently funneled
+                    // into the retryable bucket and re-open #435.
+                    let message = match settlement.failure_kind {
+                        Some(SettlementFailureKind::Rejected { program_error_code }) => {
+                            match program_error_code {
+                                Some(code) => format!(
+                                    "Payment was rejected on-chain (program error {code}); \
+                                     this transaction cannot succeed and should not be retried."
+                                ),
+                                None => "Payment was rejected on-chain; this transaction \
+                                     cannot succeed and should not be retried."
+                                    .to_string(),
+                            }
+                        }
+                        // Transient failures, plus the unclassified `None` case
+                        // (only reachable from an external verifier — retry is the
+                        // safe default since replay protection prevents double-spend).
+                        Some(SettlementFailureKind::Timeout)
+                        | Some(SettlementFailureKind::Submission)
+                        | None => {
+                            "Payment transaction could not be confirmed. Please retry.".to_string()
+                        }
+                    };
+                    return Err(GatewayError::InvalidPayment(message));
                 }
                 Ok(settlement) => {
                     escrow_deposited_amount = settlement.verified_amount;

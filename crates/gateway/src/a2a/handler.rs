@@ -12,7 +12,7 @@ use axum::http::HeaderMap;
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
-use solvela_protocol::{ChatMessage, ChatRequest, Role};
+use solvela_protocol::{ChatMessage, ChatRequest, Role, SettlementFailureKind};
 use solvela_router::profiles::{self, Profile};
 use solvela_router::scorer;
 
@@ -400,14 +400,34 @@ async fn handle_payment_submitted(
 
         if !settlement.success {
             // Settlement detail (tx_signature, RPC error) is logged by the facilitator;
-            // do not surface it to the client.
+            // do not surface it to the client. Distinguish a deterministic on-chain
+            // rejection (a dead end) from a transient failure so an A2A agent isn't
+            // told to retry a transaction that can never confirm (issue #435). Only
+            // the numeric program code crosses the boundary (GHSA-cgqx-mg48-949v).
             tracing::warn!(
                 error = ?settlement.error,
+                failure_kind = ?settlement.failure_kind,
                 "A2A payment settlement returned success=false"
             );
+            let message = match settlement.failure_kind {
+                Some(SettlementFailureKind::Rejected { program_error_code }) => {
+                    match program_error_code {
+                        Some(code) => format!(
+                            "Payment was rejected on-chain (program error {code}); \
+                             this transaction cannot succeed and should not be retried."
+                        ),
+                        None => "Payment was rejected on-chain; this transaction \
+                             cannot succeed and should not be retried."
+                            .to_string(),
+                    }
+                }
+                Some(SettlementFailureKind::Timeout)
+                | Some(SettlementFailureKind::Submission)
+                | None => "Payment settlement failed. Transaction was not confirmed.".to_string(),
+            };
             return Err(JsonRpcErrorData {
                 code: ERR_PAYMENT_FAILED,
-                message: "Payment settlement failed. Transaction was not confirmed.".to_string(),
+                message,
                 data: None,
             });
         }

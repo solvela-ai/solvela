@@ -10,6 +10,7 @@ use reqwest::Client;
 use tracing::{debug, info, warn};
 
 use crate::traits::Error;
+use crate::types::SettlementFailureKind;
 
 /// Submit a base64-encoded signed transaction to Solana RPC.
 ///
@@ -62,15 +63,86 @@ pub async fn send_transaction(
 /// Check if an error from `send_transaction` indicates the transaction is
 /// already on-chain (idempotency — a successful resubmission).
 ///
-/// Covers known variants: "already processed" (lowercase/titlecase/spaced),
-/// `AlreadyProcessed` enum form, JSON-RPC code -32002.
+/// Covers known variants: "already processed" (lowercase/titlecase/spaced) and
+/// the `AlreadyProcessed` enum form.
+///
+/// NB: this deliberately does NOT match on the bare JSON-RPC code `-32002`.
+/// `-32002` is `SendTransactionPreflightFailure`, the umbrella code for ALL
+/// preflight rejections — including deterministic program errors such as
+/// `ConstraintAddress` (2012). Treating any `-32002` as "already processed"
+/// made the gateway swallow a hard rejection as an idempotent resubmission,
+/// then dead-end in the 30s confirmation poll and report it as a transient
+/// "could not be confirmed, please retry" timeout (issue #435). A genuine
+/// already-processed response always carries the "already processed" /
+/// "already been processed" message text, which the matches above cover.
 pub fn is_already_processed_error(err: &Error) -> bool {
-    let s = err.to_string();
-    let lower = s.to_lowercase();
+    let lower = err.to_string().to_lowercase();
     lower.contains("already processed")
         || lower.contains("already been processed")
         || lower.contains("alreadyprocessed")
-        || s.contains("-32002")
+}
+
+/// Classify a raw settlement error string into a retry verdict.
+///
+/// Pure (no I/O). The input is whatever error text the settlement path
+/// produced — a `send_transaction` preflight error, a `getSignatureStatuses`
+/// `err` value, or a confirmation-budget timeout message. The output is the
+/// safe, typed [`SettlementFailureKind`] the gateway switches on; this function
+/// extracts only the numeric program error code, never raw RPC internals.
+pub fn classify_settlement_error(raw: &str) -> SettlementFailureKind {
+    // A program error means the program ran and rejected the transaction. The
+    // same signed transaction can never confirm on retry. Solana surfaces this
+    // two ways: the structured `InstructionError` (JSON / Debug form) and the
+    // human-readable "custom program error: 0x..." preflight message.
+    if raw.contains("InstructionError") || raw.contains("custom program error") {
+        return SettlementFailureKind::Rejected {
+            program_error_code: extract_program_error_code(raw),
+        };
+    }
+    // Confirmation budget exhausted with no on-chain error observed — the
+    // blockhash may simply have been slow to land. Worth a retry.
+    if raw.contains("not confirmed within") {
+        return SettlementFailureKind::Timeout;
+    }
+    // Everything else — RPC transport failure, expired blockhash, generic send
+    // failure. Transient, so the client may retry.
+    SettlementFailureKind::Submission
+}
+
+/// Extract the numeric on-chain program error code from a raw error string.
+///
+/// Handles the structured JSON form (`"Custom":2012`), the Debug form
+/// (`Custom(2012)`), and the preflight text form (`custom program error: 0x7dc`).
+/// Returns `None` when the instruction error is non-`Custom` (e.g. a builtin
+/// like `InsufficientFunds`) or no code can be parsed. The markers are anchored
+/// (`"Custom":` / `Custom(`) rather than a bare `Custom` substring so an
+/// unrelated occurrence of the word can't anchor the scan on the wrong digits.
+fn extract_program_error_code(raw: &str) -> Option<u32> {
+    // Form 1: structured/Debug — `"Custom":2012` or `Custom(2012)`.
+    for marker in ["\"Custom\":", "Custom("] {
+        if let Some(idx) = raw.find(marker) {
+            let digits: String = raw[idx + marker.len()..]
+                .chars()
+                .skip_while(|c| c.is_whitespace())
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(code) = digits.parse::<u32>() {
+                return Some(code);
+            }
+        }
+    }
+    // Form 2: `custom program error: 0x7dc` — hex run after the marker.
+    const HEX_MARKER: &str = "custom program error: 0x";
+    if let Some(idx) = raw.find(HEX_MARKER) {
+        let hex: String = raw[idx + HEX_MARKER.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
+        if let Ok(code) = u32::from_str_radix(&hex, 16) {
+            return Some(code);
+        }
+    }
+    None
 }
 
 /// Poll `getSignatureStatuses` until the transaction reaches `confirmed` or
@@ -257,15 +329,127 @@ mod tests {
     }
 
     #[test]
-    fn test_is_already_processed_error_jsonrpc_code() {
-        let e =
-            Error::Rpc(r#"{"code":-32002,"message":"Transaction simulation failed"}"#.to_string());
+    fn test_is_already_processed_error_jsonrpc_code_with_text() {
+        // A genuine already-processed response carries the message text even
+        // when it also carries the -32002 code — that text is what we match on.
+        let e = Error::Rpc(
+            r#"{"code":-32002,"message":"Transaction simulation failed: This transaction has already been processed"}"#
+                .to_string(),
+        );
         assert!(is_already_processed_error(&e));
+    }
+
+    #[test]
+    fn test_is_already_processed_error_bare_code_is_not_already_processed() {
+        // Bare -32002 (SendTransactionPreflightFailure) must NOT be treated as
+        // already-processed — it is the umbrella code for deterministic program
+        // rejections like ConstraintAddress. Regression guard for issue #435.
+        let e = Error::Rpc(
+            r#"{"code":-32002,"message":"Transaction simulation failed: Error processing Instruction 0: custom program error: 0x7dc","data":{"err":{"InstructionError":[0,{"Custom":2012}]}}}"#
+                .to_string(),
+        );
+        assert!(!is_already_processed_error(&e));
     }
 
     #[test]
     fn test_is_already_processed_error_unrelated() {
         let e = Error::Rpc("blockhash not found".to_string());
         assert!(!is_already_processed_error(&e));
+    }
+
+    #[test]
+    fn classify_preflight_custom_program_error_is_rejected() {
+        // Real shape of a mainnet preflight ConstraintAddress rejection: carries
+        // both the "custom program error: 0x7dc" text and the structured
+        // InstructionError/Custom(2012). 0x7dc == 2012.
+        let raw = r#"submission failed: rpc error: {"code":-32002,"message":"Transaction simulation failed: Error processing Instruction 0: custom program error: 0x7dc","data":{"err":{"InstructionError":[0,{"Custom":2012}]}}}"#;
+        assert_eq!(
+            classify_settlement_error(raw),
+            SettlementFailureKind::Rejected {
+                program_error_code: Some(2012)
+            }
+        );
+    }
+
+    #[test]
+    fn classify_landed_on_chain_error_is_rejected() {
+        // A tx that landed and then failed execution (getSignatureStatuses err).
+        let raw = r#"transaction failed on-chain: {"InstructionError":[0,{"Custom":6001}]}"#;
+        assert_eq!(
+            classify_settlement_error(raw),
+            SettlementFailureKind::Rejected {
+                program_error_code: Some(6001)
+            }
+        );
+    }
+
+    #[test]
+    fn classify_builtin_instruction_error_has_no_code() {
+        // Non-Custom builtin errors still classify as Rejected, just without a code.
+        let raw =
+            r#"transaction failed on-chain: {"InstructionError":[1,"InsufficientFundsForRent"]}"#;
+        assert_eq!(
+            classify_settlement_error(raw),
+            SettlementFailureKind::Rejected {
+                program_error_code: None
+            }
+        );
+    }
+
+    #[test]
+    fn classify_debug_form_custom_code_is_extracted() {
+        // Rust Debug rendering of the err (e.g. via `{err:?}`): `Custom(2012)`.
+        let raw = "transaction failed on-chain: InstructionError(0, Custom(2012))";
+        assert_eq!(
+            classify_settlement_error(raw),
+            SettlementFailureKind::Rejected {
+                program_error_code: Some(2012)
+            }
+        );
+    }
+
+    #[test]
+    fn classify_custom_as_string_value_yields_no_spurious_code() {
+        // "Custom" appearing as a string value (not the `"Custom":` key / `Custom(`
+        // form) must not anchor the scan onto unrelated digits — code stays None,
+        // still classified Rejected via the InstructionError marker.
+        let raw = r#"transaction failed on-chain: {"InstructionError":[7,"Custom"]}"#;
+        assert_eq!(
+            classify_settlement_error(raw),
+            SettlementFailureKind::Rejected {
+                program_error_code: None
+            }
+        );
+    }
+
+    #[test]
+    fn classify_hex_only_program_error_is_rejected_with_code() {
+        // Only the text form present (no structured InstructionError) — extract hex.
+        let raw = "submission failed: Error processing Instruction 0: custom program error: 0x1771";
+        assert_eq!(
+            classify_settlement_error(raw),
+            SettlementFailureKind::Rejected {
+                program_error_code: Some(6001)
+            }
+        );
+    }
+
+    #[test]
+    fn classify_confirmation_timeout_is_timeout() {
+        let raw = "settlement failed: transaction not confirmed within 30s";
+        assert_eq!(
+            classify_settlement_error(raw),
+            SettlementFailureKind::Timeout
+        );
+    }
+
+    #[test]
+    fn classify_transport_failure_is_submission() {
+        // Expired blockhash / RPC blip — genuinely retryable, not a rejection.
+        let raw = "submission failed: rpc error: blockhash not found";
+        assert_eq!(
+            classify_settlement_error(raw),
+            SettlementFailureKind::Submission
+        );
     }
 }

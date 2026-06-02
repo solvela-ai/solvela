@@ -107,6 +107,7 @@ mod tests {
                 network: SOLANA_NETWORK.to_string(),
                 error: None,
                 verified_amount: None,
+                failure_kind: None,
             })
         }
     }
