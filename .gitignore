@@ -70,3 +70,6 @@ wallet.json
 
 # Local ONNX embedding model cache (fastembed) — never commit (~133MB)
 .fastembed_cache/
+
+# Generated codemap/audit reports — local artifacts, never commit
+.reports/
