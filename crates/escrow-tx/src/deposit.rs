@@ -4,7 +4,7 @@
 //! `deposit` instruction. The transaction is returned as a base64-encoded string
 //! suitable for submission to any Solana RPC endpoint.
 
-use super::pda::{
+use crate::pda::{
     anchor_discriminator, decode_bs58_pubkey, derive_ata_address, find_program_address,
     ATA_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_PROGRAM_ID,
 };
@@ -29,6 +29,24 @@ pub enum DepositError {
     #[error("failed to derive {0}")]
     DerivationFailed(&'static str),
 }
+
+// ---------------------------------------------------------------------------
+// Golden vector (money-path drift guard)
+// ---------------------------------------------------------------------------
+
+/// Byte-exact base64 deposit transaction for a fixed input. Pins the deposit-tx
+/// wire layout so any change to the discriminator, account ordering, instruction
+/// data, expiry math, or signing breaks the build. Asserted by
+/// `tests/golden_vector.rs` here and by `deposit_tx_golden_vector` in
+/// `solvela-x402`. Fixed input: agent keypair from seed `[42u8; 32]`, provider
+/// `9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM`, USDC mint
+/// `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`, program
+/// `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`, `service_id=[7u8; 32]`,
+/// `expiry_slot=1_000_750`, `recent_blockhash=[0xABu8; 32]`, `amount=2625`.
+///
+/// DO NOT hand-edit. If this changes, the deposit-tx layout changed — recompute
+/// only after confirming the new layout is still accepted on-chain.
+pub const GOLDEN_VECTOR_B64: &str = "Ad449R7ht12UKokgbDUYh29Ey/wDEwPioT/QtJOPKwSO4RHIaFRqS0DH+bPpEo2vCK78jbRLpP/6FV/5TY+qLw8BAAYKGX9rI+FshTLGq8g4+s1ep4m+DHaykgM0A5v6iz02jWFyvMLyv5o/k5XBGVxL9QMaEsQP6v01aK7nXazb0N/wMBS12eVticTdq8DzgM47jC/J8D1uNnFG6ZNqwpSU6GOelSnAbR4dY/56biCP6roeTxLQ8Q4TL7a2ArnBn2RW9HJ+jAiHYL/eHd3PMsF/IJuCQu5SqvEx+s2I0OosbQsG8sb6evO+2606PWXzaqvJdDGxu+TC0vbg5HymAgNFL11hBt324ddloZPZy+FGzut5rBy0he1fWzeROoz1hX7/AKmMlyWPTiSJ8bs9ECkUjg2DC1oTmdr/EIQEjnvY2+n4WQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgo61GtoIM8r3akxjdsa2N5CEHZ8QBYuAbfwPDOL78eGrq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urqwEJCQAEBQECAwYHCDjyI8aJUuHytkEKAAAAAAAABwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcuRQ8AAAAAAA==";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -198,7 +216,7 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, DepositError> 
     ix_data.extend_from_slice(&params.amount.to_le_bytes());
     ix_data.extend_from_slice(&params.service_id);
     ix_data.extend_from_slice(&params.expiry_slot.to_le_bytes());
-    debug_assert_eq!(ix_data.len(), 56, "deposit ix_data must be 56 bytes");
+    assert_eq!(ix_data.len(), 56, "deposit ix_data must be 56 bytes");
 
     // Instruction account indices remapped to the new sorted order.
     // Anchor program expects: agent, provider, mint, escrow, agent_ata, vault, token, ata, system
@@ -245,7 +263,10 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, DepositError> 
 /// - 32-byte recent blockhash
 /// - compact-u16 instruction count (always 1)
 /// - instruction: program_id_index || compact-u16 accts || accts || compact-u16 data_len || data
-pub(super) fn build_legacy_message(
+///
+/// Exposed `pub` so `solvela-x402`'s `refund.rs` can reuse it verbatim via the
+/// re-exported `deposit` module (`super::deposit::build_legacy_message`).
+pub fn build_legacy_message(
     header: [u8; 3],
     accounts: &[[u8; 32]],
     program_id: &[u8; 32],
@@ -255,9 +276,22 @@ pub(super) fn build_legacy_message(
     ix_data: &[u8],
 ) -> Vec<u8> {
     let total_accounts = accounts.len() + 1; // +1 for the program key
-    debug_assert!(
+                                             // FIX-4: hard asserts (not debug_assert) so a >127 count cannot silently
+                                             // truncate to a single compact-u16 byte in release builds, producing a
+                                             // malformed transaction that could misdirect funds.
+    assert!(
         total_accounts <= 127,
         "compact-u16 single-byte encoding assumes <= 127 accounts; got {total_accounts}"
+    );
+    assert!(
+        ix_account_indices.len() <= 127,
+        "compact-u16 single-byte encoding assumes <= 127 instruction accounts; got {}",
+        ix_account_indices.len()
+    );
+    assert!(
+        ix_data.len() <= 127,
+        "compact-u16 single-byte encoding assumes <= 127 instruction data bytes; got {}",
+        ix_data.len()
     );
 
     let mut msg = Vec::new();

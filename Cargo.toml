@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/gateway",
     "crates/x402",
+    "crates/escrow-tx",
     "crates/router",
     "crates/cli",
     "crates/protocol",
@@ -88,5 +89,6 @@ dotenvy = "0.15"
 # `version` is required by crates.io at publish time so consumers get the
 # published artifact when they pull from the registry.
 solvela-x402 = { path = "crates/x402", version = "0.2" }           # renamed from `x402` — that name is taken on crates.io
+solvela-escrow-tx = { path = "crates/escrow-tx", version = "0.2" } # no-deps escrow deposit-tx builder, shared with the Rust SDK
 solvela-router = { path = "crates/router", version = "0.2" }
 solvela-protocol = { path = "crates/protocol", version = "0.2" }

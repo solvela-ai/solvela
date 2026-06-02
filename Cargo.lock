@@ -3648,6 +3648,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "solvela-escrow-tx"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "bs58",
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "sha2 0.11.0",
+ "thiserror",
+]
+
+[[package]]
 name = "solvela-protocol"
 version = "0.2.2"
 dependencies = [
@@ -3681,6 +3693,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "solvela-escrow-tx",
  "solvela-protocol",
  "sqlx",
  "thiserror",

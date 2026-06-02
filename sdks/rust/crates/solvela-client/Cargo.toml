@@ -14,6 +14,7 @@ readme = "README.md"
 
 [dependencies]
 solvela-protocol = { workspace = true }
+solvela-escrow-tx = { workspace = true }
 solana-sdk = { workspace = true }
 spl-token = { workspace = true }
 reqwest = { workspace = true }
@@ -32,6 +33,8 @@ zeroize = { workspace = true }
 ed25519-dalek = { workspace = true }
 lru = { workspace = true }
 ahash = { workspace = true }
+sha2 = { workspace = true }
+getrandom = { workspace = true }
 
 [dev-dependencies]
 wiremock = "0.6"

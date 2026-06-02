@@ -165,25 +165,11 @@ mod tests {
         );
     }
 
-    /// Cross-check: the stand-alone `solana_types::derive_ata` should now also
-    /// produce the canonical ATA after the hash-order fix.
-    #[test]
-    fn test_solana_types_derive_ata_matches() {
-        use crate::solana_types::{derive_ata as sol_derive_ata, Pubkey};
-
-        let wallet = Pubkey(
-            decode_bs58_pubkey("4P8mSmvv3nfzUtoqhNKG1mfGrHMVbXvKBXR7fDivv6qp")
-                .expect("valid wallet"),
-        );
-        let mint = Pubkey(
-            decode_bs58_pubkey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").expect("valid mint"),
-        );
-        let ata = sol_derive_ata(&wallet, &mint, &Pubkey::TOKEN_PROGRAM_ID).expect("derivation");
-        assert_eq!(
-            ata.to_string(),
-            "CYHVCkLwiEjMBdRiz5MsrrCbVL2YTZuv57TjV3ggxoSN"
-        );
-    }
+    // NOTE: the `test_solana_types_derive_ata_matches` cross-check that pinned
+    // this `derive_ata_address` against `crate::solana_types::derive_ata` lives
+    // in `solvela-x402` (`crates/x402/src/escrow/mod.rs`), since `solana_types`
+    // is an x402-internal module not present in this no-deps crate. It validates
+    // the re-exported `pda` derivation, so it still guards the same invariant.
 
     /// Regression test for escrow PDA derivation against an externally-computed
     /// canonical Solana value.

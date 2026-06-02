@@ -68,6 +68,9 @@ pub enum ClientError {
     #[error("payment recipient mismatch: expected {expected}, got {actual}")]
     RecipientMismatch { expected: String, actual: String },
 
+    #[error("escrow program mismatch: expected {expected}, got {actual}")]
+    EscrowProgramMismatch { expected: String, actual: String },
+
     #[error("payment amount {amount} exceeds maximum allowed {max}")]
     AmountExceedsMax { amount: u64, max: u64 },
 
