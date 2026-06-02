@@ -463,6 +463,66 @@ mod tests {
         assert_eq!(escrow_expiry_slot(u64::MAX - 100, 300), u64::MAX);
     }
 
+    // --- FIX-5: client floor vs gateway buffer compatibility ---
+
+    /// The gateway's `MIN_EXPIRY_BUFFER_SLOTS`, hardcoded here because the SDK
+    /// cannot depend on the x402 crate. Source of truth:
+    /// `crates/x402/src/escrow/verifier.rs` (`MIN_EXPIRY_BUFFER_SLOTS = 50`),
+    /// which mirrors the on-chain `MIN_EXPIRY_BUFFER` in
+    /// `programs/escrow/src/instructions/deposit.rs`. If the gateway value ever
+    /// rises above 150, these tests must be revisited.
+    const GATEWAY_MIN_EXPIRY_BUFFER_SLOTS: u64 = 50;
+
+    #[test]
+    fn client_floor_at_least_gateway_buffer() {
+        // The client's floor must be >= the gateway's lower bound so a deposit
+        // floored to the client minimum is never bounced for being too close.
+        // Route the floor through `escrow_expiry_slot` (a 0-second timeout hits
+        // the floor exactly) so the comparison is computed at runtime rather
+        // than const-folded.
+        let current = 1_000_000u64;
+        let floored_buffer = escrow_expiry_slot(current, 0) - current;
+        assert_eq!(
+            floored_buffer, MIN_ESCROW_EXPIRY_SLOTS_AHEAD,
+            "a 0-second timeout must produce exactly the client floor"
+        );
+        assert!(
+            floored_buffer >= GATEWAY_MIN_EXPIRY_BUFFER_SLOTS,
+            "client expiry floor ({floored_buffer}) must be >= gateway buffer ({GATEWAY_MIN_EXPIRY_BUFFER_SLOTS})"
+        );
+    }
+
+    #[test]
+    fn client_never_signs_below_gateway_buffer_for_any_timeout() {
+        // For ANY max_timeout_seconds (including 0 and the saturating extreme),
+        // the slots between the chosen expiry and the current slot must be at
+        // least the gateway's lower bound. The verifier enforces only this
+        // LOWER bound — there is NO upper bound in
+        // `crates/x402/src/escrow/verifier.rs` (verified), so the client's
+        // cap (MAX_ESCROW_EXPIRY_SLOTS_AHEAD = 10_000) is always accepted and
+        // the floor-up for short timeouts is known-safe.
+        let current = 1_000_000u64;
+        for t in [
+            0u64,
+            1,
+            10,
+            19, // 19 s × 2.5 = 47.5 → 47 slots, below the gateway buffer pre-floor
+            20,
+            59,
+            60,
+            300,
+            3600,
+            u64::MAX,
+        ] {
+            let expiry = escrow_expiry_slot(current, t);
+            let buffer = expiry - current;
+            assert!(
+                buffer >= GATEWAY_MIN_EXPIRY_BUFFER_SLOTS,
+                "timeout {t}s produced buffer {buffer} < gateway minimum {GATEWAY_MIN_EXPIRY_BUFFER_SLOTS}"
+            );
+        }
+    }
+
     // --- service_id CSPRNG invariant (#118) ---
 
     #[test]

@@ -33,6 +33,11 @@ pub enum RefundError {
     /// agent pubkey, service_id, and program id.
     #[error("derived PDA {derived} does not match expected {expected}")]
     PdaMismatch { derived: String, expected: String },
+    /// Message serialization failed because a length exceeded the single-byte
+    /// compact-u16 limit (127). Propagated from
+    /// [`super::deposit::build_legacy_message`].
+    #[error("message serialization failed: {0}")]
+    MessageBuild(#[from] super::deposit::DepositError),
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +222,7 @@ pub fn build_refund_tx(params: &RefundParams) -> Result<String, RefundError> {
         8u8, // program_id_index = 8 (last account)
         &ix_account_indices,
         &ix_data,
-    );
+    )?;
 
     // Step 8: Sign the message with the agent keypair
     let signature = signing_key.sign(&msg);

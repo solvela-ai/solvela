@@ -821,10 +821,23 @@ impl SolvelaClient {
             warn!("prefer_escrow is set but the gateway advertised no escrow scheme; falling back to exact");
             accepts.iter().find(|a| is_exact(a))
         } else {
-            accepts
-                .iter()
-                .find(|a| is_exact(a))
-                .or_else(|| accepts.iter().find(|a| is_escrow(a)))
+            // Default: prefer exact. Only fall back to an escrow accept when no
+            // exact scheme was advertised. Mirror of the FIX-1 reasoning: the
+            // escrow path incurs a gateway claim fee, so silently using it when
+            // the caller didn't ask for it is a surprising cost — warn loudly
+            // so the downgrade is observable in logs.
+            if let Some(exact) = accepts.iter().find(|a| is_exact(a)) {
+                return Some(exact);
+            }
+            if let Some(escrow) = accepts.iter().find(|a| is_escrow(a)) {
+                warn!(
+                    "no exact scheme advertised; falling back to escrow, which \
+                     incurs a gateway claim fee. Set prefer_escrow to silence \
+                     this, or expect an exact scheme from the gateway."
+                );
+                return Some(escrow);
+            }
+            None
         }
     }
 }
@@ -1163,6 +1176,102 @@ mod tests {
             }
             PayloadData::Direct(_) => panic!("expected Escrow payload variant"),
         }
+    }
+
+    #[tokio::test]
+    async fn escrow_tampered_pay_to_rejected_before_signing() {
+        // FIX-3(b)(i): on the escrow path, a `pay_to` that does not match the
+        // configured `expected_recipient` must be rejected with RecipientMismatch
+        // BEFORE any transaction is signed. The recipient check runs ahead of the
+        // scheme branch, so no RPC is mounted — if signing were reached it would
+        // fail on the unreachable RPC instead of returning RecipientMismatch.
+        let mock_server = MockServer::start().await;
+
+        let trusted_recipient = solana_sdk::pubkey::Pubkey::new_unique().to_string();
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                rpc_url: "http://127.0.0.1:1".to_string(), // unreachable on purpose
+                prefer_escrow: true,
+                expected_recipient: Some(trusted_recipient.clone()),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        // 402 advertises an escrow scheme whose pay_to is an attacker wallet,
+        // different from the trusted recipient the client pins.
+        let mut pr = escrow_payment_required();
+        let attacker_pay_to = solana_sdk::pubkey::Pubkey::new_unique().to_string();
+        assert_ne!(attacker_pay_to, trusted_recipient);
+        pr.accepts[0].pay_to = attacker_pay_to.clone();
+
+        let result = client.sign_payment_for_402(&pr).await;
+        match result.unwrap_err() {
+            ClientError::RecipientMismatch { expected, actual } => {
+                assert_eq!(expected, trusted_recipient);
+                assert_eq!(actual, attacker_pay_to);
+            }
+            other => panic!("expected RecipientMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn escrow_deposit_amount_equals_advertised_amount() {
+        // FIX-3(b)(ii): the escrow deposit must be built with amount ==
+        // accept.amount (the `amount_atomic` parsed once from the advertised
+        // accept), never re-parsed or recomputed. Decode the signed deposit tx
+        // and assert the Anchor `deposit` instruction-data amount (u64 LE
+        // immediately after the 8-byte discriminator) equals the advertised
+        // amount.
+        let mock_server = MockServer::start().await;
+        mount_solana_rpc(&mock_server).await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                rpc_url: format!("{}/", mock_server.uri()),
+                prefer_escrow: true,
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let pr = escrow_payment_required();
+        let advertised_amount: u64 = pr.accepts[0].amount.parse().unwrap();
+
+        let header = client.sign_payment_for_402(&pr).await.unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&header)
+            .unwrap();
+        let payload: PaymentPayload = serde_json::from_slice(&decoded).unwrap();
+
+        let deposit_tx_b64 = match payload.payload {
+            PayloadData::Escrow(p) => p.deposit_tx,
+            PayloadData::Direct(_) => panic!("expected Escrow payload"),
+        };
+        let tx_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&deposit_tx_b64)
+            .unwrap();
+
+        // Find the Anchor `deposit` discriminator in the instruction-data region,
+        // then read the u64 LE amount that immediately follows it.
+        let disc = solvela_escrow_tx::pda::anchor_discriminator("deposit");
+        let disc_pos = tx_bytes
+            .windows(8)
+            .position(|w| w == disc)
+            .expect("deposit discriminator present in tx bytes");
+        let amount_bytes: [u8; 8] = tx_bytes[disc_pos + 8..disc_pos + 16]
+            .try_into()
+            .expect("8 amount bytes after discriminator");
+        let encoded_amount = u64::from_le_bytes(amount_bytes);
+
+        assert_eq!(
+            encoded_amount, advertised_amount,
+            "deposit amount must equal the advertised accept.amount, not a re-parsed value"
+        );
     }
 
     #[tokio::test]

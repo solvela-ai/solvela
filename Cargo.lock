@@ -3657,6 +3657,7 @@ dependencies = [
  "ed25519-dalek",
  "sha2 0.11.0",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

@@ -24,7 +24,7 @@ fn golden_keypair_b58() -> String {
 
 fn golden_params() -> DepositParams {
     DepositParams {
-        agent_keypair_b58: golden_keypair_b58(),
+        agent_keypair_b58: zeroize::Zeroizing::new(golden_keypair_b58()),
         provider_wallet_b58: PROVIDER.to_string(),
         usdc_mint_b58: USDC_MINT.to_string(),
         escrow_program_id_b58: ESCROW_PROGRAM.to_string(),

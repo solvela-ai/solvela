@@ -157,10 +157,13 @@ impl Wallet {
 
     /// Return the keypair as a base58-encoded string.
     ///
-    /// The caller is responsible for zeroizing the returned string when done.
+    /// Returned inside [`zeroize::Zeroizing`] so the secret-bearing string is
+    /// wiped on drop. This keeps the zeroization chain intact end-to-end:
+    /// `Wallet`'s buffer is zeroizing, and the base58 form handed to
+    /// `DepositParams::agent_keypair_b58` (also `Zeroizing<String>`) is too.
     #[must_use]
-    pub fn to_keypair_b58(&self) -> String {
-        bs58::encode(*self.keypair_bytes).into_string()
+    pub fn to_keypair_b58(&self) -> Zeroizing<String> {
+        Zeroizing::new(bs58::encode(*self.keypair_bytes).into_string())
     }
 
     /// Access the inner keypair for transaction signing.
