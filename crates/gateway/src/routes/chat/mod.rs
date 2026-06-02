@@ -253,6 +253,13 @@ pub async fn chat_completions(
     let escrow_deposited_amount: Option<u64>;
     // Gateway-advertised amount — used as defense-in-depth cap when deposit amount is unknown
     let client_amount: u64;
+    // M3: budget is checked + reserved BEFORE settlement inside the arm below, so
+    // an over-budget request never settles on-chain. These are bound there and
+    // consumed after the match (the `None` arm diverges).
+    let wallet_address: String;
+    let tx_signature: Option<String>;
+    let estimated_cost: f64;
+    let budget_reservation: crate::usage::BudgetReservation;
 
     match payment_payload {
         Some(payload) => {
@@ -487,6 +494,49 @@ pub async fn chat_completions(
                 ));
             }
 
+            // --- M3: check + reserve budget BEFORE settling on-chain ---
+            // The wallet's spend limit must be enforced before the payment is
+            // broadcast. Otherwise an over-budget request settles on-chain and is
+            // then rejected with a 4xx — the agent pays and gets no service. The
+            // reservation is released on any settlement failure below so reserving
+            // early never leaks budget for a payment that did not happen.
+            (wallet_address, tx_signature) = extract_payment_info(payment_header.unwrap());
+
+            // Reuse the C1 `expected_cost` computed above rather than calling
+            // `estimate_cost` again — one hot-path computation, and the budget
+            // gate is guaranteed to reserve against the exact figure the payment
+            // amount was validated against (no boundary divergence between the
+            // two sites).
+            estimated_cost = expected_cost.total.parse::<f64>().map_err(|_| {
+                GatewayError::Internal("failed to parse estimated cost as f64".to_string())
+            })?;
+
+            // GHSA-86cr-h3rx-vj6j: budget-enforcement guard. A corrupted model
+            // registry entry can produce NaN or ±Infinity in the cost total. NaN
+            // parses back to f64::NAN successfully, then every comparison in
+            // `check_budget` against wallet limits is `false` — silently bypassing
+            // the budget gate. Reject non-finite or negative values here,
+            // fail-closed, before the gate (and before settlement) runs.
+            if !estimated_cost.is_finite() || estimated_cost < 0.0 {
+                warn!(
+                    estimated_cost,
+                    model = %req.model,
+                    "model registry produced a non-finite or negative cost; refusing"
+                );
+                return Err(GatewayError::Internal(
+                    "estimated cost is not a valid finite non-negative number".to_string(),
+                ));
+            }
+
+            budget_reservation = match state
+                .usage
+                .check_budget(&wallet_address, estimated_cost)
+                .await
+            {
+                Ok(reservation) => reservation,
+                Err(e) => return Err(GatewayError::BadRequest(e.to_string())),
+            };
+
             // Verify and settle via Facilitator — hard enforcement
             // R1 FIX: Check settlement.success flag
             match state.facilitator.verify_and_settle(&payload).await {
@@ -529,6 +579,8 @@ pub async fn chat_completions(
                             "Payment transaction could not be confirmed. Please retry.".to_string()
                         }
                     };
+                    // M3: settlement did not happen — give the reserved budget back.
+                    state.usage.release_reservation(&budget_reservation).await;
                     return Err(GatewayError::InvalidPayment(message));
                 }
                 Ok(settlement) => {
@@ -549,6 +601,8 @@ pub async fn chat_completions(
                     // server-internal context. Full detail is in the warn! line above.
                     counter!("solvela_payments_total", "status" => "failed").increment(1);
                     warn!(error = %e, "payment verification failed");
+                    // M3: settlement did not happen — give the reserved budget back.
+                    state.usage.release_reservation(&budget_reservation).await;
                     return Err(GatewayError::InvalidPayment(
                         "Payment verification failed. Check your transaction and retry."
                             .to_string(),
@@ -566,45 +620,10 @@ pub async fn chat_completions(
         }
     }
 
-    // Extract tx_signature for usage tracking.
-    let (wallet_address, tx_signature) = extract_payment_info(payment_header.unwrap());
-
-    // Check budget before proxying to provider.
-    let estimated_cost = state
-        .model_registry
-        .estimate_cost(
-            &req.model,
-            estimate_input_tokens(&req),
-            req.max_tokens.unwrap_or(1000),
-        )
-        .map_err(|e| GatewayError::Internal(format!("failed to estimate cost: {e}")))?
-        .total
-        .parse::<f64>()
-        .map_err(|_| GatewayError::Internal("failed to parse estimated cost as f64".to_string()))?;
-
-    // GHSA-86cr-h3rx-vj6j: budget-enforcement guard. A corrupted model registry
-    // entry can produce NaN or ±Infinity in the cost total. NaN parses back to
-    // f64::NAN successfully, then every comparison in `check_budget` against
-    // wallet limits is `false` — silently bypassing the budget gate. Reject
-    // non-finite or negative values here, fail-closed, before the gate runs.
-    if !estimated_cost.is_finite() || estimated_cost < 0.0 {
-        warn!(
-            estimated_cost,
-            model = %req.model,
-            "model registry produced a non-finite or negative cost; refusing"
-        );
-        return Err(GatewayError::Internal(
-            "estimated cost is not a valid finite non-negative number".to_string(),
-        ));
-    }
-
-    if let Err(e) = state
-        .usage
-        .check_budget(&wallet_address, estimated_cost)
-        .await
-    {
-        return Err(GatewayError::BadRequest(e.to_string()));
-    }
+    // `wallet_address`, `tx_signature`, `estimated_cost`, and `budget_reservation`
+    // were bound inside the Some arm above — budget is now checked + reserved
+    // BEFORE settlement (M3), and the reservation reconciled by `log_spend`'s
+    // `(billed − estimated)` delta on success.
 
     // Step 5: Proxy to provider (with cache and fallback)
     let provider_name = &model_info.provider;

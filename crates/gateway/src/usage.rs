@@ -352,8 +352,9 @@ impl UsageTracker {
         &self,
         wallet_address: &str,
         estimated_cost_usdc: f64,
-    ) -> Result<(), UsageError> {
+    ) -> Result<BudgetReservation, UsageError> {
         // No Redis configured — apply a conservative per-request hard cap.
+        // No counters are committed, so the reservation is empty (release is a no-op).
         if self.redis_client.is_none() {
             const NO_REDIS_REQUEST_CAP_USDC: f64 = 1.0;
             if estimated_cost_usdc > NO_REDIS_REQUEST_CAP_USDC {
@@ -363,12 +364,12 @@ impl UsageTracker {
                     spent: estimated_cost_usdc,
                 });
             }
-            return Ok(());
+            return Ok(BudgetReservation::default());
         }
 
         // Try Redis hot-path budget check.
         let Some(client) = &self.redis_client else {
-            return Ok(());
+            return Ok(BudgetReservation::default());
         };
 
         let mut conn = match client.get_multiplexed_async_connection().await {
@@ -513,7 +514,45 @@ impl UsageTracker {
             }
         }
 
-        Ok(())
+        Ok(BudgetReservation { committed })
+    }
+
+    /// Release a budget reservation previously returned by [`check_budget`].
+    ///
+    /// Decrements exactly the Redis counters `check_budget` incremented, so the
+    /// wallet's budget headroom is restored when a request is abandoned AFTER
+    /// reserving but BEFORE the spend is realized — chiefly when on-chain
+    /// payment settlement fails (M3). Without this, reserving before settlement
+    /// would leak the reservation and permanently consume budget for a payment
+    /// that never happened.
+    ///
+    /// Best-effort and infallible by design: Redis errors are logged, not
+    /// propagated. A failed release at worst leaves a counter over-counted until
+    /// its TTL expires (self-healing); returning an error here would only
+    /// complicate an already-failing request path. No-op when the reservation is
+    /// empty (no Redis, or no budget windows applied).
+    ///
+    /// [`check_budget`]: Self::check_budget
+    pub async fn release_reservation(&self, reservation: &BudgetReservation) {
+        if reservation.committed.is_empty() {
+            return;
+        }
+        let Some(client) = &self.redis_client else {
+            return;
+        };
+        let mut conn = match client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    reserved_counters = ?reservation.committed,
+                    "failed to acquire Redis connection to release budget reservation; \
+                     these counters stay over-counted until their TTL expires"
+                );
+                return;
+            }
+        };
+        rollback_committed(&mut conn, &reservation.committed).await;
     }
 
     /// Get spending summary for a wallet.
@@ -548,6 +587,23 @@ impl UsageTracker {
 
         Err(UsageError::NotConfigured)
     }
+}
+
+/// A committed budget reservation returned by [`UsageTracker::check_budget`].
+///
+/// Holds the exact Redis counters (key + amount) that were incremented, so they
+/// can be released verbatim via [`UsageTracker::release_reservation`] if the
+/// request fails before the spend is realized. Capturing the precise keys —
+/// rather than re-deriving them at release time — makes the release correct even
+/// if an hour/day boundary rolls over between reserve and release. Empty when no
+/// Redis is configured or no budget windows applied; release is then a no-op.
+///
+/// Deliberately NOT `Clone`: a reservation maps 1:1 to committed Redis counters,
+/// so a clone released separately would double-decrement them. There is exactly
+/// one owner — the request that reserved.
+#[derive(Debug, Default)]
+pub struct BudgetReservation {
+    committed: Vec<(String, f64)>,
 }
 
 // ---------------------------------------------------------------------------
