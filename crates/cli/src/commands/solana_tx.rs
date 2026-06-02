@@ -315,7 +315,7 @@ pub async fn build_escrow_deposit(
 ) -> Result<String> {
     let recent_blockhash = fetch_blockhash(rpc_url, client).await?;
     solvela_x402::escrow::deposit::build_deposit_tx(&solvela_x402::escrow::deposit::DepositParams {
-        agent_keypair_b58: payer_keypair_b58.to_string(),
+        agent_keypair_b58: zeroize::Zeroizing::new(payer_keypair_b58.to_string()),
         provider_wallet_b58: provider_wallet.to_string(),
         usdc_mint_b58: USDC_MINT.to_string(),
         escrow_program_id_b58: escrow_program_id.to_string(),

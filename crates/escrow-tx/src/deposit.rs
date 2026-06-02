@@ -28,6 +28,15 @@ pub enum DepositError {
     /// A PDA or ATA derivation failed.
     #[error("failed to derive {0}")]
     DerivationFailed(&'static str),
+    /// A length that must fit in a single compact-u16 byte exceeded 127.
+    ///
+    /// `build_legacy_message` encodes account counts, instruction-account
+    /// counts, and instruction-data lengths as a single `u8`, which is only a
+    /// valid Solana compact-u16 encoding for values ≤ 127. A larger value would
+    /// silently truncate (high bit becomes a continuation flag) and produce a
+    /// malformed transaction that could misdirect funds, so we reject it.
+    #[error("{field} length {len} exceeds the 127-byte compact-u16 single-byte limit")]
+    MessageTooLong { field: &'static str, len: usize },
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +64,11 @@ pub const GOLDEN_VECTOR_B64: &str = "Ad449R7ht12UKokgbDUYh29Ey/wDEwPioT/QtJOPKwS
 /// Parameters required to build an escrow deposit transaction.
 pub struct DepositParams {
     /// Base58-encoded 64-byte ed25519 keypair (32-byte secret || 32-byte pubkey).
-    pub agent_keypair_b58: String,
+    ///
+    /// Wrapped in [`zeroize::Zeroizing`] so the raw secret material is wiped
+    /// from memory when the params are dropped, rather than lingering in a
+    /// plain `String` heap allocation.
+    pub agent_keypair_b58: zeroize::Zeroizing<String>,
     /// Base58-encoded provider wallet pubkey.
     pub provider_wallet_b58: String,
     /// Base58-encoded USDC mint pubkey.
@@ -104,31 +117,42 @@ impl std::fmt::Debug for DepositParams {
 pub fn build_deposit_tx(params: &DepositParams) -> Result<String, DepositError> {
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
+    use zeroize::{Zeroize, Zeroizing};
 
     // Step 1: Validate amount
     if params.amount == 0 {
         return Err(DepositError::ZeroAmount);
     }
 
-    // Step 2: Decode the 64-byte keypair and validate derived pubkey
-    let keypair_bytes = bs58::decode(&params.agent_keypair_b58)
-        .into_vec()
-        .map_err(|e| DepositError::InvalidKeypair(format!("invalid base58: {e}")))?;
+    // Step 2: Decode the 64-byte keypair and validate derived pubkey.
+    // Both the bs58-decoded Vec and the fixed-size array hold the raw secret
+    // key, so they are wrapped in `Zeroizing` to wipe on drop (and on every
+    // early return below).
+    let keypair_bytes = Zeroizing::new(
+        bs58::decode(&*params.agent_keypair_b58)
+            .into_vec()
+            .map_err(|e| DepositError::InvalidKeypair(format!("invalid base58: {e}")))?,
+    );
     if keypair_bytes.len() != 64 {
         return Err(DepositError::InvalidKeypair(format!(
             "must be 64 bytes, got {}",
             keypair_bytes.len()
         )));
     }
-    let mut keypair_arr = [0u8; 64];
+    let mut keypair_arr = Zeroizing::new([0u8; 64]);
     keypair_arr.copy_from_slice(&keypair_bytes);
 
     let signing_key = SigningKey::from_keypair_bytes(&keypair_arr)
         .map_err(|e| DepositError::InvalidKeypair(format!("ed25519 error: {e}")))?;
     let agent_pubkey = signing_key.verifying_key().to_bytes();
 
-    // Validate that the stored pubkey in bytes 32..64 matches the derived one
-    let stored_pubkey = &keypair_bytes[32..64];
+    // Validate that the stored pubkey in bytes 32..64 matches the derived one.
+    // Copy the public half out so `keypair_bytes` can be eagerly zeroized
+    // immediately afterwards — the secret half is no longer needed.
+    let mut stored_pubkey = [0u8; 32];
+    stored_pubkey.copy_from_slice(&keypair_bytes[32..64]);
+    keypair_arr.zeroize();
+    drop(keypair_bytes);
     if stored_pubkey != agent_pubkey {
         return Err(DepositError::InvalidKeypair(
             "derived pubkey does not match stored pubkey".to_string(),
@@ -235,7 +259,7 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, DepositError> 
         9u8, // program_id_index = 9 (last account)
         &ix_account_indices,
         &ix_data,
-    );
+    )?;
 
     // Step 9: Sign the message with the agent keypair
     let signature = signing_key.sign(&msg);
@@ -259,13 +283,31 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, DepositError> 
 ///
 /// Layout:
 /// - header (3 bytes)
-/// - compact-u16 account count + N×32 byte keys (data accounts + program key)
+/// - account count (single u8 — see below) + N×32 byte keys (data accounts + program key)
 /// - 32-byte recent blockhash
-/// - compact-u16 instruction count (always 1)
-/// - instruction: program_id_index || compact-u16 accts || accts || compact-u16 data_len || data
+/// - instruction count (single u8): always 1
+/// - instruction: program_id_index || acct_count(u8) || accts || data_len(u8) || data
+///
+/// Note on the length prefixes: Solana's wire format is compact-u16 (1–3 bytes,
+/// 7 bits per byte with a continuation flag). This serializer pushes a **single
+/// `u8`** for each length, which is the *correct* compact-u16 encoding only for
+/// lengths ≤ 127. For any length ≥ 128 a real compact-u16 would emit a
+/// continuation byte; emitting a bare `u8` there would set the high bit and
+/// corrupt the encoding. Every escrow tx this builds (deposit: 10 accounts, 9
+/// instruction accounts, 56 data bytes; refund: 9 accounts, 8 instruction
+/// accounts, 8 data bytes) is comfortably under 127, so the single-byte path is
+/// always taken — but to keep that invariant honest we return
+/// [`DepositError::MessageTooLong`] rather than silently truncating.
 ///
 /// Exposed `pub` so `solvela-x402`'s `refund.rs` can reuse it verbatim via the
-/// re-exported `deposit` module (`super::deposit::build_legacy_message`).
+/// re-exported `deposit` module (`super::deposit::build_legacy_message`); it
+/// therefore cannot be `pub(crate)`.
+///
+/// # Errors
+///
+/// Returns [`DepositError::MessageTooLong`] if the total account count, the
+/// instruction-account count, or the instruction-data length exceeds 127 (the
+/// single-byte compact-u16 limit).
 pub fn build_legacy_message(
     header: [u8; 3],
     accounts: &[[u8; 32]],
@@ -274,32 +316,35 @@ pub fn build_legacy_message(
     program_id_index: u8,
     ix_account_indices: &[u8],
     ix_data: &[u8],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, DepositError> {
     let total_accounts = accounts.len() + 1; // +1 for the program key
-                                             // FIX-4: hard asserts (not debug_assert) so a >127 count cannot silently
-                                             // truncate to a single compact-u16 byte in release builds, producing a
-                                             // malformed transaction that could misdirect funds.
-    assert!(
-        total_accounts <= 127,
-        "compact-u16 single-byte encoding assumes <= 127 accounts; got {total_accounts}"
-    );
-    assert!(
-        ix_account_indices.len() <= 127,
-        "compact-u16 single-byte encoding assumes <= 127 instruction accounts; got {}",
-        ix_account_indices.len()
-    );
-    assert!(
-        ix_data.len() <= 127,
-        "compact-u16 single-byte encoding assumes <= 127 instruction data bytes; got {}",
-        ix_data.len()
-    );
+    if total_accounts > 127 {
+        return Err(DepositError::MessageTooLong {
+            field: "account count",
+            len: total_accounts,
+        });
+    }
+    if ix_account_indices.len() > 127 {
+        return Err(DepositError::MessageTooLong {
+            field: "instruction account count",
+            len: ix_account_indices.len(),
+        });
+    }
+    if ix_data.len() > 127 {
+        return Err(DepositError::MessageTooLong {
+            field: "instruction data length",
+            len: ix_data.len(),
+        });
+    }
 
+    // SAFETY (length casts): each `as u8` below is guarded by the `> 127` checks
+    // above, so every value fits in the single-byte compact-u16 range [0, 127].
     let mut msg = Vec::new();
 
     // Header
     msg.extend_from_slice(&header);
 
-    // Account keys (compact-u16 count + keys)
+    // Account keys (single-byte compact-u16 count + keys)
     msg.push(total_accounts as u8);
     for acc in accounts {
         msg.extend_from_slice(acc);
@@ -309,17 +354,17 @@ pub fn build_legacy_message(
     // Recent blockhash
     msg.extend_from_slice(recent_blockhash);
 
-    // Instruction count (compact-u16): always 1
+    // Instruction count (single-byte compact-u16): always 1
     msg.push(1u8);
 
     // Instruction
     msg.push(program_id_index); // program_id_index
-    msg.push(ix_account_indices.len() as u8); // compact-u16: account count
+    msg.push(ix_account_indices.len() as u8); // single-byte compact-u16: account count
     msg.extend_from_slice(ix_account_indices); // account indices
-    msg.push(ix_data.len() as u8); // compact-u16: data length
+    msg.push(ix_data.len() as u8); // single-byte compact-u16: data length
     msg.extend_from_slice(ix_data); // instruction data
 
-    msg
+    Ok(msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +393,7 @@ mod tests {
 
     fn base_params() -> DepositParams {
         DepositParams {
-            agent_keypair_b58: test_agent_keypair_b58(),
+            agent_keypair_b58: zeroize::Zeroizing::new(test_agent_keypair_b58()),
             provider_wallet_b58: PROVIDER.to_string(),
             usdc_mint_b58: USDC_MINT.to_string(),
             escrow_program_id_b58: ESCROW_PROGRAM.to_string(),
@@ -427,8 +472,70 @@ mod tests {
     #[test]
     fn test_build_deposit_tx_invalid_keypair_rejected() {
         let mut params = base_params();
-        params.agent_keypair_b58 = "notavalidkeypair!!!".to_string();
+        params.agent_keypair_b58 = zeroize::Zeroizing::new("notavalidkeypair!!!".to_string());
         let result = build_deposit_tx(&params);
         assert!(result.is_err(), "invalid keypair should be rejected");
+    }
+
+    #[test]
+    fn test_deposit_params_debug_redacts_keypair() {
+        let params = base_params();
+        let debug_str = format!("{params:?}");
+        assert!(
+            debug_str.contains("[REDACTED]"),
+            "Debug output must redact the keypair: {debug_str}"
+        );
+        assert!(
+            !debug_str.contains(&*params.agent_keypair_b58),
+            "Debug output must not contain the raw keypair: {debug_str}"
+        );
+    }
+
+    #[test]
+    fn test_build_legacy_message_rejects_too_many_accounts() {
+        // 127 data accounts + 1 program key = 128 total → exceeds the limit.
+        let accounts = vec![[0u8; 32]; 127];
+        let result = build_legacy_message(
+            [1, 0, 0],
+            &accounts,
+            &[0u8; 32],
+            &[0u8; 32],
+            127,
+            &[0u8],
+            &[0u8],
+        );
+        assert!(
+            matches!(
+                result,
+                Err(DepositError::MessageTooLong {
+                    field: "account count",
+                    len: 128
+                })
+            ),
+            "expected MessageTooLong(account count), got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_build_legacy_message_rejects_long_ix_data() {
+        let result = build_legacy_message(
+            [1, 0, 0],
+            &[[0u8; 32]],
+            &[0u8; 32],
+            &[0u8; 32],
+            1,
+            &[0u8],
+            &[0u8; 128], // 128 instruction-data bytes → exceeds the limit
+        );
+        assert!(
+            matches!(
+                result,
+                Err(DepositError::MessageTooLong {
+                    field: "instruction data length",
+                    len: 128
+                })
+            ),
+            "expected MessageTooLong(instruction data length), got: {result:?}"
+        );
     }
 }

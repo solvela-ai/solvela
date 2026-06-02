@@ -567,7 +567,7 @@ mod tests {
         let mut full = [0u8; 64];
         full[..32].copy_from_slice(&seed);
         full[32..].copy_from_slice(verifying_key.as_bytes());
-        let agent_keypair_b58 = bs58::encode(&full).into_string();
+        let agent_keypair_b58 = zeroize::Zeroizing::new(bs58::encode(&full).into_string());
 
         let service_id = [7u8; 32];
         let params = DepositParams {
@@ -655,7 +655,7 @@ mod tests {
         let mut full = [0u8; 64];
         full[..32].copy_from_slice(&seed);
         full[32..].copy_from_slice(verifying_key.as_bytes());
-        let agent_keypair_b58 = bs58::encode(&full).into_string();
+        let agent_keypair_b58 = zeroize::Zeroizing::new(bs58::encode(&full).into_string());
         let agent_pubkey_b58 = bs58::encode(verifying_key.as_bytes()).into_string();
 
         let params = DepositParams {
@@ -781,7 +781,7 @@ mod tests {
         let mut full = [0u8; 64];
         full[..32].copy_from_slice(&seed);
         full[32..].copy_from_slice(verifying_key.as_bytes());
-        let agent_keypair_b58 = bs58::encode(&full).into_string();
+        let agent_keypair_b58 = zeroize::Zeroizing::new(bs58::encode(&full).into_string());
         let agent_pubkey_b58 = bs58::encode(verifying_key.as_bytes()).into_string();
 
         let service_id = [7u8; 32];

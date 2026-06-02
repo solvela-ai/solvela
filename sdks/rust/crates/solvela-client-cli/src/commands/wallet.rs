@@ -156,7 +156,9 @@ fn export(wallet_args: &WalletArgs, yes: bool) -> Result<(), String> {
         }
     }
 
-    println!("{}", wallet.to_keypair_b58());
+    // `to_keypair_b58` returns `Zeroizing<String>` (wiped on drop); deref to
+    // `&str` for display so the secret isn't copied into a fresh `String`.
+    println!("{}", &*wallet.to_keypair_b58());
 
     Ok(())
 }
