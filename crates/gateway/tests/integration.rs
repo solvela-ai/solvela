@@ -24,7 +24,7 @@ use gateway::services::ServiceRegistry;
 use gateway::{build_router, AppState};
 use solvela_protocol::{
     ChatChoice, ChatChunk, ChatChunkChoice, ChatDelta, ChatMessage, ChatRequest, ChatResponse,
-    ModelInfo, Role, Usage,
+    ModelRegistration, Role, Usage,
 };
 use solvela_router::models::ModelRegistry;
 use solvela_x402::traits::{Error as X402Error, PaymentVerifier};
@@ -414,7 +414,7 @@ impl LLMProvider for MockProvider {
         &self.provider_name
     }
 
-    fn supported_models(&self) -> Vec<ModelInfo> {
+    fn supported_models(&self) -> Vec<ModelRegistration> {
         vec![]
     }
 

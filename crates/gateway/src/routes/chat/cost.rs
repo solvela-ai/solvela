@@ -5,7 +5,7 @@
 
 use tracing::warn;
 
-use solvela_protocol::{ChatRequest, ModelInfo, Usage};
+use solvela_protocol::{ChatRequest, ModelRegistration, Usage};
 
 /// Payment scheme parsed off the `X-PAYMENT` header at the request boundary.
 ///
@@ -61,7 +61,7 @@ const DEFAULT_COMPLETION_TOKENS_CAP: u32 = 8192;
 pub(crate) fn cap_usage_to_request_limits(
     usage: &Usage,
     req: &ChatRequest,
-    model_info: &ModelInfo,
+    model_info: &ModelRegistration,
 ) -> Usage {
     let completion_cap = [
         req.max_tokens,
@@ -123,7 +123,7 @@ pub(crate) fn estimate_input_tokens(req: &ChatRequest) -> u32 {
 pub(crate) fn compute_actual_atomic_cost(
     prompt_tokens: u32,
     completion_tokens: u32,
-    model_info: &ModelInfo,
+    model_info: &ModelRegistration,
 ) -> Option<u64> {
     let input = model_info.input_cost_per_million;
     let output = model_info.output_cost_per_million;
@@ -430,7 +430,7 @@ pub(crate) fn semantic_hit_full_atomic(
     registry: &solvela_router::models::ModelRegistry,
     model: &str,
     req: &ChatRequest,
-    model_info: &ModelInfo,
+    model_info: &ModelRegistration,
 ) -> Option<u64> {
     usage
         .and_then(|u| compute_actual_atomic_cost(u.prompt_tokens, u.completion_tokens, model_info))
@@ -441,7 +441,7 @@ pub(crate) fn semantic_hit_full_atomic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use solvela_protocol::{ChatMessage, ModelInfo, Role};
+    use solvela_protocol::{ChatMessage, ModelRegistration, Role};
 
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_compute_actual_atomic_cost_basic() {
-        let model_info = ModelInfo {
+        let model_info = ModelRegistration {
             id: "openai/gpt-4o".to_string(),
             provider: "openai".to_string(),
             model_id: "gpt-4o".to_string(),
@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn test_compute_actual_atomic_cost_zero_tokens() {
-        let model_info = ModelInfo {
+        let model_info = ModelRegistration {
             id: "test/model".to_string(),
             provider: "test".to_string(),
             model_id: "model".to_string(),
@@ -619,7 +619,7 @@ mod tests {
     fn test_compute_actual_atomic_cost_applies_single_fee_via_registry() {
         // Regression: prevents double-application of the 5% platform fee.
         // Exercises the production wiring TOML → ModelRegistry → compute_actual_atomic_cost.
-        // A hand-crafted ModelInfo cannot catch a registry-side bake-in; this test must.
+        // A hand-crafted ModelRegistration cannot catch a registry-side bake-in; this test must.
         let toml = r#"
 [models.test-model]
 provider = "test"
@@ -651,7 +651,7 @@ supports_vision = false
 
     #[test]
     fn test_compute_actual_atomic_cost_includes_5_percent_fee() {
-        let model_info = ModelInfo {
+        let model_info = ModelRegistration {
             id: "test/model".to_string(),
             provider: "test".to_string(),
             model_id: "model".to_string(),
@@ -676,8 +676,8 @@ supports_vision = false
     // cap_usage_to_request_limits — provider-trust bounds (H7)
     // =========================================================================
 
-    fn test_model_info() -> ModelInfo {
-        ModelInfo {
+    fn test_model_info() -> ModelRegistration {
+        ModelRegistration {
             id: "test/model".to_string(),
             provider: "test".to_string(),
             model_id: "test-model".to_string(),
@@ -776,7 +776,7 @@ supports_vision = false
     /// entry must not be a silent revenue gap.
     #[test]
     fn test_compute_actual_atomic_cost_rejects_non_finite_pricing() {
-        let mut model_info = ModelInfo {
+        let mut model_info = ModelRegistration {
             id: "test/model".to_string(),
             provider: "test".to_string(),
             model_id: "model".to_string(),

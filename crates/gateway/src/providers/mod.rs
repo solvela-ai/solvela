@@ -15,7 +15,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::Stream;
 
-use solvela_protocol::{ChatChunk, ChatRequest, ChatResponse, ModelInfo};
+use solvela_protocol::{ChatChunk, ChatRequest, ChatResponse, ModelRegistration};
 
 /// Error type for provider operations.
 pub type ProviderError = Box<dyn std::error::Error + Send + Sync>;
@@ -34,7 +34,7 @@ pub trait LLMProvider: Send + Sync {
     fn name(&self) -> &str;
 
     /// List of models this provider supports.
-    fn supported_models(&self) -> Vec<ModelInfo>;
+    fn supported_models(&self) -> Vec<ModelRegistration>;
 
     /// Execute a chat completion request.
     async fn chat_completion(

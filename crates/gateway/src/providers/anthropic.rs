@@ -4,7 +4,7 @@ use tracing::warn;
 
 use solvela_protocol::{
     ChatChoice, ChatChunk, ChatChunkChoice, ChatDelta, ChatMessage, ChatRequest, ChatResponse,
-    ModelInfo, Role, Usage,
+    ModelRegistration, Role, Usage,
 };
 
 use super::{ChatStream, LLMProvider, ProviderError};
@@ -405,7 +405,7 @@ impl LLMProvider for AnthropicProvider {
         "anthropic"
     }
 
-    fn supported_models(&self) -> Vec<ModelInfo> {
+    fn supported_models(&self) -> Vec<ModelRegistration> {
         vec![]
     }
 

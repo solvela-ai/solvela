@@ -228,7 +228,6 @@ async fn test_models_endpoint() {
         ModelInfo {
             id: "openai/gpt-4o".to_string(),
             provider: "openai".to_string(),
-            model_id: "gpt-4o".to_string(),
             display_name: "GPT-4o".to_string(),
             input_cost_per_million: 2.5,
             output_cost_per_million: 10.0,
@@ -237,14 +236,10 @@ async fn test_models_endpoint() {
             supports_tools: true,
             supports_vision: true,
             reasoning: false,
-            supports_structured_output: true,
-            supports_batch: false,
-            max_output_tokens: Some(16384),
         },
         ModelInfo {
             id: "anthropic/claude-sonnet-4-20250514".to_string(),
             provider: "anthropic".to_string(),
-            model_id: "claude-sonnet-4-20250514".to_string(),
             display_name: "Claude Sonnet 4".to_string(),
             input_cost_per_million: 3.0,
             output_cost_per_million: 15.0,
@@ -253,9 +248,6 @@ async fn test_models_endpoint() {
             supports_tools: true,
             supports_vision: true,
             reasoning: false,
-            supports_structured_output: true,
-            supports_batch: false,
-            max_output_tokens: Some(8192),
         },
     ];
 
@@ -430,14 +422,15 @@ mod wire_format {
     // `id`/`object`/`provider`/`display_name`/`context_window`/`capabilities`/
     // `pricing`, with capabilities + pricing as nested objects. Internal-only
     // fields (`model_id`, `supports_structured_output`, `supports_batch`,
-    // `max_output_tokens`) are intentionally not carried on the wire — see
-    // crates/protocol/src/model.rs.
+    // `max_output_tokens`) are not carried on the wire — and as of the
+    // ModelRegistration/ModelInfo type split they no longer exist on the wire
+    // `ModelInfo` at all (they live on the gateway-internal ModelRegistration).
+    // See crates/protocol/src/model.rs.
     #[test]
     fn model_info_emits_snake_case() {
         let m = ModelInfo {
             id: "openai/gpt-4o".to_string(),
             provider: "openai".to_string(),
-            model_id: "gpt-4o".to_string(),
             display_name: "GPT-4o".to_string(),
             input_cost_per_million: 2.5,
             output_cost_per_million: 10.0,
@@ -446,9 +439,6 @@ mod wire_format {
             supports_tools: true,
             supports_vision: true,
             reasoning: false,
-            supports_structured_output: true,
-            supports_batch: false,
-            max_output_tokens: Some(16384),
         };
         let json = serde_json::to_string(&m).unwrap();
         assert_keys(
@@ -494,7 +484,6 @@ mod wire_format {
         let m = ModelInfo {
             id: "openai/gpt-4o".to_string(),
             provider: "openai".to_string(),
-            model_id: "gpt-4o".to_string(),
             display_name: "GPT-4o".to_string(),
             input_cost_per_million: 2.5,
             output_cost_per_million: 10.0,
@@ -503,9 +492,6 @@ mod wire_format {
             supports_tools: true,
             supports_vision: true,
             reasoning: false,
-            supports_structured_output: true,
-            supports_batch: false,
-            max_output_tokens: Some(16384),
         };
         let once = serde_json::to_string(&m).unwrap();
         let back: ModelInfo = serde_json::from_str(&once).unwrap();
