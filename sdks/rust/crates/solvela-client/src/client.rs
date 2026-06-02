@@ -634,8 +634,11 @@ impl SolvelaClient {
     ///
     /// # Errors
     ///
-    /// Returns `ClientError::BalanceError` if the address is invalid or the
-    /// RPC call fails for a reason other than "account not found".
+    /// Returns `ClientError::BalanceError` if the address is invalid, the RPC
+    /// call fails for a reason other than "account not found", or the RPC
+    /// returns an HTTP 200 with a structurally unexpected body (missing
+    /// `result.value`, no usable balance fields, or a negative balance) —
+    /// these surface as errors rather than a silent `0.0`.
     pub async fn usdc_balance_of(&self, address: &str) -> Result<f64, ClientError> {
         let owner: Pubkey = address
             .parse()
@@ -688,9 +691,12 @@ impl SolvelaClient {
             )));
         }
 
-        let ui_amount = json["result"]["value"]["uiAmount"].as_f64().unwrap_or(0.0);
-
-        Ok(ui_amount)
+        // The error-object case is handled above; parse the balance via the
+        // shared helper so this and `BalanceMonitor` behave identically. The
+        // helper errors (never silently returns 0.0) on a structurally
+        // unexpected body, which would otherwise trip the free-tier fallback
+        // and suppress payments. A real zero balance still parses as Ok(0.0).
+        crate::rpc_error::parse_token_balance(&json).map_err(ClientError::BalanceError)
     }
 
     /// Return the last known USDC balance, or `None` if it has never been polled.
@@ -1062,6 +1068,82 @@ mod tests {
             .await
             .unwrap();
         assert!((balance - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_usdc_balance_falls_back_to_amount_when_ui_amount_null() {
+        // `uiAmount` is a deprecated field that can be `null`; the balance must
+        // be computed from the authoritative `amount` + `decimals`, NOT treated
+        // as 0.0. 2_500_000 atomic / 10^6 = 2.5 USDC.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "context": { "slot": 1 },
+                    "value": {
+                        "amount": "2500000",
+                        "decimals": 6,
+                        "uiAmount": serde_json::Value::Null,
+                        "uiAmountString": "2.5"
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: "http://unused".to_string(),
+                rpc_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let balance = client
+            .usdc_balance_of(&client.wallet.address())
+            .await
+            .unwrap();
+        assert!((balance - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_usdc_balance_errors_on_malformed_response_not_silent_zero() {
+        // No `error` object and no `result.value` — a structurally unexpected
+        // body (e.g. a proxy error page). This MUST be an error, not a silent
+        // 0.0 that would trip the free-tier fallback and suppress payments.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "context": { "slot": 1 } }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: "http://unused".to_string(),
+                rpc_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let result = client.usdc_balance_of(&client.wallet.address()).await;
+        assert!(
+            matches!(result, Err(ClientError::BalanceError(_))),
+            "malformed RPC response must error, got {result:?}"
+        );
     }
 
     #[tokio::test]

@@ -210,7 +210,11 @@ impl BalanceMonitor {
             return Err(BalanceError::RpcError(error.to_string()));
         }
 
-        Ok(json["result"]["value"]["uiAmount"].as_f64().unwrap_or(0.0))
+        // Parse via the shared helper (same logic as `usdc_balance_of`). A
+        // structurally unexpected body errors here rather than silently
+        // storing 0.0 into the monitor's atomic, which would wrongly trip the
+        // low-balance callback / free-tier fallback. See issue #323.
+        crate::rpc_error::parse_token_balance(&json).map_err(BalanceError::ParseResponse)
     }
 }
 
