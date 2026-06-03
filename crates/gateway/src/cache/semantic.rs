@@ -602,14 +602,21 @@ fn redis_value_to_string(v: &redis::Value) -> Option<String> {
 /// different images embed to distinct vectors (preventing a cross-image
 /// semantic-cache collision). Each image contributes ` image=<rep>`:
 /// - `http(s)` URL → the URL verbatim (already short and stable).
-/// - `data:` URI → `sha256:<first-32-hex>` (128-bit prefix) of the raw base64
-///   payload string bytes (verbatim — the payload is NOT decoded first; see
-///   [`solvela_protocol::ParsedImage::Base64`]), so a multi-megabyte base64
-///   blob does not bloat the embedded text or exceed the embed budget while
-///   still distinguishing distinct images. 128 bits avoids birthday collisions
-///   in the shared, wallet-agnostic cache. (Two distinct base64 encodings of
-///   the same image hash differently — a benign cache *miss*, never a wrong
-///   hit.)
+/// - `data:` URI → `sha256:<media_type>:<first-32-hex>` (the declared MIME plus
+///   a 128-bit prefix) of the raw base64 payload string bytes (verbatim — the
+///   payload is NOT decoded first; see [`solvela_protocol::ParsedImage::Base64`]),
+///   so a multi-megabyte base64 blob does not bloat the embedded text or exceed
+///   the embed budget while still distinguishing distinct images. The declared
+///   `media_type` is part of the rep because it IS forwarded to providers
+///   (Anthropic `source.media_type`, Gemini `inlineData.mimeType`) and changes
+///   how the image decodes — so the SAME payload sent as `image/png` vs
+///   `image/jpeg` must embed distinctly (dropping `media_type` would collide
+///   them and risk serving one MIME's cached answer for the other — a
+///   wrong-answer money loss). This mirrors the exact tier's
+///   `sha256:<media_type>:<payload-hash>` rep (`cache/exact.rs`) so the two
+///   tiers agree on the same image. 128 bits avoids birthday collisions in the
+///   shared, wallet-agnostic cache. (Two distinct base64 encodings of the same
+///   image hash differently — a benign cache *miss*, never a wrong hit.)
 /// - unparseable url → returns [`ImageRepResult::Skip`], so the caller bypasses
 ///   the semantic cache entirely for this request rather than building a key
 ///   that could diverge from a (hypothetical) parsed key. Defensive: malformed
@@ -621,11 +628,21 @@ fn image_rep_suffix(model: &str, content: &solvela_protocol::MessageContent) -> 
     for img in content.image_urls() {
         let rep = match img.parse() {
             Ok(ParsedImage::Url { url }) => url,
-            Ok(ParsedImage::Base64 { data, .. }) => {
-                // Hash the payload (not the media-type) so the same bytes sent
-                // as different declared types still distinguish by content; a
-                // short prefix is plenty to avoid collisions in a cache key.
-                format!("sha256:{}", short_hash_hex(data.as_bytes()))
+            Ok(ParsedImage::Base64 { media_type, data }) => {
+                // Fold BOTH the declared `media_type` and the payload hash into
+                // the rep. The SAME base64 payload sent as `image/png` vs
+                // `image/jpeg` decodes differently downstream — `media_type` is
+                // forwarded to providers verbatim (Anthropic `source.media_type`,
+                // Gemini `inlineData.mimeType`) — so dropping `media_type` here
+                // would collide them and risk serving one MIME's cached answer
+                // for the other (a wrong-answer money loss). Mirrors the exact
+                // tier's `sha256:<media_type>:<payload-hash>` (`cache/exact.rs`)
+                // so the two tiers agree on the same image. The separators are
+                // unambiguous: `media_type` is route-allowlisted to
+                // `image/png|jpeg|webp` (contains `/`, never `:`) and the hash
+                // is hex (never `:`), so no `(media_type, payload)` pair can
+                // alias another.
+                format!("sha256:{}:{}", media_type, short_hash_hex(data.as_bytes()))
             }
             Err(_) => {
                 // UNREACHABLE in production: the chat route validates every image
@@ -1125,6 +1142,47 @@ mod tests {
             pt.len()
         );
         assert!(pt.contains("image=sha256:"));
+    }
+
+    /// The declared `media_type` is part of the embedded image rep. The SAME
+    /// base64 payload sent as `image/png` vs `image/jpeg` must yield DIFFERENT
+    /// `prompt_text` (the MIME is forwarded to providers — Anthropic
+    /// `source.media_type`, Gemini `inlineData.mimeType` — and changes how the
+    /// image decodes, so a png-declared answer must not be served for a
+    /// jpeg-declared request). Identical MIME + payload must stay stable.
+    /// Mirrors the exact tier's `cache_key_data_uri_distinguishes_media_type`.
+    ///
+    /// Falsifiability: dropping `media_type` from `image_rep_suffix`'s Base64
+    /// arm (the prior `format!("sha256:{}", ..)` form) collapses the two MIMEs
+    /// onto identical `prompt_text` and the `assert_ne!` fails.
+    #[test]
+    fn prompt_text_distinguishes_media_type_for_same_payload() {
+        let payload = "AAAA";
+        let png = image_req("describe", &format!("data:image/png;base64,{payload}"));
+        let jpeg = image_req("describe", &format!("data:image/jpeg;base64,{payload}"));
+        assert_ne!(
+            prompt_text(&png),
+            prompt_text(&jpeg),
+            "same base64 payload under different declared MIME must yield \
+             distinct prompt_text; otherwise a png answer could be served for \
+             a jpeg request (the MIME is forwarded to the provider verbatim)"
+        );
+
+        // Identical MIME + payload must stay stable (a legitimate hit must
+        // still be reachable).
+        let png2 = image_req("describe", &format!("data:image/png;base64,{payload}"));
+        assert_eq!(
+            prompt_text(&png),
+            prompt_text(&png2),
+            "identical MIME + payload must yield identical prompt_text"
+        );
+        // And the rep embeds the media_type before the hash, per the
+        // `sha256:<media_type>:<hash>` convention shared with the exact tier.
+        let pt = prompt_text(&png).expect("parseable data-URI image prompt");
+        assert!(
+            pt.contains("image=sha256:image/png:"),
+            "embedded rep must carry the media_type, got: {pt:?}"
+        );
     }
 
     /// FIX 2 (PR #2 round-2 review): an unparseable image must make `prompt_text`

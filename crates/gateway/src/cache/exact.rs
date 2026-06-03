@@ -36,9 +36,15 @@ fn short_hash_hex(bytes: &[u8]) -> String {
 /// `semantic.rs::image_rep_suffix` does for its embedded text.
 ///
 /// - `http(s)` URL → kept verbatim (already short and stable).
-/// - `data:` URI ([`ParsedImage::Base64`]) → `sha256:<first-32-hex>` of the raw
-///   base64 payload string bytes (verbatim — NOT decoded first), identical to
-///   `semantic.rs`'s convention so the two tiers agree on "same image".
+/// - `data:` URI ([`ParsedImage::Base64`]) → `sha256:<media_type>:<first-32-hex>`
+///   where the hash is over the raw base64 payload string bytes (verbatim — NOT
+///   decoded first). The declared `media_type` is part of the rep because the
+///   provider decodes the same bytes per declared MIME, so the same payload sent
+///   as `image/png` vs `image/jpeg` is a different request and must key
+///   differently (omitting `media_type` would collide them and serve a
+///   wrong-answer response for the other type). The payload-hash portion stays
+///   identical to `semantic.rs`'s convention so the two tiers agree on "same
+///   payload".
 /// - unparseable url → `rawsha256:<first-32-hex>` of the raw url string bytes.
 ///
 /// NOTE: the unparseable arm deliberately DIFFERS from `semantic.rs`, which
@@ -54,10 +60,21 @@ fn short_hash_hex(bytes: &[u8]) -> String {
 fn image_key_rep(image_url: &solvela_protocol::ImageUrl) -> String {
     match image_url.parse() {
         Ok(ParsedImage::Url { url }) => url,
-        Ok(ParsedImage::Base64 { data, .. }) => {
-            // Hash the payload (not the media-type) so the same bytes sent under
-            // different declared types still distinguish by content.
-            format!("sha256:{}", short_hash_hex(data.as_bytes()))
+        Ok(ParsedImage::Base64 { media_type, data }) => {
+            // Fold BOTH the declared `media_type` and the payload hash into the
+            // rep. The provider decodes the same base64 bytes according to the
+            // declared MIME (Anthropic `source.media_type`, Gemini
+            // `inlineData.mimeType`), so `data:image/png;base64,XYZ` and
+            // `data:image/jpeg;base64,XYZ` are DIFFERENT requests that can yield
+            // different responses — they must key differently. Dropping
+            // `media_type` here would collide them onto one key and serve one
+            // declared type's paid response for the other (a wrong-answer money
+            // loss). Format `sha256:<media_type>:<payload-hash>` cannot alias
+            // across different `(media_type, payload)` pairs: `media_type` is
+            // allowlisted to `image/{png,jpeg,webp}` (contains `/` but never
+            // `:`) and the hash is fixed-length hex (`0-9a-f`, never `:`), so
+            // the two `:` separators are unambiguous and no other split parses.
+            format!("sha256:{}:{}", media_type, short_hash_hex(data.as_bytes()))
         }
         Err(_) => {
             // Defensive (unreachable past the route's pre-settlement parse gate):
@@ -141,7 +158,9 @@ impl ResponseCache {
     /// genuinely different multimodal prompts collide) BUT each image's `url`
     /// is first substituted with a short, stable representation via
     /// [`message_with_bounded_images`]: an `http(s)` URL verbatim, or a
-    /// `sha256:<prefix>` of a `data:` URI's base64 payload. This bounds the
+    /// `sha256:<media_type>:<prefix>` of a `data:` URI's declared MIME plus its
+    /// base64 payload hash (the MIME is keyed because the provider decodes the
+    /// same bytes per declared type). This bounds the
     /// bytes hashed into the key — a `data:` URI can be up to
     /// `MAX_DATA_URI_BYTES` (10 MiB) — without weakening exact-match
     /// correctness (distinct images still produce distinct keys; the same image
@@ -613,6 +632,70 @@ mod tests {
             ResponseCache::cache_key(&x).expect("must serialise"),
             ResponseCache::cache_key(&y).expect("must serialise"),
             "payloads differing only in a late byte must still produce distinct keys"
+        );
+    }
+
+    /// A `data:` URI with a base64 payload of `payload` under an explicit
+    /// `media_type`. Lets a test vary the declared MIME while holding the
+    /// payload fixed.
+    fn data_uri_mime(media_type: &str, payload: &str) -> String {
+        format!("data:{media_type};base64,{payload}")
+    }
+
+    /// The declared `media_type` is part of the cache key. The SAME base64
+    /// payload sent as `image/png` vs `image/jpeg` MUST produce DIFFERENT keys:
+    /// the provider decodes the bytes per declared MIME (Anthropic
+    /// `source.media_type`, Gemini `inlineData.mimeType`), so the two are
+    /// genuinely different requests that can yield different responses. Folding
+    /// them onto one key would serve one declared type's paid response for the
+    /// other — a wrong-answer money loss.
+    ///
+    /// Falsifiability: dropping `media_type` from `image_key_rep`'s Base64 arm
+    /// (hashing the payload alone) makes the first assertion fail because the
+    /// two reps would be byte-identical. The second assertion guards the other
+    /// direction — same MIME + same payload still produces ONE key, so a
+    /// legitimate hit stays reachable.
+    #[test]
+    fn cache_key_data_uri_distinguishes_media_type() {
+        let payload = "A".repeat(64);
+
+        let png = make_request(
+            "openai/gpt-4o",
+            vec![image_message(
+                "describe",
+                &data_uri_mime("image/png", &payload),
+            )],
+            None,
+        );
+        let jpeg = make_request(
+            "openai/gpt-4o",
+            vec![image_message(
+                "describe",
+                &data_uri_mime("image/jpeg", &payload),
+            )],
+            None,
+        );
+        assert_ne!(
+            ResponseCache::cache_key(&png).expect("must serialise"),
+            ResponseCache::cache_key(&jpeg).expect("must serialise"),
+            "same payload under different declared media types must key differently \
+             (the provider decodes per MIME — they are different requests)"
+        );
+
+        // Same media type + same payload → same key (a legitimate hit is
+        // reachable; the media_type addition does not break stability).
+        let png2 = make_request(
+            "openai/gpt-4o",
+            vec![image_message(
+                "describe",
+                &data_uri_mime("image/png", &payload),
+            )],
+            None,
+        );
+        assert_eq!(
+            ResponseCache::cache_key(&png).expect("must serialise"),
+            ResponseCache::cache_key(&png2).expect("must serialise"),
+            "identical media type + payload must still produce one key"
         );
     }
 
