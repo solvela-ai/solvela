@@ -480,7 +480,7 @@ impl SolvelaClient {
             model: model.to_string(),
             messages: vec![ChatMessage {
                 role: Role::User,
-                content: "cost estimate probe".to_string(),
+                content: "cost estimate probe".into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -878,7 +878,7 @@ mod tests {
             model: "openai/gpt-4o".to_string(),
             messages: vec![ChatMessage {
                 role: Role::User,
-                content: "Hello".to_string(),
+                content: "Hello".into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -929,7 +929,7 @@ mod tests {
                 index: 0,
                 message: ChatMessage {
                     role: Role::Assistant,
-                    content: "Hello! How can I help?".to_string(),
+                    content: "Hello! How can I help?".into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
@@ -1301,7 +1301,10 @@ mod tests {
         .unwrap();
 
         let resp = client.chat(sample_chat_request()).await.unwrap();
-        assert_eq!(resp.choices[0].message.content, "Hello! How can I help?");
+        assert_eq!(
+            resp.choices[0].message.content.as_text(),
+            "Hello! How can I help?"
+        );
     }
 
     #[tokio::test]
@@ -1834,11 +1837,17 @@ data: [DONE]\n\n";
         .unwrap();
 
         let resp1 = client.chat(sample_chat_request()).await.unwrap();
-        assert_eq!(resp1.choices[0].message.content, "Hello! How can I help?");
+        assert_eq!(
+            resp1.choices[0].message.content.as_text(),
+            "Hello! How can I help?"
+        );
 
         // Second call should come from cache (mock expects exactly 1 call)
         let resp2 = client.chat(sample_chat_request()).await.unwrap();
-        assert_eq!(resp2.choices[0].message.content, "Hello! How can I help?");
+        assert_eq!(
+            resp2.choices[0].message.content.as_text(),
+            "Hello! How can I help?"
+        );
     }
 
     #[tokio::test]
@@ -1867,7 +1876,10 @@ data: [DONE]\n\n";
             .store(0, std::sync::atomic::Ordering::Relaxed);
 
         let resp = client.chat(sample_chat_request()).await.unwrap();
-        assert_eq!(resp.choices[0].message.content, "Hello! How can I help?");
+        assert_eq!(
+            resp.choices[0].message.content.as_text(),
+            "Hello! How can I help?"
+        );
     }
 
     #[tokio::test]
@@ -1896,7 +1908,10 @@ data: [DONE]\n\n";
             .store(5_000_000, std::sync::atomic::Ordering::Relaxed);
 
         let resp = client.chat(sample_chat_request()).await.unwrap();
-        assert_eq!(resp.choices[0].message.content, "Hello! How can I help?");
+        assert_eq!(
+            resp.choices[0].message.content.as_text(),
+            "Hello! How can I help?"
+        );
     }
 
     #[tokio::test]
@@ -1924,7 +1939,10 @@ data: [DONE]\n\n";
             .store(0, std::sync::atomic::Ordering::Relaxed);
 
         let resp = client.chat(sample_chat_request()).await.unwrap();
-        assert_eq!(resp.choices[0].message.content, "Hello! How can I help?");
+        assert_eq!(
+            resp.choices[0].message.content.as_text(),
+            "Hello! How can I help?"
+        );
     }
 
     #[tokio::test]
@@ -1940,7 +1958,7 @@ data: [DONE]\n\n";
                 index: 0,
                 message: ChatMessage {
                     role: Role::Assistant,
-                    content: "As an AI language model, I can help you.".to_string(),
+                    content: "As an AI language model, I can help you.".into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
@@ -1977,7 +1995,10 @@ data: [DONE]\n\n";
         .unwrap();
 
         let resp = client.chat(sample_chat_request()).await.unwrap();
-        assert_eq!(resp.choices[0].message.content, "Hello! How can I help?");
+        assert_eq!(
+            resp.choices[0].message.content.as_text(),
+            "Hello! How can I help?"
+        );
     }
 
     #[tokio::test]

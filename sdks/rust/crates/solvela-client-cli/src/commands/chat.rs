@@ -35,7 +35,7 @@ pub async fn run(
         model: model.to_string(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: prompt.to_string(),
+            content: prompt.to_string().into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -86,7 +86,7 @@ pub async fn run(
             .map_err(|e| format!("chat error: {e}"))?;
 
         if let Some(choice) = resp.choices.first() {
-            println!("{}", choice.message.content);
+            println!("{}", choice.message.content.as_text());
         }
 
         eprintln!("[model: {}]", resp.model);

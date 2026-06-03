@@ -129,7 +129,7 @@ mod tests {
     fn make_messages(content: &str) -> Vec<ChatMessage> {
         vec![ChatMessage {
             role: Role::User,
-            content: content.to_string(),
+            content: content.into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,

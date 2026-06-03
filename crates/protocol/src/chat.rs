@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::tools::{ToolCall, ToolDefinition};
+use crate::vision::MessageContent;
 
 /// Role of a message participant.
 ///
@@ -24,11 +25,27 @@ pub enum Role {
     Unknown,
 }
 
+/// Deserialize the `content` field, mapping both an absent field and an
+/// explicit JSON `null` to the [`MessageContent`] default (`Text("")`).
+///
+/// OpenAI emits `"content": null` on assistant turns that carry only
+/// `tool_calls`. The `#[serde(untagged)]` `MessageContent` enum cannot match
+/// `null` against either variant, so without this it would hard-fail
+/// deserialization — surfacing a 500 *after* payment on the chat path. This
+/// keeps a missing/null content tolerant and lossless.
+fn deserialize_content<'de, D>(de: D) -> Result<MessageContent, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<MessageContent>::deserialize(de)?.unwrap_or_default())
+}
+
 /// A single message in a chat conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
-    pub content: String,
+    #[serde(default, deserialize_with = "deserialize_content")]
+    pub content: MessageContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -108,6 +125,109 @@ pub struct ChatResponse {
 mod tests {
     use super::*;
     use crate::tools::{FunctionCall, FunctionDefinitionInner, ToolCall, ToolDefinition};
+    use crate::vision::ContentPart;
+
+    #[test]
+    fn test_chat_message_deserializes_content_array() {
+        // CowAgent-style payload: content is an array of content parts.
+        let json = r#"{"role":"user","content":[{"type":"text","text":"Hello!"}]}"#;
+        let msg: ChatMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.role, Role::User);
+        assert!(matches!(msg.content, MessageContent::Parts(_)));
+        assert_eq!(msg.content.as_text(), "Hello!");
+    }
+
+    #[test]
+    fn test_chat_message_deserializes_content_string() {
+        let json = r#"{"role":"user","content":"Hello!"}"#;
+        let msg: ChatMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg.content, MessageContent::Text(_)));
+        assert_eq!(msg.content.as_text(), "Hello!");
+    }
+
+    #[test]
+    fn test_chat_message_string_content_serializes_as_json_string() {
+        // Wire-compat regression guard: string content must serialize back
+        // out as a bare JSON string, never an array/object.
+        let msg = ChatMessage {
+            role: Role::User,
+            content: "hi".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["content"], serde_json::json!("hi"));
+        assert!(json["content"].is_string());
+    }
+
+    #[test]
+    fn test_chat_message_multi_text_parts_flatten() {
+        let json =
+            r#"{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}"#;
+        let msg: ChatMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content.as_text(), "a b");
+    }
+
+    #[test]
+    fn test_chat_message_null_content_defaults_to_empty() {
+        // OpenAI emits `"content": null` on tool-call assistant turns.
+        let json = r#"{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]}"#;
+        let msg: ChatMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.role, Role::Assistant);
+        assert_eq!(msg.content.as_text(), "");
+        assert!(msg.content.is_empty());
+        assert!(msg.tool_calls.is_some());
+    }
+
+    #[test]
+    fn test_chat_message_absent_content_defaults_to_empty() {
+        let json = r#"{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]}"#;
+        let msg: ChatMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content.as_text(), "");
+        assert!(msg.content.is_empty());
+    }
+
+    #[test]
+    fn test_chat_message_number_content_rejected() {
+        // A JSON number is not a valid content shape — must fail to
+        // deserialize (surfaced as a 4xx at the HTTP boundary), never panic.
+        let json = r#"{"role":"user","content":42}"#;
+        let result: Result<ChatMessage, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_chat_message_object_content_rejected() {
+        // REGRESSION GUARD: an unknown JSON OBJECT content (e.g. a future
+        // `{"type":"audio",...}`) must be rejected, not silently coerced to
+        // `Text("")`. `deserialize_content` only maps JSON `null`/absent to the
+        // default; any other non-string/non-array value (here an object)
+        // matches neither untagged `MessageContent` variant, so the inner
+        // deserialize errors and propagates. Without this, an object would be
+        // billed as an empty prompt while the structured content is dropped.
+        let json = r#"{"role":"user","content":{"type":"audio","data":"x"}}"#;
+        let result: Result<ChatMessage, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "object content must be rejected, not coerced to empty text"
+        );
+    }
+
+    #[test]
+    fn test_chat_message_mixed_text_image_returns_only_text() {
+        let json = r#"{"role":"user","content":[{"type":"text","text":"look"},{"type":"image_url","image_url":{"url":"https://example.com/i.png"}}]}"#;
+        let msg: ChatMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg.content, MessageContent::Parts(_)));
+        assert_eq!(msg.content.as_text(), "look");
+        // Sanity: the parsed parts actually include the image part.
+        if let MessageContent::Parts(ref parts) = msg.content {
+            assert_eq!(parts.len(), 2);
+            assert!(parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::ImageUrl { .. })));
+        }
+    }
 
     #[test]
     fn test_chat_request_serialization() {
@@ -115,7 +235,7 @@ mod tests {
             model: "openai/gpt-4o".to_string(),
             messages: vec![ChatMessage {
                 role: Role::User,
-                content: "Hello!".to_string(),
+                content: "Hello!".into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -147,7 +267,7 @@ mod tests {
     fn test_chat_message_with_tool_calls() {
         let msg = ChatMessage {
             role: Role::Assistant,
-            content: String::new(),
+            content: MessageContent::Text(String::new()),
             name: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_1".to_string(),
@@ -171,7 +291,7 @@ mod tests {
     fn test_chat_message_tool_result() {
         let msg = ChatMessage {
             role: Role::Tool,
-            content: r#"{"temp":72}"#.to_string(),
+            content: r#"{"temp":72}"#.into(),
             name: Some("get_weather".to_string()),
             tool_calls: None,
             tool_call_id: Some("call_abc123".to_string()),
@@ -187,7 +307,7 @@ mod tests {
         let json = r#"{"role":"user","content":"Hello!"}"#;
         let msg: ChatMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.role, Role::User);
-        assert_eq!(msg.content, "Hello!");
+        assert_eq!(msg.content.as_text(), "Hello!");
         assert!(msg.tool_calls.is_none());
         assert!(msg.tool_call_id.is_none());
         assert!(msg.name.is_none());
@@ -208,7 +328,7 @@ mod tests {
             model: "openai/gpt-4o".to_string(),
             messages: vec![ChatMessage {
                 role: Role::User,
-                content: "What's the weather?".to_string(),
+                content: "What's the weather?".into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,

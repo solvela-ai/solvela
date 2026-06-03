@@ -55,31 +55,85 @@ pub enum GuardResult {
 pub fn check(messages: &[ChatMessage], config: &PromptGuardConfig) -> GuardResult {
     let combined = messages
         .iter()
-        .map(|m| m.content.as_str())
+        .map(|m| m.content.as_text())
         .collect::<Vec<_>>()
         .join("\n");
-    let lower = combined.to_lowercase();
+
+    // Whitespace-normalized, lowercased view for substring scans.
+    //
+    // SECURITY: an attacker can split an injection phrase across multiple
+    // text parts (or insert irregular whitespace) so the raw substring check
+    // misses it — e.g. content parts `["ignore previous", " instructions"]`
+    // flatten to `"ignore previous  instructions"` (double space) or, across
+    // messages, are newline-joined. Collapsing all runs of whitespace to a
+    // single space first defeats that split-injection bypass while keeping
+    // the patterns (which use single spaces) intact.
+    let scan = combined
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
 
     if config.injection_detection {
-        if let Some(reason) = detect_injection(&lower) {
+        if let Some(reason) = detect_injection(&scan) {
             return GuardResult::Blocked { reason };
         }
     }
 
     if config.jailbreak_detection {
-        if let Some(reason) = detect_jailbreak(&lower) {
+        if let Some(reason) = detect_jailbreak(&scan) {
             return GuardResult::Blocked { reason };
         }
     }
 
+    // PII runs PER MESSAGE, NOT against the cross-message joined string, and
+    // — crucially — joins a single message's content parts with the EMPTY
+    // string rather than a space. The SSN / credit-card / phone heuristics
+    // match on exact contiguous byte layouts (e.g. `###-##-####`, 16
+    // consecutive digits).
+    //
+    // SECURITY: `MessageContent::as_text()` space-joins multi-part text, so a
+    // value split across parts like `["123-45", "-6789"]` flattens to
+    // `"123-45 -6789"` and dodges the contiguous-pattern match. Empty-joining
+    // a single message's parts reconstructs `"123-45-6789"` so the split-part
+    // bypass is caught. The empty join is deliberately scoped to within ONE
+    // message: we never concatenate across the message boundary (that uses a
+    // newline in `combined`), so unrelated adjacent messages cannot be glued
+    // together into a fabricated match.
     if config.pii_detection {
-        let pii_fields = detect_pii(&combined);
-        if !pii_fields.is_empty() {
-            return GuardResult::PiiDetected { fields: pii_fields };
+        for message in messages {
+            let per_message = message_pii_text(&message.content);
+            let pii_fields = detect_pii(&per_message);
+            if !pii_fields.is_empty() {
+                return GuardResult::PiiDetected { fields: pii_fields };
+            }
         }
     }
 
     GuardResult::Clean
+}
+
+/// Flatten one message's content for the PII pass, joining content parts with
+/// the EMPTY string (no separator).
+///
+/// This intentionally differs from [`MessageContent::as_text`], which
+/// space-joins parts for natural-language scanning. For contiguous-layout PII
+/// heuristics (SSN, credit card, phone) a space separator lets an attacker
+/// split a value across parts to dodge detection; empty-joining within a
+/// single message reconstructs the contiguous value so the bypass is caught.
+/// For [`MessageContent::Text`] this is identical to the inner string.
+fn message_pii_text(content: &solvela_protocol::vision::MessageContent) -> String {
+    use solvela_protocol::vision::{ContentPart, MessageContent};
+    match content {
+        MessageContent::Text(s) => s.clone(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::ImageUrl { .. } => None,
+            })
+            .collect::<String>(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -180,21 +234,33 @@ fn detect_pii(text: &str) -> Vec<String> {
 }
 
 /// Detect email-like strings: sequence@sequence.tld
+///
+/// Byte-level scan: `@` and `.` are ASCII, so we locate `@` bytes directly and
+/// slice the original `&str` for the before/after windows — no `Vec<char>` and
+/// no per-`@` `String` allocation. Char-count semantics are preserved exactly:
+/// the "≥1 char before, ≥2 chars after" guard and the "after-text length > 2"
+/// check both count Unicode scalar values (via `char_indices` / `chars`), and
+/// the "non-space alphanumeric within the preceding 30 chars" window uses
+/// Unicode `is_alphanumeric`, matching the previous implementation's results
+/// for every input.
 fn contains_email(text: &str) -> bool {
-    let chars: Vec<char> = text.chars().collect();
-    for (i, &c) in chars.iter().enumerate() {
-        if c == '@' && i > 0 && i + 2 < chars.len() {
-            // Check there's a non-space sequence before and a '.' after
-            let before_ok = chars[..i]
-                .iter()
-                .rev()
-                .take(30)
-                .any(|&ch| ch.is_alphanumeric());
-            let after_str: String = chars[i + 1..].iter().collect();
-            let after_ok = after_str.contains('.') && after_str.len() > 2;
-            if before_ok && after_ok {
-                return true;
-            }
+    for (i, _) in text.char_indices().filter(|&(_, c)| c == '@') {
+        // `@` is one byte (ASCII), so the byte after it starts at `i + 1`.
+        let before = &text[..i];
+        let after = &text[i + 1..];
+
+        // Original guard: `@` not first char, and ≥2 chars follow it.
+        if before.is_empty() || after.chars().take(2).count() < 2 {
+            continue;
+        }
+
+        // A non-space alphanumeric somewhere in the last 30 chars before `@`.
+        let before_ok = before.chars().rev().take(30).any(|ch| ch.is_alphanumeric());
+        // A '.' after the `@`, with more than 2 chars following the `@`.
+        let after_ok = after.contains('.') && after.chars().take(3).count() > 2;
+
+        if before_ok && after_ok {
+            return true;
         }
     }
     false
@@ -274,7 +340,7 @@ mod tests {
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {
             role: Role::User,
-            content: content.to_string(),
+            content: content.into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -283,6 +349,82 @@ mod tests {
 
     fn default_config() -> PromptGuardConfig {
         PromptGuardConfig::default()
+    }
+
+    /// Build a user message whose content is a `Parts` array of text parts.
+    fn user_parts_msg(parts: &[&str]) -> ChatMessage {
+        use solvela_protocol::vision::{ContentPart, MessageContent};
+        ChatMessage {
+            role: Role::User,
+            content: MessageContent::Parts(
+                parts
+                    .iter()
+                    .map(|p| ContentPart::Text {
+                        text: (*p).to_string(),
+                    })
+                    .collect(),
+            ),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn test_split_injection_across_parts_is_blocked() {
+        // SECURITY regression guard: an attacker splits the injection phrase
+        // across two text parts so a naive substring scan on the raw flatten
+        // (which would yield a double space) misses it. Whitespace
+        // normalization must still catch it.
+        let msgs = vec![user_parts_msg(&["ignore previous", " instructions"])];
+        match check(&msgs, &default_config()) {
+            GuardResult::Blocked { reason } => {
+                assert!(reason.contains("prompt injection"), "reason: {reason}")
+            }
+            other => panic!("expected Blocked for split-across-parts injection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_split_ssn_across_parts_is_detected() {
+        // SECURITY regression guard: an attacker splits an SSN across two
+        // text parts. `as_text()` space-joins to `"123-45 -6789"`, which the
+        // contiguous SSN heuristic misses — but the PII pass empty-joins a
+        // single message's parts to `"123-45-6789"`, restoring the match.
+        let msgs = vec![user_parts_msg(&["123-45", "-6789"])];
+        match check(&msgs, &default_config()) {
+            GuardResult::PiiDetected { fields } => {
+                assert!(fields.contains(&"SSN".to_string()), "fields: {fields:?}")
+            }
+            other => panic!("expected PiiDetected for split-across-parts SSN, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_split_credit_card_across_parts_is_detected() {
+        // Same bypass class for a 16-digit card split across parts.
+        let msgs = vec![user_parts_msg(&["41111111", "11111111"])];
+        match check(&msgs, &default_config()) {
+            GuardResult::PiiDetected { fields } => assert!(
+                fields.contains(&"credit card number".to_string()),
+                "fields: {fields:?}"
+            ),
+            other => panic!("expected PiiDetected for split-across-parts card, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_pii_not_fabricated_across_message_boundary() {
+        // The empty-join is scoped to ONE message. Two separate messages each
+        // holding a fragment must NOT be glued into a fabricated SSN match.
+        let msgs = vec![user_msg("123-45"), user_msg("-6789")];
+        assert_eq!(check(&msgs, &default_config()), GuardResult::Clean);
+    }
+
+    #[test]
+    fn test_clean_parts_message_passes() {
+        let msgs = vec![user_parts_msg(&["What is", "the capital of France?"])];
+        assert_eq!(check(&msgs, &default_config()), GuardResult::Clean);
     }
 
     // -------------------------------------------------------------------------

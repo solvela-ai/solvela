@@ -221,7 +221,7 @@ fn concatenate_user_content(messages: &[solvela_protocol::ChatMessage]) -> Strin
     messages
         .iter()
         .filter(|m| m.role == solvela_protocol::Role::User)
-        .map(|m| m.content.as_str())
+        .map(|m| m.content.as_text())
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
@@ -276,7 +276,7 @@ mod tests {
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {
             role: Role::User,
-            content: content.to_string(),
+            content: content.into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,

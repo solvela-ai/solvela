@@ -57,7 +57,7 @@ fn aggregate_content(response: &ChatResponse) -> String {
     response
         .choices
         .iter()
-        .map(|c| c.message.content.as_str())
+        .map(|c| c.message.content.as_text())
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -98,7 +98,7 @@ mod tests {
                 index: 0,
                 message: ChatMessage {
                     role: Role::Assistant,
-                    content: content.to_string(),
+                    content: content.into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn short_content_ending_alphanumeric_not_truncated() {
         let resp = make_response("short text ending abrupt");
-        assert!(resp.choices[0].message.content.len() <= TRUNCATION_MIN_LEN);
+        assert!(resp.choices[0].message.content.as_text().len() <= TRUNCATION_MIN_LEN);
         assert_eq!(is_degraded(&resp), None);
     }
 }

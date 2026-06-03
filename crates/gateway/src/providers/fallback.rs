@@ -12,6 +12,33 @@ use solvela_protocol::{ChatRequest, ChatResponse};
 use super::health::ProviderHealthTracker;
 use super::{ChatStream, ProviderError, ProviderRegistry};
 
+/// Defense-in-depth backstop: reject any request whose messages carry image
+/// content parts before it can reach a provider serialization step.
+///
+/// Image/multimodal content is rejected with a nicer 415 at the HTTP route
+/// (`routes/chat/mod.rs`) before payment, but that is a single gate. This
+/// backstop covers every provider-DISPATCH entry point — the HTTP fallback
+/// variants plus the A2A dispatch leg (which funnels through
+/// `chat_with_model_fallback`) — so image content cannot be serialized to an
+/// upstream provider via any dispatch path. The A2A request-INTAKE leg
+/// (cost estimation in `handle_new_request`) does NOT pass through this module;
+/// it is safe separately because it builds `Text` content from a plain string,
+/// not from client image parts. Native image-block translation, capability
+/// gating, and image cost accounting are a tracked follow-up PR. Returns the
+/// module's `ProviderError` so the caller surfaces a failure rather than
+/// silently dropping (or billing for) image parts.
+fn reject_image_content(req: &ChatRequest) -> Result<(), ProviderError> {
+    if req.messages.iter().any(|m| m.content.has_image_parts()) {
+        tracing::error!(
+            model = %req.model,
+            "image/multimodal content reached provider dispatch — rejecting \
+             (backstop; should have been blocked upstream)"
+        );
+        return Err("image/multimodal content is not yet supported".into());
+    }
+    Ok(())
+}
+
 /// Result from a fallback-aware request. Tracks whether the response
 /// came from the originally requested model or a fallback.
 #[derive(Debug)]
@@ -36,6 +63,7 @@ pub async fn chat_with_model_fallback(
     primary_model: &str,
     req: ChatRequest,
 ) -> Result<FallbackResult<ChatResponse>, ProviderError> {
+    reject_image_content(&req)?;
     let chain = model_fallback_chain(primary_provider, primary_model);
     let mut last_error: Option<ProviderError> = None;
 
@@ -116,6 +144,7 @@ pub async fn stream_with_model_fallback(
     primary_model: &str,
     req: ChatRequest,
 ) -> Result<FallbackResult<ChatStream>, ProviderError> {
+    reject_image_content(&req)?;
     let chain = model_fallback_chain(primary_provider, primary_model);
     let mut last_error: Option<ProviderError> = None;
 
@@ -190,6 +219,7 @@ pub async fn chat_with_fallback(
     provider_names: &[String],
     req: ChatRequest,
 ) -> Result<ChatResponse, ProviderError> {
+    reject_image_content(&req)?;
     let mut last_error: Option<ProviderError> = None;
 
     for name in provider_names {
@@ -241,6 +271,7 @@ pub async fn stream_with_fallback(
     provider_names: &[String],
     req: ChatRequest,
 ) -> Result<ChatStream, ProviderError> {
+    reject_image_content(&req)?;
     let mut last_error: Option<ProviderError> = None;
 
     for name in provider_names {
@@ -281,6 +312,7 @@ pub async fn chat_with_chain(
     original_model: &str,
     req: ChatRequest,
 ) -> Result<FallbackResult<ChatResponse>, ProviderError> {
+    reject_image_content(&req)?;
     let mut last_error: Option<ProviderError> = None;
 
     for (prov, model_id) in chain {
@@ -351,6 +383,7 @@ pub async fn stream_with_chain(
     original_model: &str,
     req: ChatRequest,
 ) -> Result<FallbackResult<ChatStream>, ProviderError> {
+    reject_image_content(&req)?;
     let mut last_error: Option<ProviderError> = None;
 
     for (prov, model_id) in chain {
@@ -533,6 +566,90 @@ pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use solvela_protocol::{ChatMessage, ContentPart, ImageUrl, MessageContent, Role};
+
+    use crate::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
+
+    /// Build a request whose single message carries an image content part.
+    fn image_request() -> ChatRequest {
+        ChatRequest {
+            model: "openai/gpt-4o".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "what is in this image?".to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "https://example.com/cat.png".to_string(),
+                            detail: None,
+                        },
+                    },
+                ]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        }
+    }
+
+    /// FIX 1 backstop: an image-bearing request passed directly to the shared
+    /// dispatch chokepoint must be rejected and never reach a provider. The
+    /// registry is empty, so if the guard did NOT fire we'd see the
+    /// "no available models" exhaustion error instead — asserting the guard's
+    /// own message proves the rejection happens *before* dispatch.
+    #[tokio::test]
+    async fn image_content_rejected_before_provider_dispatch() {
+        let providers = ProviderRegistry::from_env(reqwest::Client::new());
+        let health = ProviderHealthTracker::new(CircuitBreakerConfig::default());
+
+        let err =
+            chat_with_model_fallback(&providers, &health, "openai", "gpt-4o", image_request())
+                .await
+                .expect_err("image content must be rejected by the backstop");
+        assert!(
+            err.to_string()
+                .contains("image/multimodal content is not yet supported"),
+            "must fail via the image backstop, not provider exhaustion: {err}"
+        );
+
+        // The same guard protects the streaming, provider-name, and chain
+        // variants — the four dispatch paths the HTTP route can take. The
+        // streaming `Ok` payload (`FallbackResult<ChatStream>`) is not `Debug`,
+        // so map it to `()` before unwrapping the error.
+        let err =
+            stream_with_model_fallback(&providers, &health, "openai", "gpt-4o", image_request())
+                .await
+                .map(|_| ())
+                .expect_err("streaming dispatch must also reject image content");
+        assert!(err
+            .to_string()
+            .contains("image/multimodal content is not yet supported"));
+
+        let chain = vec![("openai".to_string(), "gpt-4o".to_string())];
+        let err = chat_with_chain(&providers, &health, &chain, "gpt-4o", image_request())
+            .await
+            .expect_err("chain dispatch must also reject image content");
+        assert!(err
+            .to_string()
+            .contains("image/multimodal content is not yet supported"));
+
+        let names = vec!["openai".to_string()];
+        let err = chat_with_fallback(&providers, &health, &names, image_request())
+            .await
+            .expect_err("provider-name dispatch must also reject image content");
+        assert!(err
+            .to_string()
+            .contains("image/multimodal content is not yet supported"));
+    }
 
     #[test]
     fn test_fallback_chain_primary_first() {

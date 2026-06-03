@@ -21,7 +21,7 @@ use axum::Json;
 use metrics::{counter, histogram};
 use tracing::{info, warn};
 
-use solvela_protocol::{ChatRequest, SettlementFailureKind};
+use solvela_protocol::{ChatRequest, MessageContent, Role, SettlementFailureKind};
 use solvela_router::profiles::{self, Profile};
 use solvela_router::scorer;
 
@@ -46,6 +46,12 @@ pub(crate) use payment::uses_durable_nonce;
 /// Maximum number of messages allowed in a single chat request.
 /// Prevents excessive memory usage and cost from very long conversations.
 const MAX_MESSAGES: usize = 256;
+
+/// Maximum number of content parts allowed in a single message's `Parts`
+/// content array. Defense-in-depth against part-flooding within the 10MB
+/// body limit (each part is small individually but a multi-thousand-element
+/// array forces excessive per-part work on the hot path).
+const MAX_CONTENT_PARTS: usize = 64;
 
 /// Platform-wide upper bound for `max_tokens` to prevent unbounded cost exposure.
 const MAX_TOKENS_LIMIT: u32 = 128_000;
@@ -75,6 +81,63 @@ pub async fn chat_completions(
         )));
     }
 
+    // Content validation — runs BEFORE payment, guard, and provider dispatch.
+    //
+    // PR #1 accepts `content` as a string OR an array of OpenAI text parts.
+    // Image/multimodal content is NOT yet processed (native image blocks,
+    // capability gating, and image cost accounting are a tracked follow-up
+    // PR). Reject it explicitly with a 415 so it is never silently dropped,
+    // mis-costed, or cached — rather than half-supported. Also cap the
+    // per-message parts array to bound hot-path work.
+    for msg in &req.messages {
+        if msg.content.has_image_parts() {
+            warn!("rejected request with image/multimodal content (not yet supported)");
+            return Err(GatewayError::UnsupportedMediaType(
+                "image/multimodal content is not yet supported; \
+                 send text content (string or text parts)"
+                    .to_string(),
+            ));
+        }
+        // Same `Parts` arm as the image check above (image check first, then
+        // length cap — order/errors unchanged) so the variant is matched once.
+        if let MessageContent::Parts(parts) = &msg.content {
+            if parts.len() > MAX_CONTENT_PARTS {
+                return Err(GatewayError::BadRequest(format!(
+                    "too many content parts in a message: {} exceeds maximum of {}",
+                    parts.len(),
+                    MAX_CONTENT_PARTS
+                )));
+            }
+        }
+    }
+
+    // Empty-prompt rejection — runs BEFORE payment so an empty request is never
+    // billed (the cost path floors token estimates at `.max(1)`, and a
+    // `Parts([])` value additionally serializes to `"content":[]`, which
+    // OpenAI-format providers 400 on — i.e. a paid request would 5xx AFTER the
+    // agent settled on-chain).
+    //
+    // null/absent content deserializes to `Text("")`, and all-whitespace or
+    // image-only `Parts` flatten to empty text; all of those pass the gates
+    // above. Reject when NO `User`-role message carries non-empty text — i.e.
+    // there is no actual user prompt anywhere in the request.
+    //
+    // Assistant turns with `content: null` + `tool_calls` (legitimate OpenAI
+    // multi-turn), and System/Developer/Tool messages, are NOT user prompts and
+    // do not satisfy this check on their own — but they are never the *reason*
+    // for rejection either, since we only require at least one non-empty User
+    // message to exist.
+    let has_user_prompt = req
+        .messages
+        .iter()
+        .any(|msg| msg.role == Role::User && !msg.content.as_text().trim().is_empty());
+    if !has_user_prompt {
+        warn!("rejected request with no non-empty user prompt content");
+        return Err(GatewayError::BadRequest(
+            "request contains no user message with non-empty text content".to_string(),
+        ));
+    }
+
     // Extract request ID from the incoming header
     let request_id: Option<String> = headers
         .get("x-request-id")
@@ -101,23 +164,35 @@ pub async fn chat_completions(
         "chat completion request"
     );
 
-    // Step 1b: Prompt guard — check for injection, jailbreak, and PII
-    let guard_config = PromptGuardConfig::default();
-    match prompt_guard::check(&req.messages, &guard_config) {
-        GuardResult::Blocked { reason } => {
-            warn!(reason = %reason, "request blocked by prompt guard");
-            return Err(GatewayError::BadRequest(
-                "Request blocked by content policy".to_string(),
-            ));
-        }
-        GuardResult::PiiDetected { fields } => {
-            warn!(
-                pii_fields = ?fields,
-                "PII detected in request — forwarding with warning logged"
-            );
-        }
-        GuardResult::Clean => {}
-    }
+    // Step 1b: Prompt guard — check for injection, jailbreak, and PII.
+    //
+    // security 92 / DoS amplification: the guard does expensive scans (notably a
+    // large allocation on the PII path). It MUST NOT run on the unauthenticated
+    // no-payment 402 path — that path only needs a cost estimate, and running the
+    // guard there lets any anonymous caller force full guard work for free. So
+    // the guard is deferred and invoked only on paths that actually reach a
+    // provider: the dev-bypass branch and the verified/paid path below. Defining
+    // it as a closure keeps a single source of truth for both call sites.
+    let run_prompt_guard =
+        |messages: &[solvela_protocol::ChatMessage]| -> Result<(), GatewayError> {
+            let guard_config = PromptGuardConfig::default();
+            match prompt_guard::check(messages, &guard_config) {
+                GuardResult::Blocked { reason } => {
+                    warn!(reason = %reason, "request blocked by prompt guard");
+                    Err(GatewayError::BadRequest(
+                        "Request blocked by content policy".to_string(),
+                    ))
+                }
+                GuardResult::PiiDetected { fields } => {
+                    warn!(
+                        pii_fields = ?fields,
+                        "PII detected in request — forwarding with warning logged"
+                    );
+                    Ok(())
+                }
+                GuardResult::Clean => Ok(()),
+            }
+        };
 
     // Step 2: Look up model in registry for pricing
     let model_info = state
@@ -152,6 +227,9 @@ pub async fn chat_completions(
             req.model
         );
         counter!("solvela_payments_total", "status" => "dev_bypass").increment(1);
+
+        // Dev-bypass still reaches a provider, so it must run the guard.
+        run_prompt_guard(&req.messages)?;
 
         let ctx = ProviderCallContext {
             state: &state,
@@ -241,6 +319,12 @@ pub async fn chat_completions(
         // See `GatewayError::PaymentChallenge` doc and issue #217.
         return Err(GatewayError::PaymentChallenge(Box::new(payment_required)));
     }
+
+    // Payment header is present — this request will reach a provider on success,
+    // so run the (deferred) prompt guard now, before decode/verify/proxy. This is
+    // the security-92 reorder: the guard runs for every request that reaches a
+    // provider, and never on the pure no-payment 402 return above.
+    run_prompt_guard(&req.messages)?;
 
     // Step 4: Payment present — try to decode and verify via Facilitator
     let payment_payload = decode_payment_from_header(payment_header.unwrap());
