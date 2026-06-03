@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import base64
+import json
 import secrets
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
+
+import httpx
 
 from solvela.constants import USDC_MINT, X402_VERSION
 from solvela.errors import SignerError
@@ -34,6 +37,14 @@ _MAX_ESCROW_EXPIRY_SLOTS_AHEAD = 10_000
 # headroom (150 vs 50) absorbs slot-skew between the slot we read and the slot
 # the gateway verifies against. ~150 slots ≈ 60 s.
 _MIN_ESCROW_EXPIRY_SLOTS_AHEAD = 150
+
+# Floor below which a getSlot result is implausible and rejected. A stub /
+# genesis / freshly-reset validator can answer getSlot with a near-zero slot;
+# computing an escrow expiry from that base yields an already-expired (or
+# trivially-near-expiry) deposit the gateway would bounce. Mainnet/devnet have
+# been well past this for years, so a real node never trips it. Fail closed
+# rather than silently signing a dead-on-arrival escrow deposit.
+_MIN_PLAUSIBLE_SLOT = 1_000_000
 
 if TYPE_CHECKING:
     from solders.pubkey import Pubkey
@@ -190,6 +201,14 @@ class KeypairSigner(Signer):
         if not program_id:
             raise SignerError("escrow scheme selected but escrow_program_id is missing")
 
+        # Reject a non-integer (float/bool) amount BEFORE it reaches the on-chain
+        # u64 amount field. ``int(2.9)`` would silently truncate the deposit and
+        # mis-charge the agent; ``bool`` is an ``int`` subclass that would
+        # deposit 1 atomic unit. Fail closed at the boundary.
+        if not (isinstance(amount_atomic, int) and not isinstance(amount_atomic, bool)):
+            raise SignerError(
+                "escrow deposit amount must be an integer number of atomic USDC units"
+            )
         if amount_atomic <= 0:
             raise SignerError("escrow deposit amount must be greater than zero")
 
@@ -261,10 +280,6 @@ class KeypairSigner(Signer):
         ``SignerError`` *before* any blind indexing — so a 429/5xx HTML body or
         an error payload never leaks node URLs / internals into a traceback.
         """
-        import json
-
-        import httpx
-
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 self._rpc_url,
@@ -296,11 +311,9 @@ class KeypairSigner(Signer):
         failure, malformed body, RPC error, or missing/invalid ``result`` is a
         ``SignerError`` — never a silent default slot, which would let the
         escrow expiry be computed from a bogus base and bounced or mis-set.
+        Also rejects an implausibly-low slot (stub/genesis node) so the escrow
+        expiry is never computed from a near-zero base.
         """
-        import json
-
-        import httpx
-
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 self._rpc_url,
@@ -324,6 +337,11 @@ class KeypairSigner(Signer):
             slot = data.get("result") if isinstance(data, dict) else None
             if not isinstance(slot, int) or isinstance(slot, bool) or slot < 0:
                 raise SignerError("getSlot RPC: missing or invalid result")
+            if slot < _MIN_PLAUSIBLE_SLOT:
+                raise SignerError(
+                    f"getSlot RPC returned implausibly low slot {slot} "
+                    f"(< {_MIN_PLAUSIBLE_SLOT}); refusing to build an escrow deposit"
+                )
             return slot
 
     @staticmethod

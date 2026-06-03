@@ -56,6 +56,19 @@ SYSTEM_PROGRAM_ID = "11111111111111111111111111111111"
 # byte; emitting a bare u8 there would corrupt the encoding, so we reject.
 _COMPACT_U16_SINGLE_BYTE_MAX = 127
 
+# Maximum value representable as a little-endian u64 (the on-chain amount field).
+_U64_MAX = 0xFFFF_FFFF_FFFF_FFFF
+
+
+def _is_strict_int(value: object) -> bool:
+    """True only for a real ``int`` — rejects ``float`` and ``bool``.
+
+    Money-path guard: ``bool`` is an ``int`` subclass, and a ``float`` amount
+    would be silently truncated by ``int(...)`` / ``.to_bytes`` and mis-charge
+    the agent. Both must be refused at the boundary.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
 
 class DepositError(SignerError):
     """Raised when an escrow deposit transaction cannot be built.
@@ -105,7 +118,7 @@ def derive_ata_address(wallet: Pubkey, mint: Pubkey) -> Pubkey:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class DepositParams:
     """Inputs for :func:`build_deposit_tx`.
 
@@ -114,6 +127,11 @@ class DepositParams:
     Production code (``KeypairSigner.sign_payment``) generates the CSPRNG
     ``service_id``, computes ``expiry_slot`` from the current slot, and fetches
     the blockhash, then calls this builder.
+
+    Frozen + validated at construction: a money-path struct must not be mutated
+    after the byte-layout-relevant fields are checked. To produce a variant
+    (e.g. in tests), use ``dataclasses.replace(params, ...)`` which re-runs
+    validation, never attribute assignment.
     """
 
     # Base58-encoded 64-byte ed25519 keypair (32-byte secret || 32-byte pubkey).
@@ -121,7 +139,7 @@ class DepositParams:
     provider_wallet_b58: str
     usdc_mint_b58: str
     escrow_program_id_b58: str
-    # Atomic USDC units (6 decimals). MUST be > 0.
+    # Atomic USDC units (6 decimals). MUST be a positive int (no float/bool).
     amount: int
     # 32-byte service identifier that seeds the escrow PDA.
     service_id: bytes
@@ -129,6 +147,23 @@ class DepositParams:
     expiry_slot: int
     # Recent blockhash (32 bytes) from getLatestBlockhash.
     recent_blockhash: bytes
+
+    def __post_init__(self) -> None:
+        # Reject a float/bool amount BEFORE any to_bytes / arithmetic use:
+        # ``int(2.9)`` would silently truncate the on-chain transfer amount,
+        # and ``True`` is an ``int`` subclass that would deposit 1 atomic unit.
+        if not _is_strict_int(self.amount):
+            raise DepositError("deposit amount must be an integer number of atomic USDC units")
+        if self.amount <= 0:
+            raise DepositError("deposit amount must be greater than zero")
+        if self.amount > _U64_MAX:
+            raise DepositError("deposit amount exceeds u64 range")
+        if len(self.service_id) != 32:
+            raise DepositError(f"service_id must be 32 bytes, got {len(self.service_id)}")
+        if len(self.recent_blockhash) != 32:
+            raise DepositError(
+                f"recent_blockhash must be 32 bytes, got {len(self.recent_blockhash)}"
+            )
 
     def __repr__(self) -> str:
         # Never leak the keypair into logs / tracebacks.
@@ -213,10 +248,15 @@ def build_deposit_tx(params: DepositParams) -> str:
         DepositError: zero amount, malformed keypair/address, bad service_id or
             blockhash length, or message-too-long.
     """
-    # Step 1: reject zero amount (fail-closed money-path invariant).
+    # Step 1: fail-closed money-path guards on the amount. ``DepositParams``
+    # already validates these at construction, but we re-check here (defense in
+    # depth) BEFORE any ``.to_bytes`` use so a hand-constructed params object
+    # that bypassed __post_init__ can never silently truncate a float amount.
+    if not _is_strict_int(params.amount):
+        raise DepositError("deposit amount must be an integer number of atomic USDC units")
     if params.amount <= 0:
         raise DepositError("deposit amount must be greater than zero")
-    if params.amount > 0xFFFF_FFFF_FFFF_FFFF:
+    if params.amount > _U64_MAX:
         raise DepositError("deposit amount exceeds u64 range")
 
     if len(params.service_id) != 32:
@@ -224,11 +264,15 @@ def build_deposit_tx(params: DepositParams) -> str:
     if len(params.recent_blockhash) != 32:
         raise DepositError(f"recent_blockhash must be 32 bytes, got {len(params.recent_blockhash)}")
 
-    # Step 2: load the keypair and recover the agent pubkey.
+    # Step 2: load the keypair and recover the agent pubkey. The raw solders
+    # exception is NOT interpolated and the chain is dropped: a malformed
+    # keypair string is (or contains) secret key material, and some solders
+    # error variants can echo the offending input. Surface a generic message
+    # only — never the raw input or the underlying exception text.
     try:
         keypair = Keypair.from_base58_string(params.agent_keypair_b58)
-    except Exception as exc:  # noqa: BLE001 — normalize to typed error
-        raise DepositError(f"invalid agent keypair: {exc}") from exc
+    except Exception:  # noqa: BLE001 — normalize to typed error, no secret leak
+        raise DepositError("invalid agent keypair: bad base58 or wrong length") from None
     agent_pubkey = keypair.pubkey()
     agent_pubkey_bytes = bytes(agent_pubkey)
 
