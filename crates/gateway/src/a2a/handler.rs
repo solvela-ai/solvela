@@ -509,6 +509,7 @@ async fn handle_payment_submitted(
     let result = chat_with_model_fallback(
         &state.providers,
         &state.provider_health,
+        &state.model_registry,
         &model_info.provider,
         &model_info.model_id,
         chat_req,

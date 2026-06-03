@@ -4,7 +4,7 @@ use tracing::warn;
 
 use solvela_protocol::{
     ChatChoice, ChatChunk, ChatChunkChoice, ChatDelta, ChatMessage, ChatRequest, ChatResponse,
-    ModelRegistration, Role, Usage,
+    MessageContent, ModelRegistration, ParseImageError, ParsedImage, Role, Usage,
 };
 
 use super::{ChatStream, LLMProvider, ProviderError};
@@ -47,10 +47,42 @@ struct AnthropicRequest {
     stream: Option<bool>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Anthropic message content: a list of content blocks.
+///
+/// Anthropic's Messages API accepts `content` as either a bare string or an
+/// array of typed content blocks. We always emit the array form so a single
+/// code path carries both text-only and multimodal messages. For text-only
+/// messages this is a one-element `[{"type":"text","text":...}]`, which the
+/// API treats identically to a bare string.
+///
+/// Wire schema verified against the Anthropic Messages API docs
+/// (platform.claude.com/docs/en/api/messages, fetched 2026-06-03):
+///   text:  {"type":"text","text": "..."}
+///   image (base64): {"type":"image","source":{"type":"base64",
+///                     "media_type":"image/png","data":"<b64>"}}
+///   image (url):    {"type":"image","source":{"type":"url",
+///                     "url":"https://..."}}
+/// Outbound-only (request) — no `Deserialize`.
+#[derive(Debug, Serialize)]
 struct AnthropicMessage {
     role: String,
-    content: String,
+    content: Vec<AnthropicContentBlockOut>,
+}
+
+/// Outbound-only (request) — no `Deserialize`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicContentBlockOut {
+    Text { text: String },
+    Image { source: AnthropicImageSource },
+}
+
+/// Outbound-only (request) — no `Deserialize`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicImageSource {
+    Base64 { media_type: String, data: String },
+    Url { url: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,16 +112,73 @@ struct AnthropicUsage {
 // Format translation
 // ---------------------------------------------------------------------------
 
+/// Translate one OpenAI [`MessageContent`] into Anthropic content blocks.
+///
+/// Text-only content becomes a single text block (the API treats a
+/// one-element text array identically to a bare string). Multimodal content
+/// preserves part ORDER — interleaving of text and images is meaningful to
+/// the model — and translates each image via [`ImageUrl::parse`]
+/// (`data:` URI → base64 source; http(s) → url source). A malformed image
+/// URL returns `Err` so the request is rejected rather than silently dropping
+/// the image.
+fn content_to_anthropic_blocks(
+    content: &MessageContent,
+) -> Result<Vec<AnthropicContentBlockOut>, String> {
+    match content {
+        MessageContent::Text(s) => Ok(vec![AnthropicContentBlockOut::Text { text: s.clone() }]),
+        MessageContent::Parts(parts) => {
+            let mut blocks = Vec::with_capacity(parts.len());
+            for part in parts {
+                match part {
+                    solvela_protocol::ContentPart::Text { text } => {
+                        blocks.push(AnthropicContentBlockOut::Text { text: text.clone() });
+                    }
+                    solvela_protocol::ContentPart::ImageUrl { image_url } => {
+                        let source = match image_url
+                            .parse()
+                            .map_err(|e: ParseImageError| e.to_string())?
+                        {
+                            ParsedImage::Base64 { media_type, data } => {
+                                AnthropicImageSource::Base64 { media_type, data }
+                            }
+                            ParsedImage::Url { url } => AnthropicImageSource::Url { url },
+                        };
+                        blocks.push(AnthropicContentBlockOut::Image { source });
+                    }
+                }
+            }
+            Ok(blocks)
+        }
+    }
+}
+
 /// Convert an OpenAI-format request to Anthropic Messages API format.
-fn to_anthropic_request(req: &ChatRequest) -> AnthropicRequest {
+///
+/// Fallible: a malformed image data URI in any user/assistant message
+/// surfaces as `Err` rather than dropping the image. System messages are
+/// always flattened to text (Anthropic's `system` param is a plain string).
+fn to_anthropic_request(req: &ChatRequest) -> Result<AnthropicRequest, String> {
     // Extract system message(s) — Anthropic takes system as a separate param
+    // (a plain string), so it cannot carry image blocks. An image in a
+    // system/developer message would be silently dropped by `as_text()` while
+    // the vision gate still accepts the request — the agent pays but the model
+    // never sees the image. Reject it explicitly instead.
     let system: Option<String> = {
-        let system_msgs: Vec<String> = req
+        let mut system_msgs: Vec<String> = Vec::new();
+        for m in req
             .messages
             .iter()
             .filter(|m| m.role == Role::System || m.role == Role::Developer)
-            .map(|m| m.content.as_text().into_owned())
-            .collect();
+        {
+            if m.content.has_image_parts() {
+                return Err(
+                    "image content is not supported in system/developer messages; \
+                     place images in a user message"
+                        .to_string(),
+                );
+            }
+            system_msgs.push(m.content.as_text().into_owned());
+        }
 
         if system_msgs.is_empty() {
             None
@@ -99,19 +188,20 @@ fn to_anthropic_request(req: &ChatRequest) -> AnthropicRequest {
     };
 
     // Filter to user/assistant messages only
-    let messages: Vec<AnthropicMessage> = req
+    let mut messages: Vec<AnthropicMessage> = Vec::new();
+    for m in req
         .messages
         .iter()
         .filter(|m| m.role == Role::User || m.role == Role::Assistant)
-        .map(|m| AnthropicMessage {
-            role: match m.role {
-                Role::User => "user".to_string(),
-                Role::Assistant => "assistant".to_string(),
-                _ => "user".to_string(), // shouldn't happen due to filter
-            },
-            content: m.content.as_text().into_owned(),
-        })
-        .collect();
+    {
+        let role = match m.role {
+            Role::User => "user".to_string(),
+            Role::Assistant => "assistant".to_string(),
+            _ => "user".to_string(), // shouldn't happen due to filter
+        };
+        let content = content_to_anthropic_blocks(&m.content)?;
+        messages.push(AnthropicMessage { role, content });
+    }
 
     // Extract model_id part (e.g., "anthropic/claude-sonnet-4-20250514" → "claude-sonnet-4-20250514")
     let model = req
@@ -120,7 +210,7 @@ fn to_anthropic_request(req: &ChatRequest) -> AnthropicRequest {
         .unwrap_or(&req.model)
         .to_string();
 
-    AnthropicRequest {
+    Ok(AnthropicRequest {
         model,
         max_tokens: req.max_tokens.unwrap_or(4096),
         system,
@@ -128,7 +218,7 @@ fn to_anthropic_request(req: &ChatRequest) -> AnthropicRequest {
         temperature: req.temperature,
         top_p: req.top_p,
         stream: None,
-    }
+    })
 }
 
 /// Convert an Anthropic response to OpenAI-format ChatResponse.
@@ -414,7 +504,8 @@ impl LLMProvider for AnthropicProvider {
         req: ChatRequest,
     ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
         let original_model = req.model.clone();
-        let anthropic_req = to_anthropic_request(&req);
+        let anthropic_req = to_anthropic_request(&req)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
         let req_body = serde_json::to_value(&anthropic_req)?;
         let response = super::retry_with_backoff(2, || {
@@ -439,7 +530,10 @@ impl LLMProvider for AnthropicProvider {
 
     async fn chat_completion_stream(&self, req: ChatRequest) -> Result<ChatStream, ProviderError> {
         let model = req.model.clone();
-        let mut anthropic_req = to_anthropic_request(&req);
+        let mut anthropic_req = to_anthropic_request(&req).map_err(|e| -> ProviderError {
+            // Surface the malformed-image error rather than dropping the image.
+            e.into()
+        })?;
         anthropic_req.stream = Some(true);
 
         let response = self
@@ -462,8 +556,16 @@ impl LLMProvider for AnthropicProvider {
 mod tests {
     use super::*;
 
+    /// Helper: the text of a single text block, or panic.
+    fn block_text(block: &AnthropicContentBlockOut) -> &str {
+        match block {
+            AnthropicContentBlockOut::Text { text } => text,
+            AnthropicContentBlockOut::Image { .. } => panic!("expected a text block"),
+        }
+    }
+
     #[test]
-    fn test_user_text_parts_flattened_to_space_joined_string() {
+    fn test_user_text_parts_become_separate_text_blocks() {
         use solvela_protocol::vision::{ContentPart, MessageContent};
         let req = ChatRequest {
             model: "anthropic/claude-sonnet-4-20250514".to_string(),
@@ -489,10 +591,231 @@ mod tests {
             tool_choice: None,
         };
 
-        let anthropic_req = to_anthropic_request(&req);
+        let anthropic_req = to_anthropic_request(&req).unwrap();
         assert_eq!(anthropic_req.messages.len(), 1);
-        // String-based adapter flattens text parts with a single space.
-        assert_eq!(anthropic_req.messages[0].content, "first second");
+        // Each text part maps to its own text block, preserving order.
+        assert_eq!(anthropic_req.messages[0].content.len(), 2);
+        assert_eq!(block_text(&anthropic_req.messages[0].content[0]), "first");
+        assert_eq!(block_text(&anthropic_req.messages[0].content[1]), "second");
+    }
+
+    #[test]
+    fn test_text_only_string_message_is_single_text_block() {
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-20250514".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: "hello".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+        let anthropic_req = to_anthropic_request(&req).unwrap();
+        // Wire-shape pin: a one-element text array, which the API treats
+        // identically to a bare string.
+        let v = serde_json::to_value(&anthropic_req.messages[0]).unwrap();
+        assert_eq!(
+            v["content"],
+            serde_json::json!([{"type":"text","text":"hello"}])
+        );
+    }
+
+    #[test]
+    fn test_user_image_data_uri_becomes_base64_block() {
+        use solvela_protocol::vision::{ContentPart, ImageUrl, MessageContent};
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "what is this?".to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                            detail: None,
+                        },
+                    },
+                ]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+        let anthropic_req = to_anthropic_request(&req).unwrap();
+        // Exact wire shape per Anthropic Messages API (verified 2026-06-03).
+        let v = serde_json::to_value(&anthropic_req.messages[0]).unwrap();
+        assert_eq!(
+            v["content"],
+            serde_json::json!([
+                {"type":"text","text":"what is this?"},
+                {"type":"image","source":{
+                    "type":"base64","media_type":"image/png","data":"iVBORw0KGgo="
+                }}
+            ])
+        );
+    }
+
+    #[test]
+    fn test_user_image_http_url_becomes_url_block() {
+        use solvela_protocol::vision::{ContentPart, ImageUrl, MessageContent};
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/cat.png".to_string(),
+                        detail: Some("high".to_string()),
+                    },
+                }]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+        let anthropic_req = to_anthropic_request(&req).unwrap();
+        let v = serde_json::to_value(&anthropic_req.messages[0]).unwrap();
+        assert_eq!(
+            v["content"],
+            serde_json::json!([
+                {"type":"image","source":{
+                    "type":"url","url":"https://example.com/cat.png"
+                }}
+            ])
+        );
+    }
+
+    #[test]
+    fn test_malformed_image_data_uri_is_rejected_not_dropped() {
+        use solvela_protocol::vision::{ContentPart, ImageUrl, MessageContent};
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        // No scheme — neither data: nor http(s).
+                        url: "not-a-valid-image".to_string(),
+                        detail: None,
+                    },
+                }]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+        assert!(
+            to_anthropic_request(&req).is_err(),
+            "a malformed image URL must reject the request, not silently drop the image"
+        );
+    }
+
+    #[test]
+    fn test_data_uri_without_base64_rejected_at_adapter() {
+        use solvela_protocol::vision::{ContentPart, ImageUrl, MessageContent};
+        // A `data:` URI lacking the `;base64` token (URL-encoded inline text)
+        // must be rejected at the ADAPTER level, not only the protocol unit
+        // test — forwarding it would corrupt the image source.
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png,rawnotbase64".to_string(),
+                        detail: None,
+                    },
+                }]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+        assert!(
+            to_anthropic_request(&req).is_err(),
+            "a non-base64 data URI must be rejected at the adapter"
+        );
+    }
+
+    #[test]
+    fn test_image_in_system_message_is_rejected_not_dropped() {
+        use solvela_protocol::vision::{ContentPart, ImageUrl, MessageContent};
+        // A WELL-FORMED image in a SYSTEM message. Anthropic's `system` param is
+        // a plain string, so `as_text()` would silently drop the image while the
+        // request still settles — the agent pays, the model never sees it. Must
+        // reject instead.
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::System,
+                    content: MessageContent::Parts(vec![
+                        ContentPart::Text {
+                            text: "context".to_string(),
+                        },
+                        ContentPart::ImageUrl {
+                            image_url: ImageUrl {
+                                url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                                detail: None,
+                            },
+                        },
+                    ]),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: "hi".into(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            ],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+        assert!(
+            to_anthropic_request(&req).is_err(),
+            "an image in a system message must reject the request, not be silently dropped"
+        );
     }
 
     #[test]
@@ -523,7 +846,7 @@ mod tests {
             tool_choice: None,
         };
 
-        let anthropic_req = to_anthropic_request(&req);
+        let anthropic_req = to_anthropic_request(&req).unwrap();
         assert_eq!(
             anthropic_req.system,
             Some("You are a helpful assistant.".to_string())
@@ -568,7 +891,7 @@ mod tests {
             tool_choice: None,
         };
 
-        let anthropic_req = to_anthropic_request(&req);
+        let anthropic_req = to_anthropic_request(&req).unwrap();
 
         // Both System and Developer messages should be extracted into the system param
         assert_eq!(
@@ -578,7 +901,8 @@ mod tests {
         // Only the User message should remain in messages
         assert_eq!(anthropic_req.messages.len(), 1);
         assert_eq!(anthropic_req.messages[0].role, "user");
-        assert_eq!(anthropic_req.messages[0].content, "Hello!");
+        assert_eq!(anthropic_req.messages[0].content.len(), 1);
+        assert_eq!(block_text(&anthropic_req.messages[0].content[0]), "Hello!");
     }
 
     #[test]

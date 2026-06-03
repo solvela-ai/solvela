@@ -1,7 +1,7 @@
 //! Multimodal content wire-format types.
 //!
-//! **Status: wired in.** [`MessageContent`] is now the type of
-//! `ChatMessage::content`. It accepts both OpenAI shapes for message
+//! **Status: wired in (vision supported).** [`MessageContent`] is the type
+//! of `ChatMessage::content`. It accepts both OpenAI shapes for message
 //! content: a plain JSON string (`"hello"`) deserializes to
 //! [`MessageContent::Text`], and an array of content parts
 //! (`[{"type":"text","text":"hello"}]`) deserializes to
@@ -10,25 +10,77 @@
 //! round-trips as a JSON string, preserving backward compatibility for
 //! existing string-only clients.
 //!
-//! Image parts are NOT silently dropped here. They are rejected upstream:
-//! the chat route returns `415 Unsupported Media Type` for any request
-//! carrying image content, and `reject_image_content` is a backstop at
-//! provider dispatch. Because image content never reaches this layer in
-//! practice, [`MessageContent::as_text`] simply ignores any image parts it
-//! sees rather than treating that case as an error.
+//! Image parts are NOT silently dropped. As of PR #2, vision is supported
+//! and gated on the resolved model's `supports_vision` capability: a request
+//! carrying image content for a non-vision model is rejected with
+//! `415 Unsupported Media Type` in the chat route. For vision-capable models
+//! the image parts are translated to each provider's native multimodal wire
+//! format (Anthropic image content blocks, Gemini `inlineData`/`fileData`
+//! parts) or passed through natively for OpenAI-format providers.
 //!
 //! For the string-based provider adapters (Anthropic / Google), text
-//! parts are flattened to a single string via
-//! [`MessageContent::as_text`]. For OpenAI-format providers (OpenAI / xAI
-//! / DeepSeek), the request is serialized through directly, so array
-//! content passes through natively to the upstream API.
+//! parts are flattened to a single string via [`MessageContent::as_text`]
+//! when no images are present, and translated to native image blocks when
+//! they are. For OpenAI-format providers (OpenAI / xAI / DeepSeek), the
+//! request is serialized through directly, so array content (text + images)
+//! passes through natively to the upstream API.
 //!
-//! Native image-block translation for Anthropic / Google, model
-//! capability gating in `models.toml`, and image cost accounting are not
-//! yet implemented; image content is rejected at the boundary until they
-//! are.
+//! [`ImageUrl::parse`] decodes an `image_url.url` into a [`ParsedImage`]:
+//! either an inline base64 payload (from a `data:` URI) or a remote
+//! `http(s)` URL. Malformed inputs return a clear error and never panic.
 
 use serde::{Deserialize, Serialize};
+
+/// Maximum accepted size of an `image_url.url` field (bytes of the raw string).
+///
+/// This is the single chokepoint that bounds the cost of decoding/splitting a
+/// `data:` URI and of folding image bytes into the cache key. A multi-megabyte
+/// base64 blob is rejected here before any per-byte work, covering every caller
+/// (the Anthropic/Gemini adapters and both cache layers) at once. 10 MiB of
+/// base64 decodes to ~7.5 MB of image bytes — comfortably inside both
+/// providers' inline-image budgets (Anthropic 32 MB request, Gemini 20 MB
+/// request) while keeping a single hostile request from pinning a worker.
+pub const MAX_DATA_URI_BYTES: usize = 10 * 1024 * 1024;
+
+/// Errors from [`ImageUrl::parse`]. Typed so the chat route can map a malformed
+/// client image to a 4xx (client error) rather than a 500.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ParseImageError {
+    /// The `url` field was empty (or all whitespace).
+    #[error("image_url.url is empty")]
+    Empty,
+    /// A `data:` URI with no `,` separating metadata from payload.
+    #[error("malformed data URI: missing ',' separator")]
+    MissingComma,
+    /// A `data:` URI lacking the `;base64` token (non-base64/URL-encoded data).
+    #[error("unsupported data URI: only base64-encoded image data URIs are supported (expected ';base64' before the comma)")]
+    NotBase64,
+    /// A `data:` URI whose base64 payload was empty.
+    #[error("malformed data URI: empty base64 payload")]
+    EmptyPayload,
+    /// The `url` field exceeded [`MAX_DATA_URI_BYTES`].
+    #[error("image_url.url too large: {0} bytes exceeds the {1}-byte limit")]
+    TooLarge(usize, usize),
+    /// The scheme was neither a `data:` URI nor an `http(s)` URL, OR the
+    /// declared media type is not in the supported image allowlist. The
+    /// payload is the offending value (URL scheme or media type), already
+    /// length-bounded so it is safe to surface.
+    #[error("unsupported image_url: {0}")]
+    UnsupportedScheme(String),
+}
+
+/// The image media types accepted by [`ImageUrl::parse`].
+///
+/// Restricted to the formats the downstream providers actually decode. Verified
+/// 2026-06-03 against the live Anthropic vision docs
+/// (platform.claude.com/docs/en/build-with-claude/vision — jpeg/png/gif/webp)
+/// and the Gemini image-understanding docs
+/// (ai.google.dev/gemini-api/docs/image-understanding — png/jpeg/webp/heic/heif).
+/// We accept the Anthropic set (which is also the OpenAI-documented set); `gif`
+/// is Anthropic-only and `heic/heif` are Gemini-only, so callers that route a
+/// `gif` to Gemini may still see a provider-side rejection — but no UNSUPPORTED
+/// type is ever forwarded blindly.
+const SUPPORTED_MEDIA_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// An image URL with optional detail level.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -36,6 +88,119 @@ pub struct ImageUrl {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub detail: Option<String>,
+}
+
+/// The decoded form of an [`ImageUrl::url`] field.
+///
+/// OpenAI's `image_url.url` is overloaded: it is either a `data:` URI
+/// carrying inline base64 bytes, or an `http(s)` URL pointing at a remote
+/// image. Providers need these split apart — Anthropic uses
+/// `source.type = "base64"` vs `"url"`, Gemini uses `inlineData` vs
+/// `fileData` — so this enum is the single normalized representation both
+/// adapters translate from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedImage {
+    /// Inline base64 image decoded from a `data:` URI. `media_type` is the
+    /// MIME type (e.g. `image/png`); `data` is the raw base64 payload (the
+    /// substring AFTER the `,`), passed through verbatim — not re-decoded.
+    Base64 { media_type: String, data: String },
+    /// A remote `http(s)` image URL, passed through verbatim.
+    Url { url: String },
+}
+
+impl ImageUrl {
+    /// Parse [`Self::url`] into a [`ParsedImage`].
+    ///
+    /// Accepts two shapes (mirroring the OpenAI `image_url.url` contract):
+    /// - `data:[<media-type>][;base64],<data>` → [`ParsedImage::Base64`].
+    ///   The media-type defaults to `image/jpeg` when omitted (matching the
+    ///   `data:` URI spec's default of `text/plain` being inappropriate for
+    ///   image content; image providers require an image MIME type). Only
+    ///   base64-encoded data URIs are accepted — a `data:` URI WITHOUT the
+    ///   `;base64` token (i.e. percent/URL-encoded inline text) is rejected,
+    ///   because the downstream provider image fields require base64 bytes
+    ///   and silently forwarding URL-encoded text would corrupt the image.
+    ///   The declared media type must be in the supported allowlist
+    ///   ([`SUPPORTED_MEDIA_TYPES`]); an unsupported type is rejected rather
+    ///   than forwarded to a provider that cannot decode it.
+    /// - `http://...` / `https://...` → [`ParsedImage::Url`].
+    ///
+    /// Returns a typed [`ParseImageError`] for any other shape (empty, oversize,
+    /// missing comma in a `data:` URI, non-base64, empty payload, unsupported
+    /// scheme/media-type). Never panics: every slice is bounds-checked via
+    /// `split_once` / `strip_prefix`.
+    ///
+    /// Size: the raw `url` is rejected up front if it exceeds
+    /// [`MAX_DATA_URI_BYTES`], BEFORE any decode/split, so this method bounds
+    /// the work a single request can trigger across every caller.
+    pub fn parse(&self) -> Result<ParsedImage, ParseImageError> {
+        // Size cap FIRST — before any trim/split/decode — so an oversize blob
+        // never reaches per-byte work. Measured on the raw, untrimmed string.
+        if self.url.len() > MAX_DATA_URI_BYTES {
+            return Err(ParseImageError::TooLarge(
+                self.url.len(),
+                MAX_DATA_URI_BYTES,
+            ));
+        }
+
+        let url = self.url.trim();
+        if url.is_empty() {
+            return Err(ParseImageError::Empty);
+        }
+
+        if let Some(rest) = url.strip_prefix("data:") {
+            // `data:[<media-type>][;base64],<data>`. Split on the FIRST comma:
+            // the metadata (media-type + encoding flags) precedes it, the
+            // payload follows. A data URI without a comma is malformed.
+            let (meta, data) = rest.split_once(',').ok_or(ParseImageError::MissingComma)?;
+
+            // The metadata is `<media-type>;base64` (media-type optional).
+            // We require the `;base64` token; URL-encoded (non-base64) data
+            // URIs are rejected rather than forwarded as corrupt image bytes.
+            let base64_meta = meta
+                .strip_suffix(";base64")
+                .ok_or(ParseImageError::NotBase64)?;
+
+            let media_type = if base64_meta.is_empty() {
+                // No media-type segment (`data:;base64,...`) → default. Image
+                // providers require an image MIME type, so default to JPEG
+                // rather than the `data:` spec's text/plain default.
+                "image/jpeg".to_string()
+            } else {
+                base64_meta.to_string()
+            };
+
+            // Reject media types no downstream provider can decode.
+            if !SUPPORTED_MEDIA_TYPES.contains(&media_type.as_str()) {
+                return Err(ParseImageError::UnsupportedScheme(media_type));
+            }
+
+            // NOTE: we do NOT trim the payload. base64 contains no internal
+            // whitespace in well-formed input, and trimming would silently
+            // "repair" a malformed payload (masking a client bug); the payload
+            // is passed through verbatim for the provider to validate/decode.
+            if data.is_empty() {
+                return Err(ParseImageError::EmptyPayload);
+            }
+
+            return Ok(ParsedImage::Base64 {
+                media_type,
+                data: data.to_string(),
+            });
+        }
+
+        if url.starts_with("http://") || url.starts_with("https://") {
+            return Ok(ParsedImage::Url {
+                url: url.to_string(),
+            });
+        }
+
+        // Surface only the scheme prefix (length-bounded), never the full URL.
+        let prefix: String = url.chars().take(16).collect();
+        Err(ParseImageError::UnsupportedScheme(format!(
+            "expected a 'data:' URI or an http(s) URL, got {prefix:?}"
+        )))
+    }
 }
 
 /// A single part of multi-modal content (text or image).
@@ -109,10 +274,10 @@ impl MessageContent {
     /// borrows that part's string (zero-copy), and it only allocates when
     /// joining 2+ text parts (separated by a single space `" "`). An empty
     /// `Parts` list, or one with no text parts, yields a borrowed empty
-    /// string. Any image parts are ignored here because image content is
-    /// rejected upstream (415 on the chat route + `reject_image_content`
-    /// backstop) and so never reaches this method in practice; see module
-    /// docs.
+    /// string. Image parts contribute no text here — callers that need the
+    /// images (the provider adapters) iterate the parts directly via the
+    /// `Parts` variant; `as_text` is the text-only flattening used for prompt
+    /// guards, system-message extraction, and routing/scoring.
     ///
     /// The join separator is a single space so the flattened text reads
     /// naturally for guard scanning and string-based provider adapters.
@@ -155,10 +320,10 @@ impl MessageContent {
     /// True when the flattened TEXT content is empty.
     ///
     /// Reflects text emptiness only: a `Parts` value whose only members are
-    /// image parts is considered empty here. That is acceptable because image
-    /// content is rejected upstream (415 on the chat route; see the chat
-    /// route validation), so `is_empty()` callers never observe an
-    /// image-only message in practice. Computed without allocating.
+    /// image parts is considered empty here (it has no text). The chat route's
+    /// empty-prompt check requires at least one non-empty User *text*
+    /// message, so an image-only User turn still needs accompanying text to be
+    /// accepted. Computed without allocating.
     pub fn is_empty(&self) -> bool {
         match self {
             MessageContent::Text(s) => s.is_empty(),
@@ -171,10 +336,9 @@ impl MessageContent {
 
     /// True if any [`ContentPart::ImageUrl`] is present.
     ///
-    /// Used by the chat route to reject image/multimodal content (415):
-    /// native image-block translation, capability gating, and image cost
-    /// accounting are not yet implemented, so image content is rejected at
-    /// the boundary until they are.
+    /// Used by the chat route's capability gate (reject image content for a
+    /// non-vision model), by the image cost-estimate path, and by the cache
+    /// layers to decide whether to flatten content for the key.
     pub fn has_image_parts(&self) -> bool {
         match self {
             MessageContent::Text(_) => false,
@@ -182,6 +346,22 @@ impl MessageContent {
                 .iter()
                 .any(|p| matches!(p, ContentPart::ImageUrl { .. })),
         }
+    }
+
+    /// Iterate the [`ImageUrl`] of every image part, in order.
+    ///
+    /// Empty for [`MessageContent::Text`] and for any `Parts` list with no
+    /// image parts. Used by the cost-estimate path (per-image token
+    /// contribution keyed on `detail`) and by the cache image-rep folding.
+    pub fn image_urls(&self) -> impl Iterator<Item = &ImageUrl> {
+        let slice: &[ContentPart] = match self {
+            MessageContent::Text(_) => &[],
+            MessageContent::Parts(parts) => parts.as_slice(),
+        };
+        slice.iter().filter_map(|p| match p {
+            ContentPart::ImageUrl { image_url } => Some(image_url),
+            ContentPart::Text { .. } => None,
+        })
     }
 }
 
@@ -405,6 +585,194 @@ mod tests {
             },
         }]);
         assert!(only_image.is_empty());
+    }
+
+    // =========================================================================
+    // ImageUrl::parse — data-URI / http(s) decoding (PR #2)
+    // =========================================================================
+
+    fn img(url: &str) -> ImageUrl {
+        ImageUrl {
+            url: url.to_string(),
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn parse_data_uri_base64_with_media_type() {
+        let got = img("data:image/png;base64,iVBORw0KGgo=").parse().unwrap();
+        assert_eq!(
+            got,
+            ParsedImage::Base64 {
+                media_type: "image/png".to_string(),
+                data: "iVBORw0KGgo=".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_data_uri_base64_defaults_media_type_when_omitted() {
+        // `data:;base64,...` — no media-type segment → default to image/jpeg.
+        let got = img("data:;base64,QUJD").parse().unwrap();
+        assert_eq!(
+            got,
+            ParsedImage::Base64 {
+                media_type: "image/jpeg".to_string(),
+                data: "QUJD".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_http_and_https_urls_pass_through() {
+        assert_eq!(
+            img("https://example.com/cat.png").parse().unwrap(),
+            ParsedImage::Url {
+                url: "https://example.com/cat.png".to_string()
+            }
+        );
+        assert_eq!(
+            img("http://example.com/dog.jpg").parse().unwrap(),
+            ParsedImage::Url {
+                url: "http://example.com/dog.jpg".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_rejects_malformed_inputs() {
+        // Empty → typed Empty.
+        assert_eq!(img("").parse(), Err(ParseImageError::Empty));
+        assert_eq!(img("   ").parse(), Err(ParseImageError::Empty));
+        // data: URI without a comma separator → MissingComma.
+        assert_eq!(
+            img("data:image/png;base64").parse(),
+            Err(ParseImageError::MissingComma)
+        );
+        // data: URI that is not base64-encoded (URL-encoded inline text) →
+        // NotBase64.
+        assert_eq!(
+            img("data:text/plain,hello%20world").parse(),
+            Err(ParseImageError::NotBase64)
+        );
+        assert_eq!(
+            img("data:image/png,rawbytes").parse(),
+            Err(ParseImageError::NotBase64)
+        );
+        // data: URI with empty base64 payload → EmptyPayload.
+        assert_eq!(
+            img("data:image/png;base64,").parse(),
+            Err(ParseImageError::EmptyPayload)
+        );
+        // Non-http(s) scheme → UnsupportedScheme.
+        assert!(matches!(
+            img("ftp://example.com/x.png").parse(),
+            Err(ParseImageError::UnsupportedScheme(_))
+        ));
+        assert!(matches!(
+            img("file:///etc/passwd").parse(),
+            Err(ParseImageError::UnsupportedScheme(_))
+        ));
+        assert!(matches!(
+            img("javascript:alert(1)").parse(),
+            Err(ParseImageError::UnsupportedScheme(_))
+        ));
+        // Bare string, no scheme.
+        assert!(matches!(
+            img("just-some-text").parse(),
+            Err(ParseImageError::UnsupportedScheme(_))
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_oversize_data_uri_before_decoding() {
+        // A url longer than the cap is rejected with TooLarge, regardless of
+        // whether the rest of the shape is valid — and BEFORE any split/decode.
+        let huge = "data:image/png;base64,".to_string() + &"A".repeat(MAX_DATA_URI_BYTES);
+        let err = img(&huge).parse().unwrap_err();
+        match err {
+            ParseImageError::TooLarge(len, cap) => {
+                assert!(len > cap);
+                assert_eq!(cap, MAX_DATA_URI_BYTES);
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+
+        // A url exactly at the cap is NOT rejected for size (it parses on shape;
+        // here the payload makes it a valid base64 data URI).
+        let at_cap_payload_len = MAX_DATA_URI_BYTES - "data:image/png;base64,".len();
+        let at_cap = "data:image/png;base64,".to_string() + &"A".repeat(at_cap_payload_len);
+        assert_eq!(at_cap.len(), MAX_DATA_URI_BYTES);
+        assert!(img(&at_cap).parse().is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_unsupported_media_type() {
+        // image/svg+xml is not in the provider allowlist → UnsupportedScheme.
+        assert!(matches!(
+            img("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=").parse(),
+            Err(ParseImageError::UnsupportedScheme(_))
+        ));
+        // image/bmp likewise rejected.
+        assert!(matches!(
+            img("data:image/bmp;base64,Qk0=").parse(),
+            Err(ParseImageError::UnsupportedScheme(_))
+        ));
+        // Each allowlisted type is accepted.
+        for mt in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+            let uri = format!("data:{mt};base64,QUJD");
+            let parsed = img(&uri).parse().expect("allowlisted type must parse");
+            assert_eq!(
+                parsed,
+                ParsedImage::Base64 {
+                    media_type: mt.to_string(),
+                    data: "QUJD".to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn parse_does_not_re_decode_payload() {
+        // The base64 payload is passed through verbatim (providers re-decode).
+        // Even an invalid-base64 string is forwarded as-is; validation is the
+        // provider's job, and `parse` must not panic or alter the bytes.
+        let got = img("data:image/webp;base64,!!!not-valid-b64!!!")
+            .parse()
+            .unwrap();
+        assert_eq!(
+            got,
+            ParsedImage::Base64 {
+                media_type: "image/webp".to_string(),
+                data: "!!!not-valid-b64!!!".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn image_urls_iterates_only_image_parts_in_order() {
+        let mc = MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "look".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: img("https://example.com/a.png"),
+            },
+            ContentPart::ImageUrl {
+                image_url: img("https://example.com/b.png"),
+            },
+        ]);
+        let urls: Vec<&str> = mc.image_urls().map(|u| u.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            vec!["https://example.com/a.png", "https://example.com/b.png"]
+        );
+
+        // Text content and text-only parts yield no images.
+        assert_eq!(
+            MessageContent::Text("hi".to_string()).image_urls().count(),
+            0
+        );
     }
 
     #[test]

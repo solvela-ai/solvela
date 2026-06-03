@@ -1893,14 +1893,18 @@ async fn test_chat_text_content_array_returns_mock_response() {
     assert_eq!(json["choices"][0]["message"]["content"], "[mock response]");
 }
 
-/// Image/multimodal content is not yet supported in PR #1 — it must be
-/// rejected with a clear 4xx (415), not silently dropped (which would mis-cost
-/// and mis-cache) and not 500. Rejection runs BEFORE payment/provider.
+/// PR #2 capability gating: image content sent to a NON-vision model must be
+/// rejected with a clear 415 — not silently dropped (which would change the
+/// prompt's meaning while still billing) and not 500. `deepseek/deepseek-chat`
+/// has `supports_vision` unset in the test registry. (The blanket PR-#1 415 is
+/// replaced by this model-aware gate.)
 #[tokio::test]
-async fn test_chat_image_content_rejected_with_415() {
+async fn test_chat_image_content_rejected_for_non_vision_model_415() {
     let app = test_app_with_mock_provider();
 
-    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://x/y.png"}}]}]}"#;
+    // Include a text part so the empty-prompt check passes — we want to reach
+    // the vision gate, not be rejected as an empty prompt.
+    let body = r#"{"model":"deepseek/deepseek-chat","messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image_url","image_url":{"url":"https://x/y.png"}}]}]}"#;
 
     let response = app
         .oneshot(
@@ -1921,12 +1925,187 @@ async fn test_chat_image_content_rejected_with_415() {
     assert_eq!(
         response.status(),
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        "image content must be rejected with 415, not 200 and not 500"
+        "image content for a non-vision model must be rejected with 415, not 200/500"
     );
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["type"], "unsupported_media_type");
+}
+
+/// PR #2 capability gating: image content sent to a VISION-capable model
+/// (`openai/gpt-4o`, `supports_vision = true`) must be ACCEPTED and reach the
+/// (mock) provider, returning 200 — not the PR-#1 blanket 415.
+#[tokio::test]
+async fn test_chat_image_content_accepted_for_vision_model_200() {
+    let app = test_app_with_mock_provider();
+
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]}]}"#;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "image content for a vision model must be accepted (200), not rejected"
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["object"], "chat.completion");
+}
+
+/// 402 path: a vision model + image with NO payment header must return 402
+/// whose cost breakdown reflects the image-token contribution (the estimate
+/// must not silently zero out the image). The same prompt WITHOUT the image
+/// must quote strictly less, proving the image added to the upfront quote.
+#[tokio::test]
+async fn test_chat_image_402_cost_breakdown_includes_image_tokens() {
+    async fn quote_total(body: &'static str) -> f64 {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let info: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        info["cost_breakdown"]["total"]
+            .as_str()
+            .expect("total must be a string")
+            .parse()
+            .expect("total must parse")
+    }
+
+    let with_image = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[{"type":"text","text":"describe this"},{"type":"image_url","image_url":{"url":"https://example.com/cat.png","detail":"high"}}]}]}"#;
+    let text_only = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[{"type":"text","text":"describe this"}]}]}"#;
+
+    let image_total = quote_total(with_image).await;
+    let text_total = quote_total(text_only).await;
+    assert!(
+        image_total > text_total,
+        "image 402 quote ({image_total}) must exceed the text-only quote ({text_total}) — \
+         the image-token contribution must not be silently zeroed"
+    );
+}
+
+/// Unknown model + image → 404 (model-not-found), NOT 415/500. The model lookup
+/// precedes the vision gate, so an unknown model is a clean 404 even with an
+/// image present.
+#[tokio::test]
+async fn test_chat_unknown_model_with_image_returns_404() {
+    let app = test_app();
+    let body = r#"{"model":"nonexistent/model","messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]}]}"#;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "unknown model with an image must be 404, not 415/500"
+    );
+}
+
+/// Image-only message (no text part) on a vision model → rejected as empty
+/// prompt (the route requires at least one non-empty User text message).
+#[tokio::test]
+async fn test_chat_image_only_no_text_rejected_as_empty_prompt() {
+    let app = test_app();
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]}]}"#;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "an image-only message with no text must be rejected as an empty prompt (400)"
+    );
+}
+
+/// A `data:` URI missing `;base64` must be rejected at the ROUTE as a 4xx
+/// (client error) pre-payment — not a post-payment 5xx. Vision model so the
+/// vision gate passes and we reach the image-validation chokepoint.
+#[tokio::test]
+async fn test_chat_data_uri_without_base64_rejected_at_route_4xx() {
+    let app = test_app();
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[{"type":"text","text":"look"},{"type":"image_url","image_url":{"url":"data:image/png,rawnotbase64"}}]}]}"#;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a non-base64 data URI must be a 4xx at the route, pre-payment"
+    );
+}
+
+/// Image in a system message (vision model) → rejected at the route as a 4xx,
+/// never silently dropped after payment.
+#[tokio::test]
+async fn test_chat_image_in_system_message_rejected_at_route() {
+    let app = test_app();
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"system","content":[{"type":"text","text":"ctx"},{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]},{"role":"user","content":"hi"}]}"#;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "an image in a system message must be rejected at the route, not silently dropped"
+    );
 }
 
 /// A JSON number for `content` (`42`) is not a valid content shape. It must be
@@ -2043,15 +2222,18 @@ async fn test_chat_content_parts_over_cap_returns_400() {
 
 /// Image rejection runs BEFORE the 402, not after. The same image body that is
 /// rejected with 415 when a payment header IS present
-/// (`test_chat_image_content_rejected_with_415`) must also be rejected with
-/// 415 when NO payment header is present — proving the image guard precedes the
-/// payment check and an unpaid image request never leaks a 402 cost quote.
+/// (`test_chat_image_content_rejected_for_non_vision_model_415`) must also be
+/// rejected with 415 when NO payment header is present — proving the vision
+/// gate precedes the payment check and an unpaid image request to a non-vision
+/// model never leaks a 402 cost quote.
 #[tokio::test]
-async fn test_chat_image_content_rejected_with_415_without_payment() {
+async fn test_chat_image_content_rejected_for_non_vision_model_without_payment() {
     let app = test_app();
 
     // Raw JSON so we exercise the real wire deserialization of an image part.
-    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://x/y.png"}}]}]}"#;
+    // Non-vision model + a text part (so we reach the vision gate, not the
+    // empty-prompt check).
+    let body = r#"{"model":"deepseek/deepseek-chat","messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image_url","image_url":{"url":"https://x/y.png"}}]}]}"#;
 
     let response = app
         .oneshot(

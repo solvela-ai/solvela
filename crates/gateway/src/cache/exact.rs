@@ -372,6 +372,61 @@ mod tests {
         );
     }
 
+    /// The exact-cache key must distinguish two prompts that share text but
+    /// carry different images — otherwise distinct multimodal prompts collide
+    /// and serve each other's responses. The `cache_key` content-normalization
+    /// deliberately keeps the ORIGINAL content (does not flatten) when image
+    /// parts are present, so the images are part of the hashed bytes.
+    #[test]
+    fn cache_key_distinguishes_distinct_images() {
+        use solvela_protocol::ImageUrl;
+        fn image_message(text: &str, url: &str) -> ChatMessage {
+            ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: text.to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: url.to_string(),
+                            detail: None,
+                        },
+                    },
+                ]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }
+        }
+        let a = make_request(
+            "openai/gpt-4o",
+            vec![image_message("describe", "https://example.com/a.png")],
+            None,
+        );
+        let b = make_request(
+            "openai/gpt-4o",
+            vec![image_message("describe", "https://example.com/b.png")],
+            None,
+        );
+        assert_ne!(
+            ResponseCache::cache_key(&a).expect("must serialise"),
+            ResponseCache::cache_key(&b).expect("must serialise"),
+            "distinct images with identical text must produce distinct cache keys"
+        );
+
+        // Same image + same text → same key (a legitimate hit is reachable).
+        let a2 = make_request(
+            "openai/gpt-4o",
+            vec![image_message("describe", "https://example.com/a.png")],
+            None,
+        );
+        assert_eq!(
+            ResponseCache::cache_key(&a).expect("must serialise"),
+            ResponseCache::cache_key(&a2).expect("must serialise"),
+        );
+    }
+
     #[test]
     fn test_cache_key_different_for_different_temperatures() {
         let req_a = make_request("openai/gpt-4o", vec![user_message("Hello")], Some(0.7));
