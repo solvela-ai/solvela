@@ -2,6 +2,21 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-06-03 — Rust SDK v0.2.4 published (x402 escrow signing) + `solvela-protocol` 0.3.0
+
+Published the Rust payment SDK with x402 **escrow-deposit signing** to crates.io — the first release agents can use for trustless per-request escrow (the signing code itself landed in [#451](https://github.com/solvela-ai/solvela/pull/451); this release makes it installable). Six crates went out, in dependency order:
+
+- `solvela-escrow-tx@0.2.0` — no-deps deposit-tx builder (PDA/ATA derivation, Anchor discriminator, signed legacy tx)
+- `solvela-protocol@0.3.0` — shared wire-format types
+- `solvela-client` / `solvela-client-cli-args` / `solvela-client-cli` / `solvela-client-proxy @ 0.2.4` — the SDK workspace, published by the tag-triggered `sdk-rust-publish.yml` (tag `sdks/rust/v0.2.4`)
+
+- **Blocker caught pre-tag** — the SDK workspace `cargo publish --dry-run --locked`, run against the *published* dependencies, failed to compile: `solvela-client` needs `MAINNET_ESCROW_PROGRAM_ID` and the `Message.content: String → MessageContent` enum, but the published `solvela-protocol@0.2.2` lacked both. Local `crates/protocol` had drifted past `0.2.2` (those symbols landed via [#457](https://github.com/solvela-ai/solvela/pull/457) + [#461](https://github.com/solvela-ai/solvela/pull/461)) without a version bump, so a tag-publish would have failed mid-run after creating an irreversible tag.
+- **Fix** ([#464](https://github.com/solvela-ai/solvela/pull/464)) — bumped `solvela-protocol` `0.2.2 → 0.3.0` and cascaded the `"0.2" → "0.3"` requirement across the root and SDK workspaces; bumped the SDK workspace `0.2.3 → 0.2.4`.
+- **Why 0.3.0, not 0.2.3** — `content: String → MessageContent` is a breaking Rust API change. Both already-published consumers (`solvela-client@0.2.3`, `solvela-x402@0.2.0`) pin `^0.2`; publishing `0.2.3` into that range would break their fresh builds. `0.3.0` keeps existing `^0.2` pins from resolving it.
+- **Publish order** — `escrow-tx` and `protocol` are manual (`cargo publish -p …`; neither has a tag workflow), then the SDK dry-run was re-run green against the live `protocol@0.3.0`, then the tag was pushed. All six crates verified live via the crates.io JSON API (Apache-2.0, not yanked); the workflow's verify → test → dry-run → publish → visibility chain passed.
+- **License flip** — first crates published since the 2026-05-31 MIT → Apache-2.0 relicense, so their crates.io `license` now reads Apache-2.0. `solvela-router`/`solvela-cli`/`solvela-x402`, npm `@solvela/sdk`, and PyPI `solvela-sdk` still show MIT until their next publish.
+- **Follow-up** — `solvela-x402` re-exports protocol wire types, so its next publish needs a protocol `"0.3"` pin and likely its own version bump.
+
 ## 2026-05-31 — Escrow mainnet program rebuilt with the correct USDC mint
 
 The on-chain escrow program (`9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU`) had been deployed from a **default-feature build**, baking in the **devnet** USDC mint (`4zMMC9…`) instead of mainnet (`EPjFW…`). Because `deposit`/`claim` pin `address = USDC_MINT`, every real-USDC escrow payment was rejected on-chain with `AnchorError ConstraintAddress 2012` (`0x7dc`) — the entire escrow scheme was non-functional on mainnet (the `exact` scheme was unaffected). No funds were ever at risk: deposits reverted atomically.
