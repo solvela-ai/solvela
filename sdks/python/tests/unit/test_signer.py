@@ -105,9 +105,13 @@ class TestSignPayment:
         assert payload.accepted.scheme == "exact"
 
         # The transaction is base64-encoded; decoding must succeed and the
-        # result must be a non-empty serialized Solana transaction.
+        # result must be a plausibly-shaped signed Solana transaction.
         tx_bytes = base64.b64decode(payload.payload.transaction)
-        assert len(tx_bytes) > 0
+        assert tx_bytes[0] == 0x01  # compact-u16 signature count = 1
+        assert len(tx_bytes) > 100  # sig(64) + message header/keys/blockhash/ix
+        # The SPL transfer amount (1 USDC = 1_000_000 atomic) must appear as a
+        # little-endian u64 inside the serialized instruction data.
+        assert (1_000_000).to_bytes(8, "little") in tx_bytes
 
     @pytest.mark.asyncio
     async def test_sign_payment_raises_on_rpc_429(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
@@ -280,6 +284,9 @@ class TestSchemeBranching:
                 resource=_resource(),
                 accepted=_escrow_accept(escrow_program_id=None),
             )
+        # Rejection must happen before any network call — no getSlot / blockhash
+        # RPC may be issued for an escrow payment we can't build.
+        assert len(httpx_mock.get_requests()) == 0
 
     @pytest.mark.asyncio
     async def test_escrow_zero_amount_rejected(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
@@ -288,6 +295,94 @@ class TestSchemeBranching:
         with pytest.raises(SignerError, match="greater than zero"):
             await signer.sign_payment(
                 amount_atomic=0,
+                recipient="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+                resource=_resource(),
+                accepted=_escrow_accept(),
+            )
+        # No network call for an amount we reject before building.
+        assert len(httpx_mock.get_requests()) == 0
+
+    @pytest.mark.asyncio
+    async def test_escrow_negative_amount_rejected(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        wallet, _ = Wallet.create()
+        signer = KeypairSigner(wallet, rpc_url=_RPC_URL)
+        with pytest.raises(SignerError, match="greater than zero"):
+            await signer.sign_payment(
+                amount_atomic=-1,
+                recipient="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+                resource=_resource(),
+                accepted=_escrow_accept(),
+            )
+        assert len(httpx_mock.get_requests()) == 0
+
+    @pytest.mark.asyncio
+    async def test_escrow_float_amount_rejected(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        # A float amount would be silently truncated into the on-chain u64.
+        wallet, _ = Wallet.create()
+        signer = KeypairSigner(wallet, rpc_url=_RPC_URL)
+        with pytest.raises(SignerError, match="integer"):
+            await signer.sign_payment(
+                amount_atomic=2625.0,  # type: ignore[arg-type]
+                recipient="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+                resource=_resource(),
+                accepted=_escrow_accept(),
+            )
+        assert len(httpx_mock.get_requests()) == 0
+
+    @pytest.mark.asyncio
+    async def test_escrow_stub_low_slot_rejected(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        # A stub/genesis node returning a near-zero slot must be refused, not
+        # used to compute an instantly-expired escrow deposit.
+        wallet, _ = Wallet.create()
+        signer = KeypairSigner(wallet, rpc_url=_RPC_URL)
+        httpx_mock.add_response(url=_RPC_URL, json={"jsonrpc": "2.0", "id": 1, "result": 0})
+        with pytest.raises(SignerError, match="implausibly low slot"):
+            await signer.sign_payment(
+                amount_atomic=2625,
+                recipient="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+                resource=_resource(),
+                accepted=_escrow_accept(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_escrow_getslot_429_rejected(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        wallet, _ = Wallet.create()
+        signer = KeypairSigner(wallet, rpc_url=_RPC_URL)
+        httpx_mock.add_response(url=_RPC_URL, status_code=429, text="<html>Rate limited</html>")
+        with pytest.raises(SignerError, match="getSlot RPC HTTP 429"):
+            await signer.sign_payment(
+                amount_atomic=2625,
+                recipient="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+                resource=_resource(),
+                accepted=_escrow_accept(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_escrow_getslot_malformed_json_rejected(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        wallet, _ = Wallet.create()
+        signer = KeypairSigner(wallet, rpc_url=_RPC_URL)
+        httpx_mock.add_response(url=_RPC_URL, text="not valid json")
+        with pytest.raises(SignerError, match="getSlot RPC: malformed JSON"):
+            await signer.sign_payment(
+                amount_atomic=2625,
+                recipient="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+                resource=_resource(),
+                accepted=_escrow_accept(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_escrow_getslot_jsonrpc_error_rejected(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        # A JSON-RPC {"error": {...}} body must surface as SignerError carrying
+        # only the numeric code, never a silent default slot.
+        wallet, _ = Wallet.create()
+        signer = KeypairSigner(wallet, rpc_url=_RPC_URL)
+        httpx_mock.add_response(
+            url=_RPC_URL,
+            json={"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "node behind"}},
+        )
+        with pytest.raises(SignerError, match="getSlot RPC error"):
+            await signer.sign_payment(
+                amount_atomic=2625,
                 recipient="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
                 resource=_resource(),
                 accepted=_escrow_accept(),

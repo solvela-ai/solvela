@@ -10,6 +10,9 @@ value (the Rust/on-chain value is ground truth).
 from __future__ import annotations
 
 import base64
+import dataclasses
+import re
+from pathlib import Path
 
 import pytest
 from solders.keypair import Keypair  # type: ignore[import-untyped]
@@ -121,31 +124,78 @@ class TestDerivation:
 
 class TestRejections:
     def test_zero_amount_rejected(self) -> None:
-        params = _golden_params()
-        params.amount = 0
+        # Frozen + validated at construction: replace re-runs __post_init__.
         with pytest.raises(DepositError, match="zero"):
-            build_deposit_tx(params)
+            dataclasses.replace(_golden_params(), amount=0)
+
+    def test_negative_amount_rejected(self) -> None:
+        with pytest.raises(DepositError, match="zero"):
+            dataclasses.replace(_golden_params(), amount=-1)
+
+    def test_float_amount_rejected(self) -> None:
+        # A float would be silently truncated by .to_bytes -> wrong charge.
+        with pytest.raises(DepositError, match="integer"):
+            dataclasses.replace(_golden_params(), amount=2625.0)  # type: ignore[arg-type]
+
+    def test_bool_amount_rejected(self) -> None:
+        # bool is an int subclass; True would deposit 1 atomic unit.
+        with pytest.raises(DepositError, match="integer"):
+            dataclasses.replace(_golden_params(), amount=True)  # type: ignore[arg-type]
 
     def test_invalid_keypair_rejected(self) -> None:
-        params = _golden_params()
-        params.agent_keypair_b58 = "notavalidkeypair!!!"
+        params = dataclasses.replace(_golden_params(), agent_keypair_b58="notavalidkeypair!!!")
         with pytest.raises(DepositError):
             build_deposit_tx(params)
 
+    def test_invalid_keypair_error_does_not_leak_secret(self) -> None:
+        # A malformed keypair string IS secret material. The raised message must
+        # not echo any fragment of the input or the raw solders exception text.
+        secret_b58 = str(Keypair.from_seed(bytes([99] * 32)))
+        params = dataclasses.replace(_golden_params(), agent_keypair_b58=secret_b58 + "X")
+        with pytest.raises(DepositError) as exc_info:
+            build_deposit_tx(params)
+        msg = str(exc_info.value)
+        assert secret_b58 not in msg
+        # No long base58 run from the input should appear in the message.
+        assert secret_b58[:16] not in msg
+        assert msg == "invalid agent keypair: bad base58 or wrong length"
+
     def test_invalid_provider_rejected(self) -> None:
-        params = _golden_params()
-        params.provider_wallet_b58 = "not-base58!!!"
+        params = dataclasses.replace(_golden_params(), provider_wallet_b58="not-base58!!!")
         with pytest.raises(DepositError):
             build_deposit_tx(params)
 
     def test_bad_service_id_length_rejected(self) -> None:
-        params = _golden_params()
-        params.service_id = bytes([7] * 31)
-        with pytest.raises(DepositError):
-            build_deposit_tx(params)
+        with pytest.raises(DepositError, match="service_id"):
+            dataclasses.replace(_golden_params(), service_id=bytes([7] * 31))
 
     def test_bad_blockhash_length_rejected(self) -> None:
-        params = _golden_params()
-        params.recent_blockhash = bytes([0xAB] * 31)
-        with pytest.raises(DepositError):
-            build_deposit_tx(params)
+        with pytest.raises(DepositError, match="blockhash"):
+            dataclasses.replace(_golden_params(), recent_blockhash=bytes([0xAB] * 31))
+
+
+class TestGoldenVectorDriftGuard:
+    """The Python golden-vector constant MUST equal the Rust source of truth.
+
+    If the Rust ``GOLDEN_VECTOR_B64`` ever changes, the on-chain wire layout
+    changed and this test fails loudly, forcing a resync of the Python constant
+    and builder rather than letting the two SDKs silently diverge.
+    """
+
+    def test_python_golden_matches_rust_source(self) -> None:
+        # tests/unit/test_escrow.py -> worktree root is parents[4].
+        worktree_root = Path(__file__).resolve().parents[4]
+        rust_src = worktree_root / "crates" / "escrow-tx" / "src" / "deposit.rs"
+        assert rust_src.is_file(), f"Rust deposit.rs not found at {rust_src}"
+        text = rust_src.read_text(encoding="utf-8")
+        m = re.search(r'GOLDEN_VECTOR_B64:\s*&str\s*=\s*"([^"]+)"', text)
+        assert m is not None, (
+            "could not locate GOLDEN_VECTOR_B64 in crates/escrow-tx/src/deposit.rs"
+        )
+        rust_value = m.group(1)
+        assert rust_value == GOLDEN_VECTOR_B64, (
+            "Python GOLDEN_VECTOR_B64 has drifted from the Rust source of truth "
+            "(crates/escrow-tx/src/deposit.rs). The on-chain layout is ground "
+            "truth: resync the Python constant AND re-verify build_deposit_tx "
+            "byte-parity — do NOT just paste the new value."
+        )
