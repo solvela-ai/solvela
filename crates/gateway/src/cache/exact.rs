@@ -9,9 +9,93 @@
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-use solvela_protocol::{ChatRequest, ChatResponse, MessageContent};
+use solvela_protocol::{ChatRequest, ChatResponse, ContentPart, MessageContent, ParsedImage};
 
 use super::{ResponseCache, CACHE_KEY_PREFIX};
+
+/// First 32 hex chars (16 bytes / 128 bits) of the SHA-256 of `bytes`. Stable
+/// and compact. Deliberately mirrors `semantic.rs::short_hash_hex` (same 16-byte
+/// prefix) so the exact and semantic tiers fold an image's `data:` payload into
+/// their keys with byte-identical representations — the two caches reason about
+/// "same image" the same way. Replicated here (rather than sharing) to keep this
+/// change contained to `exact.rs` and avoid restructuring module boundaries.
+/// 128 bits keeps birthday-collision probability negligible in the shared,
+/// wallet-agnostic cache.
+fn short_hash_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    hex::encode(&digest[..16])
+}
+
+/// A short, stable representation of an image URL for the cache key.
+///
+/// Substituted for the raw `ImageUrl.url` BEFORE serialising a message with
+/// image parts, so the SHA-256 key never folds in a multi-megabyte `data:`
+/// payload (up to `MAX_DATA_URI_BYTES` = 10 MiB) verbatim — matching what
+/// `semantic.rs::image_rep_suffix` does for its embedded text.
+///
+/// - `http(s)` URL → kept verbatim (already short and stable).
+/// - `data:` URI ([`ParsedImage::Base64`]) → `sha256:<first-32-hex>` of the raw
+///   base64 payload string bytes (verbatim — NOT decoded first), identical to
+///   `semantic.rs`'s convention so the two tiers agree on "same image".
+/// - unparseable url → `rawsha256:<first-32-hex>` of the raw url string bytes.
+///
+/// NOTE: the unparseable arm deliberately DIFFERS from `semantic.rs`, which
+/// returns `Skip` (bypassing the cache entirely) to avoid building an
+/// embedding-divergent key. The exact tier has no embedding and no
+/// divergent-key risk — the key is a literal SHA-256 over the substituted
+/// content — so substituting a stable hash of the raw url is safe and strictly
+/// better than skipping: two DISTINCT malformed urls must never collide onto
+/// one key (which would serve one input's paid response for the other). The
+/// route rejects malformed images pre-settlement, so this arm is defensive; the
+/// `rawsha256:` prefix keeps it in a distinct namespace from a real payload
+/// hash so a raw-url hash can never alias a base64-payload hash.
+fn image_key_rep(image_url: &solvela_protocol::ImageUrl) -> String {
+    match image_url.parse() {
+        Ok(ParsedImage::Url { url }) => url,
+        Ok(ParsedImage::Base64 { data, .. }) => {
+            // Hash the payload (not the media-type) so the same bytes sent under
+            // different declared types still distinguish by content.
+            format!("sha256:{}", short_hash_hex(data.as_bytes()))
+        }
+        Err(_) => {
+            // Defensive (unreachable past the route's pre-settlement parse gate):
+            // hash the raw url so two distinct malformed values still differ.
+            format!("rawsha256:{}", short_hash_hex(image_url.url.as_bytes()))
+        }
+    }
+}
+
+/// Rewrite a message that carries image parts so each image's `url` is replaced
+/// by its short [`image_key_rep`], bounding the bytes hashed into the cache key
+/// while preserving exact-match correctness (distinct images still differ; the
+/// same image is stable). Text parts and message ordering are preserved
+/// verbatim — only the image-url field is substituted.
+fn message_with_bounded_images(
+    msg: &solvela_protocol::ChatMessage,
+) -> solvela_protocol::ChatMessage {
+    let MessageContent::Parts(parts) = &msg.content else {
+        // Only `Parts` can carry images; `has_image_parts()` already guaranteed
+        // we are in the image branch, so this is defensive.
+        return msg.clone();
+    };
+    let bounded: Vec<ContentPart> = parts
+        .iter()
+        .map(|part| match part {
+            ContentPart::ImageUrl { image_url } => ContentPart::ImageUrl {
+                image_url: solvela_protocol::ImageUrl {
+                    url: image_key_rep(image_url),
+                    detail: image_url.detail.clone(),
+                },
+            },
+            ContentPart::Text { text } => ContentPart::Text { text: text.clone() },
+        })
+        .collect();
+    let mut rewritten = msg.clone();
+    rewritten.content = MessageContent::Parts(bounded);
+    rewritten
+}
 
 impl ResponseCache {
     /// Generate a cache key from a request.
@@ -53,9 +137,17 @@ impl ResponseCache {
     /// content carries no image parts is normalised to its canonical
     /// `Text(as_text())` form *for key computation only* (the caller's `req`
     /// is never mutated). Messages that contain image parts keep their
-    /// original serialisation: flattening would discard the image and let two
-    /// genuinely different multimodal prompts collide. (Image content is
-    /// rejected upstream today, so this branch is defensive.)
+    /// `Parts` structure (flattening would discard the image and let two
+    /// genuinely different multimodal prompts collide) BUT each image's `url`
+    /// is first substituted with a short, stable representation via
+    /// [`message_with_bounded_images`]: an `http(s)` URL verbatim, or a
+    /// `sha256:<prefix>` of a `data:` URI's base64 payload. This bounds the
+    /// bytes hashed into the key — a `data:` URI can be up to
+    /// `MAX_DATA_URI_BYTES` (10 MiB) — without weakening exact-match
+    /// correctness (distinct images still produce distinct keys; the same image
+    /// is stable). It mirrors the fold `semantic.rs::image_rep_suffix` already
+    /// applies. (Image content is validated upstream before settlement, so the
+    /// unparseable arm is defensive.)
     pub fn cache_key(req: &ChatRequest) -> Option<String> {
         // Normalise message content to a canonical text form so the same
         // prompt sent as a JSON string and as a text-parts array hashes
@@ -66,9 +158,12 @@ impl ResponseCache {
             .iter()
             .map(|msg| {
                 if msg.content.has_image_parts() {
-                    // Keep original content: flattening would drop the image
-                    // and let distinct multimodal prompts collide.
-                    msg.clone()
+                    // Keep the `Parts` structure (flattening would drop the
+                    // image and let distinct multimodal prompts collide) but
+                    // substitute each image url with a short, stable rep so a
+                    // 10 MiB `data:` payload is not hashed verbatim. Distinct
+                    // images still differ; the same image stays stable.
+                    message_with_bounded_images(msg)
                 } else {
                     let mut normalized = msg.clone();
                     normalized.content = MessageContent::Text(msg.content.as_text().into_owned());
@@ -424,6 +519,145 @@ mod tests {
         assert_eq!(
             ResponseCache::cache_key(&a).expect("must serialise"),
             ResponseCache::cache_key(&a2).expect("must serialise"),
+        );
+    }
+
+    /// Build a user message carrying one text part + one image part. Shared by
+    /// the bounded-image-key tests below.
+    fn image_message(text: &str, url: &str) -> ChatMessage {
+        use solvela_protocol::ImageUrl;
+        ChatMessage {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: text.to_string(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: url.to_string(),
+                        detail: None,
+                    },
+                },
+            ]),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// A valid `data:` URI with a base64 payload of `len` `A` characters.
+    /// `image/png;base64` is in the supported allowlist so `ImageUrl::parse`
+    /// returns `ParsedImage::Base64` (the path we want to fold to a short hash).
+    fn data_uri(payload: &str) -> String {
+        format!("data:image/png;base64,{payload}")
+    }
+
+    /// A `data:` URI image produces a stable key (same payload → same key, a
+    /// legitimate hit is reachable) and a different payload → a different key.
+    /// AND the key-input is BOUNDED: two payloads sharing a 10 KiB prefix that
+    /// differ only in a late byte must still produce distinct keys via the
+    /// payload hash — proving we hash the whole payload (through `sha256`),
+    /// not a truncated prefix, while never folding the multi-megabyte raw bytes
+    /// into the serialised key input verbatim.
+    #[test]
+    fn cache_key_data_uri_image_is_stable_distinct_and_bounded() {
+        // Same data URI → same key.
+        let payload_a = "A".repeat(10_000);
+        let a = make_request(
+            "openai/gpt-4o",
+            vec![image_message("describe", &data_uri(&payload_a))],
+            None,
+        );
+        let a2 = make_request(
+            "openai/gpt-4o",
+            vec![image_message("describe", &data_uri(&payload_a))],
+            None,
+        );
+        assert_eq!(
+            ResponseCache::cache_key(&a).expect("must serialise"),
+            ResponseCache::cache_key(&a2).expect("must serialise"),
+            "identical data-URI image + text must produce the same key (hit reachable)"
+        );
+
+        // Different data URI → different key.
+        let payload_b = "B".repeat(10_000);
+        let b = make_request(
+            "openai/gpt-4o",
+            vec![image_message("describe", &data_uri(&payload_b))],
+            None,
+        );
+        assert_ne!(
+            ResponseCache::cache_key(&a).expect("must serialise"),
+            ResponseCache::cache_key(&b).expect("must serialise"),
+            "distinct data-URI payloads must produce distinct keys"
+        );
+
+        // Bounded but lossless: two payloads sharing a 10 KiB prefix differing
+        // only in the FINAL byte must still produce distinct keys. A truncated
+        // (prefix-only) hash would collide them and serve one paid response for
+        // the other; hashing the full payload via sha256 keeps them distinct.
+        let shared_prefix = "C".repeat(10_240);
+        let late_diff_x = format!("{shared_prefix}X");
+        let late_diff_y = format!("{shared_prefix}Y");
+        let x = make_request(
+            "openai/gpt-4o",
+            vec![image_message("describe", &data_uri(&late_diff_x))],
+            None,
+        );
+        let y = make_request(
+            "openai/gpt-4o",
+            vec![image_message("describe", &data_uri(&late_diff_y))],
+            None,
+        );
+        assert_ne!(
+            ResponseCache::cache_key(&x).expect("must serialise"),
+            ResponseCache::cache_key(&y).expect("must serialise"),
+            "payloads differing only in a late byte must still produce distinct keys"
+        );
+    }
+
+    /// A `data:` URI and an `http(s)` URL of the "same logical image" must NOT
+    /// collide onto one key. We construct the degenerate case where the http
+    /// URL's text equals the data URI's payload-hash representation namespace
+    /// boundary — i.e. confirm the two reps live in different shapes
+    /// (`sha256:<hex>` for a data URI vs the verbatim URL for http) so a crafted
+    /// URL cannot be made to alias a payload hash. Serving an http-image
+    /// response for a data-URI request (or vice versa) would be a wrong-answer
+    /// money loss.
+    #[test]
+    fn cache_key_data_uri_and_http_url_do_not_collide() {
+        let data = make_request(
+            "openai/gpt-4o",
+            vec![image_message("describe", &data_uri("AAAA"))],
+            None,
+        );
+        let http = make_request(
+            "openai/gpt-4o",
+            vec![image_message("describe", "https://example.com/a.png")],
+            None,
+        );
+        assert_ne!(
+            ResponseCache::cache_key(&data).expect("must serialise"),
+            ResponseCache::cache_key(&http).expect("must serialise"),
+            "a data-URI image and an http URL must never share a cache key"
+        );
+
+        // Adversarial: an http URL whose literal text is the SAME string we'd
+        // emit for the data-URI rep would still not collide, because the data
+        // URI is replaced by `sha256:<hash-of-payload>`, not by its raw url. So
+        // even if a client sends `https://.../sha256:<hex>` it hashes its own
+        // (verbatim) url, never aliasing the payload hash of a different image.
+        let crafted = make_request(
+            "openai/gpt-4o",
+            vec![image_message(
+                "describe",
+                "https://x/sha256:0123456789abcdef0123456789abcdef",
+            )],
+            None,
+        );
+        assert_ne!(
+            ResponseCache::cache_key(&data).expect("must serialise"),
+            ResponseCache::cache_key(&crafted).expect("must serialise"),
         );
     }
 

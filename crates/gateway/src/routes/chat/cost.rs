@@ -124,18 +124,72 @@ const IMAGE_TOKENS_LOW_DETAIL: u32 = 85;
 /// worst-case.
 const IMAGE_TOKENS_HIGH_DETAIL: u32 = 765;
 
+/// Internal, parse-only classification of the OpenAI `detail` hint for the
+/// purpose of the UPFRONT 402 quote ONLY.
+///
+/// This is deliberately NOT the wire type: `ImageUrl.detail` stays
+/// `Option<String>` in `crates/protocol/src/vision.rs` and is serialized
+/// verbatim to OpenAI-format passthrough providers (openai/xai/deepseek). This
+/// enum is constructed transiently from that string solely to drive the
+/// token-estimate branch; it never round-trips back onto the wire, so it cannot
+/// emit a normalized/"unknown" value upstream (which would risk a provider 400)
+/// or drift the cross-repo SDK wire contract.
+///
+/// The point of making this a typed enum (rather than matching the raw string
+/// inline) is to make the FAIL-SAFE-LARGE direction structural: the only
+/// variant that maps to the cheap 85-token estimate is `Low`; every other
+/// input — including unknown/typo strings and an absent detail — resolves to a
+/// variant that prices at the conservative high figure. A future reader cannot
+/// mistake the coercion of `"loow"` (a typo) to high as accidental.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageDetail {
+    Low,
+    High,
+    Auto,
+}
+
+impl ImageDetail {
+    /// Classify the raw `detail` hint for the upfront quote.
+    ///
+    /// Mapping: `"low"` → [`Low`], `"high"` → [`High`], `"auto"` → [`Auto`].
+    /// EVERYTHING ELSE — any unknown/typo string (e.g. `"loow"`, `"HIGH"`) AND
+    /// the absent (`None`) case — resolves to [`High`]. This is the DELIBERATE
+    /// fail-safe-large direction for the quote: an under-classified image must
+    /// reserve the larger token figure so the upfront 402 reservation isn't
+    /// under-funded. It never over-bills — the final charge is reconciled to
+    /// provider-reported `Usage` at settlement (see [`image_tokens_for_detail`]
+    /// and `compute_actual_atomic_cost`). The estimate only needs to be
+    /// conservative enough not to under-fund the reservation.
+    ///
+    /// [`Low`]: ImageDetail::Low
+    /// [`High`]: ImageDetail::High
+    /// [`Auto`]: ImageDetail::Auto
+    fn from_opt(detail: Option<&str>) -> ImageDetail {
+        match detail {
+            Some("low") => ImageDetail::Low,
+            Some("high") => ImageDetail::High,
+            Some("auto") => ImageDetail::Auto,
+            // Unknown/typo string OR absent → conservative high (fail-safe-large).
+            _ => ImageDetail::High,
+        }
+    }
+}
+
 /// Conservative upfront-quote token contribution for one image, keyed on the
-/// OpenAI `detail` hint. Unknown/absent detail is treated as high (the
-/// fail-safe-large direction for a quote).
+/// typed [`ImageDetail`] classification of the OpenAI `detail` hint. Only
+/// `Low` is cheap; `High` and `Auto` both price at the conservative high
+/// figure. Unknown/absent detail is classified as `High` by
+/// [`ImageDetail::from_opt`] (the fail-safe-large direction for a quote), so it
+/// lands here as the high figure without a catch-all string arm.
 fn image_tokens_for_detail(detail: Option<&str>) -> u32 {
-    match detail {
-        Some("low") => IMAGE_TOKENS_LOW_DETAIL,
-        // "high", "auto", anything else, or unspecified → conservative high.
-        // NOTE: mapping "auto" (and unknown values) to high(765) is INTENTIONAL
-        // conservative over-estimation for the UPFRONT QUOTE ONLY — it never
-        // over-bills, because the final charge is reconciled to provider-reported
-        // usage at settlement; it only ensures the reservation isn't under-funded.
-        _ => IMAGE_TOKENS_HIGH_DETAIL,
+    match ImageDetail::from_opt(detail) {
+        ImageDetail::Low => IMAGE_TOKENS_LOW_DETAIL,
+        // "high"/"auto" — and, via from_opt, every unknown/typo/absent value —
+        // map to the conservative high figure. This is over-estimation for the
+        // UPFRONT QUOTE ONLY; it never over-bills, because the final charge is
+        // reconciled to provider-reported usage at settlement. It only ensures
+        // the reservation isn't under-funded.
+        ImageDetail::High | ImageDetail::Auto => IMAGE_TOKENS_HIGH_DETAIL,
     }
 }
 
@@ -677,6 +731,52 @@ mod tests {
         assert_eq!(
             estimate_input_tokens(&unknown),
             estimate_input_tokens(&high)
+        );
+    }
+
+    #[test]
+    fn image_detail_from_opt_maps_known_and_fails_safe_high() {
+        // Known hints map to their explicit variant.
+        assert_eq!(ImageDetail::from_opt(Some("low")), ImageDetail::Low);
+        assert_eq!(ImageDetail::from_opt(Some("high")), ImageDetail::High);
+        assert_eq!(ImageDetail::from_opt(Some("auto")), ImageDetail::Auto);
+
+        // Absent detail → High (fail-safe-large for the upfront quote).
+        assert_eq!(ImageDetail::from_opt(None), ImageDetail::High);
+
+        // Unknown / typo / wrong-case strings ALL → High, never Low. This is the
+        // structural guarantee: the only path to the cheap estimate is an exact
+        // "low"; an under-classified image always reserves the larger figure.
+        for bad in ["loow", "LOW", "Low", "hi", "ultra-mega", "", "  low  "] {
+            assert_eq!(
+                ImageDetail::from_opt(Some(bad)),
+                ImageDetail::High,
+                "unknown/typo detail {bad:?} must fail safe to High, never Low"
+            );
+        }
+    }
+
+    #[test]
+    fn image_tokens_for_detail_only_low_is_cheap() {
+        // Pins the enum→constant mapping: Low is the only cheap classification;
+        // high/auto/unknown/absent all resolve to the conservative high figure.
+        assert_eq!(
+            image_tokens_for_detail(Some("low")),
+            IMAGE_TOKENS_LOW_DETAIL
+        );
+        assert_eq!(
+            image_tokens_for_detail(Some("high")),
+            IMAGE_TOKENS_HIGH_DETAIL
+        );
+        assert_eq!(
+            image_tokens_for_detail(Some("auto")),
+            IMAGE_TOKENS_HIGH_DETAIL
+        );
+        assert_eq!(image_tokens_for_detail(None), IMAGE_TOKENS_HIGH_DETAIL);
+        assert_eq!(
+            image_tokens_for_detail(Some("loow")),
+            IMAGE_TOKENS_HIGH_DETAIL,
+            "a typo must price at the conservative high figure"
         );
     }
 

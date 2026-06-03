@@ -741,6 +741,41 @@ supports_streaming = true
         }
     }
 
+    /// Registry mirroring a real `model_fallback_chain` arm so the
+    /// `*_with_model_fallback` paths (which build the chain INTERNALLY from
+    /// `model_fallback_chain`, unlike the `*_with_chain` paths that take an
+    /// explicit chain) can be exercised. For `("openai", "gpt-4o")` the chain is
+    /// `[gpt-4o, claude-sonnet-4-6, gemini-3.1-pro, grok-3]`; here the primary
+    /// `openai/gpt-4o` is vision-capable and the next-in-chain
+    /// `anthropic/claude-sonnet-4-6` is declared NON-vision, so a correct
+    /// implementation must dispatch the primary (then fail) and SKIP the
+    /// non-vision fallback rather than dispatch an image to it post-payment.
+    fn gpt4o_chain_mixed_registry() -> ModelRegistry {
+        ModelRegistry::from_toml(
+            r#"
+[models.gpt-4o]
+provider = "openai"
+model_id = "gpt-4o"
+display_name = "GPT-4o"
+input_cost_per_million = 1.0
+output_cost_per_million = 1.0
+context_window = 128000
+supports_streaming = true
+supports_vision = true
+
+[models.claude-sonnet]
+provider = "anthropic"
+model_id = "claude-sonnet-4-6"
+display_name = "Claude Sonnet"
+input_cost_per_million = 1.0
+output_cost_per_million = 1.0
+context_window = 128000
+supports_streaming = true
+"#,
+        )
+        .unwrap()
+    }
+
     /// FIX 1 (PR #2 round-1 review): post-payment failover must NOT dispatch an
     /// image request to a non-vision model. The chain's first entry is
     /// vision-capable (and is dispatched, then fails); the second entry is
@@ -791,6 +826,123 @@ supports_streaming = true
         // The surfaced error is the vision model's own provider failure (it WAS
         // dispatched and failed). The point of this test is the skip, asserted
         // above. The all-non-vision case below pins the vision-exhaustion error.
+        assert!(
+            err.to_string().contains("simulated provider failure"),
+            "{err}"
+        );
+    }
+
+    /// FIX 1 (test-coverage review): the `*_with_chain` paths are tested above,
+    /// but `chat_with_model_fallback` — which `routes/chat/provider.rs` and the
+    /// A2A handler actually call — builds its chain INTERNALLY via
+    /// `model_fallback_chain` and had no direct vision-skip test. A regression
+    /// that reverted the `candidate_rejects_images` check inside THIS function
+    /// would slip past CI. This pins it: the generated chain for
+    /// `("openai","gpt-4o")` is `[gpt-4o, claude-sonnet-4-6, ...]`; with a
+    /// registry where the primary is vision-capable and the next entry is
+    /// non-vision, the primary is dispatched (and fails) but the non-vision
+    /// fallback must NEVER be dispatched.
+    #[tokio::test]
+    async fn model_fallback_image_request_never_dispatches_to_non_vision() {
+        let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut map: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+        map.insert(
+            "openai".to_string(),
+            Arc::new(RecordingProvider {
+                name: "openai".to_string(),
+                dispatched: dispatched.clone(),
+            }),
+        );
+        // The non-vision fallback's provider IS configured — so if the skip were
+        // broken, the image WOULD be dispatched to it. That is what makes the
+        // negative assertion meaningful.
+        map.insert(
+            "anthropic".to_string(),
+            Arc::new(RecordingProvider {
+                name: "anthropic".to_string(),
+                dispatched: dispatched.clone(),
+            }),
+        );
+        let providers = ProviderRegistry::from_providers(map);
+        let health = ProviderHealthTracker::new(CircuitBreakerConfig::default());
+        let registry = gpt4o_chain_mixed_registry();
+
+        // primary openai/gpt-4o (vision) is dispatched then fails; the chain's
+        // next entry anthropic/claude-sonnet-4-6 (non-vision) must be skipped.
+        let err = chat_with_model_fallback(
+            &providers,
+            &health,
+            &registry,
+            "openai",
+            "gpt-4o",
+            image_request(),
+        )
+        .await
+        .expect_err("must error once the vision primary fails and only non-vision remains");
+
+        let calls = dispatched.lock().unwrap().clone();
+        assert!(
+            calls.contains(&"gpt-4o".to_string()),
+            "the vision-capable primary should have been dispatched, got {calls:?}"
+        );
+        assert!(
+            !calls.contains(&"claude-sonnet-4-6".to_string()),
+            "the non-vision fallback must NEVER be dispatched for an image request \
+             via chat_with_model_fallback, got {calls:?}"
+        );
+        assert!(
+            err.to_string().contains("simulated provider failure"),
+            "{err}"
+        );
+    }
+
+    /// Streaming twin: `stream_with_model_fallback` must apply the same vision
+    /// skip on its internally-built chain. Same coverage-gap rationale as the
+    /// non-streaming test above.
+    #[tokio::test]
+    async fn model_fallback_image_stream_never_dispatches_to_non_vision() {
+        let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut map: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+        map.insert(
+            "openai".to_string(),
+            Arc::new(RecordingProvider {
+                name: "openai".to_string(),
+                dispatched: dispatched.clone(),
+            }),
+        );
+        map.insert(
+            "anthropic".to_string(),
+            Arc::new(RecordingProvider {
+                name: "anthropic".to_string(),
+                dispatched: dispatched.clone(),
+            }),
+        );
+        let providers = ProviderRegistry::from_providers(map);
+        let health = ProviderHealthTracker::new(CircuitBreakerConfig::default());
+        let registry = gpt4o_chain_mixed_registry();
+
+        let err = stream_with_model_fallback(
+            &providers,
+            &health,
+            &registry,
+            "openai",
+            "gpt-4o",
+            image_request(),
+        )
+        .await
+        .map(|_| ())
+        .expect_err("must error once the vision primary fails and only non-vision remains");
+
+        let calls = dispatched.lock().unwrap().clone();
+        assert!(
+            calls.contains(&"gpt-4o".to_string()),
+            "the vision-capable primary should have been dispatched, got {calls:?}"
+        );
+        assert!(
+            !calls.contains(&"claude-sonnet-4-6".to_string()),
+            "the non-vision fallback must NEVER be dispatched for an image stream \
+             via stream_with_model_fallback, got {calls:?}"
+        );
         assert!(
             err.to_string().contains("simulated provider failure"),
             "{err}"
