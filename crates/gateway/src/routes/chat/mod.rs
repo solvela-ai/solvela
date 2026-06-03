@@ -53,6 +53,18 @@ const MAX_MESSAGES: usize = 256;
 /// array forces excessive per-part work on the hot path).
 const MAX_CONTENT_PARTS: usize = 64;
 
+/// Maximum number of image parts allowed across an ENTIRE request.
+///
+/// `MAX_MESSAGES` (256) × `MAX_CONTENT_PARTS` (64) otherwise admits up to ~16K
+/// image parts, and URL images are ~30 bytes each so thousands fit inside the
+/// 10MB body limit. Each image also adds a per-image token contribution to the
+/// upfront 402 estimate, so an unbounded count inflates the quote and forces
+/// per-image work on the hot path. 100 is the tightest hard limit across the
+/// supported vision providers (Anthropic's API caps a request at 100 images),
+/// so an accepted count never settles payment then gets rejected upstream for
+/// image-count. Enforced BEFORE payment.
+const MAX_IMAGES_PER_REQUEST: usize = 100;
+
 /// Platform-wide upper bound for `max_tokens` to prevent unbounded cost exposure.
 const MAX_TOKENS_LIMIT: u32 = 128_000;
 
@@ -101,6 +113,21 @@ pub async fn chat_completions(
                 )));
             }
         }
+    }
+
+    // Aggregate image-count cap — runs BEFORE payment and model resolution so a
+    // request carrying more images than any provider accepts is a client 4xx,
+    // never billed-then-rejected upstream. Bounds the abuse case where thousands
+    // of small URL images fit inside the body limit (see MAX_IMAGES_PER_REQUEST).
+    let total_images: usize = req
+        .messages
+        .iter()
+        .map(|msg| msg.content.image_urls().count())
+        .sum();
+    if total_images > MAX_IMAGES_PER_REQUEST {
+        return Err(GatewayError::BadRequest(format!(
+            "too many images: {total_images} exceeds maximum of {MAX_IMAGES_PER_REQUEST}"
+        )));
     }
 
     // Empty-prompt rejection — runs BEFORE payment so an empty request is never

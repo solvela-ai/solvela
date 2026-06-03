@@ -2220,6 +2220,62 @@ async fn test_chat_content_parts_over_cap_returns_400() {
     );
 }
 
+/// MAX_IMAGES_PER_REQUEST (over edge): >100 images spread across messages must
+/// be rejected with 400 BadRequest, naming the cap. Runs before payment and
+/// model resolution so an over-large vision request is never billed. Uses two
+/// user messages of 60 image parts each (120 total > 100), each within the
+/// 64-part-per-message cap so the aggregate image cap is what fires.
+#[tokio::test]
+async fn test_chat_image_count_over_cap_returns_400() {
+    let app = test_app();
+
+    let image_parts = |n: usize| -> Vec<serde_json::Value> {
+        (0..n)
+            .map(|i| {
+                serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {"url": format!("https://example.com/{i}.png")}
+                })
+            })
+            .collect()
+    };
+    let mut first = vec![serde_json::json!({"type": "text", "text": "describe these"})];
+    first.extend(image_parts(60));
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [
+            {"role": "user", "content": first},
+            {"role": "user", "content": image_parts(60)},
+        ],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "120 images exceeds the cap of 100 and must be rejected with 400"
+    );
+
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let msg = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("too many images") && msg.contains("100"),
+        "400 error must name the image cap, got: {msg}"
+    );
+}
+
 /// Image rejection runs BEFORE the 402, not after. The same image body that is
 /// rejected with 415 when a payment header IS present
 /// (`test_chat_image_content_rejected_for_non_vision_model_415`) must also be
