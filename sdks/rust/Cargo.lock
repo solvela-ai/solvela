@@ -3320,7 +3320,7 @@ dependencies = [
 
 [[package]]
 name = "solvela-client"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "ahash",
  "base64",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "solvela-client-cli"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "clap",
  "futures",
@@ -3366,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "solvela-client-cli-args"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "bs58",
  "clap",
@@ -3379,7 +3379,7 @@ dependencies = [
 
 [[package]]
 name = "solvela-client-proxy"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "axum",
  "clap",
@@ -3413,10 +3413,11 @@ dependencies = [
 
 [[package]]
 name = "solvela-protocol"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
