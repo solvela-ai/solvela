@@ -179,7 +179,11 @@ class KeypairSigner(Signer):
         except SignerError:
             raise
         except Exception as e:
-            raise SignerError(f"Failed to sign payment: {e}") from e
+            # Drop the __cause__ chain (`from None`): a future inner exception
+            # could carry secret key material that a logger / Sentry would walk
+            # off __cause__. The `{e}` text stays in the message (sufficient for
+            # diagnostics) but the original exception object is not attached.
+            raise SignerError(f"Failed to sign payment: {e}") from None
 
     async def _sign_escrow_payment(
         self,
@@ -252,7 +256,11 @@ class KeypairSigner(Signer):
         except SignerError:
             raise
         except Exception as e:
-            raise SignerError(f"Failed to sign escrow deposit: {e}") from e
+            # Drop the __cause__ chain (`from None`): a future inner exception
+            # could carry secret key material that a logger / Sentry would walk
+            # off __cause__. The `{e}` text stays in the message (sufficient for
+            # diagnostics) but the original exception object is not attached.
+            raise SignerError(f"Failed to sign escrow deposit: {e}") from None
 
     @staticmethod
     def _escrow_expiry_slot(current_slot: int, max_timeout_seconds: int) -> int:

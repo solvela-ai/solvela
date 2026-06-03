@@ -46,6 +46,18 @@ class TestWalletKeypairBytes:
         restored = Wallet.from_keypair_bytes(raw)
         assert restored.address() == wallet.address()
 
+    def test_from_keypair_bytes_invalid_does_not_leak_input(self) -> None:
+        # Regression guard (M-1): the raw bytes ARE secret key material, so the
+        # error message must be a generic static string with no fragment of the
+        # offending input or the underlying solders exception interpolated.
+        bad = bytes(range(40))  # wrong length -> rejected
+        with pytest.raises(WalletError) as exc_info:
+            Wallet.from_keypair_bytes(bad)
+        msg = str(exc_info.value)
+        assert bad.hex() not in msg
+        assert "40" not in msg  # no echoed length detail
+        assert exc_info.value.__cause__ is None  # chain dropped (from None)
+
 
 class TestWalletKeypairB58:
     def test_from_keypair_b58(self) -> None:
@@ -53,6 +65,19 @@ class TestWalletKeypairB58:
         b58 = wallet.to_keypair_b58()
         restored = Wallet.from_keypair_b58(b58)
         assert restored.address() == wallet.address()
+
+    def test_from_keypair_b58_invalid_does_not_leak_input(self) -> None:
+        # Regression guard (M-1): the base58 string IS secret key material, so
+        # the error message must be a generic static string with no fragment of
+        # the offending input or the underlying solders exception interpolated.
+        bad_b58 = "5KQwrPbwdL6PhXujxW37FSSQ" + "Z" * 60  # not a valid keypair
+        with pytest.raises(WalletError) as exc_info:
+            Wallet.from_keypair_b58(bad_b58)
+        msg = str(exc_info.value)
+        assert bad_b58 not in msg
+        # No long substring of the input should survive into the message.
+        assert bad_b58[:16] not in msg
+        assert exc_info.value.__cause__ is None  # chain dropped (from None)
 
 
 class TestWalletEnv:

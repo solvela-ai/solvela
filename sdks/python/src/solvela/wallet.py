@@ -59,8 +59,13 @@ class Wallet:
         """
         try:
             return cls(Keypair.from_bytes(raw))
-        except Exception as exc:
-            raise WalletError(f"Invalid keypair bytes: {exc}") from exc
+        except Exception:
+            # The raw input IS secret key material, and some solders error
+            # variants echo the offending input. Surface a generic static
+            # message only and drop the chain (`from None`) — never interpolate
+            # the exception or the input, which a logger / Sentry would capture
+            # as plaintext key bytes. Mirrors build_deposit_tx's keypair-parse fix.
+            raise WalletError("Invalid keypair bytes: bad length or encoding") from None
 
     @classmethod
     def from_keypair_b58(cls, b58: str) -> Wallet:
@@ -71,8 +76,13 @@ class Wallet:
         """
         try:
             return cls(Keypair.from_base58_string(b58))
-        except Exception as exc:
-            raise WalletError(f"Invalid base58 keypair: {exc}") from exc
+        except Exception:
+            # The base58 string IS secret key material, and some solders error
+            # variants echo the offending input. Surface a generic static
+            # message only and drop the chain (`from None`) — never interpolate
+            # the exception or the input, which a logger / Sentry would capture
+            # as a plaintext key. Mirrors build_deposit_tx's keypair-parse fix.
+            raise WalletError("Invalid base58 keypair: bad base58 or wrong length") from None
 
     @classmethod
     def from_env(cls, var: str) -> Wallet:

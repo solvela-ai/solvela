@@ -415,3 +415,11 @@ class TestEscrowExpirySlot:
 
     def test_huge_timeout_clamped_to_cap(self) -> None:
         assert KeypairSigner._escrow_expiry_slot(1_000_000, 10**12) == 1_010_000
+
+    def test_negative_timeout_clamps_to_min_floor_not_backwards(self) -> None:
+        # A negative max_timeout_seconds must NOT push the expiry slot backwards
+        # (which would yield an already-expired / dead-on-arrival deposit). The
+        # `max(max_timeout_seconds, 0)` clamp floors the timeout to 0, so the
+        # result is current_slot + _MIN_ESCROW_EXPIRY_SLOTS_AHEAD (150).
+        assert KeypairSigner._escrow_expiry_slot(1_000_000, -1) == 1_000_150
+        assert KeypairSigner._escrow_expiry_slot(1_000_000, -(10**12)) == 1_000_150

@@ -132,6 +132,16 @@ class DepositParams:
     after the byte-layout-relevant fields are checked. To produce a variant
     (e.g. in tests), use ``dataclasses.replace(params, ...)`` which re-runs
     validation, never attribute assignment.
+
+    .. warning::
+        ``agent_keypair_b58`` is secret key material that is **NOT wiped from
+        Python heap memory**. Unlike the Rust builder (which holds the key in a
+        ``Zeroizing<String>`` zeroed on drop), CPython cannot reliably overwrite
+        an immutable ``str`` — copies may linger in the interned-string table,
+        f-string buffers, and GC arenas until reclaimed. Callers MUST keep a
+        ``DepositParams`` short-lived (build the tx, then drop it) and MUST NEVER
+        store it in a cache, module-global, or long-lived attribute. No ctypes
+        scrub is attempted here — it would give false assurance.
     """
 
     # Base58-encoded 64-byte ed25519 keypair (32-byte secret || 32-byte pubkey).
@@ -243,6 +253,13 @@ def build_deposit_tx(params: DepositParams) -> str:
 
     Returns a base64 (standard alphabet) wire-format Solana legacy transaction
     ready for the gateway / ``sendTransaction``.
+
+    .. warning::
+        ``params.agent_keypair_b58`` is secret key material that is **NOT wiped
+        from Python heap memory** after this call (unlike the Rust builder's
+        ``Zeroizing<String>``). CPython cannot reliably overwrite an immutable
+        ``str``. Keep the ``DepositParams`` short-lived and never cache it; see
+        the :class:`DepositParams` docstring.
 
     Raises:
         DepositError: zero amount, malformed keypair/address, bad service_id or
