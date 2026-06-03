@@ -21,7 +21,7 @@ use axum::Json;
 use metrics::{counter, histogram};
 use tracing::{info, warn};
 
-use solvela_protocol::{ChatRequest, SettlementFailureKind};
+use solvela_protocol::{ChatRequest, MessageContent, SettlementFailureKind};
 use solvela_router::profiles::{self, Profile};
 use solvela_router::scorer;
 
@@ -46,6 +46,12 @@ pub(crate) use payment::uses_durable_nonce;
 /// Maximum number of messages allowed in a single chat request.
 /// Prevents excessive memory usage and cost from very long conversations.
 const MAX_MESSAGES: usize = 256;
+
+/// Maximum number of content parts allowed in a single message's `Parts`
+/// content array. Defense-in-depth against part-flooding within the 10MB
+/// body limit (each part is small individually but a multi-thousand-element
+/// array forces excessive per-part work on the hot path).
+const MAX_CONTENT_PARTS: usize = 64;
 
 /// Platform-wide upper bound for `max_tokens` to prevent unbounded cost exposure.
 const MAX_TOKENS_LIMIT: u32 = 128_000;
@@ -73,6 +79,34 @@ pub async fn chat_completions(
             req.messages.len(),
             MAX_MESSAGES
         )));
+    }
+
+    // Content validation — runs BEFORE payment, guard, and provider dispatch.
+    //
+    // PR #1 accepts `content` as a string OR an array of OpenAI text parts.
+    // Image/multimodal content is NOT yet processed (native image blocks,
+    // capability gating, and image cost accounting are a tracked follow-up
+    // PR). Reject it explicitly with a 415 so it is never silently dropped,
+    // mis-costed, or cached — rather than half-supported. Also cap the
+    // per-message parts array to bound hot-path work.
+    for msg in &req.messages {
+        if msg.content.has_image_parts() {
+            warn!("rejected request with image/multimodal content (not yet supported)");
+            return Err(GatewayError::UnsupportedMediaType(
+                "image/multimodal content is not yet supported; \
+                 send text content (string or text parts)"
+                    .to_string(),
+            ));
+        }
+        if let MessageContent::Parts(parts) = &msg.content {
+            if parts.len() > MAX_CONTENT_PARTS {
+                return Err(GatewayError::BadRequest(format!(
+                    "too many content parts in a message: {} exceeds maximum of {}",
+                    parts.len(),
+                    MAX_CONTENT_PARTS
+                )));
+            }
+        }
     }
 
     // Extract request ID from the incoming header

@@ -103,7 +103,16 @@ pub(crate) fn cap_usage_to_request_limits(
 
 /// Rough token estimate: ~4 chars per token.
 pub(crate) fn estimate_input_tokens(req: &ChatRequest) -> u32 {
-    let chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
+    // `as_text()` flattens only text parts — image parts contribute zero chars,
+    // so this estimate silently undercounts vision input. Images are rejected
+    // upstream today, so the trap is currently dead; this assert fires it in
+    // tests when vision lands (PR #2) so the estimate is revisited then.
+    debug_assert!(
+        !req.messages.iter().any(|m| m.content.has_image_parts()),
+        "estimate_input_tokens does not account for image tokens — image content \
+         must be rejected upstream; revisit when vision lands (PR #2)"
+    );
+    let chars: usize = req.messages.iter().map(|m| m.content.as_text().len()).sum();
     (chars / 4).max(1) as u32
 }
 
@@ -446,7 +455,7 @@ mod tests {
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {
             role: Role::User,
-            content: content.to_string(),
+            content: content.into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,

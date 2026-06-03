@@ -88,7 +88,7 @@ async fn handle_new_request(
         model: resolved_model.clone(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: user_text.clone(),
+            content: user_text.clone().into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -458,7 +458,7 @@ async fn handle_payment_submitted(
         model: resolved_model.clone(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: record.original_message.clone(),
+            content: record.original_message.clone().into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -486,13 +486,26 @@ async fn handle_payment_submitted(
         data: None,
     })?;
 
-    // Extract response text
-    let response_text = result
-        .data
-        .choices
-        .first()
-        .map(|c| c.message.content.clone())
-        .unwrap_or_default();
+    // Extract response text. A paid A2A request that yields no choices, or a
+    // choice with empty content, is money-adjacent: the agent paid but gets an
+    // empty artifact. Default to an empty string (preserving success
+    // behavior) but warn so the condition is observable rather than silent.
+    let response_text = match result.data.choices.first() {
+        Some(choice) => {
+            let text = choice.message.content.as_text().into_owned();
+            if text.is_empty() {
+                tracing::warn!(
+                    task_id,
+                    "A2A provider returned empty content for paid request"
+                );
+            }
+            text
+        }
+        None => {
+            tracing::warn!(task_id, "A2A provider returned no choices for paid request");
+            String::new()
+        }
+    };
 
     // Update task state
     if let Err(e) = task_store::update_task_state(state, task_id, TaskState::Completed).await {
@@ -672,7 +685,7 @@ fn resolve_model(
     if let Some(profile) = Profile::from_alias(model_hint) {
         let messages = vec![ChatMessage {
             role: Role::User,
-            content: user_text.to_string(),
+            content: user_text.to_string().into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,

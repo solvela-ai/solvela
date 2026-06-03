@@ -118,11 +118,11 @@ fn validate_gemini_model_name(model: &str) -> Result<(), String> {
 fn to_gemini_request(req: &ChatRequest) -> GeminiRequest {
     // Extract system instruction
     let system_instruction: Option<GeminiContent> = {
-        let system_text: Vec<&str> = req
+        let system_text: Vec<std::borrow::Cow<'_, str>> = req
             .messages
             .iter()
             .filter(|m| m.role == Role::System || m.role == Role::Developer)
-            .map(|m| m.content.as_str())
+            .map(|m| m.content.as_text())
             .collect();
 
         if system_text.is_empty() {
@@ -151,7 +151,7 @@ fn to_gemini_request(req: &ChatRequest) -> GeminiRequest {
                 Role::Unknown => "user".to_string(), // filtered above; safe fallback for forward-compat
             }),
             parts: vec![GeminiPart {
-                text: m.content.clone(),
+                text: m.content.as_text().into_owned(),
             }],
         })
         .collect();
@@ -239,7 +239,7 @@ fn from_gemini_response(resp: GeminiResponse, original_model: &str) -> ChatRespo
             index: 0,
             message: ChatMessage {
                 role: Role::Assistant,
-                content,
+                content: content.into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -325,20 +325,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_gemini_user_text_parts_flattened_to_space_joined_string() {
+        use solvela_protocol::vision::{ContentPart, MessageContent};
+        let req = ChatRequest {
+            model: "google/gemini-2.5-flash".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "first".to_string(),
+                    },
+                    ContentPart::Text {
+                        text: "second".to_string(),
+                    },
+                ]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let gemini_req = to_gemini_request(&req);
+        assert_eq!(gemini_req.contents.len(), 1);
+        // String-based adapter flattens text parts with a single space.
+        assert_eq!(gemini_req.contents[0].parts[0].text, "first second");
+    }
+
+    #[test]
     fn test_gemini_request_translation() {
         let req = ChatRequest {
             model: "google/gemini-2.5-flash".to_string(),
             messages: vec![
                 ChatMessage {
                     role: Role::System,
-                    content: "Be concise.".to_string(),
+                    content: "Be concise.".into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
                 },
                 ChatMessage {
                     role: Role::User,
-                    content: "Hello!".to_string(),
+                    content: "Hello!".into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
@@ -378,14 +411,14 @@ mod tests {
             messages: vec![
                 ChatMessage {
                     role: Role::Developer,
-                    content: "Always respond in JSON.".to_string(),
+                    content: "Always respond in JSON.".into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
                 },
                 ChatMessage {
                     role: Role::User,
-                    content: "Hello!".to_string(),
+                    content: "Hello!".into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
@@ -432,7 +465,7 @@ mod tests {
         };
 
         let chat_resp = from_gemini_response(gemini_resp, "google/gemini-2.5-flash");
-        assert_eq!(chat_resp.choices[0].message.content, "Hi there!");
+        assert_eq!(chat_resp.choices[0].message.content.as_text(), "Hi there!");
         assert_eq!(chat_resp.choices[0].finish_reason, Some("stop".to_string()));
         assert_eq!(chat_resp.usage.as_ref().unwrap().total_tokens, 8);
     }

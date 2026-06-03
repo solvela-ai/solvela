@@ -392,7 +392,7 @@ impl MockProvider {
                 index: 0,
                 message: ChatMessage {
                     role: Role::Assistant,
-                    content: "[mock response]".to_string(),
+                    content: "[mock response]".into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
@@ -620,7 +620,7 @@ async fn semantic_cache_serves_paraphrase() {
             index: 0,
             message: ChatMessage {
                 role: Role::Assistant,
-                content: "Plants convert sunlight, water and CO2 into glucose.".to_string(),
+                content: "Plants convert sunlight, water and CO2 into glucose.".into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -637,7 +637,7 @@ async fn semantic_cache_serves_paraphrase() {
         model: "openai/gpt-4o".to_string(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: "Explain how photosynthesis works in plants.".to_string(),
+            content: "Explain how photosynthesis works in plants.".into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -741,7 +741,7 @@ async fn semantic_cache_populates_on_miss() {
         model: "openai/gpt-4o".to_string(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: prompt.clone(),
+            content: prompt.clone().into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -943,7 +943,7 @@ async fn semantic_cache_hit_on_escrow_paid_request() {
             index: 0,
             message: ChatMessage {
                 role: Role::Assistant,
-                content: "Mitochondria are the cell's energy organelles.".to_string(),
+                content: "Mitochondria are the cell's energy organelles.".into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -960,7 +960,7 @@ async fn semantic_cache_hit_on_escrow_paid_request() {
         model: "openai/gpt-4o".to_string(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: "What is the role of mitochondria in animal cells?".to_string(),
+            content: "What is the role of mitochondria in animal cells?".into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -1057,7 +1057,7 @@ async fn semantic_cache_hit_on_exact_paid_request() {
             message: ChatMessage {
                 role: Role::Assistant,
                 content: "The universe began roughly 13.8 billion years ago in a hot, dense state."
-                    .to_string(),
+                    .into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -1074,7 +1074,7 @@ async fn semantic_cache_hit_on_exact_paid_request() {
         model: "openai/gpt-4o".to_string(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: "What is the Big Bang theory in cosmology?".to_string(),
+            content: "What is the Big Bang theory in cosmology?".into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -1166,7 +1166,7 @@ async fn semantic_cache_hit_after_real_set_write_back() {
             message: ChatMessage {
                 role: Role::Assistant,
                 content: "Ocean tides are driven by the gravitational pull of the Moon and Sun."
-                    .to_string(),
+                    .into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -1183,7 +1183,7 @@ async fn semantic_cache_hit_after_real_set_write_back() {
         model: "openai/gpt-4o".to_string(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: "What causes ocean tides on Earth?".to_string(),
+            content: "What causes ocean tides on Earth?".into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -1297,7 +1297,7 @@ async fn semantic_hit_full_atomic_fallback_serves_usage_less_entry() {
             message: ChatMessage {
                 role: Role::Assistant,
                 content: "Tectonic plates drift slowly atop the partially molten asthenosphere."
-                    .to_string(),
+                    .into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -1313,7 +1313,7 @@ async fn semantic_hit_full_atomic_fallback_serves_usage_less_entry() {
         model: "openai/gpt-4o".to_string(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: "What causes the movement of tectonic plates?".to_string(),
+            content: "What causes the movement of tectonic plates?".into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -1751,6 +1751,111 @@ async fn test_chat_with_payment_returns_mock_response() {
     assert_eq!(json["object"], "chat.completion");
     assert_eq!(json["choices"][0]["message"]["content"], "[mock response]");
     assert!(json["usage"]["total_tokens"].is_number());
+}
+
+/// CowAgent scenario: `content` arrives as an array of OpenAI text parts.
+/// This MUST flow through the real route (parse → guard → payment → provider)
+/// and return 200, exactly like a string-content request.
+#[tokio::test]
+async fn test_chat_text_content_array_returns_mock_response() {
+    let app = test_app_with_mock_provider();
+
+    // Raw body so we exercise the wire-format deserialization of array content.
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[{"type":"text","text":"Hello!"}]}]}"#;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "text content array must be accepted and return 200"
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["object"], "chat.completion");
+    assert_eq!(json["choices"][0]["message"]["content"], "[mock response]");
+}
+
+/// Image/multimodal content is not yet supported in PR #1 — it must be
+/// rejected with a clear 4xx (415), not silently dropped (which would mis-cost
+/// and mis-cache) and not 500. Rejection runs BEFORE payment/provider.
+#[tokio::test]
+async fn test_chat_image_content_rejected_with_415() {
+    let app = test_app_with_mock_provider();
+
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://x/y.png"}}]}]}"#;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "image content must be rejected with 415, not 200 and not 500"
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "unsupported_media_type");
+}
+
+/// A JSON number for `content` (`42`) is not a valid content shape. It must be
+/// rejected with a 4xx at the deserialization boundary — never a panic/500.
+#[tokio::test]
+async fn test_chat_number_content_returns_4xx() {
+    let app = test_app_with_mock_provider();
+
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":42}]}"#;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        response.status().is_client_error(),
+        "numeric content must return 4xx (not panic/500), got {}",
+        response.status()
+    );
 }
 
 /// Paid requests with NO provider configured should return 500 (stub rejection).

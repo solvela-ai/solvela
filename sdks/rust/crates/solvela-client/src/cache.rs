@@ -106,7 +106,7 @@ mod tests {
                 index: 0,
                 message: ChatMessage {
                     role: Role::Assistant,
-                    content: content.to_string(),
+                    content: content.into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
@@ -124,7 +124,7 @@ mod tests {
     fn make_messages(content: &str) -> Vec<ChatMessage> {
         vec![ChatMessage {
             role: Role::User,
-            content: content.to_string(),
+            content: content.into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -144,7 +144,7 @@ mod tests {
         let key = ResponseCache::cache_key("model-a", &make_messages("hi"));
         cache.put(key, resp.clone());
         let cached = cache.get(key).expect("should be cached");
-        assert_eq!(cached.choices[0].message.content, "hello");
+        assert_eq!(cached.choices[0].message.content.as_text(), "hello");
     }
 
     #[test]
@@ -179,7 +179,7 @@ mod tests {
         cache.put(key, make_response("first"));
         cache.put(key, make_response("second"));
         let cached = cache.get(key).expect("should exist");
-        assert_eq!(cached.choices[0].message.content, "first");
+        assert_eq!(cached.choices[0].message.content.as_text(), "first");
     }
 
     #[test]
@@ -191,7 +191,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         cache.put(key, make_response("second"));
         let cached = cache.get(key).expect("should exist");
-        assert_eq!(cached.choices[0].message.content, "second");
+        assert_eq!(cached.choices[0].message.content.as_text(), "second");
     }
 
     #[test]

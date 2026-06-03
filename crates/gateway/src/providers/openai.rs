@@ -98,7 +98,7 @@ mod tests {
             model: model.to_string(),
             messages: vec![ChatMessage {
                 role: Role::User,
-                content: "hi".to_string(),
+                content: "hi".into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -144,6 +144,29 @@ mod tests {
         let req = sample_request("gpt-4o-mini");
         let body = build_chat_body(&req).expect("body must serialize");
         assert_eq!(body["model"], "gpt-4o-mini");
+    }
+
+    #[test]
+    fn build_chat_body_passes_text_parts_through_as_array() {
+        use solvela_protocol::vision::{ContentPart, MessageContent};
+        let mut req = sample_request("openai/gpt-4o");
+        req.messages[0].content = MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "Hello!".to_string(),
+            },
+            ContentPart::Text {
+                text: "world".to_string(),
+            },
+        ]);
+        let body = build_chat_body(&req).expect("body must serialize");
+        // OpenAI-format providers pass array content through natively rather
+        // than flattening it — the upstream API consumes the parts directly.
+        assert!(
+            body["messages"][0]["content"].is_array(),
+            "text Parts content must serialize as a JSON array for OpenAI passthrough"
+        );
+        assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(body["messages"][0]["content"][0]["text"], "Hello!");
     }
 
     #[test]

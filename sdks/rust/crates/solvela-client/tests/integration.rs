@@ -30,7 +30,7 @@ fn sample_chat_response() -> ChatResponse {
             index: 0,
             message: ChatMessage {
                 role: Role::Assistant,
-                content: "Hello from integration test!".to_string(),
+                content: "Hello from integration test!".into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -77,7 +77,7 @@ fn sample_chat_request() -> solvela_protocol::ChatRequest {
         model: "openai/gpt-4o".to_string(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: "Hello".to_string(),
+            content: "Hello".into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -108,7 +108,7 @@ async fn test_full_free_model_flow() {
     assert_eq!(resp.id, "chatcmpl-integration");
     assert_eq!(resp.choices.len(), 1);
     assert_eq!(
-        resp.choices[0].message.content,
+        resp.choices[0].message.content.as_text(),
         "Hello from integration test!"
     );
     assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));

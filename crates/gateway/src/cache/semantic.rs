@@ -614,7 +614,7 @@ pub(crate) fn prompt_text(req: &ChatRequest) -> String {
             // and collide above the similarity threshold — wrong tool result
             // served from cache. The suffix is JSON to preserve structure;
             // missing fields are simply omitted (no `null` noise).
-            let base = format!("{}: {}", role_str(&m.role), m.content);
+            let base = format!("{}: {}", role_str(&m.role), m.content.as_text());
             let tool_calls_suffix = m
                 .tool_calls
                 .as_ref()
@@ -729,7 +729,7 @@ mod tests {
     fn user_msg(content: &str) -> ChatMessage {
         ChatMessage {
             role: Role::User,
-            content: content.to_string(),
+            content: content.into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -866,7 +866,7 @@ mod tests {
             let mut r = req("m", "what's the weather?");
             r.messages.push(ChatMessage {
                 role: Role::Assistant,
-                content: String::new(),
+                content: solvela_protocol::MessageContent::Text(String::new()),
                 name: None,
                 tool_calls: Some(vec![ToolCall {
                     id: "call_1".to_string(),
@@ -894,7 +894,7 @@ mod tests {
         let mut plain = req("m", "what's the weather?");
         plain.messages.push(ChatMessage {
             role: Role::Assistant,
-            content: "It's sunny.".to_string(),
+            content: "It's sunny.".into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,

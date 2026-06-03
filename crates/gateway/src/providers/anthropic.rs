@@ -84,11 +84,11 @@ struct AnthropicUsage {
 fn to_anthropic_request(req: &ChatRequest) -> AnthropicRequest {
     // Extract system message(s) — Anthropic takes system as a separate param
     let system: Option<String> = {
-        let system_msgs: Vec<&str> = req
+        let system_msgs: Vec<std::borrow::Cow<'_, str>> = req
             .messages
             .iter()
             .filter(|m| m.role == Role::System || m.role == Role::Developer)
-            .map(|m| m.content.as_str())
+            .map(|m| m.content.as_text())
             .collect();
 
         if system_msgs.is_empty() {
@@ -109,7 +109,7 @@ fn to_anthropic_request(req: &ChatRequest) -> AnthropicRequest {
                 Role::Assistant => "assistant".to_string(),
                 _ => "user".to_string(), // shouldn't happen due to filter
             },
-            content: m.content.clone(),
+            content: m.content.as_text().into_owned(),
         })
         .collect();
 
@@ -158,7 +158,7 @@ fn from_anthropic_response(resp: AnthropicResponse, original_model: &str) -> Cha
             index: 0,
             message: ChatMessage {
                 role: Role::Assistant,
-                content,
+                content: content.into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -463,20 +463,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_user_text_parts_flattened_to_space_joined_string() {
+        use solvela_protocol::vision::{ContentPart, MessageContent};
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-20250514".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "first".to_string(),
+                    },
+                    ContentPart::Text {
+                        text: "second".to_string(),
+                    },
+                ]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let anthropic_req = to_anthropic_request(&req);
+        assert_eq!(anthropic_req.messages.len(), 1);
+        // String-based adapter flattens text parts with a single space.
+        assert_eq!(anthropic_req.messages[0].content, "first second");
+    }
+
+    #[test]
     fn test_system_message_extraction() {
         let req = ChatRequest {
             model: "anthropic/claude-sonnet-4-20250514".to_string(),
             messages: vec![
                 ChatMessage {
                     role: Role::System,
-                    content: "You are a helpful assistant.".to_string(),
+                    content: "You are a helpful assistant.".into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
                 },
                 ChatMessage {
                     role: Role::User,
-                    content: "Hello!".to_string(),
+                    content: "Hello!".into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
@@ -507,21 +540,21 @@ mod tests {
             messages: vec![
                 ChatMessage {
                     role: Role::System,
-                    content: "You are a helpful assistant.".to_string(),
+                    content: "You are a helpful assistant.".into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
                 },
                 ChatMessage {
                     role: Role::Developer,
-                    content: "Always respond in JSON.".to_string(),
+                    content: "Always respond in JSON.".into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
                 },
                 ChatMessage {
                     role: Role::User,
-                    content: "Hello!".to_string(),
+                    content: "Hello!".into(),
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
@@ -603,7 +636,7 @@ mod tests {
         assert_eq!(chat_resp.object, "chat.completion");
         assert_eq!(chat_resp.choices.len(), 1);
         assert_eq!(
-            chat_resp.choices[0].message.content,
+            chat_resp.choices[0].message.content.as_text(),
             "Hello! How can I help you?"
         );
         assert_eq!(chat_resp.choices[0].finish_reason, Some("stop".to_string()));

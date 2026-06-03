@@ -97,7 +97,7 @@ mod tests {
             model: model.to_string(),
             messages: vec![ChatMessage {
                 role: Role::User,
-                content: "hi".to_string(),
+                content: "hi".into(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,

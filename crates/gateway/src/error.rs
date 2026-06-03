@@ -65,6 +65,14 @@ pub enum GatewayError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    /// The request carried content the gateway accepts on the wire but does
+    /// not yet process — currently image/multimodal content parts. Maps to
+    /// 415 Unsupported Media Type. The inner message is forwarded verbatim
+    /// (it is a static, safe-to-share capability message, not an internal
+    /// detail).
+    #[error("unsupported media type: {0}")]
+    UnsupportedMediaType(String),
+
     #[error("rate limited")]
     RateLimited,
 
@@ -114,6 +122,11 @@ impl IntoResponse for GatewayError {
                 )
             }
             GatewayError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg.clone()),
+            GatewayError::UnsupportedMediaType(msg) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
+                msg.clone(),
+            ),
             GatewayError::RateLimited => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limited",
@@ -229,6 +242,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_unsupported_media_type_returns_415() {
+        let (status, json) = error_response(GatewayError::UnsupportedMediaType(
+            "image/multimodal content is not yet supported".to_string(),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(json["error"]["type"], "unsupported_media_type");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not yet supported"));
+    }
+
+    #[tokio::test]
     async fn test_rate_limited_returns_429() {
         let (status, json) = error_response(GatewayError::RateLimited).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
@@ -274,6 +301,10 @@ mod tests {
         assert_eq!(
             GatewayError::BadRequest("oops".to_string()).to_string(),
             "bad request: oops"
+        );
+        assert_eq!(
+            GatewayError::UnsupportedMediaType("images".to_string()).to_string(),
+            "unsupported media type: images"
         );
         assert_eq!(GatewayError::RateLimited.to_string(), "rate limited");
         assert_eq!(
@@ -369,6 +400,7 @@ mod tests {
             GatewayError::InvalidPayment("x".to_string()),
             GatewayError::SettlementFailed("x".to_string()),
             GatewayError::BadRequest("x".to_string()),
+            GatewayError::UnsupportedMediaType("x".to_string()),
             GatewayError::RateLimited,
             GatewayError::Internal("x".to_string()),
         ];

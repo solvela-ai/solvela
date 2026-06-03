@@ -235,7 +235,7 @@ mod tests {
     fn user_message(content: &str) -> ChatMessage {
         ChatMessage {
             role: Role::User,
-            content: content.to_string(),
+            content: content.into(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
