@@ -118,11 +118,11 @@ fn validate_gemini_model_name(model: &str) -> Result<(), String> {
 fn to_gemini_request(req: &ChatRequest) -> GeminiRequest {
     // Extract system instruction
     let system_instruction: Option<GeminiContent> = {
-        let system_text: Vec<std::borrow::Cow<'_, str>> = req
+        let system_text: Vec<String> = req
             .messages
             .iter()
             .filter(|m| m.role == Role::System || m.role == Role::Developer)
-            .map(|m| m.content.as_text())
+            .map(|m| m.content.as_text().into_owned())
             .collect();
 
         if system_text.is_empty() {

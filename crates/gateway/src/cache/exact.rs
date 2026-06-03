@@ -9,7 +9,7 @@
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-use solvela_protocol::{ChatRequest, ChatResponse};
+use solvela_protocol::{ChatRequest, ChatResponse, MessageContent};
 
 use super::{ResponseCache, CACHE_KEY_PREFIX};
 
@@ -37,8 +37,47 @@ impl ResponseCache {
     /// prompt sharing the remaining fields collide — a wallet A request
     /// served wallet B's response. Callers treat `None` as a guaranteed cache
     /// miss and fall through to the upstream provider.
+    ///
+    /// ## Content normalization (wire-shape independence)
+    ///
+    /// `ChatMessage::content` is a `#[serde(untagged)]` [`MessageContent`]:
+    /// the same text reaches us either as a bare JSON string
+    /// (`Text("hello")`) or as an array of parts
+    /// (`Parts([{"type":"text","text":"hello"}])`) depending on the client
+    /// (curl sends strings, array-shaped agents send parts). Those two shapes
+    /// serialise to *different* bytes, so hashing `req.messages` verbatim
+    /// would yield different keys for text-identical prompts — an exact-cache
+    /// miss that charges the operator for a duplicate upstream call and
+    /// violates CLAUDE.md rule #16 (identical prompts share a cached
+    /// response). To make the key wire-shape-independent, each message whose
+    /// content carries no image parts is normalised to its canonical
+    /// `Text(as_text())` form *for key computation only* (the caller's `req`
+    /// is never mutated). Messages that contain image parts keep their
+    /// original serialisation: flattening would discard the image and let two
+    /// genuinely different multimodal prompts collide. (Image content is
+    /// rejected upstream today, so this branch is defensive.)
     pub fn cache_key(req: &ChatRequest) -> Option<String> {
-        let msgs_json = match serde_json::to_string(&req.messages) {
+        // Normalise message content to a canonical text form so the same
+        // prompt sent as a JSON string and as a text-parts array hashes
+        // identically. Clone-and-swap is fine here: this is the cache-key
+        // path, not the hottest request loop, and we must not mutate `req`.
+        let normalized_messages: Vec<_> = req
+            .messages
+            .iter()
+            .map(|msg| {
+                if msg.content.has_image_parts() {
+                    // Keep original content: flattening would drop the image
+                    // and let distinct multimodal prompts collide.
+                    msg.clone()
+                } else {
+                    let mut normalized = msg.clone();
+                    normalized.content = MessageContent::Text(msg.content.as_text().into_owned());
+                    normalized
+                }
+            })
+            .collect();
+
+        let msgs_json = match serde_json::to_string(&normalized_messages) {
             Ok(s) => s,
             Err(e) => {
                 warn!(error = %e, model = %req.model, "cache_key: failed to serialise messages; treating as guaranteed miss");
@@ -210,7 +249,7 @@ impl ResponseCache {
 mod tests {
     use super::*;
     use crate::cache::CacheConfig;
-    use solvela_protocol::{ChatMessage, Role};
+    use solvela_protocol::{ChatMessage, ContentPart, Role};
 
     use crate::cache::test_metrics::{counter_value, install_test_recorder};
 
@@ -236,6 +275,21 @@ mod tests {
         ChatMessage {
             role: Role::User,
             content: content.into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// Build a user message whose content is a `Parts` array carrying a single
+    /// text part — the wire shape array-based clients send. `as_text()` on
+    /// this equals the equivalent `Text(content)` message.
+    fn user_message_parts(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Text {
+                text: content.to_string(),
+            }]),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -272,6 +326,49 @@ mod tests {
         assert_ne!(
             ResponseCache::cache_key(&req_a).expect("test request must serialise"),
             ResponseCache::cache_key(&req_b).expect("test request must serialise"),
+        );
+    }
+
+    /// Wire-shape independence (CLAUDE.md rule #16). The same text prompt sent
+    /// as a bare JSON string (`Text("hello")`) and as a text-parts array
+    /// (`Parts([{type:text, text:"hello"}])`) MUST hash to the same cache key;
+    /// otherwise an array-shaped client (e.g. an agent that sends content
+    /// arrays) misses the cache populated by a string-shaped client (e.g.
+    /// curl) for a text-identical prompt, charging the operator for a
+    /// duplicate upstream call. A genuinely different prompt must still hash
+    /// differently — proving the normalization collapses *shape* but not
+    /// *content*.
+    ///
+    /// Falsifiability: removing the content normalization from `cache_key`
+    /// (hashing `req.messages` verbatim) makes the first assertion fail,
+    /// because the two wire shapes serialise to different bytes.
+    #[test]
+    fn cache_key_is_wire_shape_independent_for_text() {
+        let req_string = make_request("openai/gpt-4o", vec![user_message("hello")], Some(0.7));
+        let req_parts = make_request(
+            "openai/gpt-4o",
+            vec![user_message_parts("hello")],
+            Some(0.7),
+        );
+        let key_string =
+            ResponseCache::cache_key(&req_string).expect("test request must serialise");
+        let key_parts = ResponseCache::cache_key(&req_parts).expect("test request must serialise");
+        assert_eq!(
+            key_string, key_parts,
+            "Text(\"hello\") and Parts([Text(\"hello\")]) are the same prompt and \
+             must share a cache key"
+        );
+
+        // A genuinely different prompt (in either shape) must NOT collide.
+        let req_other = make_request(
+            "openai/gpt-4o",
+            vec![user_message_parts("goodbye")],
+            Some(0.7),
+        );
+        let key_other = ResponseCache::cache_key(&req_other).expect("test request must serialise");
+        assert_ne!(
+            key_string, key_other,
+            "different prompt text must produce a different cache key"
         );
     }
 

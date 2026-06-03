@@ -10,16 +10,23 @@
 //! round-trips as a JSON string, preserving backward compatibility for
 //! existing string-only clients.
 //!
+//! Image parts are NOT silently dropped here. They are rejected upstream:
+//! the chat route returns `415 Unsupported Media Type` for any request
+//! carrying image content, and `reject_image_content` is a backstop at
+//! provider dispatch. Because image content never reaches this layer in
+//! practice, [`MessageContent::as_text`] simply ignores any image parts it
+//! sees rather than treating that case as an error.
+//!
 //! For the string-based provider adapters (Anthropic / Google), text
 //! parts are flattened to a single string via
-//! [`MessageContent::as_text`]; image parts are dropped in this stage.
-//! For OpenAI-format providers (OpenAI / xAI / DeepSeek), the request is
-//! serialized through directly, so array content passes through natively
-//! to the upstream API.
+//! [`MessageContent::as_text`]. For OpenAI-format providers (OpenAI / xAI
+//! / DeepSeek), the request is serialized through directly, so array
+//! content passes through natively to the upstream API.
 //!
 //! Native image-block translation for Anthropic / Google, model
-//! capability gating in `models.toml`, and image cost accounting are a
-//! tracked follow-up PR — image parts are ignored here.
+//! capability gating in `models.toml`, and image cost accounting are not
+//! yet implemented; image content is rejected at the boundary until they
+//! are.
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +39,15 @@ pub struct ImageUrl {
 }
 
 /// A single part of multi-modal content (text or image).
+///
+/// The ABSENCE of a `#[serde(other)]` / catch-all variant is DELIBERATE
+/// policy, not an oversight. An unknown `type` value fails to deserialize
+/// and is rejected loudly at the wire boundary (4xx) rather than being
+/// silently coerced into an "unknown" variant. This keeps billing and
+/// capability gating sound: a client cannot smuggle a content part of an
+/// unrecognized type past cost accounting or the image-rejection check by
+/// labelling it with a `type` we don't model. Add a real variant here when
+/// a new content kind is intentionally supported — never a catch-all.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
@@ -93,7 +109,10 @@ impl MessageContent {
     /// borrows that part's string (zero-copy), and it only allocates when
     /// joining 2+ text parts (separated by a single space `" "`). An empty
     /// `Parts` list, or one with no text parts, yields a borrowed empty
-    /// string. Image parts are ignored in this stage (see module docs).
+    /// string. Any image parts are ignored here because image content is
+    /// rejected upstream (415 on the chat route + `reject_image_content`
+    /// backstop) and so never reaches this method in practice; see module
+    /// docs.
     ///
     /// The join separator is a single space so the flattened text reads
     /// naturally for guard scanning and string-based provider adapters.
@@ -101,29 +120,33 @@ impl MessageContent {
         match self {
             MessageContent::Text(s) => std::borrow::Cow::Borrowed(s),
             MessageContent::Parts(parts) => {
-                let mut texts = parts.iter().filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    ContentPart::ImageUrl { .. } => None,
-                });
-                match texts.next() {
+                // Collect the text-part slices up front so we know the exact
+                // count and can size the join allocation precisely.
+                let texts: Vec<&str> = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        ContentPart::ImageUrl { .. } => None,
+                    })
+                    .collect();
+                match texts.as_slice() {
                     // No text parts at all → borrow an empty static str.
-                    None => std::borrow::Cow::Borrowed(""),
-                    Some(first) => match texts.next() {
-                        // Exactly one text part → borrow it (zero-copy).
-                        None => std::borrow::Cow::Borrowed(first),
-                        // 2+ text parts → allocate and space-join.
-                        Some(second) => {
-                            let mut joined = String::with_capacity(first.len() + second.len() + 1);
-                            joined.push_str(first);
+                    [] => std::borrow::Cow::Borrowed(""),
+                    // Exactly one text part → borrow it (zero-copy).
+                    [only] => std::borrow::Cow::Borrowed(only),
+                    // 2+ text parts → allocate ONCE for any number of parts and
+                    // space-join. Capacity = sum(lengths) + (count - 1)
+                    // separators, so the buffer never reallocates mid-join.
+                    many => {
+                        let total: usize = many.iter().map(|s| s.len()).sum();
+                        let mut joined = String::with_capacity(total + many.len() - 1);
+                        joined.push_str(many[0]);
+                        for part in &many[1..] {
                             joined.push(' ');
-                            joined.push_str(second);
-                            for rest in texts {
-                                joined.push(' ');
-                                joined.push_str(rest);
-                            }
-                            std::borrow::Cow::Owned(joined)
+                            joined.push_str(part);
                         }
-                    },
+                        std::borrow::Cow::Owned(joined)
+                    }
                 }
             }
         }
@@ -133,9 +156,9 @@ impl MessageContent {
     ///
     /// Reflects text emptiness only: a `Parts` value whose only members are
     /// image parts is considered empty here. That is acceptable because image
-    /// content is rejected upstream in PR #1 (see the chat route validation),
-    /// so `is_empty()` callers never observe an image-only message in
-    /// practice. Computed without allocating.
+    /// content is rejected upstream (415 on the chat route; see the chat
+    /// route validation), so `is_empty()` callers never observe an
+    /// image-only message in practice. Computed without allocating.
     pub fn is_empty(&self) -> bool {
         match self {
             MessageContent::Text(s) => s.is_empty(),
@@ -148,9 +171,10 @@ impl MessageContent {
 
     /// True if any [`ContentPart::ImageUrl`] is present.
     ///
-    /// Used by the chat route to reject image/multimodal content in PR #1:
+    /// Used by the chat route to reject image/multimodal content (415):
     /// native image-block translation, capability gating, and image cost
-    /// accounting are a tracked follow-up PR.
+    /// accounting are not yet implemented, so image content is rejected at
+    /// the boundary until they are.
     pub fn has_image_parts(&self) -> bool {
         match self {
             MessageContent::Text(_) => false,

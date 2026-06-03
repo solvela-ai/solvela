@@ -84,11 +84,11 @@ struct AnthropicUsage {
 fn to_anthropic_request(req: &ChatRequest) -> AnthropicRequest {
     // Extract system message(s) — Anthropic takes system as a separate param
     let system: Option<String> = {
-        let system_msgs: Vec<std::borrow::Cow<'_, str>> = req
+        let system_msgs: Vec<String> = req
             .messages
             .iter()
             .filter(|m| m.role == Role::System || m.role == Role::Developer)
-            .map(|m| m.content.as_text())
+            .map(|m| m.content.as_text().into_owned())
             .collect();
 
         if system_msgs.is_empty() {

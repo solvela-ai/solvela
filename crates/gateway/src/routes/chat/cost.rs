@@ -3,7 +3,7 @@
 //! All financial calculations use integer arithmetic to avoid f64 precision
 //! loss on monetary amounts. USDC has 6 decimal places (atomic units).
 
-use tracing::warn;
+use tracing::{error, warn};
 
 use solvela_protocol::{ChatRequest, ModelRegistration, Usage};
 
@@ -104,14 +104,31 @@ pub(crate) fn cap_usage_to_request_limits(
 /// Rough token estimate: ~4 chars per token.
 pub(crate) fn estimate_input_tokens(req: &ChatRequest) -> u32 {
     // `as_text()` flattens only text parts — image parts contribute zero chars,
-    // so this estimate silently undercounts vision input. Images are rejected
-    // upstream today, so the trap is currently dead; this assert fires it in
-    // tests when vision lands (PR #2) so the estimate is revisited then.
+    // so this estimate silently undercounts vision input (an image message would
+    // be priced as ~1 token, i.e. near-zero charge). Images are rejected upstream
+    // today (route + fallback backstop return 415), so this branch is unreachable
+    // for normal traffic; this is a defense-in-depth observability guard.
+    //
+    // The `debug_assert!` documents the invariant and fires it in debug/test
+    // builds, but it is COMPILED OUT in `--release` (which is what the gateway
+    // ships), so it cannot be relied on as a production signal. The
+    // `tracing::error!` below is the production-visible guard: it survives
+    // release builds and fires on a real (money-path) cost path if image
+    // content ever reaches estimation despite the upstream rejection.
+    let has_image = req.messages.iter().any(|m| m.content.has_image_parts());
     debug_assert!(
-        !req.messages.iter().any(|m| m.content.has_image_parts()),
+        !has_image,
         "estimate_input_tokens does not account for image tokens — image content \
          must be rejected upstream; revisit when vision lands (PR #2)"
     );
+    if has_image {
+        error!(
+            messages = req.messages.len(),
+            "image content reached estimate_input_tokens — input tokens will be \
+             undercounted (image parts contribute zero chars), producing a near-zero \
+             cost estimate; should be unreachable given upstream 415 rejection"
+        );
+    }
     let chars: usize = req.messages.iter().map(|m| m.content.as_text().len()).sum();
     (chars / 4).max(1) as u32
 }

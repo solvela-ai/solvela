@@ -1379,6 +1379,108 @@ async fn semantic_hit_full_atomic_fallback_serves_usage_less_entry() {
     );
 }
 
+/// Parts-form and Text-form content with identical text MUST share the exact
+/// same cache entry. We seed the cache (via the read-after-write `store()`)
+/// using a Text-form request, then send the EQUIVALENT Parts-form request
+/// through the real HTTP route and assert it is served from cache
+/// (`x-solvela-cache: semantic-hit` + the seeded body id).
+///
+/// This is the cache-key-equivalence guard for PR #1: the cache derives its
+/// prompt text via `MessageContent::as_text()`, so `"X"` and
+/// `[{"type":"text","text":"X"}]` normalize to the same text and must collide
+/// in the cache. A regression that keyed on the raw content shape (string vs
+/// array) instead of the flattened text would surface here as a MISS (200 with
+/// no `semantic-hit` header / a fresh provider id) rather than a hit.
+///
+/// Identical text → cosine similarity 1.0, well above the 0.85 threshold, so
+/// the assertion is deterministic (not a near-threshold paraphrase).
+/// Graceful-skips when redis-stack / the embedder are unavailable, matching the
+/// other semantic-cache integration tests.
+#[tokio::test]
+async fn semantic_cache_parts_and_text_share_entry() {
+    let Some(sem) = try_semantic_cache().await else {
+        return;
+    };
+
+    // Distinctive topic avoids cosine collision with the other semantic tests
+    // that share the Redis HNSW index without a cross-test lock.
+    let seeded = ChatResponse {
+        id: "seeded-parts-text-equiv".to_string(),
+        object: "chat.completion".to_string(),
+        created: 0,
+        model: "openai/gpt-4o".to_string(),
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: Role::Assistant,
+                content: "Honeybees communicate food location through a waggle dance.".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            finish_reason: Some("stop".to_string()),
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 10,
+            completion_tokens: 15,
+            total_tokens: 25,
+        }),
+    };
+    // Seed with TEXT-form content.
+    let seed_req = ChatRequest {
+        model: "openai/gpt-4o".to_string(),
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: "How do honeybees communicate the location of food?".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }],
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        tools: None,
+        tool_choice: None,
+    };
+    sem.store(&seed_req, &seeded).await.expect("seed store");
+
+    let app = app_with_semantic_cache(Arc::clone(&sem));
+
+    // Send the EQUIVALENT request in PARTS form — identical text, split is
+    // irrelevant because as_text() flattens to the same string the seed used.
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[{"type":"text","text":"How do honeybees communicate the location of food?"}]}]}"#;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-solvela-debug", "true")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-cache")
+            .and_then(|v| v.to_str().ok()),
+        Some("semantic-hit"),
+        "a Parts-form request must hit the cache entry seeded with the \
+         equivalent Text-form content — both flatten to the same prompt text"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        v["id"], "seeded-parts-text-equiv",
+        "Parts-form request must be served the entry seeded via Text-form, \
+         proving the two content shapes share one cache entry"
+    );
+}
+
 /// Build a test app with mock providers and escrow support enabled.
 fn test_app_with_mock_provider_and_escrow() -> axum::Router {
     test_app_with_mock_provider_and_escrow_verifier(Arc::new(AlwaysPassEscrowVerifier))
@@ -1856,6 +1958,291 @@ async fn test_chat_number_content_returns_4xx() {
         "numeric content must return 4xx (not panic/500), got {}",
         response.status()
     );
+}
+
+/// MAX_CONTENT_PARTS boundary (lower edge): a message with exactly 64 text
+/// parts is at the cap and MUST NOT be rejected for parts-count. With no
+/// payment header it falls through to the 402 cost path — proving the
+/// parts-count guard accepted it (a 400 here would mean the cap was applied
+/// off-by-one at `>= 64` instead of `> 64`).
+#[tokio::test]
+async fn test_chat_content_parts_at_cap_is_accepted() {
+    let app = test_app();
+
+    let parts: Vec<serde_json::Value> = (0..64)
+        .map(|i| serde_json::json!({"type": "text", "text": format!("p{i}")}))
+        .collect();
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": parts}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 64 parts is AT the cap (MAX_CONTENT_PARTS = 64), so it must clear the
+    // parts-count gate. Without payment that means the 402 cost path, never a
+    // 400-for-too-many-parts.
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "exactly 64 content parts is at the cap and must be accepted (402, not 400)"
+    );
+}
+
+/// MAX_CONTENT_PARTS boundary (over edge): 65 text parts exceeds the cap and
+/// MUST be rejected with 400 BadRequest, with a message naming the cap. Runs
+/// before payment so an over-large request is never billed.
+#[tokio::test]
+async fn test_chat_content_parts_over_cap_returns_400() {
+    let app = test_app();
+
+    let parts: Vec<serde_json::Value> = (0..65)
+        .map(|i| serde_json::json!({"type": "text", "text": format!("p{i}")}))
+        .collect();
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": parts}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "65 content parts exceeds the cap of 64 and must be rejected with 400"
+    );
+
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let msg = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("too many content parts") && msg.contains("64"),
+        "400 error must name the content-parts cap, got: {msg}"
+    );
+}
+
+/// Image rejection runs BEFORE the 402, not after. The same image body that is
+/// rejected with 415 when a payment header IS present
+/// (`test_chat_image_content_rejected_with_415`) must also be rejected with
+/// 415 when NO payment header is present — proving the image guard precedes the
+/// payment check and an unpaid image request never leaks a 402 cost quote.
+#[tokio::test]
+async fn test_chat_image_content_rejected_with_415_without_payment() {
+    let app = test_app();
+
+    // Raw JSON so we exercise the real wire deserialization of an image part.
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://x/y.png"}}]}]}"#;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "image content must be rejected with 415 BEFORE the 402 payment check, \
+         not after — an unpaid image request must never receive a cost quote"
+    );
+
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"]["type"], "unsupported_media_type");
+}
+
+/// 402 cost path with Parts-form content: a multi-text-part message sent
+/// WITHOUT a payment header must return 402 with a populated cost breakdown,
+/// exactly like the string-content 402 path (`test_chat_returns_402_without_payment`).
+/// Proves the cost estimator handles array content and quotes a non-zero total.
+#[tokio::test]
+async fn test_chat_parts_content_returns_402_with_cost_breakdown() {
+    let app = test_app();
+
+    // Raw body so we exercise the wire-format deserialization of array content
+    // on the unauthenticated cost path.
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[{"type":"text","text":"Summarize the causes of the French Revolution"},{"type":"text","text":"in three concise bullet points."}]}]}"#;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "Parts-form content without payment must return 402 like string content"
+    );
+
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let payment_info: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(payment_info["x402_version"], 2);
+    assert!(payment_info["accepts"].is_array());
+    assert_eq!(payment_info["cost_breakdown"]["currency"], "USDC");
+    assert_eq!(payment_info["cost_breakdown"]["fee_percent"], 5);
+
+    // Total is a decimal USDC string (e.g. "0.000123"); parse and assert it is
+    // a real, non-zero quote — proves the Parts-form prompt was actually costed.
+    let total_str = payment_info["cost_breakdown"]["total"]
+        .as_str()
+        .expect("cost_breakdown.total must be a string");
+    let total: f64 = total_str
+        .parse()
+        .expect("cost_breakdown.total must parse as a decimal");
+    assert!(
+        total > 0.0,
+        "Parts-form 402 quote must be a non-zero total, got {total_str}"
+    );
+}
+
+/// Empty-content rejection (the new guard): a request whose only user message
+/// has empty `Parts([])` content carries no actual prompt and must be rejected
+/// with 400 BEFORE payment — so an empty request is never billed and never
+/// 5xxes downstream on `"content":[]`.
+#[tokio::test]
+async fn test_chat_empty_parts_content_returns_400() {
+    let app = test_app();
+
+    // Empty array content — flattens to empty text, so there is no user prompt.
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":[]}]}"#;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a request with only empty-content user messages must be rejected with 400"
+    );
+
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let msg = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("no user message with non-empty text content"),
+        "400 error must explain the empty-prompt rejection, got: {msg}"
+    );
+}
+
+/// Whitespace-only content is treated as empty by the guard (it trims before
+/// the emptiness check) and must be rejected with 400 — a request of only
+/// blanks carries no prompt and must never be billed.
+#[tokio::test]
+async fn test_chat_whitespace_only_content_returns_400() {
+    let app = test_app();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "   \t  \n "}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "whitespace-only content must be rejected with 400 (trimmed to empty)"
+    );
+}
+
+/// Legitimate OpenAI multi-turn: an ASSISTANT message with `content: null` +
+/// `tool_calls` is NOT a user prompt, but a USER message carries real text.
+/// The empty-content guard must NOT reject this — it only requires that *some*
+/// user message has non-empty text. With a payment header + mock provider it
+/// must reach the provider and return 200, proving validation let it through.
+#[tokio::test]
+async fn test_chat_assistant_null_content_with_user_text_is_accepted() {
+    let app = test_app_with_mock_provider();
+
+    // Real OpenAI tool-calling shape: assistant turn with null content +
+    // tool_calls, followed by a tool result, with a genuine user prompt first.
+    let body = r#"{
+        "model":"openai/gpt-4o",
+        "messages":[
+            {"role":"user","content":"What is the weather in Paris?"},
+            {"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},
+            {"role":"tool","tool_call_id":"call_1","content":"18C and sunny"}
+        ]
+    }"#;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a multi-turn request with assistant content:null + tool_calls must NOT \
+         be rejected by the empty-content guard when a user message has real text"
+    );
+
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["object"], "chat.completion");
 }
 
 /// Paid requests with NO provider configured should return 500 (stub rejection).

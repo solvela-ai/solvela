@@ -16,13 +16,17 @@ use super::{ChatStream, ProviderError, ProviderRegistry};
 /// content parts before it can reach a provider serialization step.
 ///
 /// Image/multimodal content is rejected with a nicer 415 at the HTTP route
-/// (`routes/chat/mod.rs`) before payment, but that is a single gate. The A2A
-/// path and every fallback variant funnel provider dispatch through this
-/// module, so guarding here guarantees image content can NEVER be serialized to
-/// an upstream provider regardless of entry path — native image-block
-/// translation, capability gating, and image cost accounting are a tracked
-/// follow-up PR. Returns the module's `ProviderError` so the caller surfaces a
-/// failure rather than silently dropping (or billing for) image parts.
+/// (`routes/chat/mod.rs`) before payment, but that is a single gate. This
+/// backstop covers every provider-DISPATCH entry point — the HTTP fallback
+/// variants plus the A2A dispatch leg (which funnels through
+/// `chat_with_model_fallback`) — so image content cannot be serialized to an
+/// upstream provider via any dispatch path. The A2A request-INTAKE leg
+/// (cost estimation in `handle_new_request`) does NOT pass through this module;
+/// it is safe separately because it builds `Text` content from a plain string,
+/// not from client image parts. Native image-block translation, capability
+/// gating, and image cost accounting are a tracked follow-up PR. Returns the
+/// module's `ProviderError` so the caller surfaces a failure rather than
+/// silently dropping (or billing for) image parts.
 fn reject_image_content(req: &ChatRequest) -> Result<(), ProviderError> {
     if req.messages.iter().any(|m| m.content.has_image_parts()) {
         tracing::error!(
