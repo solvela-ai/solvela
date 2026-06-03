@@ -71,16 +71,23 @@ pub enum ParseImageError {
 
 /// The image media types accepted by [`ImageUrl::parse`].
 ///
-/// Restricted to the formats the downstream providers actually decode. Verified
-/// 2026-06-03 against the live Anthropic vision docs
+/// Restricted to the INTERSECTION of formats every vision provider the gateway
+/// routes to can decode, so an allowed `data:` URI never settles payment and
+/// then gets rejected by the upstream provider. Verified 2026-06-03 against the
+/// live Anthropic vision docs
 /// (platform.claude.com/docs/en/build-with-claude/vision — jpeg/png/gif/webp)
 /// and the Gemini image-understanding docs
 /// (ai.google.dev/gemini-api/docs/image-understanding — png/jpeg/webp/heic/heif).
-/// We accept the Anthropic set (which is also the OpenAI-documented set); `gif`
-/// is Anthropic-only and `heic/heif` are Gemini-only, so callers that route a
-/// `gif` to Gemini may still see a provider-side rejection — but no UNSUPPORTED
-/// type is ever forwarded blindly.
-const SUPPORTED_MEDIA_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+/// `gif` is deliberately EXCLUDED: it is Anthropic-only (Gemini cannot decode
+/// it), so accepting a `data:image/gif` would let an agent pay for a request a
+/// Gemini-routed model can never serve. `heic/heif` are likewise excluded
+/// (Gemini-only). The kept set (png/jpeg/webp) is the common subset that
+/// decodes on every provider — no type is ever billed-then-rejected for being
+/// undecodable. (Remote `http(s)` image URLs carry no declared media type and
+/// so bypass this allowlist; a `.gif` URL routed to Gemini remains a residual
+/// pay-then-fail edge the gateway cannot detect without fetching — see
+/// `providers/google.rs::mime_type_from_url`.)
+const SUPPORTED_MEDIA_TYPES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
 
 /// An image URL with optional detail level.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -718,8 +725,15 @@ mod tests {
             img("data:image/bmp;base64,Qk0=").parse(),
             Err(ParseImageError::UnsupportedScheme(_))
         ));
+        // image/gif is deliberately rejected: it is Anthropic-only and Gemini
+        // cannot decode it, so accepting it would let an agent pay for a request
+        // a Gemini-routed model can never serve. Excluded from the common subset.
+        assert!(matches!(
+            img("data:image/gif;base64,R0lGODdh").parse(),
+            Err(ParseImageError::UnsupportedScheme(_))
+        ));
         // Each allowlisted type is accepted.
-        for mt in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+        for mt in ["image/png", "image/jpeg", "image/webp"] {
             let uri = format!("data:{mt};base64,QUJD");
             let parsed = img(&uri).parse().expect("allowlisted type must parse");
             assert_eq!(

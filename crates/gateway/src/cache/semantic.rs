@@ -595,17 +595,6 @@ fn redis_value_to_string(v: &redis::Value) -> Option<String> {
     }
 }
 
-/// Canonicalise a chat request's messages into the single string we embed.
-/// Deterministic and order-sensitive (message order changes meaning). Each
-/// message contributes a `role: content` line; ordering is preserved.
-///
-/// Sampling params (`temperature` / `top_p`) are **not** embedded here. An
-/// earlier attempt appended them as a trailing `params:` line, but that does
-/// not separate hits: two prompts identical except for temperature embed to
-/// near-identical vectors (cosine ≈ 0.99 ≫ the 0.85 threshold), so the param
-/// line is invisible to the KNN gate and the wrong sampling regime gets served.
-/// Sampling params are instead enforced as exact RediSearch TAG predicates (see
-/// [`param_tag`] and the `@temperature` / `@top_p` filters in [`SemanticCache::get`]).
 /// A deterministic, compact textual representation of a message's image parts,
 /// or the empty string when there are none.
 ///
@@ -613,15 +602,18 @@ fn redis_value_to_string(v: &redis::Value) -> Option<String> {
 /// different images embed to distinct vectors (preventing a cross-image
 /// semantic-cache collision). Each image contributes ` image=<rep>`:
 /// - `http(s)` URL → the URL verbatim (already short and stable).
-/// - `data:` URI → `sha256:<first-32-hex>` (128-bit prefix) of the decoded
-///   base64 PAYLOAD bytes (not the raw URL string), so a multi-megabyte base64
+/// - `data:` URI → `sha256:<first-32-hex>` (128-bit prefix) of the raw base64
+///   payload string bytes (verbatim — the payload is NOT decoded first; see
+///   [`solvela_protocol::ParsedImage::Base64`]), so a multi-megabyte base64
 ///   blob does not bloat the embedded text or exceed the embed budget while
 ///   still distinguishing distinct images. 128 bits avoids birthday collisions
-///   in the shared, wallet-agnostic cache.
-/// - unparseable url → `raw:<sha256 first-32-hex>` of the raw string, so even a
-///   malformed image still separates distinct values (defensive; malformed
-///   images are rejected before settlement, but the cache layer must not
-///   collide them).
+///   in the shared, wallet-agnostic cache. (Two distinct base64 encodings of
+///   the same image hash differently — a benign cache *miss*, never a wrong
+///   hit.)
+/// - unparseable url → returns [`ImageRepResult::Skip`], so the caller bypasses
+///   the semantic cache entirely for this request rather than building a key
+///   that could diverge from a (hypothetical) parsed key. Defensive: malformed
+///   images are rejected at the route before settlement.
 fn image_rep_suffix(model: &str, content: &solvela_protocol::MessageContent) -> ImageRepResult {
     use solvela_protocol::ParsedImage;
 
@@ -683,7 +675,17 @@ fn short_hash_hex(bytes: &[u8]) -> String {
     hex::encode(&digest[..16])
 }
 
-/// Canonicalise a request into the embedded prompt string.
+/// Canonicalise a chat request's messages into the single string we embed.
+/// Deterministic and order-sensitive (message order changes meaning). Each
+/// message contributes a `role: content` line; ordering is preserved.
+///
+/// Sampling params (`temperature` / `top_p`) are **not** embedded here. An
+/// earlier attempt appended them as a trailing `params:` line, but that does
+/// not separate hits: two prompts identical except for temperature embed to
+/// near-identical vectors (cosine ≈ 0.99 ≫ the 0.85 threshold), so the param
+/// line is invisible to the KNN gate and the wrong sampling regime gets served.
+/// Sampling params are instead enforced as exact RediSearch TAG predicates (see
+/// [`param_tag`] and the `@temperature` / `@top_p` filters in [`SemanticCache::get`]).
 ///
 /// Returns `None` to signal the caller must SKIP the semantic cache for this
 /// request — currently only when a message carries an unparseable image (see

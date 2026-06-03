@@ -219,9 +219,14 @@ pub async fn chat_completions(
     // images in system/developer messages here (the provider `system` channels
     // are text-only and would otherwise silently drop the image after payment).
     //
-    // Image parts in user/assistant/tool roles are INTENTIONALLY allowed (a
-    // valid multi-turn vision conversation can carry images in any of those
-    // roles); only system/developer-role images are rejected below.
+    // Image parts in user/assistant messages are always allowed (a valid
+    // multi-turn vision conversation carries images in those roles). Tool-role
+    // images are accepted here at the protocol layer — Gemini forwards them as
+    // user-role parts — but provider support varies: the Anthropic adapter
+    // rejects tool-role images (with a clear error) rather than silently
+    // dropping them, since it does not yet translate tool results to
+    // `tool_result` blocks. Only system/developer-role images are rejected
+    // unconditionally below.
     //
     // Per-image bytes are bounded by `MAX_DATA_URI_BYTES` inside `parse()`;
     // total image bytes across the whole request are additionally bounded by the

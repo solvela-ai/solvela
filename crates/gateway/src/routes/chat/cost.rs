@@ -116,10 +116,12 @@ const IMAGE_TOKENS_LOW_DETAIL: u32 = 85;
 
 /// Per-image token contribution for the upfront quote at `detail: "high"`,
 /// `"auto"`, or unspecified. A high-detail image tiles into multiple 512px
-/// crops; OpenAI's worst-case for a large image is ~765+ tokens (85 base +
-/// 170 per tile). We use 765 as a single conservative per-image figure so the
-/// quote over-, never under-, estimates a typical vision request. Still
-/// reconciled to provider-reported usage at settlement.
+/// crops; OpenAI's typical cost for a large (≤2048×2048) image is ~765 tokens
+/// (85 base + 170 per tile × 4 tiles). Images larger than 4 tiles cost more,
+/// but we use 765 as a single per-image figure so the quote covers a typical
+/// vision request without under-estimating it. Any overage is still reconciled
+/// to provider-reported usage at settlement, so the figure need not be a hard
+/// worst-case.
 const IMAGE_TOKENS_HIGH_DETAIL: u32 = 765;
 
 /// Conservative upfront-quote token contribution for one image, keyed on the

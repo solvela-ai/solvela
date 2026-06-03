@@ -187,6 +187,27 @@ fn to_anthropic_request(req: &ChatRequest) -> Result<AnthropicRequest, String> {
         }
     };
 
+    // Anthropic's Messages API carries only `user` and `assistant` turns, so a
+    // `Tool`-role message is dropped by the filter below (tool results are not
+    // yet translated to Anthropic `tool_result` blocks). The route gate accepts
+    // image parts in tool-role messages because other providers (e.g. Gemini)
+    // forward them, so without this guard a tool-role image would pass the gate,
+    // settle payment, then vanish here silently — the agent pays for a vision
+    // request the model never sees. Reject it loudly instead. (Tool-role TEXT is
+    // still dropped by the filter; that is a pre-existing limitation tracked
+    // separately, not introduced here.)
+    if req
+        .messages
+        .iter()
+        .any(|m| m.role == Role::Tool && m.content.has_image_parts())
+    {
+        return Err(
+            "image content in tool-role messages is not supported for Anthropic models; \
+             place images in a user message"
+                .to_string(),
+        );
+    }
+
     // Filter to user/assistant messages only
     let mut messages: Vec<AnthropicMessage> = Vec::new();
     for m in req
@@ -815,6 +836,50 @@ mod tests {
         assert!(
             to_anthropic_request(&req).is_err(),
             "an image in a system message must reject the request, not be silently dropped"
+        );
+    }
+
+    #[test]
+    fn test_image_in_tool_message_is_rejected_not_dropped() {
+        use solvela_protocol::vision::{ContentPart, ImageUrl, MessageContent};
+        // A WELL-FORMED image in a TOOL-role message. The Anthropic adapter only
+        // forwards user/assistant turns, so a tool-role message is dropped by
+        // the filter. The route gate accepts tool-role images (other providers
+        // forward them), so without an explicit guard the image would settle
+        // payment then vanish silently. Must reject loudly instead.
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::User,
+                    content: "what did the tool return?".into(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                ChatMessage {
+                    role: Role::Tool,
+                    content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                            detail: None,
+                        },
+                    }]),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: Some("call_1".to_string()),
+                },
+            ],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+        assert!(
+            to_anthropic_request(&req).is_err(),
+            "an image in a tool-role message must reject for Anthropic, not be silently dropped"
         );
     }
 
