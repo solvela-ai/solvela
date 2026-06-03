@@ -10,8 +10,10 @@ from solders.pubkey import Pubkey  # type: ignore[import-untyped]
 from solvela.constants import SOLANA_NETWORK, USDC_MINT
 from solvela.errors import SignerError
 from solvela.signer import KeypairSigner, Signer
-from solvela.types import PaymentAccept, Resource, SolanaPayload
+from solvela.types import EscrowPayload, PaymentAccept, Resource, SolanaPayload
 from solvela.wallet import Wallet
+
+ESCROW_PROGRAM = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
 
 
 class TestSignerInterface:
@@ -159,3 +161,162 @@ class TestSignPayment:
                 resource=_resource(),
                 accepted=_accept(),
             )
+
+
+def _escrow_accept(escrow_program_id: str | None = ESCROW_PROGRAM) -> PaymentAccept:
+    return PaymentAccept(
+        scheme="escrow",
+        network=SOLANA_NETWORK,
+        amount="2625",
+        asset=USDC_MINT,
+        pay_to="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+        max_timeout_seconds=300,
+        escrow_program_id=escrow_program_id,
+    )
+
+
+def _mock_slot_and_blockhash(httpx_mock, slot: int = 1_000_000) -> None:  # type: ignore[no-untyped-def]
+    """Queue getSlot then getLatestBlockhash responses (escrow path order)."""
+    httpx_mock.add_response(
+        url=_RPC_URL,
+        json={"jsonrpc": "2.0", "id": 1, "result": slot},
+    )
+    httpx_mock.add_response(
+        url=_RPC_URL,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "context": {"slot": slot},
+                "value": {"blockhash": _FAKE_BLOCKHASH, "lastValidBlockHeight": slot},
+            },
+        },
+    )
+
+
+class TestSchemeBranching:
+    """`sign_payment` must branch on `accepted.scheme` with no silent fallback."""
+
+    @pytest.mark.asyncio
+    async def test_escrow_scheme_returns_escrow_payload(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        wallet, _ = Wallet.create()
+        signer = KeypairSigner(wallet, rpc_url=_RPC_URL)
+        _mock_slot_and_blockhash(httpx_mock)
+
+        payload = await signer.sign_payment(
+            amount_atomic=2625,
+            recipient="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+            resource=_resource(),
+            accepted=_escrow_accept(),
+        )
+
+        assert payload.accepted.scheme == "escrow"
+        assert isinstance(payload.payload, EscrowPayload)
+        # deposit_tx is a non-empty signed tx
+        tx_bytes = base64.b64decode(payload.payload.deposit_tx)
+        assert tx_bytes[0] == 0x01  # 1 signature
+        # service_id is base64 of exactly 32 bytes
+        assert len(base64.b64decode(payload.payload.service_id)) == 32
+        # agent_pubkey is the wallet's base58 address
+        assert payload.payload.agent_pubkey == wallet.address()
+
+    @pytest.mark.asyncio
+    async def test_escrow_service_id_is_unique_per_call(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        wallet, _ = Wallet.create()
+        signer = KeypairSigner(wallet, rpc_url=_RPC_URL)
+        _mock_slot_and_blockhash(httpx_mock)
+        _mock_slot_and_blockhash(httpx_mock)
+
+        p1 = await signer.sign_payment(
+            amount_atomic=2625,
+            recipient="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+            resource=_resource(),
+            accepted=_escrow_accept(),
+        )
+        p2 = await signer.sign_payment(
+            amount_atomic=2625,
+            recipient="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+            resource=_resource(),
+            accepted=_escrow_accept(),
+        )
+        assert isinstance(p1.payload, EscrowPayload)
+        assert isinstance(p2.payload, EscrowPayload)
+        assert p1.payload.service_id != p2.payload.service_id
+
+    @pytest.mark.asyncio
+    async def test_exact_scheme_still_returns_solana_payload(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        # Regression: the exact path is unchanged by the escrow branch.
+        wallet, _ = Wallet.create()
+        signer = KeypairSigner(wallet, rpc_url=_RPC_URL)
+        httpx_mock.add_response(
+            url=_RPC_URL,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "context": {"slot": 1},
+                    "value": {"blockhash": _FAKE_BLOCKHASH, "lastValidBlockHeight": 1},
+                },
+            },
+        )
+        payload = await signer.sign_payment(
+            amount_atomic=1_000_000,
+            recipient="11111111111111111111111111111112",
+            resource=_resource(),
+            accepted=_accept(),
+        )
+        assert isinstance(payload.payload, SolanaPayload)
+        assert payload.accepted.scheme == "exact"
+
+    @pytest.mark.asyncio
+    async def test_escrow_missing_program_id_rejected(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        # No RPC should be hit — rejection happens before any network call.
+        wallet, _ = Wallet.create()
+        signer = KeypairSigner(wallet, rpc_url=_RPC_URL)
+        with pytest.raises(SignerError, match="escrow_program_id is missing"):
+            await signer.sign_payment(
+                amount_atomic=2625,
+                recipient="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+                resource=_resource(),
+                accepted=_escrow_accept(escrow_program_id=None),
+            )
+
+    @pytest.mark.asyncio
+    async def test_escrow_zero_amount_rejected(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        wallet, _ = Wallet.create()
+        signer = KeypairSigner(wallet, rpc_url=_RPC_URL)
+        with pytest.raises(SignerError, match="greater than zero"):
+            await signer.sign_payment(
+                amount_atomic=0,
+                recipient="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+                resource=_resource(),
+                accepted=_escrow_accept(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_unknown_scheme_rejected(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        wallet, _ = Wallet.create()
+        signer = KeypairSigner(wallet, rpc_url=_RPC_URL)
+        accept = _accept()
+        # Force an out-of-domain scheme past the type system to prove the
+        # signer fails closed rather than defaulting to a transfer.
+        object.__setattr__(accept, "scheme", "upto")
+        with pytest.raises(SignerError, match="Unsupported payment scheme"):
+            await signer.sign_payment(
+                amount_atomic=1_000_000,
+                recipient="11111111111111111111111111111112",
+                resource=_resource(),
+                accepted=accept,
+            )
+
+
+class TestEscrowExpirySlot:
+    def test_typical_300s(self) -> None:
+        # 300 s * 2.5 slots/s = 750 slots ahead.
+        assert KeypairSigner._escrow_expiry_slot(1_000_000, 300) == 1_000_750
+
+    def test_zero_seconds_applies_min_floor(self) -> None:
+        assert KeypairSigner._escrow_expiry_slot(1_000_000, 0) == 1_000_150
+
+    def test_huge_timeout_clamped_to_cap(self) -> None:
+        assert KeypairSigner._escrow_expiry_slot(1_000_000, 10**12) == 1_010_000
