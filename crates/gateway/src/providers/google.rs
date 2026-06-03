@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use solvela_protocol::{
-    ChatChoice, ChatMessage, ChatRequest, ChatResponse, ModelRegistration, Role, Usage,
+    ChatChoice, ChatMessage, ChatRequest, ChatResponse, ContentPart, MessageContent,
+    ModelRegistration, ParseImageError, ParsedImage, Role, Usage,
 };
 
 use super::LLMProvider;
@@ -48,12 +49,79 @@ struct GeminiContent {
     parts: Vec<GeminiPart>,
 }
 
+/// A single Gemini content part.
+///
+/// A part carries exactly ONE payload kind. We model that as an UNTAGGED enum
+/// so an empty part or a multi-field part is unrepresentable by construction:
+/// a text part serializes to `{"text":...}`, an inline image to
+/// `{"inlineData":{...}}`, and a remote image to `{"fileData":{...}}`.
+///
+/// On the RESPONSE side `serde(untagged)` tries each variant in declaration
+/// order; an unrecognized part kind (`thought`, `executableCode`, …) falls
+/// through to [`GeminiPart::Other`] (forward-compat) and is dropped by the
+/// response reader's `match` rather than failing the whole deserialization.
+///
+/// Wire schema verified against the Gemini API docs (ai.google.dev, fetched
+/// 2026-06-03):
+///   text:        {"text":"..."}
+///   inline image:{"inlineData":{"mimeType":"image/png","data":"<b64>"}}
+///   remote image:{"fileData":{"mimeType":"image/png","fileUri":"https://..."}}
+/// Field names are camelCase on the wire (`inlineData`, `mimeType`, `fileUri`).
+///
+/// VARIANT ORDER IS LOAD-BEARING. `untagged` takes the first variant that
+/// deserializes; `Other` (a permissive catch-all) MUST stay last so the typed
+/// variants are tried first.
 #[derive(Debug, Serialize, Deserialize)]
-struct GeminiPart {
-    #[serde(default)]
-    text: String,
-    // Newer Gemini models may return `thought`, `executableCode`, etc.
-    // These are silently ignored via default serde behavior.
+#[serde(untagged)]
+enum GeminiPart {
+    Text {
+        text: String,
+    },
+    // NOTE: for an UNTAGGED enum, an enum-level `rename_all` does NOT rename the
+    // fields inside struct variants — each variant needs its own `rename_all`,
+    // or the wire field is the raw snake_case name (`inline_data`) which Gemini
+    // rejects. The per-variant `rename_all = "camelCase"` is load-bearing.
+    #[serde(rename_all = "camelCase")]
+    InlineData {
+        inline_data: GeminiInlineData,
+    },
+    #[serde(rename_all = "camelCase")]
+    FileData {
+        file_data: GeminiFileData,
+    },
+    /// Forward-compat catch-all for response part kinds we don't model
+    /// (`thought`, `executableCode`, …). Never constructed for requests; the
+    /// response reader skips it. The captured value is intentionally unread —
+    /// the variant exists only so untagged deserialization of an unknown part
+    /// kind succeeds instead of failing the whole response.
+    #[serde(skip_serializing)]
+    Other(#[allow(dead_code)] serde_json::Value),
+}
+
+impl GeminiPart {
+    fn text(s: String) -> Self {
+        GeminiPart::Text { text: s }
+    }
+}
+
+/// Outbound-only when constructed for a request; also read back on responses,
+/// so it keeps `Deserialize`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiInlineData {
+    mime_type: String,
+    data: String,
+}
+
+/// Constructed only for requests, but `Deserialize` is REQUIRED: it is a
+/// payload of the untagged [`GeminiPart`] enum, whose derived `Deserialize`
+/// (used to read responses) needs every variant payload to be `Deserialize`.
+/// Removing it does not compile.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiFileData {
+    mime_type: String,
+    file_uri: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -115,46 +183,127 @@ fn validate_gemini_model_name(model: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn to_gemini_request(req: &ChatRequest) -> GeminiRequest {
-    // Extract system instruction
+/// Infer a concrete image MIME type for Gemini's `fileData.mimeType` from a
+/// remote URL's path extension.
+///
+/// `fileData` requires a real MIME type; `image/*` is rejected by the API. The
+/// OpenAI `image_url.url` contract carries no type, so we sniff the path
+/// extension (ignoring any query string), restricted to the formats Gemini
+/// decodes (png/jpeg/webp). Anything unrecognized falls back to `image/jpeg` —
+/// the most common web format — rather than a wildcard. The type is advisory;
+/// Gemini ultimately sniffs the fetched bytes, but it must be a valid value.
+fn mime_type_from_url(url: &str) -> String {
+    // Strip query/fragment so `?v=2` / `#frag` don't defeat the extension match.
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .trim_end_matches('/');
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        // Gemini does not support gif; fall back to jpeg (advisory only).
+        _ => "image/jpeg",
+    }
+    .to_string()
+}
+
+/// Translate one OpenAI [`MessageContent`] into Gemini parts.
+///
+/// Text-only content becomes a single text part. Multimodal content preserves
+/// part ORDER and translates each image via [`ImageUrl::parse`]: a `data:` URI
+/// → `inlineData` (base64), an http(s) URL → `fileData` (`fileUri`). A
+/// malformed image URL returns `Err` so the image is never silently dropped.
+fn content_to_gemini_parts(content: &MessageContent) -> Result<Vec<GeminiPart>, String> {
+    match content {
+        MessageContent::Text(s) => Ok(vec![GeminiPart::text(s.clone())]),
+        MessageContent::Parts(parts) => {
+            let mut out = Vec::with_capacity(parts.len());
+            for part in parts {
+                match part {
+                    ContentPart::Text { text } => out.push(GeminiPart::text(text.clone())),
+                    ContentPart::ImageUrl { image_url } => {
+                        let p = match image_url
+                            .parse()
+                            .map_err(|e: ParseImageError| e.to_string())?
+                        {
+                            ParsedImage::Base64 { media_type, data } => GeminiPart::InlineData {
+                                inline_data: GeminiInlineData {
+                                    mime_type: media_type,
+                                    data,
+                                },
+                            },
+                            ParsedImage::Url { url } => GeminiPart::FileData {
+                                file_data: GeminiFileData {
+                                    // Gemini's `fileData` requires a concrete
+                                    // MIME type — `image/*` is NOT a valid value
+                                    // and the API rejects it. OpenAI image_url
+                                    // URLs don't carry a type, so infer it from
+                                    // the URL path extension, defaulting to JPEG.
+                                    mime_type: mime_type_from_url(&url),
+                                    file_uri: url,
+                                },
+                            },
+                        };
+                        out.push(p);
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn to_gemini_request(req: &ChatRequest) -> Result<GeminiRequest, String> {
+    // Extract system instruction. An image in a system/developer message would
+    // be silently dropped by `as_text()` while the vision gate still accepts the
+    // request — the agent pays, the model never sees it. Reject it explicitly.
     let system_instruction: Option<GeminiContent> = {
-        let system_text: Vec<String> = req
+        let mut system_text: Vec<String> = Vec::new();
+        for m in req
             .messages
             .iter()
             .filter(|m| m.role == Role::System || m.role == Role::Developer)
-            .map(|m| m.content.as_text().into_owned())
-            .collect();
+        {
+            if m.content.has_image_parts() {
+                return Err(
+                    "image content is not supported in system/developer messages; \
+                     place images in a user message"
+                        .to_string(),
+                );
+            }
+            system_text.push(m.content.as_text().into_owned());
+        }
 
         if system_text.is_empty() {
             None
         } else {
             Some(GeminiContent {
                 role: None,
-                parts: vec![GeminiPart {
-                    text: system_text.join("\n\n"),
-                }],
+                parts: vec![GeminiPart::text(system_text.join("\n\n"))],
             })
         }
     };
 
     // Convert messages (excluding system) to Gemini contents
-    let contents: Vec<GeminiContent> = req
+    let mut contents: Vec<GeminiContent> = Vec::new();
+    for m in req
         .messages
         .iter()
         .filter(|m| m.role != Role::System && m.role != Role::Developer && m.role != Role::Unknown)
-        .map(|m| GeminiContent {
-            role: Some(match m.role {
-                Role::User => "user".to_string(),
-                Role::Assistant => "model".to_string(),
-                Role::System | Role::Developer => "user".to_string(), // filtered above, but safe fallback
-                Role::Tool => "user".to_string(), // Gemini uses "user" for tool results
-                Role::Unknown => "user".to_string(), // filtered above; safe fallback for forward-compat
-            }),
-            parts: vec![GeminiPart {
-                text: m.content.as_text().into_owned(),
-            }],
-        })
-        .collect();
+    {
+        let role = Some(match m.role {
+            Role::User => "user".to_string(),
+            Role::Assistant => "model".to_string(),
+            Role::System | Role::Developer => "user".to_string(), // filtered above, but safe fallback
+            Role::Tool => "user".to_string(), // Gemini uses "user" for tool results
+            Role::Unknown => "user".to_string(), // filtered above; safe fallback for forward-compat
+        });
+        let parts = content_to_gemini_parts(&m.content)?;
+        contents.push(GeminiContent { role, parts });
+    }
 
     let generation_config =
         if req.max_tokens.is_some() || req.temperature.is_some() || req.top_p.is_some() {
@@ -167,11 +316,11 @@ fn to_gemini_request(req: &ChatRequest) -> GeminiRequest {
             None
         };
 
-    GeminiRequest {
+    Ok(GeminiRequest {
         contents,
         system_instruction,
         generation_config,
-    }
+    })
 }
 
 fn from_gemini_response(resp: GeminiResponse, original_model: &str) -> ChatResponse {
@@ -181,7 +330,15 @@ fn from_gemini_response(resp: GeminiResponse, original_model: &str) -> ChatRespo
                 .content
                 .parts
                 .iter()
-                .map(|p| p.text.as_str())
+                .filter_map(|p| match p {
+                    GeminiPart::Text { text } => Some(text.as_str()),
+                    // Non-text response parts (inline/file data, or any
+                    // forward-compat `Other` kind like `thought`) contribute no
+                    // assistant text and are skipped.
+                    GeminiPart::InlineData { .. }
+                    | GeminiPart::FileData { .. }
+                    | GeminiPart::Other(_) => None,
+                })
                 .collect::<Vec<_>>()
                 .join("");
             let reason = c.finish_reason.as_ref().map(|r| match r.as_str() {
@@ -281,7 +438,8 @@ impl LLMProvider for GoogleProvider {
             model_name
         );
 
-        let gemini_req = to_gemini_request(&req);
+        let gemini_req = to_gemini_request(&req)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
         let req_body = serde_json::to_value(&gemini_req)?;
         let response = super::retry_with_backoff(2, || {
@@ -324,8 +482,16 @@ impl LLMProvider for GoogleProvider {
 mod tests {
     use super::*;
 
+    /// Text of a `GeminiPart::Text`, else `None`.
+    fn part_text(p: &GeminiPart) -> Option<&str> {
+        match p {
+            GeminiPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
     #[test]
-    fn test_gemini_user_text_parts_flattened_to_space_joined_string() {
+    fn test_gemini_user_text_parts_become_separate_parts() {
         use solvela_protocol::vision::{ContentPart, MessageContent};
         let req = ChatRequest {
             model: "google/gemini-2.5-flash".to_string(),
@@ -351,10 +517,226 @@ mod tests {
             tool_choice: None,
         };
 
-        let gemini_req = to_gemini_request(&req);
+        let gemini_req = to_gemini_request(&req).unwrap();
         assert_eq!(gemini_req.contents.len(), 1);
-        // String-based adapter flattens text parts with a single space.
-        assert_eq!(gemini_req.contents[0].parts[0].text, "first second");
+        // Each text part maps to its own text part, preserving order.
+        assert_eq!(gemini_req.contents[0].parts.len(), 2);
+        assert_eq!(part_text(&gemini_req.contents[0].parts[0]), Some("first"));
+        assert_eq!(part_text(&gemini_req.contents[0].parts[1]), Some("second"));
+    }
+
+    #[test]
+    fn test_gemini_image_data_uri_becomes_inline_data() {
+        use solvela_protocol::vision::{ContentPart, ImageUrl, MessageContent};
+        let req = ChatRequest {
+            model: "google/gemini-3.1-pro".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "what is this?".to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                            detail: None,
+                        },
+                    },
+                ]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+        let gemini_req = to_gemini_request(&req).unwrap();
+        // Exact wire shape per Gemini API (verified 2026-06-03): camelCase
+        // inlineData/mimeType.
+        let v = serde_json::to_value(&gemini_req.contents[0]).unwrap();
+        assert_eq!(
+            v["parts"],
+            serde_json::json!([
+                {"text":"what is this?"},
+                {"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo="}}
+            ])
+        );
+    }
+
+    #[test]
+    fn test_gemini_image_http_url_becomes_file_data() {
+        use solvela_protocol::vision::{ContentPart, ImageUrl, MessageContent};
+        let req = ChatRequest {
+            model: "google/gemini-3.1-pro".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/cat.png".to_string(),
+                        detail: None,
+                    },
+                }]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+        let gemini_req = to_gemini_request(&req).unwrap();
+        let v = serde_json::to_value(&gemini_req.contents[0]).unwrap();
+        // MIME inferred from the `.png` path extension (never the invalid
+        // `image/*` wildcard).
+        assert_eq!(
+            v["parts"],
+            serde_json::json!([
+                {"fileData":{"mimeType":"image/png","fileUri":"https://example.com/cat.png"}}
+            ])
+        );
+    }
+
+    #[test]
+    fn test_mime_type_from_url_infers_extension() {
+        assert_eq!(mime_type_from_url("https://x/a.png"), "image/png");
+        assert_eq!(mime_type_from_url("https://x/a.PNG"), "image/png");
+        assert_eq!(mime_type_from_url("https://x/a.jpg"), "image/jpeg");
+        assert_eq!(mime_type_from_url("https://x/a.jpeg"), "image/jpeg");
+        assert_eq!(mime_type_from_url("https://x/a.webp"), "image/webp");
+        // Query string is ignored when sniffing the extension.
+        assert_eq!(mime_type_from_url("https://x/a.png?v=2"), "image/png");
+        // Unknown / no extension → jpeg fallback, never a wildcard.
+        assert_eq!(mime_type_from_url("https://x/image"), "image/jpeg");
+        assert_eq!(mime_type_from_url("https://x/a.gif"), "image/jpeg");
+        assert!(!mime_type_from_url("https://x/a.png").contains('*'));
+    }
+
+    #[test]
+    fn test_gemini_image_in_system_message_rejected() {
+        use solvela_protocol::vision::{ContentPart, ImageUrl, MessageContent};
+        let req = ChatRequest {
+            model: "google/gemini-3.1-pro".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::System,
+                    content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                            detail: None,
+                        },
+                    }]),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: "hi".into(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            ],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+        assert!(
+            to_gemini_request(&req).is_err(),
+            "an image in a system message must reject, not be silently dropped"
+        );
+    }
+
+    #[test]
+    fn test_gemini_data_uri_without_base64_rejected_at_adapter() {
+        use solvela_protocol::vision::{ContentPart, ImageUrl, MessageContent};
+        let req = ChatRequest {
+            model: "google/gemini-3.1-pro".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png,rawnotbase64".to_string(),
+                        detail: None,
+                    },
+                }]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+        assert!(
+            to_gemini_request(&req).is_err(),
+            "a non-base64 data URI must be rejected at the adapter"
+        );
+    }
+
+    #[test]
+    fn test_gemini_response_skips_non_text_parts() {
+        // A response with an unknown part kind (`thought`) plus a text part must
+        // deserialize (untagged `Other` catch-all) and yield only the text.
+        let raw = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {"thought": true},
+                        {"text": "hello"},
+                        {"inlineData": {"mimeType": "image/png", "data": "AAAA"}}
+                    ]
+                },
+                "finishReason": "STOP"
+            }]
+        });
+        let resp: GeminiResponse = serde_json::from_value(raw).unwrap();
+        let out = from_gemini_response(resp, "google/gemini-3.1-pro");
+        assert_eq!(out.choices[0].message.content.as_text(), "hello");
+    }
+
+    #[test]
+    fn test_gemini_malformed_image_is_rejected_not_dropped() {
+        use solvela_protocol::vision::{ContentPart, ImageUrl, MessageContent};
+        let req = ChatRequest {
+            model: "google/gemini-3.1-pro".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "ftp://bad/scheme.png".to_string(),
+                        detail: None,
+                    },
+                }]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+        assert!(
+            to_gemini_request(&req).is_err(),
+            "a malformed image URL must reject the request, not silently drop the image"
+        );
     }
 
     #[test]
@@ -385,12 +767,12 @@ mod tests {
             tool_choice: None,
         };
 
-        let gemini_req = to_gemini_request(&req);
+        let gemini_req = to_gemini_request(&req).unwrap();
 
         assert!(gemini_req.system_instruction.is_some());
         assert_eq!(
-            gemini_req.system_instruction.unwrap().parts[0].text,
-            "Be concise."
+            part_text(&gemini_req.system_instruction.unwrap().parts[0]),
+            Some("Be concise.")
         );
         assert_eq!(gemini_req.contents.len(), 1);
         assert_eq!(gemini_req.contents[0].role.as_deref(), Some("user"));
@@ -432,13 +814,13 @@ mod tests {
             tool_choice: None,
         };
 
-        let gemini_req = to_gemini_request(&req);
+        let gemini_req = to_gemini_request(&req).unwrap();
 
         // Developer message should be extracted as system_instruction
         assert!(gemini_req.system_instruction.is_some());
         assert_eq!(
-            gemini_req.system_instruction.unwrap().parts[0].text,
-            "Always respond in JSON."
+            part_text(&gemini_req.system_instruction.unwrap().parts[0]),
+            Some("Always respond in JSON.")
         );
         // Only the User message should remain in contents
         assert_eq!(gemini_req.contents.len(), 1);
@@ -451,9 +833,7 @@ mod tests {
             candidates: Some(vec![GeminiCandidate {
                 content: GeminiContent {
                     role: Some("model".to_string()),
-                    parts: vec![GeminiPart {
-                        text: "Hi there!".to_string(),
-                    }],
+                    parts: vec![GeminiPart::text("Hi there!".to_string())],
                 },
                 finish_reason: Some("STOP".to_string()),
             }]),

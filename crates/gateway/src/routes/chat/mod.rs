@@ -53,6 +53,18 @@ const MAX_MESSAGES: usize = 256;
 /// array forces excessive per-part work on the hot path).
 const MAX_CONTENT_PARTS: usize = 64;
 
+/// Maximum number of image parts allowed across an ENTIRE request.
+///
+/// `MAX_MESSAGES` (256) × `MAX_CONTENT_PARTS` (64) otherwise admits up to ~16K
+/// image parts, and URL images are ~30 bytes each so thousands fit inside the
+/// 10MB body limit. Each image also adds a per-image token contribution to the
+/// upfront 402 estimate, so an unbounded count inflates the quote and forces
+/// per-image work on the hot path. 100 is the tightest hard limit across the
+/// supported vision providers (Anthropic's API caps a request at 100 images),
+/// so an accepted count never settles payment then gets rejected upstream for
+/// image-count. Enforced BEFORE payment.
+const MAX_IMAGES_PER_REQUEST: usize = 100;
+
 /// Platform-wide upper bound for `max_tokens` to prevent unbounded cost exposure.
 const MAX_TOKENS_LIMIT: u32 = 128_000;
 
@@ -81,25 +93,17 @@ pub async fn chat_completions(
         )));
     }
 
-    // Content validation — runs BEFORE payment, guard, and provider dispatch.
+    // Content-shape validation — runs BEFORE payment, guard, and provider
+    // dispatch. Caps the per-message parts array to bound hot-path work.
     //
-    // PR #1 accepts `content` as a string OR an array of OpenAI text parts.
-    // Image/multimodal content is NOT yet processed (native image blocks,
-    // capability gating, and image cost accounting are a tracked follow-up
-    // PR). Reject it explicitly with a 415 so it is never silently dropped,
-    // mis-costed, or cached — rather than half-supported. Also cap the
-    // per-message parts array to bound hot-path work.
+    // The IMAGE capability gate is deliberately NOT here: it needs the
+    // resolved model's `supports_vision` flag, which is only known after model
+    // resolution + registry lookup below. Image content for a non-vision model
+    // is rejected there (415); for a vision model it is translated to the
+    // provider's native multimodal format. Note: the empty-prompt check below
+    // still requires at least one non-empty User *text* message, so an
+    // image-only request with no text is rejected as an empty prompt.
     for msg in &req.messages {
-        if msg.content.has_image_parts() {
-            warn!("rejected request with image/multimodal content (not yet supported)");
-            return Err(GatewayError::UnsupportedMediaType(
-                "image/multimodal content is not yet supported; \
-                 send text content (string or text parts)"
-                    .to_string(),
-            ));
-        }
-        // Same `Parts` arm as the image check above (image check first, then
-        // length cap — order/errors unchanged) so the variant is matched once.
         if let MessageContent::Parts(parts) = &msg.content {
             if parts.len() > MAX_CONTENT_PARTS {
                 return Err(GatewayError::BadRequest(format!(
@@ -109,6 +113,21 @@ pub async fn chat_completions(
                 )));
             }
         }
+    }
+
+    // Aggregate image-count cap — runs BEFORE payment and model resolution so a
+    // request carrying more images than any provider accepts is a client 4xx,
+    // never billed-then-rejected upstream. Bounds the abuse case where thousands
+    // of small URL images fit inside the body limit (see MAX_IMAGES_PER_REQUEST).
+    let total_images: usize = req
+        .messages
+        .iter()
+        .map(|msg| msg.content.image_urls().count())
+        .sum();
+    if total_images > MAX_IMAGES_PER_REQUEST {
+        return Err(GatewayError::BadRequest(format!(
+            "too many images: {total_images} exceeds maximum of {MAX_IMAGES_PER_REQUEST}"
+        )));
     }
 
     // Empty-prompt rejection — runs BEFORE payment so an empty request is never
@@ -199,6 +218,64 @@ pub async fn chat_completions(
         .model_registry
         .get(&req.model)
         .ok_or_else(|| GatewayError::ModelNotFound(req.model.clone()))?;
+
+    // Step 2a: Vision capability gate. Image content is only accepted for a
+    // model whose registry entry declares `supports_vision`. A non-vision model
+    // must reject (415) rather than silently strip the image (which would
+    // change the prompt's meaning while still billing the agent) or forward it
+    // to a provider that doesn't accept it (a paid 5xx after settlement). Runs
+    // BEFORE payment so an unsupported request is never billed.
+    let request_has_images = req.messages.iter().any(|m| m.content.has_image_parts());
+    if request_has_images && !model_info.supports_vision {
+        warn!(
+            model = %req.model,
+            "rejected image content for a non-vision model"
+        );
+        return Err(GatewayError::UnsupportedMediaType(format!(
+            "model '{}' does not support image input; \
+             use a vision-capable model or send text-only content",
+            req.model
+        )));
+    }
+
+    // Step 2a': Validate every image part at the route BEFORE payment, so a
+    // malformed image (bad scheme, non-base64 data URI, oversize, unsupported
+    // media type) is a client 4xx and the agent is never billed for it — rather
+    // than surfacing as a post-payment provider 5xx. This is the single route
+    // chokepoint; the adapters re-validate as defense-in-depth. Also reject
+    // images in system/developer messages here (the provider `system` channels
+    // are text-only and would otherwise silently drop the image after payment).
+    //
+    // Image parts in user/assistant messages are always allowed (a valid
+    // multi-turn vision conversation carries images in those roles). Tool-role
+    // images are accepted here at the protocol layer — Gemini forwards them as
+    // user-role parts — but provider support varies: the Anthropic adapter
+    // rejects tool-role images (with a clear error) rather than silently
+    // dropping them, since it does not yet translate tool results to
+    // `tool_result` blocks. Only system/developer-role images are rejected
+    // unconditionally below.
+    //
+    // Per-image bytes are bounded by `MAX_DATA_URI_BYTES` inside `parse()`;
+    // total image bytes across the whole request are additionally bounded by the
+    // 10 MB `RequestBodyLimitLayer` on the HTTP body (see lib.rs `build_router`),
+    // so no separate aggregate image-byte cap is needed here.
+    if request_has_images {
+        for msg in &req.messages {
+            let is_system = matches!(msg.role, Role::System | Role::Developer);
+            if is_system && msg.content.has_image_parts() {
+                return Err(GatewayError::BadRequest(
+                    "image content is not supported in system/developer messages; \
+                     place images in a user message"
+                        .to_string(),
+                ));
+            }
+            for image_url in msg.content.image_urls() {
+                if let Err(e) = image_url.parse() {
+                    return Err(GatewayError::BadRequest(format!("invalid image: {e}")));
+                }
+            }
+        }
+    }
 
     // Step 2b: Clamp max_tokens to model/platform limit to prevent unbounded cost
     if let Some(requested_max) = req.max_tokens {

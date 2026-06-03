@@ -3,7 +3,7 @@
 //! All financial calculations use integer arithmetic to avoid f64 precision
 //! loss on monetary amounts. USDC has 6 decimal places (atomic units).
 
-use tracing::{error, warn};
+use tracing::warn;
 
 use solvela_protocol::{ChatRequest, ModelRegistration, Usage};
 
@@ -101,36 +101,120 @@ pub(crate) fn cap_usage_to_request_limits(
     }
 }
 
-/// Rough token estimate: ~4 chars per token.
-pub(crate) fn estimate_input_tokens(req: &ChatRequest) -> u32 {
-    // `as_text()` flattens only text parts — image parts contribute zero chars,
-    // so this estimate silently undercounts vision input (an image message would
-    // be priced as ~1 token, i.e. near-zero charge). Images are rejected upstream
-    // today (route + fallback backstop return 415), so this branch is unreachable
-    // for normal traffic; this is a defense-in-depth observability guard.
-    //
-    // The `debug_assert!` documents the invariant and fires it in debug/test
-    // builds, but it is COMPILED OUT in `--release` (which is what the gateway
-    // ships), so it cannot be relied on as a production signal. The
-    // `tracing::error!` below is the production-visible guard: it survives
-    // release builds and fires on a real (money-path) cost path if image
-    // content ever reaches estimation despite the upstream rejection.
-    let has_image = req.messages.iter().any(|m| m.content.has_image_parts());
-    debug_assert!(
-        !has_image,
-        "estimate_input_tokens does not account for image tokens — image content \
-         must be rejected upstream; revisit when vision lands (PR #2)"
-    );
-    if has_image {
-        error!(
-            messages = req.messages.len(),
-            "image content reached estimate_input_tokens — input tokens will be \
-             undercounted (image parts contribute zero chars), producing a near-zero \
-             cost estimate; should be unreachable given upstream 415 rejection"
-        );
+/// Per-image token contribution for the UPFRONT 402 quote when an image is
+/// sent at OpenAI `detail: "low"`. OpenAI prices a low-detail image at a flat
+/// 85 tokens; we mirror that for the estimate.
+///
+/// MONEY-PATH NOTE: this constant governs the upfront 402 quote / budget
+/// reservation ONLY. The FINAL bill is computed from provider-reported
+/// `Usage` (which already counts the real vision tokens) via
+/// `compute_actual_atomic_cost` in the settlement path — see
+/// `image_tokens_for_detail` docs and the `chat/mod.rs` settlement arm. The
+/// estimate only needs to be conservative enough that the reservation isn't
+/// under-funded; it is reconciled to the actual usage afterward.
+const IMAGE_TOKENS_LOW_DETAIL: u32 = 85;
+
+/// Per-image token contribution for the upfront quote at `detail: "high"`,
+/// `"auto"`, or unspecified. A high-detail image tiles into multiple 512px
+/// crops; OpenAI's typical cost for a large (≤2048×2048) image is ~765 tokens
+/// (85 base + 170 per tile × 4 tiles). Images larger than 4 tiles cost more,
+/// but we use 765 as a single per-image figure so the quote covers a typical
+/// vision request without under-estimating it. Any overage is still reconciled
+/// to provider-reported usage at settlement, so the figure need not be a hard
+/// worst-case.
+const IMAGE_TOKENS_HIGH_DETAIL: u32 = 765;
+
+/// Internal, parse-only classification of the OpenAI `detail` hint for the
+/// purpose of the UPFRONT 402 quote ONLY.
+///
+/// This is deliberately NOT the wire type: `ImageUrl.detail` stays
+/// `Option<String>` in `crates/protocol/src/vision.rs` and is serialized
+/// verbatim to OpenAI-format passthrough providers (openai/xai/deepseek). This
+/// enum is constructed transiently from that string solely to drive the
+/// token-estimate branch; it never round-trips back onto the wire, so it cannot
+/// emit a normalized/"unknown" value upstream (which would risk a provider 400)
+/// or drift the cross-repo SDK wire contract.
+///
+/// The point of making this a typed enum (rather than matching the raw string
+/// inline) is to make the FAIL-SAFE-LARGE direction structural: the only
+/// variant that maps to the cheap 85-token estimate is `Low`; every other
+/// input — including unknown/typo strings and an absent detail — resolves to a
+/// variant that prices at the conservative high figure. A future reader cannot
+/// mistake the coercion of `"loow"` (a typo) to high as accidental.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageDetail {
+    Low,
+    High,
+    Auto,
+}
+
+impl ImageDetail {
+    /// Classify the raw `detail` hint for the upfront quote.
+    ///
+    /// Mapping: `"low"` → [`Low`], `"high"` → [`High`], `"auto"` → [`Auto`].
+    /// EVERYTHING ELSE — any unknown/typo string (e.g. `"loow"`, `"HIGH"`) AND
+    /// the absent (`None`) case — resolves to [`High`]. This is the DELIBERATE
+    /// fail-safe-large direction for the quote: an under-classified image must
+    /// reserve the larger token figure so the upfront 402 reservation isn't
+    /// under-funded. It never over-bills — the final charge is reconciled to
+    /// provider-reported `Usage` at settlement (see [`image_tokens_for_detail`]
+    /// and `compute_actual_atomic_cost`). The estimate only needs to be
+    /// conservative enough not to under-fund the reservation.
+    ///
+    /// [`Low`]: ImageDetail::Low
+    /// [`High`]: ImageDetail::High
+    /// [`Auto`]: ImageDetail::Auto
+    fn from_opt(detail: Option<&str>) -> ImageDetail {
+        match detail {
+            Some("low") => ImageDetail::Low,
+            Some("high") => ImageDetail::High,
+            Some("auto") => ImageDetail::Auto,
+            // Unknown/typo string OR absent → conservative high (fail-safe-large).
+            _ => ImageDetail::High,
+        }
     }
-    let chars: usize = req.messages.iter().map(|m| m.content.as_text().len()).sum();
-    (chars / 4).max(1) as u32
+}
+
+/// Conservative upfront-quote token contribution for one image, keyed on the
+/// typed [`ImageDetail`] classification of the OpenAI `detail` hint. Only
+/// `Low` is cheap; `High` and `Auto` both price at the conservative high
+/// figure. Unknown/absent detail is classified as `High` by
+/// [`ImageDetail::from_opt`] (the fail-safe-large direction for a quote), so it
+/// lands here as the high figure without a catch-all string arm.
+fn image_tokens_for_detail(detail: Option<&str>) -> u32 {
+    match ImageDetail::from_opt(detail) {
+        ImageDetail::Low => IMAGE_TOKENS_LOW_DETAIL,
+        // "high"/"auto" — and, via from_opt, every unknown/typo/absent value —
+        // map to the conservative high figure. This is over-estimation for the
+        // UPFRONT QUOTE ONLY; it never over-bills, because the final charge is
+        // reconciled to provider-reported usage at settlement. It only ensures
+        // the reservation isn't under-funded.
+        ImageDetail::High | ImageDetail::Auto => IMAGE_TOKENS_HIGH_DETAIL,
+    }
+}
+
+/// Rough input-token estimate for the upfront 402 quote / budget reservation.
+///
+/// Text is estimated at ~4 chars per token. Each image part adds a flat,
+/// detail-based contribution (see [`image_tokens_for_detail`]) so a vision
+/// request is not quoted as near-zero (text-only) and the reservation isn't
+/// under-funded. This drives ONLY the quote/reservation; the final bill comes
+/// from provider-reported `Usage` at settlement (`compute_actual_atomic_cost`),
+/// which counts the provider's real vision-token accounting.
+pub(crate) fn estimate_input_tokens(req: &ChatRequest) -> u32 {
+    let text_chars: usize = req.messages.iter().map(|m| m.content.as_text().len()).sum();
+    let text_tokens = (text_chars / 4) as u32;
+
+    let image_tokens: u32 = req
+        .messages
+        .iter()
+        .flat_map(|m| m.content.image_urls())
+        .map(|img| image_tokens_for_detail(img.detail.as_deref()))
+        .fold(0u32, |acc, t| acc.saturating_add(t));
+
+    // Floor at 1 so a (degenerate) empty request still quotes a non-zero token
+    // count, matching the prior behavior for text-only requests.
+    text_tokens.saturating_add(image_tokens).max(1)
 }
 
 /// Compute the actual cost in atomic USDC units from token usage.
@@ -590,6 +674,174 @@ mod tests {
     fn test_estimate_input_tokens_empty_message_returns_at_least_one() {
         let req = make_request("m", vec![user_msg("")]);
         assert_eq!(estimate_input_tokens(&req), 1, "minimum should be 1 token");
+    }
+
+    fn image_msg(text: &str, detail: Option<&str>) -> ChatMessage {
+        use solvela_protocol::{ContentPart, ImageUrl, MessageContent};
+        ChatMessage {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: text.to_string(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/img.png".to_string(),
+                        detail: detail.map(str::to_string),
+                    },
+                },
+            ]),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn test_estimate_input_tokens_image_adds_tokens_over_text_only() {
+        // An image request must quote MORE tokens than the same text alone, so
+        // the upfront 402 quote / budget reservation isn't under-funded.
+        let text_only = make_request("m", vec![user_msg("describe this")]);
+        let with_image = make_request("m", vec![image_msg("describe this", Some("high"))]);
+        assert!(
+            estimate_input_tokens(&with_image) > estimate_input_tokens(&text_only),
+            "image request must estimate strictly more tokens than text-only"
+        );
+        // Text "describe this" = 13 chars → 3 tokens; + 765 high-detail image.
+        assert_eq!(estimate_input_tokens(&with_image), 3 + 765);
+    }
+
+    #[test]
+    fn test_estimate_input_tokens_detail_low_cheaper_than_high() {
+        let low = make_request("m", vec![image_msg("x", Some("low"))]);
+        let high = make_request("m", vec![image_msg("x", Some("high"))]);
+        let auto = make_request("m", vec![image_msg("x", Some("auto"))]);
+        let unspecified = make_request("m", vec![image_msg("x", None)]);
+        assert!(estimate_input_tokens(&low) < estimate_input_tokens(&high));
+        // auto + unspecified are treated as the conservative high figure.
+        assert_eq!(estimate_input_tokens(&auto), estimate_input_tokens(&high));
+        assert_eq!(
+            estimate_input_tokens(&unspecified),
+            estimate_input_tokens(&high)
+        );
+
+        // An arbitrary UNKNOWN detail string also maps to the conservative high
+        // figure (fail-safe-large for the quote), never low or zero.
+        let unknown = make_request("m", vec![image_msg("x", Some("ultra-mega"))]);
+        assert_eq!(
+            estimate_input_tokens(&unknown),
+            estimate_input_tokens(&high)
+        );
+    }
+
+    #[test]
+    fn image_detail_from_opt_maps_known_and_fails_safe_high() {
+        // Known hints map to their explicit variant.
+        assert_eq!(ImageDetail::from_opt(Some("low")), ImageDetail::Low);
+        assert_eq!(ImageDetail::from_opt(Some("high")), ImageDetail::High);
+        assert_eq!(ImageDetail::from_opt(Some("auto")), ImageDetail::Auto);
+
+        // Absent detail → High (fail-safe-large for the upfront quote).
+        assert_eq!(ImageDetail::from_opt(None), ImageDetail::High);
+
+        // Unknown / typo / wrong-case strings ALL → High, never Low. This is the
+        // structural guarantee: the only path to the cheap estimate is an exact
+        // "low"; an under-classified image always reserves the larger figure.
+        for bad in ["loow", "LOW", "Low", "hi", "ultra-mega", "", "  low  "] {
+            assert_eq!(
+                ImageDetail::from_opt(Some(bad)),
+                ImageDetail::High,
+                "unknown/typo detail {bad:?} must fail safe to High, never Low"
+            );
+        }
+    }
+
+    #[test]
+    fn image_tokens_for_detail_only_low_is_cheap() {
+        // Pins the enum→constant mapping: Low is the only cheap classification;
+        // high/auto/unknown/absent all resolve to the conservative high figure.
+        assert_eq!(
+            image_tokens_for_detail(Some("low")),
+            IMAGE_TOKENS_LOW_DETAIL
+        );
+        assert_eq!(
+            image_tokens_for_detail(Some("high")),
+            IMAGE_TOKENS_HIGH_DETAIL
+        );
+        assert_eq!(
+            image_tokens_for_detail(Some("auto")),
+            IMAGE_TOKENS_HIGH_DETAIL
+        );
+        assert_eq!(image_tokens_for_detail(None), IMAGE_TOKENS_HIGH_DETAIL);
+        assert_eq!(
+            image_tokens_for_detail(Some("loow")),
+            IMAGE_TOKENS_HIGH_DETAIL,
+            "a typo must price at the conservative high figure"
+        );
+    }
+
+    #[test]
+    fn test_estimate_input_tokens_multiple_images_sum() {
+        use solvela_protocol::{ContentPart, ImageUrl, MessageContent};
+        let two_images = ChatMessage {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/a.png".to_string(),
+                        detail: Some("low".to_string()),
+                    },
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/b.png".to_string(),
+                        detail: Some("low".to_string()),
+                    },
+                },
+            ]),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        let req = make_request("m", vec![two_images]);
+        // Two low-detail images → 85 + 85 = 170 (text is empty → 0 text tokens).
+        assert_eq!(estimate_input_tokens(&req), 170);
+    }
+
+    /// SETTLEMENT CONFIRMATION (money-path): the final bill must come from
+    /// provider-reported `Usage`, NOT from `estimate_input_tokens`. The
+    /// provider counts the real vision tokens; `compute_actual_atomic_cost`
+    /// prices those. This test pins that the actual-cost path is usage-driven
+    /// and entirely independent of the upfront image estimate — so the
+    /// conservative estimate above can never become the thing the agent is
+    /// finally billed. (The chat route's settlement arm feeds the
+    /// provider-reported, then capped, `Usage` into `compute_actual_atomic_cost`;
+    /// see `crates/gateway/src/routes/chat/mod.rs`.)
+    #[test]
+    fn test_actual_cost_is_usage_driven_not_image_estimate() {
+        let model_info = ModelRegistration {
+            id: "openai/gpt-4o".to_string(),
+            provider: "openai".to_string(),
+            model_id: "gpt-4o".to_string(),
+            display_name: "GPT-4o".to_string(),
+            input_cost_per_million: 2.50,
+            output_cost_per_million: 10.00,
+            context_window: 128_000,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_vision: true,
+            reasoning: false,
+            supports_structured_output: false,
+            supports_batch: false,
+            max_output_tokens: None,
+        };
+        // Provider reports 1200 prompt tokens (image tokens already folded in by
+        // the provider) and 500 completion. The bill is a pure function of those
+        // numbers — the upfront 85/765 estimate plays no role here.
+        let billed = compute_actual_atomic_cost(1200, 500, &model_info);
+        // 1200 * 2.50/M = 3000 atomic; 500 * 10/M = 5000 atomic; sum 8000;
+        // ×1.05 fee = 8400.
+        assert_eq!(billed, Some(8400));
     }
 
     // =========================================================================

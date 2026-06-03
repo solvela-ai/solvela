@@ -57,6 +57,11 @@ async fn handle_new_request(
     state: &Arc<AppState>,
     params: &MessageSendParams,
 ) -> Result<Value, JsonRpcErrorData> {
+    // A2A is text-only today; reject image data parts before building any
+    // ChatRequest. See `reject_image_data_parts` — image bridging must route
+    // through the HTTP chat route's vision gate before being accepted here.
+    reject_image_data_parts(&params.message.parts)?;
+
     // Extract user text from message parts
     let user_text = extract_text_from_parts(&params.message.parts)?;
 
@@ -228,6 +233,13 @@ async fn handle_payment_submitted(
     task_id: &str,
     params: &MessageSendParams,
 ) -> Result<Value, JsonRpcErrorData> {
+    // A2A is text-only today; reject image data parts on the submission message
+    // before any provider-reaching work. The chat content actually dispatched
+    // here is rebuilt from the task's stored (already-text-gated)
+    // `original_message`, but defend the submission message too so an image
+    // part can never enter this path. See `reject_image_data_parts`.
+    reject_image_data_parts(&params.message.parts)?;
+
     // Load task record
     let record = task_store::load_task(state, task_id)
         .await
@@ -509,6 +521,7 @@ async fn handle_payment_submitted(
     let result = chat_with_model_fallback(
         &state.providers,
         &state.provider_health,
+        &state.model_registry,
         &model_info.provider,
         &model_info.model_id,
         chat_req,
@@ -693,6 +706,39 @@ fn validate_submitted_against_offer(
     Ok(())
 }
 
+/// Reject any `Part::Data` carrying image content (`contentType` starting with
+/// `"image/"`).
+///
+/// A2A is **text-only today**: both intake paths construct a `ChatRequest` from
+/// `extract_text_from_parts` and call the chat pipeline DIRECTLY
+/// (`handle_payment_submitted` invokes `chat_with_model_fallback`), bypassing
+/// the HTTP chat route's pre-payment vision gate (`supports_vision`, Step 2a)
+/// and per-image `ImageUrl::parse()` validation (Step 2a'). `Part::Data` cannot
+/// reach `ContentPart::ImageUrl` today, but if a future change ever bridges an
+/// image `Part::Data` into chat content, it would reach the PAID provider
+/// pipeline ungated.
+///
+/// This guard closes that latent gap defensively. Any future image bridging
+/// here MUST route through the same `supports_vision` gate + `ImageUrl::parse()`
+/// validation as the HTTP chat route BEFORE images are accepted — do not relax
+/// this check to "support vision" without wiring those gates in first.
+fn reject_image_data_parts(parts: &[Part]) -> Result<(), JsonRpcErrorData> {
+    for part in parts {
+        if let Part::Data { content_type, .. } = part {
+            if content_type.starts_with("image/") {
+                return Err(JsonRpcErrorData {
+                    code: ERR_INVALID_PARAMS,
+                    message: "Image content is not supported over A2A; this endpoint accepts \
+                              text parts only"
+                        .to_string(),
+                    data: None,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Extract the first text content from message parts.
 fn extract_text_from_parts(parts: &[Part]) -> Result<String, JsonRpcErrorData> {
     for part in parts {
@@ -859,6 +905,158 @@ supports_vision = false
         assert!(result.is_err(), "should error on empty parts");
     }
 
+    #[test]
+    fn test_reject_image_data_parts_rejects_image_png() {
+        let parts = vec![Part::Data {
+            content_type: "image/png".to_string(),
+            data: json!("base64data"),
+        }];
+        let result = reject_image_data_parts(&parts);
+        let err = result.expect_err("image/png data part must be rejected"); // safe: just built image part
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+    }
+
+    #[test]
+    fn test_reject_image_data_parts_rejects_image_jpeg_among_text() {
+        let parts = vec![
+            Part::Text {
+                text: "describe this".to_string(),
+            },
+            Part::Data {
+                content_type: "image/jpeg".to_string(),
+                data: json!("base64data"),
+            },
+        ];
+        let err = reject_image_data_parts(&parts).expect_err("image/jpeg must be rejected"); // safe: built image part
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+    }
+
+    #[test]
+    fn test_reject_image_data_parts_allows_text_only() {
+        let parts = vec![Part::Text {
+            text: "hello".to_string(),
+        }];
+        assert!(
+            reject_image_data_parts(&parts).is_ok(),
+            "text-only parts must pass"
+        );
+    }
+
+    #[test]
+    fn test_reject_image_data_parts_allows_non_image_data() {
+        // Non-image data parts (e.g. application/json) are not the vision-gate
+        // concern and must still pass — extract_text_from_parts ignores them.
+        let parts = vec![Part::Data {
+            content_type: "application/json".to_string(),
+            data: json!({"key": "value"}),
+        }];
+        assert!(
+            reject_image_data_parts(&parts).is_ok(),
+            "non-image data parts must pass the image guard"
+        );
+    }
+
+    #[test]
+    fn test_reject_image_data_parts_empty_passes() {
+        assert!(
+            reject_image_data_parts(&[]).is_ok(),
+            "empty parts must pass the image guard"
+        );
+    }
+
+    /// SECURITY (defense-in-depth): a new `message/send` carrying an image
+    /// `Part::Data` must be rejected with ERR_INVALID_PARAMS BEFORE any cost
+    /// estimation or task-store work. The image guard runs first, so this
+    /// short-circuits ahead of the ERR_INTERNAL that cache:None would otherwise
+    /// produce — proving the guard fires before the paid pipeline is reached.
+    #[tokio::test]
+    async fn test_new_request_with_image_data_part_rejected() {
+        let state = test_state();
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![
+                    Part::Text {
+                        text: "What is in this image?".to_string(),
+                    },
+                    Part::Data {
+                        content_type: "image/png".to_string(),
+                        data: json!("base64data"),
+                    },
+                ],
+                metadata: Some({
+                    let mut m = serde_json::Map::new();
+                    m.insert("model".to_string(), json!("test-model"));
+                    m
+                }),
+            },
+            task_id: None,
+        };
+
+        let result = handle_new_request(&state, &params).await;
+        let err = result.expect_err("image data part must be rejected"); // safe: built image part
+        assert_eq!(
+            err.code, ERR_INVALID_PARAMS,
+            "image guard must short-circuit with invalid-params before task-store work"
+        );
+    }
+
+    /// The image guard fires through the public dispatcher as well.
+    #[tokio::test]
+    async fn test_handle_message_send_rejects_image_data_part() {
+        let state = test_state();
+        let headers = HeaderMap::new();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "message/send".to_string(),
+            id: json!("req-img"),
+            params: json!({
+                "message": {
+                    "role": "user",
+                    "parts": [
+                        {"kind": "text", "text": "Describe"},
+                        {"kind": "data", "contentType": "image/png", "data": "base64data"}
+                    ],
+                    "metadata": {"model": "test-model"}
+                }
+            }),
+        };
+
+        let result = handle_message_send(state, &headers, &request).await;
+        let err = result.expect_err("image data part must be rejected via dispatcher"); // safe: built image part
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+    }
+
+    /// Control: a normal text `message/send` is unaffected by the image guard.
+    /// With cache:None the request advances past the guard and fails at the
+    /// task store (ERR_INTERNAL) — proving the guard did NOT reject the text
+    /// request as invalid-params.
+    #[tokio::test]
+    async fn test_new_request_text_only_unaffected_by_image_guard() {
+        let state = test_state();
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: "What is Solana?".to_string(),
+                }],
+                metadata: Some({
+                    let mut m = serde_json::Map::new();
+                    m.insert("model".to_string(), json!("test-model"));
+                    m
+                }),
+            },
+            task_id: None,
+        };
+
+        let result = handle_new_request(&state, &params).await;
+        let err = result.expect_err("cache:None blocks at task store"); // safe: cache:None
+        assert_eq!(
+            err.code, ERR_INTERNAL,
+            "text-only request must pass the image guard and reach the task store"
+        );
+    }
+
     #[tokio::test]
     async fn test_new_request_fails_without_redis() {
         // With cache: None, save_task now returns Err — task issuance must be blocked
@@ -939,6 +1137,47 @@ supports_vision = false
             result.unwrap_err().code, // safe: just asserted is_err
             ERR_MODEL_NOT_FOUND,
             "error code should be model not found"
+        );
+    }
+
+    /// The image guard also fires on the payment-submitted path: an image
+    /// `Part::Data` on the submission message must reject with
+    /// ERR_INVALID_PARAMS BEFORE the task is loaded (which would otherwise
+    /// yield ERR_TASK_NOT_FOUND for this nonexistent task).
+    #[tokio::test]
+    async fn test_payment_submitted_with_image_data_part_rejected() {
+        let state = test_state();
+        let headers = HeaderMap::new();
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![
+                    Part::Text {
+                        text: "pay".to_string(),
+                    },
+                    Part::Data {
+                        content_type: "image/png".to_string(),
+                        data: json!("base64data"),
+                    },
+                ],
+                metadata: Some({
+                    let mut m = serde_json::Map::new();
+                    m.insert(
+                        x402_meta::STATUS_KEY.to_string(),
+                        json!(x402_meta::PAYMENT_SUBMITTED),
+                    );
+                    m
+                }),
+            },
+            task_id: Some("nonexistent_task_id".to_string()),
+        };
+
+        let result =
+            handle_payment_submitted(&state, &headers, "nonexistent_task_id", &params).await;
+        let err = result.expect_err("image data part must be rejected"); // safe: built image part
+        assert_eq!(
+            err.code, ERR_INVALID_PARAMS,
+            "image guard must short-circuit before task load"
         );
     }
 

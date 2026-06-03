@@ -170,6 +170,39 @@ mod tests {
     }
 
     #[test]
+    fn build_chat_body_passes_image_parts_through_as_array() {
+        use solvela_protocol::vision::{ContentPart, ImageUrl, MessageContent};
+        let mut req = sample_request("openai/gpt-4o");
+        req.messages[0].content = MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "what is this?".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "https://example.com/cat.png".to_string(),
+                    detail: Some("high".to_string()),
+                },
+            },
+        ]);
+        let body = build_chat_body(&req).expect("body must serialize");
+        // The OpenAI passthrough must serialize `content` as a JSON ARRAY (not
+        // a stringified/dropped value) so the image reaches the upstream API.
+        assert!(
+            body["messages"][0]["content"].is_array(),
+            "image content must serialize as a JSON array, not stringified/dropped"
+        );
+        assert_eq!(body["messages"][0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["url"],
+            "https://example.com/cat.png"
+        );
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["detail"],
+            "high"
+        );
+    }
+
+    #[test]
     fn build_stream_body_injects_stream_true() {
         let req = sample_request("openai/gpt-4o");
         let body = build_stream_body(&req).expect("body must serialize");

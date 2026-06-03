@@ -323,7 +323,12 @@ impl SemanticCache {
         }
         // Don't store a prompt BGE would truncate (bug_002): its embedding would
         // reflect only the truncated prefix, risking a later wrong cross-hit.
-        let text = prompt_text(req);
+        // `None` => an unparseable image (unreachable given the route gate) means
+        // skip the cache entirely rather than build a possibly-divergent key.
+        let text = match prompt_text(req) {
+            Some(t) => t,
+            None => return,
+        };
         if !within_embed_budget(&text) {
             debug!(
                 model = %req.model,
@@ -410,7 +415,8 @@ impl SemanticCache {
     /// when the prompt exceeds [`MAX_EMBED_CHARS`] (BGE would truncate it; see
     /// bug_002) or when embedding fails.
     async fn embed_checked(&self, req: &ChatRequest) -> Option<Vec<f32>> {
-        let text = prompt_text(req);
+        // `None` => an unparseable image → skip the cache (get/store miss).
+        let text = prompt_text(req)?;
         if !within_embed_budget(&text) {
             debug!(
                 model = %req.model,
@@ -589,6 +595,103 @@ fn redis_value_to_string(v: &redis::Value) -> Option<String> {
     }
 }
 
+/// A deterministic, compact textual representation of a message's image parts,
+/// or the empty string when there are none.
+///
+/// Folded into [`prompt_text`] so two otherwise-identical prompts that carry
+/// different images embed to distinct vectors (preventing a cross-image
+/// semantic-cache collision). Each image contributes ` image=<rep>`:
+/// - `http(s)` URL → the URL verbatim (already short and stable).
+/// - `data:` URI → `sha256:<media_type>:<first-32-hex>` (the declared MIME plus
+///   a 128-bit prefix) of the raw base64 payload string bytes (verbatim — the
+///   payload is NOT decoded first; see [`solvela_protocol::ParsedImage::Base64`]),
+///   so a multi-megabyte base64 blob does not bloat the embedded text or exceed
+///   the embed budget while still distinguishing distinct images. The declared
+///   `media_type` is part of the rep because it IS forwarded to providers
+///   (Anthropic `source.media_type`, Gemini `inlineData.mimeType`) and changes
+///   how the image decodes — so the SAME payload sent as `image/png` vs
+///   `image/jpeg` must embed distinctly (dropping `media_type` would collide
+///   them and risk serving one MIME's cached answer for the other — a
+///   wrong-answer money loss). This mirrors the exact tier's
+///   `sha256:<media_type>:<payload-hash>` rep (`cache/exact.rs`) so the two
+///   tiers agree on the same image. 128 bits avoids birthday collisions in the
+///   shared, wallet-agnostic cache. (Two distinct base64 encodings of the same
+///   image hash differently — a benign cache *miss*, never a wrong hit.)
+/// - unparseable url → returns [`ImageRepResult::Skip`], so the caller bypasses
+///   the semantic cache entirely for this request rather than building a key
+///   that could diverge from a (hypothetical) parsed key. Defensive: malformed
+///   images are rejected at the route before settlement.
+fn image_rep_suffix(model: &str, content: &solvela_protocol::MessageContent) -> ImageRepResult {
+    use solvela_protocol::ParsedImage;
+
+    let mut out = String::new();
+    for img in content.image_urls() {
+        let rep = match img.parse() {
+            Ok(ParsedImage::Url { url }) => url,
+            Ok(ParsedImage::Base64 { media_type, data }) => {
+                // Fold BOTH the declared `media_type` and the payload hash into
+                // the rep. The SAME base64 payload sent as `image/png` vs
+                // `image/jpeg` decodes differently downstream — `media_type` is
+                // forwarded to providers verbatim (Anthropic `source.media_type`,
+                // Gemini `inlineData.mimeType`) — so dropping `media_type` here
+                // would collide them and risk serving one MIME's cached answer
+                // for the other (a wrong-answer money loss). Mirrors the exact
+                // tier's `sha256:<media_type>:<payload-hash>` (`cache/exact.rs`)
+                // so the two tiers agree on the same image. The separators are
+                // unambiguous: `media_type` is route-allowlisted to
+                // `image/png|jpeg|webp` (contains `/`, never `:`) and the hash
+                // is hex (never `:`), so no `(media_type, payload)` pair can
+                // alias another.
+                format!("sha256:{}:{}", media_type, short_hash_hex(data.as_bytes()))
+            }
+            Err(_) => {
+                // UNREACHABLE in production: the chat route validates every image
+                // via `ImageUrl::parse()` BEFORE settlement (routes/chat/mod.rs
+                // "Step 2a'"), so a request reaching the cache layer cannot carry
+                // an unparseable image. We nonetheless fail loud + safe rather
+                // than fall back to hashing the raw URL: a raw-URL fallback could
+                // build a key that diverges from a (hypothetical) parsed key for
+                // the same logical image, risking a wrong cross-hit. Instead we
+                // warn and signal the caller to SKIP the semantic cache entirely
+                // for this request (no get, no set) — never settle a paid
+                // response against a possibly-divergent key.
+                let truncated: String = img.url.chars().take(64).collect();
+                warn!(
+                    %model,
+                    image_url = %truncated,
+                    "semantic cache: unparseable image (unreachable given the route \
+                     parse gate); skipping semantic cache for this request"
+                );
+                return ImageRepResult::Skip;
+            }
+        };
+        out.push_str(" image=");
+        out.push_str(&rep);
+    }
+    ImageRepResult::Suffix(out)
+}
+
+/// Outcome of building the per-message image representation for [`prompt_text`].
+///
+/// `Skip` propagates an unparseable-image signal up so the request bypasses the
+/// semantic cache (rather than building a possibly-divergent key); see the
+/// `Err` arm of [`image_rep_suffix`].
+enum ImageRepResult {
+    Suffix(String),
+    Skip,
+}
+
+/// First 32 hex chars (16 bytes / 128 bits) of the SHA-256 of `bytes`. Stable
+/// and compact. 128 bits keeps the birthday-collision probability negligible in
+/// the shared, wallet-agnostic semantic cache (an 8-byte/64-bit prefix would
+/// collide after ~2^32 distinct images — too close for a cross-tenant cache).
+fn short_hash_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    hex::encode(&digest[..16])
+}
+
 /// Canonicalise a chat request's messages into the single string we embed.
 /// Deterministic and order-sensitive (message order changes meaning). Each
 /// message contributes a `role: content` line; ordering is preserved.
@@ -600,10 +703,15 @@ fn redis_value_to_string(v: &redis::Value) -> Option<String> {
 /// line is invisible to the KNN gate and the wrong sampling regime gets served.
 /// Sampling params are instead enforced as exact RediSearch TAG predicates (see
 /// [`param_tag`] and the `@temperature` / `@top_p` filters in [`SemanticCache::get`]).
-pub(crate) fn prompt_text(req: &ChatRequest) -> String {
-    req.messages
-        .iter()
-        .map(|m| {
+///
+/// Returns `None` to signal the caller must SKIP the semantic cache for this
+/// request — currently only when a message carries an unparseable image (see
+/// [`image_rep_suffix`]; unreachable given the route's pre-settlement parse
+/// gate, but fail-safe rather than build a possibly-divergent key).
+pub(crate) fn prompt_text(req: &ChatRequest) -> Option<String> {
+    let mut lines: Vec<String> = Vec::with_capacity(req.messages.len());
+    for m in &req.messages {
+        {
             // Base line: `role: content`. For an assistant turn carrying
             // `tool_calls`, or a tool turn carrying `tool_call_id`, we append
             // a deterministic suffix so two conversation histories that
@@ -614,7 +722,26 @@ pub(crate) fn prompt_text(req: &ChatRequest) -> String {
             // and collide above the similarity threshold — wrong tool result
             // served from cache. The suffix is JSON to preserve structure;
             // missing fields are simply omitted (no `null` noise).
-            let base = format!("{}: {}", role_str(&m.role), m.content.as_text());
+            // Fold a stable per-image representation into the embedded text so
+            // two prompts that differ ONLY in their image(s) embed to distinct
+            // vectors. `as_text()` drops image parts entirely, so without this
+            // a "describe data:img-A" and "describe data:img-B" would produce
+            // identical `prompt_text` and collide above the similarity
+            // threshold — serving image A's cached answer for image B (a
+            // wrong-answer money loss). The rep is the http(s) URL verbatim, or
+            // a short stable hash of the data-URI bytes (so a multi-MB base64
+            // blob doesn't bloat the embedded text or blow the embed budget).
+            let image_suffix = match image_rep_suffix(&req.model, &m.content) {
+                ImageRepResult::Suffix(s) => s,
+                // Unparseable image → skip the semantic cache for this request.
+                ImageRepResult::Skip => return None,
+            };
+            let base = format!(
+                "{}: {}{}",
+                role_str(&m.role),
+                m.content.as_text(),
+                image_suffix
+            );
             let tool_calls_suffix = m
                 .tool_calls
                 .as_ref()
@@ -627,10 +754,10 @@ pub(crate) fn prompt_text(req: &ChatRequest) -> String {
                 .as_ref()
                 .map(|id| format!(" tool_call_id={id}"))
                 .unwrap_or_default();
-            format!("{base}{tool_calls_suffix}{tool_call_id_suffix}")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+            lines.push(format!("{base}{tool_calls_suffix}{tool_call_id_suffix}"));
+        }
+    }
+    Some(lines.join("\n"))
 }
 
 /// Whether a prompt is short enough to embed without BGE silently truncating it
@@ -820,8 +947,8 @@ mod tests {
         a.messages.push(user_msg("second"));
         let mut b = req("m", "second");
         b.messages.push(user_msg("first"));
-        let ta = prompt_text(&a);
-        let tb = prompt_text(&b);
+        let ta = prompt_text(&a).expect("parseable prompt");
+        let tb = prompt_text(&b).expect("parseable prompt");
         assert!(
             !ta.is_empty(),
             "prompt_text must not be empty for non-empty messages"
@@ -848,8 +975,9 @@ mod tests {
             prompt_text(&b),
             "sampling params must NOT change the embedded text"
         );
-        assert!(!prompt_text(&a).contains("temperature"));
-        assert!(!prompt_text(&a).contains("top_p"));
+        let ta = prompt_text(&a).expect("parseable prompt");
+        assert!(!ta.contains("temperature"));
+        assert!(!ta.contains("top_p"));
     }
 
     /// Two conversation histories differing only in their assistant
@@ -899,7 +1027,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
         });
-        let text = prompt_text(&plain);
+        let text = prompt_text(&plain).expect("parseable prompt");
         assert!(
             !text.contains("tool_calls"),
             "plain (no tool_calls) message must not embed a tool_calls suffix; got: {text:?}"
@@ -932,8 +1060,156 @@ mod tests {
     fn prompt_text_includes_message_content() {
         let r = req("m", "explain semaphores");
         assert!(
-            prompt_text(&r).contains("explain semaphores"),
+            prompt_text(&r)
+                .expect("parseable prompt")
+                .contains("explain semaphores"),
             "prompt_text should include the user content"
+        );
+    }
+
+    fn image_req(text: &str, image_url: &str) -> ChatRequest {
+        use solvela_protocol::{ContentPart, ImageUrl, MessageContent};
+        ChatRequest {
+            model: "openai/gpt-4o".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: text.to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: image_url.to_string(),
+                            detail: None,
+                        },
+                    },
+                ]),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        }
+    }
+
+    /// Two prompts with identical TEXT but DIFFERENT images must produce
+    /// distinct `prompt_text`, so they embed to distinct vectors and don't
+    /// collide above the similarity threshold (serving image A's cached answer
+    /// for image B is a wrong-answer money loss). Falsifiability: reverting the
+    /// `image_rep_suffix` fold (so `as_text()` drops the image) makes both
+    /// prompts identical and this assertion fails.
+    #[test]
+    fn prompt_text_distinguishes_distinct_images() {
+        let a = image_req("describe", "https://example.com/a.png");
+        let b = image_req("describe", "https://example.com/b.png");
+        assert_ne!(
+            prompt_text(&a),
+            prompt_text(&b),
+            "distinct image URLs must yield distinct prompt_text"
+        );
+
+        // Distinct data-URI payloads (same media type) must also separate.
+        let da = image_req("describe", "data:image/png;base64,AAAA");
+        let db = image_req("describe", "data:image/png;base64,BBBB");
+        assert_ne!(
+            prompt_text(&da),
+            prompt_text(&db),
+            "distinct data-URI payloads must yield distinct prompt_text"
+        );
+    }
+
+    /// The SAME image with the SAME surrounding text must yield identical
+    /// `prompt_text` (stable; a legitimate cache hit must still be reachable).
+    #[test]
+    fn prompt_text_stable_for_identical_image() {
+        let a = image_req("describe", "https://example.com/a.png");
+        let b = image_req("describe", "https://example.com/a.png");
+        assert_eq!(prompt_text(&a), prompt_text(&b));
+
+        // And a huge data-URI payload is folded to a short hash (the embedded
+        // text must not balloon with the raw base64 bytes).
+        let big = "data:image/png;base64,".to_string() + &"Q".repeat(100_000);
+        let r = image_req("describe", &big);
+        let pt = prompt_text(&r).expect("parseable data-URI image prompt");
+        assert!(
+            pt.len() < 200,
+            "data-URI image must be folded to a short hash, got {} chars",
+            pt.len()
+        );
+        assert!(pt.contains("image=sha256:"));
+    }
+
+    /// The declared `media_type` is part of the embedded image rep. The SAME
+    /// base64 payload sent as `image/png` vs `image/jpeg` must yield DIFFERENT
+    /// `prompt_text` (the MIME is forwarded to providers — Anthropic
+    /// `source.media_type`, Gemini `inlineData.mimeType` — and changes how the
+    /// image decodes, so a png-declared answer must not be served for a
+    /// jpeg-declared request). Identical MIME + payload must stay stable.
+    /// Mirrors the exact tier's `cache_key_data_uri_distinguishes_media_type`.
+    ///
+    /// Falsifiability: dropping `media_type` from `image_rep_suffix`'s Base64
+    /// arm (the prior `format!("sha256:{}", ..)` form) collapses the two MIMEs
+    /// onto identical `prompt_text` and the `assert_ne!` fails.
+    #[test]
+    fn prompt_text_distinguishes_media_type_for_same_payload() {
+        let payload = "AAAA";
+        let png = image_req("describe", &format!("data:image/png;base64,{payload}"));
+        let jpeg = image_req("describe", &format!("data:image/jpeg;base64,{payload}"));
+        assert_ne!(
+            prompt_text(&png),
+            prompt_text(&jpeg),
+            "same base64 payload under different declared MIME must yield \
+             distinct prompt_text; otherwise a png answer could be served for \
+             a jpeg request (the MIME is forwarded to the provider verbatim)"
+        );
+
+        // Identical MIME + payload must stay stable (a legitimate hit must
+        // still be reachable).
+        let png2 = image_req("describe", &format!("data:image/png;base64,{payload}"));
+        assert_eq!(
+            prompt_text(&png),
+            prompt_text(&png2),
+            "identical MIME + payload must yield identical prompt_text"
+        );
+        // And the rep embeds the media_type before the hash, per the
+        // `sha256:<media_type>:<hash>` convention shared with the exact tier.
+        let pt = prompt_text(&png).expect("parseable data-URI image prompt");
+        assert!(
+            pt.contains("image=sha256:image/png:"),
+            "embedded rep must carry the media_type, got: {pt:?}"
+        );
+    }
+
+    /// FIX 2 (PR #2 round-2 review): an unparseable image must make `prompt_text`
+    /// return `None` — the signal that the request SKIPS the semantic cache
+    /// entirely (no get/set) rather than fall back to a possibly-divergent
+    /// raw-URL key. This branch is unreachable in production (the route validates
+    /// every image via `parse()` before settlement), but the cache layer must
+    /// fail loud + safe if it is ever reached. Falsifiability: reverting to the
+    /// old raw-URL hash fallback makes this return `Some(..)` and the test fails.
+    #[test]
+    fn prompt_text_skips_on_unparseable_image() {
+        // `ftp://` is neither a `data:` URI nor an http(s) URL → parse() errors.
+        let r = image_req("describe", "ftp://example.com/not-an-image.png");
+        assert!(
+            prompt_text(&r).is_none(),
+            "an unparseable image must skip the semantic cache (None), not build a key"
+        );
+    }
+
+    /// A parseable image still yields `Some(..)` — the skip is scoped to the
+    /// unparseable case only (the happy path is unaffected).
+    #[test]
+    fn prompt_text_some_for_parseable_image() {
+        let r = image_req("describe", "https://example.com/a.png");
+        assert!(
+            prompt_text(&r).is_some(),
+            "a parseable image must still produce embedded text"
         );
     }
 

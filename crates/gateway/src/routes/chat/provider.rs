@@ -334,6 +334,7 @@ async fn execute_streaming_call(
             fallback::stream_with_chain(
                 &ctx.state.providers,
                 &ctx.state.provider_health,
+                &ctx.state.model_registry,
                 &chain,
                 &ctx.req.model,
                 ctx.req.clone(),
@@ -343,6 +344,7 @@ async fn execute_streaming_call(
             fallback::stream_with_model_fallback(
                 &ctx.state.providers,
                 &ctx.state.provider_health,
+                &ctx.state.model_registry,
                 provider_name,
                 &ctx.req.model,
                 ctx.req.clone(),
@@ -446,6 +448,7 @@ async fn execute_non_streaming_call(
             fallback::chat_with_chain(
                 &ctx.state.providers,
                 &ctx.state.provider_health,
+                &ctx.state.model_registry,
                 &chain,
                 &ctx.req.model,
                 ctx.req.clone(),
@@ -455,6 +458,7 @@ async fn execute_non_streaming_call(
             fallback::chat_with_model_fallback(
                 &ctx.state.providers,
                 &ctx.state.provider_health,
+                &ctx.state.model_registry,
                 provider_name,
                 &ctx.req.model,
                 ctx.req.clone(),
