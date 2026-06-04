@@ -32,7 +32,8 @@ Single-package Go SDK (`package solvela`) — no sub-packages. Module: `github.c
 | `client.go` | `SolvelaClient` — main entry point. `Chat()`, `ChatStream()`, `Models()`. Orchestrates payment, caching, sessions, quality checking. |
 | `transport.go` | `Transport` — HTTP layer. `SendChat()`, `SendChatStream()` (SSE), `FetchModels()`. Handles 200/402/error responses. |
 | `wallet.go` | `Wallet` — ed25519 keypair. `CreateWallet()`, `WalletFromKeypairB58()`, `WalletFromEnv()`. Uses `mr-tron/base58`. |
-| `signer.go` | `Signer` interface + `KeypairSigner` stub. Pluggable payment transaction signing. |
+| `signer.go` | `Signer` interface + `KeypairSigner`. Builds escrow `deposit` transactions (`escrow` scheme); `exact` scheme returns a clear not-implemented error (no silent fallback). Pluggable. |
+| `escrow.go` | `buildDepositTx` + PDA/ATA derivation + legacy-message serializer. Byte-exact port of `crates/escrow-tx`; pinned to `GoldenVectorB64`. |
 | `cache.go` | `ResponseCache` — thread-safe LRU with TTL and dedup window. Default: 100 entries, 5m TTL, 2s dedup. |
 | `session.go` | `SessionStore` — conversation tracking with three-strike model escalation. |
 | `quality.go` | `CheckDegraded()` — detects empty, error-phrase, repetitive, or truncated responses. |

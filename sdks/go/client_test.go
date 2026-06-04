@@ -201,6 +201,61 @@ func TestClientChat402WithoutSigner(t *testing.T) {
 	}
 }
 
+// TestClientChat402EscrowSignerExactOnlyFailsClosed pins the fail-closed core
+// of the T1.2 scheme-selection fix: with a real KeypairSigner (which signs
+// `escrow` only — see CanSignScheme) configured, a gateway that advertises ONLY
+// the `exact` scheme has no compatible+signable entry. The client MUST surface a
+// PaymentRequiredError (no scheme it can fulfill) — NOT a SignerError (that would
+// mean it tried to sign anyway) and NOT a silent substitution to escrow.
+//
+// This guards against a future regression where CanSignScheme accidentally
+// returns true for `exact`, or findCompatibleScheme drops the signability filter
+// and routes an exact offer into the escrow signer.
+func TestClientChat402EscrowSignerExactOnlyFailsClosed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pr := PaymentRequired{
+			X402Version: X402Version,
+			Error:       "payment required",
+			CostBreakdown: CostBreakdown{
+				Total:    "1000",
+				Currency: "USDC",
+			},
+			// Gateway advertises ONLY exact — the KeypairSigner cannot sign it.
+			Accepts: []PaymentAccept{
+				{Scheme: SchemeExact, Network: SolanaNetwork, Asset: USDCMint, Amount: "1000", PayTo: "recipient123"},
+			},
+		}
+		w.WriteHeader(402)
+		_ = json.NewEncoder(w).Encode(pr)
+	}))
+	defer server.Close()
+
+	wallet, _, err := CreateWallet()
+	if err != nil {
+		t.Fatalf("create wallet: %v", err)
+	}
+	// Real escrow-only signer. RPC URL is irrelevant: selection must fail closed
+	// BEFORE any signing / RPC is attempted.
+	signer := NewKeypairSigner(wallet, server.URL)
+	client, err := NewClient(wallet, signer, WithGatewayURL(server.URL))
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error when only the unsignable `exact` scheme is offered")
+	}
+	if _, ok := err.(*PaymentRequiredError); !ok {
+		// A SignerError here would mean the client tried to sign exact — the exact
+		// scheme-mismatch money-path bug this test exists to prevent.
+		t.Fatalf("expected PaymentRequiredError (fail closed), got %T: %v", err, err)
+	}
+}
+
 func TestClientLastKnownBalance(t *testing.T) {
 	wallet, _, _ := CreateWallet()
 	client, err := NewClient(wallet, nil)
@@ -566,7 +621,9 @@ func TestClientRecipientMismatch(t *testing.T) {
 			X402Version:   2,
 			CostBreakdown: CostBreakdown{Total: "1000"},
 			Accepts: []PaymentAccept{
-				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "1000", PayTo: "wrong-recipient"},
+				// Offer escrow (signable by KeypairSigner) so selection reaches
+				// the scheme-independent recipient guard under test.
+				{Scheme: "escrow", Network: SolanaNetwork, Asset: USDCMint, Amount: "1000", PayTo: "wrong-recipient", EscrowProgramID: ptr(testEscrowProgram)},
 			},
 		}
 		w.WriteHeader(402)
@@ -603,7 +660,8 @@ func TestClientAmountExceedsMax(t *testing.T) {
 			X402Version:   2,
 			CostBreakdown: CostBreakdown{Total: "999999"},
 			Accepts: []PaymentAccept{
-				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "999999", PayTo: "recipient"},
+				// Escrow so KeypairSigner can select it and reach the amount-cap guard.
+				{Scheme: "escrow", Network: SolanaNetwork, Asset: USDCMint, Amount: "999999", PayTo: "recipient", EscrowProgramID: ptr(testEscrowProgram)},
 			},
 		}
 		w.WriteHeader(402)
@@ -681,7 +739,8 @@ func TestClientRejectsZeroAmountAttack(t *testing.T) {
 			X402Version:   2,
 			CostBreakdown: CostBreakdown{Total: "0"},
 			Accepts: []PaymentAccept{
-				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "0", PayTo: "recipient"},
+				// Escrow so selection succeeds and the zero-amount guard fires.
+				{Scheme: "escrow", Network: SolanaNetwork, Asset: USDCMint, Amount: "0", PayTo: "recipient", EscrowProgramID: ptr(testEscrowProgram)},
 			},
 		}
 		w.WriteHeader(402)
@@ -724,7 +783,8 @@ func TestClientRejectsNonNumericAmount(t *testing.T) {
 			X402Version:   2,
 			CostBreakdown: CostBreakdown{Total: "junk"},
 			Accepts: []PaymentAccept{
-				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "notanumber", PayTo: "recipient"},
+				// Escrow so selection succeeds and the non-numeric-amount guard fires.
+				{Scheme: "escrow", Network: SolanaNetwork, Asset: USDCMint, Amount: "notanumber", PayTo: "recipient", EscrowProgramID: ptr(testEscrowProgram)},
 			},
 		}
 		w.WriteHeader(402)
@@ -765,7 +825,8 @@ func TestClientRejectsForeignResourceURL(t *testing.T) {
 			CostBreakdown: CostBreakdown{Total: "100"},
 			Resource:      Resource{URL: "https://attacker.example.com/v1/chat/completions", Method: "POST"},
 			Accepts: []PaymentAccept{
-				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "100", PayTo: "recipient"},
+				// Escrow so selection succeeds and the foreign-resource-URL guard fires.
+				{Scheme: "escrow", Network: SolanaNetwork, Asset: USDCMint, Amount: "100", PayTo: "recipient", EscrowProgramID: ptr(testEscrowProgram)},
 			},
 		}
 		w.WriteHeader(402)

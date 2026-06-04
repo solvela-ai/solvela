@@ -383,13 +383,13 @@ func (c *SolvelaClient) sendWithPayment(ctx context.Context, request *ChatReques
 // gateway requires payment for the given request, and signs the payment if so.
 // Returns:
 //   - sig:        the encoded Payment-Signature header value, or "" if no
-//                 payment is needed (or the probe already returned a fully
-//                 resolved 200 response).
+//     payment is needed (or the probe already returned a fully
+//     resolved 200 response).
 //   - probeResp:  non-nil when the probe returned 200 with a complete
-//                 ChatResponse. Callers (ChatStream) MUST reuse this body
-//                 instead of issuing a second request — opening a streaming
-//                 follow-up would charge the caller twice and discard the
-//                 already-paid completion.
+//     ChatResponse. Callers (ChatStream) MUST reuse this body
+//     instead of issuing a second request — opening a streaming
+//     follow-up would charge the caller twice and discard the
+//     already-paid completion.
 //   - err:        any error encountered.
 //
 // The probe shares the same handshake logic as non-streaming Chat — the
@@ -495,15 +495,45 @@ func isCompatibleAccept(a PaymentAccept, scheme Scheme) bool {
 	return a.Scheme == scheme && a.Network == SolanaNetwork && a.Asset == USDCMint
 }
 
-func (c *SolvelaClient) findCompatibleScheme(pr *PaymentRequired) *PaymentAccept {
-	for i := range pr.Accepts {
-		if isCompatibleAccept(pr.Accepts[i], SchemeExact) {
-			return &pr.Accepts[i]
-		}
+// canSignerSign reports whether the configured signer is able to sign the given
+// scheme. A signer that implements [SchemeCapable] is asked directly; one that
+// does not is treated as scheme-agnostic (legacy custom-signer behavior). A nil
+// signer can sign nothing — the caller handles that earlier by returning a
+// PaymentRequiredError, but this stays safe regardless.
+func (c *SolvelaClient) canSignerSign(scheme Scheme) bool {
+	if c.signer == nil {
+		return false
 	}
-	for i := range pr.Accepts {
-		if isCompatibleAccept(pr.Accepts[i], SchemeEscrow) {
-			return &pr.Accepts[i]
+	if sc, ok := c.signer.(SchemeCapable); ok {
+		return sc.CanSignScheme(scheme)
+	}
+	return true
+}
+
+// findCompatibleScheme selects an accepted-scheme entry to pay against.
+//
+// An entry is only eligible if it is BOTH wire-compatible (right scheme,
+// network, and asset — see isCompatibleAccept) AND signable by the configured
+// signer (see canSignerSign). The gateway advertises `exact` first and `escrow`
+// second; we honor that preference order, but ONLY among schemes the signer can
+// actually fulfill. This is critical: KeypairSigner implements `escrow` only,
+// so without the signability filter the client would auto-select the
+// first-listed `exact` and every payment would fail (dead on arrival).
+//
+// There is NO silent substitution: we never sign a scheme the signer cannot
+// fulfill, and if no compatible+signable scheme exists we return nil so the
+// caller surfaces a clear PaymentRequiredError rather than guessing.
+func (c *SolvelaClient) findCompatibleScheme(pr *PaymentRequired) *PaymentAccept {
+	// Preference order matches the gateway's advertised order (exact, then
+	// escrow); each candidate must additionally be signable by the signer.
+	for _, scheme := range []Scheme{SchemeExact, SchemeEscrow} {
+		if !c.canSignerSign(scheme) {
+			continue
+		}
+		for i := range pr.Accepts {
+			if isCompatibleAccept(pr.Accepts[i], scheme) {
+				return &pr.Accepts[i]
+			}
 		}
 	}
 	return nil
