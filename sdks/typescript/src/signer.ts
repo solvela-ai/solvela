@@ -115,7 +115,8 @@ export class KeypairSigner implements Signer {
       );
     } catch (e) {
       if (e instanceof SignerError) throw e;
-      throw new SignerError(`Failed to sign payment: ${(e as Error).message}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new SignerError(`Failed to sign payment: ${msg}`);
     }
   }
 
@@ -166,6 +167,14 @@ export class KeypairSigner implements Signer {
     recipient: string,
     blockhash: string,
   ): Promise<string> {
+    // Validate unconditionally at the lowest level so a direct external call to
+    // this public, barrel-exported builder cannot bypass the amount guard. A
+    // zero/negative/float/out-of-range amount would otherwise be silently
+    // mis-encoded into the u64 (e.g. a negative amount wraps to ~18.4
+    // quintillion atomic USDC). The duplicate call in signExactPayment is a
+    // harmless no-op once validation passes.
+    this.assertValidAmount(amountAtomic);
+
     const mint = new PublicKey(USDC_MINT);
     const sender = this.wallet.publicKey();
     const recipientPubkey = new PublicKey(recipient);
@@ -174,7 +183,7 @@ export class KeypairSigner implements Signer {
     const recipientAta = await getAssociatedTokenAddress(mint, recipientPubkey);
 
     // SPL Token TransferChecked: createTransferCheckedInstruction emits the
-    // canonical 4-account layout [source, mint, destination, owner] and the
+    // canonical 4-account layout [source, mint, destination, authority] and the
     // instruction data [12] || amount(u64 LE) || decimals(1). The mint + the
     // decimals byte are what let the gateway verify the USDC mint on-chain; the
     // live verifier rejects the plain Transfer (discriminator 3) the old code
@@ -218,11 +227,7 @@ export class KeypairSigner implements Signer {
     }
     // The agent is the sole signer; the signature count fits in a single
     // compact-u16 byte (1 <= 127). Mirrors the escrow wire-format assembly.
-    const wire = Buffer.concat([
-      Buffer.from([1]),
-      Buffer.from(signature),
-      Buffer.from(messageBytes),
-    ]);
+    const wire = Buffer.concat([Buffer.from([1]), signature, messageBytes]);
 
     return wire.toString('base64');
   }
@@ -300,7 +305,7 @@ function compileCanonicalMessage(
   const writableNonSigners = rest.filter((m) => !m.isSigner && m.isWritable).sort(byBytes);
   const readonlyNonSigners = rest.filter((m) => !m.isSigner && !m.isWritable).sort(byBytes);
 
-  const feePayerMeta = all.find((m) => m.pubkey.toBase58() === feePayerKey);
+  const feePayerMeta = metaByKey.get(feePayerKey);
   if (!feePayerMeta) {
     throw new SignerError('internal: fee payer missing from compiled account set');
   }

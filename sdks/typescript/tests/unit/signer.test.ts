@@ -6,6 +6,7 @@ import { Keypair, Connection } from '@solana/web3.js';
 import bs58 from 'bs58';
 
 import { KeypairSigner, USDC_DECIMALS } from '../../src/signer.js';
+import { SignerError } from '../../src/errors.js';
 import { Wallet } from '../../src/wallet.js';
 import { PaymentAccept, Resource, SolanaPayload, EscrowPayload } from '../../src/types.js';
 import { SOLANA_NETWORK, USDC_MINT } from '../../src/constants.js';
@@ -224,6 +225,80 @@ describe('Exact amount rejections (fail closed before any RPC)', () => {
     expect(payload.accepted.scheme).toBe('exact');
     expect(payload.payload).toBeInstanceOf(SolanaPayload);
     expect((payload.payload as SolanaPayload).transaction).toBe(EXACT_GOLDEN_VECTOR_B64);
+  });
+});
+
+describe('buildExactTransferTx direct-call guard (fail closed before any RPC)', () => {
+  // buildExactTransferTx is public + barrel-exported, so external consumers can
+  // call it directly, bypassing signExactPayment. The amount guard MUST hold on
+  // this path too: a zero/negative/float amount would otherwise be silently
+  // mis-encoded into the on-chain u64 (a negative amount wraps to ~18.4
+  // quintillion atomic USDC). These pin the money-path Critical fix.
+  function spyNoRpc(): ReturnType<typeof vi.spyOn> {
+    return vi
+      .spyOn(Connection.prototype, 'getLatestBlockhash')
+      .mockRejectedValue(new Error('network must not be called for a rejected amount'));
+  }
+
+  it('rejects zero amount on a direct call with no RPC', async () => {
+    const spy = spyNoRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.buildExactTransferTx(0, GOLDEN_PROVIDER, goldenBlockhashBase58()),
+    ).rejects.toThrow(SignerError);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a negative amount on a direct call with no RPC', async () => {
+    const spy = spyNoRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.buildExactTransferTx(-1, GOLDEN_PROVIDER, goldenBlockhashBase58()),
+    ).rejects.toThrow(SignerError);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a float amount on a direct call with no RPC', async () => {
+    const spy = spyNoRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.buildExactTransferTx(2625.5, GOLDEN_PROVIDER, goldenBlockhashBase58()),
+    ).rejects.toThrow(SignerError);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('signPayment error wrapping (non-Error rejections)', () => {
+  // Pins SHOULD-FIX #1: a plain non-Error rejection from the RPC layer must not
+  // surface as "Failed to sign payment: undefined".
+  it('surfaces a SignerError whose message is NOT "...undefined" when RPC throws a string', async () => {
+    vi.spyOn(Connection.prototype, 'getLatestBlockhash').mockRejectedValue('boom-string-rejection');
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    let caught: unknown;
+    try {
+      await signer.signPayment(2625, GOLDEN_PROVIDER, resource(), accept());
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(SignerError);
+    const msg = (caught as Error).message;
+    expect(msg).not.toMatch(/undefined/);
+    expect(msg).toContain('boom-string-rejection');
+  });
+});
+
+describe('signPayment invalid recipient', () => {
+  // An un-decodable base58 recipient must surface a SignerError, not a raw
+  // throw from PublicKey construction.
+  it('surfaces a SignerError for an invalid recipient base58 string', async () => {
+    vi.spyOn(Connection.prototype, 'getLatestBlockhash').mockResolvedValue({
+      blockhash: goldenBlockhashBase58(),
+      lastValidBlockHeight: 1_000_000,
+    });
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.signPayment(2625, 'not-a-valid-base58-pubkey!!!', resource(), accept()),
+    ).rejects.toThrow(SignerError);
   });
 });
 
