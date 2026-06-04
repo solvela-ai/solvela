@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/mr-tron/base58"
@@ -99,7 +100,33 @@ func (w *Wallet) ToKeypairB58() string {
 	return base58.Encode(w.privateKey)
 }
 
-// String returns a debug-safe representation that redacts the secret key.
-func (w *Wallet) String() string {
+// redactedWallet renders a Wallet with the secret key redacted. It is the
+// single source of truth for every fmt verb so the raw ed25519 private key in
+// privateKey can NEVER appear in a log line via %v / %+v / %#v / %s. Mirrors the
+// DepositParams redaction pattern (escrow.go).
+func (w Wallet) redactedWallet() string {
 	return fmt.Sprintf("Wallet(address=%s, secret=REDACTED)", w.Address())
+}
+
+// String implements fmt.Stringer so plain %s / %v / %+v formatting redacts the
+// secret key. A value receiver means both a Wallet value and a *Wallet pointer
+// are covered.
+func (w Wallet) String() string {
+	return w.redactedWallet()
+}
+
+// GoString implements fmt.GoStringer so %#v formatting redacts the secret key.
+// Without it, %#v would reflect over the struct fields and dump the raw
+// ed25519.PrivateKey bytes.
+func (w Wallet) GoString() string {
+	return w.redactedWallet()
+}
+
+// Format implements fmt.Formatter so every verb (%v, %+v, %#v, %s) routes
+// through the redacted representation rather than reflecting over the struct
+// fields. fmt consults Formatter before Stringer/GoStringer, so this is the
+// authoritative guard against the secret key leaking. The value receiver means
+// *Wallet satisfies fmt.Formatter too, so a pointer is redacted as well.
+func (w Wallet) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, w.redactedWallet())
 }

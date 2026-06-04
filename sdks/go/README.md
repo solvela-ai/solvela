@@ -56,10 +56,17 @@ func main() {
 
 The core SDK (transport, caching, sessions, quality checking, streaming, balance monitoring) is fully implemented and tested.
 
-**`UnimplementedSigner` is the bundled placeholder.** It exists so the SDK compiles and the rest of the surface area (transport, caching, sessions, streaming) can be exercised, but `SignPayment` returns an error — it is **not** a working signer. To make real payments you have two options:
+**`KeypairSigner` is the bundled signer.** It builds real Solana transactions, branching on the x402 payment scheme:
 
-1. **Use a different SDK** — the [Python SDK](https://github.com/solvela-ai/solvela/tree/main/sdks/python) and [TypeScript SDK](https://github.com/solvela-ai/solvela/tree/main/sdks/typescript) include working `KeypairSigner` implementations backed by their respective Solana libraries.
-2. **Implement a custom `Signer`** — the `Signer` interface is pluggable. Provide your own implementation using `crypto/ed25519` (already in the Go standard library) and a Solana JSON-RPC client of your choice.
+- **`escrow`** — fully implemented. `SignPayment` builds a byte-exact escrow `deposit` transaction (golden-vector-pinned against the canonical Rust builder `crates/escrow-tx`), generating a per-request CSPRNG `service_id`, computing the expiry slot from `getSlot`, and fetching a recent blockhash. This is the trustless overpayment-protection path for a single metered request.
+- **`exact`** — not yet implemented in the Go SDK. `SignPayment` returns a clear error (it never silently substitutes another scheme). The byte layout has no pinned golden vector, so it is intentionally left unimplemented rather than guessed at on the money path.
+
+When the gateway advertises both `exact` and `escrow` (the default), `KeypairSigner` reports — via the optional `SchemeCapable` interface — that it can only sign `escrow`, so scheme selection prefers `escrow` rather than auto-selecting the unsignable first-listed `exact`. There is no silent substitution: if no compatible, signable scheme is offered, the client surfaces a `PaymentRequiredError`.
+
+To make `exact`-scheme payments today you have two options:
+
+1. **Use the Rust SDK** — the [Rust SDK](https://github.com/solvela-ai/solvela/tree/main/sdks/rust) is the canonical reference implementation and includes a working exact-scheme signer.
+2. **Implement a custom `Signer`** — the `Signer` interface is pluggable. Provide your own implementation using `crypto/ed25519` (already in the Go standard library) and a Solana JSON-RPC client of your choice. Optionally implement `SchemeCapable` so scheme selection knows which schemes your signer supports.
 
 ```go
 type MySigner struct{ wallet *solvela.Wallet }

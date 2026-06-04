@@ -2,6 +2,7 @@ package solvela
 
 import (
 	"crypto/ed25519"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -131,6 +132,56 @@ func TestWalletStringRedacts(t *testing.T) {
 	b58 := w.ToKeypairB58()
 	if strings.Contains(s, b58) {
 		t.Error("String() should not contain the full private key")
+	}
+}
+
+// TestWalletFormatRedactsAllVerbs guards against the %#v secret leak: fmt's
+// default %#v reflects over struct fields and would dump the raw
+// ed25519.PrivateKey bytes. Wallet implements fmt.Formatter (plus Stringer /
+// GoStringer) so EVERY verb — %v, %+v, %#v, %s — on both a Wallet value and a
+// *Wallet pointer routes through the redacted form. The key is constructed from
+// an all-0x2a seed so the raw secret bytes render as "0x2a" / "42" sequences
+// under the default formatters; their absence proves redaction.
+func TestWalletFormatRedactsAllVerbs(t *testing.T) {
+	// Deterministic key: every private-key byte is 0x2a (== 42 decimal).
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = 0x2a
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	w, err := WalletFromKeypairBytes(priv)
+	if err != nil {
+		t.Fatalf("WalletFromKeypairBytes: %v", err)
+	}
+
+	// The first 32 bytes of an ed25519.PrivateKey are the seed (all 0x2a here),
+	// so a leaked raw key would surface these byte renderings.
+	leakMarkers := []string{"0x2a", "0x2A", ", 42,", "{42,", " 42,"}
+
+	verbs := []string{"%v", "%+v", "%#v", "%s"}
+	subjects := map[string]any{
+		"value":   *w,
+		"pointer": w,
+	}
+	for name, subj := range subjects {
+		for _, verb := range verbs {
+			out := fmt.Sprintf(verb, subj)
+			if !strings.Contains(out, "REDACTED") {
+				t.Errorf("%s %s: expected REDACTED, got %q", name, verb, out)
+			}
+			if !strings.Contains(out, w.Address()) {
+				t.Errorf("%s %s: expected address %q, got %q", name, verb, w.Address(), out)
+			}
+			for _, marker := range leakMarkers {
+				if strings.Contains(out, marker) {
+					t.Errorf("%s %s leaked raw key bytes (marker %q): %q", name, verb, marker, out)
+				}
+			}
+			// Also ensure the serialized secret never appears verbatim.
+			if strings.Contains(out, w.ToKeypairB58()) {
+				t.Errorf("%s %s leaked base58 secret: %q", name, verb, out)
+			}
+		}
 	}
 }
 
