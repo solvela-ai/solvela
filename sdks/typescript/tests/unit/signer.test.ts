@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { Keypair, Connection } from '@solana/web3.js';
 import bs58 from 'bs58';
 
-import { KeypairSigner, USDC_DECIMALS } from '../../src/signer.js';
+import { KeypairSigner, USDC_DECIMALS, escrowExpirySlot } from '../../src/signer.js';
 import { SignerError } from '../../src/errors.js';
 import { Wallet } from '../../src/wallet.js';
 import { PaymentAccept, Resource, SolanaPayload, EscrowPayload } from '../../src/types.js';
@@ -68,6 +68,7 @@ function resource(): Resource {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('Signer', () => {
@@ -303,15 +304,15 @@ describe('signPayment invalid recipient', () => {
 });
 
 describe('Scheme branching (no silent fallback)', () => {
-  it('escrow scheme is rejected, never settled as an exact transfer', async () => {
-    const spy = vi
-      .spyOn(Connection.prototype, 'getLatestBlockhash')
-      .mockRejectedValue(new Error('network must not be called for an escrow rejection'));
+  it('an exact-selected payment never produces an escrow deposit', async () => {
+    vi.spyOn(Connection.prototype, 'getLatestBlockhash').mockResolvedValue({
+      blockhash: goldenBlockhashBase58(),
+      lastValidBlockHeight: 1_000_000,
+    });
     const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
-    await expect(
-      signer.signPayment(2625, GOLDEN_PROVIDER, resource(), accept('escrow')),
-    ).rejects.toThrow(/escrow/i);
-    expect(spy).not.toHaveBeenCalled();
+    const payload = await signer.signPayment(2625, GOLDEN_PROVIDER, resource(), accept('exact'));
+    expect(payload.payload).toBeInstanceOf(SolanaPayload);
+    expect(payload.payload).not.toBeInstanceOf(EscrowPayload);
   });
 
   it('an unknown scheme bypassing the type system is rejected, not default-routed', async () => {
@@ -329,5 +330,320 @@ describe('Scheme branching (no silent fallback)', () => {
     expect(spy).not.toHaveBeenCalled();
     // Defensive: escrow payload must never be produced by the exact signer.
     expect(EscrowPayload).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Escrow scheme signing. The escrow path uses raw JSON-RPC (global `fetch`) for
+// getSlot + getLatestBlockhash (mirroring the Go/Python signers), so these
+// tests mock `fetch` rather than web3.js `Connection`. Mirrors sdks/go's
+// signer_test.go escrow coverage.
+// ---------------------------------------------------------------------------
+
+const ESCROW_PROGRAM = '9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU';
+
+function escrowAccept(...programId: [] | [string | undefined]): PaymentAccept {
+  // Use a rest param so the caller distinguishes "default program id" (no arg)
+  // from "explicitly undefined / empty" — a defaulted positional param would
+  // turn an explicit `undefined` back into the default and mask the
+  // missing-program-id rejection path.
+  const pid = programId.length === 0 ? ESCROW_PROGRAM : programId[0];
+  return new PaymentAccept('escrow', SOLANA_NETWORK, '2625', USDC_MINT, GOLDEN_PROVIDER, 300, pid);
+}
+
+/** A JSON-RPC response body for a method, mirroring the real RPC shape. */
+function rpcOk(method: string): unknown {
+  if (method === 'getSlot') {
+    return { jsonrpc: '2.0', id: 1, result: 1_000_000 };
+  }
+  // getLatestBlockhash — blockhash is a base58 32-byte string. The system
+  // program id (32 zero bytes) base58-encodes to a valid 32-byte hash.
+  return {
+    jsonrpc: '2.0',
+    id: 1,
+    result: {
+      context: { slot: 1_000_000 },
+      value: { blockhash: '11111111111111111111111111111111', lastValidBlockHeight: 1_000_000 },
+    },
+  };
+}
+
+/**
+ * Install a `fetch` mock routing by JSON-RPC method. `overrides` lets a test
+ * substitute a custom { status, body } per method (body may be a non-JSON
+ * string to exercise the malformed-JSON path). Returns the vi mock for
+ * call-count assertions.
+ */
+function mockRpc(
+  overrides: Partial<Record<string, { status?: number; body?: unknown; raw?: string }>> = {},
+): ReturnType<typeof vi.fn> {
+  const fn = vi.fn(async (_url: string, init?: { body?: string }) => {
+    const parsed = JSON.parse(init?.body ?? '{}') as { method?: string };
+    const method = parsed.method ?? '';
+    const o = overrides[method];
+    if (o?.status !== undefined && o.status !== 200) {
+      return new Response('<html>error</html>', { status: o.status });
+    }
+    if (o?.raw !== undefined) {
+      return new Response(o.raw, { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    const body = o?.body ?? rpcOk(method);
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  });
+  vi.stubGlobal('fetch', fn);
+  return fn as unknown as ReturnType<typeof vi.fn>;
+}
+
+describe('Escrow scheme signing (no silent fallback)', () => {
+  it('escrow scheme produces an EscrowPayload with a valid deposit_tx + base64 service_id', async () => {
+    mockRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    const payload = await signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept());
+    expect(payload.x402Version).toBe(2);
+    expect(payload.accepted.scheme).toBe('escrow');
+    expect(payload.payload).toBeInstanceOf(EscrowPayload);
+    const ep = payload.payload as EscrowPayload;
+    // deposit_tx is a base64 signed legacy tx: compact-u16(1) || sig(64) || msg.
+    const raw = Buffer.from(ep.depositTx, 'base64');
+    expect(raw[0]).toBe(0x01);
+    expect(raw.length).toBeGreaterThan(1 + 64);
+    // service_id is base64 of exactly 32 bytes.
+    expect(Buffer.from(ep.serviceId, 'base64').length).toBe(32);
+    expect(ep.agentPubkey).toBe(goldenAgentWallet().address());
+  });
+
+  it('generates a unique service_id per call (#118 CSPRNG invariant)', async () => {
+    mockRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    const p1 = await signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept());
+    const p2 = await signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept());
+    const s1 = (p1.payload as EscrowPayload).serviceId;
+    const s2 = (p2.payload as EscrowPayload).serviceId;
+    expect(s1).not.toBe(s2);
+  });
+
+  it('rejects a missing escrow_program_id before any RPC', async () => {
+    const fn = mockRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept(undefined)),
+    ).rejects.toThrow(/escrow_program_id is missing/);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('rejects an empty escrow_program_id before any RPC', async () => {
+    const fn = mockRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept('')),
+    ).rejects.toThrow(/escrow_program_id is missing/);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('rejects a zero amount before any RPC', async () => {
+    const fn = mockRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.signPayment(0, GOLDEN_PROVIDER, resource(), escrowAccept()),
+    ).rejects.toThrow(/greater than zero/);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('rejects a float amount before any RPC', async () => {
+    const fn = mockRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.signPayment(2625.5, GOLDEN_PROVIDER, resource(), escrowAccept()),
+    ).rejects.toThrow(/integer/);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('rejects an implausibly low slot (stub/genesis node)', async () => {
+    mockRpc({ getSlot: { body: { jsonrpc: '2.0', id: 1, result: 0 } } });
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept()),
+    ).rejects.toThrow(/implausibly low slot/);
+  });
+
+  it('rejects a getSlot HTTP 429', async () => {
+    mockRpc({ getSlot: { status: 429 } });
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept()),
+    ).rejects.toThrow(/getSlot RPC HTTP 429/);
+  });
+
+  it('rejects a malformed getSlot JSON body', async () => {
+    mockRpc({ getSlot: { raw: 'not valid json' } });
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept()),
+    ).rejects.toThrow(/getSlot RPC: malformed JSON/);
+  });
+
+  it('surfaces a getSlot JSON-RPC error code without leaking the message text', async () => {
+    mockRpc({
+      getSlot: {
+        body: { jsonrpc: '2.0', id: 1, error: { code: -32000, message: 'node behind' } },
+      },
+    });
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    let caught: unknown;
+    try {
+      await signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept());
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(SignerError);
+    const msg = (caught as Error).message;
+    expect(msg).toMatch(/getSlot RPC error/);
+    expect(msg).toContain('-32000');
+    expect(msg).not.toContain('node behind');
+  });
+
+  it('does not render a code-less getSlot error as "code: 0"', async () => {
+    mockRpc({
+      getSlot: { body: { jsonrpc: '2.0', id: 1, error: { message: 'node behind' } } },
+    });
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    let caught: unknown;
+    try {
+      await signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept());
+    } catch (e) {
+      caught = e;
+    }
+    const msg = (caught as Error).message;
+    expect(msg).not.toContain('code: 0');
+    expect(msg).toMatch(/no numeric code/);
+    expect(msg).not.toContain('node behind');
+  });
+
+  it('rejects a missing blockhash', async () => {
+    mockRpc({
+      getLatestBlockhash: {
+        body: { jsonrpc: '2.0', id: 1, error: { code: -32000, message: 'internal' } },
+      },
+    });
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept()),
+    ).rejects.toThrow(/did not return a blockhash/);
+  });
+
+  it('rejects a base58-valid but wrong-length blockhash', async () => {
+    mockRpc({
+      getLatestBlockhash: {
+        body: {
+          jsonrpc: '2.0',
+          id: 1,
+          result: { context: { slot: 1_000_000 }, value: { blockhash: '1111' } },
+        },
+      },
+    });
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept()),
+    ).rejects.toThrow(/malformed blockhash/);
+  });
+
+  it('produces a payload that is NOT a SolanaPayload (escrow scheme contract)', async () => {
+    // Converse of the exact-path scheme-contract assertion: an escrow-selected
+    // payment must never produce an exact-scheme `SolanaPayload`.
+    mockRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    const payload = await signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept());
+    expect(payload.payload).toBeInstanceOf(EscrowPayload);
+    expect(payload.payload).not.toBeInstanceOf(SolanaPayload);
+  });
+
+  it('rejects a NaN maxTimeoutSeconds before any RPC, naming the field', async () => {
+    // maxTimeoutSeconds comes straight from the untrusted gateway 402. A NaN
+    // value would flow through escrowExpirySlot (Math.max(NaN,0)=NaN) into the
+    // builder and surface as a confusing wrapped error. Reject at the boundary,
+    // before any RPC mock is hit.
+    const fn = mockRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    const a = escrowAccept();
+    (a as { maxTimeoutSeconds: number }).maxTimeoutSeconds = Number.NaN;
+    await expect(
+      signer.signPayment(2625, GOLDEN_PROVIDER, resource(), a),
+    ).rejects.toThrow(/maxTimeoutSeconds/);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-integer (float) maxTimeoutSeconds before any RPC', async () => {
+    const fn = mockRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    const a = escrowAccept();
+    (a as { maxTimeoutSeconds: number }).maxTimeoutSeconds = 300.5;
+    await expect(
+      signer.signPayment(2625, GOLDEN_PROVIDER, resource(), a),
+    ).rejects.toThrow(/maxTimeoutSeconds/);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('accepts a negative finite maxTimeoutSeconds and clamps (parity with Go)', async () => {
+    // A negative finite integer is NOT a hard error: escrowExpirySlot floors it
+    // to 0 then clamps to the 150-slot floor (mirrors Go's escrowExpirySlot). It
+    // must still produce a valid EscrowPayload.
+    mockRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    const a = escrowAccept();
+    (a as { maxTimeoutSeconds: number }).maxTimeoutSeconds = -5;
+    const payload = await signer.signPayment(2625, GOLDEN_PROVIDER, resource(), a);
+    expect(payload.payload).toBeInstanceOf(EscrowPayload);
+  });
+
+  it('rejects an oversized (>64KB) getSlot RPC body', async () => {
+    // A misbehaving/hostile RPC must not be able to stream an unbounded 200 body
+    // into memory. The body cap (parity with Go's io.LimitReader) rejects it
+    // with a SignerError before JSON.parse.
+    const huge = `{"jsonrpc":"2.0","id":1,"result":1000000,"pad":"${'x'.repeat(70_000)}"}`;
+    mockRpc({ getSlot: { raw: huge } });
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept()),
+    ).rejects.toThrow(/exceeds 65536 bytes/);
+  });
+
+  it('the agent secret key never appears in an escrow error message', async () => {
+    // Drive a builder-level failure after RPC by handing a malformed provider in
+    // the accept's pay_to. The golden wallet seed is all 42 (0x2a); assert it
+    // never leaks.
+    mockRpc();
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    const bad = escrowAccept();
+    (bad as { payTo: string }).payTo = 'not-base58-0OIl!!!';
+    let caught: unknown;
+    try {
+      await signer.signPayment(2625, 'irrelevant', resource(), bad);
+    } catch (e) {
+      caught = e;
+    }
+    const msg = (caught as Error).message;
+    expect(msg).not.toMatch(/42, ?42, ?42/);
+    expect(msg).not.toMatch(/2a,? ?2a,? ?2a/i);
+  });
+});
+
+describe('escrowExpirySlot clamping math (mirrors Rust/Go/Python)', () => {
+  it('typical 300s timeout -> +750 slots', () => {
+    expect(escrowExpirySlot(1_000_000, 300)).toBe(1_000_750);
+  });
+
+  it('zero seconds applies the 150-slot floor', () => {
+    expect(escrowExpirySlot(1_000_000, 0)).toBe(1_000_150);
+  });
+
+  it('a huge timeout is clamped to the 10_000-slot cap', () => {
+    expect(escrowExpirySlot(1_000_000, 2 ** 40)).toBe(1_010_000);
+  });
+
+  it('a negative timeout clamps to the floor, never pushing expiry backwards', () => {
+    expect(escrowExpirySlot(1_000_000, -1)).toBe(1_000_150);
   });
 });
