@@ -1,8 +1,14 @@
+import { createPrivateKey, sign as edSign } from 'node:crypto';
+
 import { Keypair, PublicKey, Transaction, VersionedTransaction } from '@solana/web3.js';
 import * as bip39 from 'bip39';
 import bs58 from 'bs58';
 
 import { WalletError } from './errors.js';
+
+// DER prefix for a PKCS#8-wrapped Ed25519 private key (RFC 8410). The 32-byte
+// raw seed is appended to form a complete PKCS#8 key Node's crypto can import.
+const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 
 export class Wallet {
   private constructor(private readonly keypair: Keypair) {}
@@ -19,6 +25,25 @@ export class Wallet {
     }
     (tx as Transaction).sign(this.keypair);
     return tx;
+  }
+
+  /**
+   * Sign raw message bytes with the wallet's Ed25519 key, returning the 64-byte
+   * detached signature.
+   *
+   * This is needed by the `exact` payment signer, which compiles a legacy
+   * Solana message with the canonical (Rust-SDK-sorted) account ordering and
+   * then assembles the wire transaction manually — `Transaction.sign()` cannot
+   * be used because solana-web3.js re-compiles (and re-orders) the message at
+   * sign/serialize time, which would break byte-for-byte parity with the
+   * cross-SDK golden vector. The secret never leaves the Wallet boundary: it is
+   * imported into a Node `KeyObject` and used in-process for the signature only.
+   */
+  signMessage(message: Uint8Array): Uint8Array {
+    const seed = this.keypair.secretKey.slice(0, 32);
+    const pkcs8 = Buffer.concat([ED25519_PKCS8_PREFIX, Buffer.from(seed)]);
+    const keyObject = createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' });
+    return edSign(null, Buffer.from(message), keyObject);
   }
 
   static create(): [Wallet, string] {
