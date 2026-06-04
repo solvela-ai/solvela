@@ -14,6 +14,46 @@ use crate::wallet::Wallet;
 
 const USDC_DECIMALS: u8 = 6;
 
+// ---------------------------------------------------------------------------
+// Exact-scheme golden vector (cross-SDK money-path contract)
+// ---------------------------------------------------------------------------
+
+/// Byte-exact base64 `exact`-scheme transaction for a fixed input. Pins the
+/// canonical SPL `TransferChecked` (instruction discriminator 12) wire layout
+/// every SDK signer must reproduce so the live gateway `exact` verifier
+/// (`crates/x402/src/solana.rs`, which rejects plain `Transfer` discriminator 3)
+/// accepts it. The escrow path has the sibling [`solvela_escrow_tx::deposit::GOLDEN_VECTOR_B64`];
+/// this is its `exact` counterpart. The same literal is re-pinned and driven
+/// through the real verifier parse/validate path in
+/// `crates/x402/src/solana.rs` (`exact_golden_vector_accepted_as_usdc_transfer_checked`).
+///
+/// Fixed input (sibling-consistent with the escrow vector):
+/// - agent keypair from seed `[42u8; 32]`
+///   (pubkey `2iXtA8oeZqUU5pofxK971TCEvFGfems2AcDRaZHKD2pQ`)
+/// - recipient / `pay_to` `9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM`
+/// - USDC mint `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`
+/// - amount `2625` atomic USDC, `decimals = 6`
+/// - `recent_blockhash = [0xABu8; 32]`
+/// - instruction accounts `[source_ata, mint, dest_ata, authority]` where
+///   `source_ata = ATA(agent, mint)`, `dest_ata = ATA(pay_to, mint)`,
+///   `authority = agent`; agent is fee payer (`account_keys[0]`) and sole signer.
+///
+/// DO NOT hand-edit. If this changes, the `exact` wire layout drifted —
+/// recompute only after confirming the new layout is still accepted by the
+/// gateway verifier (the on-chain/gateway value is ground truth, never this file).
+///
+/// `#[cfg(test)]`, not `pub`: this is a test-pinning artifact, not a stable
+/// public API. No external crate imports it — the x402 gateway test duplicates
+/// the literal (separate dependency island) and the cross-SDK drift guards read
+/// it from this source file's text, so it exists only to drive this crate's own
+/// parity tests. Gating it to test builds keeps it off the public/non-test
+/// surface entirely (which would otherwise semver-imply a stability guarantee it
+/// does not carry). The escrow sibling
+/// (`solvela_escrow_tx::deposit::GOLDEN_VECTOR_B64`) is `pub` only because its
+/// golden-vector test lives in a *separate* crate and must import it.
+#[cfg(test)]
+const EXACT_GOLDEN_VECTOR_B64: &str = "AbipfII25y2dIV7pTiOYf+qp9tAqiikKnoJqJnMsMNmGEMP1hDxqdcaeDIPxW3EJq5WUYR+V27kgDsjLvDsXDwEBAAIFGX9rI+FshTLGq8g4+s1ep4m+DHaykgM0A5v6iz02jWEUtdnlbYnE3avA84DOO4wvyfA9bjZxRumTasKUlOhjntPqjPWsrKjNBSB1EhdcQ871Sl3Znt4goWtVJTc485fcBt324ddloZPZy+FGzut5rBy0he1fWzeROoz1hX7/AKnG+nrzvtutOj1l82qryXQxsbvkwtL24OR8pgIDRS9dYaurq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urAQMEAQQCAAoMQQoAAAAAAAAG";
+
 /// Hard upper bound on how many Solana slots into the future an escrow's expiry
 /// may be set. Mirrors the CLI's `MAX_ESCROW_EXPIRY_SLOTS_AHEAD`
 /// (`crates/cli/src/commands/util.rs`). Solana slots are ~400 ms, so `10_000`
@@ -89,8 +129,8 @@ async fn get_latest_blockhash(rpc_url: &str, http: &reqwest::Client) -> Result<H
 
 /// Build and sign a USDC-SPL `TransferChecked` transaction for an exact payment.
 ///
-/// Fetches a recent blockhash via JSON-RPC, builds the SPL Token instruction,
-/// signs with the wallet's keypair, and returns a base64-encoded transaction.
+/// Fetches a recent blockhash via JSON-RPC, then delegates the byte-exact
+/// construction to [`build_exact_transfer_tx`].
 ///
 /// # Errors
 ///
@@ -104,6 +144,48 @@ pub(crate) async fn sign_exact_payment(
     recipient: &str,
     amount_atomic: u64,
 ) -> Result<String, SignerError> {
+    let blockhash = get_latest_blockhash(rpc_url, http).await?;
+    build_exact_transfer_tx(wallet, recipient, amount_atomic, blockhash)
+}
+
+/// Build and sign a USDC-SPL `TransferChecked` (instruction discriminator 12)
+/// transaction for an exact payment, against a caller-supplied `recent_blockhash`.
+///
+/// Pure (no I/O): for fixed inputs it always produces the same bytes, which is
+/// what lets the `EXACT_GOLDEN_VECTOR_B64` test vector pin the wire layout. The agent wallet is
+/// the transaction fee payer (`account_keys[0]`) and the sole signer — this is
+/// exactly the structure the gateway `exact` verifier accepts (it validates the
+/// first signature against `account_keys[0]` and requires `TransferChecked` so
+/// the USDC mint is on-chain-verifiable; see `crates/x402/src/solana.rs` Step 5).
+/// The gateway/facilitator is the SOL fee payer only at the settlement-broadcast
+/// layer, not in the signed payload the agent produces here.
+///
+/// Instruction accounts, in canonical SPL `TransferChecked` order:
+/// `[source_ata, mint, dest_ata, authority]` where
+/// `source_ata = ATA(agent, USDC_MINT)` and `dest_ata = ATA(recipient, USDC_MINT)`,
+/// and instruction data is `[12] || amount(u64 LE) || decimals(=6)`.
+///
+/// # Errors
+///
+/// Returns `SignerError::TransactionBuild` if the recipient address is invalid
+/// or the SPL instruction cannot be built.
+pub(crate) fn build_exact_transfer_tx(
+    wallet: &Wallet,
+    recipient: &str,
+    amount_atomic: u64,
+    blockhash: Hash,
+) -> Result<String, SignerError> {
+    // Reject a zero amount BEFORE building anything. A `0` would produce a
+    // perfectly valid `$0` `TransferChecked` that the gateway accepts as a
+    // signed payment, settling nothing while the request proceeds. Fail closed
+    // at the boundary — parity with the Python `_sign_exact_payment` guard and
+    // the escrow `DepositParams` amount check (money-path: reject zero amount).
+    if amount_atomic == 0 {
+        return Err(SignerError::TransactionBuild(
+            "exact transfer amount must be greater than zero".to_string(),
+        ));
+    }
+
     let mint: Pubkey = USDC_MINT
         .parse()
         .map_err(|e| SignerError::TransactionBuild(format!("invalid USDC mint: {e}")))?;
@@ -126,8 +208,6 @@ pub(crate) async fn sign_exact_payment(
         USDC_DECIMALS,
     )
     .map_err(|e| SignerError::TransactionBuild(format!("instruction build: {e}")))?;
-
-    let blockhash = get_latest_blockhash(rpc_url, http).await?;
 
     let message = Message::new(&[ix], Some(&wallet.pubkey()));
     // Bind the reconstructed `Keypair` to a local so the borrow lasts
@@ -360,6 +440,82 @@ mod tests {
     use super::*;
     use solana_sdk::signer::keypair::Keypair;
     use solana_sdk::signer::Signer;
+
+    const GOLDEN_PROVIDER: &str = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+
+    /// Deterministic agent wallet from seed `[42u8; 32]` — identical to the
+    /// escrow golden vector's agent keypair, for sibling consistency.
+    fn golden_agent_wallet() -> Wallet {
+        use ed25519_dalek::SigningKey;
+        let seed = [42u8; 32];
+        let sk = SigningKey::from_bytes(&seed);
+        let mut kp = [0u8; 64];
+        kp[..32].copy_from_slice(&sk.to_bytes());
+        kp[32..].copy_from_slice(sk.verifying_key().as_bytes());
+        Wallet::from_keypair_bytes(&kp).expect("valid golden keypair")
+    }
+
+    /// Pinning test (a): the reference `exact` construction reproduces the
+    /// canonical golden vector byte-for-byte. `sign_exact_payment` delegates to
+    /// `build_exact_transfer_tx` after fetching the blockhash, so proving the
+    /// pure builder reproduces the vector for the fixed blockhash proves
+    /// `sign_exact_payment` does too (task item 4 — Rust-SDK parity).
+    ///
+    /// NEVER edit `EXACT_GOLDEN_VECTOR_B64` to match this output — the vector is
+    /// the cross-SDK contract; if this drifts, the wire layout changed.
+    #[test]
+    fn exact_tx_matches_golden_vector() {
+        let wallet = golden_agent_wallet();
+        let blockhash = Hash::new_from_array([0xABu8; 32]);
+        let b64 = build_exact_transfer_tx(&wallet, GOLDEN_PROVIDER, 2625, blockhash)
+            .expect("golden exact build should succeed");
+        assert_eq!(
+            b64, EXACT_GOLDEN_VECTOR_B64,
+            "exact-tx byte layout drifted from the pinned golden vector"
+        );
+    }
+
+    /// The build is pure: identical fixed input always yields identical bytes
+    /// (no nonce, no clock — the blockhash is supplied).
+    #[test]
+    fn exact_tx_is_deterministic() {
+        let wallet = golden_agent_wallet();
+        let blockhash = Hash::new_from_array([0xABu8; 32]);
+        let a = build_exact_transfer_tx(&wallet, GOLDEN_PROVIDER, 2625, blockhash).unwrap();
+        let b = build_exact_transfer_tx(&wallet, GOLDEN_PROVIDER, 2625, blockhash).unwrap();
+        assert_eq!(a, b);
+    }
+
+    /// A zero amount must be rejected before any tx is built — parity with the
+    /// Python `_sign_exact_payment` guard. A `0` would otherwise produce a valid
+    /// signed `$0` `TransferChecked` (money-path: reject zero amount).
+    #[test]
+    fn exact_zero_amount_rejected() {
+        let wallet = golden_agent_wallet();
+        let blockhash = Hash::new_from_array([0xABu8; 32]);
+        let err = build_exact_transfer_tx(&wallet, GOLDEN_PROVIDER, 0, blockhash)
+            .expect_err("zero amount must be rejected");
+        match err {
+            SignerError::TransactionBuild(msg) => {
+                assert!(
+                    msg.contains("greater than zero"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            other => panic!("expected TransactionBuild, got {other:?}"),
+        }
+    }
+
+    /// A non-zero amount (e.g. the golden vector's 2625) is unaffected by the
+    /// zero guard — the builder still succeeds and reproduces the vector.
+    #[test]
+    fn exact_nonzero_amount_still_builds() {
+        let wallet = golden_agent_wallet();
+        let blockhash = Hash::new_from_array([0xABu8; 32]);
+        let b64 = build_exact_transfer_tx(&wallet, GOLDEN_PROVIDER, 2625, blockhash)
+            .expect("non-zero amount must build");
+        assert_eq!(b64, EXACT_GOLDEN_VECTOR_B64);
+    }
 
     #[test]
     fn test_associated_token_address_deterministic() {

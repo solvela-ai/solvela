@@ -22,6 +22,18 @@ from solvela.types import (
     SolanaPayload,
 )
 
+# USDC has 6 decimals; the SPL ``TransferChecked`` instruction carries this byte
+# so the gateway can verify the mint+decimals on-chain. Mirrors the Rust SDK's
+# ``const USDC_DECIMALS: u8 = 6`` (sdks/rust/crates/solvela-client/src/signer.rs).
+USDC_DECIMALS = 6
+
+# Maximum value of the on-chain ``u64`` amount field. An ``amount_atomic`` above
+# this cannot be encoded as ``to_bytes(8, "little")`` and would otherwise raise a
+# cryptic ``OverflowError`` from deep inside the builder. We reject it explicitly
+# at the boundary with a clear ``SignerError`` (mirrors the escrow path's
+# ``escrow._U64_MAX`` guard in ``DepositParams.__post_init__``).
+_U64_MAX = 0xFFFF_FFFF_FFFF_FFFF
+
 # --- Escrow expiry-slot bounds (mirror the Rust SDK's signer.rs) ---
 #
 # Solana slots are ~400 ms. These bounds are ported verbatim from
@@ -47,6 +59,7 @@ _MIN_ESCROW_EXPIRY_SLOTS_AHEAD = 150
 _MIN_PLAUSIBLE_SLOT = 1_000_000
 
 if TYPE_CHECKING:
+    from solders.hash import Hash as Blockhash
     from solders.pubkey import Pubkey
 
     from solvela.wallet import Wallet
@@ -124,51 +137,41 @@ class KeypairSigner(Signer):
         resource: Resource,
         accepted: PaymentAccept,
     ) -> PaymentPayload:
-        """Build and sign a USDC-SPL transfer transaction (``exact`` scheme)."""
+        """Build and sign a USDC-SPL ``TransferChecked`` transaction (``exact``).
+
+        Fetches a recent blockhash via JSON-RPC, then delegates the byte-exact
+        construction to the pure :meth:`_build_exact_transfer_tx`, which pins the
+        canonical ``TransferChecked`` (instruction discriminator 12) wire layout
+        the live gateway ``exact`` verifier accepts. The gateway rejects a plain
+        SPL ``Transfer`` (discriminator 3) because it cannot verify the USDC mint
+        on-chain from it; ``TransferChecked`` carries the mint + decimals so the
+        verifier can.
+        """
+        # Reject a non-integer (float/bool) amount BEFORE it reaches the on-chain
+        # u64 amount field. ``int(2.9)`` would silently truncate the transfer and
+        # mis-charge the agent; ``bool`` is an ``int`` subclass that would send 1
+        # atomic unit. Fail closed at the boundary (mirrors the escrow path).
+        if not (isinstance(amount_atomic, int) and not isinstance(amount_atomic, bool)):
+            raise SignerError(
+                "exact transfer amount must be an integer number of atomic USDC units"
+            )
+        if amount_atomic <= 0:
+            raise SignerError("exact transfer amount must be greater than zero")
+        # Reject an out-of-u64-range amount BEFORE the build, where it would
+        # otherwise surface as a cryptic ``OverflowError`` from ``to_bytes(8, ...)``
+        # (re-wrapped into a generic "Failed to sign payment" message). Fail
+        # closed with a clear error at the boundary (mirrors the escrow path).
+        if amount_atomic > _U64_MAX:
+            raise SignerError("exact transfer amount exceeds u64 maximum")
+
         try:
             from solders.hash import Hash as Blockhash
-            from solders.instruction import AccountMeta, Instruction
-            from solders.keypair import Keypair as SoldersKeypair
-            from solders.message import Message
-            from solders.pubkey import Pubkey
-            from solders.transaction import Transaction
-
-            sender = self._wallet.pubkey()
-            recipient_pubkey = Pubkey.from_string(recipient)
-            mint = Pubkey.from_string(USDC_MINT)
-
-            # SPL Token program
-            token_program = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
-
-            # Derive ATAs
-            sender_ata = self._derive_ata(sender, mint)
-            recipient_ata = self._derive_ata(recipient_pubkey, mint)
 
             # Get recent blockhash
             blockhash_str = await self._fetch_latest_blockhash()
             blockhash = Blockhash.from_string(blockhash_str)
 
-            # Build SPL Token transfer instruction
-            # Transfer instruction = index 3, data = amount as little-endian u64
-            transfer_data = bytes([3]) + amount_atomic.to_bytes(8, "little")
-            transfer_ix = Instruction(
-                program_id=token_program,
-                accounts=[
-                    AccountMeta(pubkey=sender_ata, is_signer=False, is_writable=True),
-                    AccountMeta(pubkey=recipient_ata, is_signer=False, is_writable=True),
-                    AccountMeta(pubkey=sender, is_signer=True, is_writable=False),
-                ],
-                data=transfer_data,
-            )
-
-            # Build and sign transaction
-            msg = Message.new_with_blockhash([transfer_ix], sender, blockhash)
-            kp_bytes = self._wallet.to_keypair_bytes()
-            solders_kp = SoldersKeypair.from_bytes(kp_bytes)
-            tx = Transaction.new_unsigned(msg)
-            tx.sign([solders_kp], blockhash)
-
-            tx_b64 = base64.b64encode(bytes(tx)).decode()
+            tx_b64 = self._build_exact_transfer_tx(int(amount_atomic), recipient, blockhash)
 
             return PaymentPayload(
                 x402_version=X402_VERSION,
@@ -184,6 +187,77 @@ class KeypairSigner(Signer):
             # off __cause__. The `{e}` text stays in the message (sufficient for
             # diagnostics) but the original exception object is not attached.
             raise SignerError(f"Failed to sign payment: {e}") from None
+
+    def _build_exact_transfer_tx(
+        self,
+        amount_atomic: int,
+        recipient: str,
+        blockhash: Blockhash,
+    ) -> str:
+        """Build and sign a USDC-SPL ``TransferChecked`` (discriminator 12) tx.
+
+        Pure (no I/O): for fixed inputs it always produces the same bytes, which
+        is what lets ``EXACT_GOLDEN_VECTOR_B64``
+        (``sdks/rust/crates/solvela-client/src/signer.rs``) pin the wire layout.
+        The agent wallet is the transaction fee payer (``account_keys[0]``) and
+        the sole signer.
+
+        Instruction accounts, in canonical SPL ``TransferChecked`` order:
+        ``[source_ata, mint, dest_ata, authority]`` where
+        ``source_ata = ATA(agent, USDC_MINT)`` and
+        ``dest_ata = ATA(recipient, USDC_MINT)``; instruction data is
+        ``[12] || amount(u64 LE) || decimals(=6)``.
+        """
+        from solders.instruction import AccountMeta, Instruction
+        from solders.keypair import Keypair as SoldersKeypair
+        from solders.message import Message
+        from solders.pubkey import Pubkey
+        from solders.transaction import Transaction
+
+        sender = self._wallet.pubkey()
+        recipient_pubkey = Pubkey.from_string(recipient)
+        mint = Pubkey.from_string(USDC_MINT)
+
+        # SPL Token program
+        token_program = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+
+        # Derive ATAs
+        sender_ata = self._derive_ata(sender, mint)
+        recipient_ata = self._derive_ata(recipient_pubkey, mint)
+
+        # Build SPL Token TransferChecked instruction.
+        # TransferChecked = discriminator 12, data = [12] || amount(u64 LE) ||
+        # decimals(1). The 4-account layout (with the mint) is what lets the
+        # gateway verify the USDC mint on-chain; the live verifier rejects the
+        # plain Transfer (discriminator 3) the old code emitted.
+        transfer_data = bytes([12]) + amount_atomic.to_bytes(8, "little") + bytes([USDC_DECIMALS])
+        transfer_ix = Instruction(
+            program_id=token_program,
+            accounts=[
+                AccountMeta(pubkey=sender_ata, is_signer=False, is_writable=True),
+                AccountMeta(pubkey=mint, is_signer=False, is_writable=False),
+                AccountMeta(pubkey=recipient_ata, is_signer=False, is_writable=True),
+                AccountMeta(pubkey=sender, is_signer=True, is_writable=False),
+            ],
+            data=transfer_data,
+        )
+
+        # Build and sign transaction
+        msg = Message.new_with_blockhash([transfer_ix], sender, blockhash)
+        kp_bytes = self._wallet.to_keypair_bytes()
+        # Parse the keypair under a specific catch that raises a STATIC message:
+        # the input is secret key material, so we must not interpolate the
+        # underlying exception text (which could echo key-adjacent bytes) into the
+        # error. Mirrors build_deposit_tx's keypair-parse redaction (escrow.py)
+        # and keeps `from None` to drop the __cause__ chain.
+        try:
+            solders_kp = SoldersKeypair.from_bytes(kp_bytes)
+        except Exception:  # noqa: BLE001 — normalize to typed error, no secret leak
+            raise SignerError("keypair parse failed") from None
+        tx = Transaction.new_unsigned(msg)
+        tx.sign([solders_kp], blockhash)
+
+        return base64.b64encode(bytes(tx)).decode()
 
     async def _sign_escrow_payment(
         self,

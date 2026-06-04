@@ -1110,4 +1110,77 @@ mod tests {
         assert_eq!(result.failure_kind, Some(SettlementFailureKind::Submission));
         assert!(result.error.is_some());
     }
+
+    // -----------------------------------------------------------------------
+    // Exact-scheme golden vector — gateway-acceptance (pinning test b)
+    // -----------------------------------------------------------------------
+
+    /// Canonical `exact`-scheme golden vector. Re-pinned here from the Rust SDK
+    /// (`sdks/rust/crates/solvela-client/src/signer.rs::EXACT_GOLDEN_VECTOR_B64`),
+    /// mirroring how the escrow `GOLDEN_VECTOR_B64` is re-pinned across crates.
+    /// The two crates are separate dependency islands (the SDK uses solana-sdk;
+    /// x402 uses the hand-rolled parser), so the literal is duplicated and each
+    /// side independently proves its property. If the SDK constant changes, this
+    /// literal MUST change with it — they are the same cross-SDK contract.
+    const EXACT_GOLDEN_VECTOR_B64: &str = "AbipfII25y2dIV7pTiOYf+qp9tAqiikKnoJqJnMsMNmGEMP1hDxqdcaeDIPxW3EJq5WUYR+V27kgDsjLvDsXDwEBAAIFGX9rI+FshTLGq8g4+s1ep4m+DHaykgM0A5v6iz02jWEUtdnlbYnE3avA84DOO4wvyfA9bjZxRumTasKUlOhjntPqjPWsrKjNBSB1EhdcQ871Sl3Znt4goWtVJTc485fcBt324ddloZPZy+FGzut5rBy0he1fWzeROoz1hX7/AKnG+nrzvtutOj1l82qryXQxsbvkwtL24OR8pgIDRS9dYaurq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urAQMEAQQCAAoMQQoAAAAAAAAG";
+
+    /// Fixed `pay_to`/recipient for the exact golden vector (sibling-consistent
+    /// with the escrow vector's provider).
+    const EXACT_GOLDEN_PAY_TO: &str = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+
+    /// Drive the canonical `exact` golden vector through the real verifier
+    /// parse/validate path — the same surface `verify_payment` uses before the
+    /// RPC `simulateTransaction` step (which needs a live node and is therefore
+    /// not exercised here, exactly as the existing extraction tests do).
+    ///
+    /// Asserts the gateway accepts it as a valid USDC `TransferChecked`
+    /// (discriminator 12) with the right mint, amount, and destination ATA, and
+    /// that the agent's signature verifies as `account_keys[0]` (fee payer).
+    #[test]
+    fn exact_golden_vector_accepted_as_usdc_transfer_checked() {
+        use crate::solana_types::derive_ata;
+
+        let usdc_mint = Pubkey::from_str(TEST_USDC_MINT).unwrap();
+        let pay_to = Pubkey::from_str(EXACT_GOLDEN_PAY_TO).unwrap();
+
+        // Verifier configured with the golden vector's recipient so the
+        // destination-ATA check (verify_payment Step 4) is meaningful.
+        let verifier = SolanaVerifier::new(
+            "https://api.mainnet-beta.solana.com",
+            EXACT_GOLDEN_PAY_TO,
+            TEST_USDC_MINT,
+            reqwest::Client::new(),
+        )
+        .expect("verifier");
+
+        // Step 1 (decode_and_validate): signature verifies against account_keys[0]
+        // (the agent / fee payer). This is the real cryptographic gate.
+        let tx = verifier
+            .decode_and_validate_transaction(EXACT_GOLDEN_VECTOR_B64)
+            .expect("golden exact tx must decode and signature-verify");
+
+        let message = tx.parse_message().expect("message must parse");
+
+        // Step 3 (extract_spl_transfer): must be a TransferChecked, not plain Transfer.
+        let transfer = extract_spl_transfer(&message).expect("must extract SPL transfer");
+
+        // Mint is present (TransferChecked) and is USDC — a plain Transfer would
+        // have mint == None and be rejected at verify_payment Step 5.
+        assert_eq!(
+            transfer.mint,
+            Some(usdc_mint),
+            "golden vector must be a USDC TransferChecked (discriminator 12), not plain Transfer"
+        );
+
+        // Amount matches the fixed input.
+        assert_eq!(transfer.amount, 2625, "golden vector amount drifted");
+
+        // Destination is the recipient's USDC ATA (verify_payment Step 4).
+        let expected_ata = derive_ata(&pay_to, &usdc_mint, &Pubkey::TOKEN_PROGRAM_ID)
+            .expect("derive recipient ATA");
+        assert_eq!(
+            transfer.destination, expected_ata,
+            "destination must be ATA(pay_to, USDC_MINT)"
+        );
+    }
 }
