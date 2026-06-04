@@ -256,6 +256,52 @@ async fn test_payment_signature_header_stripped_from_caller() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// Matcher asserting the forwarded request does NOT carry an `accept-encoding`
+/// header. The proxy must strip it: its reqwest client has no
+/// gzip/brotli/deflate support, so advertising encodings it cannot decompress
+/// yields a compressed body that fails to parse (e.g. a Brotli 402 body).
+struct NoAcceptEncoding;
+
+impl wiremock::Match for NoAcceptEncoding {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        !request.headers.contains_key("accept-encoding")
+    }
+}
+
+#[tokio::test]
+async fn test_accept_encoding_stripped_from_caller() {
+    let mock = MockServer::start().await;
+
+    // Only matches if the forwarded request has no accept-encoding header.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(NoAcceptEncoding)
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"ok":true}"#))
+        .expect(1)
+        .mount(&mock)
+        .await;
+
+    let app = build_test_app(&mock.uri());
+
+    // Caller sends the header CowAgent's Python openai client always sends.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("accept-encoding", "gzip, deflate, br")
+                .body(Body::from(r"{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // If the proxy forwarded accept-encoding, the mock would not match and
+    // wiremock would return 404 (verified on drop via .expect(1)).
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn test_amount_exceeds_max_returns_error() {
     let mock = MockServer::start().await;
