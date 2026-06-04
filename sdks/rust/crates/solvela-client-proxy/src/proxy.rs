@@ -185,9 +185,16 @@ fn forward_headers(
 ) -> reqwest::RequestBuilder {
     for (name, value) in headers {
         let name_lower = name.as_str().to_lowercase();
+        // `accept-encoding` is stripped because this proxy's contract is to pipe
+        // bodies through unmodified (see `build_passthrough_response`) and its
+        // reqwest client is built without gzip/brotli/deflate support — so it
+        // cannot decompress a response it advertised it could accept. Forwarding
+        // the caller's `accept-encoding` lets the gateway (or a fronting edge
+        // proxy) compress the body, which then fails to parse as JSON. Treat it
+        // as hop-by-hop here.
         if matches!(
             name_lower.as_str(),
-            "host" | "connection" | "transfer-encoding" | "payment-signature"
+            "host" | "connection" | "transfer-encoding" | "payment-signature" | "accept-encoding"
         ) {
             if name_lower == "payment-signature" {
                 warn!("stripped PAYMENT-SIGNATURE header from caller (security)");
