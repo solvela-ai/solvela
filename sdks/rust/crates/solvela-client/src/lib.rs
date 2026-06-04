@@ -14,4 +14,10 @@ pub use balance::BalanceMonitor;
 pub use client::SolvelaClient;
 pub use config::{ClientBuilder, ClientConfig, DEFAULT_MAX_PAYMENT_AMOUNT_ATOMIC};
 pub use error::{ClientError, SignerError, WalletError};
+// NOTE: `signer::EXACT_GOLDEN_VECTOR_B64` is intentionally NOT re-exported here.
+// It is a `pub(crate)` test-pinning artifact (the `exact`-scheme golden vector),
+// not a stable public API: nothing outside this crate imports it (the x402
+// gateway test duplicates the literal; the cross-SDK drift guards read it from
+// source text). Re-exporting it would semver-imply a stability guarantee it does
+// not carry.
 pub use wallet::Wallet;
