@@ -1,3 +1,5 @@
+import { randomBytes, createHash } from 'node:crypto';
+
 import {
   Connection,
   Message,
@@ -10,10 +12,17 @@ import {
 } from '@solana/spl-token';
 import bs58 from 'bs58';
 
-import { PaymentAccept, PaymentPayload, Resource, SolanaPayload } from './types.js';
+import {
+  PaymentAccept,
+  PaymentPayload,
+  Resource,
+  SolanaPayload,
+  EscrowPayload,
+} from './types.js';
 import { SignerError } from './errors.js';
 import { Wallet } from './wallet.js';
 import { USDC_MINT, X402_VERSION } from './constants.js';
+import { buildDepositTx } from './escrow.js';
 
 /**
  * USDC has 6 decimals. The SPL `TransferChecked` instruction carries this byte
@@ -23,6 +32,97 @@ import { USDC_MINT, X402_VERSION } from './constants.js';
  * `USDC_DECIMALS = 6` (`sdks/python/src/solvela/signer.py`).
  */
 export const USDC_DECIMALS = 6;
+
+// --- Escrow expiry-slot bounds (mirror the Rust/Go/Python SDK signers) ---
+//
+// Solana slots are ~400 ms. These bounds are ported verbatim from
+// sdks/rust/crates/solvela-client/src/signer.rs (and sdks/go/signer.go,
+// sdks/python/.../signer.py) so all SDKs choose compatible expiry slots and
+// none is bounced by the gateway.
+
+/**
+ * Upper bound on how far ahead an escrow may expire (~66 min). Rejects a
+ * malicious/misconfigured gateway from pushing expiry to "never".
+ */
+const MAX_ESCROW_EXPIRY_SLOTS_AHEAD = 10_000;
+
+/**
+ * Lower bound on expiry distance. Mirrors AND exceeds the gateway's
+ * MIN_EXPIRY_BUFFER_SLOTS = 50 (crates/x402/src/escrow/verifier.rs); the extra
+ * headroom (150 vs 50) absorbs slot-skew between the slot we read and the slot
+ * the gateway verifies against. ~150 slots ~= 60 s.
+ */
+const MIN_ESCROW_EXPIRY_SLOTS_AHEAD = 150;
+
+/**
+ * Floor below which a getSlot result is implausible and rejected. A stub /
+ * genesis / freshly-reset validator can answer getSlot with a near-zero slot;
+ * computing an escrow expiry from that base yields an already-expired (or
+ * trivially-near-expiry) deposit the gateway would bounce. Mainnet/devnet have
+ * been well past this for years. Fail closed rather than silently signing a
+ * dead-on-arrival escrow deposit.
+ */
+const MIN_PLAUSIBLE_SLOT = 1_000_000;
+
+const BLOCKHASH_LENGTH = 32;
+
+/**
+ * RPC request timeout (ms). A bare `fetch()` has no timeout, so a stalled RPC
+ * endpoint would hang the payment path forever. Both the Go SDK
+ * (`http.Client{Timeout: 30s}`) and the Python SDK (`httpx ... timeout=30`)
+ * enforce this; mirror it with an `AbortController` + `setTimeout`, the same
+ * pattern `src/transport.ts` uses.
+ */
+const RPC_TIMEOUT_MS = 30_000;
+
+/**
+ * Cap on a successful (200 OK) JSON-RPC response body, in bytes. The
+ * getSlot/getLatestBlockhash responses this signer reads are tiny (a few hundred
+ * bytes), but we still bound the read so a misbehaving/hostile RPC endpoint
+ * cannot stream an unbounded body into memory and OOM the agent. Mirrors the Go
+ * SDK's `maxRPCBodyBytes = 64 << 10` (`io.LimitReader`).
+ */
+const MAX_RPC_BODY_BYTES = 65_536;
+
+/**
+ * Render a parenthesized, message-free description of a JSON-RPC error object,
+ * suitable for appending to a `SignerError`. It surfaces only the numeric code
+ * (never the RPC message text — GHSA-cgqx-mg48-949v), and clearly distinguishes
+ * an unparseable / code-less error from a real code. Mirrors the Go SDK's
+ * `rpcErrorCodeSuffix`.
+ */
+function rpcErrorCodeSuffix(rawErr: unknown): string {
+  if (rawErr !== null && typeof rawErr === 'object' && 'code' in rawErr) {
+    const code = (rawErr as { code: unknown }).code;
+    if (typeof code === 'number' && Number.isInteger(code)) {
+      return `(code: ${code})`;
+    }
+  }
+  return '(unparseable error object, no numeric code)';
+}
+
+/**
+ * Compute the slot at which a now-created escrow PDA should expire.
+ *
+ * Ported from the Rust SDK's `escrow_expiry_slot`: ~2.5 slots/s (1000 ms /
+ * 400 ms), clamped into `[MIN_ESCROW_EXPIRY_SLOTS_AHEAD,
+ * MAX_ESCROW_EXPIRY_SLOTS_AHEAD]`. The floor mirrors and exceeds the gateway's
+ * MIN_EXPIRY_BUFFER_SLOTS so a too-near expiry is never bounced; the cap rejects
+ * an unbounded-future expiry. A negative timeout is floored to 0 (never pushes
+ * expiry backwards into a dead-on-arrival deposit). `currentSlot` and the
+ * effective offset stay within Number.MAX_SAFE_INTEGER for any plausible slot,
+ * so the add cannot lose precision. Exported for direct unit testing.
+ */
+export function escrowExpirySlot(currentSlot: number, maxTimeoutSeconds: number): number {
+  const timeout = Math.max(maxTimeoutSeconds, 0);
+  // timeout * 1000 / 400, floored to whole slots (matches the Rust integer math).
+  const timeoutSlots = Math.floor((timeout * 1000) / 400);
+  const effective = Math.max(
+    MIN_ESCROW_EXPIRY_SLOTS_AHEAD,
+    Math.min(timeoutSlots, MAX_ESCROW_EXPIRY_SLOTS_AHEAD),
+  );
+  return currentSlot + effective;
+}
 
 export interface Signer {
   signPayment(
@@ -44,15 +144,17 @@ export class KeypairSigner implements Signer {
    *
    * `exact`  -> SPL-token `TransferChecked` to the gateway's pay_to ATA
    *             (returns a `SolanaPayload`).
+   * `escrow` -> on-chain `deposit` into a per-request escrow PDA, byte-exact
+   *             with the canonical builder (returns an `EscrowPayload`).
    *
-   * There is NO silent fallback: an `escrow`-selected payment is rejected with
-   * a clear `SignerError` rather than being settled as an `exact` transfer.
-   * Silently routing an escrow-selected payment as an exact transfer is the
-   * scheme-mismatch money-path bug the `solvela-x402` skill warns against (it
-   * is the exact bug that existed in the Go/Python signers). The TS SDK does
-   * not yet implement the escrow deposit builder; until it does, the signer
-   * fails closed rather than producing a wrong-scheme transfer. An unknown
-   * scheme is likewise rejected, never default-routed.
+   * There is NO silent fallback: an `escrow`-selected payment always produces an
+   * escrow deposit, never an `exact` transfer, and an `exact`-selected payment
+   * never produces an escrow deposit. Silently routing an escrow-selected
+   * payment as an exact transfer is the scheme-mismatch money-path bug the
+   * `solvela-x402` skill warns against (it is the exact bug that previously
+   * existed in the Go/Python signers and in this TS signer before escrow
+   * support landed). An unknown scheme is likewise rejected, never
+   * default-routed.
    */
   async signPayment(
     amountAtomic: number,
@@ -64,12 +166,7 @@ export class KeypairSigner implements Signer {
       return this.signExactPayment(amountAtomic, recipient, resource, accepted);
     }
     if (accepted.scheme === 'escrow') {
-      // No silent fallback: escrow was selected but the TS SDK cannot build an
-      // escrow deposit yet. Refuse rather than settle an exact transfer.
-      throw new SignerError(
-        'escrow payment scheme is not yet supported by the TypeScript SDK; ' +
-          'refusing to silently fall back to an exact transfer',
-      );
+      return this.signEscrowPayment(amountAtomic, resource, accepted);
     }
     // `accepted.scheme` is a closed union (`PaymentAccept.fromJSON` rejects
     // unknown wire schemes), so this is only reachable if the type is bypassed.
@@ -117,6 +214,215 @@ export class KeypairSigner implements Signer {
       if (e instanceof SignerError) throw e;
       const msg = e instanceof Error ? e.message : String(e);
       throw new SignerError(`Failed to sign payment: ${msg}`);
+    }
+  }
+
+  /**
+   * Build and sign an escrow `deposit` transaction (`escrow` scheme).
+   *
+   * Generates a fresh CSPRNG `service_id`, computes the expiry slot from the
+   * current slot and `accepted.maxTimeoutSeconds` (mirroring the Rust/Go/Python
+   * SDKs), fetches a recent blockhash, and delegates the byte-exact transaction
+   * construction to the shared, golden-vector-pinned `buildDepositTx`. There is
+   * NO silent fallback to an exact transfer.
+   */
+  private async signEscrowPayment(
+    amountAtomic: number,
+    resource: Resource,
+    accepted: PaymentAccept,
+  ): Promise<PaymentPayload> {
+    // Fail clearly if escrow was selected but no program id was offered — never
+    // silently fall back to an exact transfer.
+    if (!accepted.escrowProgramId) {
+      throw new SignerError('escrow scheme selected but escrow_program_id is missing');
+    }
+
+    // Reject a bad amount BEFORE any RPC/network call (mirrors the exact path
+    // and the Go/Python signers). A zero/negative/float/out-of-range amount
+    // would otherwise be mis-encoded into the on-chain u64 and mis-charge the
+    // agent.
+    this.assertValidAmount(amountAtomic);
+
+    // Validate `maxTimeoutSeconds` BEFORE any RPC call. It comes straight from
+    // the untrusted gateway 402 with no parse-boundary validation; a
+    // NaN/Infinity/non-integer value propagates through `escrowExpirySlot`
+    // (`Math.max(NaN, 0) = NaN`) into `buildDepositTx` and surfaces as a
+    // confusing wrapped error. Reject only non-finite/non-integer values here —
+    // a *negative* finite integer is intentionally allowed, since
+    // `escrowExpirySlot` floors it to 0 then clamps to the 150-slot floor
+    // (parity with Go's `escrowExpirySlot`). This validation is scoped to the
+    // escrow path only — the exact path does not consume this field, so we must
+    // not start rejecting 402s over it (e.g. in `PaymentAccept.fromJSON`).
+    if (!Number.isInteger(accepted.maxTimeoutSeconds)) {
+      throw new SignerError(
+        'maxTimeoutSeconds must be a finite integer number of seconds',
+      );
+    }
+
+    try {
+      // Per-request CSPRNG service_id (#118 invariant): two identical requests
+      // must never share a service_id -> escrow PDA -> vault ATA. Hash 32 random
+      // bytes so the result is distinct per call (mirrors the Rust/Go SDKs).
+      const serviceId = new Uint8Array(createHash('sha256').update(randomBytes(32)).digest());
+
+      const currentSlot = await this.fetchCurrentSlot();
+      const expirySlot = escrowExpirySlot(currentSlot, accepted.maxTimeoutSeconds);
+
+      const recentBlockhash = await this.fetchLatestBlockhash();
+
+      const depositTx = buildDepositTx({
+        wallet: this.wallet,
+        providerWalletB58: accepted.payTo,
+        usdcMintB58: USDC_MINT,
+        escrowProgramIdB58: accepted.escrowProgramId,
+        amount: amountAtomic,
+        serviceId,
+        expirySlot,
+        recentBlockhash,
+      });
+
+      const payload = new EscrowPayload(
+        depositTx,
+        Buffer.from(serviceId).toString('base64'),
+        this.wallet.address(),
+      );
+      return new PaymentPayload(X402_VERSION, resource, accepted, payload);
+    } catch (e) {
+      if (e instanceof SignerError) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new SignerError(`Failed to sign escrow deposit: ${msg}`);
+    }
+  }
+
+  /**
+   * Fetch the current slot via JSON-RPC `getSlot` (commitment confirmed).
+   *
+   * Fails closed: any HTTP failure, malformed body, RPC error, or
+   * missing/invalid result is a `SignerError` — never a silent default slot,
+   * which would let the escrow expiry be computed from a bogus base. Also
+   * rejects an implausibly-low slot (stub/genesis node). Mirrors the Go/Python
+   * `fetchCurrentSlot`. Only the numeric RPC error code is surfaced, never the
+   * message text (which can echo node internals — GHSA-cgqx-mg48-949v).
+   */
+  private async fetchCurrentSlot(): Promise<number> {
+    const data = await this.postRpc('getSlot', [{ commitment: 'confirmed' }], 'getSlot');
+    if (data.error !== undefined && data.error !== null) {
+      throw new SignerError(`getSlot RPC error ${rpcErrorCodeSuffix(data.error)}`);
+    }
+    const slot = data.result;
+    // Use Number.isSafeInteger (not Number.isInteger): a slot above
+    // Number.MAX_SAFE_INTEGER cannot be added to the expiry offset without
+    // precision loss, so reject it rather than computing a bogus expiry. The
+    // amount guard already uses the safe-integer bound; keep this consistent.
+    if (typeof slot !== 'number' || !Number.isSafeInteger(slot) || slot < 0) {
+      throw new SignerError('getSlot RPC: missing or invalid result');
+    }
+    if (slot < MIN_PLAUSIBLE_SLOT) {
+      throw new SignerError(
+        `getSlot RPC returned implausibly low slot ${slot} ` +
+          `(< ${MIN_PLAUSIBLE_SLOT}); refusing to build an escrow deposit`,
+      );
+    }
+    return slot;
+  }
+
+  /**
+   * Fetch a recent blockhash via JSON-RPC `getLatestBlockhash` and decode it to
+   * raw 32 bytes. Fails closed on any HTTP/JSON/RPC failure or a
+   * missing/malformed blockhash, never returning a default. Mirrors the
+   * Go/Python `fetchLatestBlockhash`. The builder needs the raw 32-byte
+   * blockhash (NOT the base58 string), so we bs58-decode it here.
+   */
+  private async fetchLatestBlockhash(): Promise<Uint8Array> {
+    const data = await this.postRpc(
+      'getLatestBlockhash',
+      [{ commitment: 'finalized' }],
+      'Blockhash',
+    );
+    const result = data.result as { value?: { blockhash?: unknown } } | undefined;
+    const blockhashStr = result?.value?.blockhash;
+    if (typeof blockhashStr !== 'string' || blockhashStr.length === 0) {
+      if (data.error !== undefined && data.error !== null) {
+        throw new SignerError(`RPC did not return a blockhash ${rpcErrorCodeSuffix(data.error)}`);
+      }
+      throw new SignerError('RPC did not return a blockhash');
+    }
+    let raw: Uint8Array;
+    try {
+      raw = bs58.decode(blockhashStr);
+    } catch {
+      throw new SignerError('RPC returned a malformed blockhash');
+    }
+    if (raw.length !== BLOCKHASH_LENGTH) {
+      throw new SignerError('RPC returned a malformed blockhash');
+    }
+    return raw;
+  }
+
+  /**
+   * Issue a JSON-RPC POST and return the decoded body. HTTP-level failures,
+   * non-200 status, and malformed JSON are surfaced as `SignerError` before any
+   * field access — so a 429/5xx HTML body never leaks node internals into the
+   * error string (only the status code is surfaced). Mirrors the Go SDK's
+   * `postRPC`.
+   *
+   * A bare `fetch()` has no timeout; a stalled RPC would hang the payment path
+   * forever, so we bound the request with an `AbortController` +
+   * {@link RPC_TIMEOUT_MS} (same pattern as `src/transport.ts`, and parity with
+   * the Go `http.Client{Timeout: 30s}` / Python `httpx ... timeout=30`). The
+   * 200-path body is read as text and rejected if it exceeds
+   * {@link MAX_RPC_BODY_BYTES} so a hostile RPC cannot OOM the agent (parity with
+   * the Go `io.LimitReader` cap), then `JSON.parse`d.
+   */
+  private async postRpc(
+    method: string,
+    params: unknown[],
+    label: string,
+  ): Promise<{ result?: unknown; error?: unknown }> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+    try {
+      let resp: Response;
+      try {
+        resp = await fetch(this.rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+          signal: controller.signal,
+        });
+      } catch (e) {
+        // An abort (timeout) and a transport failure both surface here; name the
+        // timeout case explicitly so a stalled RPC is diagnosable. Never echo the
+        // underlying error text (it can leak node URLs/internals).
+        if ((e as Error).name === 'AbortError') {
+          throw new SignerError(`${label} RPC request timed out after ${RPC_TIMEOUT_MS}ms`);
+        }
+        throw new SignerError(`${label} RPC request failed`);
+      }
+      if (resp.status !== 200) {
+        throw new SignerError(`${label} RPC HTTP ${resp.status}`);
+      }
+      // Read the success body as text under a size cap (Go's io.LimitReader
+      // equivalent) BEFORE parsing, so an unbounded/hostile body cannot OOM the
+      // agent. Only then JSON.parse, preserving the malformed-JSON handling.
+      let text: string;
+      try {
+        text = await resp.text();
+      } catch {
+        throw new SignerError(`${label} RPC: malformed JSON body`);
+      }
+      if (text.length > MAX_RPC_BODY_BYTES) {
+        throw new SignerError(
+          `${label} RPC: response body exceeds ${MAX_RPC_BODY_BYTES} bytes`,
+        );
+      }
+      try {
+        return JSON.parse(text) as { result?: unknown; error?: unknown };
+      } catch {
+        throw new SignerError(`${label} RPC: malformed JSON body`);
+      }
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
