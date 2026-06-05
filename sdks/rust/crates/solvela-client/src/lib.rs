@@ -8,12 +8,14 @@ pub(crate) mod rpc_error;
 #[allow(dead_code)] // SessionInfo::escalated and cleanup_expired are reserved for future use
 pub(crate) mod session;
 pub(crate) mod signer;
+pub mod stats;
 pub mod wallet;
 
 pub use balance::BalanceMonitor;
 pub use client::SolvelaClient;
 pub use config::{ClientBuilder, ClientConfig, DEFAULT_MAX_PAYMENT_AMOUNT_ATOMIC};
 pub use error::{ClientError, SignerError, WalletError};
+pub use stats::{DayStats, ModelStats, StatsResponse, StatsSummary};
 // NOTE: `signer::EXACT_GOLDEN_VECTOR_B64` is intentionally NOT re-exported here.
 // It is a `pub(crate)` test-pinning artifact (the `exact`-scheme golden vector),
 // not a stable public API: nothing outside this crate imports it (the x402
