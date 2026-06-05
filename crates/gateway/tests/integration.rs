@@ -159,6 +159,60 @@ impl PaymentVerifier for SettleRecordingVerifier {
     }
 }
 
+/// An `exact`-scheme verifier whose `verify_payment` passes but whose
+/// `settle_payment` (the deferred post-delivery broadcast) FAILS with
+/// `success: false`. Records that settlement was *reached* by flipping a shared
+/// `AtomicBool`.
+///
+/// Used by the #486 second-pass reconciliation tests: when the provider has
+/// already delivered and the deferred `exact` settle then fails, the request
+/// must STILL return the delivered completion (200) — delivery-without-charge is
+/// the accepted backstop — while the budget reservation is reconciled (released)
+/// on EVERY settle-after-deliver-failed branch, including the streaming path
+/// where `usage`/`cost_outcome` are both `None`.
+struct SettleFailsExactVerifier {
+    settled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl PaymentVerifier for SettleFailsExactVerifier {
+    fn network(&self) -> &str {
+        SOLANA_NETWORK
+    }
+
+    fn scheme(&self) -> &str {
+        "exact"
+    }
+
+    async fn verify_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<VerificationResult, X402Error> {
+        Ok(VerificationResult {
+            valid: true,
+            reason: None,
+            verified_amount: Some(2625),
+        })
+    }
+
+    async fn settle_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<SettlementResult, X402Error> {
+        // Settlement was reached (deferred broadcast attempted) but did NOT land.
+        self.settled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(SettlementResult {
+            success: false,
+            tx_signature: Some("MockExactSettleAfterDeliverFailedTxSig".to_string()),
+            network: SOLANA_NETWORK.to_string(),
+            error: Some("simulated post-delivery broadcast failure".to_string()),
+            verified_amount: None,
+            failure_kind: Some(solvela_protocol::SettlementFailureKind::Timeout),
+        })
+    }
+}
+
 /// A mock verifier for the escrow scheme.
 struct AlwaysPassEscrowVerifier;
 
@@ -190,6 +244,54 @@ impl PaymentVerifier for AlwaysPassEscrowVerifier {
         Ok(SettlementResult {
             success: true,
             tx_signature: Some("MockEscrowSettledTxSig123".to_string()),
+            network: SOLANA_NETWORK.to_string(),
+            error: None,
+            verified_amount: Some(2625),
+            failure_kind: None,
+        })
+    }
+}
+
+/// An escrow verifier that passes verification and, on `settle_payment` (the
+/// on-chain deposit broadcast), flips a shared `AtomicBool`. The #486 escrow
+/// regression test inspects this flag: for escrow the deposit MUST land on-chain
+/// BEFORE the provider is called (trustless commitment), so the flag must be
+/// `true` even when the provider later fails — the no-charge lever for escrow is
+/// skipping the CLAIM (and refund-at-expiry), not deferring the deposit.
+struct SettleRecordingEscrowVerifier {
+    settled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl PaymentVerifier for SettleRecordingEscrowVerifier {
+    fn network(&self) -> &str {
+        SOLANA_NETWORK
+    }
+
+    fn scheme(&self) -> &str {
+        "escrow"
+    }
+
+    async fn verify_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<VerificationResult, X402Error> {
+        Ok(VerificationResult {
+            valid: true,
+            reason: None,
+            verified_amount: Some(2625),
+        })
+    }
+
+    async fn settle_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<SettlementResult, X402Error> {
+        self.settled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(SettlementResult {
+            success: true,
+            tx_signature: Some("MockEscrowDepositSettledTxSig".to_string()),
             network: SOLANA_NETWORK.to_string(),
             error: None,
             verified_amount: Some(2625),
@@ -451,6 +553,49 @@ impl LLMProvider for MockProvider {
     }
 }
 
+/// A mock LLM provider whose `chat_completion`/`chat_completion_stream` always
+/// fail. Used by the #486 charge-before-deliver regression tests: with EVERY
+/// configured provider failing, the fallback chain is exhausted and the route
+/// hits the `AllProvidersFailed` arm — the exact production condition (a dead
+/// model ID / total provider outage) that must NOT leave the customer charged.
+struct FailingProvider {
+    provider_name: String,
+}
+
+impl FailingProvider {
+    fn new(name: &str) -> Self {
+        Self {
+            provider_name: name.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for FailingProvider {
+    fn name(&self) -> &str {
+        &self.provider_name
+    }
+
+    fn supported_models(&self) -> Vec<ModelRegistration> {
+        vec![]
+    }
+
+    async fn chat_completion(
+        &self,
+        _req: solvela_protocol::ChatRequest,
+    ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        // Mimics a Google 404 for a discontinued model ID (the #486 trigger).
+        Err("HTTP 404 model not found (simulated provider outage)".into())
+    }
+
+    async fn chat_completion_stream(
+        &self,
+        _req: solvela_protocol::ChatRequest,
+    ) -> Result<ChatStream, Box<dyn std::error::Error + Send + Sync>> {
+        Err("HTTP 404 model not found (simulated provider outage)".into())
+    }
+}
+
 /// Build a mock `ProviderRegistry` that has providers for all models in TEST_MODELS_TOML.
 fn mock_provider_registry() -> ProviderRegistry {
     let mut providers: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
@@ -462,6 +607,29 @@ fn mock_provider_registry() -> ProviderRegistry {
     providers.insert(
         "deepseek".to_string(),
         Arc::new(MockProvider::new("deepseek")),
+    );
+    ProviderRegistry::from_providers(providers)
+}
+
+/// Build a `ProviderRegistry` where every provider in the `openai/gpt-4o`
+/// fallback chain that the test env configures FAILS. The chain for
+/// `("openai","gpt-4o")` is `[gpt-4o, claude-sonnet-4-6, gemini-3.1-pro,
+/// grok-3]`; we register failing `openai` + `anthropic` (google/xai are absent →
+/// skipped), so the chain is fully exhausted and the route returns
+/// `AllProvidersFailed`.
+fn failing_provider_registry() -> ProviderRegistry {
+    let mut providers: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+    providers.insert(
+        "openai".to_string(),
+        Arc::new(FailingProvider::new("openai")),
+    );
+    providers.insert(
+        "anthropic".to_string(),
+        Arc::new(FailingProvider::new("anthropic")),
+    );
+    providers.insert(
+        "deepseek".to_string(),
+        Arc::new(FailingProvider::new("deepseek")),
     );
     ProviderRegistry::from_providers(providers)
 }
@@ -485,6 +653,16 @@ fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
 fn test_app_with_mock_provider_and_exact_verifier(
     exact_verifier: Arc<dyn PaymentVerifier>,
 ) -> (axum::Router, Arc<AppState>) {
+    test_app_with_provider_registry_and_exact_verifier(mock_provider_registry(), exact_verifier)
+}
+
+/// Like [`test_app_with_mock_provider_and_exact_verifier`] but also lets the
+/// caller inject the `ProviderRegistry`, so a fully-failing provider set can be
+/// wired to exercise the `AllProvidersFailed` arm end-to-end (#486).
+fn test_app_with_provider_registry_and_exact_verifier(
+    providers: ProviderRegistry,
+    exact_verifier: Arc<dyn PaymentVerifier>,
+) -> (axum::Router, Arc<AppState>) {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
     let facilitator = solvela_x402::facilitator::Facilitator::new(vec![exact_verifier]);
@@ -496,7 +674,7 @@ fn test_app_with_mock_provider_and_exact_verifier(
         config,
         model_registry,
         service_registry: RwLock::new(service_registry),
-        providers: mock_provider_registry(),
+        providers,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -1491,6 +1669,18 @@ fn test_app_with_mock_provider_and_escrow() -> axum::Router {
 fn test_app_with_mock_provider_and_escrow_verifier(
     escrow_verifier: Arc<dyn PaymentVerifier>,
 ) -> axum::Router {
+    test_app_with_provider_registry_and_escrow_verifier(mock_provider_registry(), escrow_verifier)
+}
+
+/// Like [`test_app_with_mock_provider_and_escrow_verifier`] but also lets the
+/// caller inject the `ProviderRegistry`, so a fully-failing provider set can be
+/// wired to exercise the escrow provider-failure path end-to-end (#486): the
+/// deposit settles, but provider exhaustion must yield a retryable 503 and NO
+/// claim (refund-at-expiry), never a bare 500.
+fn test_app_with_provider_registry_and_escrow_verifier(
+    providers: ProviderRegistry,
+    escrow_verifier: Arc<dyn PaymentVerifier>,
+) -> axum::Router {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
 
@@ -1531,7 +1721,7 @@ fn test_app_with_mock_provider_and_escrow_verifier(
         config,
         model_registry,
         service_registry: RwLock::new(service_registry),
-        providers: mock_provider_registry(),
+        providers,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -2483,9 +2673,13 @@ async fn test_chat_assistant_null_content_with_user_text_is_accepted() {
     assert_eq!(json["object"], "chat.completion");
 }
 
-/// Paid requests with NO provider configured should return 500 (stub rejection).
+/// Paid requests with NO provider configured must return a RETRYABLE 503 — not a
+/// 500 — and crucially must NOT have charged the customer (#486). The `exact`
+/// transfer is deferred until a successful provider response, so with no provider
+/// it is never broadcast. (Pre-#486 this returned a bare 500 with the payment
+/// already settled on-chain.)
 #[tokio::test]
-async fn test_chat_paid_no_provider_returns_500() {
+async fn test_chat_paid_no_provider_returns_503_unavailable() {
     let app = test_app();
 
     let body = serde_json::json!({
@@ -2509,11 +2703,11 @@ async fn test_chat_paid_no_provider_returns_500() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["type"], "internal_error");
+    assert_eq!(json["error"]["type"], "upstream_unavailable");
 }
 
 #[tokio::test]
@@ -4363,12 +4557,14 @@ async fn test_chat_with_broken_model_circuit_returns_stub() {
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
-    // In test env with no real providers, paid requests return 500
-    // (security fix: never serve stub responses to paying users) or 402
+    // In test env with no real providers, paid requests never serve a stub
+    // (security fix). Post-#486 an unfulfillable paid request returns a
+    // retryable 503 (no charge taken) rather than a bare 500; a 402 is also
+    // acceptable if the payment challenge path is hit first.
     assert!(
-        resp.status() == StatusCode::INTERNAL_SERVER_ERROR
+        resp.status() == StatusCode::SERVICE_UNAVAILABLE
             || resp.status() == StatusCode::PAYMENT_REQUIRED,
-        "expected 500 or 402, got {}",
+        "expected 503 or 402, got {}",
         resp.status()
     );
 }
@@ -4723,10 +4919,11 @@ async fn test_payment_status_none_on_402() {
     assert!(response.headers().get("x-rcr-request-id").is_some());
 }
 
-/// G.2 Test 8: Request ID present on 500 error responses.
+/// G.2 Test 8: Request ID present on error responses.
 ///
-/// A paid request with no real provider configured returns 500.
-/// The RequestIdLayer middleware should still attach the request ID.
+/// A paid request with no real provider configured returns a retryable 503
+/// (post-#486; previously 500). The RequestIdLayer middleware should still
+/// attach the request ID regardless of the error status.
 #[tokio::test]
 async fn test_request_id_present_on_500_error() {
     let app = test_app();
@@ -4752,10 +4949,10 @@ async fn test_request_id_present_on_500_error() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(
         response.headers().get("x-rcr-request-id").is_some(),
-        "X-RCR-Request-Id must be present on 500 error responses"
+        "X-RCR-Request-Id must be present on error responses"
     );
     // Should be a valid UUID (36 chars with dashes)
     let id = response
@@ -5044,6 +5241,269 @@ async fn test_within_budget_request_settles_and_succeeds() {
     assert!(
         settled.load(std::sync::atomic::Ordering::SeqCst),
         "settlement must be reached for a within-budget request"
+    );
+}
+
+// =========================================================================
+// #486: provider failure must never charge-without-delivery
+// =========================================================================
+
+/// #486 (exact scheme): when EVERY provider fails on a paid request, the gateway
+/// must NOT settle the customer's payment on-chain — the `exact` transfer has no
+/// refund path, so settling then 500-ing charges the customer for nothing.
+///
+/// We inject a `SettleRecordingVerifier` (flips a flag iff `settle_payment` is
+/// reached) and a `failing_provider_registry()` (every provider in the chain
+/// fails, the production trigger of #486). The fix defers the `exact` broadcast
+/// until AFTER a successful provider response, so on total provider failure
+/// settlement is never reached: the flag stays `false`. The client receives a
+/// retryable 503 (not a 500), and crucially no funds leave the wallet.
+///
+/// Pre-fix, `verify_and_settle` broadcast the transfer BEFORE the provider call,
+/// so the flag would be `true` (funds taken) and the response a bare 500 —
+/// exactly the production defect. This test fails against that ordering.
+#[tokio::test]
+async fn exact_provider_failure_never_settles() {
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (app, _state) = test_app_with_provider_registry_and_exact_verifier(
+        failing_provider_registry(),
+        Arc::new(SettleRecordingVerifier {
+            settled: Arc::clone(&settled),
+        }),
+    );
+
+    // Small request, well under the $1.00 no-Redis budget cap, so the failure is
+    // the provider exhaustion — not the budget gate.
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !settled.load(std::sync::atomic::Ordering::SeqCst),
+        "EXACT settlement must NOT be reached when all providers fail — \
+         the customer must not be charged for an undelivered completion (#486)"
+    );
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "an unfulfillable paid request must surface a retryable 503, not a 500 (#486)"
+    );
+}
+
+/// #486 (exact scheme) happy-path guard: a successful provider response MUST
+/// still settle the deferred `exact` transfer. The reorder (verify-before, settle
+/// -after) must not silently drop settlement on the success path — that would be
+/// the opposite money bug (delivering for free, leaking gateway/provider cost).
+#[tokio::test]
+async fn exact_provider_success_still_settles() {
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (app, _state) = test_app_with_provider_registry_and_exact_verifier(
+        mock_provider_registry(),
+        Arc::new(SettleRecordingVerifier {
+            settled: Arc::clone(&settled),
+        }),
+    );
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a delivered paid request must return 200"
+    );
+    assert!(
+        settled.load(std::sync::atomic::Ordering::SeqCst),
+        "EXACT settlement MUST be reached once the provider delivers — \
+         deferring the broadcast must not drop it on the success path (#486)"
+    );
+}
+
+/// #486 (escrow scheme): the deposit must land on-chain BEFORE serving
+/// (trustless commitment), so settlement IS reached even when the provider then
+/// fails. The no-charge lever for escrow is the CLAIM: on provider failure the
+/// gateway must NOT claim — the deposit refunds at expiry — and must surface a
+/// retryable 503 (not a bare 500) so the client knows to retry / await refund.
+///
+/// This asserts the HTTP-level contract (503) and that the deposit settle WAS
+/// reached. The claim is structurally skipped because it only fires in the
+/// provider-success arm; a 503 here proves the failure arm was taken.
+#[tokio::test]
+async fn escrow_provider_failure_settles_deposit_but_returns_retryable() {
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let app = test_app_with_provider_registry_and_escrow_verifier(
+        failing_provider_registry(),
+        Arc::new(SettleRecordingEscrowVerifier {
+            settled: Arc::clone(&settled),
+        }),
+    );
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_escrow_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        settled.load(std::sync::atomic::Ordering::SeqCst),
+        "ESCROW deposit must settle on-chain before serving (trustless commitment)"
+    );
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "escrow provider failure must surface a retryable 503 (no claim, refund-at-expiry), \
+         not a bare 500 (#486)"
+    );
+}
+
+/// #486 (exact scheme, second-pass): when the provider DELIVERS but the deferred
+/// `exact` settle then fails, the gateway must still return the delivered
+/// completion (200) — delivery-without-charge is the accepted backstop. The
+/// money-path requirement this guards is that settlement WAS reached (the
+/// deferred broadcast was attempted, not silently skipped) and the request did
+/// not 500. The reservation reconciliation (release) happens behind a noop usage
+/// tracker here, so it is asserted at the unit level
+/// (`settle_after_deliver_failed_releases_reservation_unit`); this test pins the
+/// end-to-end HTTP contract through the real route.
+#[tokio::test]
+async fn exact_settle_after_deliver_failed_still_returns_delivered_completion() {
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (app, _state) = test_app_with_provider_registry_and_exact_verifier(
+        mock_provider_registry(),
+        Arc::new(SettleFailsExactVerifier {
+            settled: Arc::clone(&settled),
+        }),
+    );
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        settled.load(std::sync::atomic::Ordering::SeqCst),
+        "deferred EXACT settle MUST be reached after the provider delivers (#486)"
+    );
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a settle-after-deliver failure must NOT fail the request — the provider \
+         already delivered; delivery-without-charge is the accepted backstop (#486)"
+    );
+}
+
+/// #486 (exact scheme, STREAMING, second-pass): the streaming variant of the
+/// above. On the streaming path `usage`/`cost_outcome` are both `None`, so the
+/// downstream `log_spend` reconciliation never fires — the reservation MUST be
+/// reconciled at the settle-failure branch itself. This pins the HTTP contract
+/// (the request still streams a 200) on that branch end-to-end.
+#[tokio::test]
+async fn exact_settle_after_deliver_failed_streaming_still_returns_200() {
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (app, _state) = test_app_with_provider_registry_and_exact_verifier(
+        mock_provider_registry(),
+        Arc::new(SettleFailsExactVerifier {
+            settled: Arc::clone(&settled),
+        }),
+    );
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+        "stream": true,
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        settled.load(std::sync::atomic::Ordering::SeqCst),
+        "deferred EXACT settle MUST be reached after a streaming provider delivers (#486)"
+    );
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a streaming settle-after-deliver failure must still return a delivered 200, \
+         with the budget reservation reconciled at the settle-failure branch (#486)"
     );
 }
 
