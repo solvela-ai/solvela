@@ -9,10 +9,10 @@ The Solvela TypeScript SDK lives in the monorepo at
 ## Status
 
 <Note>
-`@solvela/sdk@0.2.2` (published 2026-05-14) ships the v2 wire-format fix and is
-wire-aligned with the production gateway at `api.solvela.ai`. Pin to `^0.2.2` —
-earlier `0.2.x` releases emit a `PaymentPayload` envelope shape the gateway
-no longer accepts.
+`@solvela/sdk@0.2.3` (published 2026-06-05) adds native x402 escrow-deposit
+signing (four-language parity) and is wire-aligned with the production gateway
+at `api.solvela.ai`. Pin to `^0.2.3` — earlier `0.2.x` releases emit a
+`PaymentPayload` envelope shape the gateway no longer accepts.
 </Note>
 
 For low-level use inside or outside the monorepo, the
@@ -23,7 +23,7 @@ package exposes the x402 parser + payment-signer primitives that
 ## Documentation
 
 - **Source:** [`sdks/typescript/`](https://github.com/solvela-ai/solvela/tree/main/sdks/typescript) in the monorepo
-- **npm package:** [@solvela/sdk](https://www.npmjs.com/package/@solvela/sdk) (current: `0.2.2`)
+- **npm package:** [@solvela/sdk](https://www.npmjs.com/package/@solvela/sdk) (current: `0.2.3`)
 
 ## History
 

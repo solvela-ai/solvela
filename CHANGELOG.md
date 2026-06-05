@@ -2,6 +2,12 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-06-05 — TypeScript SDK native escrow signing (`@solvela/sdk@0.2.3`); gateway charge-without-delivery + discontinued-model fixes
+
+[#482](https://github.com/solvela-ai/solvela/pull/482) adds native x402 escrow-deposit signing to the **TypeScript** SDK, completing **four-language escrow parity** (Python/Go/Rust/TS). The deposit transaction is byte-identical to the canonical Rust builder and golden-vector-pinned (a drift guard reads `crates/escrow-tx/src/deposit.rs`); `preferEscrow: true` now signs a real escrow deposit instead of failing closed (closes [#480](https://github.com/solvela-ai/solvela/issues/480)). Released as **`@solvela/sdk@0.2.3`** (additive — new exports, existing API unchanged).
+
+Verified end-to-end with a **real-money escrow payment on Solana mainnet** against the live gateway (deposit settled on-chain, completion returned) — the production verifier is the only place this wire format can be proven, beyond unit tests and golden vectors. That test surfaced two gateway defects, both fixed and deployed: [#487](https://github.com/solvela-ai/solvela/pull/487) removed Google's discontinued `gemini-2.0-flash`/`-flash-lite` model IDs (shut down 2026-06-01; the gateway charged then 500'd on the 404), and [#491](https://github.com/solvela-ai/solvela/pull/491) closed [#486](https://github.com/solvela-ai/solvela/issues/486) — paid requests now **never charge without delivery** (exact defers settlement until after a successful provider response; escrow skips the claim on provider failure → refund-at-expiry; failures return a retryable 503 and release the budget reservation; reviewed via the 2-round money-path process).
+
 ## 2026-06-04 — Cross-SDK `exact`-payment fixes (Python + TypeScript), Go escrow signing, Rust proxy 402 fix
 
 Four SDK-only PRs landed, all on the x402 payment path. The unifying thread: the live gateway verifier has required SPL **`TransferChecked` (ix 12)** for `exact` USDC payments since `e4f0db45` (so the mint is on-chain-verifiable and a plain `Transfer` can't spoof it), and two SDK signers had drifted to plain **`Transfer` (ix 3)**, silently failing verification in production. No gateway redeploy — the verifier was already correct.
