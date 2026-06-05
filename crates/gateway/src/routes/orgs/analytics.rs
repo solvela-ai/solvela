@@ -21,6 +21,7 @@ pub struct TeamStatsResponse {
     pub total_spend_usdc: f64,
     pub total_requests: i64,
     pub by_model: Vec<ModelBreakdown>,
+    pub by_provider: Vec<ProviderBreakdown>,
     pub by_wallet: Vec<WalletBreakdown>,
 }
 
@@ -28,6 +29,14 @@ pub struct TeamStatsResponse {
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct ModelBreakdown {
     pub model: String,
+    pub request_count: i64,
+    pub total_cost_usdc: f64,
+}
+
+/// Per-provider breakdown for team analytics.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ProviderBreakdown {
+    pub provider: String,
     pub request_count: i64,
     pub total_cost_usdc: f64,
 }
@@ -167,6 +176,35 @@ pub async fn get_team_stats(
         }
     };
 
+    // By-provider breakdown
+    let by_provider = sqlx::query_as::<_, ProviderBreakdown>(
+        r#"SELECT s.provider,
+                  COUNT(*) AS request_count,
+                  COALESCE(SUM(s.cost_usdc), 0.0)::DOUBLE PRECISION AS total_cost_usdc
+           FROM spend_logs s
+           JOIN team_wallets tw ON tw.wallet_address = s.wallet_address
+           WHERE tw.team_id = $1
+             AND s.created_at >= NOW() - make_interval(days => $2)
+           GROUP BY s.provider
+           ORDER BY total_cost_usdc DESC"#,
+    )
+    .bind(team_id)
+    .bind(days)
+    .fetch_all(pool)
+    .await;
+
+    let by_provider = match by_provider {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(team_id = %team_id, error = %e, "failed to fetch team stats by provider");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to fetch team stats by provider" })),
+            )
+                .into_response();
+        }
+    };
+
     // By-wallet breakdown
     let by_wallet = sqlx::query_as::<_, WalletBreakdown>(
         r#"SELECT tw.wallet_address,
@@ -204,6 +242,7 @@ pub async fn get_team_stats(
             total_spend_usdc,
             total_requests,
             by_model,
+            by_provider,
             by_wallet,
         }),
     )

@@ -572,16 +572,23 @@ impl UsageTracker {
             .await
             .map_err(|e| UsageError::Database(e.to_string()))?;
 
+            // Daily/monthly spend come from the same Redis counters the budget
+            // path increments (`spend:{wallet}:{period}`). Read via the shared
+            // `wallet_window_spend` helper so the stats HTTP endpoint and this
+            // summary path use one key derivation — no copy-pasted key strings.
+            // Redis-optional (Architectural Rule #12): absent Redis / missing /
+            // undecodable counters fall back to 0.0, never an error.
+            let (daily_cost_usdc, monthly_cost_usdc) =
+                wallet_window_spend(self.redis_client(), wallet_address).await;
+
             return Ok(SpendSummary {
                 wallet_address: wallet_address.to_string(),
                 total_requests: row.0 as u64,
                 total_input_tokens: row.1 as u64,
                 total_output_tokens: row.2 as u64,
                 total_cost_usdc: row.3,
-                // TODO: Query Redis daily/monthly spend counters to populate these fields.
-                // Currently returns 0.0 — see backend audit Q5.
-                daily_cost_usdc: 0.0,
-                monthly_cost_usdc: 0.0,
+                daily_cost_usdc,
+                monthly_cost_usdc,
             });
         }
 
@@ -1006,6 +1013,32 @@ pub async fn get_redis_spend(client: &redis::Client, key: &str) -> Result<f64, U
     redis_get_f64(&mut conn, key)
         .await
         .map_err(UsageError::Redis)
+}
+
+/// Read a wallet's current-window (today / this-month) spend from the
+/// `spend:{wallet}:{period}` Redis counters the budget path increments.
+///
+/// Single source of truth for the per-wallet daily/monthly key derivation,
+/// shared by [`UsageTracker::get_summary`] and the `GET /v1/wallet/:address/stats`
+/// HTTP handler so neither re-derives (or copy-pastes) the key format.
+///
+/// Redis is OPTIONAL (Architectural Rule #12): when `client` is `None` — or a
+/// counter is missing or fails to decode — the corresponding value falls back
+/// to `0.0` rather than erroring, matching the budget GET endpoint's
+/// `.unwrap_or(0.0)`. These are display counters; the authoritative ledger is
+/// Postgres `spend_logs`, so a `0.0` fallback under-reports a window at worst —
+/// it never bills. Returns `(daily, monthly)` decimal-USDC.
+pub async fn wallet_window_spend(client: Option<&redis::Client>, wallet: &str) -> (f64, f64) {
+    let Some(client) = client else {
+        return (0.0, 0.0);
+    };
+    let now = Utc::now();
+    let day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
+    let month_key = format!("spend:{}:{}", wallet, now.format("%Y-%m"));
+    (
+        get_redis_spend(client, &day_key).await.unwrap_or(0.0),
+        get_redis_spend(client, &month_key).await.unwrap_or(0.0),
+    )
 }
 
 // ---------------------------------------------------------------------------
