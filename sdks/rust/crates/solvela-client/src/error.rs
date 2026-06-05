@@ -82,6 +82,9 @@ pub enum ClientError {
 
     #[error("balance check failed: {0}")]
     BalanceError(String),
+
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 #[cfg(test)]

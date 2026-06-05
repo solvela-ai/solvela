@@ -20,6 +20,7 @@ use crate::error::ClientError;
 use crate::quality;
 use crate::session::SessionStore;
 use crate::signer;
+use crate::stats::StatsResponse;
 use crate::wallet::Wallet;
 
 /// Client for interacting with a `Solvela` gateway.
@@ -517,6 +518,93 @@ impl SolvelaClient {
         }
     }
 
+    /// Fetch per-wallet spend statistics from the gateway.
+    ///
+    /// Wraps `GET /v1/wallet/{wallet}/stats?days=N`. The endpoint is
+    /// authenticated: it requires a gateway-issued **session token** scoped to
+    /// `wallet`. The gateway returns this token in the `x-solvela-session`
+    /// response header after a successful paid chat, and it expires after ~1h.
+    /// This client does not retain that token (it is never read from chat
+    /// responses), so the caller must supply it explicitly via `session_token`.
+    /// A token issued for a different wallet yields a `403` from the gateway,
+    /// surfaced here as `ClientError::Gateway { status: 403, .. }`.
+    ///
+    /// `days` selects the reporting window:
+    /// - `Some(n)` — must be within `1..=365` (the gateway's accepted range);
+    ///   an out-of-range value is rejected client-side with
+    ///   `ClientError::InvalidArgument` rather than sent (which the gateway
+    ///   would reject with `400`). The `days` query parameter is sent only when
+    ///   `Some`.
+    /// - `None` — the parameter is omitted so the gateway's default window (30
+    ///   days) applies.
+    ///
+    /// All `*_cost_usdc` fields in the response are decimal-USDC strings,
+    /// mirrored verbatim from the gateway (never parsed to `f64`) to avoid float
+    /// drift.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::InvalidArgument` if `days` is out of range or
+    /// `session_token` is empty, `ClientError::Gateway` for any non-200 response
+    /// (including `401`/`403` auth failures), or `ClientError::ParseError` if
+    /// the response body is malformed.
+    pub async fn stats(
+        &self,
+        wallet: &str,
+        days: Option<u16>,
+        session_token: &str,
+    ) -> Result<StatsResponse, ClientError> {
+        // Validate `days` client-side against the gateway's accepted range
+        // (1..=365). Erroring here avoids a guaranteed-400 round trip and gives
+        // a clearer message than the gateway's. `u16` admits values up to
+        // 65_535, so an over-365 value is reachable and must be rejected.
+        if let Some(d) = days {
+            if !(1..=365).contains(&d) {
+                return Err(ClientError::InvalidArgument(format!(
+                    "days must be between 1 and 365, got {d}"
+                )));
+            }
+        }
+
+        // An empty session token can never authenticate; reject before sending.
+        if session_token.is_empty() {
+            return Err(ClientError::InvalidArgument(
+                "session_token must not be empty".to_string(),
+            ));
+        }
+
+        // Append `days` only when provided, so `None` lets the gateway's own
+        // default window apply. `d` is a validated `u16` (1..=365), so it is
+        // purely numeric and needs no percent-encoding. The wallet path segment
+        // is the caller-supplied address; the gateway re-validates its format
+        // and the base58 alphabet contains no URL-reserved characters.
+        let url = match days {
+            Some(d) => format!(
+                "{}/v1/wallet/{}/stats?days={}",
+                self.config.gateway_url, wallet, d
+            ),
+            None => format!("{}/v1/wallet/{}/stats", self.config.gateway_url, wallet),
+        };
+
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {session_token}"))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body = resp.text().await?;
+
+        if status != StatusCode::OK {
+            return Err(ClientError::Gateway {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+        serde_json::from_str(&body).map_err(|e| ClientError::ParseError(e.to_string()))
+    }
+
     /// Sign a payment for a 402 response and return the encoded
     /// `PAYMENT-SIGNATURE` header value.
     ///
@@ -865,7 +953,7 @@ mod tests {
     use base64::Engine as _;
     use futures::StreamExt;
     use solvela_protocol::*;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_wallet() -> Wallet {
@@ -2039,5 +2127,310 @@ data: [DONE]\n\n";
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].choices[0].delta.content.as_deref(), Some("Free"));
+    }
+
+    // -------------------------------------------------------------------------
+    // stats()
+    // -------------------------------------------------------------------------
+
+    const TEST_STATS_WALLET: &str = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+
+    /// A representative, fully-populated stats body mirroring the gateway's
+    /// `StatsResponse` wire shape (see `crates/gateway/src/routes/stats.rs`).
+    fn sample_stats_body() -> serde_json::Value {
+        serde_json::json!({
+            "wallet": TEST_STATS_WALLET,
+            "period_days": 30,
+            "summary": {
+                "total_requests": 1247,
+                "total_cost_usdc": "3.847291",
+                "total_input_tokens": 892_400,
+                "total_output_tokens": 341_200,
+                "daily_cost_usdc": "0.142300",
+                "monthly_cost_usdc": "3.847291"
+            },
+            "by_model": [{
+                "model": "anthropic/claude-sonnet-4-20250514",
+                "requests": 412,
+                "cost_usdc": "1.923000",
+                "input_tokens": 310_000,
+                "output_tokens": 142_000
+            }],
+            "by_day": [{
+                "date": "2026-03-11",
+                "requests": 47,
+                "cost_usdc": "0.142300"
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn test_stats_200_deserializes_all_fields() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/wallet/{TEST_STATS_WALLET}/stats")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_stats_body()))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let stats = client
+            .stats(TEST_STATS_WALLET, Some(30), "session-token-abc")
+            .await
+            .unwrap();
+
+        // Top-level
+        assert_eq!(stats.wallet, TEST_STATS_WALLET);
+        assert_eq!(stats.period_days, 30);
+
+        // Summary — including daily/monthly, all decimal-USDC strings.
+        assert_eq!(stats.summary.total_requests, 1247);
+        assert_eq!(stats.summary.total_cost_usdc, "3.847291");
+        assert_eq!(stats.summary.total_input_tokens, 892_400);
+        assert_eq!(stats.summary.total_output_tokens, 341_200);
+        assert_eq!(stats.summary.daily_cost_usdc, "0.142300");
+        assert_eq!(stats.summary.monthly_cost_usdc, "3.847291");
+
+        // by_model
+        assert_eq!(stats.by_model.len(), 1);
+        assert_eq!(
+            stats.by_model[0].model,
+            "anthropic/claude-sonnet-4-20250514"
+        );
+        assert_eq!(stats.by_model[0].requests, 412);
+        assert_eq!(stats.by_model[0].cost_usdc, "1.923000");
+        assert_eq!(stats.by_model[0].input_tokens, 310_000);
+        assert_eq!(stats.by_model[0].output_tokens, 142_000);
+
+        // by_day
+        assert_eq!(stats.by_day.len(), 1);
+        assert_eq!(stats.by_day[0].date, "2026-03-11");
+        assert_eq!(stats.by_day[0].requests, 47);
+        assert_eq!(stats.by_day[0].cost_usdc, "0.142300");
+    }
+
+    #[tokio::test]
+    async fn test_stats_sends_days_query_param_when_provided() {
+        let mock_server = MockServer::start().await;
+
+        // The mock only matches when `days=7` is present in the query string;
+        // if the param were omitted (or wrong) this mock would not match and
+        // the request would 404, failing the test.
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/wallet/{TEST_STATS_WALLET}/stats")))
+            .and(wiremock::matchers::query_param("days", "7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_stats_body()))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let stats = client
+            .stats(TEST_STATS_WALLET, Some(7), "tok")
+            .await
+            .unwrap();
+        assert_eq!(stats.wallet, TEST_STATS_WALLET);
+    }
+
+    #[tokio::test]
+    async fn test_stats_omits_days_query_param_when_none() {
+        let mock_server = MockServer::start().await;
+
+        // Match only when `days` is absent, so the server default applies.
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/wallet/{TEST_STATS_WALLET}/stats")))
+            .and(wiremock::matchers::query_param_is_missing("days"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_stats_body()))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let stats = client.stats(TEST_STATS_WALLET, None, "tok").await.unwrap();
+        assert_eq!(stats.wallet, TEST_STATS_WALLET);
+    }
+
+    #[tokio::test]
+    async fn test_stats_sets_bearer_auth_header() {
+        let mock_server = MockServer::start().await;
+
+        // Only matches when the exact Bearer header is present.
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/wallet/{TEST_STATS_WALLET}/stats")))
+            .and(header("authorization", "Bearer my-session-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_stats_body()))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let stats = client
+            .stats(TEST_STATS_WALLET, None, "my-session-token")
+            .await
+            .unwrap();
+        assert_eq!(stats.wallet, TEST_STATS_WALLET);
+    }
+
+    #[tokio::test]
+    async fn test_stats_403_maps_to_gateway_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/wallet/{TEST_STATS_WALLET}/stats")))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": "token wallet does not match requested address"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let result = client
+            .stats(TEST_STATS_WALLET, Some(30), "wrong-wallet-token")
+            .await;
+        match result.unwrap_err() {
+            ClientError::Gateway { status, message } => {
+                assert_eq!(status, 403);
+                assert!(
+                    message.contains("does not match"),
+                    "403 body should be surfaced verbatim: {message}"
+                );
+            }
+            other => panic!("expected Gateway 403, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stats_500_maps_to_gateway_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/wallet/{TEST_STATS_WALLET}/stats")))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let result = client.stats(TEST_STATS_WALLET, None, "tok").await;
+        match result.unwrap_err() {
+            ClientError::Gateway { status, .. } => assert_eq!(status, 500),
+            other => panic!("expected Gateway 500, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stats_rejects_out_of_range_days_before_request() {
+        // days outside 1..=365 must be rejected client-side with a clear
+        // InvalidArgument error, never sent to the gateway (which would 400).
+        // The mock asserts zero requests reach it.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/wallet/{TEST_STATS_WALLET}/stats")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_stats_body()))
+            .expect(0)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        // 0 is below the minimum.
+        let too_small = client.stats(TEST_STATS_WALLET, Some(0), "tok").await;
+        assert!(matches!(
+            too_small.unwrap_err(),
+            ClientError::InvalidArgument(_)
+        ));
+
+        // 366 is above the maximum.
+        let too_big = client.stats(TEST_STATS_WALLET, Some(366), "tok").await;
+        assert!(matches!(
+            too_big.unwrap_err(),
+            ClientError::InvalidArgument(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_stats_rejects_empty_session_token() {
+        // An empty session token can never authenticate; reject it before
+        // sending rather than letting the gateway 401.
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/wallet/{TEST_STATS_WALLET}/stats")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_stats_body()))
+            .expect(0)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let result = client.stats(TEST_STATS_WALLET, Some(30), "").await;
+        assert!(matches!(
+            result.unwrap_err(),
+            ClientError::InvalidArgument(_)
+        ));
     }
 }
