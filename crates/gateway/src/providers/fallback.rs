@@ -593,7 +593,6 @@ pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a s
         ("openai", "gpt-4.1-nano") => vec![
             ("openai", "gpt-4.1-nano"),
             ("google", "gemini-2.5-flash-lite"),
-            ("google", "gemini-2.0-flash-lite"),
         ],
         ("anthropic", "claude-haiku-4-5-20251001") => vec![
             ("anthropic", "claude-haiku-4-5-20251001"),

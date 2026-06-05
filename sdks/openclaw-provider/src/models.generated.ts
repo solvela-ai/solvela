@@ -324,34 +324,6 @@ export const SOLVELA_MODELS: SolvelaModel[] = [
     "reasoning": false
   },
   {
-    "id": "solvela/gemini-2.0-flash",
-    "name": "Gemini 2.0 Flash",
-    "provider": "google",
-    "contextWindow": 1000000,
-    "maxTokens": 8192,
-    "inputCostPerMillion": 0.1,
-    "outputCostPerMillion": 0.4,
-    "supportsStreaming": true,
-    "supportsTools": true,
-    "supportsVision": false,
-    "supportsStructuredOutput": false,
-    "reasoning": false
-  },
-  {
-    "id": "solvela/gemini-2.0-flash-lite",
-    "name": "Gemini 2.0 Flash Lite",
-    "provider": "google",
-    "contextWindow": 1000000,
-    "maxTokens": 32768,
-    "inputCostPerMillion": 0.075,
-    "outputCostPerMillion": 0.3,
-    "supportsStreaming": true,
-    "supportsTools": false,
-    "supportsVision": false,
-    "supportsStructuredOutput": false,
-    "reasoning": false
-  },
-  {
     "id": "solvela/deepseek-coder",
     "name": "DeepSeek Coder V3",
     "provider": "deepseek",
@@ -395,4 +367,4 @@ export const SOLVELA_MODELS: SolvelaModel[] = [
   }
 ];
 
-export const MODEL_COUNT = 26;
+export const MODEL_COUNT = 24;
