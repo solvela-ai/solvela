@@ -636,6 +636,93 @@ async fn audit_logs_endpoint_returns_json_array(pool: PgPool) {
     assert!(json.is_array(), "audit-logs response must be an array");
 }
 
+/// Gap 3: the team-stats response must include a `by_provider` breakdown,
+/// grouped on `spend_logs.provider` (joined through `team_wallets`), mirroring
+/// the existing `by_model` breakdown. Seed spend rows spanning two providers
+/// and assert the array aggregates correctly and is ordered by spend DESC.
+#[sqlx::test(migrations = "../../migrations")]
+async fn team_stats_includes_by_provider_breakdown(pool: PgPool) {
+    let app = router_with_pool(pool.clone());
+    let org_id = create_test_org(&app, "acme").await;
+
+    // Create a team via HTTP.
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/v1/orgs/{org_id}/teams"),
+            r#"{"name":"Eng"}"#,
+        ))
+        .await
+        .expect("team");
+    let team_id = Uuid::parse_str(body_to_json(resp).await["id"].as_str().unwrap()).expect("uuid");
+
+    // Assign a wallet to the team via HTTP.
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/v1/orgs/{org_id}/teams/{team_id}/wallets"),
+            &format!(r#"{{"wallet_address":"{TEST_MEMBER_WALLET}"}}"#),
+        ))
+        .await
+        .expect("assign wallet");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Seed spend rows spanning two providers for that wallet.
+    // anthropic: 0.30 + 0.20 = 0.50 over 2 requests; openai: 0.10 over 1.
+    for (model, provider, cost) in [
+        ("anthropic/claude-sonnet-4", "anthropic", 0.30_f64),
+        ("anthropic/claude-haiku", "anthropic", 0.20_f64),
+        ("openai/gpt-4o", "openai", 0.10_f64),
+    ] {
+        sqlx::query(
+            r#"INSERT INTO spend_logs
+                   (wallet_address, model, provider, input_tokens, output_tokens, cost_usdc)
+               VALUES ($1, $2, $3, 10, 20, $4)"#,
+        )
+        .bind(TEST_MEMBER_WALLET)
+        .bind(model)
+        .bind(provider)
+        .bind(cost)
+        .execute(&pool)
+        .await
+        .expect("seed spend_log");
+    }
+
+    let resp = app
+        .oneshot(bare_request(
+            "GET",
+            &format!("/v1/orgs/{org_id}/teams/{team_id}/stats?days=7"),
+        ))
+        .await
+        .expect("team stats");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_to_json(resp).await;
+
+    let by_provider = json["by_provider"]
+        .as_array()
+        .expect("by_provider must be an array");
+    assert_eq!(by_provider.len(), 2, "two distinct providers seeded");
+
+    // Ordered by total_cost_usdc DESC: anthropic (0.50) before openai (0.10).
+    assert_eq!(by_provider[0]["provider"], "anthropic");
+    assert_eq!(by_provider[0]["request_count"], 2);
+    assert!(
+        (by_provider[0]["total_cost_usdc"].as_f64().unwrap() - 0.50).abs() < 1e-9,
+        "anthropic total must aggregate to 0.50, got {}",
+        by_provider[0]["total_cost_usdc"]
+    );
+
+    assert_eq!(by_provider[1]["provider"], "openai");
+    assert_eq!(by_provider[1]["request_count"], 1);
+    assert!(
+        (by_provider[1]["total_cost_usdc"].as_f64().unwrap() - 0.10).abs() < 1e-9,
+        "openai total must aggregate to 0.10, got {}",
+        by_provider[1]["total_cost_usdc"]
+    );
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn org_stats_endpoint_returns_200(pool: PgPool) {
     let app = router_with_pool(pool);

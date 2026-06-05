@@ -46,6 +46,17 @@ pub struct StatsSummary {
     pub total_cost_usdc: String,
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
+    /// Spend in the last 24h window (today, UTC) for this wallet, decimal USDC.
+    ///
+    /// Read from the `spend:{wallet}:{%Y-%m-%d}` Redis counter the budget path
+    /// increments. Redis-optional (Architectural Rule #12): `0.0` when Redis is
+    /// absent or the counter is missing — never an error.
+    pub daily_cost_usdc: String,
+    /// Spend in the current calendar month (UTC) for this wallet, decimal USDC.
+    ///
+    /// Read from the `spend:{wallet}:{%Y-%m}` Redis counter. Same Redis-optional
+    /// `0.0` fallback as `daily_cost_usdc`.
+    pub monthly_cost_usdc: String,
 }
 
 /// Per-model breakdown.
@@ -189,11 +200,22 @@ pub async fn wallet_stats(
             .into_response()
     })?;
 
+    // Daily/monthly current-window spend come from the same Redis counters the
+    // budget path increments, via the shared `wallet_window_spend` helper (no
+    // copy-pasted key strings). Redis is OPTIONAL (Architectural Rule #12): when
+    // it is absent or a counter is missing, these are 0.0 and the endpoint still
+    // returns 200 with the DB-backed summary intact — it never hard-requires
+    // Redis. Formatted to 6 decimals to match the other `*_cost_usdc` fields.
+    let (daily_cost, monthly_cost) =
+        crate::usage::wallet_window_spend(state.usage.redis_client(), &address).await;
+
     let summary = StatsSummary {
         total_requests: summary_row.total_requests,
         total_cost_usdc: format!("{:.6}", summary_row.total_cost),
         total_input_tokens: summary_row.total_input,
         total_output_tokens: summary_row.total_output,
+        daily_cost_usdc: format!("{daily_cost:.6}"),
+        monthly_cost_usdc: format!("{monthly_cost:.6}"),
     };
 
     let by_model = model_rows
@@ -269,6 +291,8 @@ mod tests {
                 total_cost_usdc: "0.000000".to_string(),
                 total_input_tokens: 0,
                 total_output_tokens: 0,
+                daily_cost_usdc: "0.000000".to_string(),
+                monthly_cost_usdc: "0.000000".to_string(),
             },
             by_model: vec![],
             by_day: vec![],
@@ -357,6 +381,8 @@ mod tests {
                 total_cost_usdc: "3.847291".to_string(),
                 total_input_tokens: 892_400,
                 total_output_tokens: 341_200,
+                daily_cost_usdc: "0.142300".to_string(),
+                monthly_cost_usdc: "3.847291".to_string(),
             },
             by_model: vec![ModelStats {
                 model: "anthropic/claude-sonnet-4-20250514".to_string(),
@@ -387,6 +413,8 @@ mod tests {
         assert_eq!(json["summary"]["total_cost_usdc"], "3.847291");
         assert_eq!(json["summary"]["total_input_tokens"], 892_400);
         assert_eq!(json["summary"]["total_output_tokens"], 341_200);
+        assert_eq!(json["summary"]["daily_cost_usdc"], "0.142300");
+        assert_eq!(json["summary"]["monthly_cost_usdc"], "3.847291");
 
         // by_model array
         assert_eq!(json["by_model"].as_array().unwrap().len(), 1);
@@ -418,6 +446,8 @@ mod tests {
                 total_cost_usdc: "0.000000".to_string(),
                 total_input_tokens: 0,
                 total_output_tokens: 0,
+                daily_cost_usdc: "0.000000".to_string(),
+                monthly_cost_usdc: "0.000000".to_string(),
             },
             by_model: vec![],
             by_day: vec![],
@@ -430,6 +460,8 @@ mod tests {
         assert_eq!(json["summary"]["total_cost_usdc"], "0.000000");
         assert_eq!(json["summary"]["total_input_tokens"], 0);
         assert_eq!(json["summary"]["total_output_tokens"], 0);
+        assert_eq!(json["summary"]["daily_cost_usdc"], "0.000000");
+        assert_eq!(json["summary"]["monthly_cost_usdc"], "0.000000");
         assert!(json["by_model"].as_array().unwrap().is_empty());
         assert!(json["by_day"].as_array().unwrap().is_empty());
     }

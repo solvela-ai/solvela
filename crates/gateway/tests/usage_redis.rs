@@ -658,6 +658,102 @@ async fn check_budget_redis_get_failure_fails_closed(pool: PgPool) {
     .await;
 }
 
+/// Gap 2: `get_summary` must populate `daily_cost_usdc` / `monthly_cost_usdc`
+/// from the same `spend:{wallet}:{period}` Redis counters the budget path
+/// writes, parsed the same way (decimal USDC). Seed both windows, then assert
+/// the summary reflects them.
+#[sqlx::test(migrations = "../../migrations")]
+async fn get_summary_populates_daily_and_monthly_from_redis(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let now = Utc::now();
+
+    let day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
+    let month_key = format!("spend:{}:{}", wallet, now.format("%Y-%m"));
+
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("conn");
+    let _: () = redis::cmd("SET")
+        .arg(&day_key)
+        .arg("0.25")
+        .arg("EX")
+        .arg(3600)
+        .query_async(&mut conn)
+        .await
+        .expect("seed daily");
+    let _: () = redis::cmd("SET")
+        .arg(&month_key)
+        .arg("1.75")
+        .arg("EX")
+        .arg(3600)
+        .query_async(&mut conn)
+        .await
+        .expect("seed monthly");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+    let summary = tracker
+        .get_summary(&wallet)
+        .await
+        .expect("summary with DB + Redis must succeed");
+
+    assert!(
+        (summary.daily_cost_usdc - 0.25).abs() < 1e-9,
+        "daily must reflect the seeded counter, got {}",
+        summary.daily_cost_usdc
+    );
+    assert!(
+        (summary.monthly_cost_usdc - 1.75).abs() < 1e-9,
+        "monthly must reflect the seeded counter, got {}",
+        summary.monthly_cost_usdc
+    );
+
+    redis_del(&client, &[&day_key, &month_key]).await;
+}
+
+/// Gap 2: a missing Redis counter (no spend yet this window) must fall back to
+/// 0.0 gracefully, never an error — matching the budget endpoint's
+/// `.unwrap_or(0.0)`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn get_summary_falls_back_to_zero_when_counters_missing(pool: PgPool) {
+    let client = redis_client();
+    // Fresh per-test wallet => no spend keys exist for it.
+    let wallet = unique_wallet();
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+    let summary = tracker
+        .get_summary(&wallet)
+        .await
+        .expect("summary must succeed even with no Redis counters");
+
+    assert_eq!(
+        summary.daily_cost_usdc, 0.0,
+        "missing daily counter must fall back to 0.0"
+    );
+    assert_eq!(
+        summary.monthly_cost_usdc, 0.0,
+        "missing monthly counter must fall back to 0.0"
+    );
+}
+
+/// Gap 2: with a DB but NO Redis configured, daily/monthly must be 0.0 (not an
+/// error) — Redis is optional (Architectural Rule #12).
+#[sqlx::test(migrations = "../../migrations")]
+async fn get_summary_zero_windows_when_redis_absent(pool: PgPool) {
+    let wallet = unique_wallet();
+
+    // DB present, Redis absent.
+    let tracker = UsageTracker::new(Some(pool.clone()), None);
+    let summary = tracker
+        .get_summary(&wallet)
+        .await
+        .expect("summary must succeed with DB only");
+
+    assert_eq!(summary.daily_cost_usdc, 0.0);
+    assert_eq!(summary.monthly_cost_usdc, 0.0);
+}
+
 #[tokio::test]
 async fn get_redis_spend_returns_zero_for_missing_key() {
     let client = redis_client();
