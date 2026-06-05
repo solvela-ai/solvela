@@ -19,7 +19,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::Response;
 use axum::Json;
 use metrics::{counter, histogram};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use solvela_protocol::{ChatRequest, MessageContent, Role, SettlementFailureKind};
 use solvela_router::profiles::{self, Profile};
@@ -412,6 +412,10 @@ pub async fn chat_completions(
     let mut escrow_agent_pubkey: Option<String> = None;
     // FIX 3: Track the verified deposit amount to cap claim amounts
     let escrow_deposited_amount: Option<u64>;
+    // #486: for the `exact` scheme the on-chain broadcast is DEFERRED until after
+    // a successful provider response, so we hold the verified payload here to
+    // settle it post-call. `None` for escrow (its deposit already settled).
+    let mut payload_for_settle: Option<solvela_x402::types::PaymentPayload> = None;
     // Gateway-advertised amount — used as defense-in-depth cap when deposit amount is unknown
     let client_amount: u64;
     // M3: budget is checked + reserved BEFORE settlement inside the arm below, so
@@ -702,78 +706,149 @@ pub async fn chat_completions(
                 Err(e) => return Err(GatewayError::BadRequest(e.to_string())),
             };
 
-            // Verify and settle via Facilitator — hard enforcement
-            // R1 FIX: Check settlement.success flag
-            match state.facilitator.verify_and_settle(&payload).await {
-                Ok(settlement) if !settlement.success => {
-                    // Settlement returned Ok but the transaction did not succeed.
-                    // Distinguish a deterministic on-chain rejection (a dead end —
-                    // retrying the same signed tx can never confirm) from a
-                    // transient timeout/transport failure (issue #435). The full
-                    // error detail stays server-side; the client only ever sees the
-                    // numeric program error code, never raw RPC internals
-                    // (GHSA-cgqx-mg48-949v).
-                    counter!("solvela_payments_total", "status" => "failed").increment(1);
-                    tracing::warn!(
-                        tx_signature = %settlement.tx_signature.as_deref().unwrap_or("unknown"),
-                        error = ?settlement.error,
-                        failure_kind = ?settlement.failure_kind,
-                        "payment settlement failed"
-                    );
-                    // Exhaustive on purpose — no `_` wildcard, so a future
-                    // `SettlementFailureKind` variant can't be silently funneled
-                    // into the retryable bucket and re-open #435.
-                    let message = match settlement.failure_kind {
-                        Some(SettlementFailureKind::Rejected { program_error_code }) => {
-                            match program_error_code {
-                                Some(code) => format!(
+            // #486: charge-before-deliver fix. The settlement step broadcasts
+            // the customer's payment on-chain. Doing that BEFORE the provider
+            // call means a provider failure leaves the customer charged with no
+            // completion — and on `exact` there is no refund path. We split by
+            // scheme:
+            //
+            //   - `exact`: VERIFY only here (validate + simulate, NO broadcast).
+            //     The transfer is deferred and broadcast AFTER a successful
+            //     provider response (see `settle_exact` below). If the provider
+            //     fails, settlement never happens → the customer is not charged.
+            //
+            //   - `escrow`: the deposit MUST be on-chain before serving (the
+            //     scheme's trustless commitment), so we still verify_and_settle
+            //     the deposit here. The no-charge lever for escrow is the CLAIM:
+            //     on provider failure we simply do not claim, and the deposit
+            //     refunds at expiry (the claim only fires in the success arm).
+            //
+            // `verify_payment` is non-mutating and repeatable, so verifying now
+            // for `exact` and settling later does not double-anything; replay
+            // protection above already guards against re-submission of the tx.
+            match payment_scheme {
+                PaymentScheme::Exact => {
+                    match state.facilitator.verify(&payload).await {
+                        Ok(verification) if !verification.valid => {
+                            counter!("solvela_payments_total", "status" => "failed").increment(1);
+                            warn!(
+                                reason = ?verification.reason,
+                                "exact payment verification rejected (pre-settlement)"
+                            );
+                            state.usage.release_reservation(&budget_reservation).await;
+                            return Err(GatewayError::InvalidPayment(
+                                "Payment verification failed. Check your transaction and retry."
+                                    .to_string(),
+                            ));
+                        }
+                        Ok(verification) => {
+                            // Deferred settlement: no broadcast yet. `verified_amount`
+                            // is unused for `exact` (no escrow claim), so this stays
+                            // `None`. The actual broadcast happens post-response via
+                            // the held `payload_for_settle`. Settlement on `exact`
+                            // bills the `client_amount` the agent signed, NOT the
+                            // verifier's `verified_amount` — log the intentional
+                            // divergence rather than silently dropping a money-path
+                            // field.
+                            debug!(
+                                verified_amount = ?verification.verified_amount,
+                                client_amount,
+                                "exact: settlement uses client_amount, not verified_amount"
+                            );
+                            escrow_deposited_amount = None;
+                            payload_for_settle = Some(payload.clone());
+                            counter!("solvela_payments_total", "status" => "verified").increment(1);
+                            info!("exact payment verified (settlement deferred until provider delivers)");
+                        }
+                        Err(e) => {
+                            // GHSA-cgqx-mg48-949v: do not echo verifier internals.
+                            counter!("solvela_payments_total", "status" => "failed").increment(1);
+                            warn!(error = %e, "exact payment verification failed (pre-settlement)");
+                            state.usage.release_reservation(&budget_reservation).await;
+                            return Err(GatewayError::InvalidPayment(
+                                "Payment verification failed. Check your transaction and retry."
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+                // Escrow: deposit must land on-chain before serving. Verify and
+                // settle (broadcast) the deposit now — hard enforcement.
+                // R1 FIX: Check settlement.success flag
+                PaymentScheme::Escrow => {
+                    match state.facilitator.verify_and_settle(&payload).await {
+                        Ok(settlement) if !settlement.success => {
+                            // Settlement returned Ok but the transaction did not succeed.
+                            // Distinguish a deterministic on-chain rejection (a dead end —
+                            // retrying the same signed tx can never confirm) from a
+                            // transient timeout/transport failure (issue #435). The full
+                            // error detail stays server-side; the client only ever sees the
+                            // numeric program error code, never raw RPC internals
+                            // (GHSA-cgqx-mg48-949v).
+                            counter!("solvela_payments_total", "status" => "failed").increment(1);
+                            tracing::warn!(
+                                tx_signature = %settlement.tx_signature.as_deref().unwrap_or("unknown"),
+                                error = ?settlement.error,
+                                failure_kind = ?settlement.failure_kind,
+                                "payment settlement failed"
+                            );
+                            // Exhaustive on purpose — no `_` wildcard, so a future
+                            // `SettlementFailureKind` variant can't be silently funneled
+                            // into the retryable bucket and re-open #435.
+                            let message = match settlement.failure_kind {
+                                Some(SettlementFailureKind::Rejected { program_error_code }) => {
+                                    match program_error_code {
+                                        Some(code) => format!(
                                     "Payment was rejected on-chain (program error {code}); \
                                      this transaction cannot succeed and should not be retried."
                                 ),
-                                None => "Payment was rejected on-chain; this transaction \
+                                        None => "Payment was rejected on-chain; this transaction \
                                      cannot succeed and should not be retried."
+                                            .to_string(),
+                                    }
+                                }
+                                // Transient failures, plus the unclassified `None` case
+                                // (only reachable from an external verifier — retry is the
+                                // safe default since replay protection prevents double-spend).
+                                Some(SettlementFailureKind::Timeout)
+                                | Some(SettlementFailureKind::Submission)
+                                | None => {
+                                    "Payment transaction could not be confirmed. Please retry."
+                                        .to_string()
+                                }
+                            };
+                            // M3: settlement did not happen — give the reserved budget back.
+                            state.usage.release_reservation(&budget_reservation).await;
+                            return Err(GatewayError::InvalidPayment(message));
+                        }
+                        Ok(settlement) => {
+                            escrow_deposited_amount = settlement.verified_amount;
+                            counter!("solvela_payments_total", "status" => "verified").increment(1);
+                            histogram!("solvela_payment_amount_usdc")
+                                .record(client_amount as f64 / 1_000_000.0);
+                            info!(
+                                tx_signature = ?settlement.tx_signature,
+                                network = %settlement.network,
+                                verified_amount = ?settlement.verified_amount,
+                                "payment verified and settled"
+                            );
+                        }
+                        Err(e) => {
+                            // GHSA-cgqx-mg48-949v: do not echo the verifier error to clients;
+                            // it can carry the internal RPC URL, raw RPC error JSON, and other
+                            // server-internal context. Full detail is in the warn! line above.
+                            counter!("solvela_payments_total", "status" => "failed").increment(1);
+                            warn!(error = %e, "payment verification failed");
+                            // M3: settlement did not happen — give the reserved budget back.
+                            state.usage.release_reservation(&budget_reservation).await;
+                            return Err(GatewayError::InvalidPayment(
+                                "Payment verification failed. Check your transaction and retry."
                                     .to_string(),
-                            }
+                            ));
                         }
-                        // Transient failures, plus the unclassified `None` case
-                        // (only reachable from an external verifier — retry is the
-                        // safe default since replay protection prevents double-spend).
-                        Some(SettlementFailureKind::Timeout)
-                        | Some(SettlementFailureKind::Submission)
-                        | None => {
-                            "Payment transaction could not be confirmed. Please retry.".to_string()
-                        }
-                    };
-                    // M3: settlement did not happen — give the reserved budget back.
-                    state.usage.release_reservation(&budget_reservation).await;
-                    return Err(GatewayError::InvalidPayment(message));
-                }
-                Ok(settlement) => {
-                    escrow_deposited_amount = settlement.verified_amount;
-                    counter!("solvela_payments_total", "status" => "verified").increment(1);
-                    histogram!("solvela_payment_amount_usdc")
-                        .record(client_amount as f64 / 1_000_000.0);
-                    info!(
-                        tx_signature = ?settlement.tx_signature,
-                        network = %settlement.network,
-                        verified_amount = ?settlement.verified_amount,
-                        "payment verified and settled"
-                    );
-                }
-                Err(e) => {
-                    // GHSA-cgqx-mg48-949v: do not echo the verifier error to clients;
-                    // it can carry the internal RPC URL, raw RPC error JSON, and other
-                    // server-internal context. Full detail is in the warn! line above.
-                    counter!("solvela_payments_total", "status" => "failed").increment(1);
-                    warn!(error = %e, "payment verification failed");
-                    // M3: settlement did not happen — give the reserved budget back.
-                    state.usage.release_reservation(&budget_reservation).await;
-                    return Err(GatewayError::InvalidPayment(
-                        "Payment verification failed. Check your transaction and retry."
-                            .to_string(),
-                    ));
-                }
-            }
+                    }
+                } // end PaymentScheme::Escrow arm
+            } // end match payment_scheme
         }
         None => {
             counter!("solvela_payments_total", "status" => "failed").increment(1);
@@ -823,6 +898,77 @@ pub async fn chat_completions(
             let usage = usage
                 .as_ref()
                 .map(|u| cap_usage_to_request_limits(u, &req, model_info));
+
+            // #486: deferred `exact` settlement. The provider delivered, so it is
+            // now safe to broadcast the customer's transfer on-chain. We do this
+            // BEFORE returning the response. A broadcast failure here is logged
+            // but does NOT fail the request: the provider already produced output
+            // and `verify` proved the tx valid + simulated successful on-chain;
+            // the (rare) residual of delivery-without-charge is the acceptable
+            // backstop, and the inverse — charge-without-delivery — is exactly
+            // what this fix eliminates. `escrow` already settled its deposit
+            // pre-call (the deposit must commit before serving), so this is a
+            // no-op for escrow.
+            // When the post-delivery `exact` settle fails, the payment was NOT
+            // collected on-chain, so the budget reservation committed pre-settlement
+            // must be reconciled HERE — on every failure branch — rather than via the
+            // downstream `log_spend` delta. The downstream reconciliation does not
+            // cover this case: on the STREAMING path `usage`/`cost_outcome` are both
+            // `None`, so neither `log_spend` branch fires and the reservation would
+            // stay permanently committed (budget over-counted); on the non-streaming
+            // path `log_spend` WOULD fire and record `billed` spend for a charge that
+            // never landed. Either way is wrong. We release the reservation (the wallet
+            // was not charged → its budget returns) and set this flag so the downstream
+            // logging is skipped. `escrow` never reaches here (`payload_for_settle` is
+            // `None`; it settled pre-call), so this is exact-only.
+            let mut settle_after_deliver_failed = false;
+            if let Some(ref payload) = payload_for_settle {
+                match state.facilitator.settle(payload).await {
+                    Ok(settlement) if settlement.success => {
+                        counter!("solvela_payments_total", "status" => "settled").increment(1);
+                        histogram!("solvela_payment_amount_usdc")
+                            .record(client_amount as f64 / 1_000_000.0);
+                        info!(
+                            tx_signature = ?settlement.tx_signature,
+                            "exact payment settled on-chain after provider delivery"
+                        );
+                    }
+                    Ok(settlement) => {
+                        // Provider already delivered; do not fail the request.
+                        // Surface for operator follow-up — the customer received a
+                        // completion the gateway could not collect payment for.
+                        settle_after_deliver_failed = true;
+                        counter!("solvela_payments_total", "status" => "settle_after_deliver_failed")
+                            .increment(1);
+                        // Reconcile the reservation: payment uncollected → release it
+                        // so the wallet's budget is not consumed (covers streaming,
+                        // where no downstream `log_spend` branch would otherwise fire).
+                        state.usage.release_reservation(&budget_reservation).await;
+                        warn!(
+                            error = ?settlement.error,
+                            failure_kind = ?settlement.failure_kind,
+                            stream = req.stream,
+                            reservation_released = true,
+                            spend_recorded = false,
+                            "exact settlement failed AFTER provider delivery — completion delivered, payment uncollected; reservation released (no spend recorded)"
+                        );
+                    }
+                    Err(e) => {
+                        settle_after_deliver_failed = true;
+                        counter!("solvela_payments_total", "status" => "settle_after_deliver_failed")
+                            .increment(1);
+                        // Same reconciliation as the non-success branch above.
+                        state.usage.release_reservation(&budget_reservation).await;
+                        warn!(
+                            error = %e,
+                            stream = req.stream,
+                            reservation_released = true,
+                            spend_recorded = false,
+                            "exact settlement errored AFTER provider delivery — completion delivered, payment uncollected; reservation released (no spend recorded)"
+                        );
+                    }
+                }
+            }
             // Post-response: usage logging, session token, and escrow claims (paid path only)
 
             // Attach session token for paid non-streaming requests
@@ -902,7 +1048,15 @@ pub async fn chat_completions(
             //       log, or the reservation is never settled down to the realised
             //       price and the wallet's budget stays consumed at the full
             //       reservation forever (merged_005 part 2 — ~70% over-consume).
-            if let Some(ref u) = usage {
+            //
+            // SKIP entirely when the post-delivery `exact` settle failed: the
+            // reservation was already reconciled (released) at the settle-failure
+            // branch above and the payment was never collected, so we must NOT also
+            // record spend here (which would over-count the wallet's budget for an
+            // uncollected charge) or release a second time.
+            if settle_after_deliver_failed {
+                // No-op: reservation already released, no spend to record.
+            } else if let Some(ref u) = usage {
                 match state
                     .model_registry
                     .estimate_cost(&req.model, u.prompt_tokens, u.completion_tokens)
@@ -1009,25 +1163,71 @@ pub async fn chat_completions(
         Err(ProviderCallError::AllProvidersFailed {
             model, provider, ..
         }) => {
-            // SECURITY: A paid request reached the stub path — all providers failed.
+            // #486: a paid request that no provider could fulfil. Because of the
+            // settlement reorder above, the customer is NOT charged for this
+            // undelivered completion:
+            //   - `exact`: the transfer was DEFERRED (never broadcast), so
+            //     nothing settled on-chain. Release the budget reservation.
+            //   - `escrow`: the deposit settled (it had to, pre-call), but we do
+            //     NOT fire a claim here (the claim only runs in the success arm),
+            //     so the deposit refunds at expiry. Also release the reservation.
+            // Either way we return a RETRYABLE 503, not a bare 500.
             warn!(
                 provider = %provider,
                 model = %model,
                 wallet = %wallet_address,
-                "paid request failed: no provider available — returning error instead of stub"
+                scheme = ?payment_scheme,
+                "paid request failed: no provider available — no charge taken (exact deferred / escrow unclaimed)"
             );
             counter!("solvela_paid_stub_rejections_total").increment(1);
 
-            Err(GatewayError::Internal(format!(
-                "all providers failed for model '{}'. Your payment was submitted but no response \
-                 could be generated. Contact the gateway operator or retry. \
-                 Provider: {}, tx: {}",
-                model,
-                provider,
-                tx_signature.as_deref().unwrap_or("unknown")
-            )))
+            // No settlement (exact) or no claim (escrow) happened, so the
+            // reserved budget must be returned — otherwise the wallet's spend
+            // counter stays consumed for a request that cost it nothing.
+            state.usage.release_reservation(&budget_reservation).await;
+
+            // Client-facing message must not leak provider/RPC internals OR the
+            // internal model ID (GHSA-cgqx-mg48-949v; `UpstreamUnavailable`'s
+            // variant contract requires the inner string stay free of internal
+            // detail). The model ID is already in the `warn!` above; the client
+            // gets a static, internals-free message per scheme.
+            let message = match payment_scheme {
+                PaymentScheme::Exact => {
+                    "No provider could serve your request right now and your payment was \
+                     NOT charged. Please retry shortly."
+                }
+                PaymentScheme::Escrow => {
+                    // An escrow deposit DID settle on-chain (pre-call) but no claim
+                    // fires here, so the deposit stays locked until it refunds at
+                    // expiry. Emit a scheme-specific metric so operators can alert on
+                    // "N escrow deposits currently locked awaiting expiry" from
+                    // metrics, not just by scraping logs.
+                    counter!(
+                        "solvela_payments_total",
+                        "status" => "escrow_unclaimed_provider_failure"
+                    )
+                    .increment(1);
+                    "No provider could serve your request right now; no claim was made against \
+                     your escrow deposit and it refunds at expiry. Please retry shortly."
+                }
+            };
+            Err(GatewayError::UpstreamUnavailable(message.to_string()))
         }
-        Err(ProviderCallError::Internal(msg)) => Err(GatewayError::Internal(msg)),
+        Err(ProviderCallError::Internal(msg)) => {
+            // #486: same accounting contract as the `AllProvidersFailed` arm — the
+            // provider never delivered, so no `exact` transfer was broadcast and no
+            // `escrow` claim was fired. The budget reservation committed pre-settlement
+            // must be returned, or the wallet's spend counter stays consumed for a
+            // request that cost it nothing. (The previous code returned here WITHOUT
+            // releasing — the leak both money-path reviewers flagged.)
+            warn!(
+                wallet = %wallet_address,
+                scheme = ?payment_scheme,
+                "paid request failed: internal provider-call error — no charge taken; releasing budget reservation"
+            );
+            state.usage.release_reservation(&budget_reservation).await;
+            Err(GatewayError::Internal(msg))
+        }
     }
 }
 

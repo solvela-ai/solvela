@@ -1289,6 +1289,34 @@ mod tests {
         assert!(result.is_ok(), "cost below cap should be allowed");
     }
 
+    /// #486 second-pass: the no-charge route arms (`Internal` provider-call
+    /// error, `AllProvidersFailed`, and the post-delivery `exact`
+    /// settle-after-deliver-failed branches) reconcile the budget reservation by
+    /// calling `release_reservation`. Without Redis the reservation is empty and
+    /// release is a no-op — pin that it neither errors nor panics, so the arms
+    /// can call it unconditionally on the failure path. (The Redis-backed
+    /// rollback arithmetic is exercised under `#[sqlx::test]` with a live store.)
+    #[tokio::test]
+    async fn test_noop_tracker_release_reservation_is_safe_noop() {
+        let tracker = UsageTracker::noop();
+        // A within-cap check yields an (empty) reservation without Redis.
+        let reservation = tracker
+            .check_budget("wallet123", 0.50)
+            .await
+            .expect("within-cap check_budget must succeed without Redis");
+        assert!(
+            reservation.committed.is_empty(),
+            "no-Redis reservation must commit no counters (release is then a no-op)"
+        );
+        // Releasing it must be a safe no-op (the failure-path arms call this
+        // unconditionally; it must never panic or block).
+        tracker.release_reservation(&reservation).await;
+        // Releasing a default/empty reservation directly is likewise safe.
+        tracker
+            .release_reservation(&BudgetReservation::default())
+            .await;
+    }
+
     #[tokio::test]
     async fn test_noop_tracker_get_summary_returns_not_configured() {
         let tracker = UsageTracker::noop();

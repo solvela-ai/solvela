@@ -42,6 +42,29 @@ impl Facilitator {
         verifier.verify_payment(payload).await
     }
 
+    /// Settle a previously-verified payment by broadcasting it on-chain.
+    ///
+    /// This does NOT re-run verification — the caller is responsible for having
+    /// already called [`Facilitator::verify`] and confirmed the payload is
+    /// valid. It exists so the gateway can DEFER the on-chain broadcast of an
+    /// `exact` transfer until AFTER a successful provider response: verify
+    /// up front (non-mutating, simulates success), call the provider, then
+    /// settle only if the provider delivered — so a provider failure never
+    /// charges the customer (issue #486). For the verify-then-settle-now case
+    /// (e.g. the `escrow` deposit, which must land before serving), use
+    /// [`Facilitator::verify_and_settle`].
+    pub async fn settle(&self, payload: &PaymentPayload) -> Result<SettlementResult, Error> {
+        let network = &payload.accepted.network;
+        let scheme = &payload.accepted.scheme;
+        info!(
+            network,
+            scheme, "routing deferred settlement to chain verifier"
+        );
+
+        let verifier = self.verifier_for(network, scheme)?;
+        verifier.settle_payment(payload).await
+    }
+
     /// Verify and then settle a payment.
     pub async fn verify_and_settle(
         &self,
@@ -155,6 +178,97 @@ mod tests {
         let settlement = result.unwrap();
         assert!(settlement.success);
         assert_eq!(settlement.tx_signature, Some("MockTxSig123".to_string()));
+    }
+
+    /// A verifier that records whether `verify_payment` was invoked, so a test
+    /// can prove `settle()` broadcasts WITHOUT re-verifying — the property the
+    /// gateway relies on to defer the `exact` broadcast until after the provider
+    /// delivers (#486). Its `verify_payment` would also REJECT (valid:false), so
+    /// if `settle()` mistakenly re-verified, settlement would not be reached.
+    struct VerifyTrackingVerifier {
+        verified: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl PaymentVerifier for VerifyTrackingVerifier {
+        fn network(&self) -> &str {
+            SOLANA_NETWORK
+        }
+
+        fn scheme(&self) -> &str {
+            "exact"
+        }
+
+        async fn verify_payment(
+            &self,
+            _payload: &PaymentPayload,
+        ) -> Result<VerificationResult, Error> {
+            self.verified
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(VerificationResult {
+                valid: false,
+                reason: Some("would reject if called".to_string()),
+                verified_amount: None,
+            })
+        }
+
+        async fn settle_payment(
+            &self,
+            _payload: &PaymentPayload,
+        ) -> Result<SettlementResult, Error> {
+            Ok(SettlementResult {
+                success: true,
+                tx_signature: Some("DeferredSettleSig".to_string()),
+                network: SOLANA_NETWORK.to_string(),
+                error: None,
+                verified_amount: None,
+                failure_kind: None,
+            })
+        }
+    }
+
+    /// `settle()` must broadcast WITHOUT calling `verify_payment` — it is the
+    /// deferred-settlement primitive for the #486 fix (verify up front, call the
+    /// provider, then settle only on delivery).
+    #[tokio::test]
+    async fn settle_does_not_reverify() {
+        let verified = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let facilitator = Facilitator::new(vec![Arc::new(VerifyTrackingVerifier {
+            verified: std::sync::Arc::clone(&verified),
+        })]);
+        let payload = make_test_payload();
+
+        let result = facilitator.settle(&payload).await;
+        assert!(result.is_ok(), "settle should broadcast");
+        assert!(
+            result.unwrap().success,
+            "settle must reach settle_payment even though verify_payment would reject"
+        );
+        assert!(
+            !verified.load(std::sync::atomic::Ordering::SeqCst),
+            "settle() must NOT call verify_payment — verification is the caller's responsibility"
+        );
+    }
+
+    /// Contrast: `verify_and_settle()` DOES verify first — and here verification
+    /// rejects, so settlement must NOT be reached and an error is returned.
+    #[tokio::test]
+    async fn verify_and_settle_rejects_when_verification_fails() {
+        let verified = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let facilitator = Facilitator::new(vec![Arc::new(VerifyTrackingVerifier {
+            verified: std::sync::Arc::clone(&verified),
+        })]);
+        let payload = make_test_payload();
+
+        let result = facilitator.verify_and_settle(&payload).await;
+        assert!(
+            result.is_err(),
+            "verify_and_settle must propagate a failed verification as an error"
+        );
+        assert!(
+            verified.load(std::sync::atomic::Ordering::SeqCst),
+            "verify_and_settle must have called verify_payment"
+        );
     }
 
     #[tokio::test]

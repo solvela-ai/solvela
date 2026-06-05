@@ -76,6 +76,18 @@ pub enum GatewayError {
     #[error("rate limited")]
     RateLimited,
 
+    /// No provider could fulfil the request (every provider in the fallback
+    /// chain failed or its circuit is open). Maps to 503 Service Unavailable —
+    /// a RETRYABLE status, distinct from the 500 used for genuine internal
+    /// faults. On the paid path this is returned ONLY when no charge has been
+    /// taken (`exact`: settlement was deferred and never broadcast) or no claim
+    /// will be made (`escrow`: the deposit refunds at expiry) — i.e. the
+    /// customer is never billed for an undelivered completion (#486). The inner
+    /// message is forwarded verbatim and must stay free of internal detail
+    /// (provider error bodies, RPC URLs) — log those at `warn!` instead.
+    #[error("upstream unavailable: {0}")]
+    UpstreamUnavailable(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -131,6 +143,11 @@ impl IntoResponse for GatewayError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limited",
                 "Too many requests".to_string(),
+            ),
+            GatewayError::UpstreamUnavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "upstream_unavailable",
+                msg.clone(),
             ),
             GatewayError::Internal(msg) => {
                 tracing::error!(error = %msg, "internal server error");
@@ -263,6 +280,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_upstream_unavailable_returns_503() {
+        // #486: paid request that no provider could fulfil maps to a RETRYABLE
+        // 503, distinct from the 500 used for genuine internal faults. The inner
+        // message is forwarded verbatim, so the *caller* is contractually
+        // responsible for keeping it free of internal detail (model IDs, RPC
+        // URLs) — verified at the construction site in routes/chat. Here we lock
+        // the status code and the envelope shape.
+        let (status, json) = error_response(GatewayError::UpstreamUnavailable(
+            "No provider could serve your request right now. Please retry shortly.".to_string(),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["error"]["type"], "upstream_unavailable");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Please retry shortly"));
+    }
+
+    #[tokio::test]
     async fn test_internal_error_returns_500() {
         let (status, json) =
             error_response(GatewayError::Internal("panic recovered".to_string())).await;
@@ -307,6 +344,10 @@ mod tests {
             "unsupported media type: images"
         );
         assert_eq!(GatewayError::RateLimited.to_string(), "rate limited");
+        assert_eq!(
+            GatewayError::UpstreamUnavailable("down".to_string()).to_string(),
+            "upstream unavailable: down"
+        );
         assert_eq!(
             GatewayError::Internal("crash".to_string()).to_string(),
             "internal error: crash"
@@ -402,6 +443,7 @@ mod tests {
             GatewayError::BadRequest("x".to_string()),
             GatewayError::UnsupportedMediaType("x".to_string()),
             GatewayError::RateLimited,
+            GatewayError::UpstreamUnavailable("x".to_string()),
             GatewayError::Internal("x".to_string()),
         ];
 
