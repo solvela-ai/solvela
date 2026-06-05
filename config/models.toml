@@ -242,28 +242,6 @@ supports_tools = true
 supports_vision = true
 max_output_tokens = 16384
 
-# --- Additional Google ---
-
-[models.google-gemini-2-0-flash]
-provider = "google"
-model_id = "gemini-2.0-flash"
-display_name = "Gemini 2.0 Flash"
-input_cost_per_million = 0.10
-output_cost_per_million = 0.40
-context_window = 1000000
-supports_streaming = true
-supports_tools = true
-max_output_tokens = 8192
-
-[models.google-gemini-2-0-flash-lite]
-provider = "google"
-model_id = "gemini-2.0-flash-lite"
-display_name = "Gemini 2.0 Flash Lite"
-input_cost_per_million = 0.075
-output_cost_per_million = 0.30
-context_window = 1000000
-supports_streaming = true
-
 # --- Additional DeepSeek ---
 
 [models.deepseek-coder]

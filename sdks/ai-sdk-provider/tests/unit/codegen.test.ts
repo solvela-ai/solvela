@@ -63,8 +63,6 @@ const KNOWN_MODEL_IDS: readonly string[] = [
   "deepseek-chat",
   "deepseek-coder",
   "deepseek-reasoner",
-  "google-gemini-2-0-flash",
-  "google-gemini-2-0-flash-lite",
   "google-gemini-2-5-flash",
   "google-gemini-2-5-flash-lite",
   "google-gemini-3-1-pro",
@@ -84,7 +82,7 @@ const KNOWN_MODEL_IDS: readonly string[] = [
   "xai-grok-code-fast-1",
 ] as const;
 
-const EXPECTED_COUNT = 26;
+const EXPECTED_COUNT = 24;
 
 // ---------------------------------------------------------------------------
 // Helpers

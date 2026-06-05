@@ -9,8 +9,6 @@ export type SolvelaModelId =
   | "deepseek-chat"
   | "deepseek-coder"
   | "deepseek-reasoner"
-  | "google-gemini-2-0-flash"
-  | "google-gemini-2-0-flash-lite"
   | "google-gemini-2-5-flash"
   | "google-gemini-2-5-flash-lite"
   | "google-gemini-3-1-pro"
@@ -128,35 +126,6 @@ export const MODELS = [
     supportsTools: false,
     supportsVision: false,
     reasoning: true,
-    supportsStructuredOutput: false,
-  },
-  {
-    id: "google-gemini-2-0-flash",
-    provider: "google",
-    modelId: "gemini-2.0-flash",
-    displayName: "Gemini 2.0 Flash",
-    inputCostPerMillion: 0.1,
-    outputCostPerMillion: 0.4,
-    contextWindow: 1000000,
-    supportsStreaming: true,
-    supportsTools: true,
-    supportsVision: false,
-    reasoning: false,
-    supportsStructuredOutput: false,
-    maxOutputTokens: 8192,
-  },
-  {
-    id: "google-gemini-2-0-flash-lite",
-    provider: "google",
-    modelId: "gemini-2.0-flash-lite",
-    displayName: "Gemini 2.0 Flash Lite",
-    inputCostPerMillion: 0.075,
-    outputCostPerMillion: 0.3,
-    contextWindow: 1000000,
-    supportsStreaming: true,
-    supportsTools: false,
-    supportsVision: false,
-    reasoning: false,
     supportsStructuredOutput: false,
   },
   {
