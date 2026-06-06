@@ -32,9 +32,9 @@ use crate::usage::SpendLogEntry;
 use crate::AppState;
 
 use cost::{
-    cap_usage_to_request_limits, compute_actual_atomic_cost, estimate_input_tokens,
-    estimated_atomic_cost, scheme_realized_discount, spend_cost_atomic, usdc_atomic_amount_checked,
-    usdc_f64_to_atomic_safe, PaymentScheme,
+    cap_usage_to_request_limits, completion_token_ceiling, compute_actual_atomic_cost,
+    estimate_input_tokens, estimated_atomic_cost, scheme_realized_discount, spend_cost_atomic,
+    usdc_atomic_amount_checked, usdc_f64_to_atomic_safe, PaymentScheme,
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
@@ -355,7 +355,10 @@ pub async fn chat_completions(
             .estimate_cost(
                 &req.model,
                 estimate_input_tokens(&req),
-                req.max_tokens.unwrap_or(1000),
+                // #500: reserve for the SAME completion-token ceiling billing
+                // will cap to (not a flat 1000), so an omitted-max_tokens
+                // request can never bill above its reservation.
+                completion_token_ceiling(req.max_tokens, model_info),
             )
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
 
@@ -517,7 +520,14 @@ pub async fn chat_completions(
                 .estimate_cost(
                     &req.model,
                     estimate_input_tokens(&req),
-                    req.max_tokens.unwrap_or(1000),
+                    // #500: same completion-token ceiling as the 402 quote above
+                    // and as the settlement-time `cap_usage_to_request_limits`.
+                    // This figure feeds both the client-amount validation (C1)
+                    // and the budget reservation (M3), so the reservation is an
+                    // upper bound on the billable cost — an omitted-max_tokens
+                    // request cannot reserve under cap and then overshoot via the
+                    // `log_spend` reconciliation delta.
+                    completion_token_ceiling(req.max_tokens, model_info),
                 )
                 .map_err(|e| GatewayError::Internal(e.to_string()))?;
             let expected_amount: u64 = usdc_atomic_amount_checked(&expected_cost.total)
