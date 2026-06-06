@@ -706,9 +706,15 @@ pub async fn chat_completions(
                 ));
             }
 
+            // Pass the (forgeable, attribution-only) x-tenant tag so the
+            // per-tenant budget gate can enforce a provisioned `(wallet, tenant)`
+            // bucket and apply the require_tenant fail-closed policy. All tenant
+            // rejections (TenantRequired / TenantNotProvisioned) and budget
+            // overruns map to a 400 via BadRequest below — and they fire here,
+            // pre-settlement / pre-provider-call.
             budget_reservation = match state
                 .usage
-                .check_budget(&wallet_address, estimated_cost)
+                .check_budget(&wallet_address, estimated_cost, tenant.as_deref())
                 .await
             {
                 Ok(reservation) => reservation,
@@ -1117,6 +1123,11 @@ pub async fn chat_completions(
                             request_id: request_id.clone(),
                             session_id: session_id.clone(),
                             tenant: tenant.clone(),
+                            // Reconcile per-tenant counters only when
+                            // check_budget actually enforced a provisioned bucket
+                            // (decision == Enforce). Threaded from the reservation
+                            // so the Skip path never accumulates per-tenant spend.
+                            tenant_enforced: budget_reservation.tenant_enforced(),
                             estimated_cost_usdc: Some(estimated_cost),
                         });
                     }
@@ -1165,6 +1176,9 @@ pub async fn chat_completions(
                     request_id: request_id.clone(),
                     session_id: session_id.clone(),
                     tenant: tenant.clone(),
+                    // Same gating as the usage-present arm: reconcile per-tenant
+                    // counters only when a provisioned bucket was enforced.
+                    tenant_enforced: budget_reservation.tenant_enforced(),
                     estimated_cost_usdc: Some(estimated_cost),
                 });
             }

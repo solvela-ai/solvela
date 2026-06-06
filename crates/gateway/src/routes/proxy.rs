@@ -571,6 +571,9 @@ pub async fn proxy_service(
         // x-tenant header. Per-tenant attribution for the proxy path can be
         // added later; None leaves these rows untagged for now.
         tenant: None,
+        // No tenant tag is read on the proxy path, so no per-tenant bucket is
+        // enforced — never reconcile per-tenant counters here.
+        tenant_enforced: false,
         // Service-marketplace proxy doesn't go through `check_budget`
         // (it has flat per-request pricing, not per-wallet budgets), so no
         // reservation is committed and log_spend increments by the full

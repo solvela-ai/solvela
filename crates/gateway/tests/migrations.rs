@@ -26,6 +26,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "api_keys",
     "audit_logs",
     "team_budgets",
+    "tenant_budgets", // migration 011
 ];
 
 /// Columns whose presence proves the right ALTER TABLE migrations ran.
@@ -36,6 +37,8 @@ const EXPECTED_COLUMNS: &[(&str, &str)] = &[
     ("escrow_claim_queue", "next_retry_at"), // migration 004
     ("wallet_budgets", "updated_at"),        // migration 001
     ("wallet_budgets", "hourly_limit_usdc"), // migration 007
+    ("wallet_budgets", "require_tenant"),    // migration 011
+    ("tenant_budgets", "hourly_limit_usdc"), // migration 011
 ];
 
 #[tokio::test]
