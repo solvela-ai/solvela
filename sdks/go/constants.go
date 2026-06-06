@@ -11,6 +11,13 @@ const (
 	// (Solana mainnet-beta, encoded as "solana:<genesis-hash-prefix>").
 	SolanaNetwork = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
 
+	// MainnetEscrowProgramID is the deployed Solvela escrow program on Solana
+	// mainnet-beta. [DefaultConfig] pins [ClientConfig].ExpectedEscrowProgram to
+	// this value so an escrow deposit is never signed for an unexpected program
+	// (mirrors the hardcoded [USDCMint] / [SolanaNetwork]). Matches the Rust
+	// SDK's MAINNET_ESCROW_PROGRAM_ID.
+	MainnetEscrowProgramID = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+
 	// MaxTimeoutSeconds is the upper bound (in seconds) enforced on
 	// [ClientConfig].Timeout when constructing a client.
 	MaxTimeoutSeconds = 300

@@ -14,18 +14,26 @@ const DefaultMaxPaymentAmount uint64 = 10_000_000
 
 // ClientConfig holds all configuration for a Solvela client.
 type ClientConfig struct {
-	GatewayURL         string
-	RPCURL             string
-	PreferEscrow       bool
-	Timeout            time.Duration
-	ExpectedRecipient  string
-	MaxPaymentAmount   *uint64
-	EnableCache        bool
-	EnableSessions     bool
-	SessionTTL         time.Duration
-	EnableQualityCheck bool
-	MaxQualityRetries  int
-	FreeFallbackModel  string
+	GatewayURL        string
+	RPCURL            string
+	PreferEscrow      bool
+	Timeout           time.Duration
+	ExpectedRecipient string
+	// ExpectedEscrowProgram, when non-empty, pins the escrow program ID the
+	// client is willing to sign a deposit for. A 402 advertising an escrow
+	// scheme whose EscrowProgramID differs is rejected before signing,
+	// preventing a malicious gateway from redirecting the deposit to an
+	// attacker's program (mirrors ExpectedRecipient for the escrow path).
+	// [DefaultConfig] pins this to [MainnetEscrowProgramID]; an empty value
+	// disables the pin (see [DisableEscrowProgramPin]).
+	ExpectedEscrowProgram string
+	MaxPaymentAmount      *uint64
+	EnableCache           bool
+	EnableSessions        bool
+	SessionTTL            time.Duration
+	EnableQualityCheck    bool
+	MaxQualityRetries     int
+	FreeFallbackModel     string
 	// BalancePollInterval, when non-zero, instructs [NewClient] to start a
 	// background [BalanceMonitor] that periodically refreshes the client's
 	// last-known wallet balance. The free-fallback-model guard in
@@ -46,15 +54,19 @@ type ClientConfig struct {
 //   - GatewayURL points to the production HTTPS endpoint.
 //   - MaxPaymentAmount is set to [DefaultMaxPaymentAmount] (10 USDC atomic) to
 //     prevent wallet drains from a misconfigured or malicious gateway.
+//   - ExpectedEscrowProgram is pinned to [MainnetEscrowProgramID] so an escrow
+//     deposit is never signed for an unexpected program. Override with
+//     [WithExpectedEscrowProgram] or disable with [DisableEscrowProgramPin].
 func DefaultConfig() ClientConfig {
 	defaultMax := DefaultMaxPaymentAmount
 	return ClientConfig{
-		GatewayURL:        "https://api.solvela.ai",
-		RPCURL:            "https://api.mainnet-beta.solana.com",
-		Timeout:           180 * time.Second,
-		SessionTTL:        1800 * time.Second,
-		MaxQualityRetries: 1,
-		MaxPaymentAmount:  &defaultMax,
+		GatewayURL:            "https://api.solvela.ai",
+		RPCURL:                "https://api.mainnet-beta.solana.com",
+		Timeout:               180 * time.Second,
+		SessionTTL:            1800 * time.Second,
+		MaxQualityRetries:     1,
+		MaxPaymentAmount:      &defaultMax,
+		ExpectedEscrowProgram: MainnetEscrowProgramID,
 	}
 }
 
@@ -73,6 +85,22 @@ func WithTimeout(d time.Duration) Option { return func(c *ClientConfig) { c.Time
 // WithExpectedRecipient sets the expected payment recipient for verification.
 func WithExpectedRecipient(r string) Option {
 	return func(c *ClientConfig) { c.ExpectedRecipient = r }
+}
+
+// WithExpectedEscrowProgram pins the escrow program ID the client will sign a
+// deposit for. A 402 advertising an escrow scheme whose EscrowProgramID differs
+// is rejected before signing. By default the client pins
+// [MainnetEscrowProgramID] (see [DefaultConfig]); use this to point at a
+// different deployment.
+func WithExpectedEscrowProgram(id string) Option {
+	return func(c *ClientConfig) { c.ExpectedEscrowProgram = id }
+}
+
+// DisableEscrowProgramPin clears the escrow-program pin, allowing any advertised
+// escrow program. This removes a security guarantee; prefer
+// [WithExpectedEscrowProgram] to point at a non-default deployment instead.
+func DisableEscrowProgramPin() Option {
+	return func(c *ClientConfig) { c.ExpectedEscrowProgram = "" }
 }
 
 // WithMaxPaymentAmount sets the maximum payment amount in atomic units.

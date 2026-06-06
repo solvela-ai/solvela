@@ -370,9 +370,12 @@ export class KeypairSigner implements Signer {
    * forever, so we bound the request with an `AbortController` +
    * {@link RPC_TIMEOUT_MS} (same pattern as `src/transport.ts`, and parity with
    * the Go `http.Client{Timeout: 30s}` / Python `httpx ... timeout=30`). The
-   * 200-path body is read as text and rejected if it exceeds
-   * {@link MAX_RPC_BODY_BYTES} so a hostile RPC cannot OOM the agent (parity with
-   * the Go `io.LimitReader` cap), then `JSON.parse`d.
+   * 200-path body is read as raw bytes and rejected if it exceeds
+   * {@link MAX_RPC_BODY_BYTES} so a hostile RPC cannot OOM the agent. The cap is
+   * measured in bytes (`ArrayBuffer.byteLength`) to be byte-exact with the Go
+   * `io.LimitReader` cap — `String.length` counts UTF-16 code units, which
+   * under-counts multi-byte UTF-8 sequences and would let an over-cap body slip
+   * through. The bytes are then UTF-8 decoded and `JSON.parse`d.
    */
   private async postRpc(
     method: string,
@@ -402,19 +405,25 @@ export class KeypairSigner implements Signer {
       if (resp.status !== 200) {
         throw new SignerError(`${label} RPC HTTP ${resp.status}`);
       }
-      // Read the success body as text under a size cap (Go's io.LimitReader
+      // Read the success body as raw bytes under a size cap (Go's io.LimitReader
       // equivalent) BEFORE parsing, so an unbounded/hostile body cannot OOM the
-      // agent. Only then JSON.parse, preserving the malformed-JSON handling.
+      // agent. The cap is measured in bytes — not String.length (UTF-16 code
+      // units) — to be byte-exact with Go's io.LimitReader. Only then UTF-8
+      // decode + JSON.parse, preserving the malformed-JSON handling.
       let text: string;
       try {
-        text = await resp.text();
-      } catch {
+        const buf = await resp.arrayBuffer();
+        if (buf.byteLength > MAX_RPC_BODY_BYTES) {
+          throw new SignerError(
+            `${label} RPC: response body exceeds ${MAX_RPC_BODY_BYTES} bytes`,
+          );
+        }
+        text = new TextDecoder('utf-8', { fatal: false }).decode(buf);
+      } catch (e) {
+        if (e instanceof SignerError) {
+          throw e;
+        }
         throw new SignerError(`${label} RPC: malformed JSON body`);
-      }
-      if (text.length > MAX_RPC_BODY_BYTES) {
-        throw new SignerError(
-          `${label} RPC: response body exceeds ${MAX_RPC_BODY_BYTES} bytes`,
-        );
       }
       try {
         return JSON.parse(text) as { result?: unknown; error?: unknown };

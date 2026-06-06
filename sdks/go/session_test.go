@@ -191,4 +191,3 @@ func TestGetOrCreateDoesNotIncrementRequestCount(t *testing.T) {
 		t.Fatal("expected escalation after 3 RecordRequests with same hash")
 	}
 }
-

@@ -610,6 +610,24 @@ describe('Escrow scheme signing (no silent fallback)', () => {
     ).rejects.toThrow(/exceeds 65536 bytes/);
   });
 
+  it('caps the RPC body by UTF-8 byte length, not UTF-16 code units', async () => {
+    // Regression for #484: the cap must be byte-exact (parity with Go's
+    // io.LimitReader). A body padded with multi-byte UTF-8 characters can be
+    // <= 65536 in String.length (UTF-16 code units) while exceeding 65536
+    // bytes. The old `text().length` check would let it through; the
+    // `arrayBuffer().byteLength` check must reject it.
+    const pad = 'é'.repeat(40_000); // 'é' = 1 code unit, 2 UTF-8 bytes
+    const body = `{"jsonrpc":"2.0","id":1,"result":1000000,"pad":"${pad}"}`;
+    // Sanity: under the cap by code units, over it by bytes.
+    expect(body.length).toBeLessThanOrEqual(65_536);
+    expect(Buffer.byteLength(body, 'utf-8')).toBeGreaterThan(65_536);
+    mockRpc({ getSlot: { raw: body } });
+    const signer = new KeypairSigner(goldenAgentWallet(), RPC_URL);
+    await expect(
+      signer.signPayment(2625, GOLDEN_PROVIDER, resource(), escrowAccept()),
+    ).rejects.toThrow(/exceeds 65536 bytes/);
+  });
+
   it('the agent secret key never appears in an escrow error message', async () => {
     // Drive a builder-level failure after RPC by handing a malformed provider in
     // the accept's pay_to. The golden wallet seed is all 42 (0x2a); assert it

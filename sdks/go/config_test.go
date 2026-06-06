@@ -165,3 +165,26 @@ func TestMultipleOptions(t *testing.T) {
 		t.Errorf("MaxPaymentAmount: got %v", cfg.MaxPaymentAmount)
 	}
 }
+
+func TestDefaultConfigPinsEscrowProgram(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.ExpectedEscrowProgram != MainnetEscrowProgramID {
+		t.Errorf("ExpectedEscrowProgram: got %q, want %q", cfg.ExpectedEscrowProgram, MainnetEscrowProgramID)
+	}
+}
+
+func TestWithExpectedEscrowProgram(t *testing.T) {
+	cfg := DefaultConfig()
+	WithExpectedEscrowProgram("EscRowOverride11111111111111111111111111111")(&cfg)
+	if cfg.ExpectedEscrowProgram != "EscRowOverride11111111111111111111111111111" {
+		t.Errorf("ExpectedEscrowProgram: got %q", cfg.ExpectedEscrowProgram)
+	}
+}
+
+func TestDisableEscrowProgramPin(t *testing.T) {
+	cfg := DefaultConfig()
+	DisableEscrowProgramPin()(&cfg)
+	if cfg.ExpectedEscrowProgram != "" {
+		t.Errorf("ExpectedEscrowProgram should be empty after disable, got %q", cfg.ExpectedEscrowProgram)
+	}
+}

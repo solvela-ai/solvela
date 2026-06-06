@@ -82,6 +82,20 @@ class RecipientMismatchError(ClientError):
         super().__init__(f"Recipient mismatch: expected {expected}, got {actual}")
 
 
+class EscrowProgramMismatchError(ClientError):
+    """Raised when the 402's escrow program ID does not match the configured pin.
+
+    Surfaced before any escrow deposit is signed, preventing a malicious gateway
+    from redirecting the deposit to an attacker's program. Mirrors
+    ``RecipientMismatchError`` for the escrow path.
+    """
+
+    def __init__(self, expected: str, actual: str) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(f"Escrow program mismatch: expected {expected}, got {actual}")
+
+
 class AmountExceedsMaxError(ClientError):
     """Raised when a payment amount exceeds the configured maximum.
 

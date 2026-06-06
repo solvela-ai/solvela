@@ -1290,3 +1290,164 @@ func TestChatPaymentRejectedAfterSign(t *testing.T) {
 		t.Error("PaymentRejectedError.Reason should be non-empty")
 	}
 }
+
+// TestClientEscrowProgramMismatch verifies the escrow-program pin rejects a 402
+// whose advertised escrow program differs from the configured pin, before any
+// deposit is signed. Mirrors TestClientRecipientMismatch for the escrow path.
+func TestClientEscrowProgramMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pr := PaymentRequired{
+			X402Version:   2,
+			CostBreakdown: CostBreakdown{Total: "1000"},
+			Accepts: []PaymentAccept{
+				{Scheme: "escrow", Network: SolanaNetwork, Asset: USDCMint, Amount: "1000", PayTo: "recipient", EscrowProgramID: ptr("AttackerProgram1111111111111111111111111111")},
+			},
+		}
+		w.WriteHeader(402)
+		json.NewEncoder(w).Encode(pr)
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	signer := NewKeypairSigner(wallet, "")
+	client, err := NewClient(wallet, signer,
+		WithGatewayURL(server.URL),
+		WithExpectedEscrowProgram(testEscrowProgram),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	mismatch, ok := err.(*EscrowProgramMismatchError)
+	if !ok {
+		t.Fatalf("expected EscrowProgramMismatchError, got %T: %v", err, err)
+	}
+	if mismatch.Expected != testEscrowProgram || mismatch.Actual != "AttackerProgram1111111111111111111111111111" {
+		t.Fatalf("unexpected mismatch fields: %+v", mismatch)
+	}
+}
+
+// TestClientEscrowProgramMismatchMissingFailsClosed verifies that a non-empty
+// pin rejects a 402 that omits the escrow program ID entirely (fail closed).
+func TestClientEscrowProgramMismatchMissingFailsClosed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pr := PaymentRequired{
+			X402Version:   2,
+			CostBreakdown: CostBreakdown{Total: "1000"},
+			Accepts: []PaymentAccept{
+				{Scheme: "escrow", Network: SolanaNetwork, Asset: USDCMint, Amount: "1000", PayTo: "recipient", EscrowProgramID: nil},
+			},
+		}
+		w.WriteHeader(402)
+		json.NewEncoder(w).Encode(pr)
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	signer := NewKeypairSigner(wallet, "")
+	client, err := NewClient(wallet, signer,
+		WithGatewayURL(server.URL),
+		WithExpectedEscrowProgram(testEscrowProgram),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if _, ok := err.(*EscrowProgramMismatchError); !ok {
+		t.Fatalf("expected EscrowProgramMismatchError for missing program, got %T: %v", err, err)
+	}
+}
+
+// TestClientEscrowProgramMatchPassesPin verifies that a matching escrow program
+// passes the pin guard. The escrow signer then proceeds to issue Solana RPC,
+// which the test gateway does not serve, so the request fails AFTER the guard —
+// proving the pin did not reject a legitimate program (mirrors the Rust
+// recipient-match test that fails on unreachable RPC, not the guard).
+func TestClientEscrowProgramMatchPassesPin(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pr := PaymentRequired{
+			X402Version:   2,
+			CostBreakdown: CostBreakdown{Total: "1000"},
+			Accepts: []PaymentAccept{
+				{Scheme: "escrow", Network: SolanaNetwork, Asset: USDCMint, Amount: "1000", PayTo: "recipient", EscrowProgramID: ptr(testEscrowProgram), MaxTimeoutSeconds: 60},
+			},
+		}
+		w.WriteHeader(402)
+		json.NewEncoder(w).Encode(pr)
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	// Point the signer's RPC at the (non-RPC) test server so signing fails fast
+	// rather than hitting mainnet.
+	signer := NewKeypairSigner(wallet, server.URL)
+	client, err := NewClient(wallet, signer,
+		WithGatewayURL(server.URL),
+		WithRPCURL(server.URL),
+		WithExpectedEscrowProgram(testEscrowProgram),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error (RPC unavailable), got nil")
+	}
+	if _, ok := err.(*EscrowProgramMismatchError); ok {
+		t.Fatalf("pin must NOT reject a matching program; got EscrowProgramMismatchError: %v", err)
+	}
+}
+
+// TestClientEscrowProgramPinDisabledProceeds verifies that disabling the pin
+// lets any advertised escrow program through the guard (failing later at RPC).
+func TestClientEscrowProgramPinDisabledProceeds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pr := PaymentRequired{
+			X402Version:   2,
+			CostBreakdown: CostBreakdown{Total: "1000"},
+			Accepts: []PaymentAccept{
+				{Scheme: "escrow", Network: SolanaNetwork, Asset: USDCMint, Amount: "1000", PayTo: "recipient", EscrowProgramID: ptr("SomeOtherProgram111111111111111111111111111"), MaxTimeoutSeconds: 60},
+			},
+		}
+		w.WriteHeader(402)
+		json.NewEncoder(w).Encode(pr)
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	signer := NewKeypairSigner(wallet, server.URL)
+	client, err := NewClient(wallet, signer,
+		WithGatewayURL(server.URL),
+		WithRPCURL(server.URL),
+		DisableEscrowProgramPin(),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.Chat(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error (RPC unavailable), got nil")
+	}
+	if _, ok := err.(*EscrowProgramMismatchError); ok {
+		t.Fatalf("disabled pin must NOT reject any program; got EscrowProgramMismatchError: %v", err)
+	}
+}

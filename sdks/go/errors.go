@@ -69,6 +69,17 @@ func (e *RecipientMismatchError) Error() string {
 	return fmt.Sprintf("recipient mismatch: expected %s, got %s", e.Expected, e.Actual)
 }
 
+// EscrowProgramMismatchError indicates the 402's escrow program ID does not
+// match the configured pin (see [ClientConfig].ExpectedEscrowProgram). Returned
+// before any escrow deposit is signed.
+type EscrowProgramMismatchError struct {
+	Expected, Actual string
+}
+
+func (e *EscrowProgramMismatchError) Error() string {
+	return fmt.Sprintf("escrow program mismatch: expected %s, got %s", e.Expected, e.Actual)
+}
+
 // AmountExceedsMaxError indicates the payment amount exceeds the configured maximum.
 type AmountExceedsMaxError struct {
 	Amount, MaxAmount uint64

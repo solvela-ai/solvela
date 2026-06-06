@@ -1,9 +1,20 @@
+import { MAINNET_ESCROW_PROGRAM_ID } from './constants.js';
+
 export interface ClientConfig {
   gatewayUrl: string;
   rpcUrl: string;
   preferEscrow: boolean;
   timeout: number;
   expectedRecipient?: string;
+  /**
+   * Pins the escrow program ID the client will sign a deposit for. A 402
+   * advertising an escrow scheme whose `escrowProgramId` differs is rejected
+   * before signing, preventing a malicious gateway from redirecting the deposit
+   * to an attacker's program (mirrors `expectedRecipient` for the escrow path).
+   * `DEFAULT_CONFIG` pins this to {@link MAINNET_ESCROW_PROGRAM_ID}; `undefined`
+   * disables the pin (see {@link ClientBuilder.disableEscrowProgramPin}).
+   */
+  expectedEscrowProgram?: string;
   maxPaymentAmount?: number;
   enableCache: boolean;
   enableSessions: boolean;
@@ -25,6 +36,7 @@ export const DEFAULT_CONFIG: ClientConfig = {
   rpcUrl: 'https://api.mainnet-beta.solana.com',
   preferEscrow: false,
   timeout: 180,
+  expectedEscrowProgram: MAINNET_ESCROW_PROGRAM_ID,
   maxPaymentAmount: DEFAULT_MAX_PAYMENT_AMOUNT,
   enableCache: false,
   enableSessions: false,
@@ -79,6 +91,25 @@ export class ClientBuilder {
 
   withExpectedRecipient(recipient: string): ClientBuilder {
     return this.with({ expectedRecipient: recipient });
+  }
+
+  /**
+   * Pin the escrow program ID the client will sign a deposit for. A 402
+   * advertising an escrow scheme whose `escrowProgramId` differs is rejected
+   * before signing. Defaults to {@link MAINNET_ESCROW_PROGRAM_ID}; use this to
+   * point at a different deployment.
+   */
+  withExpectedEscrowProgram(id: string): ClientBuilder {
+    return this.with({ expectedEscrowProgram: id });
+  }
+
+  /**
+   * Clear the escrow-program pin, allowing any advertised escrow program. This
+   * removes a security guarantee; prefer {@link withExpectedEscrowProgram} to
+   * point at a non-default deployment instead.
+   */
+  disableEscrowProgramPin(): ClientBuilder {
+    return this.with({ expectedEscrowProgram: undefined });
   }
 
   withMaxPaymentAmount(amount: number): ClientBuilder {
