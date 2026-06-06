@@ -181,6 +181,7 @@ async fn log_spend_persists_row_when_db_configured(pool: PgPool) {
         request_id: Some("req-abc".to_string()),
         session_id: None,
         tenant: None,
+        tenant_enforced: false,
         estimated_cost_usdc: None,
     });
 
@@ -246,6 +247,7 @@ async fn log_spend_with_no_backends_does_not_panic() {
         request_id: None,
         session_id: None,
         tenant: None,
+        tenant_enforced: false,
         estimated_cost_usdc: None,
     });
 }

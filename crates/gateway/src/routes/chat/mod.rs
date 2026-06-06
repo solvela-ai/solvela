@@ -1123,6 +1123,11 @@ pub async fn chat_completions(
                             request_id: request_id.clone(),
                             session_id: session_id.clone(),
                             tenant: tenant.clone(),
+                            // Reconcile per-tenant counters only when
+                            // check_budget actually enforced a provisioned bucket
+                            // (decision == Enforce). Threaded from the reservation
+                            // so the Skip path never accumulates per-tenant spend.
+                            tenant_enforced: budget_reservation.tenant_enforced(),
                             estimated_cost_usdc: Some(estimated_cost),
                         });
                     }
@@ -1171,6 +1176,9 @@ pub async fn chat_completions(
                     request_id: request_id.clone(),
                     session_id: session_id.clone(),
                     tenant: tenant.clone(),
+                    // Same gating as the usage-present arm: reconcile per-tenant
+                    // counters only when a provisioned bucket was enforced.
+                    tenant_enforced: budget_reservation.tenant_enforced(),
                     estimated_cost_usdc: Some(estimated_cost),
                 });
             }

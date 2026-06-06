@@ -77,6 +77,7 @@ async fn log_spend_writes_redis_hourly_daily_monthly_counters(pool: PgPool) {
         request_id: None,
         session_id: None,
         tenant: None,
+        tenant_enforced: false,
         estimated_cost_usdc: None,
     });
 
@@ -126,6 +127,7 @@ async fn log_spend_accumulates_across_calls(pool: PgPool) {
         request_id: None,
         session_id: None,
         tenant: None,
+        tenant_enforced: false,
         estimated_cost_usdc: None,
     };
     tracker.log_spend(entry.clone());
@@ -502,6 +504,7 @@ async fn log_spend_writes_team_counters_when_wallet_in_team(pool: PgPool) {
         request_id: None,
         session_id: None,
         tenant: None,
+        tenant_enforced: false,
         estimated_cost_usdc: None,
     });
 
@@ -977,9 +980,11 @@ async fn check_budget_rejects_untagged_when_require_tenant(pool: PgPool) {
     let wallet = unique_wallet();
     let now = Utc::now();
 
+    // Seed BOTH hourly and daily limits so both wallet windows are reserved
+    // before the tenant gate rejects — proves rollback releases ALL windows.
     sqlx::query(
-        "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc, require_tenant) \
-         VALUES ($1, 100.00, TRUE)",
+        "INSERT INTO wallet_budgets (wallet_address, hourly_limit_usdc, daily_limit_usdc, require_tenant) \
+         VALUES ($1, 50.00, 100.00, TRUE)",
     )
     .bind(&wallet)
     .execute(&pool)
@@ -997,15 +1002,27 @@ async fn check_budget_rejects_untagged_when_require_tenant(pool: PgPool) {
         other => panic!("expected TenantRequired, got {other:?}"),
     }
 
-    // No budget leak: the wallet daily counter must not have been left committed.
+    // No budget leak: NEITHER the wallet daily NOR the wallet hourly counter
+    // must have been left committed (rollback completeness — all reserved
+    // windows are released on a fail-closed rejection, not just the daily one).
     let day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
-    let leaked = get_redis_spend(&client, &day_key).await.expect("get");
-    assert_eq!(leaked, 0.0, "rejected request must leak no wallet spend");
+    let hour_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H"));
+    let leaked_day = get_redis_spend(&client, &day_key).await.expect("get day");
+    let leaked_hour = get_redis_spend(&client, &hour_key).await.expect("get hour");
+    assert_eq!(
+        leaked_day, 0.0,
+        "rejected request must leak no wallet daily spend"
+    );
+    assert_eq!(
+        leaked_hour, 0.0,
+        "rejected request must leak no wallet hourly spend"
+    );
 
     redis_del(
         &client,
         &[
             &day_key,
+            &hour_key,
             &format!("budget_config:{wallet}"),
             &format!("team_member:{wallet}"),
             &format!("tenant_require:{wallet}"),
@@ -1194,6 +1211,10 @@ async fn tenant_counter_reconciles_estimate_to_actual(pool: PgPool) {
         request_id: None,
         session_id: None,
         tenant: Some(tenant.to_string()),
+        // A provisioned tenant bucket was enforced by check_budget above, so the
+        // handler would thread tenant_enforced=true → reconcile per-tenant
+        // counters.
+        tenant_enforced: true,
         estimated_cost_usdc: Some(estimated),
     });
 
@@ -1238,6 +1259,8 @@ async fn log_spend_writes_tenant_counters_with_correct_key(pool: PgPool) {
         request_id: None,
         session_id: None,
         tenant: Some(tenant.to_string()),
+        // Tenant enforcement was active for this request → reconcile counters.
+        tenant_enforced: true,
         estimated_cost_usdc: None,
     });
 
@@ -1248,4 +1271,480 @@ async fn log_spend_writes_tenant_counters_with_correct_key(pool: PgPool) {
     assert_eq!(val.parse::<f64>().unwrap_or(0.0), 0.005);
 
     redis_del_tenant(&client, &wallet, tenant).await;
+}
+
+/// A provisioned tenant HOURLY budget is enforced on the
+/// `spend:{wallet}:{tenant}:{%Y-%m-%dT%H}` key. A wrong `%H` key derivation
+/// would let this slip through undetected (only daily was covered before).
+#[sqlx::test(migrations = "../../migrations")]
+async fn check_budget_enforces_provisioned_tenant_hourly_limit(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let tenant = "acme";
+    let now = Utc::now();
+
+    sqlx::query(
+        "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc) VALUES ($1, 100.00)",
+    )
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("seed wallet budget");
+    sqlx::query(
+        "INSERT INTO tenant_budgets (wallet_address, tenant, hourly_limit_usdc) VALUES ($1, $2, 1.00)",
+    )
+    .bind(&wallet)
+    .bind(tenant)
+    .execute(&pool)
+    .await
+    .expect("seed tenant hourly budget");
+
+    // Pre-seed the tenant HOURLY counter near its $1.00 cap.
+    let tenant_hour_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%dT%H"));
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("conn");
+    let _: () = redis::cmd("SET")
+        .arg(&tenant_hour_key)
+        .arg("0.95")
+        .arg("EX")
+        .arg(3600)
+        .query_async(&mut conn)
+        .await
+        .expect("seed tenant hourly spend");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    // $0.04 fits (0.95 + 0.04 = 0.99 ≤ 1.00).
+    tracker
+        .check_budget(&wallet, 0.04, Some(tenant))
+        .await
+        .expect("$0.04 must fit under the tenant hourly cap");
+
+    // $0.10 now breaches the HOURLY cap (0.99 + 0.10 = 1.09 > 1.00).
+    let err = tracker
+        .check_budget(&wallet, 0.10, Some(tenant))
+        .await
+        .expect_err("must reject over the tenant hourly cap");
+    match err {
+        UsageError::BudgetExceeded { limit, .. } => {
+            assert!(
+                (limit - 1.0).abs() < 1e-9,
+                "limit must be tenant hourly 1.0, got {limit}"
+            );
+        }
+        other => panic!("expected BudgetExceeded, got {other:?}"),
+    }
+
+    redis_del_tenant(&client, &wallet, tenant).await;
+}
+
+/// A provisioned tenant MONTHLY budget is enforced on the
+/// `spend:{wallet}:{tenant}:{%Y-%m}` key. Guards a wrong `%Y-%m` derivation.
+#[sqlx::test(migrations = "../../migrations")]
+async fn check_budget_enforces_provisioned_tenant_monthly_limit(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let tenant = "acme";
+    let now = Utc::now();
+
+    sqlx::query(
+        "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc) VALUES ($1, 100.00)",
+    )
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("seed wallet budget");
+    sqlx::query(
+        "INSERT INTO tenant_budgets (wallet_address, tenant, monthly_limit_usdc) VALUES ($1, $2, 1.00)",
+    )
+    .bind(&wallet)
+    .bind(tenant)
+    .execute(&pool)
+    .await
+    .expect("seed tenant monthly budget");
+
+    // Pre-seed the tenant MONTHLY counter near its $1.00 cap.
+    let tenant_month_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m"));
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("conn");
+    let _: () = redis::cmd("SET")
+        .arg(&tenant_month_key)
+        .arg("0.95")
+        .arg("EX")
+        .arg(3600)
+        .query_async(&mut conn)
+        .await
+        .expect("seed tenant monthly spend");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    tracker
+        .check_budget(&wallet, 0.04, Some(tenant))
+        .await
+        .expect("$0.04 must fit under the tenant monthly cap");
+
+    let err = tracker
+        .check_budget(&wallet, 0.10, Some(tenant))
+        .await
+        .expect_err("must reject over the tenant monthly cap");
+    match err {
+        UsageError::BudgetExceeded { limit, .. } => {
+            assert!(
+                (limit - 1.0).abs() < 1e-9,
+                "limit must be tenant monthly 1.0, got {limit}"
+            );
+        }
+        other => panic!("expected BudgetExceeded, got {other:?}"),
+    }
+
+    redis_del_tenant(&client, &wallet, tenant).await;
+}
+
+/// Reconciliation across ALL THREE tenant windows (hour + day + month), not
+/// just day. `check_budget` reserves the estimate on each provisioned window and
+/// `log_spend` settles each to the actual via the (cost − estimate) delta on the
+/// SAME `spend:{wallet}:{tenant}:{period}` key.
+#[sqlx::test(migrations = "../../migrations")]
+async fn tenant_counters_reconcile_all_three_windows(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let tenant = "acme";
+
+    sqlx::query(
+        "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc) VALUES ($1, 100.00)",
+    )
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("seed wallet");
+    // All three tenant windows provisioned and generous so nothing rejects.
+    sqlx::query(
+        "INSERT INTO tenant_budgets (wallet_address, tenant, hourly_limit_usdc, daily_limit_usdc, monthly_limit_usdc) \
+         VALUES ($1, $2, 10.00, 10.00, 10.00)",
+    )
+    .bind(&wallet)
+    .bind(tenant)
+    .execute(&pool)
+    .await
+    .expect("seed tenant budget");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    let estimated = 0.0050;
+    tracker
+        .check_budget(&wallet, estimated, Some(tenant))
+        .await
+        .expect("reserve estimate");
+
+    let now = Utc::now();
+    let hour_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%dT%H"));
+    let day_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%d"));
+    let month_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m"));
+
+    for k in [&hour_key, &day_key, &month_key] {
+        let v = get_redis_spend(&client, k).await.expect("get");
+        assert!(
+            (v - estimated).abs() < 1e-9,
+            "after reserve, {k} must equal estimate {estimated}, got {v}"
+        );
+    }
+
+    let actual = 0.0075;
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: wallet.clone(),
+        model: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        input_tokens: 10,
+        output_tokens: 20,
+        cost_usdc: actual,
+        tx_signature: None,
+        request_id: None,
+        session_id: None,
+        tenant: Some(tenant.to_string()),
+        tenant_enforced: true,
+        estimated_cost_usdc: Some(estimated),
+    });
+
+    // Each of the three windows must settle to the actual.
+    for k in [&hour_key, &day_key, &month_key] {
+        let mut settled = estimated;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if let Ok(v) = get_redis_spend(&client, k).await {
+                settled = v;
+                if (settled - actual).abs() < 1e-9 {
+                    break;
+                }
+            }
+        }
+        assert!(
+            (settled - actual).abs() < 1e-9,
+            "{k} must reconcile estimate→actual to {actual}, got {settled}"
+        );
+    }
+
+    redis_del_tenant(&client, &wallet, tenant).await;
+}
+
+/// Core bug-class test: cap-escape blocked END-TO-END. After `log_spend`
+/// reconciles the tenant counter to the actual, a SECOND `check_budget` whose
+/// amount would breach the tenant cap cumulatively is REJECTED. This proves the
+/// counter the handler actually wrote (`log_spend`) is the very one enforcement
+/// reads (`check_budget`) — a wrong-key reconcile would let the second request
+/// through and fail this test.
+#[sqlx::test(migrations = "../../migrations")]
+async fn tenant_cap_escape_blocked_end_to_end(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let tenant = "acme";
+
+    sqlx::query(
+        "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc) VALUES ($1, 100.00)",
+    )
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("seed wallet");
+    sqlx::query(
+        "INSERT INTO tenant_budgets (wallet_address, tenant, daily_limit_usdc) VALUES ($1, $2, 1.00)",
+    )
+    .bind(&wallet)
+    .bind(tenant)
+    .execute(&pool)
+    .await
+    .expect("seed tenant budget");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    // First request: reserve a small estimate, then settle a LARGE actual via
+    // log_spend so the tenant counter ends near the cap (0.90 of 1.00).
+    let estimated = 0.10;
+    tracker
+        .check_budget(&wallet, estimated, Some(tenant))
+        .await
+        .expect("first request fits");
+
+    let actual = 0.90;
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: wallet.clone(),
+        model: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        input_tokens: 10,
+        output_tokens: 20,
+        cost_usdc: actual,
+        tx_signature: None,
+        request_id: None,
+        session_id: None,
+        tenant: Some(tenant.to_string()),
+        tenant_enforced: true,
+        estimated_cost_usdc: Some(estimated),
+    });
+
+    // Wait for the counter to settle to the actual (0.90).
+    let now = Utc::now();
+    let tenant_day_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%d"));
+    let mut settled = estimated;
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if let Ok(v) = get_redis_spend(&client, &tenant_day_key).await {
+            settled = v;
+            if (settled - actual).abs() < 1e-9 {
+                break;
+            }
+        }
+    }
+    assert!(
+        (settled - actual).abs() < 1e-9,
+        "tenant counter must settle to {actual} before the escape attempt, got {settled}"
+    );
+
+    // Second request: 0.90 + 0.20 = 1.10 > 1.00 → MUST be rejected. If the
+    // reconcile had written a wrong key, the counter read here would still be
+    // ~0.10 (the reservation only) and this would wrongly succeed.
+    let err = tracker
+        .check_budget(&wallet, 0.20, Some(tenant))
+        .await
+        .expect_err("cumulative spend must breach the tenant cap and be rejected");
+    match err {
+        UsageError::BudgetExceeded { limit, .. } => {
+            assert!((limit - 1.0).abs() < 1e-9, "limit must be 1.0, got {limit}");
+        }
+        other => panic!("expected BudgetExceeded, got {other:?}"),
+    }
+
+    redis_del_tenant(&client, &wallet, tenant).await;
+}
+
+/// Skip-path counter suppression: a tagged request on an UNENFORCED wallet (no
+/// provisioned row, require_tenant=FALSE) must NOT accumulate per-tenant Redis
+/// counters via `log_spend` (tenant_enforced=false). Pre-PR2-fix this would
+/// poison a later-provisioned budget. Also asserts the wallet daily counter
+/// still tracks the spend (attribution/enforcement unaffected for the wallet).
+#[sqlx::test(migrations = "../../migrations")]
+async fn log_spend_skips_tenant_counter_when_not_enforced(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let tenant = "acme";
+    let now = Utc::now();
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+    // tenant_enforced=false mirrors what the handler threads on the Skip path.
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: wallet.clone(),
+        model: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        input_tokens: 1,
+        output_tokens: 1,
+        cost_usdc: 0.0050,
+        tx_signature: None,
+        request_id: None,
+        session_id: None,
+        tenant: Some(tenant.to_string()),
+        tenant_enforced: false,
+        estimated_cost_usdc: None,
+    });
+
+    // Wallet daily counter must materialize (wallet accounting unaffected).
+    let wallet_day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
+    wait_for_key(&client, &wallet_day_key)
+        .await
+        .expect("wallet daily counter must still be written");
+
+    // The per-tenant counter must NOT have been written.
+    let tenant_day_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%d"));
+    let tenant_spend = get_redis_spend(&client, &tenant_day_key)
+        .await
+        .expect("get");
+    assert_eq!(
+        tenant_spend, 0.0,
+        "unenforced (Skip-path) request must not write a per-tenant counter"
+    );
+
+    redis_del(&client, &[&wallet_day_key]).await;
+    redis_del_tenant(&client, &wallet, tenant).await;
+}
+
+/// Backward-compat: the wallet DAILY counter sum is identical for an unenforced
+/// wallet whether or not a tenant tag is supplied. The tag must not alter wallet
+/// accounting in any way (it only ever drives the optional tenant bucket).
+#[sqlx::test(migrations = "../../migrations")]
+async fn wallet_daily_counter_unchanged_by_tag_on_unenforced_wallet(pool: PgPool) {
+    let client = redis_client();
+    let wallet_untagged = unique_wallet();
+    let wallet_tagged = unique_wallet();
+    let now = Utc::now();
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    let mk = |wallet: &str, tenant: Option<String>| SpendLogEntry {
+        wallet_address: wallet.to_string(),
+        model: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        input_tokens: 1,
+        output_tokens: 1,
+        cost_usdc: 0.0050,
+        tx_signature: None,
+        request_id: None,
+        session_id: None,
+        tenant,
+        // Unenforced wallet → Skip path → tenant_enforced is false either way.
+        tenant_enforced: false,
+        estimated_cost_usdc: None,
+    };
+    tracker.log_spend(mk(&wallet_untagged, None));
+    tracker.log_spend(mk(&wallet_tagged, Some("acme".to_string())));
+
+    let untagged_key = format!("spend:{}:{}", wallet_untagged, now.format("%Y-%m-%d"));
+    let tagged_key = format!("spend:{}:{}", wallet_tagged, now.format("%Y-%m-%d"));
+    let u = wait_for_key(&client, &untagged_key)
+        .await
+        .expect("untagged daily counter")
+        .parse::<f64>()
+        .unwrap_or(-1.0);
+    let t = wait_for_key(&client, &tagged_key)
+        .await
+        .expect("tagged daily counter")
+        .parse::<f64>()
+        .unwrap_or(-1.0);
+    assert!(
+        (u - t).abs() < 1e-9 && (u - 0.005).abs() < 1e-9,
+        "wallet daily counter must be identical with/without a tag, got untagged={u} tagged={t}"
+    );
+
+    redis_del(&client, &[&untagged_key, &tagged_key]).await;
+    redis_del_tenant(&client, &wallet_tagged, "acme").await;
+}
+
+/// Fail-OPEN on DB error: when the require_tenant read errors (here forced by
+/// closing the Postgres pool before the call), an UNTAGGED request on a wallet
+/// that WAS configured `require_tenant=TRUE` is NOT rejected — enforcement
+/// degrades to the wallet/team cap (the authoritative backstop). Also asserts no
+/// error-derived sentinel was cached (cache-poisoning fix): the
+/// `tenant_require:{wallet}` key must be absent after the failed read.
+#[sqlx::test(migrations = "../../migrations")]
+async fn require_tenant_db_error_fails_open_and_does_not_cache(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+
+    // Configure the wallet as ENFORCED, then close the pool so the flag read
+    // errors at check_budget time.
+    sqlx::query(
+        "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc, require_tenant) \
+         VALUES ($1, 100.00, TRUE)",
+    )
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("seed enforced wallet");
+
+    // Clear any cached sentinel from prior reads in this test's wallet space.
+    let require_key = format!("tenant_require:{wallet}");
+    redis_del(&client, &[&require_key]).await;
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+    // Force every subsequent DB query on this pool to error.
+    pool.close().await;
+
+    // Untagged request: with a healthy DB this would be RejectRequired. With the
+    // DB erroring it must FAIL OPEN (Skip) and pass under the wallet cap.
+    tracker
+        .check_budget(&wallet, 0.10, None)
+        .await
+        .expect("DB error on require_tenant must fail OPEN (untagged passes)");
+
+    // Cache-poisoning guard: no error-derived sentinel may have been written.
+    let cached = get_redis_spend(&client, &require_key).await;
+    // tenant_require holds "1"/"0" (not a float) when present; absence is what we
+    // assert. get_redis_spend returns Ok(0.0) for a missing key, but a present
+    // sentinel "0"/"1" would parse as a number — assert the key truly is absent.
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("conn");
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&require_key)
+        .query_async(&mut conn)
+        .await
+        .expect("EXISTS");
+    assert!(
+        !exists,
+        "a DB error must NOT cache a require_tenant sentinel (cache-poisoning), but {require_key} exists; get_redis_spend={cached:?}"
+    );
+
+    let now = Utc::now();
+    redis_del(
+        &client,
+        &[
+            &require_key,
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m-%d")),
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H")),
+            &format!("budget_config:{wallet}"),
+            &format!("team_member:{wallet}"),
+        ],
+    )
+    .await;
 }

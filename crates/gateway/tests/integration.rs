@@ -2088,6 +2088,161 @@ async fn test_chat_with_tenant_header_unaffected() {
     assert!(json["usage"]["total_tokens"].is_number());
 }
 
+/// PR2 end-to-end: an enforced wallet (`require_tenant = TRUE`) receiving a
+/// request whose `x-tenant` tag is NOT provisioned must be rejected with HTTP
+/// 400 through the REAL route (parse → guard → payment-verify → `check_budget`),
+/// not just at the `usage.rs` level. This is the test that proves the PR1→PR2
+/// `tenant.as_deref()` wiring is actually exercised on the chat path: the
+/// forgeable tag flows from the header into `check_budget`, the tenant gate
+/// fires `UsageError::TenantNotProvisioned`, and the handler maps it to a 400
+/// `bad_request` (pre-settlement).
+///
+/// LIMITATION: the default test harness uses `UsageTracker::noop()` with
+/// `db_pool = None`, so `check_budget` takes the no-Redis branch and never reads
+/// `require_tenant`/`tenant_budgets`. The enforcement path is only reachable
+/// with a live Postgres + Redis, so this test self-skips (returns early, like
+/// the semantic-cache tests) when either is unavailable — e.g. in a CI image
+/// without docker-compose up. When infra IS present it asserts the real 400.
+#[tokio::test]
+async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
+    // --- Try to connect to live Postgres + Redis; skip if absent. ---
+    let Ok(db_url) = std::env::var("DATABASE_URL") else {
+        eprintln!("skipping tenant-e2e: DATABASE_URL unset");
+        return;
+    };
+    let pool = match sqlx::PgPool::connect(&db_url).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("skipping tenant-e2e: Postgres unavailable ({e})");
+            return;
+        }
+    };
+    if sqlx::migrate!("../../migrations").run(&pool).await.is_err() {
+        eprintln!("skipping tenant-e2e: migrations failed");
+        return;
+    }
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let redis_client = match redis::Client::open(redis_url) {
+        Ok(c) if c.get_multiplexed_async_connection().await.is_ok() => c,
+        _ => {
+            eprintln!("skipping tenant-e2e: Redis unavailable");
+            return;
+        }
+    };
+
+    // `check_budget` is keyed on the wallet `extract_payer_wallet` derives from
+    // the payment payload. The mock `exact` header carries an undecodable
+    // transaction (`b"mock_signed_tx_bytes"`), so `extract_signer_from_base64_tx`
+    // fails and the wallet falls back to the literal "unknown". We seed the
+    // enforced budget under exactly that key so the gate actually fires for this
+    // request. (The point of the test is the wiring + 400 mapping, not realistic
+    // signer recovery — the signer-decode path is covered by payment_util tests.)
+    let wallet = "unknown".to_string();
+    // Enforce the wallet: require_tenant = TRUE, generous wallet cap so only the
+    // tenant gate can reject. Clean any prior row first for idempotency.
+    let _ = sqlx::query("DELETE FROM tenant_budgets WHERE wallet_address = $1")
+        .bind(&wallet)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM wallet_budgets WHERE wallet_address = $1")
+        .bind(&wallet)
+        .execute(&pool)
+        .await;
+    sqlx::query(
+        "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc, require_tenant) \
+         VALUES ($1, 100.00, TRUE)",
+    )
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("seed enforced wallet");
+
+    // Clear any cached require_tenant sentinel so the fresh TRUE flag is read.
+    {
+        let mut conn = redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("redis conn");
+        let _: Result<i64, _> = redis::cmd("DEL")
+            .arg(format!("tenant_require:{wallet}"))
+            .query_async(&mut conn)
+            .await;
+    }
+
+    // Build a mock-provider app whose UsageTracker is backed by the live
+    // Postgres + Redis (unlike the default noop tracker).
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client.clone())),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: Some(pool.clone()),
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+    });
+    let app = build_router(
+        Arc::clone(&state),
+        RateLimiter::new(RateLimitConfig::default()),
+    );
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-tenant", "ghost")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "enforced wallet + unprovisioned tenant must be rejected with 400 via the real route"
+    );
+
+    // Cleanup.
+    let _ = sqlx::query("DELETE FROM wallet_budgets WHERE wallet_address = $1")
+        .bind(&wallet)
+        .execute(&pool)
+        .await;
+}
+
 /// PR1 tenant-attribution: a malformed / over-long `x-tenant` value must NOT
 /// fail the request — `validate_tenant` drops it to `None` and the request
 /// proceeds untagged. Attribution must never become a way to block a paid call.
