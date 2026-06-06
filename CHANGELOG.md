@@ -2,6 +2,10 @@
 
 All notable changes to Solvela (formerly RustyClawRouter), in reverse chronological order.
 
+## 2026-06-06 — Cross-SDK escrow-program pinning (`@solvela/sdk@0.2.4`)
+
+[#494](https://github.com/solvela-ai/solvela/pull/494) (closes [#484](https://github.com/solvela-ai/solvela/issues/484)) adds an opt-in escrow-program-id pinning guard to the Go, Python, and TypeScript SDKs, mirroring the Rust SDK's `expected_escrow_program_id`. On the escrow path each SDK now rejects (fail-closed, before signing) a 402 whose advertised `escrow_program_id` differs from the configured pin — defaulting to the canonical mainnet program — closing the gap where the gateway-supplied program was signed without a whitelist check (asymmetric with the `exact` path's `expected_recipient` guard). TS also tightens its RPC body cap to byte-exact (`arrayBuffer().byteLength`). Wire format and golden vector untouched — a pre-sign gate only. Published as **`@solvela/sdk@0.2.4`**; the Go SDK ships via module path, and the Python `solvela-sdk` PyPI release is deferred.
+
 ## 2026-06-05 — TypeScript SDK native escrow signing (`@solvela/sdk@0.2.3`); gateway charge-without-delivery + discontinued-model fixes
 
 [#482](https://github.com/solvela-ai/solvela/pull/482) adds native x402 escrow-deposit signing to the **TypeScript** SDK, completing **four-language escrow parity** (Python/Go/Rust/TS). The deposit transaction is byte-identical to the canonical Rust builder and golden-vector-pinned (a drift guard reads `crates/escrow-tx/src/deposit.rs`); `preferEscrow: true` now signs a real escrow deposit instead of failing closed (closes [#480](https://github.com/solvela-ai/solvela/issues/480)). Released as **`@solvela/sdk@0.2.3`** (additive — new exports, existing API unchanged).
