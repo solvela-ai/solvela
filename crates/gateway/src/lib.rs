@@ -445,6 +445,9 @@ fn build_cors() -> CorsLayer {
             "x-session-id"
                 .parse()
                 .expect("'x-session-id' is a valid header name"),
+            "x-tenant"
+                .parse()
+                .expect("'x-tenant' is a valid header name"),
         ])
         .expose_headers([
             // New x-solvela-* headers

@@ -8,6 +8,9 @@ use crate::routes::debug_headers::{CacheStatus, DebugInfo, PaymentStatus};
 /// Maximum length for a client-provided session ID.
 const MAX_SESSION_ID_LEN: usize = 128;
 
+/// Maximum length for a client-provided tenant attribution tag.
+const MAX_TENANT_LEN: usize = 64;
+
 /// Validate a session ID: max 128 chars, `[a-zA-Z0-9\-_]` only.
 pub(crate) fn validate_session_id(value: &str) -> Option<String> {
     if value.is_empty() || value.len() > MAX_SESSION_ID_LEN {
@@ -16,6 +19,27 @@ pub(crate) fn validate_session_id(value: &str) -> Option<String> {
     if value
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        Some(value.to_string())
+    } else {
+        None
+    }
+}
+
+/// Validate a tenant attribution tag: max 64 chars, `[a-zA-Z0-9._-]` only.
+///
+/// The tenant tag is an unauthenticated, free-form `x-tenant` header set by a
+/// trusted upstream proxy. It is recorded on the spend row for reporting and is
+/// **attribution only** — it never gates, blocks, or otherwise changes request
+/// behavior. Invalid input returns `None` so the request proceeds untagged
+/// rather than failing (a malformed tag must not be able to block a paid call).
+pub(crate) fn validate_tenant(value: &str) -> Option<String> {
+    if value.is_empty() || value.len() > MAX_TENANT_LEN {
+        return None;
+    }
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
     {
         Some(value.to_string())
     } else {
@@ -151,6 +175,72 @@ mod tests {
         );
         assert_eq!(
             validate_session_id("path/traversal"),
+            None,
+            "slashes should be rejected"
+        );
+    }
+
+    // =========================================================================
+    // validate_tenant
+    // =========================================================================
+
+    #[test]
+    fn test_validate_tenant_valid_alphanumeric() {
+        assert_eq!(
+            validate_tenant("acme123"),
+            Some("acme123".to_string()),
+            "alphanumeric tenant should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_tenant_valid_with_dot_dash_underscore() {
+        assert_eq!(
+            validate_tenant("acme.team-1_prod"),
+            Some("acme.team-1_prod".to_string()),
+            "dot, dash, and underscore should be accepted in a tenant tag"
+        );
+    }
+
+    #[test]
+    fn test_validate_tenant_empty_rejected() {
+        assert_eq!(validate_tenant(""), None, "empty tenant should be rejected");
+    }
+
+    #[test]
+    fn test_validate_tenant_oversized_rejected() {
+        let long = "a".repeat(65);
+        assert_eq!(
+            validate_tenant(&long),
+            None,
+            "tenant > 64 chars should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_tenant_exactly_64_chars_accepted() {
+        let id = "a".repeat(64);
+        assert_eq!(
+            validate_tenant(&id),
+            Some(id),
+            "tenant of exactly 64 chars should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_tenant_invalid_chars_rejected() {
+        assert_eq!(
+            validate_tenant("has spaces"),
+            None,
+            "spaces should be rejected"
+        );
+        assert_eq!(
+            validate_tenant("has!special@chars"),
+            None,
+            "special characters should be rejected"
+        );
+        assert_eq!(
+            validate_tenant("path/traversal"),
             None,
             "slashes should be rejected"
         );

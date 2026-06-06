@@ -116,6 +116,11 @@ pub struct SpendLogEntry {
     pub tx_signature: Option<String>,
     pub request_id: Option<String>,
     pub session_id: Option<String>,
+    /// Optional per-tenant attribution tag from the `x-tenant` header.
+    ///
+    /// Attribution only — recorded on the spend row for reporting; it does not
+    /// gate or change billing. See `validate_tenant` for the accepted charset.
+    pub tenant: Option<String>,
     /// Cost that was tentatively committed to the Redis spend counters at
     /// `check_budget` time. When `Some`, `log_spend` increments the counters
     /// by `(cost_usdc - estimated_cost_usdc)` so the ledger settles to the
@@ -222,8 +227,8 @@ impl UsageTracker {
             let db_entry = entry.clone();
             tokio::spawn(async move {
                 let result = sqlx::query(
-                    r#"INSERT INTO spend_logs (id, wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, request_id, session_id, created_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+                    r#"INSERT INTO spend_logs (id, wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, request_id, session_id, tenant, created_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
                 )
                 .bind(id)
                 .bind(&db_entry.wallet_address)
@@ -235,6 +240,7 @@ impl UsageTracker {
                 .bind(&db_entry.tx_signature)
                 .bind(&db_entry.request_id)
                 .bind(&db_entry.session_id)
+                .bind(&db_entry.tenant)
                 .bind(created_at)
                 .execute(&pool)
                 .await;
@@ -1064,6 +1070,16 @@ pub struct StatsModelRow {
     pub output_tokens: i64,
 }
 
+/// Per-tenant row returned by [`get_stats_by_tenant`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsTenantRow {
+    pub tenant: String,
+    pub requests: i64,
+    pub cost: f64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
 /// Per-day row returned by [`get_stats_by_day`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsDayRow {
@@ -1126,6 +1142,45 @@ pub async fn get_stats_by_model(
         .map(
             |(model, requests, cost, input_tokens, output_tokens)| StatsModelRow {
                 model,
+                requests,
+                cost,
+                input_tokens,
+                output_tokens,
+            },
+        )
+        .collect())
+}
+
+/// Fetch per-tenant spend breakdown for a wallet over the given number of days.
+///
+/// Rows with a NULL `tenant` (requests that carried no `x-tenant` tag) are
+/// excluded — this is the attribution breakdown for tagged traffic only.
+pub async fn get_stats_by_tenant(
+    pool: &sqlx::PgPool,
+    wallet: &str,
+    days: i32,
+) -> Result<Vec<StatsTenantRow>, sqlx::Error> {
+    let rows: Vec<(String, i64, f64, i64, i64)> = sqlx::query_as(
+        r#"SELECT tenant, COUNT(*) as requests,
+                  COALESCE(SUM(cost_usdc), 0)::DOUBLE PRECISION as cost,
+                  COALESCE(SUM(input_tokens), 0) as input_tokens,
+                  COALESCE(SUM(output_tokens), 0) as output_tokens
+           FROM spend_logs
+           WHERE wallet_address = $1
+             AND tenant IS NOT NULL
+             AND created_at >= NOW() - make_interval(days => $2)
+           GROUP BY tenant ORDER BY cost DESC"#,
+    )
+    .bind(wallet)
+    .bind(days)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(tenant, requests, cost, input_tokens, output_tokens)| StatsTenantRow {
+                tenant,
                 requests,
                 cost,
                 input_tokens,
@@ -1232,6 +1287,7 @@ mod tests {
             tx_signature: None,
             request_id: None,
             session_id: None,
+            tenant: None,
             estimated_cost_usdc: None,
         });
     }

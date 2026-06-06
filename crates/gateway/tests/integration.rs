@@ -2045,6 +2045,88 @@ async fn test_chat_with_payment_returns_mock_response() {
     assert!(json["usage"]["total_tokens"].is_number());
 }
 
+/// PR1 tenant-attribution: a paid request carrying an `x-tenant` header must be
+/// handled IDENTICALLY to one without it. The tag is attribution-only — it must
+/// never gate, block, or change request behavior. This exercises the real route
+/// (parse → guard → payment → provider) through `oneshot`, per CLAUDE.md rule 10.
+/// The persisted `tenant` value cannot be read back without a DB in this harness
+/// (log_spend is fire-and-forget into PostgreSQL), so the contract checked here
+/// is "header accepted, happy path unaffected"; the value's acceptance rules are
+/// pinned by the `validate_tenant` unit tests.
+#[tokio::test]
+async fn test_chat_with_tenant_header_unaffected() {
+    let app = test_app_with_mock_provider();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-tenant", "acme.team-1")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Same outcome as test_chat_with_payment_returns_mock_response: 200 + body.
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["object"], "chat.completion");
+    assert_eq!(json["choices"][0]["message"]["content"], "[mock response]");
+    assert!(json["usage"]["total_tokens"].is_number());
+}
+
+/// PR1 tenant-attribution: a malformed / over-long `x-tenant` value must NOT
+/// fail the request — `validate_tenant` drops it to `None` and the request
+/// proceeds untagged. Attribution must never become a way to block a paid call.
+#[tokio::test]
+async fn test_chat_with_invalid_tenant_header_still_succeeds() {
+    let app = test_app_with_mock_provider();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    // 65 chars (> MAX_TENANT_LEN) plus an illegal '/': rejected by validate_tenant.
+    let bad_tenant = format!("{}/path", "a".repeat(65));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-tenant", bad_tenant)
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "an invalid x-tenant tag must not block a paid request — it is dropped to None"
+    );
+}
+
 /// CowAgent scenario: `content` arrives as an array of OpenAI text parts.
 /// This MUST flow through the real route (parse → guard → payment → provider)
 /// and return 200, exactly like a string-content request.

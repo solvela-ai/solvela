@@ -32,6 +32,7 @@ const EXPECTED_TABLES: &[&str] = &[
 const EXPECTED_COLUMNS: &[(&str, &str)] = &[
     ("spend_logs", "request_id"),            // migration 003
     ("spend_logs", "session_id"),            // migration 003
+    ("spend_logs", "tenant"),                // migration 010
     ("escrow_claim_queue", "next_retry_at"), // migration 004
     ("wallet_budgets", "updated_at"),        // migration 001
     ("wallet_budgets", "hourly_limit_usdc"), // migration 007

@@ -567,6 +567,10 @@ pub async fn proxy_service(
         tx_signature,
         request_id: request_id.clone(),
         session_id: None,
+        // PR1 keeps the service-marketplace proxy minimal: it does not read the
+        // x-tenant header. Per-tenant attribution for the proxy path can be
+        // added later; None leaves these rows untagged for now.
+        tenant: None,
         // Service-marketplace proxy doesn't go through `check_budget`
         // (it has flat per-request pricing, not per-wallet budgets), so no
         // reservation is committed and log_spend increments by the full
