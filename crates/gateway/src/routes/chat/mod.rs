@@ -706,9 +706,15 @@ pub async fn chat_completions(
                 ));
             }
 
+            // Pass the (forgeable, attribution-only) x-tenant tag so the
+            // per-tenant budget gate can enforce a provisioned `(wallet, tenant)`
+            // bucket and apply the require_tenant fail-closed policy. All tenant
+            // rejections (TenantRequired / TenantNotProvisioned) and budget
+            // overruns map to a 400 via BadRequest below — and they fire here,
+            // pre-settlement / pre-provider-call.
             budget_reservation = match state
                 .usage
-                .check_budget(&wallet_address, estimated_cost)
+                .check_budget(&wallet_address, estimated_cost, tenant.as_deref())
                 .await
             {
                 Ok(reservation) => reservation,

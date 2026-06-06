@@ -31,6 +31,25 @@ const TEAM_MEMBER_CACHE_TTL: u64 = 60;
 /// TTL for cached team budget config in Redis (seconds).
 const TEAM_BUDGET_CACHE_TTL: u64 = 60;
 
+/// TTL for cached per-tenant budget config / provisioning lookups (seconds).
+const TENANT_BUDGET_CACHE_TTL: u64 = 60;
+
+// ---------------------------------------------------------------------------
+// SECURITY BOUNDARY — per-tenant budgets are cooperative accounting, NOT isolation
+// ---------------------------------------------------------------------------
+//
+// The `x-tenant` header that drives per-tenant budgets (see
+// `tenant_enforcement_decision`, `check_budget`'s tenant bucket, and the
+// `spend:{wallet}:{tenant}:{period}` counters) is UNAUTHENTICATED and FORGEABLE.
+// Per-tenant budgets are **cooperative accounting under ONE trusted
+// single-wallet proxy** (e.g. Telsi metering its own downstream customers) —
+// they are **NOT a security boundary between mutually-distrusting tenants**.
+// Anyone who controls the wallet's traffic can set any tenant tag, attributing
+// spend to (or evading a cap under) an arbitrary tenant. The authoritative,
+// non-forgeable budget is the wallet (and team) cap; the tenant bucket is a
+// sub-allocation convenience for a cooperating proxy. Do not later mistake this
+// for isolation.
+
 /// Cached budget configuration for a wallet, stored in Redis as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudgetConfig {
@@ -55,6 +74,65 @@ pub struct TeamBudgetConfig {
     pub hourly: Option<f64>,
     pub daily: Option<f64>,
     pub monthly: Option<f64>,
+}
+
+/// Cached per-tenant budget configuration, stored in Redis as JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantBudgetConfig {
+    pub hourly: Option<f64>,
+    pub daily: Option<f64>,
+    pub monthly: Option<f64>,
+}
+
+/// Outcome of the per-tenant enforcement decision matrix.
+///
+/// Pure function of three booleans so the money-path policy can be unit-tested
+/// exhaustively with no Redis/DB. See [`tenant_enforcement_decision`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TenantDecision {
+    /// A provisioned `(wallet, tenant)` budget row exists for the supplied tag —
+    /// enforce its hourly/daily/monthly bucket atomically.
+    Enforce,
+    /// The wallet has `require_tenant = TRUE` but the request carried no tenant
+    /// tag — reject (fail-closed) before any provider call/settlement.
+    RejectRequired,
+    /// The wallet has `require_tenant = TRUE`, a tag was supplied, but no
+    /// `tenant_budgets` row exists for it — reject (provision-first).
+    RejectNotProvisioned,
+    /// No per-tenant enforcement applies (wallet/team enforcement only). This is
+    /// the path every existing wallet takes today.
+    Skip,
+}
+
+/// Per-tenant budget enforcement decision matrix (pure — the money-path
+/// contract). Given:
+///
+/// - `require_tenant`: the wallet's `wallet_budgets.require_tenant` flag,
+/// - `tag`: the validated `x-tenant` value (`None` if untagged),
+/// - `has_row`: whether a `tenant_budgets` row exists for `(wallet, tag)`,
+///
+/// returns what the tenant bucket should do. A provisioned tenant budget is
+/// always enforced when its tag is present (`Enforce`), regardless of
+/// `require_tenant`. When `require_tenant` is set, an untagged request is
+/// rejected (`RejectRequired`) and a tagged-but-unprovisioned request is
+/// rejected (`RejectNotProvisioned`). Otherwise there is no tenant enforcement
+/// (`Skip`) — byte-for-byte the legacy wallet/team-only path.
+pub fn tenant_enforcement_decision(
+    require_tenant: bool,
+    tag: Option<&str>,
+    has_row: bool,
+) -> TenantDecision {
+    match (require_tenant, tag, has_row) {
+        // A provisioned tenant budget is enforced whenever its tag is present,
+        // independent of require_tenant.
+        (_, Some(_), true) => TenantDecision::Enforce,
+        // Enforced wallet, no tag → fail-closed.
+        (true, None, _) => TenantDecision::RejectRequired,
+        // Enforced wallet, tag present but no provisioned row → provision-first.
+        (true, Some(_), false) => TenantDecision::RejectNotProvisioned,
+        // Unenforced wallet: no tag, or tag with no row → no tenant enforcement.
+        (false, _, _) => TenantDecision::Skip,
+    }
 }
 
 /// Tolerance for f64 USDC comparisons.
@@ -150,6 +228,18 @@ pub enum UsageError {
 
     #[error("not configured")]
     NotConfigured,
+
+    #[error(
+        "wallet {wallet} requires an x-tenant tag: this wallet is configured to \
+         spend only under a provisioned tenant; supply a valid x-tenant header"
+    )]
+    TenantRequired { wallet: String },
+
+    #[error(
+        "tenant '{tenant}' is not provisioned for wallet {wallet}: this wallet \
+         may only spend under a known, provisioned tenant"
+    )]
+    TenantNotProvisioned { wallet: String, tenant: String },
 }
 
 /// Usage tracker with optional PostgreSQL and Redis backends.
@@ -264,6 +354,7 @@ impl UsageTracker {
             let client = client.clone();
             let db_pool = self.db_pool.clone();
             let wallet = entry.wallet_address;
+            let tenant = entry.tenant;
             let cost = match entry.estimated_cost_usdc {
                 Some(reserved) => entry.cost_usdc - reserved,
                 None => entry.cost_usdc,
@@ -299,6 +390,28 @@ impl UsageTracker {
                 // Monthly spend counter
                 let month_key = format!("spend:{}:{}", wallet, now.format("%Y-%m"));
                 incr_and_expire(&mut conn, &month_key, cost, 86400 * 31).await;
+
+                // Per-tenant counters: settle the same `cost` delta on the
+                // `spend:{wallet}:{tenant}:{period}` keys that `check_budget`'s
+                // `Enforce` arm reserved against. Mirrors the wallet/team
+                // reconciliation. Runs whenever the spend row carried a tenant
+                // tag (`entry.tenant`), symmetric with the wallet counter; if no
+                // tenant budget was provisioned the counter merely tracks tagged
+                // spend and self-expires (harmless). The header is forgeable —
+                // see the module-level security note.
+                if let Some(tag) = tenant.as_deref() {
+                    let tenant_hour_key =
+                        format!("spend:{}:{}:{}", wallet, tag, now.format("%Y-%m-%dT%H"));
+                    incr_and_expire(&mut conn, &tenant_hour_key, cost, 7200).await;
+
+                    let tenant_day_key =
+                        format!("spend:{}:{}:{}", wallet, tag, now.format("%Y-%m-%d"));
+                    incr_and_expire(&mut conn, &tenant_day_key, cost, 86400).await;
+
+                    let tenant_month_key =
+                        format!("spend:{}:{}:{}", wallet, tag, now.format("%Y-%m"));
+                    incr_and_expire(&mut conn, &tenant_month_key, cost, 86400 * 31).await;
+                }
 
                 // Team-level counters: look up team membership.
                 // log_spend runs in a fire-and-forget tokio::spawn after the
@@ -358,9 +471,18 @@ impl UsageTracker {
         &self,
         wallet_address: &str,
         estimated_cost_usdc: f64,
+        tenant: Option<&str>,
     ) -> Result<BudgetReservation, UsageError> {
         // No Redis configured — apply a conservative per-request hard cap.
         // No counters are committed, so the reservation is empty (release is a no-op).
+        //
+        // NOTE: the per-tenant fail-closed gates (TenantRequired /
+        // TenantNotProvisioned) are NOT applied on this no-Redis branch. They
+        // depend on reading `wallet_budgets.require_tenant` and `tenant_budgets`
+        // from the DB, which is read via the Redis-cached helpers below. With no
+        // Redis the operator is already in degraded single-cap mode (Rule #12);
+        // tenant enforcement is a feature of the Redis/DB-backed path. This keeps
+        // the no-Redis path byte-for-byte unchanged from before PR2.
         if self.redis_client.is_none() {
             const NO_REDIS_REQUEST_CAP_USDC: f64 = 1.0;
             if estimated_cost_usdc > NO_REDIS_REQUEST_CAP_USDC {
@@ -517,6 +639,99 @@ impl UsageTracker {
                     "team membership lookup failed; denying request (fail-closed)"
                 );
                 return Err(UsageError::Database(e));
+            }
+        }
+
+        // --- Per-tenant budget enforcement ---
+        //
+        // SECURITY: see the module-level "cooperative accounting, NOT isolation"
+        // note — `tenant` comes from the forgeable `x-tenant` header.
+        //
+        // Decision matrix (pure, see `tenant_enforcement_decision`):
+        //   * provisioned `(wallet, tenant)` row present  → enforce the bucket
+        //     (whether or not require_tenant is set).
+        //   * require_tenant=TRUE, no tag                 → RejectRequired.
+        //   * require_tenant=TRUE, tag but no row         → RejectNotProvisioned.
+        //   * otherwise                                   → Skip (wallet/team only).
+        //
+        // We load the wallet's require_tenant flag and (when a tag is present)
+        // the tenant_budgets row in one combined helper so the no-tenant path
+        // adds no extra round-trip relative to pre-PR2 when require_tenant is
+        // unset and no tag is supplied.
+        let (require_tenant, tenant_config) =
+            get_tenant_enforcement(&mut conn, self.db_pool.as_ref(), wallet_address, tenant).await;
+
+        match tenant_enforcement_decision(require_tenant, tenant, tenant_config.is_some()) {
+            TenantDecision::Skip => {}
+            TenantDecision::RejectRequired => {
+                // Fail-closed BEFORE settlement: nothing has been broadcast yet,
+                // but earlier wallet/team windows were reserved — release them so
+                // a rejected request leaks no budget.
+                rollback_committed(&mut conn, &committed).await;
+                warn!(
+                    wallet = %wallet_address,
+                    "tenant_required: wallet requires an x-tenant tag; denying untagged request"
+                );
+                return Err(UsageError::TenantRequired {
+                    wallet: wallet_address.to_string(),
+                });
+            }
+            TenantDecision::RejectNotProvisioned => {
+                rollback_committed(&mut conn, &committed).await;
+                warn!(
+                    wallet = %wallet_address,
+                    tenant = tenant.unwrap_or("<none>"),
+                    "tenant_not_provisioned: enforced wallet, unknown tenant; denying request"
+                );
+                return Err(UsageError::TenantNotProvisioned {
+                    wallet: wallet_address.to_string(),
+                    tenant: tenant.unwrap_or_default().to_string(),
+                });
+            }
+            TenantDecision::Enforce => {
+                // Safe: Enforce is only returned when both `tenant` is Some and a
+                // row exists. Counters key `spend:{wallet}:{tenant}:{period}`.
+                let tag = tenant.unwrap_or_default();
+                let tcfg = tenant_config.unwrap_or(TenantBudgetConfig {
+                    hourly: None,
+                    daily: None,
+                    monthly: None,
+                });
+
+                if let Some(hourly_limit) = tcfg.hourly {
+                    let _ = try_commit!(
+                        format!(
+                            "spend:{}:{}:{}",
+                            wallet_address,
+                            tag,
+                            now.format("%Y-%m-%dT%H")
+                        ),
+                        estimated_cost_usdc,
+                        hourly_limit,
+                        7200
+                    );
+                }
+                if let Some(daily_limit) = tcfg.daily {
+                    let _ = try_commit!(
+                        format!(
+                            "spend:{}:{}:{}",
+                            wallet_address,
+                            tag,
+                            now.format("%Y-%m-%d")
+                        ),
+                        estimated_cost_usdc,
+                        daily_limit,
+                        86400
+                    );
+                }
+                if let Some(monthly_limit) = tcfg.monthly {
+                    let _ = try_commit!(
+                        format!("spend:{}:{}:{}", wallet_address, tag, now.format("%Y-%m")),
+                        estimated_cost_usdc,
+                        monthly_limit,
+                        86400 * 31
+                    );
+                }
             }
         }
 
@@ -1009,6 +1224,171 @@ async fn get_team_budget_config(
     config
 }
 
+/// Load the per-tenant enforcement inputs for a wallet+tag in one combined
+/// lookup: the wallet's `require_tenant` flag and (when a tag is present) the
+/// `(wallet, tenant)` `tenant_budgets` row.
+///
+/// Returns `(require_tenant, tenant_config)`. `tenant_config` is `None` when no
+/// tag is supplied OR no provisioned row exists for the tag — the
+/// [`tenant_enforcement_decision`] matrix distinguishes those two cases using
+/// `require_tenant`.
+///
+/// Caching mirrors the wallet/team helpers (Redis, 60s TTL):
+/// - `tenant_require:{wallet}` → "1"/"0" sentinel for the flag.
+/// - `tenant_budget:{wallet}:{tenant}` → JSON config, or "none" sentinel.
+///
+/// **Fail-closed posture:** unlike the display-only helpers, a DB error here
+/// returns `require_tenant = true` with `tenant_config = None`. If we cannot
+/// confirm the wallet is unenforced, we must treat it as enforced — so a
+/// transient DB blip denies (`RejectRequired`/`RejectNotProvisioned`) rather
+/// than silently bypassing a configured tenant gate. Wallets that never set the
+/// flag are unaffected in steady state (the read succeeds and returns false).
+async fn get_tenant_enforcement(
+    conn: &mut redis::aio::MultiplexedConnection,
+    db_pool: Option<&sqlx::PgPool>,
+    wallet: &str,
+    tenant: Option<&str>,
+) -> (bool, Option<TenantBudgetConfig>) {
+    // --- require_tenant flag ---
+    let require_cache_key = format!("tenant_require:{wallet}");
+    let require_tenant = {
+        let cached: Option<String> = redis::cmd("GET")
+            .arg(&require_cache_key)
+            .query_async(conn)
+            .await
+            .ok()
+            .flatten();
+        match cached.as_deref() {
+            Some("1") => Some(true),
+            Some("0") => Some(false),
+            _ => None,
+        }
+    };
+
+    let require_tenant = match require_tenant {
+        Some(v) => v,
+        None => {
+            let value = if let Some(pool) = db_pool {
+                match sqlx::query_as::<_, (bool,)>(
+                    "SELECT require_tenant FROM wallet_budgets WHERE wallet_address = $1",
+                )
+                .bind(wallet)
+                .fetch_optional(pool)
+                .await
+                {
+                    Ok(Some((flag,))) => flag,
+                    // No wallet_budgets row → never enforced (matches the
+                    // default-FALSE column semantics for unconfigured wallets).
+                    Ok(None) => false,
+                    Err(e) => {
+                        // Fail-closed: cannot confirm the wallet is unenforced.
+                        warn!(
+                            wallet = %wallet,
+                            error = %e,
+                            "failed to query wallet_budgets.require_tenant — failing closed (enforced)"
+                        );
+                        true
+                    }
+                }
+            } else {
+                // No DB pool — operator chose to run without a DB; nothing to
+                // enforce (consistent with team membership returning None).
+                false
+            };
+            let sentinel = if value { "1" } else { "0" };
+            let _: Result<(), _> = redis::cmd("SET")
+                .arg(&require_cache_key)
+                .arg(sentinel)
+                .arg("EX")
+                .arg(TENANT_BUDGET_CACHE_TTL)
+                .query_async(conn)
+                .await;
+            value
+        }
+    };
+
+    // --- tenant_budgets row (only when a tag is present) ---
+    let tenant_config = match tenant {
+        None => None,
+        Some(tag) => get_tenant_budget_config(conn, db_pool, wallet, tag).await,
+    };
+
+    (require_tenant, tenant_config)
+}
+
+/// Load the `(wallet, tenant)` budget config from `tenant_budgets`. Cached in
+/// Redis with 60s TTL (`tenant_budget:{wallet}:{tenant}`), with a "none"
+/// sentinel for "no provisioned row" to avoid repeated DB misses.
+///
+/// Returns `None` when no row exists. On a DB error returns `None` (the
+/// require_tenant fail-closed posture in [`get_tenant_enforcement`] is what
+/// guards the enforced-wallet case; an unenforced wallet with a transient DB
+/// error simply skips tenant enforcement, falling back to wallet/team caps).
+async fn get_tenant_budget_config(
+    conn: &mut redis::aio::MultiplexedConnection,
+    db_pool: Option<&sqlx::PgPool>,
+    wallet: &str,
+    tenant: &str,
+) -> Option<TenantBudgetConfig> {
+    let cache_key = format!("tenant_budget:{wallet}:{tenant}");
+
+    if let Ok(Some(json_str)) = redis::cmd("GET")
+        .arg(&cache_key)
+        .query_async::<Option<String>>(conn)
+        .await
+    {
+        if json_str == "none" {
+            return None;
+        }
+        if let Ok(config) = serde_json::from_str::<TenantBudgetConfig>(&json_str) {
+            return Some(config);
+        }
+    }
+
+    let config = if let Some(pool) = db_pool {
+        match sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>)>(
+            r#"SELECT
+                hourly_limit_usdc::DOUBLE PRECISION,
+                daily_limit_usdc::DOUBLE PRECISION,
+                monthly_limit_usdc::DOUBLE PRECISION
+            FROM tenant_budgets
+            WHERE wallet_address = $1 AND tenant = $2"#,
+        )
+        .bind(wallet)
+        .bind(tenant)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some((hourly, daily, monthly))) => Some(TenantBudgetConfig {
+                hourly,
+                daily,
+                monthly,
+            }),
+            Ok(None) => None,
+            Err(e) => {
+                warn!(wallet = %wallet, tenant = %tenant, error = %e, "failed to query tenant_budgets");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let cache_val = match &config {
+        Some(cfg) => serde_json::to_string(cfg).unwrap_or_else(|_| "none".to_string()),
+        None => "none".to_string(),
+    };
+    let _: Result<(), _> = redis::cmd("SET")
+        .arg(&cache_key)
+        .arg(&cache_val)
+        .arg("EX")
+        .arg(TENANT_BUDGET_CACHE_TTL)
+        .query_async(conn)
+        .await;
+
+    config
+}
+
 /// Read the current spend from Redis for a given key pattern.
 /// Public helper used by budget API endpoints to report current spend.
 pub async fn get_redis_spend(client: &redis::Client, key: &str) -> Result<f64, UsageError> {
@@ -1322,7 +1702,7 @@ mod tests {
         // Without Redis, the conservative cap is $1.00.  A cost of exactly $1.00
         // (not strictly greater) must be allowed through.
         let tracker = UsageTracker::noop();
-        let result = tracker.check_budget("wallet123", 1.0).await;
+        let result = tracker.check_budget("wallet123", 1.0, None).await;
         assert!(result.is_ok(), "cost equal to cap should be allowed");
     }
 
@@ -1331,7 +1711,7 @@ mod tests {
         // Without Redis, requests exceeding $1.00 must be rejected to prevent
         // runaway spend on high-cost models.
         let tracker = UsageTracker::noop();
-        let result = tracker.check_budget("wallet123", 1.01).await;
+        let result = tracker.check_budget("wallet123", 1.01, None).await;
         assert!(
             matches!(result, Err(UsageError::BudgetExceeded { .. })),
             "cost above cap should be rejected when Redis is unavailable"
@@ -1341,7 +1721,7 @@ mod tests {
     #[tokio::test]
     async fn test_noop_tracker_check_budget_passes_below_cap() {
         let tracker = UsageTracker::noop();
-        let result = tracker.check_budget("wallet123", 0.50).await;
+        let result = tracker.check_budget("wallet123", 0.50, None).await;
         assert!(result.is_ok(), "cost below cap should be allowed");
     }
 
@@ -1357,7 +1737,7 @@ mod tests {
         let tracker = UsageTracker::noop();
         // A within-cap check yields an (empty) reservation without Redis.
         let reservation = tracker
-            .check_budget("wallet123", 0.50)
+            .check_budget("wallet123", 0.50, None)
             .await
             .expect("within-cap check_budget must succeed without Redis");
         assert!(
@@ -1639,5 +2019,192 @@ mod tests {
             MIGRATION_007.contains("update_updated_at_column()"),
             "trigger must use the generic update_updated_at_column function"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // PR2: per-tenant budget enforcement
+    // -----------------------------------------------------------------------
+
+    /// Exhaustive truth table for the money-path decision matrix. Every
+    /// (require_tenant, tag_present, has_row) cell is pinned. This is the
+    /// contract; it must stay byte-for-byte as specified in the PR brief.
+    #[test]
+    fn test_tenant_enforcement_decision_matrix_exhaustive() {
+        use TenantDecision::*;
+        // require_tenant = FALSE (default for every existing wallet)
+        assert_eq!(
+            tenant_enforcement_decision(false, None, false),
+            Skip,
+            "unenforced + untagged → Skip"
+        );
+        assert_eq!(
+            tenant_enforcement_decision(false, None, true),
+            Skip,
+            "unenforced + untagged → Skip even if a (stale) row flag is set"
+        );
+        assert_eq!(
+            tenant_enforcement_decision(false, Some("acme"), false),
+            Skip,
+            "unenforced + tagged + no row → Skip (wallet/team only)"
+        );
+        assert_eq!(
+            tenant_enforcement_decision(false, Some("acme"), true),
+            Enforce,
+            "unenforced + tagged + provisioned row → Enforce"
+        );
+
+        // require_tenant = TRUE
+        assert_eq!(
+            tenant_enforcement_decision(true, None, false),
+            RejectRequired,
+            "enforced + untagged → RejectRequired"
+        );
+        assert_eq!(
+            tenant_enforcement_decision(true, None, true),
+            RejectRequired,
+            "enforced + untagged → RejectRequired regardless of row flag"
+        );
+        assert_eq!(
+            tenant_enforcement_decision(true, Some("ghost"), false),
+            RejectNotProvisioned,
+            "enforced + tagged + no row → RejectNotProvisioned"
+        );
+        assert_eq!(
+            tenant_enforcement_decision(true, Some("acme"), true),
+            Enforce,
+            "enforced + tagged + provisioned row → Enforce"
+        );
+    }
+
+    /// Backward-compat invariant at the policy layer: an unenforced wallet
+    /// (require_tenant=FALSE) yields `Skip` whether or not a tag is present, as
+    /// long as no provisioned row exists — identical to the pre-PR2
+    /// wallet/team-only path. (The Redis-counter equivalent is proven in the
+    /// integration suite.)
+    #[test]
+    fn test_tenant_decision_backward_compat_unenforced_wallet() {
+        assert_eq!(
+            tenant_enforcement_decision(false, None, false),
+            tenant_enforcement_decision(false, Some("anything"), false),
+            "unenforced wallet with no provisioned row must behave identically \
+             tagged or untagged (both Skip)"
+        );
+    }
+
+    #[test]
+    fn test_tenant_error_messages() {
+        let err = UsageError::TenantRequired {
+            wallet: "WalletABC".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("WalletABC"), "must name the wallet");
+        assert!(msg.contains("x-tenant"), "must mention the required header");
+
+        let err = UsageError::TenantNotProvisioned {
+            wallet: "WalletABC".to_string(),
+            tenant: "ghost".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("WalletABC"), "must name the wallet");
+        assert!(msg.contains("ghost"), "must name the unprovisioned tenant");
+    }
+
+    #[test]
+    fn test_tenant_spend_key_format() {
+        // The per-tenant counters key `spend:{wallet}:{tenant}:{period}`.
+        let wallet = "WalletABC";
+        let tenant = "acme";
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 4, 5)
+            .expect("valid date")
+            .and_hms_opt(14, 30, 0)
+            .expect("valid time");
+        assert_eq!(
+            format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%dT%H")),
+            "spend:WalletABC:acme:2026-04-05T14"
+        );
+        assert_eq!(
+            format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%d")),
+            "spend:WalletABC:acme:2026-04-05"
+        );
+        assert_eq!(
+            format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m")),
+            "spend:WalletABC:acme:2026-04"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_noop_tracker_check_budget_ignores_tenant_without_redis() {
+        // Backward-compat / no-Redis: the tenant fail-closed gates are NOT applied
+        // on the no-Redis branch (they need the DB-backed flag). A within-cap
+        // request passes whether tagged or untagged.
+        let tracker = UsageTracker::noop();
+        tracker
+            .check_budget("wallet123", 0.50, None)
+            .await
+            .expect("untagged within-cap must pass without Redis");
+        tracker
+            .check_budget("wallet123", 0.50, Some("acme"))
+            .await
+            .expect("tagged within-cap must pass identically without Redis");
+    }
+
+    /// Migration 011 SQL (loaded from file).
+    const MIGRATION_011: &str = include_str!("../../../migrations/011_tenant_budgets.sql");
+
+    #[test]
+    fn test_migration_011_creates_tenant_budgets_table() {
+        assert!(
+            MIGRATION_011.contains("CREATE TABLE IF NOT EXISTS tenant_budgets"),
+            "migration must create tenant_budgets table"
+        );
+        assert!(
+            MIGRATION_011.contains("PRIMARY KEY (wallet_address, tenant)"),
+            "tenant_budgets PK must be (wallet_address, tenant)"
+        );
+        for col in [
+            "hourly_limit_usdc",
+            "daily_limit_usdc",
+            "monthly_limit_usdc",
+        ] {
+            assert!(
+                MIGRATION_011.contains(col),
+                "tenant_budgets must have {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_migration_011_adds_require_tenant_column() {
+        assert!(
+            MIGRATION_011
+                .contains("ADD COLUMN IF NOT EXISTS require_tenant BOOLEAN NOT NULL DEFAULT FALSE"),
+            "migration must add require_tenant column defaulting to FALSE"
+        );
+    }
+
+    #[test]
+    fn test_migration_011_creates_updated_at_trigger() {
+        assert!(
+            MIGRATION_011.contains("trg_tenant_budgets_updated_at"),
+            "migration must create updated_at trigger for tenant_budgets"
+        );
+        assert!(
+            MIGRATION_011.contains("update_updated_at_column()"),
+            "trigger must use the generic update_updated_at_column function"
+        );
+    }
+
+    #[test]
+    fn test_tenant_budget_config_serialization_roundtrip() {
+        let config = TenantBudgetConfig {
+            hourly: Some(1.0),
+            daily: Some(10.0),
+            monthly: None,
+        };
+        let json = serde_json::to_string(&config).expect("serialize");
+        let back: TenantBudgetConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.hourly, Some(1.0));
+        assert_eq!(back.daily, Some(10.0));
+        assert!(back.monthly.is_none());
     }
 }

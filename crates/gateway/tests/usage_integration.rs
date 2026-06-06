@@ -93,19 +93,19 @@ async fn check_budget_without_redis_applies_one_dollar_per_request_cap() {
 
     // Below the cap — allowed.
     tracker
-        .check_budget(WALLET_A, 0.50)
+        .check_budget(WALLET_A, 0.50, None)
         .await
         .expect("0.50 USDC must be within the no-Redis cap");
 
     // At the cap — allowed (boundary).
     tracker
-        .check_budget(WALLET_A, 1.00)
+        .check_budget(WALLET_A, 1.00, None)
         .await
         .expect("$1.00 USDC must be at-or-below the cap");
 
     // Above the cap — denied.
     let err = tracker
-        .check_budget(WALLET_A, 1.01)
+        .check_budget(WALLET_A, 1.01, None)
         .await
         .expect_err("anything above $1 must be rejected without Redis");
     match err {
