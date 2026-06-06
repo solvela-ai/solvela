@@ -7,14 +7,14 @@ description: Client libraries for Solvela — TypeScript, Python, Go, Rust CLI, 
 Official SDKs are available for four languages plus an MCP server. All SDKs handle the x402 payment handshake automatically — pass a private key and the SDK signs transactions for you.
 
 <Note>
-`@solvela/sdk@0.2.3` (published 2026-06-05) adds native x402 escrow-deposit signing (four-language parity) and is wire-aligned with the live gateway. Pin to `^0.2.3` — earlier `0.2.x` releases predate the v2 payment envelope and will not complete a real payment against `api.solvela.ai`.
+`@solvela/sdk@0.2.4` (published 2026-06-06) adds opt-in escrow-program-id pinning (atop the native escrow-deposit signing from 0.2.3) and is wire-aligned with the live gateway. Pin to `^0.2.4` — earlier `0.2.x` releases predate the v2 payment envelope and will not complete a real payment against `api.solvela.ai`.
 </Note>
 
 ## Comparison
 
 | Language | Package | Install | x402 Auto-payment | Async |
 |----------|---------|---------|-------------------|-------|
-| TypeScript | `@solvela/sdk` | `npm install @solvela/sdk@^0.2.3` | Yes | Yes |
+| TypeScript | `@solvela/sdk` | `npm install @solvela/sdk@^0.2.4` | Yes | Yes |
 | Python | `solvela-sdk` | `pip install solvela-sdk` | Yes | Yes (async-only) |
 | Go | `github.com/solvela-ai/solvela/sdks/go` | `go get github.com/solvela-ai/solvela/sdks/go` | Yes (BYO Signer) | Yes (context-based) |
 | Rust CLI | `solvela-cli` | `cargo install solvela-cli` | Yes | — |
@@ -33,7 +33,7 @@ All four language SDKs live in the [`solvela-ai/solvela`](https://github.com/sol
 The Rust client SDK was consolidated into the monorepo on 2026-05-16 ([#316](https://github.com/solvela-ai/solvela/pull/316)) at [`sdks/rust/`](https://github.com/solvela-ai/solvela/tree/main/sdks/rust); the standalone `solvela-ai/solvela-client` repo is archived. The four legacy Rust crates (`solvela-client`, `solvela-client-cli`, `solvela-client-cli-args`, `solvela-client-proxy`) remain published on crates.io at `0.2.1` — `cargo install solvela-client-cli` still works. The monorepo's flagship CLI is `solvela-cli` (`cargo install solvela-cli`); a monorepo-native publish workflow for the four legacy crates is the remaining runbook step.
 
 <CardGroup>
-  <Card title="TypeScript" description="@solvela/sdk@^0.2.3 — async client with automatic x402 signing and built-in Solana wallet support" href="/docs/sdks/typescript" />
+  <Card title="TypeScript" description="@solvela/sdk@^0.2.4 — async client with automatic x402 signing and built-in Solana wallet support" href="/docs/sdks/typescript" />
   <Card title="Python" description="pip install solvela-sdk — async-first client with built-in Solana signing" href="/docs/sdks/python" />
   <Card title="Go" description="go get github.com/solvela-ai/solvela/sdks/go — context-aware, goroutine-safe; ships an UnimplementedSigner stub (bring your own)" href="/docs/sdks/go" />
   <Card title="Rust CLI" description="cargo install solvela-cli — interactive chat, model listing, health checks" href="/docs/sdks/rust" />

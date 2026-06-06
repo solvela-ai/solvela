@@ -1,6 +1,6 @@
 {
   "name": "@solvela/sdk",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "TypeScript SDK for Solvela — Solana-native AI agent payment gateway",
   "type": "module",
   "main": "dist/index.js",
