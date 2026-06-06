@@ -122,6 +122,70 @@ class TestValidatePayment:
             client._validate_payment(_accept(amount="-1"))
 
 
+class TestEscrowProgramPin:
+    """`_validate_payment` must reject an escrow 402 whose program ID differs
+    from the configured pin, before any deposit is signed. Mirrors the
+    recipient guard for the escrow path."""
+
+    MAINNET = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+
+    def _escrow_accept(self, *, program_id: str | None) -> PaymentAccept:
+        return PaymentAccept(
+            scheme="escrow",
+            network=SOLANA_NETWORK,
+            amount="1000",
+            asset=USDC_MINT,
+            pay_to="RecipientPubkey111111111111111111111111111",
+            max_timeout_seconds=300,
+            escrow_program_id=program_id,
+        )
+
+    def test_default_config_pins_mainnet_escrow_program(self) -> None:
+        assert ClientConfig().expected_escrow_program_id == self.MAINNET
+
+    def test_mismatch_rejected(self) -> None:
+        from solvela.errors import EscrowProgramMismatchError
+
+        client = SolvelaClient(config=ClientConfig(max_payment_amount=None))
+        attacker = "AttackerProgram1111111111111111111111111111"
+        with pytest.raises(EscrowProgramMismatchError) as exc:
+            client._validate_payment(self._escrow_accept(program_id=attacker))
+        assert exc.value.expected == self.MAINNET
+        assert exc.value.actual == attacker
+
+    def test_missing_program_fails_closed(self) -> None:
+        from solvela.errors import EscrowProgramMismatchError
+
+        client = SolvelaClient(config=ClientConfig(max_payment_amount=None))
+        with pytest.raises(EscrowProgramMismatchError):
+            client._validate_payment(self._escrow_accept(program_id=None))
+
+    def test_match_proceeds(self) -> None:
+        # A matching program passes the guard; _validate_payment returns the
+        # parsed amount (signing/RPC happens later, not here).
+        client = SolvelaClient(config=ClientConfig(max_payment_amount=None))
+        amount = client._validate_payment(self._escrow_accept(program_id=self.MAINNET))
+        assert amount == 1000
+
+    def test_disabled_pin_proceeds_for_any_program(self) -> None:
+        # Back-compat / escape hatch: with the pin disabled (None), any
+        # advertised escrow program passes the guard.
+        client = SolvelaClient(
+            config=ClientConfig(max_payment_amount=None, expected_escrow_program_id=None)
+        )
+        amount = client._validate_payment(
+            self._escrow_accept(program_id="SomeOtherProgram111111111111111111111111111")
+        )
+        assert amount == 1000
+
+    def test_exact_scheme_unaffected_by_pin(self) -> None:
+        # The escrow pin must NOT apply to an exact-scheme accept (no program ID
+        # field is relevant there) — existing exact callers are unaffected.
+        client = SolvelaClient(config=ClientConfig(max_payment_amount=None))
+        amount = client._validate_payment(_accept())  # scheme="exact"
+        assert amount == 1000
+
+
 class TestQueryBalanceRpcDiscrimination:
     """`_query_balance` must distinguish ATA-not-found from real RPC errors.
 

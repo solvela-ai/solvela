@@ -123,3 +123,22 @@ class TestClientBuilder:
     def test_builder_rejects_plain_http_rpc_for_remote_hosts(self) -> None:
         with pytest.raises(ClientError, match="rpc_url"):
             ClientBuilder().rpc_url("http://rpc.example.com")
+
+
+class TestEscrowProgramPinConfig:
+    MAINNET = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+
+    def test_default_config_pins_mainnet(self) -> None:
+        assert ClientConfig().expected_escrow_program_id == self.MAINNET
+
+    def test_builder_override(self) -> None:
+        cfg = (
+            ClientBuilder()
+            .expected_escrow_program_id("EscRowOverride11111111111111111111111111111")
+            .build()
+        )
+        assert cfg.expected_escrow_program_id == "EscRowOverride11111111111111111111111111111"
+
+    def test_builder_disable(self) -> None:
+        cfg = ClientBuilder().disable_escrow_program_pin().build()
+        assert cfg.expected_escrow_program_id is None

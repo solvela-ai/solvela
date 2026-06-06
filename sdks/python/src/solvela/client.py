@@ -13,6 +13,7 @@ from solvela.constants import SOLANA_NETWORK, USDC_MINT
 from solvela.errors import (
     AmountExceedsMaxError,
     ClientError,
+    EscrowProgramMismatchError,
     PaymentRejectedError,
     PaymentRequiredError,
     RecipientMismatchError,
@@ -398,6 +399,19 @@ class SolvelaClient:
                 expected=self._config.expected_recipient,
                 actual=accept.pay_to,
             )
+        # Escrow-program pin: only the escrow scheme signs a deposit bound to a
+        # program ID. Reject before signing if the advertised program differs
+        # from the configured pin (prevents a malicious gateway redirecting the
+        # deposit to an attacker's program). Fail closed: a missing/None
+        # advertised program against a non-None pin is a mismatch. Mirrors the
+        # ``expected_recipient`` check above.
+        if accept.scheme == "escrow" and self._config.expected_escrow_program_id is not None:
+            actual_program = accept.escrow_program_id or ""
+            if actual_program != self._config.expected_escrow_program_id:
+                raise EscrowProgramMismatchError(
+                    expected=self._config.expected_escrow_program_id,
+                    actual=actual_program,
+                )
         # Wire amount is a string; cast at this single boundary so the rest of
         # the SDK only ever sees a typed AtomicUsdc. A malformed or negative
         # value must surface as ClientError, not bare ValueError/OverflowError,

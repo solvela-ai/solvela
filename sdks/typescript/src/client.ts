@@ -19,6 +19,7 @@ import {
   ClientError,
   PaymentRequiredError,
   RecipientMismatchError,
+  EscrowProgramMismatchError,
   AmountExceedsMaxError,
   InsufficientBalanceError,
   SignerError,
@@ -372,6 +373,21 @@ export class SolvelaClient {
       accepted.payTo !== this.config.expectedRecipient
     ) {
       throw new RecipientMismatchError(this.config.expectedRecipient, accepted.payTo);
+    }
+
+    // Escrow-program pin: only the escrow scheme signs a deposit bound to a
+    // program ID. Reject before signing if the advertised program differs from
+    // the configured pin (prevents a malicious gateway redirecting the deposit
+    // to an attacker's program). Fail closed: a missing/empty advertised program
+    // against a non-empty pin is a mismatch. Mirrors the recipient check above.
+    if (accepted.scheme === 'escrow' && this.config.expectedEscrowProgram) {
+      const actualProgram = accepted.escrowProgramId ?? '';
+      if (actualProgram !== this.config.expectedEscrowProgram) {
+        throw new EscrowProgramMismatchError(
+          this.config.expectedEscrowProgram,
+          actualProgram,
+        );
+      }
     }
 
     const amount = parseAtomicAmount(accepted.amount);

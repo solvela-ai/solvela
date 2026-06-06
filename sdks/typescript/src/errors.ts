@@ -65,6 +65,16 @@ export class RecipientMismatchError extends ClientError {
   }
 }
 
+export class EscrowProgramMismatchError extends ClientError {
+  constructor(
+    public readonly expected: string,
+    public readonly actual: string,
+  ) {
+    super(`Escrow program mismatch: expected ${expected}, got ${actual}`);
+    this.name = 'EscrowProgramMismatchError';
+  }
+}
+
 export class AmountExceedsMaxError extends ClientError {
   constructor(
     public readonly amount: number,

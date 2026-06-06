@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from solvela.constants import MAINNET_ESCROW_PROGRAM_ID
 from solvela.errors import ClientError
 from solvela.types import AtomicUsdc
 
@@ -52,6 +53,11 @@ class ClientConfig:
         ``max_payment_amount`` defaults to 10 USDC (10_000_000 atomic units) so
         a hostile or buggy gateway cannot silently drain the wallet. Callers
         that genuinely need higher limits must set this explicitly.
+
+        ``expected_escrow_program_id`` is pinned to
+        ``MAINNET_ESCROW_PROGRAM_ID`` by default so an escrow deposit is never
+        signed for an unexpected program (mirrors ``expected_recipient`` for the
+        escrow path). Set to ``None`` to disable the pin.
     """
 
     gateway_url: str = "https://api.solvela.ai"
@@ -59,6 +65,7 @@ class ClientConfig:
     prefer_escrow: bool = False
     timeout: float = 180.0
     expected_recipient: str | None = None
+    expected_escrow_program_id: str | None = MAINNET_ESCROW_PROGRAM_ID
     max_payment_amount: AtomicUsdc | None = field(default=DEFAULT_MAX_PAYMENT_AMOUNT)
     enable_cache: bool = False
     enable_sessions: bool = False
@@ -98,6 +105,25 @@ class ClientBuilder:
 
     def expected_recipient(self, value: str | None) -> ClientBuilder:
         self._config.expected_recipient = value
+        return self
+
+    def expected_escrow_program_id(self, value: str | None) -> ClientBuilder:
+        """Pin the escrow program ID the client will sign a deposit for.
+
+        A 402 advertising an escrow scheme whose ``escrow_program_id`` differs is
+        rejected before signing. Defaults to ``MAINNET_ESCROW_PROGRAM_ID`` (see
+        ``ClientConfig``); use this to point at a different deployment.
+        """
+        self._config.expected_escrow_program_id = value
+        return self
+
+    def disable_escrow_program_pin(self) -> ClientBuilder:
+        """Clear the escrow-program pin, allowing any advertised escrow program.
+
+        This removes a security guarantee; prefer ``expected_escrow_program_id``
+        to point at a non-default deployment instead.
+        """
+        self._config.expected_escrow_program_id = None
         return self
 
     def max_payment_amount(self, value: AtomicUsdc | None) -> ClientBuilder:

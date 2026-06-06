@@ -6,11 +6,16 @@ import {
   PaymentAccept,
   PaymentRequired,
 } from '../../src/types.js';
-import { ClientError, SignerError, AmountExceedsMaxError } from '../../src/errors.js';
+import {
+  ClientError,
+  SignerError,
+  AmountExceedsMaxError,
+  EscrowProgramMismatchError,
+} from '../../src/errors.js';
 import type { Signer } from '../../src/signer.js';
 import type { Resource } from '../../src/types.js';
 import { PaymentPayload, SolanaPayload } from '../../src/types.js';
-import { SOLANA_NETWORK, USDC_MINT } from '../../src/constants.js';
+import { SOLANA_NETWORK, USDC_MINT, MAINNET_ESCROW_PROGRAM_ID } from '../../src/constants.js';
 
 /**
  * Coverage for security audit fixes:
@@ -42,15 +47,20 @@ function pr(overrides: Partial<{
   network: string;
   asset?: string;
   payTo: string;
+  scheme: string;
+  escrowProgramId?: string;
 }>): Record<string, unknown> {
   const accepted: Record<string, unknown> = {
-    scheme: 'exact',
+    scheme: overrides.scheme ?? 'exact',
     network: overrides.network ?? SOLANA_NETWORK,
     amount: overrides.amount ?? '1000000',
     asset: overrides.asset ?? USDC_MINT,
     pay_to: overrides.payTo ?? '11111111111111111111111111111111',
     max_timeout_seconds: 300,
   };
+  if (overrides.escrowProgramId !== undefined) {
+    accepted.escrow_program_id = overrides.escrowProgramId;
+  }
   return {
     x402_version: 2,
     resource: { url: '/v1/chat/completions', method: 'POST' },
@@ -381,5 +391,78 @@ describe('Security: Scheme literal validation', () => {
     expect(() =>
       PaymentAccept.fromJSON({ ...validBase, scheme: 'escrow' }),
     ).not.toThrow();
+  });
+});
+
+describe('Security: escrow program pin before signing', () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const ATTACKER = 'AttackerProgram1111111111111111111111111111';
+
+  it('rejects an escrow 402 whose program differs from the default pin, before signing', async () => {
+    mockFetchOnce(402, pr({ scheme: 'escrow', escrowProgramId: ATTACKER }));
+
+    const signer = new StubSigner();
+    // preferEscrow so findCompatibleScheme selects the escrow accept under test.
+    const client = new SolvelaClient({ signer, config: { preferEscrow: true } });
+    const request = new ChatRequest('gpt-4', [new ChatMessage('user', 'Hi')]);
+
+    await expect(client.chat(request)).rejects.toThrow(EscrowProgramMismatchError);
+    expect(signer.called).toBe(false);
+  });
+
+  it('fails closed when the escrow program is missing from the 402', async () => {
+    // No escrow_program_id field at all -> treated as '' -> mismatch vs pin.
+    mockFetchOnce(402, pr({ scheme: 'escrow' }));
+
+    const signer = new StubSigner();
+    const client = new SolvelaClient({ signer, config: { preferEscrow: true } });
+    const request = new ChatRequest('gpt-4', [new ChatMessage('user', 'Hi')]);
+
+    await expect(client.chat(request)).rejects.toThrow(EscrowProgramMismatchError);
+    expect(signer.called).toBe(false);
+  });
+
+  it('proceeds to sign when the escrow program matches the default mainnet pin', async () => {
+    mockFetchOnce(402, pr({ scheme: 'escrow', escrowProgramId: MAINNET_ESCROW_PROGRAM_ID }));
+
+    const signer = new StubSigner();
+    const client = new SolvelaClient({ signer, config: { preferEscrow: true } });
+    const request = new ChatRequest('gpt-4', [new ChatMessage('user', 'Hi')]);
+
+    // The stub signer returns a payload without real RPC; reaching it proves the
+    // pin did NOT reject a legitimate program. The retried request then resolves
+    // against the mocked fetch (still 402), but the signer must have been called.
+    await client.chat(request).catch(() => {});
+    expect(signer.called).toBe(true);
+  });
+
+  it('proceeds to sign for any program when the pin is disabled', async () => {
+    mockFetchOnce(402, pr({ scheme: 'escrow', escrowProgramId: ATTACKER }));
+
+    const signer = new StubSigner();
+    const client = new SolvelaClient({
+      signer,
+      config: { preferEscrow: true, expectedEscrowProgram: undefined },
+    });
+    const request = new ChatRequest('gpt-4', [new ChatMessage('user', 'Hi')]);
+
+    await client.chat(request).catch(() => {});
+    expect(signer.called).toBe(true);
+  });
+
+  it('does not apply the escrow pin to an exact-scheme 402 (back-compat)', async () => {
+    // An exact accept has no escrow program; the pin must not interfere.
+    mockFetchOnce(402, pr({ scheme: 'exact' }));
+
+    const signer = new StubSigner();
+    const client = new SolvelaClient({ signer });
+    const request = new ChatRequest('gpt-4', [new ChatMessage('user', 'Hi')]);
+
+    await client.chat(request).catch(() => {});
+    expect(signer.called).toBe(true);
   });
 });

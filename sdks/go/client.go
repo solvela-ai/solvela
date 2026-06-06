@@ -570,6 +570,20 @@ func (c *SolvelaClient) validatePayment(accepted *PaymentAccept) error {
 	if c.config.ExpectedRecipient != "" && accepted.PayTo != c.config.ExpectedRecipient {
 		return &RecipientMismatchError{Expected: c.config.ExpectedRecipient, Actual: accepted.PayTo}
 	}
+	// Escrow-program pin: only the escrow scheme signs a deposit bound to a
+	// program ID. Reject before signing if the advertised program differs from
+	// the configured pin (prevents a malicious gateway redirecting the deposit
+	// to an attacker's program). Fail closed: a missing/empty advertised
+	// program against a non-empty pin is a mismatch. Mirrors ExpectedRecipient.
+	if accepted.Scheme == SchemeEscrow && c.config.ExpectedEscrowProgram != "" {
+		actual := ""
+		if accepted.EscrowProgramID != nil {
+			actual = *accepted.EscrowProgramID
+		}
+		if actual != c.config.ExpectedEscrowProgram {
+			return &EscrowProgramMismatchError{Expected: c.config.ExpectedEscrowProgram, Actual: actual}
+		}
+	}
 	// Defense-in-depth: re-verify network and asset here in case a caller bypassed
 	// findCompatibleScheme.
 	if accepted.Network != SolanaNetwork {

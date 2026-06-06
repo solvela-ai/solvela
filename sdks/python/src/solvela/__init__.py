@@ -6,6 +6,7 @@ from solvela.config import ClientBuilder, ClientConfig
 from solvela.errors import (
     AmountExceedsMaxError,
     ClientError,
+    EscrowProgramMismatchError,
     GatewayError,
     InsufficientBalanceError,
     PaymentRejectedError,
@@ -40,6 +41,7 @@ __all__ = [
     "ClientConfig",
     "AmountExceedsMaxError",
     "ClientError",
+    "EscrowProgramMismatchError",
     "GatewayError",
     "InsufficientBalanceError",
     "PaymentRejectedError",
