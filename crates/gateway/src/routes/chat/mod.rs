@@ -38,7 +38,7 @@ use cost::{
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
-use response::{build_session_token, validate_session_id};
+use response::{build_session_token, validate_session_id, validate_tenant};
 
 // Re-export `uses_durable_nonce` for use by `crate::routes::proxy`
 pub(crate) use payment::uses_durable_nonce;
@@ -168,6 +168,15 @@ pub async fn chat_completions(
         .get("x-session-id")
         .and_then(|v| v.to_str().ok())
         .and_then(validate_session_id);
+
+    // Extract and validate the x-tenant attribution tag. Unauthenticated,
+    // free-form header set by a trusted upstream proxy; recorded on the spend
+    // row for reporting only. Attribution-only — it never gates the request, so
+    // an invalid value simply yields `None` (untagged) rather than an error.
+    let tenant: Option<String> = headers
+        .get("x-tenant")
+        .and_then(|v| v.to_str().ok())
+        .and_then(validate_tenant);
 
     // Step 1: Resolve model — handle aliases and smart routing profiles
     let original_model = req.model.clone();
@@ -1107,6 +1116,7 @@ pub async fn chat_completions(
                             tx_signature: tx_signature.clone(),
                             request_id: request_id.clone(),
                             session_id: session_id.clone(),
+                            tenant: tenant.clone(),
                             estimated_cost_usdc: Some(estimated_cost),
                         });
                     }
@@ -1154,6 +1164,7 @@ pub async fn chat_completions(
                     tx_signature: tx_signature.clone(),
                     request_id: request_id.clone(),
                     session_id: session_id.clone(),
+                    tenant: tenant.clone(),
                     estimated_cost_usdc: Some(estimated_cost),
                 });
             }

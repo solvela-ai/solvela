@@ -76,6 +76,7 @@ async fn log_spend_writes_redis_hourly_daily_monthly_counters(pool: PgPool) {
         tx_signature: None,
         request_id: None,
         session_id: None,
+        tenant: None,
         estimated_cost_usdc: None,
     });
 
@@ -124,6 +125,7 @@ async fn log_spend_accumulates_across_calls(pool: PgPool) {
         tx_signature: None,
         request_id: None,
         session_id: None,
+        tenant: None,
         estimated_cost_usdc: None,
     };
     tracker.log_spend(entry.clone());
@@ -499,6 +501,7 @@ async fn log_spend_writes_team_counters_when_wallet_in_team(pool: PgPool) {
         tx_signature: None,
         request_id: None,
         session_id: None,
+        tenant: None,
         estimated_cost_usdc: None,
     });
 

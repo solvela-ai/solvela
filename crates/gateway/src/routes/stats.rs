@@ -12,7 +12,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::session::verify_session_token;
-use crate::usage::{get_stats_by_day, get_stats_by_model, get_wallet_stats};
+use crate::usage::{get_stats_by_day, get_stats_by_model, get_stats_by_tenant, get_wallet_stats};
 use crate::AppState;
 
 /// Base58 character set for wallet address validation.
@@ -36,6 +36,10 @@ pub struct StatsResponse {
     pub period_days: i32,
     pub summary: StatsSummary,
     pub by_model: Vec<ModelStats>,
+    /// Per-tenant attribution breakdown for traffic tagged via the `x-tenant`
+    /// header. Empty when no tagged requests exist in the period. Additive,
+    /// backward-compatible field (clients that ignore it are unaffected).
+    pub by_tenant: Vec<TenantStats>,
     pub by_day: Vec<DayStats>,
 }
 
@@ -63,6 +67,16 @@ pub struct StatsSummary {
 #[derive(Debug, Serialize)]
 pub struct ModelStats {
     pub model: String,
+    pub requests: i64,
+    pub cost_usdc: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+/// Per-tenant breakdown (attribution only).
+#[derive(Debug, Serialize)]
+pub struct TenantStats {
+    pub tenant: String,
     pub requests: i64,
     pub cost_usdc: String,
     pub input_tokens: i64,
@@ -166,10 +180,11 @@ pub async fn wallet_stats(
         }
     };
 
-    // Run the three queries concurrently
-    let (summary_result, by_model_result, by_day_result) = tokio::join!(
+    // Run the queries concurrently
+    let (summary_result, by_model_result, by_tenant_result, by_day_result) = tokio::join!(
         get_wallet_stats(pool, &address, params.days),
         get_stats_by_model(pool, &address, params.days),
+        get_stats_by_tenant(pool, &address, params.days),
         get_stats_by_day(pool, &address, params.days),
     );
 
@@ -184,6 +199,15 @@ pub async fn wallet_stats(
 
     let model_rows = by_model_result.map_err(|e| {
         tracing::error!(error = %e, wallet = %address, "failed to retrieve stats by model");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "failed to retrieve stats" })),
+        )
+            .into_response()
+    })?;
+
+    let tenant_rows = by_tenant_result.map_err(|e| {
+        tracing::error!(error = %e, wallet = %address, "failed to retrieve stats by tenant");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "failed to retrieve stats" })),
@@ -229,6 +253,17 @@ pub async fn wallet_stats(
         })
         .collect();
 
+    let by_tenant = tenant_rows
+        .into_iter()
+        .map(|r| TenantStats {
+            tenant: r.tenant,
+            requests: r.requests,
+            cost_usdc: format!("{:.6}", r.cost),
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+        })
+        .collect();
+
     let by_day = day_rows
         .into_iter()
         .map(|r| DayStats {
@@ -243,6 +278,7 @@ pub async fn wallet_stats(
         period_days: params.days,
         summary,
         by_model,
+        by_tenant,
         by_day,
     })
     .into_response())
@@ -295,6 +331,7 @@ mod tests {
                 monthly_cost_usdc: "0.000000".to_string(),
             },
             by_model: vec![],
+            by_tenant: vec![],
             by_day: vec![],
         };
         let json = serde_json::to_string(&resp).expect("should serialize");
@@ -391,6 +428,13 @@ mod tests {
                 input_tokens: 310_000,
                 output_tokens: 142_000,
             }],
+            by_tenant: vec![TenantStats {
+                tenant: "acme.team-1".to_string(),
+                requests: 200,
+                cost_usdc: "0.500000".to_string(),
+                input_tokens: 100_000,
+                output_tokens: 50_000,
+            }],
             by_day: vec![DayStats {
                 date: "2026-03-11".to_string(),
                 requests: 47,
@@ -427,6 +471,14 @@ mod tests {
         assert_eq!(json["by_model"][0]["input_tokens"], 310_000);
         assert_eq!(json["by_model"][0]["output_tokens"], 142_000);
 
+        // by_tenant array (PR1 attribution breakdown)
+        assert_eq!(json["by_tenant"].as_array().unwrap().len(), 1);
+        assert_eq!(json["by_tenant"][0]["tenant"], "acme.team-1");
+        assert_eq!(json["by_tenant"][0]["requests"], 200);
+        assert_eq!(json["by_tenant"][0]["cost_usdc"], "0.500000");
+        assert_eq!(json["by_tenant"][0]["input_tokens"], 100_000);
+        assert_eq!(json["by_tenant"][0]["output_tokens"], 50_000);
+
         // by_day array
         assert_eq!(json["by_day"].as_array().unwrap().len(), 1);
         assert_eq!(json["by_day"][0]["date"], "2026-03-11");
@@ -450,6 +502,7 @@ mod tests {
                 monthly_cost_usdc: "0.000000".to_string(),
             },
             by_model: vec![],
+            by_tenant: vec![],
             by_day: vec![],
         };
 
@@ -463,6 +516,7 @@ mod tests {
         assert_eq!(json["summary"]["daily_cost_usdc"], "0.000000");
         assert_eq!(json["summary"]["monthly_cost_usdc"], "0.000000");
         assert!(json["by_model"].as_array().unwrap().is_empty());
+        assert!(json["by_tenant"].as_array().unwrap().is_empty());
         assert!(json["by_day"].as_array().unwrap().is_empty());
     }
 }
