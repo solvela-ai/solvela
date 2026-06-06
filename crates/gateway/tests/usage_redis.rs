@@ -1679,19 +1679,28 @@ async fn wallet_daily_counter_unchanged_by_tag_on_unenforced_wallet(pool: PgPool
     redis_del_tenant(&client, &wallet_tagged, "acme").await;
 }
 
-/// Fail-OPEN on DB error: when the require_tenant read errors (here forced by
-/// closing the Postgres pool before the call), an UNTAGGED request on a wallet
-/// that WAS configured `require_tenant=TRUE` is NOT rejected — enforcement
-/// degrades to the wallet/team cap (the authoritative backstop). Also asserts no
-/// error-derived sentinel was cached (cache-poisoning fix): the
-/// `tenant_require:{wallet}` key must be absent after the failed read.
+/// Fail-OPEN on wallet-config DB error: when the `wallet_budgets` read errors
+/// (forced by closing the Postgres pool), an UNTAGGED request on a wallet that
+/// WAS configured `require_tenant=TRUE` is NOT rejected by the tenant gate —
+/// enforcement degrades to the (restrictive) wallet cap (the authoritative
+/// backstop), with `require_tenant` reading `false` from the restrictive
+/// fallback. Also asserts the error-derived config is NOT cached (N2
+/// cache-poisoning fix): `budget_config:{wallet}` must be absent after the failed
+/// read, so the next request re-attempts the DB.
+///
+/// N2 note: `require_tenant` now rides on `budget_config:{wallet}` (the separate
+/// `tenant_require:{wallet}` sentinel was removed). To isolate the wallet-config
+/// DB error from the H4 team-membership fail-closed path, the team membership is
+/// pre-seeded as a cached "none" so `get_team_for_wallet` is served from Redis
+/// (and does not error on the closed pool) — otherwise the team gate would deny
+/// first and we could never reach the tenant gate.
 #[sqlx::test(migrations = "../../migrations")]
 async fn require_tenant_db_error_fails_open_and_does_not_cache(pool: PgPool) {
     let client = redis_client();
     let wallet = unique_wallet();
 
-    // Configure the wallet as ENFORCED, then close the pool so the flag read
-    // errors at check_budget time.
+    // Configure the wallet as ENFORCED, then close the pool so the wallet-config
+    // read errors at check_budget time.
     sqlx::query(
         "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc, require_tenant) \
          VALUES ($1, 100.00, TRUE)",
@@ -1701,50 +1710,380 @@ async fn require_tenant_db_error_fails_open_and_does_not_cache(pool: PgPool) {
     .await
     .expect("seed enforced wallet");
 
-    // Clear any cached sentinel from prior reads in this test's wallet space.
-    let require_key = format!("tenant_require:{wallet}");
-    redis_del(&client, &[&require_key]).await;
+    // Clear any cached wallet config from prior reads in this wallet's space, and
+    // pre-seed team membership as "none" so the team lookup is served from Redis
+    // (not the closed pool).
+    let config_key = format!("budget_config:{wallet}");
+    let team_key = format!("team_member:{wallet}");
+    redis_del(&client, &[&config_key]).await;
+    {
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("conn");
+        let _: () = redis::cmd("SET")
+            .arg(&team_key)
+            .arg("none")
+            .arg("EX")
+            .arg(60)
+            .query_async(&mut conn)
+            .await
+            .expect("seed team none");
+    }
 
     let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
     // Force every subsequent DB query on this pool to error.
     pool.close().await;
 
     // Untagged request: with a healthy DB this would be RejectRequired. With the
-    // DB erroring it must FAIL OPEN (Skip) and pass under the wallet cap.
+    // wallet-config DB read erroring, require_tenant reads `false` (restrictive
+    // fallback) → tenant gate Skips, and the request passes under the restrictive
+    // wallet cap ($0.50/hr, $1/day, $10/mo). $0.10 fits.
     tracker
         .check_budget(&wallet, 0.10, None)
         .await
-        .expect("DB error on require_tenant must fail OPEN (untagged passes)");
+        .expect("DB error on wallet config must fail OPEN for the tenant gate (untagged passes)");
 
-    // Cache-poisoning guard: no error-derived sentinel may have been written.
-    let cached = get_redis_spend(&client, &require_key).await;
-    // tenant_require holds "1"/"0" (not a float) when present; absence is what we
-    // assert. get_redis_spend returns Ok(0.0) for a missing key, but a present
-    // sentinel "0"/"1" would parse as a number — assert the key truly is absent.
+    // N2 cache-poisoning guard: the error-derived restrictive fallback must NOT
+    // have been cached — `budget_config:{wallet}` must be absent so the next
+    // request re-attempts the DB read rather than serving require_tenant=false
+    // for a full TTL.
     let mut conn = client
         .get_multiplexed_async_connection()
         .await
         .expect("conn");
     let exists: bool = redis::cmd("EXISTS")
-        .arg(&require_key)
+        .arg(&config_key)
         .query_async(&mut conn)
         .await
         .expect("EXISTS");
     assert!(
         !exists,
-        "a DB error must NOT cache a require_tenant sentinel (cache-poisoning), but {require_key} exists; get_redis_spend={cached:?}"
+        "a wallet-config DB error must NOT cache an error-derived budget_config (cache-poisoning), but {config_key} exists"
     );
 
     let now = Utc::now();
     redis_del(
         &client,
         &[
-            &require_key,
+            &config_key,
+            &team_key,
+            &format!("tenant_require:{wallet}"),
             &format!("spend:{}:{}", wallet, now.format("%Y-%m-%d")),
             &format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H")),
-            &format!("budget_config:{wallet}"),
-            &format!("team_member:{wallet}"),
         ],
     )
     .await;
+}
+
+/// N3: a DB ERROR reading `tenant_budgets` for an ENFORCED wallet (require_tenant
+/// = TRUE) is still fail-closed (deny), but surfaced as the transient
+/// `UsageError::Database` variant — NOT `TenantNotProvisioned` (which would
+/// mislead an operator into chasing a phantom provisioning issue during a DB
+/// blip). Confirmed-absent vs. DB-error are distinguished by `TenantLookup`.
+///
+/// Setup mirrors the fail-open test: pre-seed `budget_config:{wallet}` as cached
+/// (require_tenant=true) and `team_member:{wallet}` as "none" so neither the
+/// wallet-config nor team reads touch the DB, then close the pool so ONLY the
+/// tagged `tenant_budgets` lookup errors.
+#[sqlx::test(migrations = "../../migrations")]
+async fn tenant_lookup_db_error_for_enforced_wallet_surfaces_database_not_not_provisioned(
+    pool: PgPool,
+) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let tenant = "acme";
+
+    let config_key = format!("budget_config:{wallet}");
+    let team_key = format!("team_member:{wallet}");
+    let tenant_budget_key = format!("tenant_budget:{wallet}:{tenant}");
+
+    {
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("conn");
+        // Cache an ENFORCED wallet config (require_tenant=true) so the
+        // wallet-config read is served from Redis on the closed pool.
+        let cfg = r#"{"hourly":null,"daily":100.0,"monthly":null,"require_tenant":true}"#;
+        let _: () = redis::cmd("SET")
+            .arg(&config_key)
+            .arg(cfg)
+            .arg("EX")
+            .arg(60)
+            .query_async(&mut conn)
+            .await
+            .expect("seed config");
+        // Team membership "none" so the team lookup is served from Redis.
+        let _: () = redis::cmd("SET")
+            .arg(&team_key)
+            .arg("none")
+            .arg("EX")
+            .arg(60)
+            .query_async(&mut conn)
+            .await
+            .expect("seed team none");
+        // Ensure no cached tenant_budget so the lookup must hit the (closed) DB.
+        let _: i64 = redis::cmd("DEL")
+            .arg(&tenant_budget_key)
+            .query_async(&mut conn)
+            .await
+            .expect("del tenant_budget cache");
+    }
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+    // Close the pool so the tenant_budgets read errors (the only uncached read).
+    pool.close().await;
+
+    let err = tracker
+        .check_budget(&wallet, 0.10, Some(tenant))
+        .await
+        .expect_err("enforced wallet + tenant_budgets DB error must deny");
+    match err {
+        UsageError::Database(_) => {}
+        UsageError::TenantNotProvisioned { .. } => panic!(
+            "a transient tenant_budgets DB error must surface as Database, not TenantNotProvisioned"
+        ),
+        other => panic!("expected Database, got {other:?}"),
+    }
+
+    // The transient error must NOT have cached a "none" sentinel for the tenant.
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("conn");
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&tenant_budget_key)
+        .query_async(&mut conn)
+        .await
+        .expect("EXISTS");
+    assert!(
+        !exists,
+        "a tenant_budgets DB error must NOT cache a 'none' sentinel (cache-poisoning)"
+    );
+
+    let now = Utc::now();
+    redis_del(
+        &client,
+        &[
+            &config_key,
+            &team_key,
+            &tenant_budget_key,
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m-%d")),
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H")),
+        ],
+    )
+    .await;
+}
+
+/// N4 / 4a: the Skip path's `tenant_enforced` flag must flow from PRODUCTION code
+/// into `log_spend`, never a hard-coded literal. `check_budget` on an unprovisioned
+/// wallet returns a `BudgetReservation` whose `tenant_enforced()` is false; we
+/// thread THAT value into `SpendLogEntry.tenant_enforced` (exactly as the chat
+/// handler does) and assert `log_spend` writes NO per-tenant counter. A future
+/// regression that set the flag true on Skip would write a tenant counter and
+/// fail this test.
+#[sqlx::test(migrations = "../../migrations")]
+async fn skip_path_reservation_flag_suppresses_tenant_counter_through_real_path(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let tenant = "acme";
+    let now = Utc::now();
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    // Default wallet (no wallet_budgets row, no tenant_budgets row,
+    // require_tenant=FALSE) → tenant decision is Skip even with a tag present.
+    let reservation = tracker
+        .check_budget(&wallet, 0.0050, Some(tenant))
+        .await
+        .expect("Skip-path request must be allowed under the default wallet cap");
+
+    // The value MUST come from production code, not a literal.
+    assert!(
+        !reservation.tenant_enforced(),
+        "Skip path must yield tenant_enforced=false from check_budget"
+    );
+
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: wallet.clone(),
+        model: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        input_tokens: 10,
+        output_tokens: 20,
+        cost_usdc: 0.0050,
+        tx_signature: None,
+        request_id: None,
+        session_id: None,
+        tenant: Some(tenant.to_string()),
+        // Sourced from the real reservation, NOT hard-coded.
+        tenant_enforced: reservation.tenant_enforced(),
+        estimated_cost_usdc: Some(0.0050),
+    });
+
+    // The wallet daily counter must materialize (wallet accounting unaffected)...
+    let wallet_day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
+    wait_for_key(&client, &wallet_day_key)
+        .await
+        .expect("wallet daily counter must be written");
+
+    // ...but NO per-tenant counter may have been written on the Skip path.
+    let tenant_day_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%d"));
+    let tenant_spend = get_redis_spend(&client, &tenant_day_key)
+        .await
+        .expect("get tenant spend");
+    assert_eq!(
+        tenant_spend, 0.0,
+        "Skip-path reservation (tenant_enforced=false) must not write a per-tenant counter"
+    );
+
+    redis_del(&client, &[&wallet_day_key]).await;
+    redis_del_tenant(&client, &wallet, tenant).await;
+}
+
+/// N4: a provisioned tenant row with NO hourly/daily/monthly limits commits zero
+/// tenant counters, so `check_budget` must report `tenant_enforced=false` (only
+/// true when at least one window counter was actually committed). Otherwise
+/// `log_spend` would write per-tenant counters that `check_budget` never
+/// reserved, breaking reserve/settle symmetry.
+#[sqlx::test(migrations = "../../migrations")]
+async fn limitless_provisioned_tenant_row_reports_not_enforced(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let tenant = "acme";
+    let now = Utc::now();
+
+    sqlx::query(
+        "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc) VALUES ($1, 100.00)",
+    )
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("seed wallet");
+    // Provisioned row with all-NULL limits (a real, present row, no caps).
+    sqlx::query("INSERT INTO tenant_budgets (wallet_address, tenant) VALUES ($1, $2)")
+        .bind(&wallet)
+        .bind(tenant)
+        .execute(&pool)
+        .await
+        .expect("seed limitless tenant budget");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+    let reservation = tracker
+        .check_budget(&wallet, 0.0050, Some(tenant))
+        .await
+        .expect("limitless tenant row must pass under the wallet cap");
+
+    assert!(
+        !reservation.tenant_enforced(),
+        "a limitless provisioned tenant row commits no counters → tenant_enforced must be false"
+    );
+
+    // And no tenant counter should have been committed.
+    let tenant_day_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%d"));
+    let tenant_spend = get_redis_spend(&client, &tenant_day_key)
+        .await
+        .expect("get tenant spend");
+    assert_eq!(
+        tenant_spend, 0.0,
+        "limitless tenant row must commit no per-tenant counter"
+    );
+
+    redis_del_tenant(&client, &wallet, tenant).await;
+}
+
+/// Partial tenant-window rollback (4b): a provisioned tenant row with hourly +
+/// daily + monthly limits where MONTHLY is near-full. A request whose estimate
+/// fits hourly+daily but trips monthly must roll back the hourly AND daily tenant
+/// counters that were committed before the monthly window rejected — leaving both
+/// back at 0.0 (mirrors the wallet-window rollback assertion).
+#[sqlx::test(migrations = "../../migrations")]
+async fn tenant_partial_window_rollback_on_monthly_trip(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let tenant = "acme";
+    let now = Utc::now();
+
+    sqlx::query(
+        "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc) VALUES ($1, 100.00)",
+    )
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("seed wallet");
+    // Tenant: generous hourly + daily, tight monthly (so monthly trips last).
+    sqlx::query(
+        "INSERT INTO tenant_budgets (wallet_address, tenant, hourly_limit_usdc, daily_limit_usdc, monthly_limit_usdc) \
+         VALUES ($1, $2, 100.00, 100.00, 1.00)",
+    )
+    .bind(&wallet)
+    .bind(tenant)
+    .execute(&pool)
+    .await
+    .expect("seed tenant budget");
+
+    // Pre-seed the MONTHLY tenant counter near its $1.00 cap so the request trips
+    // monthly only (hourly+daily are generous and start empty).
+    let tenant_hour_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%dT%H"));
+    let tenant_day_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%d"));
+    let tenant_month_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m"));
+    {
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("conn");
+        let _: () = redis::cmd("SET")
+            .arg(&tenant_month_key)
+            .arg("0.95")
+            .arg("EX")
+            .arg(3600)
+            .query_async(&mut conn)
+            .await
+            .expect("seed monthly near cap");
+    }
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    // $0.10: hourly (0→0.10) and daily (0→0.10) commit, then monthly
+    // (0.95→1.05 > 1.00) trips → all three must roll back.
+    let err = tracker
+        .check_budget(&wallet, 0.10, Some(tenant))
+        .await
+        .expect_err("monthly tenant cap must reject");
+    match err {
+        UsageError::BudgetExceeded { limit, .. } => {
+            assert!(
+                (limit - 1.0).abs() < 1e-9,
+                "limit must be tenant monthly 1.0, got {limit}"
+            );
+        }
+        other => panic!("expected BudgetExceeded, got {other:?}"),
+    }
+
+    // Hourly AND daily tenant counters must be back at 0.0 (rolled back).
+    let leaked_hour = get_redis_spend(&client, &tenant_hour_key)
+        .await
+        .expect("get tenant hour");
+    let leaked_day = get_redis_spend(&client, &tenant_day_key)
+        .await
+        .expect("get tenant day");
+    assert_eq!(
+        leaked_hour, 0.0,
+        "tenant hourly counter must be rolled back to 0.0 after the monthly trip"
+    );
+    assert_eq!(
+        leaked_day, 0.0,
+        "tenant daily counter must be rolled back to 0.0 after the monthly trip"
+    );
+    // Monthly counter must be unchanged at its pre-seeded value (the trip rolls
+    // back its own add inside the Lua script).
+    let month_val = get_redis_spend(&client, &tenant_month_key)
+        .await
+        .expect("get tenant month");
+    assert!(
+        (month_val - 0.95).abs() < 1e-9,
+        "tenant monthly counter must remain at the pre-seeded 0.95, got {month_val}"
+    );
+
+    redis_del_tenant(&client, &wallet, tenant).await;
 }

@@ -2158,13 +2158,17 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
     .await
     .expect("seed enforced wallet");
 
-    // Clear any cached require_tenant sentinel so the fresh TRUE flag is read.
+    // Clear any cached wallet budget config so the fresh require_tenant=TRUE flag
+    // is read. Since N2 the flag rides on `budget_config:{wallet}` (the prior
+    // separate `tenant_require:{wallet}` sentinel was removed); clear both for
+    // robustness against stale entries from earlier runs.
     {
         let mut conn = redis_client
             .get_multiplexed_async_connection()
             .await
             .expect("redis conn");
         let _: Result<i64, _> = redis::cmd("DEL")
+            .arg(format!("budget_config:{wallet}"))
             .arg(format!("tenant_require:{wallet}"))
             .query_async(&mut conn)
             .await;

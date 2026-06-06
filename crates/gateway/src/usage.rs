@@ -56,6 +56,16 @@ pub struct BudgetConfig {
     pub hourly: Option<f64>,
     pub daily: Option<f64>,
     pub monthly: Option<f64>,
+    /// Whether this wallet is configured `require_tenant = TRUE` in
+    /// `wallet_budgets` — i.e. it may only spend under a tagged, provisioned
+    /// tenant. Read from the SAME `wallet_budgets` row as the limits so the
+    /// tenant gate needs no extra Redis/DB round-trip (N2).
+    ///
+    /// `#[serde(default)]` so cached JSON written before this field existed
+    /// (pre-N2) still deserializes — the absent field defaults to `false`
+    /// (unenforced), which is the safe, backward-compatible value.
+    #[serde(default)]
+    pub require_tenant: bool,
 }
 
 impl Default for BudgetConfig {
@@ -64,6 +74,7 @@ impl Default for BudgetConfig {
             hourly: None,
             daily: Some(DEFAULT_DAILY_LIMIT_USDC),
             monthly: None,
+            require_tenant: false,
         }
     }
 }
@@ -82,6 +93,25 @@ pub struct TenantBudgetConfig {
     pub hourly: Option<f64>,
     pub daily: Option<f64>,
     pub monthly: Option<f64>,
+}
+
+/// Result of looking up a `(wallet, tenant)` `tenant_budgets` row.
+///
+/// Distinguishes a CONFIRMED-ABSENT row from a transient DB ERROR (N3). The two
+/// must be surfaced differently for an enforced wallet: a confirmed absence is a
+/// genuine "not provisioned" config issue (`TenantNotProvisioned`), whereas a DB
+/// error is a transient infrastructure blip that should map to
+/// `UsageError::Database` so operators don't chase a phantom provisioning
+/// problem. Both still deny the request for an enforced wallet (fail-closed) —
+/// only the surfaced error variant differs.
+#[derive(Debug, Clone)]
+enum TenantLookup {
+    /// A provisioned `tenant_budgets` row exists for `(wallet, tenant)`.
+    Found(TenantBudgetConfig),
+    /// The query SUCCEEDED and confirmed no row exists.
+    Absent,
+    /// The query ERRORED (transient DB problem) — provisioning state unknown.
+    DbError,
 }
 
 /// Outcome of the per-tenant enforcement decision matrix.
@@ -674,17 +704,58 @@ impl UsageTracker {
         //   * require_tenant=TRUE, tag but no row         → RejectNotProvisioned.
         //   * otherwise                                   → Skip (wallet/team only).
         //
-        // We load the wallet's require_tenant flag and (when a tag is present)
-        // the tenant_budgets row in one combined helper so the no-tenant path
-        // adds no extra round-trip relative to pre-PR2 when require_tenant is
-        // unset and no tag is supplied.
-        let (require_tenant, tenant_config) =
-            get_tenant_enforcement(&mut conn, self.db_pool.as_ref(), wallet_address, tenant).await;
+        // Round-trip cost (N2): `require_tenant` rides on the `BudgetConfig` read
+        // above (`get_wallet_budget_config`) — the same `wallet_budgets` row read
+        // it already performs — so there is NO extra Redis/DB round-trip for the
+        // no-tenant path. A tagged request additionally reads the
+        // `tenant_budgets` row (cached 60s); an untagged request reads nothing
+        // more here.
+        let require_tenant = config.require_tenant;
 
-        // Set true only on the `Enforce` arm. Threaded out via
+        // The tenant_budgets row is read ONLY when a tag is present. The lookup
+        // distinguishes a confirmed-absent row from a transient DB error (N3):
+        // for an enforced wallet a DB error surfaces as `UsageError::Database`
+        // (transient infra) rather than `TenantNotProvisioned` (a config issue),
+        // while still denying the request.
+        let tenant_lookup = match tenant {
+            None => TenantLookup::Absent,
+            Some(tag) => {
+                get_tenant_budget_config(&mut conn, self.db_pool.as_ref(), wallet_address, tag)
+                    .await
+            }
+        };
+
+        // N3: a DB error reading `tenant_budgets` for an ENFORCED wallet is
+        // fail-closed (deny) but surfaced as a transient `Database` error, not
+        // `TenantNotProvisioned`. For an UNENFORCED wallet a DB error simply
+        // skips tenant enforcement (the wallet/team cap is the authoritative
+        // backstop) — handled below via `has_row = false` → `Skip`.
+        if matches!(tenant_lookup, TenantLookup::DbError) && require_tenant {
+            rollback_committed(&mut conn, &committed).await;
+            warn!(
+                wallet = %wallet_address,
+                "tenant_lookup_db_error: enforced wallet, tenant_budgets read failed; \
+                 denying request (fail-closed) as a transient DB error"
+            );
+            return Err(UsageError::Database(
+                "tenant_budgets lookup failed".to_string(),
+            ));
+        }
+
+        // For the decision matrix, a `Found` row means has_row=true; `Absent` and
+        // (for an unenforced wallet) `DbError` both mean has_row=false → Skip.
+        let tenant_config: Option<TenantBudgetConfig> = match tenant_lookup {
+            TenantLookup::Found(cfg) => Some(cfg),
+            TenantLookup::Absent | TenantLookup::DbError => None,
+        };
+
+        // Set true only when a provisioned tenant bucket was enforced AND at
+        // least one window counter was actually committed (N4). Threaded out via
         // `BudgetReservation::tenant_enforced` so `log_spend` reconciles the
-        // per-tenant counters ONLY when a provisioned bucket was actually
-        // enforced (not on the pre-provisioning `Skip` path).
+        // per-tenant counters ONLY for windows that were actually reserved — a
+        // limitless provisioned row commits nothing, so it must NOT report
+        // enforced (otherwise log_spend would write counters check_budget never
+        // reserved).
         let mut tenant_enforced = false;
 
         match tenant_enforcement_decision(require_tenant, tenant, tenant_config.is_some()) {
@@ -722,7 +793,6 @@ impl UsageTracker {
                 });
             }
             TenantDecision::Enforce => {
-                tenant_enforced = true;
                 // `Enforce` is only returned when both `tenant` is `Some` and a
                 // provisioned row exists. Using `.expect`/`unreachable!` (instead
                 // of `unwrap_or_default()` / an all-None default) turns a future
@@ -737,7 +807,7 @@ impl UsageTracker {
 
                 // A provisioned row with NO hourly/daily/monthly limit set means
                 // enforcement is a silent no-op (no `try_commit!` fires). Surface
-                // it for observability — behaviour is unchanged.
+                // it for observability.
                 let any_limit =
                     tcfg.hourly.is_some() || tcfg.daily.is_some() || tcfg.monthly.is_some();
                 if !any_limit {
@@ -748,6 +818,14 @@ impl UsageTracker {
                          hourly/daily/monthly limit set — enforcement is a silent no-op"
                     );
                 }
+
+                // N4: report enforced ONLY when at least one window counter was
+                // actually committed below (i.e. at least one limit is Some). A
+                // limitless provisioned row reserves zero counters, so it must NOT
+                // report enforced — otherwise `log_spend` would write per-tenant
+                // counters that `check_budget` never reserved, breaking the
+                // reserve/settle symmetry.
+                tenant_enforced = any_limit;
 
                 if let Some(hourly_limit) = tcfg.hourly {
                     let _ = try_commit!(
@@ -1082,12 +1160,28 @@ fn restrictive_budget_fallback() -> BudgetConfig {
         hourly: Some(0.50),
         daily: Some(1.0),
         monthly: Some(10.0),
+        // Fail OPEN for the tenant gate on a wallet-config DB error: the
+        // restrictive hourly/daily/monthly caps above are the authoritative,
+        // non-forgeable backstop. Setting this `true` on a transient blip would
+        // reject ALL untagged traffic gateway-wide. The error path that returns
+        // this value MUST NOT cache it (see `get_wallet_budget_config`), so the
+        // next request re-attempts the DB read rather than serving a poisoned
+        // `require_tenant=false` for a full TTL.
+        require_tenant: false,
     }
 }
 
 /// Load per-wallet budget config. Checks Redis cache first (`budget_config:{wallet}`),
 /// falls back to DB query, caches result in Redis with 60s TTL.
 /// Returns default config ($100/day) if no row exists; restrictive fallback on DB error.
+///
+/// Reads the wallet's `require_tenant` flag from the SAME `wallet_budgets` row,
+/// surfaced on [`BudgetConfig::require_tenant`]. The tenant gate consumes it from
+/// here, so the no-tenant path adds NO extra Redis/DB round-trip relative to
+/// pre-PR2 (N2 — the previous separate `tenant_require:{wallet}` lookup was
+/// removed). On a DB error the restrictive fallback (with `require_tenant=false`)
+/// is returned but NOT cached, so a transient blip cannot poison the cache for a
+/// full TTL.
 async fn get_wallet_budget_config(
     conn: &mut redis::aio::MultiplexedConnection,
     db_pool: Option<&sqlx::PgPool>,
@@ -1113,13 +1207,19 @@ async fn get_wallet_budget_config(
         }
     }
 
-    // Cache miss — query DB
-    let config = if let Some(pool) = db_pool {
-        match sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>)>(
+    // Cache miss — query DB. `persist` is true only when the query SUCCEEDED
+    // (a real row, a confirmed absence, or no DB pool). On a DB error we return
+    // the restrictive fallback WITHOUT caching, so a transient error cannot
+    // poison the cache (including its `require_tenant=false`) for a full TTL —
+    // the next request re-attempts the DB read. Mirrors the `persist` pattern in
+    // `get_tenant_enforcement` / `get_tenant_budget_config`.
+    let (config, persist) = if let Some(pool) = db_pool {
+        match sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>, bool)>(
             r#"SELECT
                 hourly_limit_usdc::DOUBLE PRECISION,
                 daily_limit_usdc::DOUBLE PRECISION,
-                monthly_limit_usdc::DOUBLE PRECISION
+                monthly_limit_usdc::DOUBLE PRECISION,
+                require_tenant
             FROM wallet_budgets
             WHERE wallet_address = $1"#,
         )
@@ -1127,32 +1227,41 @@ async fn get_wallet_budget_config(
         .fetch_optional(pool)
         .await
         {
-            Ok(Some((hourly, daily, monthly))) => BudgetConfig {
-                hourly,
-                daily: daily.or(Some(DEFAULT_DAILY_LIMIT_USDC)),
-                monthly,
-            },
-            Ok(None) => BudgetConfig::default(),
+            Ok(Some((hourly, daily, monthly, require_tenant))) => (
+                BudgetConfig {
+                    hourly,
+                    daily: daily.or(Some(DEFAULT_DAILY_LIMIT_USDC)),
+                    monthly,
+                    require_tenant,
+                },
+                true,
+            ),
+            // No wallet_budgets row → default config, require_tenant=false
+            // (matches the column's DEFAULT FALSE for unconfigured wallets).
+            Ok(None) => (BudgetConfig::default(), true),
             Err(e) => {
-                warn!(wallet = %wallet, error = %e, "failed to query wallet_budgets — using restrictive fallback");
-                restrictive_budget_fallback()
+                warn!(wallet = %wallet, error = %e, "failed to query wallet_budgets — using restrictive fallback (not caching)");
+                (restrictive_budget_fallback(), false)
             }
         }
     } else {
-        BudgetConfig::default()
+        (BudgetConfig::default(), true)
     };
 
-    // Cache in Redis (best-effort)
-    if let Ok(json_str) = serde_json::to_string(&config) {
-        if let Err(e) = redis::cmd("SET")
-            .arg(&cache_key)
-            .arg(&json_str)
-            .arg("EX")
-            .arg(BUDGET_CONFIG_CACHE_TTL)
-            .query_async::<()>(conn)
-            .await
-        {
-            tracing::warn!(cache_key = %cache_key, error = %e, "failed to write to Redis cache");
+    // Cache in Redis (best-effort) — only when the value is authoritative (a
+    // successful read), never an error-derived restrictive fallback.
+    if persist {
+        if let Ok(json_str) = serde_json::to_string(&config) {
+            if let Err(e) = redis::cmd("SET")
+                .arg(&cache_key)
+                .arg(&json_str)
+                .arg("EX")
+                .arg(BUDGET_CONFIG_CACHE_TTL)
+                .query_async::<()>(conn)
+                .await
+            {
+                tracing::warn!(cache_key = %cache_key, error = %e, "failed to write to Redis cache");
+            }
         }
     }
 
@@ -1298,137 +1407,29 @@ async fn get_team_budget_config(
     config
 }
 
-/// Load the per-tenant enforcement inputs for a wallet+tag in one combined
-/// lookup: the wallet's `require_tenant` flag and (when a tag is present) the
-/// `(wallet, tenant)` `tenant_budgets` row.
-///
-/// Returns `(require_tenant, tenant_config)`. `tenant_config` is `None` when no
-/// tag is supplied OR no provisioned row exists for the tag — the
-/// [`tenant_enforcement_decision`] matrix distinguishes those two cases using
-/// `require_tenant`.
-///
-/// Caching mirrors the wallet/team helpers (Redis, 60s TTL):
-/// - `tenant_require:{wallet}` → "1"/"0" sentinel for the flag.
-/// - `tenant_budget:{wallet}:{tenant}` → JSON config, or "none" sentinel.
-///
-/// **Fail-OPEN posture on DB error:** a DB error reading
-/// `wallet_budgets.require_tenant` returns `require_tenant = false` with
-/// `tenant_config = None` — i.e. NO tenant enforcement for that request. The
-/// rationale: the wallet (and team) cap is the authoritative, non-forgeable
-/// backstop and still applies, so a request can never escape its real spend
-/// limit. Failing CLOSED here would let a single transient DB blip reject ALL
-/// untagged traffic gateway-wide; failing open degrades only the optional
-/// sub-allocation convenience while the hard cap holds. This mirrors how
-/// `get_wallet_budget_config` / `get_team_for_wallet` / `get_tenant_budget_config`
-/// already degrade on DB error.
-///
-/// Critically, on a DB error we return the fallback WITHOUT writing the Redis
-/// sentinel, so a transient error cannot poison the cache for a full TTL — the
-/// next request re-attempts the DB read. The sentinel is only written when the
-/// query SUCCEEDED.
-///
-/// **Steady-state policy is unchanged:** when the flag READS `true`, an untagged
-/// request is still rejected (`RejectRequired`) and a tagged-but-unprovisioned
-/// request is still rejected (`RejectNotProvisioned`) — fail-closed. The
-/// fail-open behaviour applies ONLY to the DB-error path, not to a wallet that
-/// is genuinely configured as enforced.
-async fn get_tenant_enforcement(
-    conn: &mut redis::aio::MultiplexedConnection,
-    db_pool: Option<&sqlx::PgPool>,
-    wallet: &str,
-    tenant: Option<&str>,
-) -> (bool, Option<TenantBudgetConfig>) {
-    // --- require_tenant flag ---
-    let require_cache_key = format!("tenant_require:{wallet}");
-    let require_tenant = {
-        let cached: Option<String> = redis::cmd("GET")
-            .arg(&require_cache_key)
-            .query_async(conn)
-            .await
-            .ok()
-            .flatten();
-        match cached.as_deref() {
-            Some("1") => Some(true),
-            Some("0") => Some(false),
-            _ => None,
-        }
-    };
-
-    let require_tenant = match require_tenant {
-        Some(v) => v,
-        None => {
-            // The DB read yields a (value, persist) pair: `persist` is true only
-            // when the query SUCCEEDED, so a DB error never writes an
-            // error-derived sentinel into Redis (which would poison the cache for
-            // a full TTL). On DB error we fail OPEN (false) per the doc comment —
-            // the wallet/team cap remains the authoritative backstop.
-            let (value, persist) = if let Some(pool) = db_pool {
-                match sqlx::query_as::<_, (bool,)>(
-                    "SELECT require_tenant FROM wallet_budgets WHERE wallet_address = $1",
-                )
-                .bind(wallet)
-                .fetch_optional(pool)
-                .await
-                {
-                    Ok(Some((flag,))) => (flag, true),
-                    // No wallet_budgets row → never enforced (matches the
-                    // default-FALSE column semantics for unconfigured wallets).
-                    Ok(None) => (false, true),
-                    Err(e) => {
-                        // Fail-OPEN: cannot confirm the flag; the non-forgeable
-                        // wallet/team cap still applies. Do NOT cache this
-                        // error-derived value — re-attempt the DB read next request.
-                        warn!(
-                            wallet = %wallet,
-                            error = %e,
-                            "failed to query wallet_budgets.require_tenant — failing open (unenforced); not caching"
-                        );
-                        (false, false)
-                    }
-                }
-            } else {
-                // No DB pool — operator chose to run without a DB; nothing to
-                // enforce (consistent with team membership returning None). This
-                // is not an error, so it is safe to cache.
-                (false, true)
-            };
-            if persist {
-                let sentinel = if value { "1" } else { "0" };
-                let _: Result<(), _> = redis::cmd("SET")
-                    .arg(&require_cache_key)
-                    .arg(sentinel)
-                    .arg("EX")
-                    .arg(TENANT_BUDGET_CACHE_TTL)
-                    .query_async(conn)
-                    .await;
-            }
-            value
-        }
-    };
-
-    // --- tenant_budgets row (only when a tag is present) ---
-    let tenant_config = match tenant {
-        None => None,
-        Some(tag) => get_tenant_budget_config(conn, db_pool, wallet, tag).await,
-    };
-
-    (require_tenant, tenant_config)
-}
-
 /// Load the `(wallet, tenant)` budget config from `tenant_budgets`. Cached in
 /// Redis with 60s TTL (`tenant_budget:{wallet}:{tenant}`), with a "none"
 /// sentinel for "no provisioned row" to avoid repeated DB misses.
 ///
-/// Returns `None` when no row exists. On a DB error returns `None` (the
-/// require_tenant fail-closed posture in [`get_tenant_enforcement`] is what
-/// guards the enforced-wallet case; an unenforced wallet with a transient DB
-/// error simply skips tenant enforcement, falling back to wallet/team caps).
+/// Returns a [`TenantLookup`] that distinguishes a provisioned row
+/// ([`TenantLookup::Found`]) from a confirmed absence ([`TenantLookup::Absent`])
+/// and a transient DB error ([`TenantLookup::DbError`]) — N3. The caller maps a
+/// `DbError` on an enforced wallet to `UsageError::Database` (transient infra)
+/// rather than `TenantNotProvisioned` (a config issue), while still denying the
+/// request. Only `Found`/`Absent` are cached; a `DbError` is never cached, so a
+/// transient error cannot poison the "none" sentinel for a full TTL — the next
+/// request re-attempts the DB read.
+///
+/// `require_tenant` is NOT read here: it now rides on
+/// [`BudgetConfig::require_tenant`] from the wallet-config read that
+/// `check_budget` already performs (N2), so the no-tenant path adds no extra
+/// round-trip.
 async fn get_tenant_budget_config(
     conn: &mut redis::aio::MultiplexedConnection,
     db_pool: Option<&sqlx::PgPool>,
     wallet: &str,
     tenant: &str,
-) -> Option<TenantBudgetConfig> {
+) -> TenantLookup {
     let cache_key = format!("tenant_budget:{wallet}:{tenant}");
 
     if let Ok(Some(json_str)) = redis::cmd("GET")
@@ -1437,18 +1438,17 @@ async fn get_tenant_budget_config(
         .await
     {
         if json_str == "none" {
-            return None;
+            return TenantLookup::Absent;
         }
         if let Ok(config) = serde_json::from_str::<TenantBudgetConfig>(&json_str) {
-            return Some(config);
+            return TenantLookup::Found(config);
         }
     }
 
-    // `persist` is true only when the query SUCCEEDED (a real row, or a
-    // confirmed absence). On a DB error we return `None` WITHOUT caching, so a
-    // transient error cannot poison the "none" sentinel for a full TTL — the
-    // next request re-attempts the DB read.
-    let (config, persist) = if let Some(pool) = db_pool {
+    // A DB error returns `DbError` WITHOUT caching, so a transient error cannot
+    // poison the "none" sentinel for a full TTL — the next request re-attempts
+    // the DB read. Only a successful read (`Found`/`Absent`) is cached.
+    let lookup = if let Some(pool) = db_pool {
         match sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>)>(
             r#"SELECT
                 hourly_limit_usdc::DOUBLE PRECISION,
@@ -1462,30 +1462,31 @@ async fn get_tenant_budget_config(
         .fetch_optional(pool)
         .await
         {
-            Ok(Some((hourly, daily, monthly))) => (
-                Some(TenantBudgetConfig {
-                    hourly,
-                    daily,
-                    monthly,
-                }),
-                true,
-            ),
-            Ok(None) => (None, true),
+            Ok(Some((hourly, daily, monthly))) => TenantLookup::Found(TenantBudgetConfig {
+                hourly,
+                daily,
+                monthly,
+            }),
+            Ok(None) => TenantLookup::Absent,
             Err(e) => {
                 warn!(wallet = %wallet, tenant = %tenant, error = %e, "failed to query tenant_budgets — not caching");
-                (None, false)
+                TenantLookup::DbError
             }
         }
     } else {
         // No DB pool — a stable "no provisioned row" answer; safe to cache.
-        (None, true)
+        TenantLookup::Absent
     };
 
-    if persist {
-        let cache_val = match &config {
-            Some(cfg) => serde_json::to_string(cfg).unwrap_or_else(|_| "none".to_string()),
-            None => "none".to_string(),
-        };
+    let cache_val = match &lookup {
+        TenantLookup::Found(cfg) => {
+            Some(serde_json::to_string(cfg).unwrap_or_else(|_| "none".to_string()))
+        }
+        TenantLookup::Absent => Some("none".to_string()),
+        // Never cache a transient error-derived value.
+        TenantLookup::DbError => None,
+    };
+    if let Some(cache_val) = cache_val {
         let _: Result<(), _> = redis::cmd("SET")
             .arg(&cache_key)
             .arg(&cache_val)
@@ -1495,7 +1496,7 @@ async fn get_tenant_budget_config(
             .await;
     }
 
-    config
+    lookup
 }
 
 /// Read the current spend from Redis for a given key pattern.
@@ -2003,6 +2004,8 @@ mod tests {
         assert_eq!(config.daily, Some(100.0));
         assert!(config.hourly.is_none());
         assert!(config.monthly.is_none());
+        // N2: default wallet is unenforced.
+        assert!(!config.require_tenant);
     }
 
     #[test]
@@ -2011,12 +2014,31 @@ mod tests {
             hourly: Some(10.0),
             daily: Some(100.0),
             monthly: None,
+            require_tenant: true,
         };
         let json = serde_json::to_string(&config).expect("should serialize");
         let deserialized: BudgetConfig = serde_json::from_str(&json).expect("should deserialize");
         assert_eq!(deserialized.hourly, Some(10.0));
         assert_eq!(deserialized.daily, Some(100.0));
         assert!(deserialized.monthly.is_none());
+        assert!(deserialized.require_tenant);
+    }
+
+    /// N2 backward-compat: cached `BudgetConfig` JSON written BEFORE the
+    /// `require_tenant` field existed (pre-N2) must still deserialize, with the
+    /// absent field defaulting to `false` (unenforced) via `#[serde(default)]`.
+    /// Without the attribute this would error and corrupt-fall-through to a DB
+    /// read every request during a deploy that left old cache entries.
+    #[test]
+    fn test_budget_config_deserializes_legacy_json_without_require_tenant() {
+        let legacy = r#"{"hourly":null,"daily":0.05,"monthly":null}"#;
+        let cfg: BudgetConfig =
+            serde_json::from_str(legacy).expect("legacy cached JSON must still deserialize");
+        assert_eq!(cfg.daily, Some(0.05));
+        assert!(
+            !cfg.require_tenant,
+            "absent require_tenant must default to false (unenforced)"
+        );
     }
 
     #[test]

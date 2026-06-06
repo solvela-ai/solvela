@@ -10,6 +10,9 @@
 -- wallet's traffic can set any tenant tag.
 --
 -- Additive + idempotent. Mirrors the 005/007/008 trigger pattern.
+-- No FK from tenant_budgets.wallet_address -> wallet_budgets.wallet_address: a
+-- wallet may be provisioned a tenant budget without ever having a wallet_budgets
+-- row (it runs on the default wallet cap), so an FK would wrongly reject those.
 CREATE TABLE IF NOT EXISTS tenant_budgets (
     wallet_address      TEXT        NOT NULL,
     tenant              TEXT        NOT NULL,
