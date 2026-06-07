@@ -9,7 +9,7 @@ use solvela_protocol::{
     CostBreakdown, PaymentAccept, PaymentRequired, Resource, MAX_TIMEOUT_SECONDS,
     PLATFORM_FEE_PERCENT, SOLANA_NETWORK, USDC_MINT, X402_VERSION,
 };
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn test_wallet() -> Wallet {
@@ -56,6 +56,7 @@ fn build_test_app(gateway_url: &str) -> axum::Router {
         client,
         gateway_url: gateway_url.to_string(),
         http: reqwest::Client::new(),
+        tenant: None,
     });
     solvela_client_proxy::build_proxy_router(state)
 }
@@ -326,6 +327,7 @@ async fn test_amount_exceeds_max_returns_error() {
         client,
         gateway_url: mock.uri(),
         http: reqwest::Client::new(),
+        tenant: None,
     });
     let app = solvela_client_proxy::build_proxy_router(state);
 
@@ -347,4 +349,60 @@ async fn test_amount_exceeds_max_returns_error() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["type"], "amount_exceeds_max");
+}
+
+/// Build a proxy router whose state injects a per-tenant `x-tenant` tag.
+fn build_test_app_with_tenant(gateway_url: &str, tenant: &str) -> axum::Router {
+    let wallet = test_wallet();
+    let config = ClientConfig {
+        gateway_url: gateway_url.to_string(),
+        rpc_url: "http://127.0.0.1:1".to_string(),
+        ..ClientConfig::default()
+    };
+    let client = SolvelaClient::new(wallet, config).unwrap();
+    let state = Arc::new(solvela_client_proxy::ProxyState {
+        client,
+        gateway_url: gateway_url.to_string(),
+        http: reqwest::Client::new(),
+        tenant: Some(tenant.to_string()),
+    });
+    solvela_client_proxy::build_proxy_router(state)
+}
+
+/// With a configured tenant, the proxy injects `x-tenant` on the forwarded
+/// request — AND replaces any caller-supplied value, so the tag is
+/// operator-controlled (not spoofable by `CowAgent`). The mock only matches the
+/// operator's tenant, so a 200 + `.expect(1)` proves both at once.
+#[tokio::test]
+async fn test_tenant_tag_injected_and_caller_value_overridden() {
+    let mock = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("x-tenant", "telsi-tenant-abc"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+        .expect(1)
+        .mount(&mock)
+        .await;
+
+    let app = build_test_app_with_tenant(&mock.uri(), "telsi-tenant-abc");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                // A forged caller tag that MUST be stripped + replaced.
+                .header("x-tenant", "forged-other-tenant")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"anthropic/claude-sonnet-4"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    // `.expect(1)` is verified on MockServer drop — the only mounted matcher
+    // requires x-tenant == "telsi-tenant-abc", so a hit proves injection +
+    // override.
 }

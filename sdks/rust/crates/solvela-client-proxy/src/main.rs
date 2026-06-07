@@ -37,6 +37,13 @@ struct Cli {
     #[arg(long)]
     expected_recipient: Option<String>,
 
+    /// Per-tenant attribution tag. When set, the proxy injects `x-tenant: <id>`
+    /// on every forwarded request (replacing any caller-supplied value), so the
+    /// gateway attributes settled cost to and enforces the budget for this
+    /// tenant. The tenant entrypoint passes this from the `SOLVELA_TENANT` env.
+    #[arg(long)]
+    tenant: Option<String>,
+
     /// Enable debug logging.
     #[arg(short, long)]
     verbose: bool,
@@ -112,10 +119,15 @@ async fn main() {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
+    if let Some(ref t) = cli.tenant {
+        info!(tenant = %t, "per-tenant attribution enabled — injecting x-tenant");
+    }
+
     let state = Arc::new(proxy::ProxyState {
         client,
         gateway_url,
         http,
+        tenant: cli.tenant,
     });
 
     let app = proxy::build_proxy_router(state);

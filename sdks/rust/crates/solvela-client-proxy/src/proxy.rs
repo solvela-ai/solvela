@@ -23,6 +23,13 @@ pub struct ProxyState {
     pub client: SolvelaClient,
     pub gateway_url: String,
     pub http: reqwest::Client,
+    /// Per-tenant attribution tag injected as `x-tenant` on every forwarded
+    /// request when set. The gateway attributes settled cost to `(wallet,
+    /// tenant)` and enforces the tenant's budget. `None` = no tag (single-tenant
+    /// / untagged operation). A caller-supplied `x-tenant` is always stripped
+    /// and replaced with this value — the tag is operator-controlled, not
+    /// caller-controlled.
+    pub tenant: Option<String>,
 }
 
 /// Maximum request body size (10 MB — matches gateway limit).
@@ -55,7 +62,7 @@ async fn proxy_handler(
 
     // Build the forwarded request
     let mut req_builder = state.http.request(reqwest_method(&method), &gateway_url);
-    req_builder = forward_headers(req_builder, &headers);
+    req_builder = forward_headers(req_builder, &headers, state.tenant.as_deref());
 
     // Attach body for methods that have one
     if method == Method::POST || method == Method::PUT || method == Method::PATCH {
@@ -144,7 +151,7 @@ async fn handle_402(
 
     // Retry the request with the PAYMENT-SIGNATURE header
     let mut retry_builder = state.http.request(reqwest_method(method), gateway_url);
-    retry_builder = forward_headers(retry_builder, headers);
+    retry_builder = forward_headers(retry_builder, headers, state.tenant.as_deref());
     retry_builder = retry_builder.header("PAYMENT-SIGNATURE", &payment_header);
 
     // Attach body
@@ -182,6 +189,7 @@ async fn handle_402(
 fn forward_headers(
     mut builder: reqwest::RequestBuilder,
     headers: &HeaderMap,
+    tenant: Option<&str>,
 ) -> reqwest::RequestBuilder {
     for (name, value) in headers {
         let name_lower = name.as_str().to_lowercase();
@@ -192,9 +200,19 @@ fn forward_headers(
         // the caller's `accept-encoding` lets the gateway (or a fronting edge
         // proxy) compress the body, which then fails to parse as JSON. Treat it
         // as hop-by-hop here.
+        //
+        // `x-tenant` is stripped here and re-injected below ONLY from the
+        // operator-configured value: the attribution tag is operator-controlled,
+        // never caller-controlled, so a CowAgent-supplied tag cannot spoof or
+        // evade a tenant's budget.
         if matches!(
             name_lower.as_str(),
-            "host" | "connection" | "transfer-encoding" | "payment-signature" | "accept-encoding"
+            "host"
+                | "connection"
+                | "transfer-encoding"
+                | "payment-signature"
+                | "accept-encoding"
+                | "x-tenant"
         ) {
             if name_lower == "payment-signature" {
                 warn!("stripped PAYMENT-SIGNATURE header from caller (security)");
@@ -204,6 +222,10 @@ fn forward_headers(
         if let Ok(v) = value.to_str() {
             builder = builder.header(name.as_str(), v);
         }
+    }
+    // Inject the operator-configured tenant tag, if any.
+    if let Some(t) = tenant {
+        builder = builder.header("x-tenant", t);
     }
     builder
 }
