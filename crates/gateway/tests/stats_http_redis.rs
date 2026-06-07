@@ -160,11 +160,21 @@ async fn redis_del_keys(client: &redis::Client, keys: &[&str]) {
 
 async fn get_stats_json(app: axum::Router, wallet: &str) -> (StatusCode, serde_json::Value) {
     let token = session_token_for(wallet);
+    get_stats_json_with_bearer(app, wallet, &token).await
+}
+
+/// Hit the stats endpoint with an arbitrary bearer credential (session token OR
+/// admin token OR garbage) so tests can exercise the auth branches directly.
+async fn get_stats_json_with_bearer(
+    app: axum::Router,
+    wallet: &str,
+    bearer: &str,
+) -> (StatusCode, serde_json::Value) {
     let response = app
         .oneshot(
             Request::builder()
                 .uri(format!("/v1/wallet/{wallet}/stats"))
-                .header("authorization", format!("Bearer {token}"))
+                .header("authorization", format!("Bearer {bearer}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -174,6 +184,95 @@ async fn get_stats_json(app: axum::Router, wallet: &str) -> (StatusCode, serde_j
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json = serde_json::from_slice(&body).unwrap();
     (status, json)
+}
+
+/// Insert one settled spend row attributed to `tenant`, so the per-tenant
+/// `by_tenant` breakdown has something to surface.
+async fn insert_tenant_spend(
+    pool: &PgPool,
+    wallet: &str,
+    tenant: &str,
+    cost_usdc: &str,
+    input_tokens: i32,
+    output_tokens: i32,
+) {
+    // `id` and `created_at` use their column defaults; `tenant` is the only
+    // attribution field the `by_tenant` rollup needs.
+    sqlx::query(
+        r#"INSERT INTO spend_logs
+             (wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tenant)
+           VALUES ($1, 'anthropic/claude-sonnet-4', 'anthropic', $2, $3, $4::numeric, $5)"#,
+    )
+    .bind(wallet)
+    .bind(input_tokens)
+    .bind(output_tokens)
+    .bind(cost_usdc)
+    .bind(tenant)
+    .execute(pool)
+    .await
+    .expect("seed tenant spend row");
+}
+
+/// The trusted server-to-server path Telsi's metering cron depends on: the
+/// operator's **admin token** authorizes reading ANY wallet's stats — including
+/// the per-tenant `by_tenant` breakdown — with NO wallet-scoped session token.
+#[sqlx::test(migrations = "../../migrations")]
+async fn stats_endpoint_admin_token_reads_any_wallet_by_tenant(pool: PgPool) {
+    let wallet = random_valid_wallet();
+    insert_tenant_spend(&pool, &wallet, "telsi-tenant-1", "0.500000", 100, 50).await;
+    insert_tenant_spend(&pool, &wallet, "telsi-tenant-2", "0.250000", 40, 20).await;
+    // An untagged row (tenant IS NULL) must count toward the wallet summary but
+    // be EXCLUDED from by_tenant — the exact invariant Telsi's rollup relies on.
+    sqlx::query(
+        r#"INSERT INTO spend_logs (wallet_address, model, provider, input_tokens, output_tokens, cost_usdc)
+           VALUES ($1, 'anthropic/claude-sonnet-4', 'anthropic', 10, 5, 0.100000::numeric)"#,
+    )
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("seed untagged row");
+
+    let usage = UsageTracker::new(Some(pool.clone()), None);
+    let app = stats_router(usage, Some(pool.clone()));
+
+    // Admin token, NOT a session token for `wallet`.
+    let (status, json) = get_stats_json_with_bearer(app, &wallet, TEST_ADMIN_TOKEN).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin token must authorize any wallet"
+    );
+    // Summary includes the untagged row (3 requests, 0.85 total).
+    assert_eq!(json["summary"]["total_requests"], 3);
+    assert_eq!(json["summary"]["total_cost_usdc"], "0.850000");
+
+    let by_tenant = json["by_tenant"].as_array().expect("by_tenant array");
+    assert_eq!(
+        by_tenant.len(),
+        2,
+        "only tagged tenants attributed (untagged excluded)"
+    );
+    // Ordered by cost DESC, so tenant-1 (0.5) is first.
+    assert_eq!(by_tenant[0]["tenant"], "telsi-tenant-1");
+    assert_eq!(by_tenant[0]["cost_usdc"], "0.500000");
+    assert_eq!(by_tenant[0]["requests"], 1);
+    assert_eq!(by_tenant[1]["tenant"], "telsi-tenant-2");
+    assert_eq!(by_tenant[1]["cost_usdc"], "0.250000");
+}
+
+/// A garbage bearer that is neither a valid admin token nor a valid session
+/// token must still be rejected — the admin branch must not weaken auth.
+#[sqlx::test(migrations = "../../migrations")]
+async fn stats_endpoint_rejects_invalid_bearer(pool: PgPool) {
+    let wallet = random_valid_wallet();
+    let usage = UsageTracker::new(Some(pool.clone()), None);
+    let app = stats_router(usage, Some(pool.clone()));
+
+    let (status, _json) =
+        get_stats_json_with_bearer(app, &wallet, "not-the-admin-token-and-not-a-session").await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 /// With both Postgres and Redis present, the stats response must surface the

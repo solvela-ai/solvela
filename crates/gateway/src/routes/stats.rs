@@ -145,26 +145,53 @@ pub async fn wallet_stats(
         }
     };
 
-    match verify_session_token(token, &state.session_secret) {
-        Ok(claims) => {
-            // Verify that the session token's wallet matches the requested path.
-            // build_session_token() in chat.rs populates the wallet field from
-            // extract_payer_wallet_from_payload(), which returns the actual payer
-            // (tx fee payer for direct, agent_pubkey for escrow).
-            if claims.wallet != address {
+    // Two accepted credentials, checked in order:
+    //
+    // 1. The operator's **admin token** (the same secret that gates
+    //    `/v1/admin/stats`). A valid admin token authorizes reading ANY wallet's
+    //    stats — including the per-tenant `by_tenant` breakdown — without a
+    //    chat-derived session token. This is the trusted server-to-server path
+    //    (e.g. Telsi's metering cron) for which a session token is impractical:
+    //    session tokens are only ever issued on a *paid* chat response and the
+    //    caller has no way to mint one out-of-band. Admin auth bypasses the
+    //    wallet-match check by design (the operator reads on behalf of any
+    //    wallet it custodies).
+    //
+    // 2. A wallet-scoped **session token** (the original path), which must match
+    //    the requested wallet exactly.
+    let is_admin = state
+        .admin_token
+        .as_ref()
+        .is_some_and(|admin| admin.verify(token.as_bytes()));
+
+    if is_admin {
+        // Audit trail: an operator admin token read this wallet's billing data
+        // (summary + per-tenant breakdown) on behalf of a wallet it custodies.
+        // Mirrors the structured log on `/v1/admin/stats` so admin reads are
+        // traceable during incident investigation.
+        tracing::info!(wallet = %address, "admin token authorized wallet stats read");
+    } else {
+        match verify_session_token(token, &state.session_secret) {
+            Ok(claims) => {
+                // Verify that the session token's wallet matches the requested path.
+                // build_session_token() in chat.rs populates the wallet field from
+                // extract_payer_wallet_from_payload(), which returns the actual payer
+                // (tx fee payer for direct, agent_pubkey for escrow).
+                if claims.wallet != address {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({ "error": "token wallet does not match requested address" })),
+                    )
+                        .into_response());
+                }
+            }
+            Err(_) => {
                 return Err((
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({ "error": "token wallet does not match requested address" })),
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({ "error": "invalid or expired session token" })),
                 )
                     .into_response());
             }
-        }
-        Err(_) => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": "invalid or expired session token" })),
-            )
-                .into_response());
         }
     }
 
