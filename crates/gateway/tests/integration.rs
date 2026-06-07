@@ -5388,9 +5388,14 @@ async fn test_payment_verified_reaches_provider_path() {
 /// check + reserve ahead of settlement.
 ///
 /// The `UsageTracker::noop()` tracker (no Redis) applies a $1.00 per-request hard
-/// cap. The test model `openai/gpt-4o` costs $10.00/M output tokens, so
-/// `max_tokens: 128000` estimates ~$1.28 — over the cap → `check_budget` returns
-/// `BudgetExceeded` → the route maps it to `BadRequest` → HTTP 400.
+/// cap. The test model `openai/gpt-4o` costs $2.50/M input tokens. We drive the
+/// estimate over the cap with a large PROMPT rather than a large `max_tokens`:
+/// after #500 the reservation caps completion tokens at the billing ceiling
+/// (`DEFAULT_COMPLETION_TOKENS_CAP` = 8192 for a model with no declared
+/// `max_output_tokens`), so a huge `max_tokens` no longer inflates the estimate
+/// beyond what billing can actually charge. A ~1.6M-char prompt ≈ 400k input
+/// tokens ≈ $1.00 input cost, ×1.05 fee → over the $1.00 cap → `check_budget`
+/// returns `BudgetExceeded` → the route maps it to `BadRequest` → HTTP 400.
 ///
 /// We inject a `SettleRecordingVerifier` that flips a shared `AtomicBool` if (and
 /// only if) `settle_payment` is reached. We assert the response is 400 AND the
@@ -5405,11 +5410,13 @@ async fn test_over_budget_request_never_settles() {
             settled: Arc::clone(&settled),
         }));
 
-    // ~$1.28 estimated — over the $1.00 no-Redis hard cap.
+    // ~1.6M chars → ~400k input tokens → ~$1.00 input @ $2.50/M; ×1.05 fee plus
+    // the capped completion ceiling pushes the estimate over the $1.00 no-Redis
+    // hard cap regardless of the (now-capped) completion ceiling.
+    let big_prompt = "A".repeat(1_600_000);
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
-        "messages": [{"role": "user", "content": "Hello!"}],
-        "max_tokens": 128000,
+        "messages": [{"role": "user", "content": big_prompt}],
     });
 
     let response = app
@@ -8018,5 +8025,127 @@ async fn settle_unknown_status_returns_400() {
         resp.status().is_client_error(),
         "unknown status enum value must return 4xx, got {}",
         resp.status()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #500: the budget reservation estimate must use the SAME completion-token
+// ceiling the billing path will cap to, so a request that OMITS `max_tokens`
+// cannot reserve under the billable maximum and then overshoot a tenant /
+// wallet / team cap by one request via the reconciliation delta.
+//
+// `DEFAULT_COMPLETION_TOKENS_CAP` is 8192 (crates/gateway/src/routes/chat/cost.rs).
+// For a model with no `max_output_tokens` (e.g. the test gpt-4o entry), the
+// billing path can charge for up to 8192 completion tokens. Before the fix the
+// reservation estimated only `max_tokens.unwrap_or(1000)` output tokens, so the
+// 402 quote / reservation was the cost of 1000 output tokens — strictly below
+// what billing can charge. These tests pin the reservation to the billing
+// ceiling.
+//
+// The 402 `accepts[].amount` is exactly the reserved/quoted atomic-USDC amount
+// (route computes `estimate_cost(...) -> usdc_atomic_amount_checked`), so the
+// 402 amount is the observable proxy for the reservation through the real path.
+// ---------------------------------------------------------------------------
+
+/// Atomic-USDC amount the registry would quote for `model` at the given input /
+/// output token counts. Mirrors the route's own derivation
+/// (`estimate_cost(...).total -> usdc_atomic_amount_checked`) so the test
+/// compares the route's 402 amount against the SAME single source of truth the
+/// route uses, rather than against a hand-derived magic number.
+fn registry_quote_atomic(model: &str, input_tokens: u32, output_tokens: u32) -> u64 {
+    let registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let cost = registry
+        .estimate_cost(model, input_tokens, output_tokens)
+        .expect("model present in test registry");
+    // The route converts the decimal-USDC `total` string to atomic units; replicate.
+    let dot = cost.total.find('.').unwrap();
+    let integer: u64 = cost.total[..dot].parse().unwrap();
+    let frac_padded = format!("{:0<6}", &cost.total[dot + 1..]);
+    let frac: u64 = frac_padded[..6].parse().unwrap();
+    integer * 1_000_000 + frac
+}
+
+/// Fetch the `exact`-scheme reserved/quoted amount from a 402 challenge.
+async fn quote_402_amount_atomic(body: &str) -> u64 {
+    let app = test_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "no-payment request must return 402"
+    );
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let pr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let accepts = pr["accepts"].as_array().expect("accepts array");
+    let exact = accepts
+        .iter()
+        .find(|a| a["scheme"] == "exact")
+        .expect("exact scheme present");
+    exact["amount"]
+        .as_str()
+        .expect("amount is a string")
+        .parse()
+        .expect("amount parses as u64 atomic units")
+}
+
+#[tokio::test]
+async fn reservation_omitted_max_tokens_uses_billing_ceiling_not_1000() {
+    // Prompt of exactly 40 chars -> estimate_input_tokens = 40/4 = 10 input tokens.
+    // gpt-4o declares no max_output_tokens, so the billing completion ceiling is
+    // DEFAULT_COMPLETION_TOKENS_CAP (8192).
+    let prompt = "x".repeat(40);
+    let body = format!(
+        r#"{{"model":"openai/gpt-4o","messages":[{{"role":"user","content":"{prompt}"}}]}}"#
+    );
+    let reserved = quote_402_amount_atomic(&body).await;
+
+    let billing_ceiling_quote = registry_quote_atomic("openai/gpt-4o", 10, 8192);
+    let old_undershoot_quote = registry_quote_atomic("openai/gpt-4o", 10, 1000);
+
+    assert_eq!(
+        reserved, billing_ceiling_quote,
+        "reservation for an omitted max_tokens request must equal the cost of the \
+         billing completion-token ceiling (8192 output tokens), not 1000"
+    );
+    assert!(
+        reserved > old_undershoot_quote,
+        "reservation ({reserved}) must exceed the old 1000-token undershoot \
+         ({old_undershoot_quote}) — otherwise billing can charge above the reservation"
+    );
+}
+
+#[tokio::test]
+async fn reservation_provided_max_tokens_is_unchanged() {
+    // When max_tokens IS provided and is below both the model max and the
+    // default cap, the reservation must equal exactly that provided count —
+    // the fix must not change the estimate for already-capped requests.
+    let prompt = "x".repeat(40); // 10 input tokens
+    let body = format!(
+        r#"{{"model":"openai/gpt-4o","messages":[{{"role":"user","content":"{prompt}"}}],"max_tokens":256}}"#
+    );
+    let reserved = quote_402_amount_atomic(&body).await;
+
+    let provided_quote = registry_quote_atomic("openai/gpt-4o", 10, 256);
+    assert_eq!(
+        reserved, provided_quote,
+        "with max_tokens=256 the reservation must equal the cost of 256 output \
+         tokens (unchanged behavior for already-capped requests)"
+    );
+    // And it must be strictly below the no-cap ceiling, proving the provided cap
+    // is honored rather than always reserving 8192.
+    let ceiling_quote = registry_quote_atomic("openai/gpt-4o", 10, 8192);
+    assert!(
+        reserved < ceiling_quote,
+        "a provided max_tokens=256 must reserve less than the 8192 ceiling"
     );
 }

@@ -41,6 +41,53 @@ impl PaymentScheme {
 /// gateway cannot have priced for.
 const DEFAULT_COMPLETION_TOKENS_CAP: u32 = 8192;
 
+/// The maximum `completion_tokens` the billing path can ever charge for, given
+/// the request's `max_tokens` and the model registry entry.
+///
+/// This is the SINGLE source of truth for the completion-token ceiling, shared
+/// by both:
+///   1. the UPFRONT budget reservation / 402 quote
+///      (`chat/mod.rs` — `estimate_cost(..., completion_token_ceiling(...))`), and
+///   2. the SETTLEMENT-time provider-usage cap
+///      ([`cap_usage_to_request_limits`], which clamps the provider's reported
+///      `completion_tokens` to this same value before pricing).
+///
+/// MONEY-PATH INVARIANT (#500): the reservation MUST be an upper bound on what
+/// billing can charge. If the estimate computed a *lower* completion ceiling
+/// than the settlement cap, an omitted-`max_tokens` request could reserve under
+/// its true billable maximum, pass the `(wallet, tenant)` budget gate just
+/// under the cap, then have its actual (larger) usage reconciled by
+/// `log_spend`'s `(billed − reserved)` delta WITHOUT a second cap check —
+/// overshooting the tenant/wallet/team cap by one request. Computing both the
+/// estimate and the settlement cap from THIS function makes that undershoot
+/// structurally impossible.
+///
+/// Ceiling = `min(req_max_tokens, model_info.max_output_tokens,
+/// DEFAULT_COMPLETION_TOKENS_CAP)`, where any absent (`None`) bound is skipped
+/// and the tightest of the present bounds wins. When `req_max_tokens` is `None`
+/// (the caller omitted it), the ceiling falls back to the model's declared max
+/// output (if any), then the default cap — i.e. the largest completion the
+/// gateway could end up billing for that request.
+pub(crate) fn completion_token_ceiling(
+    req_max_tokens: Option<u32>,
+    model_info: &ModelRegistration,
+) -> u32 {
+    [
+        req_max_tokens,
+        model_info.max_output_tokens,
+        Some(DEFAULT_COMPLETION_TOKENS_CAP),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(DEFAULT_COMPLETION_TOKENS_CAP)
+    // Floor at 1: a degenerate `max_tokens = Some(0)` would otherwise yield a
+    // zero ceiling, which under-reserves to nothing on the estimate path and
+    // caps billable completion to zero on the settlement path. The ceiling is
+    // an upper bound on billable completion tokens, so it must never be < 1.
+    .max(1)
+}
+
 /// Cap a provider-reported `Usage` to limits the gateway has actually priced
 /// for. Provider responses are trusted today (the gateway speaks
 /// OpenAI-compat to the provider and parses the JSON back), but a compromised
@@ -63,15 +110,11 @@ pub(crate) fn cap_usage_to_request_limits(
     req: &ChatRequest,
     model_info: &ModelRegistration,
 ) -> Usage {
-    let completion_cap = [
-        req.max_tokens,
-        model_info.max_output_tokens,
-        Some(DEFAULT_COMPLETION_TOKENS_CAP),
-    ]
-    .into_iter()
-    .flatten()
-    .min()
-    .unwrap_or(DEFAULT_COMPLETION_TOKENS_CAP);
+    // Shared single source of truth with the upfront reservation estimate
+    // (see [`completion_token_ceiling`] and #500): the value the settlement
+    // path caps the provider's `completion_tokens` to here is exactly the value
+    // the reservation reserved for, so billing can never exceed the reservation.
+    let completion_cap = completion_token_ceiling(req.max_tokens, model_info);
 
     let prompt = usage.prompt_tokens.min(model_info.context_window);
     let completion = usage.completion_tokens.min(completion_cap);
@@ -294,12 +337,19 @@ pub(crate) fn estimated_atomic_cost(
     registry: &solvela_router::models::ModelRegistry,
     model: &str,
     req: &ChatRequest,
+    model_info: &ModelRegistration,
 ) -> Result<u64, String> {
     let f = registry
         .estimate_cost(
             model,
             estimate_input_tokens(req),
-            req.max_tokens.unwrap_or(1000),
+            // MONEY-PATH INVARIANT (#500): the estimate's completion-token bound
+            // MUST be the same `completion_token_ceiling` the settlement path
+            // caps provider usage to — not a hardcoded 1000. Otherwise an
+            // omitted-`max_tokens` request on a model whose output ceiling
+            // exceeds 1000 would under-estimate (under-reserve / under-claim)
+            // relative to what billing can actually charge.
+            completion_token_ceiling(req.max_tokens, model_info),
         )
         .and_then(|c| {
             c.total
@@ -544,7 +594,7 @@ pub(crate) fn semantic_hit_full_atomic(
 ) -> Option<u64> {
     usage
         .and_then(|u| compute_actual_atomic_cost(u.prompt_tokens, u.completion_tokens, model_info))
-        .or_else(|| estimated_atomic_cost(registry, model, req).ok())
+        .or_else(|| estimated_atomic_cost(registry, model, req, model_info).ok())
         .filter(|&c| c > 0)
 }
 
@@ -987,6 +1037,79 @@ supports_vision = false
         }
     }
 
+    // =========================================================================
+    // completion_token_ceiling — single source of truth for the completion cap
+    // shared by the upfront reservation estimate and the settlement-time
+    // provider-usage cap (#500).
+    // =========================================================================
+
+    #[test]
+    fn completion_ceiling_omitted_max_tokens_falls_back_to_default_cap() {
+        // No req cap, no model cap → DEFAULT_COMPLETION_TOKENS_CAP (8192). This
+        // is the #500 case: the estimate previously used 1000, undershooting the
+        // billable maximum.
+        let mut model = test_model_info();
+        model.max_output_tokens = None;
+        assert_eq!(
+            completion_token_ceiling(None, &model),
+            DEFAULT_COMPLETION_TOKENS_CAP
+        );
+    }
+
+    #[test]
+    fn completion_ceiling_omitted_max_tokens_uses_model_max_when_tighter() {
+        // No req cap, model declares 2048 → 2048 (tighter than the 8192 default).
+        let model = test_model_info(); // max_output_tokens = Some(2048)
+        assert_eq!(completion_token_ceiling(None, &model), 2048);
+    }
+
+    #[test]
+    fn completion_ceiling_provided_max_tokens_wins_when_tightest() {
+        let model = test_model_info(); // max_output_tokens = Some(2048)
+        assert_eq!(completion_token_ceiling(Some(256), &model), 256);
+        // A provided cap above the model max is clamped to the model max.
+        assert_eq!(completion_token_ceiling(Some(9000), &model), 2048);
+    }
+
+    #[test]
+    fn completion_ceiling_floors_zero_max_tokens_to_one() {
+        // Degenerate input: `max_tokens = Some(0)` would otherwise yield a zero
+        // ceiling (under-reserving to nothing / capping billable completion to
+        // zero). The ceiling is an upper bound on billable tokens and must never
+        // drop below 1.
+        let model = test_model_info();
+        assert_eq!(completion_token_ceiling(Some(0), &model), 1);
+    }
+
+    #[test]
+    fn completion_ceiling_matches_cap_usage_completion_cap() {
+        // The settlement cap (`cap_usage_to_request_limits`) and the reservation
+        // ceiling MUST agree for every (req_max, model_max) combination — that
+        // agreement is the #500 fix. Cross-check the two for representative
+        // inputs by clamping a hugely-inflated completion via cap_usage and
+        // comparing to the ceiling directly.
+        for req_max in [None, Some(100), Some(5000), Some(20000)] {
+            for model_max in [None, Some(2048), Some(16384)] {
+                let mut model = test_model_info();
+                model.max_output_tokens = model_max;
+                model.context_window = 1_000_000; // don't let prompt cap interfere
+                let ceiling = completion_token_ceiling(req_max, &model);
+                let req = req_with_max_tokens(req_max);
+                let inflated = solvela_protocol::Usage {
+                    prompt_tokens: 1,
+                    completion_tokens: u32::MAX,
+                    total_tokens: u32::MAX,
+                };
+                let capped = cap_usage_to_request_limits(&inflated, &req, &model);
+                assert_eq!(
+                    capped.completion_tokens, ceiling,
+                    "settlement completion cap must equal the reservation ceiling \
+                     for req_max={req_max:?}, model_max={model_max:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn cap_usage_clamps_completion_to_req_max_tokens() {
         let model = test_model_info();
@@ -1245,9 +1368,41 @@ supports_vision = false
     #[test]
     fn test_estimated_atomic_cost_valid_small_amount() {
         let reg = registry_with_cost(1.0); // $1 per million tokens
-        let result = estimated_atomic_cost(&reg, "test-model", &simple_req());
+        let result = estimated_atomic_cost(&reg, "test-model", &simple_req(), &test_model_info());
         assert!(result.is_ok(), "valid cost should succeed, got: {result:?}");
         assert!(result.unwrap() > 0, "valid cost should be positive");
+    }
+
+    #[test]
+    fn test_estimated_atomic_cost_uses_completion_ceiling_not_1000() {
+        // #500 regression: with `max_tokens` omitted and a model whose output
+        // ceiling exceeds 1000, the estimate MUST price against the
+        // `completion_token_ceiling`, not the old hardcoded 1000. Pricing is
+        // linear in completion tokens, so a larger ceiling produces a strictly
+        // larger estimate. Drive the difference through the public estimate.
+        let reg = registry_with_cost(1.0);
+        let req = simple_req(); // no max_tokens
+
+        // Model A: completion ceiling = 1000 (matches the old hardcoded value).
+        let mut model_1000 = test_model_info();
+        model_1000.max_output_tokens = Some(1000);
+        let est_1000 = estimated_atomic_cost(&reg, "test-model", &req, &model_1000)
+            .expect("estimate should succeed");
+
+        // Model B: completion ceiling = 8000 (the #500 case — model allows more
+        // output than the old default). The estimate must reflect the higher
+        // ceiling, proving it no longer hardcodes 1000.
+        let mut model_8000 = test_model_info();
+        model_8000.max_output_tokens = Some(8000);
+        let est_8000 = estimated_atomic_cost(&reg, "test-model", &req, &model_8000)
+            .expect("estimate should succeed");
+
+        assert!(
+            est_8000 > est_1000,
+            "estimate for an 8000-token ceiling ({est_8000}) must exceed the \
+             1000-token-ceiling estimate ({est_1000}); the fallback must use \
+             completion_token_ceiling, not a hardcoded 1000"
+        );
     }
 
     // R1 note: tests asserting NaN/+Inf/-Inf input through `registry_with_cost`
@@ -1272,7 +1427,7 @@ supports_vision = false
         // (~1.05e15 USDC) exceeds the cap but stays finite.
         let huge_cost = 1.0e18_f64;
         let reg = registry_with_cost(huge_cost);
-        let result = estimated_atomic_cost(&reg, "test-model", &simple_req());
+        let result = estimated_atomic_cost(&reg, "test-model", &simple_req(), &test_model_info());
         match result {
             Err(e) => assert!(
                 e.contains("overflow") || e.contains("range") || e.contains("exceeds"),
@@ -1286,7 +1441,7 @@ supports_vision = false
     fn test_estimated_atomic_cost_unknown_model_returns_err() {
         let reg = registry_with_cost(1.0);
         let req = make_request("unknown-model", vec![user_msg("hello")]);
-        let result = estimated_atomic_cost(&reg, "unknown-model", &req);
+        let result = estimated_atomic_cost(&reg, "unknown-model", &req, &test_model_info());
         assert!(
             result.is_err(),
             "unknown model must return Err, got: {result:?}"
