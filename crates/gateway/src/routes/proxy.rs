@@ -323,6 +323,31 @@ pub async fn proxy_service(
         _ => {}
     }
 
+    // Issue #499: reject `require_tenant = TRUE` wallets on this path.
+    //
+    // The service-marketplace proxy does NOT run `check_budget`'s per-tenant
+    // budget matrix (see the spend-log note below), so a wallet provisioned as
+    // `require_tenant = TRUE` — meaning "may only spend under a tagged,
+    // provisioned tenant" — would otherwise bypass that fail-closed guarantee
+    // here. Rather than add full per-tenant metering to the proxy (deliberately
+    // out of scope), we REJECT before any replay record, settlement, or upstream
+    // call, so a rejected request takes no spend. The wallet must use
+    // `POST /v1/chat/completions`, which enforces the tenant matrix.
+    //
+    // Degradation matches the chat path exactly: `require_tenant_for_wallet`
+    // returns `false` (do not reject) when Redis is absent or on a transient
+    // Redis/DB read error (the wallet caps are the backstop) — see its doc.
+    let payer_wallet = extract_payer_wallet(&payload);
+    if state.usage.require_tenant_for_wallet(&payer_wallet).await {
+        warn!(
+            service_id = %service_id,
+            "proxy request rejected: payer wallet requires per-tenant budgeting (#499)"
+        );
+        return Err(GatewayError::Forbidden(
+            "this wallet requires per-tenant budgeting; use POST /v1/chat/completions".to_string(),
+        ));
+    }
+
     // Replay protection
     let tx_raw = match &payload.payload {
         solvela_x402::types::PayloadData::Direct(p) => &p.transaction,
@@ -435,8 +460,9 @@ pub async fn proxy_service(
         }
     }
 
-    // Extract the actual PAYER wallet (not the recipient pay_to address)
-    let wallet_address = extract_payer_wallet(&payload);
+    // The actual PAYER wallet (not the recipient pay_to address) was already
+    // extracted above for the #499 require_tenant gate; reuse it.
+    let wallet_address = payer_wallet;
     let tx_signature = match &payload.payload {
         solvela_x402::types::PayloadData::Direct(p) => Some(p.transaction.clone()),
         solvela_x402::types::PayloadData::Escrow(p) => Some(p.deposit_tx.clone()),

@@ -6687,6 +6687,65 @@ async fn test_proxy_returns_503_for_unhealthy_service() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #499 — require_tenant reject on the service-marketplace proxy path
+// ---------------------------------------------------------------------------
+
+/// #499 regression guard: a NORMAL wallet (`require_tenant` absent/false) must
+/// NOT be rejected by the new gate on the proxy path — it must reach settlement.
+///
+/// With `UsageTracker::noop()` (no Redis), `require_tenant_for_wallet` returns
+/// `false` (mirrors `check_budget`'s no-Redis branch — pinned by the usage.rs
+/// unit test), so the gate is a no-op. We inject a `SettleRecordingVerifier` and
+/// assert the settlement flag is `true` — proving the request passed the gate
+/// and settled (the response then fails downstream at the unresolvable
+/// `search.example.com` SSRF/fetch, which is expected and irrelevant here).
+///
+/// The positive-reject case (`require_tenant = TRUE` → 403, no settlement) is
+/// pinned by the proxy unit-level decision (the `Forbidden` mapping in error.rs
+/// `test_forbidden_returns_403`) plus the usage.rs degradation pin; it cannot be
+/// exercised end-to-end here because forcing `require_tenant = TRUE` requires a
+/// live Redis/DB-backed `wallet_budgets` row, which the no-backend `test_app`
+/// intentionally lacks.
+#[tokio::test]
+async fn test_proxy_normal_wallet_not_rejected_and_settles() {
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (app, _state) = test_app_with_provider_registry_and_exact_verifier(
+        mock_provider_registry(),
+        Arc::new(SettleRecordingVerifier {
+            settled: Arc::clone(&settled),
+        }),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/web-search/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/services/web-search/proxy"),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The #499 gate must NOT have rejected this normal wallet.
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "a normal (require_tenant=false) wallet must not be rejected by the #499 gate"
+    );
+    // Settlement must have been reached — the request passed the gate.
+    assert!(
+        settled.load(std::sync::atomic::Ordering::SeqCst),
+        "a normal wallet must reach settlement on the proxy path (gate is a no-op for it)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Registration tests (POST /v1/services/register)
 // ---------------------------------------------------------------------------
 

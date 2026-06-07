@@ -65,6 +65,15 @@ pub enum GatewayError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    /// The caller is authenticated/paying but not PERMITTED on this path. Maps
+    /// to 403 Forbidden. Used by the service-marketplace proxy to reject a
+    /// `require_tenant = TRUE` wallet (issue #499) BEFORE any settlement — such
+    /// a wallet may only spend through `POST /v1/chat/completions`, which runs
+    /// the per-tenant budget matrix. The inner message is forwarded verbatim and
+    /// must stay a static, safe-to-share string (no internal detail).
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     /// The request carried content the gateway accepts on the wire but does
     /// not yet process — currently image/multimodal content parts. Maps to
     /// 415 Unsupported Media Type. The inner message is forwarded verbatim
@@ -134,6 +143,7 @@ impl IntoResponse for GatewayError {
                 )
             }
             GatewayError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg.clone()),
+            GatewayError::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", msg.clone()),
             GatewayError::UnsupportedMediaType(msg) => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "unsupported_media_type",
@@ -256,6 +266,21 @@ mod tests {
             error_response(GatewayError::BadRequest("missing field".to_string())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["type"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn test_forbidden_returns_403() {
+        // Issue #499: require_tenant wallets rejected on the proxy path get 403.
+        let (status, json) = error_response(GatewayError::Forbidden(
+            "this wallet requires per-tenant budgeting; use POST /v1/chat/completions".to_string(),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json["error"]["type"], "forbidden");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("per-tenant budgeting"));
     }
 
     #[tokio::test]

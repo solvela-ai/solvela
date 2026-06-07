@@ -299,6 +299,35 @@ async fn handle_payment_submitted(
             data: None,
         })?;
 
+    // Issue #499: reject `require_tenant = TRUE` wallets on the A2A path.
+    //
+    // A2A dispatches `chat_with_model_fallback` DIRECTLY (see
+    // `reject_image_data_parts`' note), bypassing the chat route's
+    // `check_budget` per-tenant matrix. A wallet provisioned as
+    // `require_tenant = TRUE` ("may only spend under a tagged, provisioned
+    // tenant") would otherwise defeat that fail-closed guarantee here. Rather
+    // than add per-tenant metering to A2A (deliberately out of scope), we fail
+    // the task cleanly BEFORE any settlement / provider call, so a rejected
+    // request takes no spend. The wallet must use `POST /v1/chat/completions`.
+    //
+    // Degradation matches the chat path: `require_tenant_for_wallet` returns
+    // `false` (do not reject) when Redis is absent or on a transient Redis/DB
+    // read error (the wallet caps are the backstop) — see its doc.
+    let payer_wallet = crate::payment_util::extract_payer_wallet(&payload);
+    if state.usage.require_tenant_for_wallet(&payer_wallet).await {
+        warn!(
+            task_id,
+            "A2A request rejected: payer wallet requires per-tenant budgeting (#499)"
+        );
+        return Err(JsonRpcErrorData {
+            code: ERR_PAYMENT_FAILED,
+            message: "This wallet requires per-tenant budgeting; use \
+                      POST /v1/chat/completions"
+                .to_string(),
+            data: None,
+        });
+    }
+
     // Verify payment (skip in dev bypass mode)
     let tx_signature = if state.dev_bypass_payment {
         warn!(
@@ -1625,6 +1654,71 @@ supports_vision = false
         assert!(
             !err.message.contains("verifier"),
             "must not leak verifier internals: {}",
+            err.message
+        );
+    }
+
+    /// #499 regression guard: a NORMAL wallet (`require_tenant` false — the
+    /// no-Redis/noop `UsageTracker` reports false, pinned by the usage.rs unit
+    /// test) must NOT be rejected by the new require_tenant gate on the A2A path.
+    /// It must proceed PAST the gate to settlement/verification.
+    ///
+    /// With an empty facilitator, verification fails with ERR_PAYMENT_FAILED —
+    /// but crucially with the verifier-failure message, NOT the #499 per-tenant
+    /// rejection. If the gate had wrongly rejected this wallet, the error message
+    /// would mention "per-tenant budgeting" and verification would never run.
+    ///
+    /// The positive-reject case (`require_tenant = TRUE` → fail the task, no
+    /// settlement) cannot be exercised here: forcing the flag TRUE needs a live
+    /// DB-backed `wallet_budgets` row, which the noop-tracker test state lacks.
+    /// It is pinned by the usage.rs degradation test plus the shared accessor.
+    #[tokio::test]
+    async fn payment_submitted_normal_wallet_not_rejected_reaches_verification() {
+        let state = test_state_with_redis();
+        let new_params = user_msg_with_text("test", Some("test-model"));
+        let task_value = handle_new_request(&state, &new_params).await.expect("task");
+        let task_id = task_value["id"].as_str().expect("id").to_string();
+
+        let tx_raw = format!("test_tx_{}", uuid::Uuid::new_v4().simple());
+        let payload = json!({
+            "x402_version": solvela_x402::types::X402_VERSION,
+            "resource": {"url": "/v1/chat/completions", "method": "POST"},
+            "accepted": {
+                "scheme": "exact",
+                "network": solvela_x402::types::SOLANA_NETWORK,
+                "amount": "1000",
+                "asset": solvela_x402::types::USDC_MINT,
+                "pay_to": "11111111111111111111111111111111",
+                "max_timeout_seconds": solvela_x402::types::MAX_TIMEOUT_SECONDS,
+            },
+            "payload": { "transaction": tx_raw }
+        });
+
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            x402_meta::STATUS_KEY.to_string(),
+            json!(x402_meta::PAYMENT_SUBMITTED),
+        );
+        metadata.insert(x402_meta::PAYLOAD_KEY.to_string(), payload);
+
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: "pay".to_string(),
+                }],
+                metadata: Some(metadata),
+            },
+            task_id: Some(task_id.clone()),
+        };
+
+        let err = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &params)
+            .await
+            .expect_err("empty facilitator must fail verification (past the #499 gate)");
+        assert_eq!(err.code, ERR_PAYMENT_FAILED);
+        assert!(
+            !err.message.contains("per-tenant"),
+            "normal wallet must NOT be rejected by the #499 gate; got: {}",
             err.message
         );
     }
