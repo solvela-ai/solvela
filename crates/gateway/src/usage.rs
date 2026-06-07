@@ -908,6 +908,61 @@ impl UsageTracker {
         rollback_committed(&mut conn, &reservation.committed).await;
     }
 
+    /// Read the wallet's `require_tenant` flag from the SAME source
+    /// [`check_budget`] uses (`get_wallet_budget_config` → `wallet_budgets` row,
+    /// cached in Redis), so the answer cannot drift from the value the chat
+    /// route's tenant gate enforces.
+    ///
+    /// Used by the paid paths that do NOT run the full `check_budget` tenant
+    /// matrix — the A2A handler and the service-marketplace proxy (issue #499) —
+    /// to REJECT (fail-closed) a request from a `require_tenant = TRUE` wallet
+    /// before any settlement or provider call. Those paths deliberately do not
+    /// implement per-tenant metering; rejecting is the documented fix.
+    ///
+    /// **Degradation mirrors [`check_budget`] exactly** so the two paths agree:
+    /// - No Redis configured → returns `false` (do NOT reject). `check_budget`'s
+    ///   no-Redis branch likewise skips the tenant gates (degraded single-cap
+    ///   mode, Rule #12); enforcing here would diverge from the chat path.
+    /// - On a Redis connection failure, or a DB error reading `wallet_budgets`,
+    ///   `get_wallet_budget_config` returns the restrictive fallback whose
+    ///   `require_tenant` is `false` (it fails OPEN on the gate, with the
+    ///   restrictive hourly/daily/monthly caps as the non-forgeable backstop —
+    ///   see `restrictive_budget_fallback`). We surface that same `false` here,
+    ///   so a transient blip does not reject all traffic on these paths either.
+    ///
+    /// [`check_budget`]: Self::check_budget
+    pub async fn require_tenant_for_wallet(&self, wallet_address: &str) -> bool {
+        // No Redis → mirror check_budget's no-Redis branch: tenant gates are a
+        // feature of the Redis/DB-backed path; return false (don't reject).
+        let Some(client) = &self.redis_client else {
+            return false;
+        };
+
+        let mut conn = match client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(e) => {
+                // Fail OPEN for the gate on a Redis connection failure, matching
+                // the restrictive-fallback policy in get_wallet_budget_config:
+                // the wallet/team caps are the authoritative backstop, and
+                // rejecting all traffic on a transient blip is worse. (The chat
+                // path's check_budget denies on Redis failure via its own budget
+                // counters; here we have no counter to consult, so we mirror the
+                // get_wallet_budget_config fallback's require_tenant=false.)
+                warn!(
+                    wallet = %wallet_address,
+                    error = %e,
+                    "require_tenant_for_wallet: Redis connection failed; treating as \
+                     require_tenant=false (fail-open gate, wallet caps remain the backstop)"
+                );
+                return false;
+            }
+        };
+
+        let config =
+            get_wallet_budget_config(&mut conn, self.db_pool.as_ref(), wallet_address).await;
+        config.require_tenant
+    }
+
     /// Get spending summary for a wallet.
     pub async fn get_summary(&self, wallet_address: &str) -> Result<SpendSummary, UsageError> {
         if let Some(pool) = &self.db_pool {
@@ -1781,6 +1836,24 @@ mod tests {
             tenant_enforced: false,
             estimated_cost_usdc: None,
         });
+    }
+
+    /// Issue #499 degradation pin: with no Redis configured,
+    /// `require_tenant_for_wallet` must return `false` (do NOT reject),
+    /// mirroring `check_budget`'s no-Redis branch which skips the tenant gates
+    /// entirely (degraded single-cap mode, Rule #12). If this ever flipped to
+    /// `true`, the A2A/proxy paths would reject ALL traffic whenever Redis is
+    /// down — a divergence from the chat path.
+    #[tokio::test]
+    async fn test_require_tenant_for_wallet_noop_returns_false() {
+        let tracker = UsageTracker::noop();
+        assert!(
+            !tracker
+                .require_tenant_for_wallet("AnyWalletAddress11111111111111111111111111")
+                .await,
+            "no-Redis tracker must report require_tenant=false (do not reject), \
+             mirroring check_budget's no-Redis branch"
+        );
     }
 
     #[test]

@@ -1841,6 +1841,37 @@ fn valid_payment_header(resource_url: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(&json)
 }
 
+/// Build an escrow PaymentPayload header whose payer (`agent_pubkey`) is the
+/// caller-supplied value. `extract_payer_wallet` returns `agent_pubkey` verbatim
+/// for an escrow payload (no tx decode), so this lets a test target a unique,
+/// deterministic payer-wallet Redis key (`budget_config:{payer}`). Used by the
+/// #499 positive-reject proxy test.
+fn valid_escrow_payment_header_for_payer(resource_url: &str, agent_pubkey: &str) -> String {
+    let payload = PaymentPayload {
+        x402_version: 2,
+        resource: Resource {
+            url: resource_url.to_string(),
+            method: "POST".to_string(),
+        },
+        accepted: PaymentAccept {
+            scheme: "escrow".to_string(),
+            network: SOLANA_NETWORK.to_string(),
+            amount: TEST_PAYMENT_AMOUNT.to_string(),
+            asset: USDC_MINT.to_string(),
+            pay_to: TEST_RECIPIENT_WALLET.to_string(),
+            max_timeout_seconds: 300,
+            escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
+        },
+        payload: PayloadData::Escrow(EscrowPayload {
+            deposit_tx: base64::engine::general_purpose::STANDARD.encode(b"mock_deposit_tx_bytes"),
+            service_id: base64::engine::general_purpose::STANDARD.encode([0u8; 32]),
+            agent_pubkey: agent_pubkey.to_string(),
+        }),
+    };
+    let json = serde_json::to_vec(&payload).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(&json)
+}
+
 /// Build a valid escrow PaymentPayload header.
 fn valid_escrow_payment_header(resource_url: &str) -> String {
     let payload = PaymentPayload {
@@ -6691,6 +6722,207 @@ async fn test_proxy_returns_503_for_unhealthy_service() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(json["error"].as_str().unwrap().contains("unavailable"));
+}
+
+// ---------------------------------------------------------------------------
+// Issue #499 — require_tenant reject on the service-marketplace proxy path
+// ---------------------------------------------------------------------------
+
+/// #499 regression guard: a NORMAL wallet (`require_tenant` absent/false) must
+/// NOT be rejected by the new gate on the proxy path — it must reach settlement.
+///
+/// With `UsageTracker::noop()` (no Redis), `require_tenant_for_wallet` returns
+/// `false` (mirrors `check_budget`'s no-Redis branch — pinned by the usage.rs
+/// unit test), so the gate is a no-op. We inject a `SettleRecordingVerifier` and
+/// assert the settlement flag is `true` — proving the request passed the gate
+/// and settled (the response then fails downstream at the unresolvable
+/// `search.example.com` SSRF/fetch, which is expected and irrelevant here).
+///
+/// The positive-reject case (`require_tenant = TRUE` → 403, no settlement) is
+/// pinned by the proxy unit-level decision (the `Forbidden` mapping in error.rs
+/// `test_forbidden_returns_403`) plus the usage.rs degradation pin; it cannot be
+/// exercised end-to-end here because forcing `require_tenant = TRUE` requires a
+/// live Redis/DB-backed `wallet_budgets` row, which the no-backend `test_app`
+/// intentionally lacks.
+#[tokio::test]
+async fn test_proxy_normal_wallet_not_rejected_and_settles() {
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (app, _state) = test_app_with_provider_registry_and_exact_verifier(
+        mock_provider_registry(),
+        Arc::new(SettleRecordingVerifier {
+            settled: Arc::clone(&settled),
+        }),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/web-search/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/services/web-search/proxy"),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The #499 gate must NOT have rejected this normal wallet.
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "a normal (require_tenant=false) wallet must not be rejected by the #499 gate"
+    );
+    // Settlement must have been reached — the request passed the gate.
+    assert!(
+        settled.load(std::sync::atomic::Ordering::SeqCst),
+        "a normal wallet must reach settlement on the proxy path (gate is a no-op for it)"
+    );
+}
+
+/// #499 POSITIVE-reject pin (proxy path): a wallet provisioned
+/// `require_tenant = TRUE` MUST be rejected with 403 `GatewayError::Forbidden`
+/// BEFORE any settlement on the service-marketplace proxy path.
+///
+/// Forcing `require_tenant = TRUE` WITHOUT a live Postgres: `proxy_service`
+/// resolves the flag via `UsageTracker::require_tenant_for_wallet` →
+/// `get_wallet_budget_config`, which consults the Redis cache key
+/// `budget_config:{wallet}` FIRST and returns it verbatim on a hit, never
+/// touching the DB (`db_pool = None` here). We pre-seed that key with a
+/// `BudgetConfig { require_tenant: true, .. }` so the gate sees `true`.
+///
+/// The escrow header carries the payer pubkey directly (`extract_payer_wallet`
+/// returns `agent_pubkey` with no tx decode), so we pick a unique per-run wallet
+/// and seed exactly its key — no `"unknown"` global-key collision with other
+/// tests.
+///
+/// We inject a `SettleRecordingVerifier` and assert (a) the response is 403 and
+/// (b) `settled == false` — proving the reject fires BEFORE settlement, so a
+/// rejected request takes no spend. Self-skips if local Redis is unavailable.
+#[tokio::test]
+async fn test_proxy_require_tenant_wallet_rejected_before_settlement() {
+    let client = match redis::Client::open("redis://127.0.0.1:6379") {
+        Ok(c) if c.get_multiplexed_async_connection().await.is_ok() => c,
+        _ => {
+            eprintln!("skipping proxy require_tenant reject test: Redis unavailable");
+            return;
+        }
+    };
+
+    // Unique payer per run → unique `budget_config:{wallet}` key.
+    let payer = format!("ReqTenantProxy{}", uuid::Uuid::new_v4().simple());
+    let cache_key = format!("budget_config:{payer}");
+
+    // Seed the SAME cache key get_wallet_budget_config reads, with
+    // require_tenant=TRUE, via the public BudgetConfig serde shape.
+    let cached = serde_json::to_string(&gateway::usage::BudgetConfig {
+        hourly: None,
+        daily: Some(100.0),
+        monthly: None,
+        require_tenant: true,
+    })
+    .unwrap();
+    {
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("redis conn");
+        let _: () = redis::cmd("SET")
+            .arg(&cache_key)
+            .arg(&cached)
+            .arg("EX")
+            .arg(60)
+            .query_async(&mut conn)
+            .await
+            .expect("seed budget_config cache");
+    }
+
+    // Build the proxy app with a Redis-backed UsageTracker (db_pool = None) so the
+    // gate resolves require_tenant from the seeded Redis cache, plus a recording
+    // verifier so we can assert settlement was NOT reached.
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(SettleRecordingVerifier {
+            settled: Arc::clone(&settled),
+        }) as Arc<dyn PaymentVerifier>]);
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::new(None, Some(client.clone())),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+    });
+    let app = build_router(
+        Arc::clone(&state),
+        RateLimiter::new(RateLimitConfig::default()),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/web-search/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_escrow_payment_header_for_payer("/v1/services/web-search/proxy", &payer),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Clean up the seeded key regardless of assertion outcome below.
+    {
+        let mut conn = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("redis conn");
+        let _: Result<i64, _> = redis::cmd("DEL")
+            .arg(&cache_key)
+            .query_async(&mut conn)
+            .await;
+    }
+
+    // (a) The #499 gate must reject the require_tenant wallet with 403.
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "a require_tenant=TRUE wallet must be rejected with 403 on the proxy path"
+    );
+    // (b) Settlement must NOT have been reached — the gate fires first, so a
+    //     rejected request takes no spend.
+    assert!(
+        !settled.load(std::sync::atomic::Ordering::SeqCst),
+        "settlement must NOT run when a require_tenant wallet is rejected (#499)"
+    );
 }
 
 // ---------------------------------------------------------------------------
