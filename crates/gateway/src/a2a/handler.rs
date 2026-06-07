@@ -1723,6 +1723,190 @@ supports_vision = false
         );
     }
 
+    /// Like [`test_state_with_redis`] (Redis-backed `cache`, required by the A2A
+    /// task store) but the `UsageTracker` is also Redis-backed
+    /// (`UsageTracker::new(None, Some(redis))`, `db_pool = None`) so
+    /// `require_tenant_for_wallet` resolves the flag from the Redis cache key
+    /// `budget_config:{wallet}` — a cache hit never touches the DB, so no live
+    /// Postgres is needed. Self-returns `None` if local Redis is unavailable so
+    /// the caller can skip cleanly.
+    fn test_state_redis_tracker() -> Option<(Arc<AppState>, redis::Client)> {
+        use crate::cache::{CacheConfig, ResponseCache};
+
+        let redis_client = redis::Client::open("redis://127.0.0.1:6379").ok()?;
+        let cache = ResponseCache::from_client(redis_client.clone(), CacheConfig::default())
+            .expect("ResponseCache::from_client should not connect");
+        let state = Arc::new(AppState {
+            config: AppConfig::default(),
+            model_registry: ModelRegistry::from_toml(
+                r#"
+[models.test-model]
+provider = "test"
+model_id = "test-model"
+display_name = "Test"
+input_cost_per_million = 1.0
+output_cost_per_million = 2.0
+context_window = 4096
+supports_streaming = false
+supports_tools = false
+supports_vision = false
+                "#,
+            )
+            .expect("valid test model TOML"),
+            service_registry: RwLock::new(ServiceRegistry::empty()),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator: Facilitator::new(vec![]),
+            usage: UsageTracker::new(None, Some(redis_client.clone())),
+            cache: Some(cache),
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            prometheus_handle: None,
+            dev_bypass_payment: false,
+        });
+        Some((state, redis_client))
+    }
+
+    /// #499 POSITIVE-reject pin (A2A path): a wallet provisioned
+    /// `require_tenant = TRUE` MUST fail the task with `ERR_PAYMENT_FAILED` and
+    /// the per-tenant guidance message BEFORE any settlement.
+    ///
+    /// Forcing `require_tenant = TRUE` WITHOUT a live Postgres:
+    /// `require_tenant_for_wallet` → `get_wallet_budget_config` consults the
+    /// Redis cache key `budget_config:{wallet}` FIRST and returns it verbatim on
+    /// a hit, never touching the DB (`db_pool = None`). We seed that key with a
+    /// `BudgetConfig { require_tenant: true, .. }`. The escrow payload carries
+    /// the payer in `agent_pubkey` (returned verbatim by `extract_payer_wallet`),
+    /// so we use a unique per-run wallet and seed exactly its key.
+    ///
+    /// Proof settlement did NOT happen: the gate returns BEFORE the replay-record
+    /// / verify / settle block, so (a) the error is the gate's per-tenant message
+    /// (a verifier/replay failure would carry a different message — contrast the
+    /// `normal_wallet` test which asserts the inverse) and (b) the tx was never
+    /// recorded in the in-memory `replay_set` (the first side-effect past the
+    /// gate). Self-skips if local Redis is unavailable.
+    #[tokio::test]
+    async fn payment_submitted_require_tenant_wallet_rejected_before_settlement() {
+        let Some((state, redis_client)) = test_state_redis_tracker() else {
+            eprintln!("skipping A2A require_tenant reject test: Redis unavailable");
+            return;
+        };
+        let mut conn = match redis_client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("skipping A2A require_tenant reject test: Redis unavailable");
+                return;
+            }
+        };
+
+        let payer = format!("ReqTenantA2a{}", uuid::Uuid::new_v4().simple());
+        let cache_key = format!("budget_config:{payer}");
+        let cached = serde_json::to_string(&crate::usage::BudgetConfig {
+            hourly: None,
+            daily: Some(100.0),
+            monthly: None,
+            require_tenant: true,
+        })
+        .unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(&cache_key)
+            .arg(&cached)
+            .arg("EX")
+            .arg(60)
+            .query_async(&mut conn)
+            .await
+            .expect("seed budget_config cache");
+
+        let new_params = user_msg_with_text("test", Some("test-model"));
+        let task_value = handle_new_request(&state, &new_params).await.expect("task");
+        let task_id = task_value["id"].as_str().expect("id").to_string();
+
+        // Escrow payload so `extract_payer_wallet` returns `agent_pubkey` verbatim.
+        let deposit_tx = format!("a2a_deposit_{}", uuid::Uuid::new_v4().simple());
+        let service_id_b64 = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode([0u8; 32])
+        };
+        let payload = json!({
+            "x402_version": solvela_x402::types::X402_VERSION,
+            "resource": {"url": "/v1/chat/completions", "method": "POST"},
+            "accepted": {
+                "scheme": "escrow",
+                "network": solvela_x402::types::SOLANA_NETWORK,
+                "amount": "1000",
+                "asset": solvela_x402::types::USDC_MINT,
+                "pay_to": "11111111111111111111111111111111",
+                "max_timeout_seconds": solvela_x402::types::MAX_TIMEOUT_SECONDS,
+            },
+            "payload": {
+                "deposit_tx": deposit_tx,
+                "service_id": service_id_b64,
+                "agent_pubkey": payer,
+            }
+        });
+
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            x402_meta::STATUS_KEY.to_string(),
+            json!(x402_meta::PAYMENT_SUBMITTED),
+        );
+        metadata.insert(x402_meta::PAYLOAD_KEY.to_string(), payload);
+
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: "pay".to_string(),
+                }],
+                metadata: Some(metadata),
+            },
+            task_id: Some(task_id.clone()),
+        };
+
+        let err = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &params)
+            .await
+            .expect_err("require_tenant wallet must be rejected by the #499 gate");
+
+        // Clean up the seeded key regardless of assertion outcome below.
+        let _: Result<i64, _> = redis::cmd("DEL")
+            .arg(&cache_key)
+            .query_async(&mut conn)
+            .await;
+
+        // (a) The rejection is the #499 gate's, with the per-tenant guidance.
+        //     This message can ONLY be produced by the gate, which in the source
+        //     returns BEFORE the replay-record / verify / settle block — so its
+        //     presence is itself proof that settlement was never reached
+        //     (contrast `..normal_wallet..` which asserts the inverse).
+        assert_eq!(err.code, ERR_PAYMENT_FAILED);
+        assert!(
+            err.message.contains("per-tenant"),
+            "require_tenant wallet must be rejected by the #499 gate with the \
+             per-tenant guidance message; got: {}",
+            err.message
+        );
+        // (b) Settlement did NOT happen — concrete probe: the replay-record is the
+        //     FIRST side-effect past the gate. If the gate rejected pre-settlement
+        //     the deposit_tx was never recorded, so a fresh check_and_record_tx
+        //     now SUCCEEDS (returns Ok). If settlement code had run, the tx would
+        //     already be recorded and this call would Err (replay detected).
+        let cache = state.cache.as_ref().expect("redis cache configured");
+        cache.check_and_record_tx(&deposit_tx, false).await.expect(
+            "deposit_tx must NOT have been replay-recorded — the #499 gate \
+                 rejects before any replay record / settlement",
+        );
+    }
+
     /// Resending the same tx_raw a second time hits the replay-detected branch
     /// (the first call records the tx in Redis even though facilitator fails).
     #[tokio::test]
