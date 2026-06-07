@@ -1035,7 +1035,7 @@ pub async fn chat_completions(
                 compute_actual_atomic_cost(u.prompt_tokens, u.completion_tokens, model_info)
             } else {
                 Some(
-                    estimated_atomic_cost(&state.model_registry, &req.model, &req)
+                    estimated_atomic_cost(&state.model_registry, &req.model, &req, model_info)
                         .unwrap_or_else(|e| {
                             warn!(
                                 error = %e,
