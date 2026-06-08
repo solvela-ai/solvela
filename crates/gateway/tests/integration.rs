@@ -4539,6 +4539,89 @@ async fn test_stats_wallet_mismatch_returns_403() {
 }
 
 // ---------------------------------------------------------------------------
+// Stats endpoint contract smoke (drift guard)
+//
+// These no-DB tests lock the live `/v1/wallet/{address}/stats` contract so it
+// can't silently drift the way an external consumer hit (they integrated
+// against a stale spec: expected a different auth method, a `?tenant=` filter,
+// and cumulative — not windowed — totals). The real contract is: auth is
+// `Authorization: Bearer <token>` (operator admin token OR a wallet-scoped
+// session token), the window is `?days=N`, and the response carries a
+// `by_tenant[]` array. Auth + validation run BEFORE the DB-availability check,
+// so these assert the contract with `db_pool: None` — no live Postgres needed,
+// making them durable CI guards. (The DB-backed 200 shape, incl. the populated
+// `by_tenant[]` array, is already covered by the `#[sqlx::test]` cases in
+// `stats_http_redis.rs`; not duplicated here.)
+// ---------------------------------------------------------------------------
+
+/// The operator **admin token** (not a wallet-scoped session token) must be
+/// accepted as `Authorization: Bearer`, and a valid admin request with no DB
+/// configured must reach the DB gate and return 503. This is the load-bearing
+/// drift guard for the consumer's discrepancy: it proves auth is Bearer/admin
+/// (NOT session-only, NOT an `x-solvela-session` header) by reaching the gate
+/// that only runs *after* auth has passed.
+#[tokio::test]
+async fn test_stats_admin_token_accepted_reaches_db_gate_503() {
+    let app = test_app(); // test_app has db_pool: None
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/wallet/7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU/stats")
+                .header("authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // 503 (not 401/403) proves the admin token cleared auth and the wallet-match
+    // bypass, then hit the no-DB gate.
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["error"].as_str().unwrap().contains("no database"));
+}
+
+/// A non-Bearer Authorization header (e.g. Basic) must be rejected with 401 —
+/// only the `Bearer <token>` scheme is accepted. Locks the auth scheme so a
+/// switch to another scheme can't pass silently.
+#[tokio::test]
+async fn test_stats_non_bearer_auth_returns_401() {
+    let app = test_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/wallet/7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU/stats")
+                .header("authorization", "Basic dXNlcjpwYXNz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// `days=366` is one past the inclusive upper bound (1..=365) and must be 400.
+/// Complements the existing `days=0` lower-bound and `days=500` cases by
+/// pinning the exact boundary, so a widening of the range can't pass silently.
+#[tokio::test]
+async fn test_stats_days_upper_boundary_366_returns_400() {
+    let app = test_app();
+    let token = test_session_token();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/wallet/7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU/stats?days=366")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
 // Session ID echo (G.1)
 // ---------------------------------------------------------------------------
 
