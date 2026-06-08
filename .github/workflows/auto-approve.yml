@@ -81,7 +81,8 @@ jobs:
               /^crates\/escrow-tx\//,
               /^programs\/escrow\//,
               /^crates\/protocol\/src\/(payment|settlement|cost|constants)\.rs$/,
-              /^crates\/gateway\/src\/routes\/chat\/(cost|payment)\.rs$/,
+              /^crates\/gateway\/src\/routes\/chat\//,        // whole paid pipeline (mod/cost/payment/provider/response)
+              /^crates\/gateway\/src\/middleware\/(x402|rate_limit)\.rs$/, // payment decode/replay gate + payer-keyed rate limit
               /^crates\/gateway\/src\/escrow\//,
               /^crates\/gateway\/src\/a2a\//,
               /^crates\/gateway\/src\/usage\.rs$/,
