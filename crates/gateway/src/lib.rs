@@ -104,6 +104,16 @@ pub struct AppState {
     /// When `true`, skip payment verification for chat requests (dev mode only).
     /// Always `false` in production — set via `SOLVELA_DEV_BYPASS_PAYMENT=true` (RCR_DEV_BYPASS_PAYMENT accepted as deprecated fallback).
     pub dev_bypass_payment: bool,
+    /// Per-client (IP) rate limiter for the **anonymous free-tier bypass** path.
+    ///
+    /// Distinct from the global outer-layer limiter (wired in `build_router`):
+    /// the outer limiter runs BEFORE model resolution and cannot know a request
+    /// is free, so the free-tier cap is enforced inside the chat handler on the
+    /// zero-cost branch only. Stricter default than the paid limit
+    /// ([`RateLimitConfig::free_default`]); override via
+    /// `SOLVELA_FREE_TIER_RATE_LIMIT`. Keyed on the TCP peer IP (never a
+    /// client-supplied header — GHSA-6ggq-cvwx-4f67).
+    pub free_rate_limiter: RateLimiter,
 }
 
 impl AppState {

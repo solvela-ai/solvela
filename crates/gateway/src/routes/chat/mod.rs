@@ -33,8 +33,8 @@ use crate::AppState;
 
 use cost::{
     cap_usage_to_request_limits, completion_token_ceiling, compute_actual_atomic_cost,
-    estimate_input_tokens, estimated_atomic_cost, scheme_realized_discount, spend_cost_atomic,
-    usdc_atomic_amount_checked, usdc_f64_to_atomic_safe, PaymentScheme,
+    estimate_input_tokens, estimated_atomic_cost, is_free_estimate, scheme_realized_discount,
+    spend_cost_atomic, usdc_atomic_amount_checked, usdc_f64_to_atomic_safe, PaymentScheme,
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
@@ -78,6 +78,10 @@ const MAX_TOKENS_LIMIT: u32 = 128_000;
 /// 5. Support both JSON and SSE streaming responses
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
+    // Infallible peer-address extractor. Yields `None` when `ConnectInfo` is
+    // absent (e.g. `oneshot` integration tests, proxy misconfig) so the free-tier
+    // path degrades to the stricter "unknown" bucket rather than 500-ing.
+    peer_addr: crate::middleware::rate_limit::PeerAddr,
     headers: HeaderMap,
     Json(mut req): Json<ChatRequest>,
 ) -> Result<Response, GatewayError> {
@@ -346,10 +350,12 @@ pub async fn chat_completions(
     }
 
     if payment_header.is_none() {
-        // Return 402 with pricing info
-        counter!("solvela_payments_total", "status" => "none").increment(1);
-        info!(model = %req.model, "no payment signature, returning 402");
-
+        // Compute the upfront cost estimate ONCE. This same `atomic_amount` is the
+        // single source of truth for two decisions below:
+        //   1. free-ness (is_free_estimate → zero-cost bypass), and
+        //   2. the amount advertised in the 402 `accepts[]` for a paid model.
+        // Deriving both from one estimate means a pricing change can never make a
+        // paid model silently bypass payment (or a free model wrongly 402).
         let cost = state
             .model_registry
             .estimate_cost(
@@ -368,6 +374,104 @@ pub async fn chat_completions(
                 req.model, e
             ))
         })?;
+
+        // ── Zero-cost (free-tier) bypass ──────────────────────────────────────
+        //
+        // A model is free IFF its computed estimate atomic cost is exactly 0
+        // (e.g. a 0.0/0.0-priced model). Such a request must be SERVED, not 402'd
+        // for a $0 payment. A paid model (atomic > 0) falls through to the 402
+        // below unchanged — `is_free_estimate` fails closed on any non-"0" value.
+        if is_free_estimate(&atomic_amount) {
+            // Anti-abuse: the free path is anonymous (no payer wallet), so it is
+            // rate-limited per client IP, STRICTER than the paid limit. Enforced
+            // BEFORE any provider work so a limited free request never reaches the
+            // upstream provider quota. Keyed on the TCP peer IP (never a
+            // client-supplied header — GHSA-6ggq-cvwx-4f67); absent ConnectInfo
+            // falls back to the shared stricter "unknown" bucket.
+            let free_client_id = crate::middleware::rate_limit::connect_info_client_id(peer_addr.0);
+            if state
+                .free_rate_limiter
+                .check(&free_client_id)
+                .await
+                .is_err()
+            {
+                counter!("solvela_payments_total", "status" => "free_rate_limited").increment(1);
+                warn!(
+                    client_id = %free_client_id,
+                    model = %req.model,
+                    "free-tier rate limit exceeded"
+                );
+                return Ok(crate::middleware::rate_limit::rate_limited_response(
+                    state.free_rate_limiter.config(),
+                ));
+            }
+
+            counter!("solvela_payments_total", "status" => "free").increment(1);
+            info!(model = %req.model, "zero-cost model — serving free-tier request without payment");
+
+            // Free requests reach a provider, so they must run the guard (same as
+            // the dev-bypass and paid paths).
+            run_prompt_guard(&req.messages)?;
+
+            let ctx = ProviderCallContext {
+                state: &state,
+                req: &req,
+                model_info,
+                headers: &headers,
+                debug_enabled,
+                request_start,
+                routing_tier: &routing_tier,
+                routing_score,
+                routing_profile: &routing_profile,
+                session_id: &session_id,
+                payment_status: PaymentStatus::Free,
+            };
+
+            return match provider::execute_provider_call(&ctx).await {
+                Ok(result) => {
+                    // Log spend at $0 via the existing fire-and-forget path so the
+                    // free tier still shows up in usage/observability. `cost_usdc`
+                    // is 0.0 and `estimated_cost_usdc` is None, so `log_spend`
+                    // increments counters by 0 (no divide-by-zero / no fail-closed
+                    // path is reachable for a zero amount). Anonymous: there is no
+                    // payer wallet, so a sentinel marks the row as free-tier.
+                    let usage = result
+                        .usage
+                        .as_ref()
+                        .map(|u| cap_usage_to_request_limits(u, &req, model_info));
+                    state.usage.log_spend(SpendLogEntry {
+                        wallet_address: "free-tier".to_string(),
+                        model: req.model.clone(),
+                        provider: result
+                            .actual_provider
+                            .unwrap_or_else(|| model_info.provider.clone()),
+                        input_tokens: usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                        output_tokens: usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                        cost_usdc: 0.0,
+                        tx_signature: None,
+                        request_id: request_id.clone(),
+                        session_id: session_id.clone(),
+                        tenant: tenant.clone(),
+                        tenant_enforced: false,
+                        estimated_cost_usdc: None,
+                    });
+                    Ok(result.response)
+                }
+                Err(e) => Err(match e {
+                    ProviderCallError::AllProvidersFailed { model, error, .. } => {
+                        GatewayError::Internal(format!(
+                            "all providers failed for free model '{}': {}",
+                            model, error
+                        ))
+                    }
+                    ProviderCallError::Internal(msg) => GatewayError::Internal(msg),
+                }),
+            };
+        }
+
+        // Return 402 with pricing info (paid model, no payment header)
+        counter!("solvela_payments_total", "status" => "none").increment(1);
+        info!(model = %req.model, "no payment signature, returning 402");
 
         let mut accepts = vec![solvela_x402::types::PaymentAccept {
             scheme: "exact".to_string(),

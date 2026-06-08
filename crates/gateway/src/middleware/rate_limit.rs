@@ -1,15 +1,45 @@
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{
-    extract::Request,
+    extract::{ConnectInfo, FromRequestParts, Request},
+    http::request::Parts,
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use tokio::sync::Mutex;
 use tracing::warn;
+
+/// Infallible extractor for the TCP peer address, for use in route handlers that
+/// need the actual connection IP (e.g. free-tier rate limiting) WITHOUT 500-ing
+/// when `ConnectInfo` is absent.
+///
+/// axum 0.8's `ConnectInfo<T>` only implements `FromRequestParts` (not
+/// `OptionalFromRequestParts`), so `Option<ConnectInfo<_>>` is not a valid
+/// extractor and a bare `ConnectInfo` would reject every request that lacks the
+/// extension — exactly the `oneshot` test path and any proxy-misconfig. This
+/// wrapper reads the same extension the middleware reads
+/// (`request.extensions().get::<ConnectInfo<SocketAddr>>()`) and yields `None`
+/// instead of failing. Pair with [`connect_info_client_id`] for keying.
+#[derive(Debug, Clone, Copy)]
+pub struct PeerAddr(pub Option<SocketAddr>);
+
+impl<S: Send + Sync> FromRequestParts<S> for PeerAddr {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(PeerAddr(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ci| ci.0),
+        ))
+    }
+}
 
 /// Configuration for the rate limiter.
 #[derive(Debug, Clone)]
@@ -43,6 +73,24 @@ impl RateLimitConfig {
             ..Self::default()
         }
     }
+
+    /// Default rate-limit budget for the anonymous **free-tier** bypass path.
+    ///
+    /// The zero-cost bypass serves requests with NO payer wallet, so abuse can
+    /// only be bounded by client IP. This default is intentionally STRICTER than
+    /// the paid `max_requests` (60/min): free requests get 5 per 60s window. The
+    /// `unknown` bucket (no `ConnectInfo`) is stricter still, matching the
+    /// default policy.
+    ///
+    /// Overridable via `SOLVELA_FREE_TIER_RATE_LIMIT` — see
+    /// [`with_max_requests`](Self::with_max_requests).
+    pub fn free_default() -> Self {
+        Self {
+            max_requests: 5,
+            window: Duration::from_secs(60),
+            unknown_max_requests: 2,
+        }
+    }
 }
 
 /// Per-client rate limit state.
@@ -70,6 +118,14 @@ impl RateLimiter {
             entries: Arc::new(Mutex::new(HashMap::new())),
             last_emergency_cleanup: Arc::new(tokio::sync::Mutex::new(None)),
         }
+    }
+
+    /// Read-only access to this limiter's config.
+    ///
+    /// Used by the free-tier in-handler path to build a matching 429 response
+    /// (limit/window headers) via [`rate_limited_response`].
+    pub fn config(&self) -> &RateLimitConfig {
+        &self.config
     }
 
     /// Check if a request from the given client should be allowed.
@@ -182,8 +238,21 @@ pub async fn rate_limit(request: Request, next: Next) -> Response {
         let limiter = limiter.clone();
         match limiter.check(&client_id).await {
             Ok(remaining) => {
-                let mut response = next.run(request).await;
-                // Add standard rate limit headers
+                let response = next.run(request).await;
+                // Do NOT overwrite rate-limit headers when the downstream handler
+                // already returned a 429. An in-handler free-tier limiter
+                // (built by `rate_limited_response`) produces its own
+                // authoritative `x-ratelimit-*` headers reflecting the FREE limit
+                // (e.g. 5/min). The outer limiter's success arm fired only
+                // because this request was under the (looser, e.g. 60/min) OUTER
+                // cap; re-inserting those values here would tell the client it
+                // has "40 remaining" alongside a 429, which would make it ignore
+                // `retry-after` and hammer. Preserve the inner 429's headers.
+                if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                    return response;
+                }
+                // Add standard rate limit headers (non-429 responses only).
+                let mut response = response;
                 let headers = response.headers_mut();
                 if let Ok(val) = limiter.config.max_requests.to_string().parse() {
                     headers.insert("x-ratelimit-limit", val);
@@ -198,29 +267,7 @@ pub async fn rate_limit(request: Request, next: Next) -> Response {
             }
             Err(()) => {
                 warn!(client_id, "rate limit exceeded");
-                let reset_secs = limiter.config.window.as_secs();
-                let mut response = (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    axum::Json(serde_json::json!({
-                        "error": {
-                            "type": "rate_limit_exceeded",
-                            "message": "Too many requests. Please slow down.",
-                        }
-                    })),
-                )
-                    .into_response();
-                let headers = response.headers_mut();
-                if let Ok(limit_val) = limiter.config.max_requests.to_string().parse() {
-                    headers.insert("x-ratelimit-limit", limit_val);
-                }
-                if let Ok(remaining_val) = "0".parse() {
-                    headers.insert("x-ratelimit-remaining", remaining_val);
-                }
-                if let Ok(reset_val) = reset_secs.to_string().parse::<axum::http::HeaderValue>() {
-                    headers.insert("x-ratelimit-reset", reset_val.clone());
-                    headers.insert("retry-after", reset_val);
-                }
-                response
+                rate_limited_response(&limiter.config)
             }
         }
     } else {
@@ -281,6 +328,69 @@ fn extract_client_id(request: &Request) -> String {
            all unidentified clients share a single stricter rate limit"
     );
     "unknown".to_string()
+}
+
+/// Derive a rate-limit client id for the **anonymous free-tier path** from the
+/// Tower-injected peer socket address.
+///
+/// The free bypass has no payer wallet, so the only honest identity is the
+/// actual TCP peer IP (from `ConnectInfo`). When `ConnectInfo` is absent
+/// (`addr == None`, e.g. behind a misconfigured proxy or in `oneshot` tests),
+/// fall back to the shared stricter `"unknown"` bucket.
+///
+/// **GHSA-6ggq-cvwx-4f67 invariant:** this NEVER keys on a client-supplied
+/// header (`X-Forwarded-For` et al.) — only the cryptographically-/transport-
+/// grounded peer address — so a free client cannot spoof its way into a fresh
+/// bucket. Mirrors steps 2–3 of [`extract_client_id`].
+pub fn connect_info_client_id(addr: Option<std::net::SocketAddr>) -> String {
+    match addr {
+        Some(a) => a.ip().to_string(),
+        None => {
+            warn!(
+                "free-tier rate limiter falling back to shared 'unknown' bucket — ConnectInfo \
+                 not configured; all unidentified free clients share a single stricter limit"
+            );
+            "unknown".to_string()
+        }
+    }
+}
+
+/// Build the canonical 429 Too Many Requests response.
+///
+/// Single source of truth for the rate-limit-exceeded body + `x-ratelimit-*` /
+/// `retry-after` headers, shared by the global rate-limit middleware and the
+/// in-handler free-tier limiter so both emit byte-identical 429s. `remaining`
+/// is always `0` here (the request was rejected).
+///
+/// These headers are **authoritative** on the wire: the outer `rate_limit`
+/// middleware now preserves any 429 response's headers unchanged (it returns
+/// early on `StatusCode::TOO_MANY_REQUESTS` instead of re-inserting its own
+/// looser limit/remaining values), so a free-tier 429 built here reaches the
+/// client carrying the correct FREE limit and `remaining == 0`.
+pub fn rate_limited_response(config: &RateLimitConfig) -> Response {
+    let reset_secs = config.window.as_secs();
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        axum::Json(serde_json::json!({
+            "error": {
+                "type": "rate_limit_exceeded",
+                "message": "Too many requests. Please slow down.",
+            }
+        })),
+    )
+        .into_response();
+    let headers = response.headers_mut();
+    if let Ok(limit_val) = config.max_requests.to_string().parse() {
+        headers.insert("x-ratelimit-limit", limit_val);
+    }
+    if let Ok(remaining_val) = "0".parse() {
+        headers.insert("x-ratelimit-remaining", remaining_val);
+    }
+    if let Ok(reset_val) = reset_secs.to_string().parse::<axum::http::HeaderValue>() {
+        headers.insert("x-ratelimit-reset", reset_val.clone());
+        headers.insert("retry-after", reset_val);
+    }
+    response
 }
 
 #[cfg(test)]
@@ -380,6 +490,54 @@ mod tests {
         assert_eq!(config.max_requests, 10000);
         assert_eq!(config.unknown_max_requests, 10); // unchanged from default
         assert_eq!(config.window, Duration::from_secs(60)); // unchanged
+    }
+
+    #[test]
+    fn test_free_default_is_stricter_than_paid() {
+        let free = RateLimitConfig::free_default();
+        let paid = RateLimitConfig::default();
+        assert!(
+            free.max_requests < paid.max_requests,
+            "free-tier limit ({}) must be stricter than the paid limit ({})",
+            free.max_requests,
+            paid.max_requests
+        );
+        assert_eq!(free.max_requests, 5);
+        assert_eq!(free.unknown_max_requests, 2);
+        assert_eq!(free.window, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_connect_info_client_id_uses_peer_ip() {
+        let addr: std::net::SocketAddr = "203.0.113.7:54321".parse().unwrap();
+        // The PORT must be dropped — keying must be per-IP, not per-connection,
+        // or each new TCP connection would escape into a fresh bucket.
+        assert_eq!(connect_info_client_id(Some(addr)), "203.0.113.7");
+    }
+
+    #[test]
+    fn test_connect_info_client_id_unknown_when_absent() {
+        // No ConnectInfo (e.g. oneshot tests / misconfigured proxy) → the shared
+        // stricter "unknown" bucket, never a per-request-spoofable value.
+        assert_eq!(connect_info_client_id(None), "unknown");
+    }
+
+    #[tokio::test]
+    async fn test_rate_limited_response_shape_and_headers() {
+        let config = RateLimitConfig::free_default();
+        let response = rate_limited_response(&config);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let headers = response.headers();
+        assert_eq!(headers.get("x-ratelimit-limit").unwrap(), "5");
+        assert_eq!(headers.get("x-ratelimit-remaining").unwrap(), "0");
+        assert_eq!(headers.get("x-ratelimit-reset").unwrap(), "60");
+        assert_eq!(headers.get("retry-after").unwrap(), "60");
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["type"], "rate_limit_exceeded");
     }
 
     #[test]

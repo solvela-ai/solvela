@@ -85,6 +85,9 @@ fn router_with_pool(pool: PgPool) -> Router {
         api_key_hmac_secret: None,
         prometheus_handle: None,
         dev_bypass_payment: false,
+        free_rate_limiter: gateway::middleware::rate_limit::RateLimiter::new(
+            gateway::middleware::rate_limit::RateLimitConfig::free_default(),
+        ),
     });
 
     Router::new()

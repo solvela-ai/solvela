@@ -437,6 +437,25 @@ fn usdc_atomic_amount(decimal_str: &str) -> String {
     usdc_atomic_amount_checked(decimal_str).unwrap_or_else(|_| "0".to_string())
 }
 
+/// Decide whether a request is **free** from its already-computed atomic-cost
+/// estimate — the SAME `atomic_amount` string the 402 challenge advertises in
+/// its `accepts[]` (the output of [`usdc_atomic_amount_checked`] over the
+/// registry `estimate_cost` total).
+///
+/// This is the single source of truth for free-ness on the no-payment path: a
+/// model is free **iff** its computed estimate atomic cost is exactly `0`. We do
+/// NOT separately inspect `input_cost_per_million`/`output_cost_per_million` —
+/// keying off the same estimate the 402 quotes guarantees a pricing change can
+/// never let a *paid* model silently bypass payment (and vice-versa).
+///
+/// **Fail-closed:** a non-numeric atomic string (which should be impossible here
+/// — it is produced by `usdc_atomic_amount_checked`) is treated as NOT free, so
+/// an unparseable amount can never open the zero-cost bypass. Returning `false`
+/// keeps the paid 402 path, which is the safe default.
+pub(crate) fn is_free_estimate(atomic_amount: &str) -> bool {
+    matches!(atomic_amount.trim().parse::<u64>(), Ok(0))
+}
+
 /// Pricing for a semantic-cache hit, in atomic USDC units.
 ///
 /// The normal path (cache miss / exact-match hit) is represented by the absence
@@ -655,6 +674,33 @@ mod tests {
     #[test]
     fn test_usdc_atomic_max_precision() {
         assert_eq!(usdc_atomic_amount("0.000001"), "1");
+    }
+
+    #[test]
+    fn test_is_free_estimate_zero_is_free() {
+        // The exact string a free (0.0/0.0) model's 402 quote carries.
+        assert!(is_free_estimate("0"));
+        assert!(is_free_estimate(" 0 ")); // tolerate incidental whitespace
+    }
+
+    #[test]
+    fn test_is_free_estimate_nonzero_is_not_free() {
+        // Smallest billable amount (1 micro-USDC) must NOT be treated as free.
+        assert!(!is_free_estimate("1"));
+        assert!(!is_free_estimate("2625"));
+        assert!(!is_free_estimate("1000000"));
+    }
+
+    #[test]
+    fn test_is_free_estimate_fails_closed_on_garbage() {
+        // A non-numeric / malformed atomic string must fail CLOSED (not free),
+        // so an unparseable amount can never open the zero-cost bypass for a
+        // paid request. Defense-in-depth: the producer is
+        // `usdc_atomic_amount_checked`, which never emits these.
+        assert!(!is_free_estimate(""));
+        assert!(!is_free_estimate("abc"));
+        assert!(!is_free_estimate("0.0")); // atomic units are integers, not decimals
+        assert!(!is_free_estimate("-1"));
     }
 
     #[test]

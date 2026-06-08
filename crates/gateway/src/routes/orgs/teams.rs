@@ -429,6 +429,9 @@ mod tests {
             prometheus_handle: None,
             api_key_hmac_secret: None,
             dev_bypass_payment: false,
+            free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::free_default(),
+            ),
         });
 
         let ctx = OrgContext {
