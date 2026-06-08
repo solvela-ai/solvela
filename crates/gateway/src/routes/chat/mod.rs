@@ -406,6 +406,36 @@ pub async fn chat_completions(
                 ));
             }
 
+            // Gate order on the free path is deliberate:
+            //   1. per-IP free check (above) — cheap, in-memory, rejects a single
+            //      spamming IP without a Redis round-trip.
+            //   2. aggregate cap (here) — global across ALL clients, bounds total
+            //      free throughput below the upstream provider's SHARED ceiling
+            //      (the per-IP check can't: many distinct IPs each under their
+            //      per-IP cap can still collectively exceed Google's ~15 RPM).
+            //   3. prompt guard → provider (below).
+            // Both rate gates run BEFORE any provider call so a rejected request
+            // never reaches the upstream free-tier quota. The cap uses Redis when
+            // configured (cross-instance) and degrades to in-memory on Redis error
+            // (it never goes unbounded); see `FreeTierGlobalCap::check`.
+            if state
+                .free_global_cap
+                .check(state.cache.as_ref())
+                .await
+                .is_err()
+            {
+                counter!("solvela_payments_total", "status" => "free_global_rate_limited")
+                    .increment(1);
+                warn!(
+                    model = %req.model,
+                    cap = state.free_global_cap.cap(),
+                    "free-tier aggregate (global) rate cap exceeded — returning gateway 429 before upstream provider 429s"
+                );
+                return Ok(crate::middleware::rate_limit::rate_limited_response(
+                    &state.free_global_cap.as_rate_limit_config(),
+                ));
+            }
+
             counter!("solvela_payments_total", "status" => "free").increment(1);
             info!(model = %req.model, "zero-cost model — serving free-tier request without payment");
 

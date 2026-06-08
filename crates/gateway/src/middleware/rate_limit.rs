@@ -212,6 +212,145 @@ impl RateLimiter {
     }
 }
 
+/// Default aggregate (global, all-clients-combined) free-tier requests-per-minute
+/// cap.
+///
+/// This MUST stay BELOW the upstream provider's SHARED free-tier ceiling. The
+/// free model is served on Google's free Gemini API tier, whose hard limit is
+/// ~15 requests/min SHARED across the whole gateway API key. The per-IP free
+/// limiter ([`RateLimitConfig::free_default`]) cannot protect that shared
+/// ceiling — many distinct IPs each under their per-IP cap can still collectively
+/// exceed 15 RPM, making Google 429 the gateway and surfacing as errors for ALL
+/// free users. 12 leaves headroom below 15 so the gateway returns its OWN clean
+/// 429 before Google's leaks through. Override via `SOLVELA_FREE_TIER_GLOBAL_RPM`.
+pub const FREE_TIER_GLOBAL_RPM_DEFAULT: u32 = 12;
+
+/// In-memory fixed-window state for the aggregate free-tier cap.
+///
+/// A single shared counter (NOT per-client): `(epoch_minute, count)`. Used as
+/// the backing store when Redis is absent, AND as the degradation fallback when
+/// a configured Redis errors at runtime. Per-instance only — acceptable for
+/// single-instance/dev; multi-instance deployments rely on the Redis path so the
+/// counter is shared across instances (see [`FreeTierGlobalCap::check`]).
+#[derive(Debug, Default)]
+struct GlobalWindow {
+    epoch_minute: u64,
+    count: u64,
+}
+
+/// Aggregate (global) free-tier rate cap — total free-model throughput across
+/// ALL clients per 1-minute fixed window, kept below the upstream provider's
+/// shared ceiling.
+///
+/// Distinct from [`RateLimiter`], which is per-client. This caps the COMBINED
+/// free traffic so the gateway 429s before the upstream provider does. Backing
+/// store is Redis when configured (cross-instance: every instance increments one
+/// shared key), degrading to an in-memory per-instance counter when Redis is
+/// absent or errors at runtime.
+#[derive(Debug, Clone)]
+pub struct FreeTierGlobalCap {
+    /// Max free requests allowed across all clients per window.
+    cap: u32,
+    /// In-memory fallback counter (Redis-absent and Redis-error paths).
+    window: Arc<std::sync::Mutex<GlobalWindow>>,
+}
+
+impl FreeTierGlobalCap {
+    /// Window length in seconds. Fixed 1-minute window to match the provider's
+    /// per-minute (RPM) ceiling and the `retry-after` advertised on rejection.
+    pub const WINDOW_SECS: u64 = 60;
+
+    /// Create a cap with the given per-minute limit.
+    pub fn new(cap: u32) -> Self {
+        Self {
+            cap,
+            window: Arc::new(std::sync::Mutex::new(GlobalWindow::default())),
+        }
+    }
+
+    /// The configured per-minute cap.
+    pub fn cap(&self) -> u32 {
+        self.cap
+    }
+
+    /// Current wall-clock epoch minute (UTC). The fixed-window bucket id shared
+    /// by Redis and the in-memory fallback so both agree on window boundaries.
+    fn epoch_minute() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() / Self::WINDOW_SECS)
+            .unwrap_or(0)
+    }
+
+    /// Increment the in-memory fixed-window counter for `minute` and return the
+    /// post-increment count. Resets the window when the minute rolls over.
+    ///
+    /// GHSA-wc9q-wc6q-gwmq pattern: recover from a poisoned lock rather than
+    /// panicking, so one panicking task can't wedge the free path for everyone.
+    fn incr_in_memory(&self, minute: u64) -> u64 {
+        let mut w = self
+            .window
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if w.epoch_minute != minute {
+            w.epoch_minute = minute;
+            w.count = 0;
+        }
+        w.count += 1;
+        w.count
+    }
+
+    /// Check (and consume one slot of) the aggregate free-tier budget.
+    ///
+    /// Returns `Ok(())` when the request is under the cap, `Err(())` when the
+    /// aggregate window is exhausted (caller emits the shared 429).
+    ///
+    /// Store selection:
+    /// - `cache = Some` (Redis configured): increment the shared Redis window
+    ///   key so the counter is cross-instance. On a Redis ERROR, DEGRADE to the
+    ///   in-memory per-instance counter and `warn!` — an infra blip must not
+    ///   hard-fail free traffic (fail-open to in-memory, NOT fail-open to
+    ///   unbounded), and the provider's own 429 is the ultimate backstop.
+    /// - `cache = None` (no Redis): use the in-memory per-instance counter.
+    pub async fn check(&self, cache: Option<&crate::cache::ResponseCache>) -> Result<(), ()> {
+        let minute = Self::epoch_minute();
+
+        let count = match cache {
+            Some(c) => match c.incr_global_free_window(minute).await {
+                Ok(n) => n,
+                Err(e) => {
+                    // Degrade to in-memory rather than failing the request. We do
+                    // NOT go unbounded: the in-memory counter still bounds this
+                    // instance for the current window.
+                    warn!(
+                        error = %e,
+                        "free-tier aggregate cap: Redis INCR failed — degrading to in-memory counter for this request"
+                    );
+                    self.incr_in_memory(minute)
+                }
+            },
+            None => self.incr_in_memory(minute),
+        };
+
+        if count > self.cap as u64 {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Build a [`RateLimitConfig`] describing this cap, so the shared
+    /// [`rate_limited_response`] emits a correct `x-ratelimit-limit` /
+    /// `retry-after` for the 1-minute aggregate window.
+    pub fn as_rate_limit_config(&self) -> RateLimitConfig {
+        RateLimitConfig {
+            max_requests: self.cap,
+            window: Duration::from_secs(Self::WINDOW_SECS),
+            unknown_max_requests: self.cap,
+        }
+    }
+}
+
 /// Paths that are exempt from rate limiting.
 ///
 /// These are operational/monitoring endpoints that must remain accessible even
@@ -554,6 +693,87 @@ mod tests {
             RATE_LIMIT_SKIP_PATHS.contains(&"/metrics"),
             "metrics endpoint must be exempt from rate limiting"
         );
+    }
+
+    #[tokio::test]
+    async fn test_free_global_cap_blocks_after_cap_in_memory() {
+        // No Redis → in-memory counter. Cap of 3: first 3 OK, 4th rejected.
+        let cap = FreeTierGlobalCap::new(3);
+        assert!(cap.check(None).await.is_ok(), "1st under cap");
+        assert!(cap.check(None).await.is_ok(), "2nd under cap");
+        assert!(cap.check(None).await.is_ok(), "3rd at cap");
+        assert!(
+            cap.check(None).await.is_err(),
+            "4th must be rejected — aggregate cap exceeded"
+        );
+        // Still rejected on subsequent calls within the same window.
+        assert!(cap.check(None).await.is_err());
+    }
+
+    #[test]
+    fn test_free_global_cap_default_below_google_ceiling() {
+        // The aggregate default MUST stay strictly below Google's shared 15 RPM
+        // free-tier ceiling, or the gateway leaks Google's 429 instead of its own.
+        assert_eq!(FREE_TIER_GLOBAL_RPM_DEFAULT, 12);
+        // Compile-time guard: a future bump to >= 15 fails the build, not just a
+        // test run. (clippy::assertions_on_constants wants the const block form.)
+        const _: () = assert!(
+            FREE_TIER_GLOBAL_RPM_DEFAULT < 15,
+            "aggregate default must stay below Google's 15 RPM shared ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_free_global_cap_window_resets() {
+        // Drive the in-memory counter directly across a window rollover: an
+        // exhausted minute must not bleed into the next minute's budget.
+        let cap = FreeTierGlobalCap::new(2);
+        assert_eq!(cap.incr_in_memory(100), 1);
+        assert_eq!(cap.incr_in_memory(100), 2);
+        assert_eq!(cap.incr_in_memory(100), 3); // over cap (count > 2)
+                                                // New minute → counter resets to 1.
+        assert_eq!(
+            cap.incr_in_memory(101),
+            1,
+            "window rollover must reset the aggregate counter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_free_global_cap_degrades_to_in_memory_on_redis_error() {
+        // A configured-but-unreachable Redis must NOT 500 the request: the cap
+        // degrades to its in-memory counter and still bounds traffic. Point at a
+        // closed port so every INCR errors, then assert the in-memory counter is
+        // what enforces the cap (cap=2 → 3rd rejected).
+        let cache = crate::cache::ResponseCache::new(
+            "redis://127.0.0.1:1",
+            crate::cache::CacheConfig::default(),
+        )
+        .expect("client open does not connect");
+        let cap = FreeTierGlobalCap::new(2);
+
+        assert!(
+            cap.check(Some(&cache)).await.is_ok(),
+            "1st must serve via in-memory degradation, not error"
+        );
+        assert!(cap.check(Some(&cache)).await.is_ok(), "2nd at cap");
+        assert!(
+            cap.check(Some(&cache)).await.is_err(),
+            "3rd must be rejected by the in-memory fallback counter — degradation is bounded, not unbounded"
+        );
+    }
+
+    #[test]
+    fn test_free_global_cap_as_rate_limit_config() {
+        let cap = FreeTierGlobalCap::new(12);
+        let cfg = cap.as_rate_limit_config();
+        assert_eq!(cfg.max_requests, 12);
+        assert_eq!(cfg.window, Duration::from_secs(60));
+        // The shared 429 builder must advertise a 60s retry-after for the
+        // 1-minute aggregate window.
+        let resp = rate_limited_response(&cfg);
+        assert_eq!(resp.headers().get("x-ratelimit-limit").unwrap(), "12");
+        assert_eq!(resp.headers().get("retry-after").unwrap(), "60");
     }
 
     #[tokio::test]

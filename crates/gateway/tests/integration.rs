@@ -17,7 +17,9 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use gateway::config::AppConfig;
-use gateway::middleware::rate_limit::{RateLimitConfig, RateLimiter};
+use gateway::middleware::rate_limit::{
+    FreeTierGlobalCap, RateLimitConfig, RateLimiter, FREE_TIER_GLOBAL_RPM_DEFAULT,
+};
 use gateway::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
 use gateway::providers::{ChatStream, LLMProvider, ProviderRegistry};
 use gateway::services::ServiceRegistry;
@@ -469,6 +471,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
         Arc::clone(&state),
@@ -707,6 +710,7 @@ fn test_app_with_provider_registry_and_exact_verifier(
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
         Arc::clone(&state),
@@ -788,6 +792,7 @@ fn app_with_semantic_cache(sem: Arc<gateway::cache::semantic::SemanticCache>) ->
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: true,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -1098,6 +1103,7 @@ fn app_with_semantic_cache_and_escrow(
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -1757,6 +1763,7 @@ fn test_app_with_provider_registry_and_escrow_verifier(
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -1828,6 +1835,7 @@ fn test_app_with_escrow() -> axum::Router {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -2257,6 +2265,7 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let app = build_router(
         Arc::clone(&state),
@@ -4166,6 +4175,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -6198,6 +6208,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -6362,6 +6373,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
 
     // Simulate claim processing by incrementing metrics atomically
@@ -6596,6 +6608,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
 
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
@@ -6984,6 +6997,7 @@ async fn test_proxy_require_tenant_wallet_rejected_before_settlement() {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let app = build_router(
         Arc::clone(&state),
@@ -7933,6 +7947,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         api_key_hmac_secret: None,
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let app = build_router(
         Arc::clone(&state),
@@ -8543,6 +8558,10 @@ fn test_app_with_free_limit(free_max: u32) -> axum::Router {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(free_cfg),
+        // Generous aggregate cap by default so the PER-IP tests above are not
+        // accidentally tripped by the global cap; the aggregate-cap tests build
+        // their own app via `test_app_with_global_cap`.
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -8792,6 +8811,9 @@ async fn dev_bypass_still_works() {
             window: std::time::Duration::from_secs(60),
             unknown_max_requests: 0,
         }),
+        // Aggregate cap also set to 0 — if the dev-bypass branch were ever
+        // (incorrectly) routed through the free gates, this PAID model would 429.
+        free_global_cap: FreeTierGlobalCap::new(0),
     });
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
 
@@ -8810,5 +8832,225 @@ async fn dev_bypass_still_works() {
             .get("x-solvela-payment-status")
             .and_then(|v| v.to_str().ok()),
         Some("dev_bypass"),
+    );
+}
+
+// ===========================================================================
+// PR B — Aggregate (global, all-clients-combined) free-tier rate cap
+// ===========================================================================
+
+/// Build a mock-provider app whose AGGREGATE (global) free-tier cap is
+/// `global_cap` requests/min, with a GENEROUS per-IP free limit so the per-IP
+/// gate never trips first — isolating the aggregate cap under test. No Redis →
+/// the cap uses its in-memory counter (deterministic for tests).
+fn test_app_with_global_cap(global_cap: u32) -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+    // Per-IP free limit set high so it never gates before the aggregate cap.
+    let free_cfg = RateLimitConfig {
+        max_requests: 10_000,
+        window: std::time::Duration::from_secs(60),
+        unknown_max_requests: 10_000,
+    };
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(free_cfg),
+        free_global_cap: FreeTierGlobalCap::new(global_cap),
+    });
+    build_router(state, RateLimiter::new(RateLimitConfig::default()))
+}
+
+/// The aggregate cap trips on COMBINED free traffic even from DISTINCT IPs —
+/// proving it is global, not per-IP. With a generous per-IP limit, three
+/// requests from three different IPs against a global cap of 2 must yield two
+/// 200s then a 429.
+#[tokio::test]
+async fn free_global_cap_trips_across_distinct_ips() {
+    let app = test_app_with_global_cap(2);
+
+    // Two distinct IPs, each well under the (generous) per-IP limit.
+    let r1 = app
+        .clone()
+        .oneshot(free_chat_request(FREE_MODEL, "203.0.113.1"))
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), StatusCode::OK, "1st (global) under cap");
+
+    let r2 = app
+        .clone()
+        .oneshot(free_chat_request(FREE_MODEL, "203.0.113.2"))
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), StatusCode::OK, "2nd (global) at cap");
+
+    // Third request from yet another distinct IP — each IP is under its OWN
+    // per-IP limit, so only the GLOBAL cap can reject this. If the cap were
+    // per-IP this would be a 200.
+    let r3 = app
+        .clone()
+        .oneshot(free_chat_request(FREE_MODEL, "203.0.113.3"))
+        .await
+        .unwrap();
+    assert_eq!(
+        r3.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "aggregate cap must reject the 3rd request from a 3rd distinct IP (proves it is global, not per-IP)"
+    );
+
+    // The 429 advertises the AGGREGATE limit (2) and a 60s retry-after.
+    assert_eq!(
+        r3.headers().get("x-ratelimit-limit").unwrap(),
+        "2",
+        "aggregate 429 must carry the global cap (2)"
+    );
+    assert_eq!(r3.headers().get("x-ratelimit-remaining").unwrap(), "0");
+    assert_eq!(
+        r3.headers().get("retry-after").unwrap(),
+        "60",
+        "aggregate cap window is 1 minute"
+    );
+    let bytes = r3.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["error"]["type"], "rate_limit_exceeded");
+}
+
+/// Under the aggregate cap → served. A single request against a generous global
+/// cap must be served normally.
+#[tokio::test]
+async fn free_global_cap_under_cap_is_served() {
+    let app = test_app_with_global_cap(5);
+    let resp = app
+        .oneshot(free_chat_request(FREE_MODEL, "198.51.100.5"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a free request under the aggregate cap must be served"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-payment-status")
+            .and_then(|v| v.to_str().ok()),
+        Some("free"),
+    );
+}
+
+/// The per-IP limit and the aggregate cap are INDEPENDENT gates: a single IP
+/// hammering returns the PER-IP 429 (smaller limit) before the aggregate cap is
+/// even consulted (per-IP runs first). Build an app where the per-IP limit (1) is
+/// tighter than the global cap (100): the 2nd request from one IP must be 429'd
+/// by the per-IP gate, carrying the per-IP limit header (1), not the global (100).
+#[tokio::test]
+async fn free_per_ip_and_global_cap_are_independent() {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    let free_cfg = RateLimitConfig {
+        max_requests: 1,
+        window: std::time::Duration::from_secs(60),
+        unknown_max_requests: 1,
+    };
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(free_cfg),
+        // Global cap deliberately LOOSER than the per-IP limit.
+        free_global_cap: FreeTierGlobalCap::new(100),
+    });
+    let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
+
+    let ip = "192.0.2.50";
+    let r1 = app
+        .clone()
+        .oneshot(free_chat_request(FREE_MODEL, ip))
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), StatusCode::OK);
+
+    // 2nd from the same IP → rejected by the PER-IP gate (runs first), carrying
+    // the per-IP limit (1), NOT the global cap (100).
+    let r2 = app
+        .clone()
+        .oneshot(free_chat_request(FREE_MODEL, ip))
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        r2.headers().get("x-ratelimit-limit").unwrap(),
+        "1",
+        "per-IP gate must reject first (limit=1), not the looser global cap (100)"
+    );
+}
+
+/// Paid models are unaffected by the aggregate cap. With a global cap of 0 (which
+/// would reject every FREE request), a PAID model with no payment header must
+/// still take its own 402 path — the aggregate cap only gates the free branch.
+#[tokio::test]
+async fn paid_model_unaffected_by_global_cap() {
+    let app = test_app_with_global_cap(0);
+    let resp = app
+        .oneshot(free_chat_request("openai/gpt-4o", "198.51.100.6"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "a paid model must 402, never be gated by the free aggregate cap"
     );
 }

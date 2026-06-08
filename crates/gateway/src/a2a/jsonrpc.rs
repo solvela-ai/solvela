@@ -126,6 +126,9 @@ supports_vision = false
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::free_default(),
             ),
+            free_global_cap: crate::middleware::rate_limit::FreeTierGlobalCap::new(
+                crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT,
+            ),
         });
 
         axum::Router::new()
