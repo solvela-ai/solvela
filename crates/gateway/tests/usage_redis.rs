@@ -2087,3 +2087,250 @@ async fn tenant_partial_window_rollback_on_monthly_trip(pool: PgPool) {
 
     redis_del_tenant(&client, &wallet, tenant).await;
 }
+
+/// Seed an org + team and map `wallet` into the team. Returns the `team_id`.
+async fn seed_team_for_wallet(pool: &PgPool, wallet: &str) -> Uuid {
+    let owner_wallet = format!("test_owner_{}", Uuid::new_v4().simple());
+    let org_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO organizations (name, slug, owner_wallet) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind("test-org")
+    .bind(format!("slug-{}", Uuid::new_v4().simple()))
+    .bind(&owner_wallet)
+    .fetch_one(pool)
+    .await
+    .expect("create org");
+
+    let team_id: Uuid =
+        sqlx::query_scalar("INSERT INTO teams (org_id, name) VALUES ($1, $2) RETURNING id")
+            .bind(org_id)
+            .bind(format!("team-{}", Uuid::new_v4().simple()))
+            .fetch_one(pool)
+            .await
+            .expect("create team");
+
+    sqlx::query("INSERT INTO team_wallets (team_id, wallet_address) VALUES ($1, $2)")
+        .bind(team_id)
+        .bind(wallet)
+        .execute(pool)
+        .await
+        .expect("assign wallet to team");
+
+    team_id
+}
+
+/// #501: a transient DB error reading `team_budgets` for a team member must
+/// FAIL CLOSED — deny the request as a transient `UsageError::Database`, roll
+/// back the already-committed wallet counters, and NEVER cache an error-derived
+/// "no team budget" sentinel (which would silently disable the team cap for
+/// every member of the team for a full TTL).
+///
+/// The DB error is forced deterministically by dropping the `team_budgets`
+/// table inside this test's isolated `#[sqlx::test]` database: membership still
+/// resolves via the separate `team_wallets` table, but the team-budget SELECT
+/// errors with "relation does not exist" — a real, non-absence DB error.
+#[sqlx::test(migrations = "../../migrations")]
+async fn check_budget_team_config_db_error_fails_closed_and_rolls_back(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let now = Utc::now();
+
+    // Wallet is a team member with a permissive individual cap — if the team
+    // path fail-OPENED, this request would sail through on the wallet cap.
+    let team_id = seed_team_for_wallet(&pool, &wallet).await;
+    sqlx::query(
+        "INSERT INTO wallet_budgets (wallet_address, hourly_limit_usdc, daily_limit_usdc) \
+         VALUES ($1, 50.00, 100.00)",
+    )
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("seed permissive wallet caps");
+
+    // Force a real DB error on the team_budgets read only (membership via
+    // team_wallets still resolves). CASCADE drops the updated_at trigger too.
+    sqlx::query("DROP TABLE team_budgets CASCADE")
+        .execute(&pool)
+        .await
+        .expect("drop team_budgets to force a DB error on the team-budget read");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    let err = tracker
+        .check_budget(&wallet, 0.10, None)
+        .await
+        .expect_err("team_budgets DB error must fail closed (deny)");
+    match err {
+        // Transient infra error, retry-safe — NOT a silent skip of team enforcement.
+        UsageError::Database(_) => {}
+        other => panic!("expected transient Database error, got {other:?}"),
+    }
+
+    // Rollback completeness: the wallet hourly + daily counters reserved before
+    // the team gate erred must be released (no leaked spend on a denied request).
+    let day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
+    let hour_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H"));
+    let leaked_day = get_redis_spend(&client, &day_key).await.expect("get day");
+    let leaked_hour = get_redis_spend(&client, &hour_key).await.expect("get hour");
+    assert_eq!(
+        leaked_day, 0.0,
+        "denied request must leak no wallet daily spend"
+    );
+    assert_eq!(
+        leaked_hour, 0.0,
+        "denied request must leak no wallet hourly spend"
+    );
+
+    // The error-derived "no team budget" answer must NOT have been cached: a
+    // single transient blip must not poison the team cap for a full TTL.
+    let team_cache_key = format!("team_budget:{team_id}");
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("conn");
+    let cached: Option<String> = redis::cmd("GET")
+        .arg(&team_cache_key)
+        .query_async(&mut conn)
+        .await
+        .expect("read team_budget cache");
+    assert_eq!(
+        cached, None,
+        "a team_budgets DB error must NOT be cached under team_budget:{{team_id}}"
+    );
+
+    redis_del(
+        &client,
+        &[
+            &day_key,
+            &hour_key,
+            &team_cache_key,
+            &format!("budget_config:{wallet}"),
+            &format!("team_member:{wallet}"),
+        ],
+    )
+    .await;
+}
+
+/// #501 regression guard: real team-row ABSENCE (query OK, no `team_budgets`
+/// row) is NOT an error — the request proceeds (team enforcement skipped) AND
+/// the `"none"` sentinel IS cached so repeated misses don't re-hit the DB.
+#[sqlx::test(migrations = "../../migrations")]
+async fn check_budget_team_config_absent_proceeds_and_caches_none(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+
+    // Team member, but NO team_budgets row provisioned for the team.
+    let team_id = seed_team_for_wallet(&pool, &wallet).await;
+    let team_cache_key = format!("team_budget:{team_id}");
+    redis_del(&client, &[&team_cache_key]).await;
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    tracker
+        .check_budget(&wallet, 0.50, None)
+        .await
+        .expect("no team budget row → request proceeds (team enforcement skipped)");
+
+    // The "none" sentinel must be cached for the absence (happy-path cache fill).
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("conn");
+    let cached: Option<String> = redis::cmd("GET")
+        .arg(&team_cache_key)
+        .query_async(&mut conn)
+        .await
+        .expect("read team_budget cache");
+    assert_eq!(
+        cached.as_deref(),
+        Some("none"),
+        "a confirmed-absent team budget must cache the \"none\" sentinel"
+    );
+
+    let now = Utc::now();
+    redis_del(
+        &client,
+        &[
+            &team_cache_key,
+            &format!("budget_config:{wallet}"),
+            &format!("team_member:{wallet}"),
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m-%d")),
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H")),
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m")),
+        ],
+    )
+    .await;
+}
+
+/// #501: a corrupt/undeserializable `team_budget:{team_id}` cache entry must be
+/// DEL'd and the DB re-queried (mirrors the wallet path's corrupt-cache DEL),
+/// rather than silently falling through and leaving the bad key to be re-read.
+#[sqlx::test(migrations = "../../migrations")]
+async fn check_budget_team_config_corrupt_cache_is_deled_and_requeried(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+
+    // Team member with a real team budget in the DB ($0.10/day).
+    let team_id = seed_team_for_wallet(&pool, &wallet).await;
+    sqlx::query("INSERT INTO team_budgets (team_id, daily_limit_usdc) VALUES ($1, 0.10)")
+        .bind(team_id)
+        .execute(&pool)
+        .await
+        .expect("seed team budget");
+
+    let team_cache_key = format!("team_budget:{team_id}");
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("conn");
+    // Prime a corrupt cache entry (not "none", not valid JSON).
+    let _: () = redis::cmd("SET")
+        .arg(&team_cache_key)
+        .arg("not-valid-json")
+        .arg("EX")
+        .arg(60)
+        .query_async(&mut conn)
+        .await
+        .expect("prime corrupt team cache");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    // Request within the team cap → must proceed once the corrupt cache is
+    // discarded and the real ($0.10) DB row is re-read.
+    tracker
+        .check_budget(&wallet, 0.05, None)
+        .await
+        .expect("corrupt team cache must be discarded and DB re-queried");
+
+    // The corrupt entry must have been replaced by a valid serialized config
+    // (DEL on detect, then the fresh DB read is re-cached) — never left corrupt.
+    let cached: Option<String> = redis::cmd("GET")
+        .arg(&team_cache_key)
+        .query_async(&mut conn)
+        .await
+        .expect("read team_budget cache after re-query");
+    let cached = cached.expect("team budget must be re-cached after corrupt-cache DEL");
+    assert_ne!(
+        cached, "not-valid-json",
+        "the corrupt cache entry must not survive"
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&cached).is_ok(),
+        "re-cached team budget must be valid JSON, got {cached}"
+    );
+
+    let now = Utc::now();
+    redis_del(
+        &client,
+        &[
+            &team_cache_key,
+            &format!("budget_config:{wallet}"),
+            &format!("team_member:{wallet}"),
+            &format!("team_spend:{}:{}", team_id, now.format("%Y-%m-%d")),
+            &format!("team_spend:{}:{}", team_id, now.format("%Y-%m-%dT%H")),
+            &format!("team_spend:{}:{}", team_id, now.format("%Y-%m")),
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m-%d")),
+        ],
+    )
+    .await;
+}
