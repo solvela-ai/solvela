@@ -83,6 +83,7 @@ jobs:
               /^crates\/gateway\/src\/escrow\//,
               /^crates\/gateway\/src\/a2a\//,
               /^crates\/gateway\/src\/usage\.rs$/,
+              /^crates\/gateway\/src\/middleware\/x402\.rs$/, // payment header decode / replay / extract
               /(^|\/)signer\.(rs|ts|py|go)$/, // SDK signing modules (any language)
               /^sdks\/.*\/escrow/,            // SDK escrow paths
             ];
