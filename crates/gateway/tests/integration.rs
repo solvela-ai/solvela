@@ -8644,20 +8644,26 @@ async fn free_path_rate_limited_per_ip() {
         StatusCode::TOO_MANY_REQUESTS,
         "exceeding the per-IP free limit must 429"
     );
-    // NOTE: the in-handler free 429 sets x-ratelimit-limit=2 / remaining=0, but
-    // the response bubbles back up through the GLOBAL rate-limit middleware whose
-    // success arm re-inserts its own (60) limit/remaining headers, overwriting
-    // them. That is correct layering — the outermost limit header reflects the
-    // global cap. The load-bearing free-tier contract that survives is: 429
-    // status, retry-after, and the rate_limit_exceeded body. Both rate-limit
-    // headers are still present (their VALUE just reflects the outer limiter).
-    assert!(
-        resp.headers().get("x-ratelimit-limit").is_some(),
-        "429 must carry x-ratelimit-limit"
+    // The in-handler free 429 sets x-ratelimit-limit=2 (the FREE limit) /
+    // remaining=0. The response bubbles back up through the GLOBAL rate-limit
+    // middleware, whose success arm now returns 429 responses UNCHANGED (it no
+    // longer re-inserts its own looser 60-limit headers). So the FREE-tier
+    // limit/remaining headers survive intact — a client sees a 429 alongside the
+    // free limit and remaining=0, never "40 remaining", and will honour
+    // retry-after instead of hammering.
+    assert_eq!(
+        resp.headers()
+            .get("x-ratelimit-limit")
+            .expect("429 must carry x-ratelimit-limit"),
+        "2",
+        "429 must carry the FREE limit (2), not the outer global limit (60)"
     );
-    assert!(
-        resp.headers().get("x-ratelimit-remaining").is_some(),
-        "429 must carry x-ratelimit-remaining"
+    assert_eq!(
+        resp.headers()
+            .get("x-ratelimit-remaining")
+            .expect("429 must carry x-ratelimit-remaining"),
+        "0",
+        "a rejected request must report 0 remaining"
     );
     assert!(
         resp.headers().get("retry-after").is_some(),

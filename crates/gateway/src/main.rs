@@ -527,10 +527,18 @@ async fn main() -> anyhow::Result<()> {
                     );
                     RateLimitConfig::free_default().max_requests
                 });
-                tracing::info!(max_requests = max, "Free-tier rate limit override from env");
-                RateLimitConfig {
-                    max_requests: max,
-                    ..RateLimitConfig::free_default()
+                if max == 0 {
+                    tracing::warn!(
+                        "SOLVELA_FREE_TIER_RATE_LIMIT=0 disables ALL free-tier access \
+                         (every free request would be rejected); using free-tier default instead"
+                    );
+                    RateLimitConfig::free_default()
+                } else {
+                    tracing::info!(max_requests = max, "Free-tier rate limit override from env");
+                    RateLimitConfig {
+                        max_requests: max,
+                        ..RateLimitConfig::free_default()
+                    }
                 }
             }
             Err(_) => RateLimitConfig::free_default(),

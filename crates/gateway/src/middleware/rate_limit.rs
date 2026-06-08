@@ -238,8 +238,21 @@ pub async fn rate_limit(request: Request, next: Next) -> Response {
         let limiter = limiter.clone();
         match limiter.check(&client_id).await {
             Ok(remaining) => {
-                let mut response = next.run(request).await;
-                // Add standard rate limit headers
+                let response = next.run(request).await;
+                // Do NOT overwrite rate-limit headers when the downstream handler
+                // already returned a 429. An in-handler free-tier limiter
+                // (built by `rate_limited_response`) produces its own
+                // authoritative `x-ratelimit-*` headers reflecting the FREE limit
+                // (e.g. 5/min). The outer limiter's success arm fired only
+                // because this request was under the (looser, e.g. 60/min) OUTER
+                // cap; re-inserting those values here would tell the client it
+                // has "40 remaining" alongside a 429, which would make it ignore
+                // `retry-after` and hammer. Preserve the inner 429's headers.
+                if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                    return response;
+                }
+                // Add standard rate limit headers (non-429 responses only).
+                let mut response = response;
                 let headers = response.headers_mut();
                 if let Ok(val) = limiter.config.max_requests.to_string().parse() {
                     headers.insert("x-ratelimit-limit", val);
@@ -348,6 +361,12 @@ pub fn connect_info_client_id(addr: Option<std::net::SocketAddr>) -> String {
 /// `retry-after` headers, shared by the global rate-limit middleware and the
 /// in-handler free-tier limiter so both emit byte-identical 429s. `remaining`
 /// is always `0` here (the request was rejected).
+///
+/// These headers are **authoritative** on the wire: the outer `rate_limit`
+/// middleware now preserves any 429 response's headers unchanged (it returns
+/// early on `StatusCode::TOO_MANY_REQUESTS` instead of re-inserting its own
+/// looser limit/remaining values), so a free-tier 429 built here reaches the
+/// client carrying the correct FREE limit and `remaining == 0`.
 pub fn rate_limited_response(config: &RateLimitConfig) -> Response {
     let reset_secs = config.window.as_secs();
     let mut response = (
