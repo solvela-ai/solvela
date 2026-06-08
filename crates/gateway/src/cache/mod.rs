@@ -44,6 +44,16 @@ const CACHE_KEY_PREFIX: &str = "solvela:cache:";
 /// Redis key prefix for transaction replay-protection entries.
 const REPLAY_KEY_PREFIX: &str = "solvela:txn:";
 
+/// Redis key prefix for the cross-instance aggregate free-tier RPM counter.
+/// The full key is `free_tier:global_rpm:<epoch_minute>` (see
+/// [`ResponseCache::incr_global_free_window`]).
+const FREE_TIER_GLOBAL_RPM_PREFIX: &str = "free_tier:global_rpm:";
+
+/// TTL (seconds) applied to a free-tier RPM window key on its first increment.
+/// Longer than the 60s window so the key outlives its own minute; old windows
+/// self-expire rather than accumulating.
+const FREE_TIER_GLOBAL_WINDOW_TTL_SECS: u64 = 120;
+
 /// Cache configuration.
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
@@ -240,6 +250,58 @@ impl ResponseCache {
                 }
             }
         }
+    }
+
+    /// Increment the global free-tier fixed-window counter for `epoch_minute`
+    /// and return the post-increment count.
+    ///
+    /// Backs the cross-instance aggregate free-tier rate cap (PR B). Multiple
+    /// gateway instances share one upstream provider API key whose free-tier
+    /// quota is a SINGLE shared ceiling (Google's free Gemini tier: ~15 RPM
+    /// across the whole key). A per-instance in-memory counter × N instances
+    /// would collectively blow past that ceiling, so the authoritative counter
+    /// MUST live in Redis when Redis is configured.
+    ///
+    /// Fixed-window counter: `INCR free_tier:global_rpm:<epoch_minute>`, with a
+    /// short TTL set on the FIRST increment so stale window keys self-expire.
+    /// The TTL (120s) comfortably outlives the 60s window — the window key is
+    /// only read during its own minute, and the extra slack absorbs clock skew
+    /// without ever letting two live windows share a key.
+    ///
+    /// Returns `Err(CacheError::Operation)` on any Redis error. The caller
+    /// (`FreeTierGlobalCap`) DEGRADES to its in-memory counter on `Err` rather
+    /// than failing the request — an infra blip must not hard-fail free traffic,
+    /// and the upstream provider's own 429 remains the ultimate backstop.
+    pub async fn incr_global_free_window(&self, epoch_minute: u64) -> Result<u64, CacheError> {
+        let key = format!("{FREE_TIER_GLOBAL_RPM_PREFIX}{epoch_minute}");
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))?;
+
+        // INCR is atomic and returns the new value. Redis creates the key at 0
+        // then increments, so a return of exactly 1 means we just created the
+        // window key — set its TTL only then (avoids resetting the TTL on every
+        // increment, which would keep a hot key alive indefinitely).
+        let count: u64 = redis::cmd("INCR")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))?;
+
+        if count == 1 {
+            // Best-effort TTL on first sight. If EXPIRE fails the counter still
+            // bounds the current minute correctly; the key would just linger,
+            // and Redis key eviction / a later window's own EXPIRE bounds that.
+            let _: Result<i64, redis::RedisError> = redis::cmd("EXPIRE")
+                .arg(&key)
+                .arg(FREE_TIER_GLOBAL_WINDOW_TTL_SECS)
+                .query_async(&mut conn)
+                .await;
+        }
+
+        Ok(count)
     }
 
     /// Get a raw string value by key.
@@ -466,5 +528,69 @@ mod tests {
             lru.get(&format!("sig_{}", cap - 1)).is_some(),
             "recent entries should remain in LRU cache"
         );
+    }
+
+    /// The Redis-backed aggregate free-tier window counter increments
+    /// monotonically within one window and sets a TTL on first sight.
+    ///
+    /// Gated on a reachable Redis (skips cleanly if down). Uses a unique
+    /// per-run epoch_minute key so concurrent test runs don't collide. Cleans
+    /// the key up afterward.
+    #[tokio::test]
+    async fn incr_global_free_window_counts_and_sets_ttl() {
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
+        let client = match redis::Client::open(redis_url.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: cannot open Redis client ({e})");
+                return;
+            }
+        };
+        let mut conn = match client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: Redis unreachable ({e})");
+                return;
+            }
+        };
+
+        let cache = ResponseCache::new(&redis_url, CacheConfig::default())
+            .expect("client creation should not connect");
+
+        // Unique window id so this test is isolated from real traffic and other
+        // runs. Derived from nanos to avoid collisions.
+        let minute = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let key = format!("{FREE_TIER_GLOBAL_RPM_PREFIX}{minute}");
+
+        // First increment → 1, and a TTL must now be set on the key.
+        let c1 = cache
+            .incr_global_free_window(minute)
+            .await
+            .expect("redis incr should succeed");
+        assert_eq!(c1, 1, "first increment of a fresh window returns 1");
+
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .expect("TTL query");
+        assert!(
+            ttl > 0 && ttl as u64 <= FREE_TIER_GLOBAL_WINDOW_TTL_SECS,
+            "first increment must set a positive TTL (<= {FREE_TIER_GLOBAL_WINDOW_TTL_SECS}s), got {ttl}"
+        );
+
+        // Subsequent increments keep counting up in the same window.
+        let c2 = cache.incr_global_free_window(minute).await.unwrap();
+        let c3 = cache.incr_global_free_window(minute).await.unwrap();
+        assert_eq!(c2, 2);
+        assert_eq!(c3, 3);
+
+        // Cleanup.
+        let _: Result<i64, redis::RedisError> =
+            redis::cmd("DEL").arg(&key).query_async(&mut conn).await;
     }
 }

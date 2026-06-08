@@ -28,7 +28,9 @@ use gateway::services::ServiceRegistry;
 use gateway::{
     balance_monitor::BalanceMonitor,
     build_router, cache, config,
-    middleware::rate_limit::{RateLimitConfig, RateLimiter},
+    middleware::rate_limit::{
+        FreeTierGlobalCap, RateLimitConfig, RateLimiter, FREE_TIER_GLOBAL_RPM_DEFAULT,
+    },
     providers::ProviderRegistry,
     AppState,
 };
@@ -545,6 +547,46 @@ async fn main() -> anyhow::Result<()> {
         };
     let free_rate_limiter = RateLimiter::new(free_rate_limit_config);
 
+    // ── Aggregate (global) free-tier rate cap ──────────────────────────────────
+    //
+    // Caps TOTAL free-model throughput across ALL clients per minute, BELOW the
+    // upstream provider's shared free-tier ceiling (Google's free Gemini tier
+    // ~15 RPM across the whole API key). The per-IP limiter above can't protect
+    // that shared ceiling — many distinct IPs each under their per-IP cap can
+    // collectively exceed it. Default FREE_TIER_GLOBAL_RPM_DEFAULT (12, below
+    // 15); override via SOLVELA_FREE_TIER_GLOBAL_RPM (RCR_ fallback for parity
+    // with the other rate-limit env vars). Backed by Redis (cross-instance) when
+    // a cache is configured; degrades to an in-memory per-instance counter
+    // otherwise (bounds a single instance — adequate for single-instance/dev).
+    let free_global_rpm =
+        match env_with_fallback("SOLVELA_FREE_TIER_GLOBAL_RPM", "RCR_FREE_TIER_GLOBAL_RPM") {
+            Ok(val) => match val.parse::<u32>() {
+                Ok(0) => {
+                    tracing::warn!(
+                        "SOLVELA_FREE_TIER_GLOBAL_RPM=0 disables ALL free-tier access \
+                         (every free request would be rejected); using default instead"
+                    );
+                    FREE_TIER_GLOBAL_RPM_DEFAULT
+                }
+                Ok(max) => {
+                    tracing::info!(
+                        global_rpm = max,
+                        "Aggregate free-tier global RPM override from env"
+                    );
+                    max
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        value = %val,
+                        "Invalid SOLVELA_FREE_TIER_GLOBAL_RPM, using default"
+                    );
+                    FREE_TIER_GLOBAL_RPM_DEFAULT
+                }
+            },
+            Err(_) => FREE_TIER_GLOBAL_RPM_DEFAULT,
+        };
+    let free_global_cap = FreeTierGlobalCap::new(free_global_rpm);
+
     // Build shared state
     let state = Arc::new(AppState {
         config: app_config.clone(),
@@ -595,6 +637,7 @@ async fn main() -> anyhow::Result<()> {
         prometheus_handle,
         dev_bypass_payment,
         free_rate_limiter: free_rate_limiter.clone(),
+        free_global_cap,
     });
 
     // ── Shutdown signal for background tasks ────────────────────────────────

@@ -404,6 +404,9 @@ supports_vision = true
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::free_default(),
             ),
+            free_global_cap: crate::middleware::rate_limit::FreeTierGlobalCap::new(
+                crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT,
+            ),
         });
 
         Router::new()
@@ -569,6 +572,9 @@ mod tests {
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::free_default(),
             ),
+            free_global_cap: crate::middleware::rate_limit::FreeTierGlobalCap::new(
+                crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT,
+            ),
         };
 
         let mut headers = HeaderMap::new();
@@ -616,6 +622,9 @@ mod tests {
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::free_default(),
+            ),
+            free_global_cap: crate::middleware::rate_limit::FreeTierGlobalCap::new(
+                crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT,
             ),
         };
 
@@ -667,6 +676,9 @@ mod tests {
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::free_default(),
+            ),
+            free_global_cap: crate::middleware::rate_limit::FreeTierGlobalCap::new(
+                crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT,
             ),
         };
 

@@ -43,7 +43,7 @@ use crate::services::ServiceRegistry;
 use solvela_router::models::ModelRegistry;
 use solvela_x402::facilitator::Facilitator;
 
-use crate::middleware::rate_limit::RateLimiter;
+use crate::middleware::rate_limit::{FreeTierGlobalCap, RateLimiter};
 use crate::middleware::request_id::RequestIdLayer;
 use crate::providers::ProviderRegistry;
 use crate::routes::escrow::SlotCache;
@@ -114,6 +114,19 @@ pub struct AppState {
     /// `SOLVELA_FREE_TIER_RATE_LIMIT`. Keyed on the TCP peer IP (never a
     /// client-supplied header — GHSA-6ggq-cvwx-4f67).
     pub free_rate_limiter: RateLimiter,
+    /// Aggregate (global, all-clients-combined) free-tier rate cap.
+    ///
+    /// Complements [`free_rate_limiter`](Self::free_rate_limiter): the per-IP
+    /// limiter rejects single-IP spammers cheaply, but cannot protect the
+    /// upstream provider's SHARED free-tier ceiling (Google's free Gemini tier
+    /// ~15 RPM across the whole API key) — many distinct IPs each under their
+    /// per-IP cap can still collectively exceed it. This cap bounds the COMBINED
+    /// free throughput so the gateway 429s before the provider does. Backed by
+    /// Redis (cross-instance) when `cache` is `Some`, degrading to an in-memory
+    /// per-instance counter otherwise. Default
+    /// [`FREE_TIER_GLOBAL_RPM_DEFAULT`](crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT);
+    /// override via `SOLVELA_FREE_TIER_GLOBAL_RPM`.
+    pub free_global_cap: FreeTierGlobalCap,
 }
 
 impl AppState {
