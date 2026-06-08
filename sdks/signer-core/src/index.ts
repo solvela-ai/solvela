@@ -28,6 +28,17 @@ export type {
   PaymentExpectations,
 } from './types.js';
 export { createPaymentHeader, decodePaymentHeader, SigningError } from './sign.js';
+export {
+  buildEscrowDepositTx,
+  escrowExpirySlot,
+  assertPlausibleSlot,
+  anchorDiscriminator,
+  GOLDEN_VECTOR_B64,
+  MIN_ESCROW_EXPIRY_SLOTS_AHEAD,
+  MAX_ESCROW_EXPIRY_SLOTS_AHEAD,
+  MIN_PLAUSIBLE_SLOT,
+  type EscrowDepositParams,
+} from './escrow.js';
 export { parse402 } from './parse-402.js';
 export { filterAccepts } from './scheme-filter.js';
 export { isStubHeader, isStubTransaction } from './stub-guard.js';
