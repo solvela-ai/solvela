@@ -10,7 +10,7 @@
     },
     "helius": {
       "command": "npx",
-      "args": ["helius-mcp@latest"],
+      "args": ["helius-mcp@1.3.0"],
       "env": {
         "HELIUS_API_KEY": "${HELIUS_API_KEY}"
       }
