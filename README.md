@@ -473,14 +473,6 @@ Solvela uses a **per-component license split**. Pick the license of the piece yo
 | **SDKs** (`sdks/*`) | [Apache-2.0](./LICENSE-APACHE) | Client libraries. The patent grant matters here — the SDKs build and broadcast USDC transactions. |
 | **Dashboard / docs site** (`dashboard/`) | [Apache-2.0](./LICENSE-APACHE) | Front-end. |
 
-### Quick reference
-
-- **You're a developer using Solvela's hosted gateway at `api.solvela.ai`** → no license obligations on you, just use it.
-- **You're self-hosting the gateway internally for your own product** → free under the Additional Use Grant if your gross annual revenue attributable to the gateway is under USD $1M.
-- **You're building a competing managed gateway service from this code** → you need a commercial license. Contact `partnerships@solvela.ai`.
-- **Your annual revenue derived from the gateway will exceed USD $1M** → you need a commercial license. Contact `partnerships@solvela.ai`.
-- **You're embedding the SDK or building on top of the protocol/router crates** → standard Apache-2.0 obligations apply (preserve copyright/NOTICE attribution, state significant changes, no warranty). You receive an explicit patent grant. No payment to Solvela required.
-
 ### Trademark
 
 "Solvela" and the Solvela logo are trademarks of the Solvela Contributors. The licenses above grant code rights only — they do not grant trademark rights. If you fork the gateway and run it yourself, please rename it.
