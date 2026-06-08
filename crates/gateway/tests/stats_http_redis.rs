@@ -95,6 +95,7 @@ fn stats_router(usage: UsageTracker, db_pool: Option<PgPool>) -> axum::Router {
         api_key_hmac_secret: None,
         prometheus_handle: None,
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
     build_router(
         Arc::clone(&state),

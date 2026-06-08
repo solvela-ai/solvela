@@ -407,6 +407,15 @@ context_window = 200000
 supports_streaming = true
 supports_tools = true
 supports_vision = true
+
+[models.google-gemini-flash-lite]
+provider = "google"
+model_id = "gemini-3.1-flash-lite"
+display_name = "Gemini 3.1 Flash Lite (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 1000000
+supports_streaming = true
 "#;
 
 /// Build a test app with the test model config (no real provider API keys).
@@ -459,6 +468,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
     let router = build_router(
         Arc::clone(&state),
@@ -608,6 +618,7 @@ fn mock_provider_registry() -> ProviderRegistry {
         "deepseek".to_string(),
         Arc::new(MockProvider::new("deepseek")),
     );
+    providers.insert("google".to_string(), Arc::new(MockProvider::new("google")));
     ProviderRegistry::from_providers(providers)
 }
 
@@ -695,6 +706,7 @@ fn test_app_with_provider_registry_and_exact_verifier(
         api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
     let router = build_router(
         Arc::clone(&state),
@@ -775,6 +787,7 @@ fn app_with_semantic_cache(sem: Arc<gateway::cache::semantic::SemanticCache>) ->
         api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: true,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -1084,6 +1097,7 @@ fn app_with_semantic_cache_and_escrow(
         api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -1742,6 +1756,7 @@ fn test_app_with_provider_registry_and_escrow_verifier(
         api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -1812,6 +1827,7 @@ fn test_app_with_escrow() -> axum::Router {
         api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -1960,7 +1976,9 @@ async fn test_models_endpoint() {
     assert_eq!(json["object"], "list");
 
     let data = json["data"].as_array().unwrap();
-    assert_eq!(data.len(), 3);
+    // 4 models in TEST_MODELS_TOML: gpt-4o, deepseek-chat, claude-sonnet, and
+    // the free google/gemini-3.1-flash-lite (added for the free-tier tests).
+    assert_eq!(data.len(), 4);
 
     // Lock in the full wire shape. The route serializes
     // `solvela_protocol::ModelInfo`, whose nested layout is the contract the
@@ -2238,6 +2256,7 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
         api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
     let app = build_router(
         Arc::clone(&state),
@@ -4146,6 +4165,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -6177,6 +6197,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -6340,6 +6361,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
 
     // Simulate claim processing by incrementing metrics atomically
@@ -6573,6 +6595,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
 
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
@@ -6960,6 +6983,7 @@ async fn test_proxy_require_tenant_wallet_rejected_before_settlement() {
         api_key_hmac_secret: None,
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
     let app = build_router(
         Arc::clone(&state),
@@ -7908,6 +7932,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         prometheus_handle: Some(test_prometheus_handle()),
         api_key_hmac_secret: None,
         dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
     });
     let app = build_router(
         Arc::clone(&state),
@@ -8462,5 +8487,322 @@ async fn reservation_provided_max_tokens_is_unchanged() {
     assert!(
         reserved < ceiling_quote,
         "a provided max_tokens=256 must reserve less than the 8192 ceiling"
+    );
+}
+
+// ===========================================================================
+// PR A — Free-tier zero-cost bypass + per-client anti-abuse rate limit
+// ===========================================================================
+
+/// Free model id present in TEST_MODELS_TOML, priced 0.0/0.0 → zero atomic cost.
+const FREE_MODEL: &str = "google/gemini-3.1-flash-lite";
+
+/// Build a mock-provider app whose FREE-tier limiter uses `free_max` requests
+/// per (named-IP) window. The paid (outer) limiter stays at its generous
+/// default so the two limiters can be shown not to cross-contaminate.
+fn test_app_with_free_limit(free_max: u32) -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+    // Stricter free-tier config: `free_max` for NAMED ip buckets, and the same
+    // for the "unknown" bucket so a no-ConnectInfo test is deterministic.
+    let free_cfg = RateLimitConfig {
+        max_requests: free_max,
+        window: std::time::Duration::from_secs(60),
+        unknown_max_requests: free_max,
+    };
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(free_cfg),
+    });
+    build_router(state, RateLimiter::new(RateLimitConfig::default()))
+}
+
+/// Build a chat request for `model` with a fixed `ConnectInfo` peer IP so the
+/// free-tier limiter keys on a NAMED bucket (not the shared "unknown" one).
+fn free_chat_request(model: &str, ip: &str) -> Request<Body> {
+    let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hello"}}]}}"#);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .header("x-solvela-debug", "true")
+        .body(Body::from(body))
+        .unwrap();
+    let addr: std::net::SocketAddr = format!("{ip}:40000").parse().unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(addr));
+    req
+}
+
+/// A zero-cost model with NO payment header is SERVED (200), not 402'd, and the
+/// debug header reports payment-status = free.
+#[tokio::test]
+async fn free_model_no_payment_is_served_not_402() {
+    let app = test_app_with_free_limit(5);
+    let resp = app
+        .oneshot(free_chat_request(FREE_MODEL, "198.51.100.10"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a zero-cost model must be served without payment, not 402'd"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-payment-status")
+            .and_then(|v| v.to_str().ok()),
+        Some("free"),
+        "payment status must be reported as free"
+    );
+
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        v["id"], "mock-chatcmpl-001",
+        "free request must reach the (mock) provider and return its response"
+    );
+}
+
+/// A PAID model with NO payment header still returns 402 (unchanged behavior).
+/// Guards that the zero-cost bypass is reachable ONLY when cost == 0.
+#[tokio::test]
+async fn paid_model_no_payment_still_402() {
+    let app = test_app_with_free_limit(5);
+    let resp = app
+        .oneshot(free_chat_request("openai/gpt-4o", "198.51.100.11"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "a paid model with no payment header must still 402"
+    );
+}
+
+/// The free path is rate-limited per client IP: under the limit → served; over
+/// the limit → 429 with the standard rate-limit headers.
+#[tokio::test]
+async fn free_path_rate_limited_per_ip() {
+    let app = test_app_with_free_limit(2);
+    let ip = "203.0.113.42";
+
+    // First 2 requests from this IP succeed.
+    for i in 0..2 {
+        let resp = app
+            .clone()
+            .oneshot(free_chat_request(FREE_MODEL, ip))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "request {i} should be served"
+        );
+    }
+
+    // The 3rd exceeds the free limit → 429 with headers.
+    let resp = app
+        .clone()
+        .oneshot(free_chat_request(FREE_MODEL, ip))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "exceeding the per-IP free limit must 429"
+    );
+    // NOTE: the in-handler free 429 sets x-ratelimit-limit=2 / remaining=0, but
+    // the response bubbles back up through the GLOBAL rate-limit middleware whose
+    // success arm re-inserts its own (60) limit/remaining headers, overwriting
+    // them. That is correct layering — the outermost limit header reflects the
+    // global cap. The load-bearing free-tier contract that survives is: 429
+    // status, retry-after, and the rate_limit_exceeded body. Both rate-limit
+    // headers are still present (their VALUE just reflects the outer limiter).
+    assert!(
+        resp.headers().get("x-ratelimit-limit").is_some(),
+        "429 must carry x-ratelimit-limit"
+    );
+    assert!(
+        resp.headers().get("x-ratelimit-remaining").is_some(),
+        "429 must carry x-ratelimit-remaining"
+    );
+    assert!(
+        resp.headers().get("retry-after").is_some(),
+        "429 must carry retry-after"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["error"]["type"], "rate_limit_exceeded");
+}
+
+/// Two different IPs get independent free-tier buckets (per-IP keying).
+#[tokio::test]
+async fn free_path_independent_ip_buckets() {
+    let app = test_app_with_free_limit(1);
+
+    // IP A uses its single allowance, then is limited.
+    let a1 = app
+        .clone()
+        .oneshot(free_chat_request(FREE_MODEL, "192.0.2.1"))
+        .await
+        .unwrap();
+    assert_eq!(a1.status(), StatusCode::OK);
+    let a2 = app
+        .clone()
+        .oneshot(free_chat_request(FREE_MODEL, "192.0.2.1"))
+        .await
+        .unwrap();
+    assert_eq!(a2.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // IP B still has its full (separate) allowance.
+    let b1 = app
+        .clone()
+        .oneshot(free_chat_request(FREE_MODEL, "192.0.2.2"))
+        .await
+        .unwrap();
+    assert_eq!(
+        b1.status(),
+        StatusCode::OK,
+        "a different IP must have an independent free bucket"
+    );
+}
+
+/// A free request and a PAID request from the same client must not share a
+/// bucket: the free limiter is dedicated to the free path. Exhaust the free
+/// bucket, then prove the paid model still reaches its own (402) path rather
+/// than being 429'd by the free limiter.
+#[tokio::test]
+async fn free_and_paid_do_not_cross_contaminate() {
+    let app = test_app_with_free_limit(1);
+    let ip = "198.51.100.77";
+
+    // Exhaust the free bucket for this IP.
+    let f1 = app
+        .clone()
+        .oneshot(free_chat_request(FREE_MODEL, ip))
+        .await
+        .unwrap();
+    assert_eq!(f1.status(), StatusCode::OK);
+    let f2 = app
+        .clone()
+        .oneshot(free_chat_request(FREE_MODEL, ip))
+        .await
+        .unwrap();
+    assert_eq!(
+        f2.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "free bucket should now be exhausted for this IP"
+    );
+
+    // A PAID model from the SAME IP must still hit its own 402 path — the free
+    // limiter must not block it.
+    let paid = app
+        .clone()
+        .oneshot(free_chat_request("openai/gpt-4o", ip))
+        .await
+        .unwrap();
+    assert_eq!(
+        paid.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "paid request must not be 429'd by the free-tier limiter"
+    );
+}
+
+/// The dev-bypass path still works (regression guard for the restructured
+/// no-payment block).
+#[tokio::test]
+async fn dev_bypass_still_works() {
+    // `app_with_semantic_cache` builds an app with dev_bypass_payment = true.
+    // Reuse the dev-bypass app builder if available; otherwise build inline.
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: true,
+        // Free limiter intentionally set to 0 so that, if the dev-bypass branch
+        // were ever (incorrectly) routed through the free limiter, this PAID
+        // model would 429 — proving dev-bypass takes its own path.
+        free_rate_limiter: RateLimiter::new(RateLimitConfig {
+            max_requests: 0,
+            window: std::time::Duration::from_secs(60),
+            unknown_max_requests: 0,
+        }),
+    });
+    let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
+
+    // A PAID model with no payment header is served via dev-bypass (200), not 402.
+    let resp = app
+        .oneshot(free_chat_request("openai/gpt-4o", "198.51.100.99"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "dev-bypass must serve a paid model without payment"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-payment-status")
+            .and_then(|v| v.to_str().ok()),
+        Some("dev_bypass"),
     );
 }

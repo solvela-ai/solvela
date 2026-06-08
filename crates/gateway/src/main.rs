@@ -510,6 +510,33 @@ async fn main() -> anyhow::Result<()> {
         enabled
     };
 
+    // ── Free-tier (anonymous zero-cost bypass) rate limiter ────────────────────
+    //
+    // Enforced INSIDE the chat handler on the zero-cost branch only (the global
+    // outer-layer limiter runs before model resolution and can't tell a request
+    // is free). Stricter default than the paid limit; keyed on the TCP peer IP.
+    // Overridable via SOLVELA_FREE_TIER_RATE_LIMIT (RCR_ fallback for parity with
+    // the other rate-limit env vars).
+    let free_rate_limit_config =
+        match env_with_fallback("SOLVELA_FREE_TIER_RATE_LIMIT", "RCR_FREE_TIER_RATE_LIMIT") {
+            Ok(val) => {
+                let max: u32 = val.parse().unwrap_or_else(|_| {
+                    tracing::warn!(
+                        value = %val,
+                        "Invalid SOLVELA_FREE_TIER_RATE_LIMIT, using free-tier default"
+                    );
+                    RateLimitConfig::free_default().max_requests
+                });
+                tracing::info!(max_requests = max, "Free-tier rate limit override from env");
+                RateLimitConfig {
+                    max_requests: max,
+                    ..RateLimitConfig::free_default()
+                }
+            }
+            Err(_) => RateLimitConfig::free_default(),
+        };
+    let free_rate_limiter = RateLimiter::new(free_rate_limit_config);
+
     // Build shared state
     let state = Arc::new(AppState {
         config: app_config.clone(),
@@ -559,6 +586,7 @@ async fn main() -> anyhow::Result<()> {
         slot_cache: gateway::routes::escrow::new_slot_cache(),
         prometheus_handle,
         dev_bypass_payment,
+        free_rate_limiter: free_rate_limiter.clone(),
     });
 
     // ── Shutdown signal for background tasks ────────────────────────────────
@@ -754,6 +782,26 @@ async fn main() -> anyhow::Result<()> {
                 }
                 _ = rl_shutdown_rx.changed() => {
                     info!("rate limiter cleanup shutting down gracefully");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Periodic cleanup for the free-tier limiter (held in AppState). Same
+    // fixed-window eviction + graceful-shutdown contract as the paid limiter
+    // above, so the free-tier IP HashMap also stays bounded.
+    let mut free_rl_shutdown_rx = shutdown_rx.clone();
+    let free_rl_clone = free_rate_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    free_rl_clone.cleanup().await;
+                }
+                _ = free_rl_shutdown_rx.changed() => {
+                    info!("free-tier rate limiter cleanup shutting down gracefully");
                     break;
                 }
             }

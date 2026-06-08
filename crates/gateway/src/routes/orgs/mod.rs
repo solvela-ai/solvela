@@ -401,6 +401,9 @@ supports_vision = true
             api_key_hmac_secret: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
+            free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::free_default(),
+            ),
         });
 
         Router::new()
@@ -563,6 +566,9 @@ mod tests {
             api_key_hmac_secret: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
+            free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::free_default(),
+            ),
         };
 
         let mut headers = HeaderMap::new();
@@ -608,6 +614,9 @@ mod tests {
             api_key_hmac_secret: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
+            free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::free_default(),
+            ),
         };
 
         let org_id = uuid::Uuid::new_v4();
@@ -656,6 +665,9 @@ mod tests {
             api_key_hmac_secret: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
+            free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::free_default(),
+            ),
         };
 
         let headers = HeaderMap::new();
