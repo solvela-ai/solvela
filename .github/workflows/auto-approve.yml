@@ -59,6 +59,7 @@ jobs:
               'Docker build',
               'Verify DCO sign-off on every commit',
               'Semantic cache (redis-stack + embedding model)',
+              'Secret scan (gitleaks)',
             ];
             // Authors whose green PRs may be auto-approved. `dependabot[bot]`
             // is included so routine dependency bumps clear review on green CI
