@@ -60,7 +60,15 @@ jobs:
               'Verify DCO sign-off on every commit',
               'Semantic cache (redis-stack + embedding model)',
             ];
-            const ALLOW = ['sky64'];
+            // Authors whose green PRs may be auto-approved. `dependabot[bot]`
+            // is included so routine dependency bumps clear review on green CI
+            // without a manual approve-as-bot step. This is safe because every
+            // other guard still applies: dependabot pushes to a same-repo branch
+            // (passes the no-fork check), the money-path exclusion below still
+            // blocks any bump that touches fund-moving code, and the full
+            // REQUIRED set must be green. Approve-only — merge stays manual
+            // (or dependabot's own auto-merge, where enabled per-PR).
+            const ALLOW = ['sky64', 'dependabot[bot]'];
 
             // Money-path surfaces: code that signs / verifies / settles payments,
             // computes cost, or touches escrow / USDC. A PR touching ANY of these
