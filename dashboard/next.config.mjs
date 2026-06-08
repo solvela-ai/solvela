@@ -42,6 +42,11 @@ const csp = [
   `style-src 'self' 'unsafe-inline'`,
   `img-src 'self' data:`,
   `font-src 'self'`,
+  // YouTube embeds: the <YouTube> MDX docs component renders an
+  // youtube.com/embed iframe. Without an explicit frame-src it would fall back
+  // to default-src 'self' and be blocked. nocookie variant keeps the protective
+  // directives (frame-ancestors / object-src) untouched.
+  `frame-src https://www.youtube.com https://www.youtube-nocookie.com`,
   `connect-src 'self' ${gatewayOrigin}${isDev ? ' ws: wss:' : ''}`,
   `frame-ancestors 'none'`,
   `object-src 'none'`,
