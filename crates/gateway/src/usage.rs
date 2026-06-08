@@ -114,6 +114,47 @@ enum TenantLookup {
     DbError,
 }
 
+/// Result of looking up a team's `team_budgets` row.
+///
+/// Distinguishes a CONFIRMED-ABSENT row from a transient DB ERROR (#501),
+/// exactly as [`TenantLookup`] does for the per-tenant path. The two MUST be
+/// surfaced differently: a confirmed absence means the team simply has no
+/// budget configured (skip team enforcement — the legacy behavior), whereas a
+/// DB error is a transient infrastructure blip whose answer is unknown.
+///
+/// Before #501 `get_team_budget_config` collapsed a DB error into a plain
+/// `None` (indistinguishable from absence) AND cached that error-derived "none"
+/// sentinel for the full TTL — silently disabling the team cap for every member
+/// of the team for up to a minute (aggregate spend across N wallets escaped the
+/// team bound). The caller now maps a `DbError` to `UsageError::Database` and
+/// denies the request (fail-closed), and only `Found`/`Absent` are ever cached.
+#[derive(Debug, Clone)]
+enum TeamLookup {
+    /// A `team_budgets` row exists for the team.
+    Found(TeamBudgetConfig),
+    /// The query SUCCEEDED and confirmed no row exists (no team budget).
+    Absent,
+    /// The query ERRORED (transient DB problem) — budget state unknown.
+    DbError,
+}
+
+impl TeamLookup {
+    /// The Redis cache value to write for this lookup, or `None` to write
+    /// nothing. Mirrors the tenant path: a `Found` row caches its serialized
+    /// JSON, a confirmed `Absent` caches the `"none"` sentinel, and a transient
+    /// `DbError` caches NOTHING (so a blip can't poison the team cap for a full
+    /// TTL — the next request re-attempts the DB read).
+    fn cache_value(&self) -> Option<String> {
+        match self {
+            TeamLookup::Found(cfg) => {
+                Some(serde_json::to_string(cfg).unwrap_or_else(|_| "none".to_string()))
+            }
+            TeamLookup::Absent => Some("none".to_string()),
+            TeamLookup::DbError => None,
+        }
+    }
+}
+
 /// Outcome of the per-tenant enforcement decision matrix.
 ///
 /// Pure function of three booleans so the money-path policy can be unit-tested
@@ -646,35 +687,57 @@ impl UsageTracker {
         // permissive individual budget bypass a tighter team cap).
         match get_team_for_wallet(&mut conn, self.db_pool.as_ref(), wallet_address).await {
             Ok(Some(tid)) => {
-                let team_config =
-                    get_team_budget_config(&mut conn, self.db_pool.as_ref(), tid).await;
+                // #501: a DB error reading `team_budgets` must NOT be collapsed
+                // into "no team budget" (fail-open). `get_team_budget_config`
+                // now returns a `TeamLookup` that distinguishes a configured
+                // budget, a confirmed absence, and a transient DB error.
+                match get_team_budget_config(&mut conn, self.db_pool.as_ref(), tid).await {
+                    TeamLookup::Found(team_cfg) => {
+                        let tid_str = tid.to_string();
 
-                if let Some(team_cfg) = team_config {
-                    let tid_str = tid.to_string();
-
-                    if let Some(hourly_limit) = team_cfg.hourly {
-                        let _ = try_commit!(
-                            format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%dT%H")),
-                            estimated_cost_usdc,
-                            hourly_limit,
-                            7200
-                        );
+                        if let Some(hourly_limit) = team_cfg.hourly {
+                            let _ = try_commit!(
+                                format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%dT%H")),
+                                estimated_cost_usdc,
+                                hourly_limit,
+                                7200
+                            );
+                        }
+                        if let Some(daily_limit) = team_cfg.daily {
+                            let _ = try_commit!(
+                                format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%d")),
+                                estimated_cost_usdc,
+                                daily_limit,
+                                86400
+                            );
+                        }
+                        if let Some(monthly_limit) = team_cfg.monthly {
+                            let _ = try_commit!(
+                                format!("team_spend:{}:{}", tid_str, now.format("%Y-%m")),
+                                estimated_cost_usdc,
+                                monthly_limit,
+                                86400 * 31
+                            );
+                        }
                     }
-                    if let Some(daily_limit) = team_cfg.daily {
-                        let _ = try_commit!(
-                            format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%d")),
-                            estimated_cost_usdc,
-                            daily_limit,
-                            86400
-                        );
+                    TeamLookup::Absent => {
+                        // Team has no budget configured — nothing to enforce.
                     }
-                    if let Some(monthly_limit) = team_cfg.monthly {
-                        let _ = try_commit!(
-                            format!("team_spend:{}:{}", tid_str, now.format("%Y-%m")),
-                            estimated_cost_usdc,
-                            monthly_limit,
-                            86400 * 31
+                    TeamLookup::DbError => {
+                        // Fail-closed: a transient DB error reading the team cap
+                        // must deny (not silently skip team enforcement), and
+                        // must release the wallet/tenant counters already
+                        // committed above so a denied request leaks no budget.
+                        rollback_committed(&mut conn, &committed).await;
+                        warn!(
+                            wallet = %wallet_address,
+                            team_id = %tid,
+                            "team_budget_db_error: team_budgets read failed; \
+                             denying request (fail-closed) as a transient DB error"
                         );
+                        return Err(UsageError::Database(
+                            "team_budgets lookup failed".to_string(),
+                        ));
                     }
                 }
             }
@@ -1395,12 +1458,23 @@ async fn get_team_for_wallet(
 }
 
 /// Load team budget config from `team_budgets` table. Cached in Redis with 60s TTL.
-/// Returns `None` if no budget row exists for the team.
+///
+/// Returns a [`TeamLookup`] that distinguishes a configured budget
+/// ([`TeamLookup::Found`]) from a confirmed absence ([`TeamLookup::Absent`]) and
+/// a transient DB error ([`TeamLookup::DbError`]) — #501. The caller maps a
+/// `DbError` to `UsageError::Database` and denies the request (fail-closed)
+/// rather than silently skipping the team cap. Only `Found`/`Absent` are cached;
+/// a `DbError` is NEVER cached, so a transient error cannot poison the "none"
+/// sentinel for a full TTL — the next request re-attempts the DB read.
+///
+/// Mirrors the `persist`/no-cache-on-error pattern of `get_wallet_budget_config`
+/// and the `TenantLookup` shape of `get_tenant_budget_config`, including the
+/// corrupt-cache `DEL` (a bad entry is deleted before falling through to DB).
 async fn get_team_budget_config(
     conn: &mut redis::aio::MultiplexedConnection,
     db_pool: Option<&sqlx::PgPool>,
     team_id: Uuid,
-) -> Option<TeamBudgetConfig> {
+) -> TeamLookup {
     let cache_key = format!("team_budget:{team_id}");
 
     // Try Redis cache
@@ -1410,15 +1484,27 @@ async fn get_team_budget_config(
         .await
     {
         if json_str == "none" {
-            return None;
+            return TeamLookup::Absent;
         }
-        if let Ok(config) = serde_json::from_str::<TeamBudgetConfig>(&json_str) {
-            return Some(config);
+        match serde_json::from_str::<TeamBudgetConfig>(&json_str) {
+            Ok(config) => return TeamLookup::Found(config),
+            Err(e) => {
+                // Corrupt cache entry — DEL it before falling through to DB so
+                // it can't be re-read on the next request (mirrors the wallet
+                // path). Do NOT serve it as an absence.
+                tracing::warn!(cache_key = %cache_key, error = %e, "corrupted team budget cache entry, falling through to DB");
+                let _ = redis::cmd("DEL")
+                    .arg(&cache_key)
+                    .query_async::<()>(conn)
+                    .await;
+            }
         }
     }
 
-    // Cache miss — query DB
-    let config = if let Some(pool) = db_pool {
+    // Cache miss — query DB. A DB error returns `DbError` WITHOUT caching, so a
+    // transient error cannot poison the "none" sentinel for a full TTL. Only a
+    // successful read (`Found`/`Absent`) is cached.
+    let lookup = if let Some(pool) = db_pool {
         match sqlx::query_as::<_, (Option<f64>, Option<f64>, Option<f64>)>(
             r#"SELECT
                 hourly_limit_usdc::DOUBLE PRECISION,
@@ -1431,35 +1517,34 @@ async fn get_team_budget_config(
         .fetch_optional(pool)
         .await
         {
-            Ok(Some((hourly, daily, monthly))) => Some(TeamBudgetConfig {
+            Ok(Some((hourly, daily, monthly))) => TeamLookup::Found(TeamBudgetConfig {
                 hourly,
                 daily,
                 monthly,
             }),
-            Ok(None) => None,
+            Ok(None) => TeamLookup::Absent,
             Err(e) => {
-                warn!(team_id = %team_id, error = %e, "failed to query team_budgets");
-                None
+                warn!(team_id = %team_id, error = %e, "failed to query team_budgets — not caching");
+                TeamLookup::DbError
             }
         }
     } else {
-        None
+        // No DB pool — a stable "no team budget" answer; safe to cache.
+        TeamLookup::Absent
     };
 
-    // Cache result
-    let cache_val = match &config {
-        Some(cfg) => serde_json::to_string(cfg).unwrap_or_else(|_| "none".to_string()),
-        None => "none".to_string(),
-    };
-    let _: Result<(), _> = redis::cmd("SET")
-        .arg(&cache_key)
-        .arg(&cache_val)
-        .arg("EX")
-        .arg(TEAM_BUDGET_CACHE_TTL)
-        .query_async(conn)
-        .await;
+    // Cache result — only `Found`/`Absent`; never a transient error-derived value.
+    if let Some(cache_val) = lookup.cache_value() {
+        let _: Result<(), _> = redis::cmd("SET")
+            .arg(&cache_key)
+            .arg(&cache_val)
+            .arg("EX")
+            .arg(TEAM_BUDGET_CACHE_TTL)
+            .query_async(conn)
+            .await;
+    }
 
-    config
+    lookup
 }
 
 /// Load the `(wallet, tenant)` budget config from `tenant_budgets`. Cached in
@@ -2428,6 +2513,49 @@ mod tests {
         let json = serde_json::to_string(&config).expect("serialize");
         let back: TenantBudgetConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.hourly, Some(1.0));
+        assert_eq!(back.daily, Some(10.0));
+        assert!(back.monthly.is_none());
+    }
+
+    /// #501: the cache-derivation contract for `get_team_budget_config`. A
+    /// transient DB error must produce NO cache write (so a blip cannot poison
+    /// the team cap for a full TTL), a confirmed absence caches the `"none"`
+    /// sentinel, and a found row caches its serialized JSON. Mirrors the
+    /// `TenantLookup` no-cache-on-error behavior.
+    #[test]
+    fn test_team_lookup_cache_value_never_caches_db_error() {
+        // DB error → never cached.
+        assert_eq!(
+            TeamLookup::DbError.cache_value(),
+            None,
+            "a transient team_budgets DB error must NEVER be cached"
+        );
+
+        // Confirmed absence → "none" sentinel (regression guard for the
+        // happy-path cache fill).
+        assert_eq!(
+            TeamLookup::Absent.cache_value(),
+            Some("none".to_string()),
+            "a confirmed-absent team budget must cache the \"none\" sentinel"
+        );
+
+        // Found → serialized JSON that round-trips back to the same config and
+        // is distinct from the absence sentinel.
+        let cfg = TeamBudgetConfig {
+            hourly: Some(0.50),
+            daily: Some(10.0),
+            monthly: None,
+        };
+        let cached = TeamLookup::Found(cfg)
+            .cache_value()
+            .expect("a found team budget must be cached");
+        assert_ne!(
+            cached, "none",
+            "a real budget must not serialize to \"none\""
+        );
+        let back: TeamBudgetConfig =
+            serde_json::from_str(&cached).expect("cached team budget must round-trip");
+        assert_eq!(back.hourly, Some(0.50));
         assert_eq!(back.daily, Some(10.0));
         assert!(back.monthly.is_none());
     }
