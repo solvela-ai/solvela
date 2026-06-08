@@ -34,3 +34,25 @@ ddab954e4f0dfa4c6332e7e479a988c29ee29d6b:crates/gateway/src/routes/chat/payment.
 
 # api-design skill doc — placeholder X-API-Key example
 828a3187f88bb5187564d9cbcabe05c8dbf1d75b:.claude/skills/api-design/SKILL.md:generic-api-key:306
+
+# --- Refreshed 2026-06-08 (first CI run via secret-scan.yml). All false positives. ---
+
+# Docs/codemap placeholder API keys (`solvela_k_...` examples, not live)
+9d9b73c6d78dd16e114ec3eac4210b3d27158340:docs/CODEMAPS/backend.md:generic-api-key:314
+a1a9cda593ece9fe6d5fe8289034dc1b9cda6879:dashboard/content/docs/enterprise/api-keys.mdx:generic-api-key:51
+a1a9cda593ece9fe6d5fe8289034dc1b9cda6879:dashboard/content/docs/enterprise/api-keys.mdx:generic-api-key:52
+a1a9cda593ece9fe6d5fe8289034dc1b9cda6879:dashboard/content/docs/enterprise/api-keys.mdx:generic-api-key:77
+
+# Docs curl example with `solvela_k_your_key_here` placeholder
+edb69b1dd812a798f825d180107367ad72b3a7f1:dashboard/content/docs/api/rate-limits.mdx:curl-auth-header:54
+
+# Test fixture in orgs/queries.rs (`solvela_k_abc123testkey`) — new commit/lines
+4c20b0652d6cf71aec604b267bb2c0f5f05f236e:crates/gateway/src/orgs/queries.rs:generic-api-key:572
+4c20b0652d6cf71aec604b267bb2c0f5f05f236e:crates/gateway/src/orgs/queries.rs:generic-api-key:585
+
+# Solana public key in example context (agent_pubkey) — public by design
+9574286b57356de108906a0de88e9167a08b2d2f:crates/gateway/src/routes/proxy.rs:generic-api-key:1271
+
+# Placeholder example key text inside the historical root .gitleaksignore triage notes
+# (do not paste the literal token here — gitleaks scans this file's history too)
+7581debe7dc190d431dcdb310d0bba069124bda6:.gitleaksignore:generic-api-key:10
