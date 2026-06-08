@@ -134,6 +134,21 @@ export const MIN_PLAUSIBLE_SLOT = 1_000_000;
  * precision.
  */
 export function escrowExpirySlot(currentSlot: number, maxTimeoutSeconds: number): number {
+  // FINDING B (audit 2026-06-08): fail closed on a non-finite input. This is a
+  // public export; before the guard a NaN timeout silently returned NaN
+  // (Math.max(NaN, 0) === NaN, which then flowed into `assertValidExpirySlot` /
+  // `u64LE`) and Infinity was silently clamped to the 10000-slot ceiling — both
+  // hide a real input error on a value path. The canonical signers never feed a
+  // non-integer here (Rust `u64` / Go `int` reject at deserialization; the
+  // canonical TS signer rejects with `!Number.isInteger` — see the Finding A note
+  // in sign.ts), so this guard only ever fires on genuinely malformed input and
+  // does NOT reject any value the canonical path produces.
+  if (!Number.isFinite(maxTimeoutSeconds)) {
+    throw new SigningError('max_timeout_seconds must be a finite number of seconds');
+  }
+  if (!Number.isFinite(currentSlot)) {
+    throw new SigningError('current_slot must be a finite number');
+  }
   const timeout = Math.max(maxTimeoutSeconds, 0);
   // timeout * 1000 / 400, floored to whole slots (matches the Rust integer math).
   const timeoutSlots = Math.floor((timeout * 1000) / 400);
@@ -252,16 +267,27 @@ function assertValidAmount(amount: number): void {
 }
 
 /**
- * Reject a non-integer, non-finite, or non-positive expiry slot.
+ * Reject a non-safe-integer, non-finite, or non-positive expiry slot.
  *
  * `expiry_slot` is encoded directly into the on-chain `u64` via {@link u64LE}.
  * An `expirySlot` of 0 silently encodes a dead-on-arrival deposit, and
  * `NaN`/`Infinity`/`-1` make `BigInt(value)` throw a raw untyped error rather
  * than a `SigningError`. Fail closed here, parallel to {@link assertValidAmount}.
+ *
+ * FINDING C (audit 2026-06-08): use `Number.isSafeInteger` (not the looser
+ * `Number.isInteger`) and an implicit MAX_SAFE_INTEGER ceiling, mirroring
+ * {@link assertValidAmount}. A value above `Number.MAX_SAFE_INTEGER` does not
+ * round-trip faithfully through an IEEE-754 double, so it cannot encode exactly
+ * into the on-chain `u64` — `Number.isInteger(2**53)` is `true` but the value is
+ * already lossy. Overflow here is theoretical (the canonical `escrowExpirySlot`
+ * caps the offset at 10000 slots above a plausible slot), but it makes the two
+ * validators symmetric so neither can be the weak link.
  */
 function assertValidExpirySlot(expirySlot: number): void {
-  if (!Number.isInteger(expirySlot)) {
-    throw new SigningError('expiry_slot must be a positive integer');
+  if (!Number.isSafeInteger(expirySlot)) {
+    throw new SigningError(
+      'expiry_slot must be a positive safe integer (<= Number.MAX_SAFE_INTEGER)',
+    );
   }
   if (expirySlot <= 0) {
     throw new SigningError('expiry_slot must be a positive integer');

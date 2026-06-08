@@ -158,6 +158,35 @@ describe('signer-core escrow deposit fail-closed expiry-slot guards', () => {
   it('rejects a non-integer expiry slot', () => {
     assert.throws(() => buildEscrowDepositTx({ ...goldenParams(), expirySlot: 1.5 }), /integer/);
   });
+
+  // FINDING B (audit 2026-06-08): a non-finite expiry_slot must fail closed as a
+  // SigningError, not leak a raw `RangeError: The number ... cannot be converted
+  // to a BigInt` out of `BigInt(Infinity)`/`BigInt(NaN)` in `u64LE`. The guard is
+  // in `assertValidExpirySlot` (Number.isSafeInteger rejects both).
+  it('rejects an Infinity expiry slot (fail closed, not a raw BigInt RangeError)', () => {
+    assert.throws(
+      () => buildEscrowDepositTx({ ...goldenParams(), expirySlot: Number.POSITIVE_INFINITY }),
+      SigningError,
+    );
+  });
+
+  it('rejects a NaN expiry slot', () => {
+    assert.throws(
+      () => buildEscrowDepositTx({ ...goldenParams(), expirySlot: Number.NaN }),
+      SigningError,
+    );
+  });
+
+  // FINDING C (audit 2026-06-08): expiry_slot parity with assertValidAmount —
+  // values above MAX_SAFE_INTEGER don't round-trip through an IEEE-754 double and
+  // cannot encode faithfully into the on-chain u64, so reject them like the amount
+  // guard does (Number.isSafeInteger, not Number.isInteger).
+  it('rejects an expiry slot above MAX_SAFE_INTEGER (safe-integer parity with amount)', () => {
+    assert.throws(
+      () => buildEscrowDepositTx({ ...goldenParams(), expirySlot: Number.MAX_SAFE_INTEGER + 2 }),
+      /safe-integer|integer/,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -201,6 +230,26 @@ describe('signer-core escrowExpirySlot clamp (parity with canonical SDKs)', () =
 
   it('floors a negative timeout to 0 then clamps to the 150-slot floor', () => {
     assert.equal(escrowExpirySlot(5_000_000, -42), 5_000_000 + MIN_ESCROW_EXPIRY_SLOTS_AHEAD);
+  });
+
+  // FINDING B (audit 2026-06-08): escrowExpirySlot is a public export. Before the
+  // guard it silently returned NaN for a NaN timeout (Math.max(NaN, 0) = NaN) and
+  // silently clamped Infinity to the 10000-slot ceiling — both hiding a real input
+  // error on a value path. Fail closed on a non-finite timeout instead. The
+  // canonical signers never feed it a non-integer (Rust u64 / Go int reject at
+  // deserialization, the canonical TS signer rejects with !Number.isInteger), so
+  // this guard only ever fires on a genuinely malformed input.
+  it('throws on a NaN timeout (was: silently returned NaN)', () => {
+    assert.throws(() => escrowExpirySlot(5_000_000, Number.NaN), SigningError);
+  });
+
+  it('throws on an Infinity timeout (was: silently clamped to the ceiling)', () => {
+    assert.throws(() => escrowExpirySlot(5_000_000, Number.POSITIVE_INFINITY), SigningError);
+  });
+
+  it('throws on a non-finite currentSlot', () => {
+    assert.throws(() => escrowExpirySlot(Number.NaN, 300), SigningError);
+    assert.throws(() => escrowExpirySlot(Number.POSITIVE_INFINITY, 300), SigningError);
   });
 });
 

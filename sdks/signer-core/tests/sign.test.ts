@@ -10,6 +10,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { Keypair } from '@solana/web3.js';
+import bs58 from 'bs58';
+
 import {
   createPaymentHeader,
   decodePaymentHeader,
@@ -173,6 +176,62 @@ describe('createPaymentHeader (escrow, stub mode)', () => {
     // 32 bytes -> 44 base64 chars with padding
     assert.equal(serviceId.length, 44);
     assert.match(serviceId, /^[A-Za-z0-9+/]+={0,2}$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Header construction (escrow scheme, real-key — max_timeout_seconds boundary)
+//
+// FINDING A (audit 2026-06-08): `buildEscrowDeposit` validates the untrusted
+// `max_timeout_seconds` from the 402 with `!Number.isInteger`. We REJECT a
+// fractional timeout to stay consistent with the four canonical SDK signers:
+//   - Rust: `PaymentAccept.max_timeout_seconds: u64` — a JSON 30.5 fails serde
+//     deserialization, never reaching the signer (integer-only at the wire).
+//   - Go:   `MaxTimeoutSeconds int` — a JSON 30.5 fails json.Unmarshal into int.
+//   - TS (canonical, sdks/typescript/src/signer.ts): explicit
+//     `if (!Number.isInteger(accepted.maxTimeoutSeconds)) throw`.
+// (Python alone tolerates a float only via an unenforced `: int` annotation — an
+// unintended latent gap, NOT the contract.) Accepting + flooring a fractional
+// timeout here would make signer-core a fourth, divergent behavior; rejecting is
+// the canonical-consistent, fail-closed choice. The valibot schema additionally
+// rejects a non-integer `max_timeout_seconds` at the parse boundary (see
+// schema.test.ts), mirroring the Rust/Go structural integer constraint; this
+// signer-side guard is defense-in-depth for callers that bypass the parser.
+//
+// The check runs BEFORE any RPC/key work, so this test needs no SOLANA_RPC_URL:
+// the timeout rejection fires before `mustConnection()`.
+// ---------------------------------------------------------------------------
+
+describe('createPaymentHeader (escrow, real-key max_timeout_seconds boundary)', () => {
+  // A real, well-formed bs58 secret key — required to reach `buildEscrowDeposit`
+  // (the privateKey-supplied path). No secret material of value: a throwaway
+  // keypair generated per run.
+  const privateKeyB58 = bs58.encode(Keypair.generate().secretKey);
+
+  it('rejects a fractional max_timeout_seconds (parity with Rust u64 / Go int / canonical TS)', async () => {
+    const fractional: PaymentRequired = {
+      ...escrowPaymentRequired,
+      accepts: [{ ...escrowPaymentRequired.accepts[0], max_timeout_seconds: 30.5 }],
+    };
+    await assert.rejects(
+      () => createPaymentHeader(fractional, RESOURCE_URL, privateKeyB58, '{}'),
+      (err: unknown) => {
+        assert.ok(err instanceof SigningError, 'must be a SigningError');
+        assert.match((err as SigningError).message, /finite integer|max_timeout_seconds/);
+        return true;
+      },
+    );
+  });
+
+  it('rejects a NaN max_timeout_seconds (fail closed before RPC)', async () => {
+    const nan: PaymentRequired = {
+      ...escrowPaymentRequired,
+      accepts: [{ ...escrowPaymentRequired.accepts[0], max_timeout_seconds: Number.NaN }],
+    };
+    await assert.rejects(
+      () => createPaymentHeader(nan, RESOURCE_URL, privateKeyB58, '{}'),
+      SigningError,
+    );
   });
 });
 
