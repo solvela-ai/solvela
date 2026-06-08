@@ -441,7 +441,7 @@ Solvela is deployed on Fly.io:
 | Resource | URL / Name |
 |----------|------------|
 | Gateway | `api.solvela.ai` (Fly app: `solvela-gateway`) |
-| PostgreSQL | `solvela-db` (Fly Postgres 17.2) |
+| PostgreSQL | `solvela-pg` (Fly Postgres 17.2) |
 | Redis | `solvela-cache` (Upstash, ord + iad) |
 
 ```bash
