@@ -77,10 +77,10 @@ pub fn resolve_model(profile: Profile, tier: Tier) -> &'static str {
         (Profile::Premium, Tier::Reasoning) => "openai/o3",
 
         // FREE: only free-tier models
-        (Profile::Free, Tier::Simple) => "openai/gpt-oss-120b",
-        (Profile::Free, Tier::Medium) => "openai/gpt-oss-120b",
-        (Profile::Free, Tier::Complex) => "openai/gpt-oss-120b",
-        (Profile::Free, Tier::Reasoning) => "openai/gpt-oss-120b",
+        (Profile::Free, Tier::Simple) => "google/gemini-3.1-flash-lite",
+        (Profile::Free, Tier::Medium) => "google/gemini-3.1-flash-lite",
+        (Profile::Free, Tier::Complex) => "google/gemini-3.1-flash-lite",
+        (Profile::Free, Tier::Reasoning) => "google/gemini-3.1-flash-lite",
     }
 }
 
@@ -101,7 +101,7 @@ pub fn resolve_alias(alias: &str) -> Option<&'static str> {
         "grok" | "grok-fast" => Some("xai/grok-4-fast-reasoning"),
         "deepseek" | "ds" => Some("deepseek/deepseek-chat"),
         "deepseek-r" | "reasoner" => Some("deepseek/deepseek-reasoner"),
-        "free" | "oss" => Some("openai/gpt-oss-120b"),
+        "free" | "oss" => Some("google/gemini-3.1-flash-lite"),
         "o3-mini" | "o3mini" => Some("openai/o3-mini"),
         "o4-mini" | "o4mini" => Some("openai/o4-mini"),
         "gpt4.1" | "gpt-4.1" | "gpt41" => Some("openai/gpt-4.1"),
@@ -143,7 +143,7 @@ mod tests {
     fn test_resolve_model() {
         assert_eq!(
             resolve_model(Profile::Free, Tier::Reasoning),
-            "openai/gpt-oss-120b"
+            "google/gemini-3.1-flash-lite"
         );
         assert_eq!(
             resolve_model(Profile::Premium, Tier::Reasoning),
@@ -152,6 +152,51 @@ mod tests {
         assert_eq!(
             resolve_model(Profile::Auto, Tier::Simple),
             "google/gemini-2.5-flash"
+        );
+    }
+
+    /// The free tier maps EVERY complexity tier to the canonical Gemini 3.1
+    /// Flash-Lite key. Pins the 2026-06 repoint off `openai/gpt-oss-120b`
+    /// (which was never served free by OpenAI's API) onto Google's free-tier
+    /// model. The companion `every_alias_and_profile_tier_resolves_to_a_registered_model`
+    /// test guarantees this key is registered in `config/models.toml`.
+    #[test]
+    fn free_profile_every_tier_resolves_to_gemini_flash_lite() {
+        for tier in [Tier::Simple, Tier::Medium, Tier::Complex, Tier::Reasoning] {
+            assert_eq!(
+                resolve_model(Profile::Free, tier),
+                "google/gemini-3.1-flash-lite",
+                "Profile::Free tier {tier:?} must route to the free Gemini model"
+            );
+        }
+    }
+
+    /// The `free` / `oss` aliases resolve to the same canonical free-tier key
+    /// as `Profile::Free`. Guards against the alias and the profile drifting
+    /// apart (which would silently route alias users to a different model).
+    #[test]
+    fn free_and_oss_aliases_resolve_to_gemini_flash_lite() {
+        assert_eq!(resolve_alias("free"), Some("google/gemini-3.1-flash-lite"));
+        assert_eq!(resolve_alias("oss"), Some("google/gemini-3.1-flash-lite"));
+        // Alias and profile must agree on the free-tier target.
+        assert_eq!(
+            resolve_alias("free"),
+            Some(resolve_model(Profile::Free, Tier::Simple))
+        );
+    }
+
+    /// The free-tier model key MUST exist in the production `config/models.toml`
+    /// registry. A repoint that named an unregistered model would 500 every
+    /// free-tier request at the registry lookup (the same class of bug the
+    /// `haiku` alias previously had).
+    #[test]
+    fn free_tier_model_is_registered_in_models_toml() {
+        let toml_str = include_str!("../../../config/models.toml");
+        let registry = crate::models::ModelRegistry::from_toml(toml_str)
+            .expect("config/models.toml must parse");
+        assert!(
+            registry.get("google/gemini-3.1-flash-lite").is_some(),
+            "the free-tier model google/gemini-3.1-flash-lite must be in models.toml"
         );
     }
 

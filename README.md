@@ -181,6 +181,7 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 | Anthropic | `claude-sonnet-4-6` | $3.00 | $15.00 | 200K |
 | Anthropic | `claude-sonnet-4-5-20250929` | $3.00 | $15.00 | 200K |
 | Anthropic | `claude-haiku-4-5-20251001` | $1.00 | $5.00 | 200K |
+| Google | `gemini-3.1-flash-lite` | Free | Free | 1M |
 | Google | `gemini-3.1-pro` | $2.00 | $12.00 | 1M |
 | Google | `gemini-2.5-flash` | $0.30 | $2.50 | 1M |
 | Google | `gemini-2.5-flash-lite` | $0.10 | $0.40 | 1M |
@@ -195,6 +196,8 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 | DeepSeek | `deepseek-coder` | $0.28 | $0.42 | 128K |
 
 All prices are provider cost in USDC. A 5% platform fee is applied on top. See `config/models.toml` for the full registry or query `GET /pricing` at runtime.
+
+> **Free-tier data-use notice.** `gemini-3.1-flash-lite` is the `free` profile's model and is served via Google's **free** Gemini API tier. On that tier Google may use submitted prompts and generated responses to improve its products, and human reviewers may read, annotate, and process them — do not send sensitive data through the free tier. The free tier is also rate-limited (~15 requests/min, shared per gateway key), so treat it as a demo/evaluation tier rather than a model to build production load on. Paid models on this list are not subject to that data-use policy.
 
 ---
 
