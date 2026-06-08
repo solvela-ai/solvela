@@ -146,6 +146,30 @@ describe('parse402', () => {
       }
     });
 
+    // FINDING A (audit 2026-06-08): `max_timeout_seconds` is integer-only on the
+    // wire — Rust deserializes it as `u64`, Go as `int`, so a fractional value
+    // never reaches those signers. The valibot schema now enforces `integer()`
+    // so signer-core rejects it at the same parse boundary rather than relying
+    // solely on the downstream signer guard.
+    it('throws on a fractional max_timeout_seconds (integer-only wire field)', () => {
+      const body = {
+        ...validDirectBody,
+        accepts: [{ ...validDirectBody.accepts[0], max_timeout_seconds: 30.5 }],
+      };
+      assert.throws(
+        () => parse402(JSON.stringify(body)),
+        /accepts\[0\]/,
+      );
+    });
+
+    it('accepts an integer max_timeout_seconds (the canonical wire value)', () => {
+      const body = {
+        ...validDirectBody,
+        accepts: [{ ...validDirectBody.accepts[0], max_timeout_seconds: 60 }],
+      };
+      assert.doesNotThrow(() => parse402(JSON.stringify(body)));
+    });
+
     it('reports the index of the first invalid accepts element', () => {
       const body = {
         ...validDirectBody,

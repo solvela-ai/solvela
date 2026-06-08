@@ -78,7 +78,17 @@ export const PaymentAcceptSchema = object({
   amount: decimalAmount,
   asset: pipe(string(), nonEmpty()),
   pay_to: pipe(string(), nonEmpty()),
-  max_timeout_seconds: pipe(number(), finite(), minValue(0)),
+  // FINDING A (audit 2026-06-08): `integer()` (not just `finite()`) so a
+  // fractional `max_timeout_seconds` is rejected at the parse boundary. The
+  // canonical wire type is integer-only — Rust deserializes it as `u64`
+  // (crates/protocol/src/payment.rs) and Go as `int` (sdks/go/types.go), so a
+  // JSON `30.5` fails to decode in both; the canonical TS signer rejects it with
+  // `!Number.isInteger`. Tightening the schema here (rather than accepting +
+  // flooring) keeps signer-core consistent with those three and mirrors their
+  // structural integer constraint. `sign.ts`'s `buildEscrowDeposit` keeps its
+  // own `!Number.isInteger` guard as defense-in-depth for callers that bypass
+  // the parser.
+  max_timeout_seconds: pipe(number(), integer(), minValue(0)),
   escrow_program_id: optional(string()),
 });
 

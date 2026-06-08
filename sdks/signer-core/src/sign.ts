@@ -28,14 +28,10 @@ import {
   Connection,
   Keypair,
   PublicKey,
-  SystemProgram,
   TransactionMessage,
   VersionedTransaction,
-  type TransactionInstruction,
 } from '@solana/web3.js';
 import {
-  ASSOCIATED_TOKEN_PROGRAM_ID,
-  TOKEN_PROGRAM_ID,
   createTransferCheckedInstruction,
   getAssociatedTokenAddress,
 } from '@solana/spl-token';
@@ -43,6 +39,11 @@ import bs58 from 'bs58';
 
 import type { PaymentAccept, PaymentExpectations, PaymentRequired } from './types.js';
 import { X402_VERSION_CLIENT } from './schema.js';
+import {
+  buildEscrowDepositTx,
+  escrowExpirySlot,
+  assertPlausibleSlot,
+} from './escrow.js';
 
 
 // X402_VERSION lives in schema.ts so parse-402.ts can compare incoming
@@ -268,7 +269,22 @@ async function buildEscrowDeposit(
   serviceId: Buffer,
   maxTimeoutSeconds: number,
 ): Promise<{ depositTx: string; agentPubkey: string }> {
-  const amount = parsePositiveAmount(amountStr, 'Escrow deposit');
+  // Validate amount BEFORE any RPC/key work. `parsePositiveAmount` enforces an
+  // integer atomic-unit string; the canonical `buildEscrowDepositTx` re-checks
+  // the safe-integer u64 range. amount is a small USDC atomic count, so the
+  // Number() conversion is exact for any plausible value (the builder rejects
+  // anything above Number.MAX_SAFE_INTEGER).
+  const amountBig = parsePositiveAmount(amountStr, 'Escrow deposit');
+  const amount = Number(amountBig);
+
+  // `max_timeout_seconds` comes straight from the untrusted 402 with no
+  // parse-boundary validation. Reject a non-finite/non-integer value here so it
+  // can't propagate a NaN through `escrowExpirySlot` into the on-chain u64. A
+  // negative finite integer is intentionally allowed — `escrowExpirySlot` floors
+  // it to 0 then clamps to the 150-slot floor (parity with the canonical SDKs).
+  if (!Number.isInteger(maxTimeoutSeconds)) {
+    throw new SigningError('max_timeout_seconds must be a finite integer number of seconds');
+  }
 
   let secretKey: Uint8Array | null = null;
   try {
@@ -276,70 +292,45 @@ async function buildEscrowDeposit(
     const payer = Keypair.fromSecretKey(secretKey);
     const agentPubkey = payer.publicKey.toBase58();
 
-    const providerPubkey = new PublicKey(providerWallet);
-    const programId = new PublicKey(programIdStr);
-
-    // Escrow PDA seeds: ["escrow", agent, serviceId]
-    const [escrowPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from('escrow'), payer.publicKey.toBuffer(), serviceId],
-      programId,
-    );
-
-    const agentAta = await getAssociatedTokenAddress(USDC_MINT, payer.publicKey);
-    const vaultAta = await getAssociatedTokenAddress(USDC_MINT, escrowPda, true);
-
     const connection = mustConnection();
     const [{ blockhash }, currentSlot] = await Promise.all([
       connection.getLatestBlockhash('finalized'),
       connection.getSlot('confirmed'),
     ]);
 
-    // Solana ~400ms/slot; floor to integer; minimum 10 slots.
-    const timeoutSlots = Math.max(Math.floor((maxTimeoutSeconds * 1000) / 400), 10);
-    const expirySlot = BigInt(currentSlot + timeoutSlots);
+    // Fail closed on a stub/genesis/reset node before computing an expiry from a
+    // near-zero base slot (which would be a dead-on-arrival deposit the gateway
+    // bounces — and the MCP standalone-deposit path would broadcast on-chain
+    // first). Parity with the canonical SDK `fetchCurrentSlot` MIN_PLAUSIBLE_SLOT
+    // check.
+    assertPlausibleSlot(currentSlot);
 
-    // Anchor instruction discriminator: sha256("global:deposit")[0:8]
-    const discriminator = createHash('sha256')
-      .update(Buffer.from('global:deposit', 'utf-8'))
-      .digest()
-      .subarray(0, 8);
+    // Expiry-slot bounds in lockstep with the four canonical SDKs and the
+    // gateway verifier: clamp the offset into [150, 10000] slots. The old
+    // signer-core code used a 10-slot floor with no upper clamp, which produced
+    // a dead-on-arrival escrow for any maxTimeoutSeconds < ~20 (the gateway
+    // rejects expiry_slot - current_slot < MIN_EXPIRY_BUFFER_SLOTS = 50).
+    const expirySlot = escrowExpirySlot(currentSlot, maxTimeoutSeconds);
 
-    const data = Buffer.concat([
-      discriminator,
-      u64LE(amount),
-      serviceId,
-      u64LE(expirySlot),
-    ]);
+    // bs58.decode returns the raw 32-byte blockhash the canonical builder needs
+    // (NOT the base58 string).
+    const recentBlockhash = bs58.decode(blockhash);
 
-    const ix: TransactionInstruction = {
-      programId,
-      keys: [
-        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
-        { pubkey: providerPubkey, isSigner: false, isWritable: false },
-        { pubkey: USDC_MINT, isSigner: false, isWritable: false },
-        { pubkey: escrowPda, isSigner: false, isWritable: true },
-        { pubkey: agentAta, isSigner: false, isWritable: true },
-        { pubkey: vaultAta, isSigner: false, isWritable: true },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      ],
-      data,
-    };
+    // Byte-exact, golden-vector-pinned legacy-message builder (canonical layout
+    // the gateway verifier expects). NO v0 VersionedTransaction, NO raw
+    // instruction-order accounts — those were the wire-drift bug this replaces.
+    const depositTx = buildEscrowDepositTx({
+      keypair: payer,
+      providerWalletB58: providerWallet,
+      usdcMintB58: USDC_MINT.toBase58(),
+      escrowProgramIdB58: programIdStr,
+      amount,
+      serviceId: new Uint8Array(serviceId),
+      expirySlot,
+      recentBlockhash,
+    });
 
-    const message = new TransactionMessage({
-      payerKey: payer.publicKey,
-      recentBlockhash: blockhash,
-      instructions: [ix],
-    }).compileToV0Message();
-
-    const tx = new VersionedTransaction(message);
-    tx.sign([payer]);
-
-    return {
-      depositTx: Buffer.from(tx.serialize()).toString('base64'),
-      agentPubkey,
-    };
+    return { depositTx, agentPubkey };
   } catch (err) {
     if (err instanceof SigningError) throw err;
     throw new SigningError(
@@ -430,14 +421,4 @@ function mustConnection(): Connection {
     );
   }
   return new Connection(rpcUrl, 'confirmed');
-}
-
-/** Encode a u64 as 8-byte little-endian. Avoids `BigInt64Array` for older Node. */
-function u64LE(value: bigint): Buffer {
-  const buf = Buffer.allocUnsafe(8);
-  const low = Number(value & 0xffffffffn);
-  const high = Number((value >> 32n) & 0xffffffffn);
-  buf.writeUInt32LE(low, 0);
-  buf.writeUInt32LE(high, 4);
-  return buf;
 }
