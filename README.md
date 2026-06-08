@@ -181,6 +181,7 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 | Anthropic | `claude-sonnet-4-6` | $3.00 | $15.00 | 200K |
 | Anthropic | `claude-sonnet-4-5-20250929` | $3.00 | $15.00 | 200K |
 | Anthropic | `claude-haiku-4-5-20251001` | $1.00 | $5.00 | 200K |
+| Google | `gemini-3.1-flash-lite` | Free | Free | 1M |
 | Google | `gemini-3.1-pro` | $2.00 | $12.00 | 1M |
 | Google | `gemini-2.5-flash` | $0.30 | $2.50 | 1M |
 | Google | `gemini-2.5-flash-lite` | $0.10 | $0.40 | 1M |
