@@ -152,6 +152,106 @@ async fn log_spend_accumulates_across_calls(pool: PgPool) {
     redis_del(&client, &[&day_key]).await;
 }
 
+/// FINDING 3: a PURE zero-cost row (`cost_usdc == 0.0` AND `estimated_cost_usdc`
+/// is None — the free-tier $0 entry) must write the DB row for observability but
+/// issue NO Redis spend-counter increment (the increment would be `INCRBYFLOAT 0.0`,
+/// a no-op round-trip). Proven by asserting the `spend:{wallet}:{day}` key NEVER
+/// materializes after a settling window, while a nonzero entry for the SAME wallet
+/// DOES create it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn log_spend_zero_cost_no_reservation_skips_redis_but_writes_db(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let now = Utc::now();
+    let day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    // (a) Pure zero-cost free-tier entry: $0, no reservation.
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: wallet.clone(),
+        model: "google/gemini-3.1-flash-lite".to_string(),
+        provider: "google".to_string(),
+        input_tokens: 5,
+        output_tokens: 7,
+        cost_usdc: 0.0,
+        tx_signature: None,
+        request_id: None,
+        session_id: None,
+        tenant: None,
+        tenant_enforced: false,
+        estimated_cost_usdc: None,
+    });
+
+    // The DB row must be written (observability). Poll for it.
+    let mut db_rows: i64 = 0;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        db_rows = sqlx::query_scalar("SELECT COUNT(*) FROM spend_logs WHERE wallet_address = $1")
+            .bind(&wallet)
+            .fetch_one(&pool)
+            .await
+            .expect("count spend_logs");
+        if db_rows >= 1 {
+            break;
+        }
+    }
+    assert_eq!(
+        db_rows, 1,
+        "a zero-cost free-tier entry must still write its DB row for observability"
+    );
+
+    // The Redis spend key must NOT exist — no INCRBYFLOAT was issued. Give the
+    // fire-and-forget spawn ample time to (not) write.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("conn");
+    let zero_cost_val: Option<String> = redis::cmd("GET")
+        .arg(&day_key)
+        .query_async(&mut conn)
+        .await
+        .expect("get day key");
+    assert!(
+        zero_cost_val.is_none(),
+        "a pure $0/no-reservation entry must NOT create a Redis spend counter, got {zero_cost_val:?}"
+    );
+
+    // (b) A NONZERO entry for the same wallet still increments Redis.
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: wallet.clone(),
+        model: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        input_tokens: 100,
+        output_tokens: 200,
+        cost_usdc: 0.0050,
+        tx_signature: None,
+        request_id: None,
+        session_id: None,
+        tenant: None,
+        tenant_enforced: false,
+        estimated_cost_usdc: None,
+    });
+    let day_val = wait_for_key(&client, &day_key)
+        .await
+        .expect("a nonzero entry must still create the Redis spend counter");
+    assert!(
+        (day_val.parse::<f64>().unwrap_or(0.0) - 0.005).abs() < 1e-9,
+        "nonzero spend counter must equal 0.005, got {day_val}"
+    );
+
+    redis_del(
+        &client,
+        &[
+            &day_key,
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H")),
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m")),
+        ],
+    )
+    .await;
+}
+
 #[sqlx::test(migrations = "../../migrations")]
 async fn check_budget_passes_when_under_default_daily_limit(pool: PgPool) {
     let client = redis_client();
