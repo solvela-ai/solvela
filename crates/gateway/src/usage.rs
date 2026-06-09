@@ -431,7 +431,24 @@ impl UsageTracker {
         // be negative if actual usage came in under the estimate. If
         // `estimated_cost_usdc` is `None` no reservation was committed
         // (legacy / proxy / test paths), so we increment by the full cost.
+        // FINDING 3: skip the Redis spend-counter round-trip for a PURE zero-cost
+        // row — `cost_usdc == 0.0` AND `estimated_cost_usdc` is None (the free-tier
+        // $0 entry). With no reservation, the increment delta below is exactly 0.0,
+        // so the three `INCRBYFLOAT spend:* 0.0` (+ per-tenant) calls are pure no-op
+        // round-trips. We still write the DB row above for observability.
+        //
+        // This is safe per solvela-fintech (fail-closed / never-drop-a-real-spend):
+        // a real (nonzero) spend has `cost_usdc != 0.0`, and a reconciled spend has
+        // `estimated_cost_usdc == Some(_)` (where the delta `0.0 - reserved` is a
+        // REAL negative adjustment that MUST still post). Both of those keep BOTH
+        // conditions from holding, so neither is ever skipped here.
+        let is_zero_cost_no_reservation =
+            entry.cost_usdc == 0.0 && entry.estimated_cost_usdc.is_none();
+
         if let Some(client) = &self.redis_client {
+            if is_zero_cost_no_reservation {
+                return;
+            }
             let client = client.clone();
             let db_pool = self.db_pool.clone();
             let wallet = entry.wallet_address;

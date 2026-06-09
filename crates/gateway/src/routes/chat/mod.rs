@@ -349,156 +349,189 @@ pub async fn chat_completions(
             });
     }
 
-    if payment_header.is_none() {
-        // Compute the upfront cost estimate ONCE. This same `atomic_amount` is the
-        // single source of truth for two decisions below:
-        //   1. free-ness (is_free_estimate → zero-cost bypass), and
-        //   2. the amount advertised in the 402 `accepts[]` for a paid model.
-        // Deriving both from one estimate means a pricing change can never make a
-        // paid model silently bypass payment (or a free model wrongly 402).
-        let cost = state
-            .model_registry
-            .estimate_cost(
-                &req.model,
-                estimate_input_tokens(&req),
-                // #500: reserve for the SAME completion-token ceiling billing
-                // will cap to (not a flat 1000), so an omitted-max_tokens
-                // request can never bill above its reservation.
-                completion_token_ceiling(req.max_tokens, model_info),
-            )
-            .map_err(|e| GatewayError::Internal(e.to_string()))?;
+    // Compute the upfront cost estimate ONCE. This same `atomic_amount` is the
+    // single source of truth for two decisions below:
+    //   1. free-ness (is_free_estimate → zero-cost bypass), and
+    //   2. the amount advertised in the 402 `accepts[]` for a paid model.
+    // Deriving both from one estimate means a pricing change can never make a
+    // paid model silently bypass payment (or a free model wrongly 402).
+    //
+    // FINDING 1: the free-ness decision is hoisted ABOVE the `payment_header`
+    // branch so it is reachable whether or not a payment header is present. A
+    // free (estimate == 0) request must be SERVED at $0 regardless of any
+    // header — previously the bypass lived inside `if payment_header.is_none()`,
+    // so a free model carrying a (stray/legacy) payment header fell through to
+    // decode/verify and failed with InvalidPayment. The quoted amount for a free
+    // model is 0, so there is nothing to claim; a present header is simply
+    // ignored. `is_free_estimate` fails closed on any non-"0" value, so a paid
+    // model can never take this path.
+    let cost = state
+        .model_registry
+        .estimate_cost(
+            &req.model,
+            estimate_input_tokens(&req),
+            // #500: reserve for the SAME completion-token ceiling billing
+            // will cap to (not a flat 1000), so an omitted-max_tokens
+            // request can never bill above its reservation.
+            completion_token_ceiling(req.max_tokens, model_info),
+        )
+        .map_err(|e| GatewayError::Internal(e.to_string()))?;
 
-        let atomic_amount = usdc_atomic_amount_checked(&cost.total).map_err(|e| {
-            GatewayError::Internal(format!(
-                "failed to compute USDC atomic amount for model '{}': {}",
-                req.model, e
-            ))
-        })?;
+    let atomic_amount = usdc_atomic_amount_checked(&cost.total).map_err(|e| {
+        GatewayError::Internal(format!(
+            "failed to compute USDC atomic amount for model '{}': {}",
+            req.model, e
+        ))
+    })?;
 
-        // ── Zero-cost (free-tier) bypass ──────────────────────────────────────
-        //
-        // A model is free IFF its computed estimate atomic cost is exactly 0
-        // (e.g. a 0.0/0.0-priced model). Such a request must be SERVED, not 402'd
-        // for a $0 payment. A paid model (atomic > 0) falls through to the 402
-        // below unchanged — `is_free_estimate` fails closed on any non-"0" value.
-        if is_free_estimate(&atomic_amount) {
-            // Anti-abuse: the free path is anonymous (no payer wallet), so it is
-            // rate-limited per client IP, STRICTER than the paid limit. Enforced
-            // BEFORE any provider work so a limited free request never reaches the
-            // upstream provider quota. Keyed on the TCP peer IP (never a
-            // client-supplied header — GHSA-6ggq-cvwx-4f67); absent ConnectInfo
-            // falls back to the shared stricter "unknown" bucket.
-            let free_client_id = crate::middleware::rate_limit::connect_info_client_id(peer_addr.0);
-            if state
-                .free_rate_limiter
-                .check(&free_client_id)
-                .await
-                .is_err()
-            {
-                counter!("solvela_payments_total", "status" => "free_rate_limited").increment(1);
-                warn!(
-                    client_id = %free_client_id,
-                    model = %req.model,
-                    "free-tier rate limit exceeded"
-                );
-                return Ok(crate::middleware::rate_limit::rate_limited_response(
-                    state.free_rate_limiter.config(),
-                ));
-            }
-
-            // Gate order on the free path is deliberate:
-            //   1. per-IP free check (above) — cheap, in-memory, rejects a single
-            //      spamming IP without a Redis round-trip.
-            //   2. aggregate cap (here) — global across ALL clients, bounds total
-            //      free throughput below the upstream provider's SHARED ceiling
-            //      (the per-IP check can't: many distinct IPs each under their
-            //      per-IP cap can still collectively exceed Google's ~15 RPM).
-            //   3. prompt guard → provider (below).
-            // Both rate gates run BEFORE any provider call so a rejected request
-            // never reaches the upstream free-tier quota. The cap uses Redis when
-            // configured (cross-instance) and degrades to in-memory on Redis error
-            // (it never goes unbounded); see `FreeTierGlobalCap::check`.
-            if state
-                .free_global_cap
-                .check(state.cache.as_ref())
-                .await
-                .is_err()
-            {
-                counter!("solvela_payments_total", "status" => "free_global_rate_limited")
-                    .increment(1);
-                warn!(
-                    model = %req.model,
-                    cap = state.free_global_cap.cap(),
-                    "free-tier aggregate (global) rate cap exceeded — returning gateway 429 before upstream provider 429s"
-                );
-                return Ok(crate::middleware::rate_limit::rate_limited_response(
-                    &state.free_global_cap.as_rate_limit_config(),
-                ));
-            }
-
-            counter!("solvela_payments_total", "status" => "free").increment(1);
-            info!(model = %req.model, "zero-cost model — serving free-tier request without payment");
-
-            // Free requests reach a provider, so they must run the guard (same as
-            // the dev-bypass and paid paths).
-            run_prompt_guard(&req.messages)?;
-
-            let ctx = ProviderCallContext {
-                state: &state,
-                req: &req,
-                model_info,
-                headers: &headers,
-                debug_enabled,
-                request_start,
-                routing_tier: &routing_tier,
-                routing_score,
-                routing_profile: &routing_profile,
-                session_id: &session_id,
-                payment_status: PaymentStatus::Free,
-            };
-
-            return match provider::execute_provider_call(&ctx).await {
-                Ok(result) => {
-                    // Log spend at $0 via the existing fire-and-forget path so the
-                    // free tier still shows up in usage/observability. `cost_usdc`
-                    // is 0.0 and `estimated_cost_usdc` is None, so `log_spend`
-                    // increments counters by 0 (no divide-by-zero / no fail-closed
-                    // path is reachable for a zero amount). Anonymous: there is no
-                    // payer wallet, so a sentinel marks the row as free-tier.
-                    let usage = result
-                        .usage
-                        .as_ref()
-                        .map(|u| cap_usage_to_request_limits(u, &req, model_info));
-                    state.usage.log_spend(SpendLogEntry {
-                        wallet_address: "free-tier".to_string(),
-                        model: req.model.clone(),
-                        provider: result
-                            .actual_provider
-                            .unwrap_or_else(|| model_info.provider.clone()),
-                        input_tokens: usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
-                        output_tokens: usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
-                        cost_usdc: 0.0,
-                        tx_signature: None,
-                        request_id: request_id.clone(),
-                        session_id: session_id.clone(),
-                        tenant: tenant.clone(),
-                        tenant_enforced: false,
-                        estimated_cost_usdc: None,
-                    });
-                    Ok(result.response)
-                }
-                Err(e) => Err(match e {
-                    ProviderCallError::AllProvidersFailed { model, error, .. } => {
-                        GatewayError::Internal(format!(
-                            "all providers failed for free model '{}': {}",
-                            model, error
-                        ))
-                    }
-                    ProviderCallError::Internal(msg) => GatewayError::Internal(msg),
-                }),
-            };
+    // ── Zero-cost (free-tier) bypass ──────────────────────────────────────────
+    //
+    // A model is free IFF its computed estimate atomic cost is exactly 0
+    // (e.g. a 0.0/0.0-priced model). Such a request must be SERVED, not 402'd
+    // for a $0 payment, and never reaches payment decode/verify/settlement —
+    // there is nothing to charge or claim at $0. A paid model (atomic > 0) falls
+    // through to the 402 / paid path below unchanged — `is_free_estimate` fails
+    // closed on any non-"0" value, so it is the single source of truth for
+    // free-ness and a paid request can never accidentally take this branch.
+    if is_free_estimate(&atomic_amount) {
+        // Anti-abuse: the free path is anonymous (no payer wallet), so it is
+        // rate-limited per client IP, STRICTER than the paid limit. Enforced
+        // BEFORE any provider work so a limited free request never reaches the
+        // upstream provider quota. Keyed on the TCP peer IP (never a
+        // client-supplied header — GHSA-6ggq-cvwx-4f67); absent ConnectInfo
+        // falls back to the shared stricter "unknown" bucket.
+        let free_client_id = crate::middleware::rate_limit::connect_info_client_id(peer_addr.0);
+        // FINDING 2: surface the `unknown` bucket collapse for operators. When
+        // ConnectInfo is absent every free client keys to one shared bucket
+        // (a trivial free-tier DoS under proxy misconfig). Production always
+        // sets ConnectInfo (`into_make_service_with_connect_info` in main.rs),
+        // so this counter staying at 0 confirms correct keying; a nonzero value
+        // is an alertable misconfiguration. This does NOT change the limiting
+        // behavior — only its observability.
+        if free_client_id == "unknown" {
+            counter!("solvela_free_tier_unknown_bucket_total").increment(1);
+        }
+        if state
+            .free_rate_limiter
+            .check(&free_client_id)
+            .await
+            .is_err()
+        {
+            counter!("solvela_payments_total", "status" => "free_rate_limited").increment(1);
+            warn!(
+                client_id = %free_client_id,
+                model = %req.model,
+                "free-tier rate limit exceeded"
+            );
+            return Ok(crate::middleware::rate_limit::rate_limited_response(
+                state.free_rate_limiter.config(),
+            ));
         }
 
+        // Gate order on the free path is deliberate:
+        //   1. per-IP free check (above) — cheap, in-memory, rejects a single
+        //      spamming IP without a Redis round-trip.
+        //   2. aggregate cap (here) — global across ALL clients, bounds total
+        //      free throughput below the upstream provider's SHARED ceiling
+        //      (the per-IP check can't: many distinct IPs each under their
+        //      per-IP cap can still collectively exceed Google's ~15 RPM).
+        //   3. prompt guard → provider (below).
+        // Both rate gates run BEFORE any provider call so a rejected request
+        // never reaches the upstream free-tier quota. The cap uses Redis when
+        // configured (cross-instance) and degrades to in-memory on Redis error
+        // (it never goes unbounded); see `FreeTierGlobalCap::check`.
+        if state
+            .free_global_cap
+            .check(state.cache.as_ref())
+            .await
+            .is_err()
+        {
+            counter!("solvela_payments_total", "status" => "free_global_rate_limited").increment(1);
+            warn!(
+                model = %req.model,
+                cap = state.free_global_cap.cap(),
+                "free-tier aggregate (global) rate cap exceeded — returning gateway 429 before upstream provider 429s"
+            );
+            return Ok(crate::middleware::rate_limit::rate_limited_response(
+                &state.free_global_cap.as_rate_limit_config(),
+            ));
+        }
+
+        counter!("solvela_payments_total", "status" => "free").increment(1);
+        // FINDING 1: a present payment header on a free model is ignored — the
+        // quoted amount is 0, so there is nothing to verify, settle, or claim.
+        // The request is served at $0 and never touches the payment path.
+        if payment_header.is_some() {
+            debug!(
+                model = %req.model,
+                "free model carried a payment header — ignored (quoted amount is 0, nothing to claim)"
+            );
+        }
+        info!(model = %req.model, "zero-cost model — serving free-tier request at $0");
+
+        // Free requests reach a provider, so they must run the guard (same as
+        // the dev-bypass and paid paths).
+        run_prompt_guard(&req.messages)?;
+
+        let ctx = ProviderCallContext {
+            state: &state,
+            req: &req,
+            model_info,
+            headers: &headers,
+            debug_enabled,
+            request_start,
+            routing_tier: &routing_tier,
+            routing_score,
+            routing_profile: &routing_profile,
+            session_id: &session_id,
+            payment_status: PaymentStatus::Free,
+        };
+
+        return match provider::execute_provider_call(&ctx).await {
+            Ok(result) => {
+                // Log spend at $0 via the existing fire-and-forget path so the
+                // free tier still shows up in usage/observability. `cost_usdc`
+                // is 0.0 and `estimated_cost_usdc` is None, so `log_spend`
+                // increments counters by 0 (no divide-by-zero / no fail-closed
+                // path is reachable for a zero amount). Anonymous: there is no
+                // payer wallet, so a sentinel marks the row as free-tier.
+                let usage = result
+                    .usage
+                    .as_ref()
+                    .map(|u| cap_usage_to_request_limits(u, &req, model_info));
+                state.usage.log_spend(SpendLogEntry {
+                    wallet_address: "free-tier".to_string(),
+                    model: req.model.clone(),
+                    provider: result
+                        .actual_provider
+                        .unwrap_or_else(|| model_info.provider.clone()),
+                    input_tokens: usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                    output_tokens: usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                    cost_usdc: 0.0,
+                    tx_signature: None,
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    tenant: tenant.clone(),
+                    tenant_enforced: false,
+                    estimated_cost_usdc: None,
+                });
+                Ok(result.response)
+            }
+            Err(e) => Err(match e {
+                ProviderCallError::AllProvidersFailed { model, error, .. } => {
+                    GatewayError::Internal(format!(
+                        "all providers failed for free model '{}': {}",
+                        model, error
+                    ))
+                }
+                ProviderCallError::Internal(msg) => GatewayError::Internal(msg),
+            }),
+        };
+    }
+
+    // Not free (estimate > 0). A paid model with NO payment header returns 402.
+    // (A paid model WITH a header falls through to decode/verify/settle below.)
+    if payment_header.is_none() {
         // Return 402 with pricing info (paid model, no payment header)
         counter!("solvela_payments_total", "status" => "none").increment(1);
         info!(model = %req.model, "no payment signature, returning 402");

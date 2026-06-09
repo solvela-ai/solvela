@@ -12,7 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Infallible extractor for the TCP peer address, for use in route handlers that
 /// need the actual connection IP (e.g. free-tier rate limiting) WITHOUT 500-ing
@@ -485,7 +485,12 @@ pub fn connect_info_client_id(addr: Option<std::net::SocketAddr>) -> String {
     match addr {
         Some(a) => a.ip().to_string(),
         None => {
-            warn!(
+            // FINDING 5: this used to `warn!` on EVERY ConnectInfo-absent request,
+            // spamming logs in a misconfigured deploy. Downgraded to `debug!`; the
+            // operator-facing signal is the `solvela_free_tier_unknown_bucket_total`
+            // metric emitted by the free path (Finding 2) and the one-time startup
+            // assertion in main.rs — both far lower noise than a per-request warn.
+            debug!(
                 "free-tier rate limiter falling back to shared 'unknown' bucket — ConnectInfo \
                  not configured; all unidentified free clients share a single stricter limit"
             );

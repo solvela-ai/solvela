@@ -8766,6 +8766,115 @@ async fn free_and_paid_do_not_cross_contaminate() {
     );
 }
 
+/// Build a free-model chat request that ALSO carries a (dummy) payment header,
+/// with a fixed `ConnectInfo` peer IP. Used to prove a free model is served at
+/// $0 regardless of a stray/legacy payment header (Finding 1).
+fn free_chat_request_with_header(model: &str, ip: &str, header_val: &str) -> Request<Body> {
+    let mut req = free_chat_request(model, ip);
+    req.headers_mut().insert(
+        "payment-signature",
+        axum::http::HeaderValue::from_str(header_val).unwrap(),
+    );
+    req
+}
+
+/// FINDING 1 (the load-bearing case): a FREE model carrying a payment header must
+/// be SERVED at $0, NOT rejected with InvalidPayment. Before the fix the
+/// zero-cost bypass lived inside `if payment_header.is_none()`, so a free model
+/// with a header skipped the bypass, hit decode/verify, and 402'd
+/// (invalid_payment). The header is simply ignored (quoted amount is 0).
+#[tokio::test]
+async fn free_model_with_payment_header_is_served() {
+    let app = test_app_with_free_limit(5);
+    let resp = app
+        .oneshot(free_chat_request_with_header(
+            FREE_MODEL,
+            "198.51.100.30",
+            // A garbage header that would NOT decode as a PaymentPayload — on a
+            // paid model this yields InvalidPayment; on a free model it must be
+            // ignored entirely.
+            "not-a-valid-payment-payload",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a free model with a (stray) payment header must be served at $0, not InvalidPayment-rejected"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-payment-status")
+            .and_then(|v| v.to_str().ok()),
+        Some("free"),
+        "a free request remains payment-status = free even with a header present"
+    );
+}
+
+/// FINDING 1 corollary: the free path's per-IP rate limit still applies when a
+/// payment header is present — a header must not let a free client escape the
+/// anti-abuse gate.
+#[tokio::test]
+async fn free_model_with_header_still_rate_limited() {
+    let app = test_app_with_free_limit(1);
+    let ip = "198.51.100.31";
+
+    let first = app
+        .clone()
+        .oneshot(free_chat_request_with_header(
+            FREE_MODEL,
+            ip,
+            "dummy-header",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK, "first free request served");
+
+    let second = app
+        .clone()
+        .oneshot(free_chat_request_with_header(
+            FREE_MODEL,
+            ip,
+            "dummy-header",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        second.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a free model with a header is still bound by the per-IP free limit"
+    );
+}
+
+/// FINDING 1 guard (unchanged paid behavior): a PAID model with a BAD (undecodable)
+/// payment header must STILL be rejected with invalid_payment (402) — the
+/// restructure must not let a paid request take the free path.
+#[tokio::test]
+async fn paid_model_bad_header_still_invalid_payment() {
+    let app = test_app_with_free_limit(5);
+    let resp = app
+        .oneshot(free_chat_request_with_header(
+            "openai/gpt-4o",
+            "198.51.100.32",
+            "not-a-valid-payment-payload",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "a paid model with a bad payment header must still be rejected"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        v["error"]["type"], "invalid_payment",
+        "an undecodable header on a paid model must map to invalid_payment, not be served free"
+    );
+}
+
 /// The dev-bypass path still works (regression guard for the restructured
 /// no-payment block).
 #[tokio::test]

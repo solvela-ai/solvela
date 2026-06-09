@@ -867,6 +867,29 @@ async fn main() -> anyhow::Result<()> {
 
     info!(addr, models = model_count, "Solvela gateway started");
 
+    // FINDING 2: confirm ConnectInfo-based per-IP keying is in effect. The serve
+    // call below uses `into_make_service_with_connect_info::<SocketAddr>()`, so
+    // every free request keys on its real TCP peer IP rather than collapsing into
+    // the shared stricter "unknown" bucket. If a proxy/misconfig ever strips
+    // ConnectInfo, the `solvela_free_tier_unknown_bucket_total` metric (emitted on
+    // the free path) climbs — alert on it.
+    info!(
+        "free-tier rate limiting keys on the TCP peer IP (ConnectInfo enabled); \
+         the shared 'unknown' bucket is the fallback only when ConnectInfo is absent — \
+         watch solvela_free_tier_unknown_bucket_total to detect that misconfig"
+    );
+
+    // FINDING 4: `unknown_max_requests` (the shared 'unknown'-bucket limit) is
+    // FIXED at its default and is NOT env-overridable. `SOLVELA_FREE_TIER_RATE_LIMIT`
+    // overrides only `max_requests` (the per-IP free limit), consistent with the
+    // paid limiter's `with_max_requests` shape. Documented here so operators do not
+    // expect an env var to tune the unknown-bucket limit.
+    info!(
+        free_unknown_max_requests = free_rate_limiter.config().unknown_max_requests,
+        "free-tier 'unknown' bucket limit is fixed at its default and not env-overridable \
+         (SOLVELA_FREE_TIER_RATE_LIMIT tunes only the per-IP free limit)"
+    );
+
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
