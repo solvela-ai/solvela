@@ -4,10 +4,15 @@
 //! Follows the OpenFacilitator `/supported` standard so Solvela
 //! is discoverable by x402 ecosystem tooling and dashboards.
 
+use std::sync::Arc;
+
+use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use solvela_x402::types::{SOLANA_NETWORK, USDC_MINT, X402_VERSION};
+use solvela_x402::types::{SOLANA_NETWORK, X402_VERSION};
+
+use crate::AppState;
 
 /// A supported payment kind (scheme + network combination).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,30 +38,41 @@ pub struct SupportedResponse {
     pub pricing_url: &'static str,
 }
 
-/// GET /v1/supported
+/// Build the `/v1/supported` response for a given accepted USDC mint.
 ///
-/// Returns x402 payment schemes and networks supported by this gateway.
-/// Compatible with the OpenFacilitator discovery standard.
-pub async fn supported() -> Json<SupportedResponse> {
-    Json(SupportedResponse {
+/// The mint is the CONFIGURED one (`config.solana.usdc_mint`) — the same mint
+/// the payment verifiers enforce — never the compile-time constant, so a
+/// deployment with a non-default mint advertises an asset it will actually
+/// accept.
+fn supported_response(usdc_mint: &str) -> SupportedResponse {
+    SupportedResponse {
         kinds: vec![SupportedKind {
             x402_version: X402_VERSION,
             scheme: "exact".to_string(),
             network: SOLANA_NETWORK.to_string(),
-            asset: USDC_MINT.to_string(),
+            asset: usdc_mint.to_string(),
         }],
         gateway: "Solvela",
         pricing_url: "/v1/models",
-    })
+    }
+}
+
+/// GET /v1/supported
+///
+/// Returns x402 payment schemes and networks supported by this gateway.
+/// Compatible with the OpenFacilitator discovery standard.
+pub async fn supported(State(state): State<Arc<AppState>>) -> Json<SupportedResponse> {
+    Json(supported_response(&state.config.solana.usdc_mint))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solvela_x402::types::USDC_MINT;
 
-    #[tokio::test]
-    async fn test_supported_response() {
-        let Json(resp) = supported().await;
+    #[test]
+    fn test_supported_response_default_mint() {
+        let resp = supported_response(USDC_MINT);
 
         assert_eq!(resp.kinds.len(), 1);
         assert_eq!(resp.kinds[0].x402_version, X402_VERSION);
@@ -64,5 +80,12 @@ mod tests {
         assert_eq!(resp.kinds[0].network, SOLANA_NETWORK);
         assert_eq!(resp.kinds[0].asset, USDC_MINT);
         assert_eq!(resp.gateway, "Solvela");
+    }
+
+    #[test]
+    fn test_supported_response_reports_configured_mint() {
+        let devnet_mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+        let resp = supported_response(devnet_mint);
+        assert_eq!(resp.kinds[0].asset, devnet_mint);
     }
 }

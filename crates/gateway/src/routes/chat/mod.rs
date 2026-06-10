@@ -536,11 +536,15 @@ pub async fn chat_completions(
         counter!("solvela_payments_total", "status" => "none").increment(1);
         info!(model = %req.model, "no payment signature, returning 402");
 
+        // Quote the CONFIGURED mint — the same one `SolanaVerifier`/
+        // `EscrowVerifier` enforce — never the compile-time constant, so a
+        // deployment with a non-default mint (e.g. devnet) quotes an asset it
+        // will actually accept.
         let mut accepts = vec![solvela_x402::types::PaymentAccept {
             scheme: "exact".to_string(),
             network: solvela_x402::types::SOLANA_NETWORK.to_string(),
             amount: atomic_amount.clone(),
-            asset: solvela_x402::types::USDC_MINT.to_string(),
+            asset: state.config.solana.usdc_mint.clone(),
             pay_to: state.config.solana.recipient_wallet.clone(),
             max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
             escrow_program_id: None,
@@ -552,7 +556,7 @@ pub async fn chat_completions(
                 scheme: "escrow".to_string(),
                 network: solvela_x402::types::SOLANA_NETWORK.to_string(),
                 amount: atomic_amount,
-                asset: solvela_x402::types::USDC_MINT.to_string(),
+                asset: state.config.solana.usdc_mint.clone(),
                 pay_to: state.config.solana.recipient_wallet.clone(),
                 max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
                 escrow_program_id: state.config.solana.escrow_program_id.clone(),
@@ -655,11 +659,12 @@ pub async fn chat_completions(
                 ));
             }
 
-            // Verify asset is USDC-SPL mint
-            if payload.accepted.asset != solvela_x402::types::USDC_MINT {
+            // Verify asset is the CONFIGURED USDC-SPL mint — the same one the
+            // verifier enforces — not the compile-time constant.
+            if payload.accepted.asset != state.config.solana.usdc_mint {
                 warn!(
                     asset = %payload.accepted.asset,
-                    expected = %solvela_x402::types::USDC_MINT,
+                    expected = %state.config.solana.usdc_mint,
                     "payment asset mismatch"
                 );
                 return Err(GatewayError::BadRequest(

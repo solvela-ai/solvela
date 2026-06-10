@@ -48,6 +48,11 @@ const TEST_PAYMENT_AMOUNT: &str = "1000000";
 /// Admin token for escrow health endpoint tests.
 const TEST_ADMIN_TOKEN: &str = "test-admin-token-for-integration-tests";
 
+/// A non-default USDC mint (devnet USDC) used to prove that 402 quotes and
+/// inbound asset validation follow `config.solana.usdc_mint` rather than the
+/// compile-time mainnet constant.
+const TEST_DEVNET_USDC_MINT: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+
 /// Returns a shared `PrometheusHandle` for all integration tests.
 ///
 /// The global `metrics` recorder can only be installed once per process, so
@@ -478,6 +483,61 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         RateLimiter::new(RateLimitConfig::default()),
     );
     (router, state)
+}
+
+/// Build a test app with a NON-default configured USDC mint and a
+/// caller-supplied provider registry.
+///
+/// Mirrors [`test_app_with_state`] except `config.solana.usdc_mint` is
+/// overridden — used to prove the 402 quote and the inbound asset validation
+/// follow the configured mint (what the verifiers enforce), not the
+/// compile-time mainnet constant.
+fn test_app_with_usdc_mint_and_providers(mint: &str, providers: ProviderRegistry) -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    config.solana.usdc_mint = mint.to_string();
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers,
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+    });
+    build_router(state, RateLimiter::new(RateLimitConfig::default()))
+}
+
+/// [`test_app_with_usdc_mint_and_providers`] with no providers configured —
+/// for exercising the 402 quote path.
+fn test_app_with_usdc_mint(mint: &str) -> axum::Router {
+    test_app_with_usdc_mint_and_providers(mint, ProviderRegistry::from_env(reqwest::Client::new()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1770,6 +1830,13 @@ fn test_app_with_provider_registry_and_escrow_verifier(
 
 /// Build a test app with escrow support enabled.
 fn test_app_with_escrow() -> axum::Router {
+    test_app_with_escrow_and_usdc_mint(USDC_MINT)
+}
+
+/// Build a test app with escrow support enabled and a caller-supplied
+/// configured USDC mint, so escrow-scheme 402 quotes can be checked against a
+/// non-default mint.
+fn test_app_with_escrow_and_usdc_mint(mint: &str) -> axum::Router {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
 
@@ -1783,6 +1850,7 @@ fn test_app_with_escrow() -> axum::Router {
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
     config.solana.escrow_program_id =
         Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
+    config.solana.usdc_mint = mint.to_string();
 
     // Create a dummy claimer — won't actually submit claims in tests
     // We need a valid 64-byte key. Use a test keypair.
@@ -1842,6 +1910,13 @@ fn test_app_with_escrow() -> axum::Router {
 
 /// Build a minimal valid PaymentPayload base64-encoded header for a given model path.
 fn valid_payment_header(resource_url: &str) -> String {
+    valid_payment_header_with(resource_url, USDC_MINT, TEST_RECIPIENT_WALLET)
+}
+
+/// Like [`valid_payment_header`] but with caller-supplied `asset` and `pay_to`,
+/// so tests can probe the inbound `accepted` field validation (e.g. a payload
+/// echoing the configured non-default mint vs. the mainnet constant).
+fn valid_payment_header_with(resource_url: &str, asset: &str, pay_to: &str) -> String {
     let payload = PaymentPayload {
         x402_version: 2,
         resource: Resource {
@@ -1852,8 +1927,8 @@ fn valid_payment_header(resource_url: &str) -> String {
             scheme: "exact".to_string(),
             network: SOLANA_NETWORK.to_string(),
             amount: TEST_PAYMENT_AMOUNT.to_string(),
-            asset: USDC_MINT.to_string(),
-            pay_to: TEST_RECIPIENT_WALLET.to_string(),
+            asset: asset.to_string(),
+            pay_to: pay_to.to_string(),
             max_timeout_seconds: 300,
             escrow_program_id: None,
         },
@@ -3698,6 +3773,16 @@ async fn test_402_offers_escrow_when_configured() {
         accepts[1]["escrow_program_id"].is_string(),
         "escrow accept should include escrow_program_id"
     );
+    // Default-config wire stability: with no usdc_mint override, both accepts
+    // entries carry the mainnet USDC mint exactly (pinned as a literal).
+    assert_eq!(
+        accepts[0]["asset"],
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    );
+    assert_eq!(
+        accepts[1]["asset"],
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    );
 }
 
 #[tokio::test]
@@ -3730,6 +3815,296 @@ async fn test_402_no_escrow_when_not_configured() {
     let accepts = pr["accepts"].as_array().unwrap();
     assert_eq!(accepts.len(), 1, "should only offer exact scheme");
     assert_eq!(accepts[0]["scheme"], "exact");
+}
+
+// ---------------------------------------------------------------------------
+// Configured (non-default) USDC mint — 402 quote and inbound asset validation
+// must follow `config.solana.usdc_mint` (what the on-chain verifiers enforce),
+// never the compile-time mainnet constant.
+// ---------------------------------------------------------------------------
+
+/// With a non-default configured mint, the chat 402 quote advertises the
+/// configured mint as `asset` — not the compile-time mainnet constant.
+#[tokio::test]
+async fn test_chat_402_quotes_configured_usdc_mint() {
+    let app = test_app_with_usdc_mint(TEST_DEVNET_USDC_MINT);
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let pr: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let accepts = pr["accepts"].as_array().unwrap();
+    assert!(!accepts.is_empty());
+    for accept in accepts {
+        assert_eq!(
+            accept["asset"], TEST_DEVNET_USDC_MINT,
+            "402 must quote the configured mint, not the compile-time constant"
+        );
+    }
+}
+
+/// Same as above with escrow configured: BOTH accepts entries (exact + escrow)
+/// quote the configured mint.
+#[tokio::test]
+async fn test_chat_402_escrow_accept_quotes_configured_usdc_mint() {
+    let app = test_app_with_escrow_and_usdc_mint(TEST_DEVNET_USDC_MINT);
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let pr: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let accepts = pr["accepts"].as_array().unwrap();
+    assert_eq!(
+        accepts.len(),
+        2,
+        "should offer both exact and escrow schemes"
+    );
+    assert_eq!(accepts[0]["asset"], TEST_DEVNET_USDC_MINT);
+    assert_eq!(accepts[1]["asset"], TEST_DEVNET_USDC_MINT);
+}
+
+/// The services proxy 402 quote also advertises the configured mint.
+#[tokio::test]
+async fn test_proxy_402_quotes_configured_usdc_mint() {
+    let app = test_app_with_usdc_mint(TEST_DEVNET_USDC_MINT);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/web-search/proxy")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let pr: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let accepts = pr["accepts"].as_array().unwrap();
+    assert!(!accepts.is_empty());
+    assert_eq!(accepts[0]["asset"], TEST_DEVNET_USDC_MINT);
+}
+
+/// The /v1/supported discovery endpoint reports the configured mint.
+#[tokio::test]
+async fn test_supported_reports_configured_usdc_mint() {
+    let app = test_app_with_usdc_mint(TEST_DEVNET_USDC_MINT);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/supported")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let kinds = json["kinds"].as_array().unwrap();
+    assert!(!kinds.is_empty());
+    assert_eq!(kinds[0]["asset"], TEST_DEVNET_USDC_MINT);
+}
+
+/// Inbound validation under a non-default configured mint: a payment payload
+/// echoing the CONFIGURED mint passes the asset check end-to-end (the
+/// always-pass verifier and mock provider then complete the request).
+#[tokio::test]
+async fn test_chat_payment_with_configured_mint_passes_asset_validation() {
+    let app =
+        test_app_with_usdc_mint_and_providers(TEST_DEVNET_USDC_MINT, mock_provider_registry());
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header_with(
+                        "/v1/chat/completions",
+                        TEST_DEVNET_USDC_MINT,
+                        TEST_RECIPIENT_WALLET,
+                    ),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "payment echoing the configured mint must pass asset validation"
+    );
+}
+
+/// Inbound validation under a non-default configured mint: a payment payload
+/// echoing the mainnet CONSTANT is rejected with the asset-mismatch error —
+/// it no longer matches what the verifier enforces.
+#[tokio::test]
+async fn test_chat_payment_with_default_mint_rejected_under_configured_mint() {
+    let app =
+        test_app_with_usdc_mint_and_providers(TEST_DEVNET_USDC_MINT, mock_provider_registry());
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header_with(
+                        "/v1/chat/completions",
+                        USDC_MINT,
+                        TEST_RECIPIENT_WALLET,
+                    ),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        body_str.contains("Payment asset is unsupported"),
+        "rejection must be the asset-mismatch error, got: {body_str}"
+    );
+}
+
+/// Proxy inbound validation: a payload echoing the configured mint gets PAST
+/// the asset check (the deliberately-wrong pay_to then triggers the LATER
+/// pay_to-mismatch rejection, proving the asset gate was cleared).
+#[tokio::test]
+async fn test_proxy_payment_with_configured_mint_passes_asset_validation() {
+    let app = test_app_with_usdc_mint(TEST_DEVNET_USDC_MINT);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/web-search/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header_with(
+                        "/v1/services/web-search/proxy",
+                        TEST_DEVNET_USDC_MINT,
+                        "WrongRecipientWallet11111111111111111111111111",
+                    ),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        body_str.contains("pay_to"),
+        "error must be the pay_to mismatch (past the asset check), got: {body_str}"
+    );
+}
+
+/// Proxy inbound validation: a payload echoing the mainnet constant under a
+/// non-default configured mint is rejected at the asset check.
+#[tokio::test]
+async fn test_proxy_payment_with_default_mint_rejected_under_configured_mint() {
+    let app = test_app_with_usdc_mint(TEST_DEVNET_USDC_MINT);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/web-search/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header_with(
+                        "/v1/services/web-search/proxy",
+                        USDC_MINT,
+                        TEST_RECIPIENT_WALLET,
+                    ),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        body_str.contains("payment asset must be"),
+        "rejection must be the asset-mismatch error, got: {body_str}"
+    );
 }
 
 #[tokio::test]

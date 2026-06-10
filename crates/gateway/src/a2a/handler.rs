@@ -124,12 +124,16 @@ async fn handle_new_request(
         data: None,
     })?;
 
-    // Build PaymentRequired (same structure as chat route)
+    // Build PaymentRequired (same structure as chat route). Quote the
+    // CONFIGURED mint — the one the verifier enforces — never the compile-time
+    // constant. The stored offer is also what `validate_submitted_against_offer`
+    // matches the submitted payment against, so quote and validation stay
+    // aligned by construction.
     let mut accepts = vec![solvela_x402::types::PaymentAccept {
         scheme: "exact".to_string(),
         network: solvela_x402::types::SOLANA_NETWORK.to_string(),
         amount: atomic_amount.clone(),
-        asset: solvela_x402::types::USDC_MINT.to_string(),
+        asset: state.config.solana.usdc_mint.clone(),
         pay_to: state.config.solana.recipient_wallet.clone(),
         max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
         escrow_program_id: None,
@@ -140,7 +144,7 @@ async fn handle_new_request(
             scheme: "escrow".to_string(),
             network: solvela_x402::types::SOLANA_NETWORK.to_string(),
             amount: atomic_amount,
-            asset: solvela_x402::types::USDC_MINT.to_string(),
+            asset: state.config.solana.usdc_mint.clone(),
             pay_to: state.config.solana.recipient_wallet.clone(),
             max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
             escrow_program_id: state.config.solana.escrow_program_id.clone(),
@@ -1329,6 +1333,13 @@ supports_vision = false
     /// `new_task_id()` so task keys are unique and never collide across
     /// parallel runs.
     fn test_state_with_redis() -> Arc<AppState> {
+        test_state_with_redis_config(AppConfig::default())
+    }
+
+    /// Like [`test_state_with_redis`] but with a caller-supplied `AppConfig`,
+    /// so tests can override payment-relevant config (e.g. a non-default
+    /// `solana.usdc_mint`).
+    fn test_state_with_redis_config(config: AppConfig) -> Arc<AppState> {
         use crate::cache::{CacheConfig, ResponseCache};
 
         let redis_client =
@@ -1337,7 +1348,7 @@ supports_vision = false
             .expect("ResponseCache::from_client should not connect");
 
         Arc::new(AppState {
-            config: AppConfig::default(),
+            config,
             model_registry: ModelRegistry::from_toml(
                 r#"
 [models.test-model]
@@ -1481,6 +1492,57 @@ supports_vision = false
             result["id"].as_str().map(str::len).unwrap_or(0) > 0,
             "task id must be set"
         );
+    }
+
+    /// With a NON-default configured USDC mint, the A2A payment-required
+    /// metadata quotes the configured mint as `asset` — not the compile-time
+    /// mainnet constant (which the verifier would never accept on that
+    /// deployment).
+    #[tokio::test]
+    async fn new_request_payment_required_quotes_configured_usdc_mint() {
+        let devnet_mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+        let mut config = AppConfig::default();
+        config.solana.usdc_mint = devnet_mint.to_string();
+        let state = test_state_with_redis_config(config);
+        let params = user_msg_with_text("Hello world", Some("test-model"));
+
+        let result = handle_new_request(&state, &params)
+            .await
+            .expect("happy path must succeed with Redis");
+
+        let accepts = result["status"]["message"]["metadata"][x402_meta::REQUIRED_KEY]["accepts"]
+            .as_array()
+            .expect("accepts must be an array");
+        assert!(!accepts.is_empty());
+        for accept in accepts {
+            assert_eq!(
+                accept["asset"], devnet_mint,
+                "A2A payment quote must use the configured mint"
+            );
+        }
+    }
+
+    /// Default-config wire stability: with no mint override, the A2A payment
+    /// quote carries the mainnet USDC mint exactly (pinned as a literal).
+    #[tokio::test]
+    async fn new_request_payment_required_quotes_default_usdc_mint() {
+        let state = test_state_with_redis();
+        let params = user_msg_with_text("Hello world", Some("test-model"));
+
+        let result = handle_new_request(&state, &params)
+            .await
+            .expect("happy path must succeed with Redis");
+
+        let accepts = result["status"]["message"]["metadata"][x402_meta::REQUIRED_KEY]["accepts"]
+            .as_array()
+            .expect("accepts must be an array");
+        assert!(!accepts.is_empty());
+        for accept in accepts {
+            assert_eq!(
+                accept["asset"], "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "default config must quote the mainnet USDC mint byte-identically"
+            );
+        }
     }
 
     /// New request through the public dispatcher with a Redis-backed state.

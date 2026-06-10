@@ -41,7 +41,9 @@ pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse
                     "required": true,
                     "params": {
                         "network": "solana",
-                        "asset": solvela_protocol::USDC_MINT,
+                        // The CONFIGURED mint (what the verifier enforces),
+                        // never the compile-time constant.
+                        "asset": state.config.solana.usdc_mint.clone(),
                         "schemes": schemes
                     }
                 }
@@ -80,8 +82,12 @@ mod tests {
     use solvela_x402::facilitator::Facilitator;
 
     fn make_state() -> Arc<AppState> {
+        make_state_with_config(AppConfig::default())
+    }
+
+    fn make_state_with_config(config: AppConfig) -> Arc<AppState> {
         Arc::new(AppState {
-            config: AppConfig::default(),
+            config,
             model_registry: ModelRegistry::from_toml(
                 r#"
 [models.test-model]
@@ -186,6 +192,71 @@ supports_vision = false
         assert_eq!(extensions.len(), 2);
         assert_eq!(extensions[0]["uri"], AP2_EXTENSION_URI);
         assert_eq!(extensions[1]["uri"], X402_EXTENSION_URI);
+    }
+
+    /// With a NON-default configured USDC mint, the AgentCard's x402 extension
+    /// advertises the configured mint — an A2A agent following the card must
+    /// build a payment the verifier will actually accept.
+    #[tokio::test]
+    async fn test_agent_card_advertises_configured_usdc_mint() {
+        let devnet_mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+        let mut config = AppConfig::default();
+        config.solana.usdc_mint = devnet_mint.to_string();
+        let state = make_state_with_config(config);
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/agent.json",
+                axum::routing::get(super::agent_card),
+            )
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                http::Request::builder()
+                    .method("GET")
+                    .uri("/.well-known/agent.json")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096)
+            .await
+            .expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+
+        assert_eq!(
+            json["capabilities"]["extensions"][1]["params"]["asset"], devnet_mint,
+            "agent card must advertise the configured mint"
+        );
+    }
+
+    /// Default-config wire stability: with no mint override, the AgentCard
+    /// advertises the mainnet USDC mint exactly (pinned as a literal).
+    #[tokio::test]
+    async fn test_agent_card_advertises_default_usdc_mint() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                http::Request::builder()
+                    .method("GET")
+                    .uri("/.well-known/agent.json")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096)
+            .await
+            .expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+
+        assert_eq!(
+            json["capabilities"]["extensions"][1]["params"]["asset"],
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        );
     }
 
     #[tokio::test]
