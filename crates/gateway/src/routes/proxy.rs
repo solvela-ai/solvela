@@ -284,9 +284,14 @@ pub async fn proxy_service(
     // Validate asset is the CONFIGURED USDC-SPL mint — the same one the
     // verifier enforces — not the compile-time constant.
     if payload.accepted.asset != state.config.solana.usdc_mint {
+        // GHSA-cgqx-mg48-949v posture: `asset` is client-controlled — cap to
+        // the max base58 pubkey length (44 chars) before echoing/logging
+        // (mirrors the tx_prefix truncation in a2a/handler.rs; chars-based so
+        // a multibyte boundary can never panic).
+        let asset_prefix: String = payload.accepted.asset.chars().take(44).collect();
         return Err(GatewayError::BadRequest(format!(
-            "payment asset must be USDC mint '{}', got '{}'",
-            state.config.solana.usdc_mint, payload.accepted.asset
+            "payment asset must be USDC mint '{}', got '{asset_prefix}'",
+            state.config.solana.usdc_mint
         )));
     }
 

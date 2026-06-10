@@ -78,7 +78,12 @@ mod tests {
         assert_eq!(resp.kinds[0].x402_version, X402_VERSION);
         assert_eq!(resp.kinds[0].scheme, "exact");
         assert_eq!(resp.kinds[0].network, SOLANA_NETWORK);
-        assert_eq!(resp.kinds[0].asset, USDC_MINT);
+        // Pin the LITERAL mainnet mint, not the constant against itself —
+        // this is the wire-stability guarantee for default deployments.
+        assert_eq!(
+            resp.kinds[0].asset,
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        );
         assert_eq!(resp.gateway, "Solvela");
     }
 

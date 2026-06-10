@@ -174,6 +174,15 @@ async fn handle_new_request(
     // without this, the agent paid for ≤max_tokens output but the provider
     // would be invoked with max_tokens=None and could return an unbounded
     // response, leaving the gateway to absorb the overrun.
+    //
+    // KNOWN WINDOW (stale offer across a mint-config change): the stored
+    // `payment_required` snapshot lives in Redis for TASK_TTL (600s). If the
+    // operator changes `solana.usdc_mint` and restarts within that window, a
+    // pre-change offer still validates against the OLD mint in
+    // `validate_submitted_against_offer`, then fails opaquely at the verifier
+    // (which enforces the NEW configured mint). Accepted: the window is short,
+    // mint changes are rare operator events, and the failure is a denial (no
+    // mis-charge). Revisit if offers ever become long-lived.
     let task_id = new_task_id();
     let record = TaskRecord {
         id: task_id.clone(),
@@ -1734,6 +1743,86 @@ supports_vision = false
         assert!(
             !err.message.contains("verifier"),
             "must not leak verifier internals: {}",
+            err.message
+        );
+    }
+
+    /// FULL two-step A2A flow under a NON-default configured mint: step 1
+    /// quotes the devnet mint; a step-2 submission echoing that devnet mint as
+    /// `accepted.asset` must get PAST `validate_submitted_against_offer`
+    /// (reaching facilitator verification — the empty facilitator then fails
+    /// with the sanitized verification message), NOT be rejected as an
+    /// offer mismatch. Every other payment_submitted test hardcodes the
+    /// mainnet constant, so without this test the offer-match path is
+    /// unguarded against the compile-time constant creeping back in.
+    #[tokio::test]
+    async fn payment_submitted_with_configured_devnet_mint_passes_offer_validation() {
+        let devnet_mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+        let mut config = AppConfig::default();
+        config.solana.usdc_mint = devnet_mint.to_string();
+        let state = test_state_with_redis_config(config);
+
+        // Step 1: new request → input-required task carrying the devnet offer.
+        let new_params = user_msg_with_text("test", Some("test-model"));
+        let task_value = handle_new_request(&state, &new_params).await.expect("task");
+        let task_id = task_value["id"].as_str().expect("id").to_string();
+
+        // Build the submission from the OFFER itself (scheme/network/asset/
+        // pay_to/amount), the way a compliant agent would.
+        let offer = task_value["status"]["message"]["metadata"][x402_meta::REQUIRED_KEY]["accepts"]
+            [0]
+        .clone();
+        assert_eq!(
+            offer["asset"], devnet_mint,
+            "offer must quote the configured mint"
+        );
+
+        let tx_raw = format!("test_tx_{}", uuid::Uuid::new_v4().simple());
+        let payload = json!({
+            "x402_version": solvela_x402::types::X402_VERSION,
+            "resource": {"url": "/v1/chat/completions", "method": "POST"},
+            "accepted": {
+                "scheme": offer["scheme"],
+                "network": offer["network"],
+                "amount": offer["amount"],
+                "asset": offer["asset"],
+                "pay_to": offer["pay_to"],
+                "max_timeout_seconds": offer["max_timeout_seconds"],
+            },
+            "payload": { "transaction": tx_raw }
+        });
+
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            x402_meta::STATUS_KEY.to_string(),
+            json!(x402_meta::PAYMENT_SUBMITTED),
+        );
+        metadata.insert(x402_meta::PAYLOAD_KEY.to_string(), payload);
+
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: "pay".to_string(),
+                }],
+                metadata: Some(metadata),
+            },
+            task_id: Some(task_id.clone()),
+        };
+
+        let err = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &params)
+            .await
+            .expect_err("empty facilitator must fail verification");
+        assert_eq!(err.code, ERR_PAYMENT_FAILED);
+        assert!(
+            !err.message.contains("does not match any offered"),
+            "devnet-mint submission must NOT be rejected at offer validation; got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("verification failed"),
+            "submission must reach facilitator verification (past the offer \
+             match); got: {}",
             err.message
         );
     }

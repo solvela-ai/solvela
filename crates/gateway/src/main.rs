@@ -87,8 +87,21 @@ async fn main() -> anyhow::Result<()> {
     }) {
         app_config.solana.recipient_wallet = val;
     }
-    if let Ok(val) = env_with_fallback("SOLVELA_SOLANA__USDC_MINT", "RCR_SOLANA__USDC_MINT") {
-        app_config.solana.usdc_mint = val;
+    if let Ok(val) = env_with_fallback("SOLVELA_SOLANA__USDC_MINT", "RCR_SOLANA__USDC_MINT")
+        .or_else(|_| env_with_fallback("SOLVELA_SOLANA_USDC_MINT", "RCR_SOLANA_USDC_MINT"))
+    {
+        // Ignore an empty/whitespace-only override and keep the default —
+        // same pattern as SOLVELA_ADMIN_TOKEN / SOLVELA_API_KEY_HMAC_SECRET
+        // below. An empty mint would otherwise replace a valid default and
+        // fail the startup validation further down.
+        if val.trim().is_empty() {
+            warn!(
+                "SOLVELA_SOLANA__USDC_MINT is set but empty — ignoring the \
+                 override and keeping the configured/default USDC mint"
+            );
+        } else {
+            app_config.solana.usdc_mint = val;
+        }
     }
     if let Ok(val) = env_with_fallback(
         "SOLVELA_SOLANA__ESCROW_PROGRAM_ID",
@@ -116,6 +129,22 @@ async fn main() -> anyhow::Result<()> {
             app_config.server.port = port;
         }
     }
+
+    // The configured USDC mint is quoted in every 402 challenge and enforced
+    // by every payment verifier, but `EscrowVerifier` only Pubkey-parses its
+    // mint at first payment — a malformed value would otherwise boot fine and
+    // then fail every payment opaquely. Validate ONCE here, after all env
+    // overrides, so every consumer (402 quote builders, SolanaVerifier,
+    // EscrowVerifier/Claimer, balance monitor, discovery surfaces) is covered.
+    // Fatal in ALL modes, same spirit as the migration rule (arch rule #15):
+    // never serve traffic against a broken money-path config.
+    validate_usdc_mint(&app_config.solana.usdc_mint).map_err(|e| {
+        error!(error = %e, "FATAL: configured USDC mint is not a valid Solana pubkey");
+        anyhow::anyhow!(
+            "invalid USDC mint configuration (SOLVELA_SOLANA__USDC_MINT / \
+             [solana].usdc_mint): {e}"
+        )
+    })?;
 
     // Load model registry from config file
     let models_toml = std::fs::read_to_string("config/models.toml")
@@ -965,6 +994,20 @@ fn redact_connection_url(url: &str) -> String {
     url.to_string()
 }
 
+/// Validate that the configured USDC mint parses as a Solana `Pubkey`
+/// (base58, exactly 32 bytes).
+///
+/// Pure startup-time seam: called once from `main()` after all env overrides
+/// are applied, so a typo'd/truncated/garbage mint refuses to boot instead of
+/// surfacing as an opaque verification failure on the first real payment.
+fn validate_usdc_mint(mint: &str) -> anyhow::Result<()> {
+    use std::str::FromStr;
+
+    solvela_x402::solana_types::Pubkey::from_str(mint)
+        .map_err(|e| anyhow::anyhow!("'{mint}' is not a valid Solana pubkey: {e}"))?;
+    Ok(())
+}
+
 /// Generate a random 32-byte secret using two UUIDv4 values.
 ///
 /// UUIDv4 provides 122 bits of randomness per call (backed by the OS CSPRNG),
@@ -1142,6 +1185,43 @@ mod tests {
             "redis_connect failure path must increment the startup-failure counter; \
              a typo in the metric name or a missing counter! call would slip past this test"
         );
+    }
+
+    /// Startup mint validation accepts both the mainnet default and a valid
+    /// non-default (devnet) mint — the configured-mint feature must not be
+    /// blocked by the validator.
+    #[test]
+    fn validate_usdc_mint_accepts_valid_pubkeys() {
+        // Mainnet USDC (the compile-time default).
+        validate_usdc_mint("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+            .expect("mainnet USDC mint must validate");
+        // Devnet USDC (the canonical non-default deployment).
+        validate_usdc_mint("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU")
+            .expect("devnet USDC mint must validate");
+        // The shipped default config value must always pass — otherwise a
+        // default deployment could not boot.
+        validate_usdc_mint(&config::AppConfig::default().solana.usdc_mint)
+            .expect("default config mint must validate");
+    }
+
+    /// Startup mint validation fails closed on every malformed shape: empty,
+    /// whitespace, non-base58, and wrong-length base58. Any of these reaching
+    /// the verifiers would fail every payment opaquely at runtime instead.
+    #[test]
+    fn validate_usdc_mint_rejects_malformed_values() {
+        for bad in [
+            "",                                              // empty
+            "   ",                                           // whitespace
+            "not-a-pubkey",                                  // non-base58 ('-')
+            "0OIl",                                          // base58-forbidden chars
+            "abc",                                           // too short (decodes < 32 bytes)
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1vEPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // too long
+        ] {
+            assert!(
+                validate_usdc_mint(bad).is_err(),
+                "malformed mint {bad:?} must fail startup validation"
+            );
+        }
     }
 
     /// Lock the exhaustive set of reason labels for the startup-failure

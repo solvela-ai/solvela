@@ -662,8 +662,13 @@ pub async fn chat_completions(
             // Verify asset is the CONFIGURED USDC-SPL mint — the same one the
             // verifier enforces — not the compile-time constant.
             if payload.accepted.asset != state.config.solana.usdc_mint {
+                // GHSA-cgqx-mg48-949v posture: `asset` is client-controlled —
+                // cap to the max base58 pubkey length (44 chars) before
+                // logging (mirrors the tx_prefix truncation in a2a/handler.rs;
+                // chars-based so a multibyte boundary can never panic).
+                let asset_prefix: String = payload.accepted.asset.chars().take(44).collect();
                 warn!(
-                    asset = %payload.accepted.asset,
+                    asset = %asset_prefix,
                     expected = %state.config.solana.usdc_mint,
                     "payment asset mismatch"
                 );

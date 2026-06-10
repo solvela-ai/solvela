@@ -34,6 +34,10 @@ fn select_payment_scheme<'a>(
 ) -> Result<&'a PaymentAccept> {
     if let Some(scheme) = override_scheme {
         let mut candidates = accepts.iter().filter(|a| a.scheme == scheme).peekable();
+        // `peek()` does NOT consume: the subsequent `find` still scans from the
+        // first scheme-matching entry. The two-step shape exists to keep the
+        // two distinct errors apart — "scheme not advertised at all" vs
+        // "advertised only with an unsupported network/asset".
         if candidates.peek().is_none() {
             anyhow::bail!("requested scheme '{scheme}' not advertised by gateway");
         }
@@ -803,6 +807,25 @@ mod tests {
         assert!(
             result.is_err(),
             "--scheme override must not select a foreign-mint entry"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains(USDC_MINT),
+            "error should name the expected USDC mint"
+        );
+    }
+
+    #[test]
+    fn test_select_payment_scheme_empty_accepts_errors() {
+        // A gateway advertising NO payment options must produce a clear,
+        // mint-naming error — never a panic or a silent default.
+        let result = select_payment_scheme(&[], None);
+        assert!(
+            result.is_err(),
+            "empty accepts list must be a hard error, never a selection"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains(USDC_MINT),
+            "error should name the expected USDC mint"
         );
     }
 

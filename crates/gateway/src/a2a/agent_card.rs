@@ -43,7 +43,7 @@ pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse
                         "network": "solana",
                         // The CONFIGURED mint (what the verifier enforces),
                         // never the compile-time constant.
-                        "asset": state.config.solana.usdc_mint.clone(),
+                        "asset": &state.config.solana.usdc_mint,
                         "schemes": schemes
                     }
                 }
