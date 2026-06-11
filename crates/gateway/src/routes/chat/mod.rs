@@ -636,8 +636,13 @@ pub async fn chat_completions(
 
             // Verify the resource URL matches this endpoint
             if payload.resource.url != "/v1/chat/completions" {
+                // `resource.url` is client-controlled and unbounded (up to the
+                // 50KB header guard), so log a truncated copy server-side —
+                // mirrors the proxy-route truncation (chars-based so a
+                // multibyte boundary can never panic).
+                let resource_url: String = payload.resource.url.chars().take(256).collect();
                 warn!(
-                    resource_url = %payload.resource.url,
+                    resource_url = %resource_url,
                     "payment resource URL mismatch"
                 );
                 return Err(GatewayError::InvalidPayment(
@@ -647,8 +652,11 @@ pub async fn chat_completions(
 
             // Verify the resource method is POST
             if !payload.resource.method.eq_ignore_ascii_case("POST") {
+                // `resource.method` is client-controlled — truncate defensively
+                // before logging (same posture as `resource.url` above).
+                let method: String = payload.resource.method.chars().take(16).collect();
                 warn!(
-                    method = %payload.resource.method,
+                    method = %method,
                     "payment resource method mismatch"
                 );
                 return Err(GatewayError::BadRequest(

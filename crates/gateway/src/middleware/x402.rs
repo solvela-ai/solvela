@@ -328,8 +328,8 @@ mod tests {
             "error must surface the canonical rejection: {err}"
         );
         assert!(
-            err.contains("exact"),
-            "error must name the accepted scheme: {err}"
+            err.contains("escrow"),
+            "error must name the rejected scheme: {err}"
         );
     }
 
