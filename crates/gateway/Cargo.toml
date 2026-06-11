@@ -78,3 +78,8 @@ http-body-util = "0.1"
 ed25519-dalek = { workspace = true }
 bs58 = { workspace = true }
 tokio-stream = "0.1"
+# OpenAPI drift guard (tests/openapi_contract.rs): validates live responses
+# against docs/openapi.json (OpenAPI 3.1 schemas = JSON Schema 2020-12).
+# Default features are disabled — they pull in network/file `$ref` resolution,
+# which the self-contained spec never needs.
+jsonschema = { version = "0.46", default-features = false }
