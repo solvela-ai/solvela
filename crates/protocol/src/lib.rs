@@ -1,3 +1,4 @@
+pub mod canonical;
 pub mod chat;
 pub mod constants;
 pub mod cost;
@@ -10,6 +11,7 @@ pub mod vision;
 
 // Flat re-exports so consumers write:
 //   use solvela_protocol::{ChatRequest, PaymentRequired, CostBreakdown};
+pub use canonical::*;
 pub use chat::*;
 pub use constants::*;
 pub use cost::*;

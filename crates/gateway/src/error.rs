@@ -1,7 +1,10 @@
-use axum::http::StatusCode;
+use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use base64::Engine;
 use serde_json::json;
-use solvela_x402::types::PaymentRequired;
+use solvela_x402::types::{
+    CanonicalPaymentRequired, PaymentRequired, CANONICAL_PAYMENT_REQUIRED_HEADER,
+};
 
 /// Gateway-level errors returned as HTTP responses.
 ///
@@ -107,11 +110,18 @@ impl IntoResponse for GatewayError {
         // envelope), so it bypasses the (status, error_type, message)
         // tuple machinery the other variants share. See variant docs.
         if let GatewayError::PaymentChallenge(payment_required) = &self {
-            return (
+            let mut response = (
                 StatusCode::PAYMENT_REQUIRED,
                 axum::Json(payment_required.as_ref()),
             )
                 .into_response();
+            // Canonical x402 wire-compat: the same 402 additionally carries
+            // the canonical v2 challenge in the `PAYMENT-REQUIRED` header so
+            // standard x402 clients (e.g. the solana-foundation `pay` CLI,
+            // which checks this header BEFORE body parsing) can pay, while
+            // legacy SDKs keep parsing the unchanged snake_case body.
+            attach_canonical_challenge_header(&mut response, payment_required);
+            return response;
         }
 
         let (status, error_type, message) = match &self {
@@ -183,6 +193,50 @@ impl IntoResponse for GatewayError {
         });
 
         (status, axum::Json(body)).into_response()
+    }
+}
+
+/// Attach the canonical x402 v2 challenge header to a 402 response.
+///
+/// The header value is `base64(standard)` of the camelCase
+/// [`CanonicalPaymentRequired`] envelope projected from the legacy body —
+/// exact-scheme entries only (escrow never crosses the canonical surface).
+///
+/// Additive by design: the legacy snake_case body remains the authoritative
+/// challenge for published SDKs. When the legacy challenge offers no `exact`
+/// scheme there is nothing a canonical client could pay, so NO header is
+/// emitted (fail closed — never advertise an unsatisfiable challenge). A
+/// serialization/encoding failure likewise skips the header with a `warn!`
+/// rather than failing the 402 for legacy clients; canonical clients then see
+/// no challenge at all (a loud failure on their side), never a wrong one.
+fn attach_canonical_challenge_header(response: &mut Response, payment_required: &PaymentRequired) {
+    let Some(canonical) = CanonicalPaymentRequired::from_payment_required(payment_required) else {
+        return;
+    };
+    let json = match serde_json::to_vec(&canonical) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to serialize canonical x402 challenge — 402 sent without PAYMENT-REQUIRED header"
+            );
+            return;
+        }
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(json);
+    match HeaderValue::from_str(&encoded) {
+        Ok(value) => {
+            response.headers_mut().insert(
+                HeaderName::from_static(CANONICAL_PAYMENT_REQUIRED_HEADER),
+                value,
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to encode canonical x402 challenge header — 402 sent without PAYMENT-REQUIRED header"
+            );
+        }
     }
 }
 

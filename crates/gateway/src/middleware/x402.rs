@@ -8,7 +8,7 @@ use axum::{
 use base64::Engine;
 use tracing::{info, warn};
 
-use solvela_x402::types::PaymentPayload;
+use solvela_x402::types::{CanonicalPaymentEnvelope, PaymentPayload};
 
 use crate::AppState;
 
@@ -103,17 +103,27 @@ pub async fn extract_payment(
 
 /// Decode a PAYMENT-SIGNATURE header value.
 ///
-/// The header is base64-encoded JSON containing a `PaymentPayload`.
-/// Some clients may send raw JSON (not base64-encoded), so we try both.
+/// The header is base64-encoded JSON containing either the legacy Solvela
+/// `PaymentPayload` (snake_case — what the published SDKs send) or a
+/// canonical x402 v2 `PaymentSignatureEnvelope` (camelCase — what standard
+/// x402 clients like the solana-foundation `pay` CLI send). Some clients may
+/// send raw JSON (not base64-encoded), so we try both encodings.
+///
+/// The legacy shape is always tried FIRST and is unchanged; the two shapes
+/// are mutually unparseable (legacy uses `deny_unknown_fields` and the
+/// canonical envelope requires `x402Version`), so neither can shadow the
+/// other. A canonical envelope that parses but fails the fail-closed mapping
+/// (escrow scheme, signature proof, non-v2 version, missing fields) returns
+/// that specific error — it is never silently retried as something else.
 ///
 /// Returns `Ok(payload)` on success, `Err(reason)` if the header cannot be decoded.
-/// Used by both the extraction middleware and the chat route handler.
+/// Used by the extraction middleware and the chat/proxy route handlers.
 pub fn decode_payment_header(header: &str) -> Result<PaymentPayload, String> {
     // Try standard base64 decode first
     if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(header) {
         if let Ok(json_str) = String::from_utf8(decoded) {
-            if let Ok(payload) = serde_json::from_str::<PaymentPayload>(&json_str) {
-                return Ok(payload);
+            if let Some(result) = parse_payment_json(&json_str) {
+                return result;
             }
         }
     }
@@ -121,18 +131,43 @@ pub fn decode_payment_header(header: &str) -> Result<PaymentPayload, String> {
     // Try URL-safe base64
     if let Ok(decoded) = base64::engine::general_purpose::URL_SAFE.decode(header) {
         if let Ok(json_str) = String::from_utf8(decoded) {
-            if let Ok(payload) = serde_json::from_str::<PaymentPayload>(&json_str) {
-                return Ok(payload);
+            if let Some(result) = parse_payment_json(&json_str) {
+                return result;
             }
         }
     }
 
     // Try raw JSON
-    if let Ok(payload) = serde_json::from_str::<PaymentPayload>(header) {
-        return Ok(payload);
+    if let Some(result) = parse_payment_json(header) {
+        return result;
     }
 
     Err("unable to decode payment header: not valid base64 or JSON".to_string())
+}
+
+/// Parse a candidate JSON string as a payment payload.
+///
+/// Returns:
+/// - `None` — the string is neither shape; the caller falls through to the
+///   next decoding attempt.
+/// - `Some(Ok(_))` — a legacy `PaymentPayload`, or a canonical v2 envelope
+///   successfully mapped into one.
+/// - `Some(Err(_))` — a canonical v2 envelope that parsed but was REJECTED by
+///   the fail-closed mapping (escrow scheme, signature proof, unsupported
+///   version, missing accepted/resource). Surfaced as a hard error so a
+///   money-relevant rejection is never masked by further decode attempts.
+fn parse_payment_json(json_str: &str) -> Option<Result<PaymentPayload, String>> {
+    if let Ok(payload) = serde_json::from_str::<PaymentPayload>(json_str) {
+        return Some(Ok(payload));
+    }
+    if let Ok(envelope) = serde_json::from_str::<CanonicalPaymentEnvelope>(json_str) {
+        return Some(
+            envelope
+                .into_payment_payload()
+                .map_err(|e| format!("canonical x402 payment rejected: {e}")),
+        );
+    }
+    None
 }
 
 #[cfg(test)]
@@ -221,6 +256,100 @@ mod tests {
             PayloadData::Direct(p) => assert_eq!(p.transaction, "base64encodedtx"),
             PayloadData::Escrow(_) => panic!("expected Direct variant"),
         }
+    }
+
+    /// Build a canonical x402 v2 envelope JSON (pay-CLI shape) with the given
+    /// scheme and proof object. Field names are literals so these tests pin
+    /// the wire contract independently of the serde derives.
+    fn canonical_envelope_json(scheme: &str, proof: serde_json::Value) -> String {
+        serde_json::json!({
+            "x402Version": 2,
+            "accepted": {
+                "scheme": scheme,
+                "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+                "amount": "2625",
+                "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "payTo": "RecipientWallet123",
+                "maxTimeoutSeconds": 300,
+                "extra": { "decimals": 6 }
+            },
+            "resource": { "url": "/v1/chat/completions", "description": "API access" },
+            "payload": proof
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_decode_canonical_v2_envelope_base64() {
+        let json =
+            canonical_envelope_json("exact", serde_json::json!({ "transaction": "dGVzdA==" }));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+
+        let decoded = decode_payment_header(&encoded).expect("canonical envelope must decode");
+        assert_eq!(decoded.x402_version, 2);
+        assert_eq!(decoded.accepted.scheme, "exact");
+        assert_eq!(decoded.accepted.pay_to, "RecipientWallet123");
+        assert_eq!(decoded.resource.url, "/v1/chat/completions");
+        assert_eq!(decoded.resource.method, "POST");
+        match &decoded.payload {
+            PayloadData::Direct(p) => assert_eq!(p.transaction, "dGVzdA=="),
+            PayloadData::Escrow(_) => panic!("canonical payment must map to Direct"),
+        }
+    }
+
+    #[test]
+    fn test_decode_canonical_v2_envelope_raw_json() {
+        let json =
+            canonical_envelope_json("exact", serde_json::json!({ "transaction": "dGVzdA==" }));
+        let decoded = decode_payment_header(&json).expect("raw canonical JSON must decode");
+        assert_eq!(decoded.accepted.scheme, "exact");
+    }
+
+    /// A canonical envelope selecting escrow must be a hard error with the
+    /// canonical-rejection message — never silently retried or defaulted.
+    #[test]
+    fn test_decode_canonical_escrow_scheme_is_hard_error() {
+        let json =
+            canonical_envelope_json("escrow", serde_json::json!({ "transaction": "dGVzdA==" }));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+
+        let err = decode_payment_header(&encoded).expect_err("escrow must be rejected");
+        assert!(
+            err.contains("canonical x402 payment rejected"),
+            "error must surface the canonical rejection: {err}"
+        );
+        assert!(
+            err.contains("exact"),
+            "error must name the accepted scheme: {err}"
+        );
+    }
+
+    /// A canonical client-broadcast `signature` proof must be a hard error —
+    /// the gateway controls broadcast (deferred settlement, #486).
+    #[test]
+    fn test_decode_canonical_signature_proof_is_hard_error() {
+        let json = canonical_envelope_json(
+            "exact",
+            serde_json::json!({ "signature": "5wZ2UM8fFakeSignature" }),
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+
+        let err = decode_payment_header(&encoded).expect_err("signature proof must be rejected");
+        assert!(err.contains("canonical x402 payment rejected"), "{err}");
+    }
+
+    /// The legacy payload must still decode FIRST and unchanged — the
+    /// canonical path is additive only.
+    #[test]
+    fn test_decode_legacy_payload_unchanged_alongside_canonical() {
+        let payload = sample_payload();
+        let json = serde_json::to_string(&payload).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+
+        let decoded = decode_payment_header(&encoded).expect("legacy payload must still decode");
+        assert_eq!(decoded.x402_version, 2);
+        assert_eq!(decoded.resource.method, "POST");
+        assert_eq!(decoded.accepted.pay_to, "RecipientWallet123");
     }
 
     /// Regression: `Debug` on `PaymentInfo` must redact the raw signed
