@@ -3636,7 +3636,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "solvela-router",
  "solvela-x402",
  "tempfile",
  "thiserror",
@@ -3674,7 +3673,6 @@ name = "solvela-router"
 version = "0.2.0"
 dependencies = [
  "serde",
- "serde_json",
  "solvela-protocol",
  "thiserror",
  "toml",
