@@ -9727,15 +9727,18 @@ async fn test_chat_402_legacy_body_shape_unchanged() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let legacy: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    // `serde_json::Value` maps iterate alphabetically (no `preserve_order`
-    // feature in this workspace), so pin the exact KEY SETS — any addition,
-    // removal, or rename still fails here.
-    let top_keys: Vec<&str> = legacy
+    // JSON object key order is not part of the wire contract, and
+    // `serde_json::Value` iteration order flips between alphabetical and
+    // declaration order depending on whether the `preserve_order` feature is
+    // unified into the build — so pin the exact KEY SETS order-insensitively
+    // (sorted) — any addition, removal, or rename still fails here.
+    let mut top_keys: Vec<&str> = legacy
         .as_object()
         .unwrap()
         .keys()
         .map(|k| k.as_str())
         .collect();
+    top_keys.sort_unstable();
     assert_eq!(
         top_keys,
         vec![
@@ -9747,19 +9750,21 @@ async fn test_chat_402_legacy_body_shape_unchanged() {
         ],
         "legacy 402 top-level keys must not change"
     );
-    let resource_keys: Vec<&str> = legacy["resource"]
+    let mut resource_keys: Vec<&str> = legacy["resource"]
         .as_object()
         .unwrap()
         .keys()
         .map(|k| k.as_str())
         .collect();
+    resource_keys.sort_unstable();
     assert_eq!(resource_keys, vec!["method", "url"]);
-    let accept_keys: Vec<&str> = legacy["accepts"][0]
+    let mut accept_keys: Vec<&str> = legacy["accepts"][0]
         .as_object()
         .unwrap()
         .keys()
         .map(|k| k.as_str())
         .collect();
+    accept_keys.sort_unstable();
     assert_eq!(
         accept_keys,
         vec![
