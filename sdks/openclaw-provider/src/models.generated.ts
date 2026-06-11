@@ -184,6 +184,20 @@ export const SOLVELA_MODELS: SolvelaModel[] = [
     "reasoning": false
   },
   {
+    "id": "solvela/gemini-3.1-flash-lite",
+    "name": "Gemini 3.1 Flash-Lite (Free)",
+    "provider": "google",
+    "contextWindow": 1000000,
+    "maxTokens": 32768,
+    "inputCostPerMillion": 0,
+    "outputCostPerMillion": 0,
+    "supportsStreaming": true,
+    "supportsTools": true,
+    "supportsVision": true,
+    "supportsStructuredOutput": false,
+    "reasoning": false
+  },
+  {
     "id": "solvela/deepseek-chat",
     "name": "DeepSeek V3.2 Chat",
     "provider": "deepseek",
@@ -367,4 +381,4 @@ export const SOLVELA_MODELS: SolvelaModel[] = [
   }
 ];
 
-export const MODEL_COUNT = 24;
+export const MODEL_COUNT = 25;
