@@ -3379,6 +3379,178 @@ async fn test_chat_stream_request_returns_ok() {
 }
 
 // ---------------------------------------------------------------------------
+// Paid spend logging — every delivered + settled paid request must record a
+// spend entry. The streaming path carries no provider usage and (on a cache
+// miss) no semantic-cost outcome, so it must log from the ESTIMATE — the same
+// amount `check_budget` reserved and (for `exact`) the agent settled on-chain.
+//
+// `UsageTracker::log_spend` emits a synchronous `info!("spend logged")` event
+// before the fire-and-forget DB/Redis writes, so a per-test capturing tracing
+// subscriber observes the production write through the REAL route — no seeded
+// fixtures (per feedback_test_through_real_paths).
+// ---------------------------------------------------------------------------
+
+/// A `MakeWriter` that captures formatted tracing output into a shared buffer
+/// so a test can assert on events emitted synchronously inside the handler.
+#[derive(Clone, Default)]
+struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = CaptureWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Parse the captured JSON-formatted tracing output and return the `fields`
+/// object of every `"spend logged"` event (one per `log_spend` call).
+fn spend_logged_events(capture: &CaptureWriter) -> Vec<serde_json::Value> {
+    let bytes = capture.0.lock().unwrap().clone();
+    String::from_utf8(bytes)
+        .expect("captured tracing output is UTF-8")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|v| v["fields"]["message"] == "spend logged")
+        .map(|v| v["fields"].clone())
+        .collect()
+}
+
+/// Send a paid request through the real route with a JSON tracing subscriber
+/// capturing handler-side events; returns (status, spend-logged field objects).
+async fn paid_request_capturing_spend_events(
+    body: &serde_json::Value,
+) -> (StatusCode, Vec<serde_json::Value>) {
+    use tracing::instrument::WithSubscriber;
+
+    let app = test_app_with_mock_provider();
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap(),
+        )
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+
+    (response.status(), spend_logged_events(&capture))
+}
+
+/// A settled paid STREAMING request (usage absent, no semantic-cache hit) must
+/// record exactly one spend entry billed at the ESTIMATE — the amount quoted in
+/// the 402 challenge, reserved by `check_budget`, and settled on-chain by the
+/// `exact` agent. Before the estimated-cost arm existed this path logged
+/// NOTHING (no spend_logs row, reservation never reconciled).
+#[tokio::test]
+async fn streaming_paid_request_logs_spend_from_estimate() {
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+        "stream": true,
+    });
+
+    // The 402 amount is the observable proxy for the reservation/estimate
+    // through the real path (see the #500 reservation tests).
+    let reserved_atomic = quote_402_amount_atomic(&body.to_string()).await;
+
+    let (status, events) = paid_request_capturing_spend_events(&body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        events.len(),
+        1,
+        "a settled streaming paid request MUST write exactly one spend entry \
+         (got {}): the agent paid the estimate on-chain, so the ledger must \
+         record it",
+        events.len()
+    );
+    let logged_usdc = events[0]["cost_usdc"]
+        .as_f64()
+        .expect("spend logged event carries cost_usdc");
+    let logged_atomic = (logged_usdc * 1_000_000.0).round() as u64;
+    assert!(
+        logged_atomic.abs_diff(reserved_atomic) <= 1,
+        "streaming spend must be billed at the reserved estimate \
+         ({reserved_atomic} atomic), got {logged_atomic} atomic"
+    );
+    assert_eq!(
+        events[0]["output_tokens"].as_u64(),
+        Some(0),
+        "streaming has no token usage — output_tokens must be recorded as 0"
+    );
+    assert!(
+        events[0]["input_tokens"].as_u64().unwrap_or(0) >= 1,
+        "input tokens are estimated from the request (minimum 1)"
+    );
+}
+
+/// Regression guard for the arm rewiring: a settled paid NON-streaming request
+/// must keep logging spend from the provider's ACTUAL (capped) usage — the
+/// mock provider reports prompt=10 / completion=5.
+#[tokio::test]
+async fn non_streaming_paid_request_logs_spend_from_actual_usage() {
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let (status, events) = paid_request_capturing_spend_events(&body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        events.len(),
+        1,
+        "a settled non-streaming paid request must write exactly one spend entry"
+    );
+    assert_eq!(
+        events[0]["input_tokens"].as_u64(),
+        Some(10),
+        "non-streaming spend must record the provider-reported prompt tokens"
+    );
+    assert_eq!(
+        events[0]["output_tokens"].as_u64(),
+        Some(5),
+        "non-streaming spend must record the provider-reported completion tokens"
+    );
+    let logged_usdc = events[0]["cost_usdc"]
+        .as_f64()
+        .expect("spend logged event carries cost_usdc");
+    let expected_atomic = registry_quote_atomic("openai/gpt-4o", 10, 5);
+    let logged_atomic = (logged_usdc * 1_000_000.0).round() as u64;
+    assert!(
+        logged_atomic.abs_diff(expected_atomic) <= 1,
+        "non-streaming spend must be billed from actual usage \
+         ({expected_atomic} atomic), got {logged_atomic} atomic"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Rate limit headers present on responses
 // ---------------------------------------------------------------------------
 

@@ -34,7 +34,8 @@ use crate::AppState;
 use cost::{
     cap_usage_to_request_limits, completion_token_ceiling, compute_actual_atomic_cost,
     estimate_input_tokens, estimated_atomic_cost, is_free_estimate, scheme_realized_discount,
-    spend_cost_atomic, usdc_atomic_amount_checked, usdc_f64_to_atomic_safe, PaymentScheme,
+    select_spend_log_arm, spend_cost_atomic, usdc_atomic_amount_checked, usdc_f64_to_atomic_safe,
+    PaymentScheme, SpendLogArm,
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
@@ -1264,132 +1265,205 @@ pub async fn chat_completions(
 
             // Log spend with actual usage (non-streaming) or estimated (streaming).
             //
-            // Two cases must both reconcile the `estimated_cost` reservation that
+            // Arm selection is the pure `select_spend_log_arm` (unit-tested
+            // exhaustively in cost.rs); the match below is exhaustive so a new
+            // arm is a compile error, never a silent fall-through. Three of the
+            // four arms must reconcile the `estimated_cost` reservation that
             // `check_budget` committed to the Redis counters (the H1 fix):
-            //   (a) usage present — price from the actual (capped) tokens.
-            //   (b) usage ABSENT but a semantic hit occurred (`cost_outcome` is
-            //       Some) — the cached response carried no `usage`. We MUST still
-            //       log, or the reservation is never settled down to the realised
-            //       price and the wallet's budget stays consumed at the full
-            //       reservation forever (merged_005 part 2 — ~70% over-consume).
+            //   (a) `ActualUsage` — price from the actual (capped) tokens.
+            //   (b) `UsagelessSemanticHit` — usage ABSENT but a semantic hit
+            //       occurred (`cost_outcome` is Some): the cached response
+            //       carried no `usage`. We MUST still log, or the reservation is
+            //       never settled down to the realised price and the wallet's
+            //       budget stays consumed at the full reservation forever
+            //       (merged_005 part 2 — ~70% over-consume).
+            //   (c) `EstimateFallback` — usage AND `cost_outcome` both absent:
+            //       the delivered+settled STREAMING path. Bill the estimate —
+            //       the amount reserved in `check_budget` and (for `exact`)
+            //       settled on-chain. Before this arm existed such requests
+            //       logged NOTHING: no spend_logs row, no tenant attribution,
+            //       and a never-reconciled reservation.
             //
-            // SKIP entirely when the post-delivery `exact` settle failed: the
-            // reservation was already reconciled (released) at the settle-failure
-            // branch above and the payment was never collected, so we must NOT also
-            // record spend here (which would over-count the wallet's budget for an
-            // uncollected charge) or release a second time.
-            if settle_after_deliver_failed {
-                // No-op: reservation already released, no spend to record.
-            } else if let Some(ref u) = usage {
-                match state
-                    .model_registry
-                    .estimate_cost(&req.model, u.prompt_tokens, u.completion_tokens)
-                    .and_then(|c| {
-                        c.total.parse::<f64>().map_err(|e| {
-                            solvela_router::models::ModelRegistryError::ParseError(e.to_string())
-                        })
-                    }) {
-                    Ok(cost) => {
-                        // On an ESCROW semantic-cache hit the agent is billed the
-                        // discounted price, so the spend ledger must record that —
-                        // not the full computed `cost`. On the exact scheme
-                        // `realized_discount` is None, so the FULL cost is logged
-                        // (the agent paid it on-chain with no refund). The counter
-                        // delta `(billed − reserved)` then settles the wallet's
-                        // budget to the right amount.
-                        //
-                        // Bill in atomic units end-to-end: `cost` is the f64
-                        // estimate from the registry, which we convert through
-                        // `usdc_f64_to_atomic_safe` (NaN/∞/negative/overflow
-                        // fail-closed → `None`). Both branches of
-                        // `spend_cost_atomic` then operate in `u64`, so the
-                        // ledger value is path-invariant. The legacy
-                        // `SpendLogEntry.cost_usdc: f64` shape gets the single
-                        // `/1_000_000.0` conversion right at the write site.
-                        let Some(cost_atomic) = usdc_f64_to_atomic_safe(cost) else {
+            // `SkipSettleFailed` (post-delivery `exact` settle failed) records
+            // nothing: the reservation was already reconciled (released) at the
+            // settle-failure branch above and the payment was never collected,
+            // so recording spend here would over-count the wallet's budget for
+            // an uncollected charge (or release a second time).
+            match select_spend_log_arm(
+                settle_after_deliver_failed,
+                usage.as_ref(),
+                cost_outcome.is_some(),
+            ) {
+                SpendLogArm::SkipSettleFailed => {
+                    // No-op: reservation already released, no spend to record.
+                }
+                SpendLogArm::ActualUsage(u) => {
+                    match state
+                        .model_registry
+                        .estimate_cost(&req.model, u.prompt_tokens, u.completion_tokens)
+                        .and_then(|c| {
+                            c.total.parse::<f64>().map_err(|e| {
+                                solvela_router::models::ModelRegistryError::ParseError(
+                                    e.to_string(),
+                                )
+                            })
+                        }) {
+                        Ok(cost) => {
+                            // On an ESCROW semantic-cache hit the agent is billed the
+                            // discounted price, so the spend ledger must record that —
+                            // not the full computed `cost`. On the exact scheme
+                            // `realized_discount` is None, so the FULL cost is logged
+                            // (the agent paid it on-chain with no refund). The counter
+                            // delta `(billed − reserved)` then settles the wallet's
+                            // budget to the right amount.
+                            //
+                            // Bill in atomic units end-to-end: `cost` is the f64
+                            // estimate from the registry, which we convert through
+                            // `usdc_f64_to_atomic_safe` (NaN/∞/negative/overflow
+                            // fail-closed → `None`). Both branches of
+                            // `spend_cost_atomic` then operate in `u64`, so the
+                            // ledger value is path-invariant. The legacy
+                            // `SpendLogEntry.cost_usdc: f64` shape gets the single
+                            // `/1_000_000.0` conversion right at the write site.
+                            let Some(cost_atomic) = usdc_f64_to_atomic_safe(cost) else {
+                                warn!(
+                                    model = %req.model,
+                                    wallet = %wallet_address,
+                                    raw_cost = cost,
+                                    "skipping spend log: computed cost is NaN/∞/negative/overflow — refusing to write a corrupt ledger entry"
+                                );
+                                return Ok(response);
+                            };
+                            let billed_atomic = spend_cost_atomic(realized_discount, cost_atomic);
+                            let billed_cost = billed_atomic as f64 / 1_000_000.0;
+                            // Pass the estimated_cost that was committed to Redis
+                            // counters in `check_budget` so log_spend can adjust
+                            // by the (billed − estimated) delta. Without this,
+                            // counters would be double-incremented.
+                            state.usage.log_spend(SpendLogEntry {
+                                wallet_address: wallet_address.clone(),
+                                model: req.model.clone(),
+                                provider: actual_provider
+                                    .unwrap_or_else(|| provider_name.to_string()),
+                                input_tokens: u.prompt_tokens,
+                                output_tokens: u.completion_tokens,
+                                cost_usdc: billed_cost,
+                                tx_signature: tx_signature.clone(),
+                                request_id: request_id.clone(),
+                                session_id: session_id.clone(),
+                                tenant: tenant.clone(),
+                                // Reconcile per-tenant counters only when
+                                // check_budget actually enforced a provisioned bucket
+                                // (decision == Enforce). Threaded from the reservation
+                                // so the Skip path never accumulates per-tenant spend.
+                                tenant_enforced: budget_reservation.tenant_enforced(),
+                                estimated_cost_usdc: Some(estimated_cost),
+                            });
+                        }
+                        Err(e) => {
                             warn!(
+                                error = %e,
                                 model = %req.model,
                                 wallet = %wallet_address,
-                                raw_cost = cost,
-                                "skipping spend log: computed cost is NaN/∞/negative/overflow — refusing to write a corrupt ledger entry"
+                                "failed to compute actual cost — skipping spend log to avoid $0 entry"
                             );
-                            return Ok(response);
-                        };
-                        let billed_atomic = spend_cost_atomic(realized_discount, cost_atomic);
-                        let billed_cost = billed_atomic as f64 / 1_000_000.0;
-                        // Pass the estimated_cost that was committed to Redis
-                        // counters in `check_budget` so log_spend can adjust
-                        // by the (billed − estimated) delta. Without this,
-                        // counters would be double-incremented.
-                        state.usage.log_spend(SpendLogEntry {
-                            wallet_address: wallet_address.clone(),
-                            model: req.model.clone(),
-                            provider: actual_provider.unwrap_or_else(|| provider_name.to_string()),
-                            input_tokens: u.prompt_tokens,
-                            output_tokens: u.completion_tokens,
-                            cost_usdc: billed_cost,
-                            tx_signature: tx_signature.clone(),
-                            request_id: request_id.clone(),
-                            session_id: session_id.clone(),
-                            tenant: tenant.clone(),
-                            // Reconcile per-tenant counters only when
-                            // check_budget actually enforced a provisioned bucket
-                            // (decision == Enforce). Threaded from the reservation
-                            // so the Skip path never accumulates per-tenant spend.
-                            tenant_enforced: budget_reservation.tenant_enforced(),
-                            estimated_cost_usdc: Some(estimated_cost),
-                        });
-                    }
-                    Err(e) => {
-                        warn!(
-                            error = %e,
-                            model = %req.model,
-                            wallet = %wallet_address,
-                            "failed to compute actual cost — skipping spend log to avoid $0 entry"
-                        );
+                        }
                     }
                 }
-            } else if cost_outcome.is_some() {
-                // Usage-less semantic hit: reconcile the reservation. On escrow,
-                // bill the discount; on exact, `realized_discount` is None so we
-                // bill the full reservation (`estimated_cost`) — a zero delta that
-                // correctly leaves the on-chain-settled full amount in the ledger.
-                // We have no token counts (the cached response omitted usage), so
-                // record the input estimate and zero output.
-                //
-                // Same atomic-domain billing as the usage-present arm. The pre-
-                // provider validator at line 561 already gated `estimated_cost`
-                // as finite + non-negative, but we still route through
-                // `usdc_f64_to_atomic_safe` so a corrupted re-derivation (or a
-                // future refactor that drops the early guard) cannot write a
-                // NaN/∞ entry to the spend ledger.
-                let Some(estimated_atomic) = usdc_f64_to_atomic_safe(estimated_cost) else {
-                    warn!(
-                        model = %req.model,
-                        wallet = %wallet_address,
-                        raw_estimated = estimated_cost,
-                        "skipping spend log: estimated_cost is NaN/∞/negative/overflow on usage-less semantic-hit fallback"
-                    );
-                    return Ok(response);
-                };
-                let billed_atomic = spend_cost_atomic(realized_discount, estimated_atomic);
-                let billed_cost = billed_atomic as f64 / 1_000_000.0;
-                state.usage.log_spend(SpendLogEntry {
-                    wallet_address: wallet_address.clone(),
-                    model: req.model.clone(),
-                    provider: actual_provider.unwrap_or_else(|| provider_name.to_string()),
-                    input_tokens: estimate_input_tokens(&req),
-                    output_tokens: 0,
-                    cost_usdc: billed_cost,
-                    tx_signature: tx_signature.clone(),
-                    request_id: request_id.clone(),
-                    session_id: session_id.clone(),
-                    tenant: tenant.clone(),
-                    // Same gating as the usage-present arm: reconcile per-tenant
-                    // counters only when a provisioned bucket was enforced.
-                    tenant_enforced: budget_reservation.tenant_enforced(),
-                    estimated_cost_usdc: Some(estimated_cost),
-                });
+                SpendLogArm::UsagelessSemanticHit => {
+                    // Usage-less semantic hit: reconcile the reservation. On escrow,
+                    // bill the discount; on exact, `realized_discount` is None so we
+                    // bill the full reservation (`estimated_cost`) — a zero delta that
+                    // correctly leaves the on-chain-settled full amount in the ledger.
+                    // We have no token counts (the cached response omitted usage), so
+                    // record the input estimate and zero output.
+                    //
+                    // Same atomic-domain billing as the usage-present arm. The pre-
+                    // provider validator at line 561 already gated `estimated_cost`
+                    // as finite + non-negative, but we still route through
+                    // `usdc_f64_to_atomic_safe` so a corrupted re-derivation (or a
+                    // future refactor that drops the early guard) cannot write a
+                    // NaN/∞ entry to the spend ledger.
+                    let Some(estimated_atomic) = usdc_f64_to_atomic_safe(estimated_cost) else {
+                        warn!(
+                            model = %req.model,
+                            wallet = %wallet_address,
+                            raw_estimated = estimated_cost,
+                            "skipping spend log: estimated_cost is NaN/∞/negative/overflow on usage-less semantic-hit fallback"
+                        );
+                        return Ok(response);
+                    };
+                    let billed_atomic = spend_cost_atomic(realized_discount, estimated_atomic);
+                    let billed_cost = billed_atomic as f64 / 1_000_000.0;
+                    state.usage.log_spend(SpendLogEntry {
+                        wallet_address: wallet_address.clone(),
+                        model: req.model.clone(),
+                        provider: actual_provider.unwrap_or_else(|| provider_name.to_string()),
+                        input_tokens: estimate_input_tokens(&req),
+                        output_tokens: 0,
+                        cost_usdc: billed_cost,
+                        tx_signature: tx_signature.clone(),
+                        request_id: request_id.clone(),
+                        session_id: session_id.clone(),
+                        tenant: tenant.clone(),
+                        // Same gating as the usage-present arm: reconcile per-tenant
+                        // counters only when a provisioned bucket was enforced.
+                        tenant_enforced: budget_reservation.tenant_enforced(),
+                        estimated_cost_usdc: Some(estimated_cost),
+                    });
+                }
+                SpendLogArm::EstimateFallback => {
+                    // Delivered + settled, but usage AND cost_outcome are both
+                    // absent — the streaming path (a streaming provider call
+                    // carries no usage data and missed the semantic cache).
+                    // Bill the ESTIMATE: it is the amount `check_budget`
+                    // reserved and, on the exact scheme, precisely what the
+                    // agent settled on-chain — so the ledger matches the money
+                    // collected. `realized_discount` is structurally None here
+                    // (no `cost_outcome`), so `spend_cost_atomic` is the
+                    // identity and billed == estimate; we still route through
+                    // it so all logging arms share one atomic-domain billing
+                    // path. `estimated_cost_usdc: Some(estimated_cost)` makes
+                    // `log_spend`'s `(billed − estimated)` reconciliation delta
+                    // zero — the reservation correctly stays at the estimate.
+                    //
+                    // Same fail-closed conversion as the other arms: the pre-
+                    // provider validator already gated `estimated_cost` as
+                    // finite + non-negative, but we still route through
+                    // `usdc_f64_to_atomic_safe` so a corrupted re-derivation
+                    // (or a future refactor that drops the early guard) cannot
+                    // write a NaN/∞ entry to the spend ledger.
+                    let Some(estimated_atomic) = usdc_f64_to_atomic_safe(estimated_cost) else {
+                        warn!(
+                            model = %req.model,
+                            wallet = %wallet_address,
+                            raw_estimated = estimated_cost,
+                            "skipping spend log: estimated_cost is NaN/∞/negative/overflow on streaming estimate fallback"
+                        );
+                        return Ok(response);
+                    };
+                    let billed_atomic = spend_cost_atomic(realized_discount, estimated_atomic);
+                    let billed_cost = billed_atomic as f64 / 1_000_000.0;
+                    state.usage.log_spend(SpendLogEntry {
+                        wallet_address: wallet_address.clone(),
+                        model: req.model.clone(),
+                        provider: actual_provider.unwrap_or_else(|| provider_name.to_string()),
+                        // No token data on this path: record the request-side
+                        // input estimate and zero output, consistent with the
+                        // usage-less semantic-hit arm.
+                        input_tokens: estimate_input_tokens(&req),
+                        output_tokens: 0,
+                        cost_usdc: billed_cost,
+                        tx_signature: tx_signature.clone(),
+                        request_id: request_id.clone(),
+                        session_id: session_id.clone(),
+                        tenant: tenant.clone(),
+                        // Same gating as the other arms: reconcile per-tenant
+                        // counters only when a provisioned bucket was enforced.
+                        tenant_enforced: budget_reservation.tenant_enforced(),
+                        estimated_cost_usdc: Some(estimated_cost),
+                    });
+                }
             }
 
             Ok(response)
