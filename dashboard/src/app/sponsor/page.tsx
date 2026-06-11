@@ -275,7 +275,7 @@ export default function SponsorPage() {
                       Embedding any non-gateway crate or SDK
                     </td>
                     <td className="py-3 pr-4 text-text-secondary leading-relaxed">
-                      Nothing — all crates and SDKs are MIT, just keep notices
+                      Nothing — all crates and SDKs are permissively licensed (Apache-2.0 or MIT), just keep notices
                     </td>
                     <td className="py-3 text-text-tertiary">
                       <a href="https://github.com/solvela-ai/solvela#licensing" target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:text-foreground">

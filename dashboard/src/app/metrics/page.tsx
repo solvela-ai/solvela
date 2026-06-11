@@ -49,23 +49,28 @@ const VERIFIED_AS_OF = '2026-04-29';
 const PERF_LOAD_RPS = 400;
 const PERF_LOAD_P99_MS = 300;
 
-// SDK / crate inventory — published artifacts. Update on each release.
+// SDK / crate inventory — published artifacts, verified against the live
+// registries (crates.io API, `npm view`, PyPI JSON, proxy.golang.org) on
+// 2026-06-11. Licenses reflect the registry metadata of the latest published
+// version, not the in-repo license (some artifacts predate the Apache-2.0
+// relicense and flip on their next publish). Update on each release.
 const PUBLISHED_ARTIFACTS = [
-  { kind: 'crate', name: 'solvela-protocol', registry: 'crates.io', version: '0.2.0', license: 'Apache-2.0' },
-  { kind: 'crate', name: 'solvela-x402',     registry: 'crates.io', version: '0.2.0', license: 'Apache-2.0' },
-  { kind: 'crate', name: 'solvela-router',   registry: 'crates.io', version: '0.2.0', license: 'Apache-2.0' },
-  { kind: 'crate', name: 'solvela-cli',      registry: 'crates.io', version: '0.2.0', license: 'Apache-2.0' },
-  { kind: 'sdk',   name: 'solvela-python',   registry: 'PyPI',      version: '0.1.0', license: 'MIT' },
-  { kind: 'sdk',   name: 'solvela-ts',       registry: 'npm',       version: '0.2.0', license: 'MIT' },
-  { kind: 'sdk',   name: 'solvela-go',       registry: 'go modules',version: '0.1.0', license: 'MIT' },
-  { kind: 'sdk',   name: 'solvela-client',   registry: 'crates.io', version: '0.2.0', license: 'MIT' },
+  { kind: 'crate', name: 'solvela-protocol',  registry: 'crates.io', version: '0.3.0', license: 'Apache-2.0' },
+  { kind: 'crate', name: 'solvela-x402',      registry: 'crates.io', version: '0.2.0', license: 'MIT' },
+  { kind: 'crate', name: 'solvela-router',    registry: 'crates.io', version: '0.2.0', license: 'MIT' },
+  { kind: 'crate', name: 'solvela-cli',       registry: 'crates.io', version: '0.2.0', license: 'MIT' },
+  { kind: 'crate', name: 'solvela-escrow-tx', registry: 'crates.io', version: '0.2.0', license: 'Apache-2.0' },
+  { kind: 'sdk',   name: 'solvela-sdk',       registry: 'PyPI',      version: '0.2.0', license: 'MIT' },
+  { kind: 'sdk',   name: '@solvela/sdk',      registry: 'npm',       version: '0.2.4', license: 'Apache-2.0' },
+  { kind: 'sdk',   name: 'solvela-go',        registry: 'go modules',version: '0.1.0', license: 'MIT' },
+  { kind: 'sdk',   name: 'solvela-client',    registry: 'crates.io', version: '0.2.5', license: 'Apache-2.0' },
 ] as const;
 
 const LICENSE_LINES = [
-  { component: 'Gateway', license: 'BUSL-1.1', note: 'Change Date 2030-05-02 → Apache-2.0' },
-  { component: 'Protocol / x402 / router / CLI', license: 'Apache-2.0', note: 'patent grant included' },
+  { component: 'Gateway', license: 'BUSL-1.1', note: 'Change Date 2030-05-02 → MIT' },
+  { component: 'Protocol / x402 / router / CLI', license: 'Apache-2.0', note: 'patent grant included; pre-relicense crates flip from MIT on next publish' },
   { component: 'Escrow program (Anchor)', license: 'Apache-2.0', note: 'on-chain neutral' },
-  { component: 'SDKs (Python / TS / Go / Rust)', license: 'MIT', note: 'maximum integration freedom' },
+  { component: 'SDKs (Python / TS / Go / Rust)', license: 'Apache-2.0 / MIT', note: 'TS + Rust published under Apache-2.0; Python flips from MIT on next publish; Go SDK is MIT' },
 ];
 
 export const metadata: Metadata = {

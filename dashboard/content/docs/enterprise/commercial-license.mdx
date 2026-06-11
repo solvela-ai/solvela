@@ -9,14 +9,14 @@ description: When you need a commercial license for the Solvela Gateway, what it
 
 The **Solvela Gateway** (the `gateway` crate and the `solvela-gateway` binary) is licensed under the [Business Source License 1.1](https://github.com/solvela-ai/solvela/blob/main/LICENSE). Most users do not need a commercial license — but some do. This page explains exactly which.
 
-> Everything *except* the gateway binary is permissively MIT-licensed. The protocol, x402, router, and CLI crates, the on-chain escrow program, and every SDK (`@solvela/sdk`, the Python SDK, the Go SDK, the MCP server, the AI SDK provider, the OpenClaw provider) are all MIT. Build on those without contacting us. See the [licensing table](https://github.com/solvela-ai/solvela#licensing) for the per-component split.
+> Everything *except* the gateway binary is permissively licensed. The protocol, x402, router, and CLI crates, the on-chain escrow program, and the SDKs (`@solvela/sdk`, the Python SDK, the MCP server, the AI SDK provider, the OpenClaw provider) are Apache-2.0 — with an express patent grant; the Go SDK is currently MIT. Build on those without contacting us. (Crate versions published before the 2026-05-31 relicense still carry MIT metadata on their registry until their next release; both licenses are permissive.) See the [licensing table](https://github.com/solvela-ai/solvela#licensing) for the per-component split.
 
 ## You do *not* need a commercial license if…
 
 - You're calling the hosted gateway at `api.solvela.ai`. There's nothing to license — you're a user, you pay per request in USDC.
 - You're self-hosting the gateway *internally* (employees, internal automation, your own product's first-party traffic) and your gross annual revenue derived from or attributable to the gateway is under USD $1,000,000.
 - You're forking the gateway for non-production purposes — research, demo, internal eval, education, dev environments.
-- You're embedding any of the libraries (`solvela-protocol`, `solvela-x402`, `solvela-router`, `solvela-cli`) or any SDK. Those are MIT. Standard notice obligations apply, no payment.
+- You're embedding any of the libraries (`solvela-protocol`, `solvela-x402`, `solvela-router`, `solvela-cli`) or any SDK. Those are Apache-2.0. Standard notice obligations apply, no payment.
 
 ## You **do** need a commercial license if…
 
