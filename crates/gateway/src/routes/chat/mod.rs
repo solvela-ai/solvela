@@ -587,7 +587,21 @@ pub async fn chat_completions(
     run_prompt_guard(&req.messages)?;
 
     // Step 4: Payment present — try to decode and verify via Facilitator
-    let payment_payload = decode_payment_from_header(payment_header.unwrap());
+    let payment_payload = match decode_payment_from_header(payment_header.unwrap()) {
+        Ok(payload) => Some(payload),
+        Err(reason) => {
+            // Canonical-surface rejections (unsupported scheme / proof /
+            // version, missing accepted/resource) and garbled headers are
+            // distinct, money-relevant failures — log the SPECIFIC reason
+            // server-side so they are never silently conflated. The client
+            // receives only the fixed string in the `None` arm below
+            // (GHSA-cgqx-mg48-949v: never reflect the parse error; the only
+            // attacker-controlled bytes in `reason` are the 32-char-capped
+            // scheme echo from `CanonicalPaymentError::UnsupportedScheme`).
+            warn!(error = %reason, "PAYMENT-SIGNATURE header decode failed");
+            None
+        }
+    };
 
     // Track escrow-specific info for post-response claim
     let payment_scheme: PaymentScheme;
@@ -622,8 +636,13 @@ pub async fn chat_completions(
 
             // Verify the resource URL matches this endpoint
             if payload.resource.url != "/v1/chat/completions" {
+                // `resource.url` is client-controlled and unbounded (up to the
+                // 50KB header guard), so log a truncated copy server-side —
+                // mirrors the proxy-route truncation (chars-based so a
+                // multibyte boundary can never panic).
+                let resource_url: String = payload.resource.url.chars().take(256).collect();
                 warn!(
-                    resource_url = %payload.resource.url,
+                    resource_url = %resource_url,
                     "payment resource URL mismatch"
                 );
                 return Err(GatewayError::InvalidPayment(
@@ -633,8 +652,11 @@ pub async fn chat_completions(
 
             // Verify the resource method is POST
             if !payload.resource.method.eq_ignore_ascii_case("POST") {
+                // `resource.method` is client-controlled — truncate defensively
+                // before logging (same posture as `resource.url` above).
+                let method: String = payload.resource.method.chars().take(16).collect();
                 warn!(
-                    method = %payload.resource.method,
+                    method = %method,
                     "payment resource method mismatch"
                 );
                 return Err(GatewayError::BadRequest(

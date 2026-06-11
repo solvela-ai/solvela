@@ -32,7 +32,8 @@ use solvela_router::models::ModelRegistry;
 use solvela_x402::traits::{Error as X402Error, PaymentVerifier};
 use solvela_x402::types::{
     EscrowPayload, PayloadData, PaymentAccept, PaymentPayload, Resource, SettlementResult,
-    SolanaPayload, VerificationResult, SOLANA_NETWORK, USDC_MINT,
+    SolanaPayload, VerificationResult, CANONICAL_PAYMENT_REQUIRED_HEADER, SOLANA_NETWORK,
+    USDC_MINT,
 };
 
 // ---------------------------------------------------------------------------
@@ -9536,5 +9537,685 @@ async fn paid_model_unaffected_by_global_cap() {
         resp.status(),
         StatusCode::PAYMENT_REQUIRED,
         "a paid model must 402, never be gated by the free aggregate cap"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Canonical x402 wire-compat (solana-foundation/pay CLI interop)
+//
+// Golden shapes in this section are pinned to the `pay` CLI's x402 client
+// (solana-foundation/pay rust/crates/core/src/client/x402.rs, backed by the
+// solana-foundation/pay-kit `solana-x402` crate):
+//   - the v2 challenge lives in a `PAYMENT-REQUIRED` response header carrying
+//     base64(JSON envelope) with camelCase fields (`x402Version`, `accepts[]`
+//     entries with `payTo` / `maxTimeoutSeconds` / `asset` / `amount`), checked
+//     BEFORE any body parsing;
+//   - the client replies in the existing `PAYMENT-SIGNATURE` header with a
+//     canonical v2 envelope `{x402Version, accepted, resource, payload:
+//     {transaction}}`.
+// The legacy snake_case 402 body and legacy PAYMENT-SIGNATURE payload must
+// remain byte-for-byte unchanged for the published SDKs.
+// ---------------------------------------------------------------------------
+
+/// Issue a no-payment chat request and return the full 402 response.
+async fn chat_402_response(app: axum::Router) -> axum::response::Response {
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+/// Decode the canonical challenge header from a 402 response into JSON.
+fn decode_canonical_challenge(response: &axum::response::Response) -> serde_json::Value {
+    let header = response
+        .headers()
+        .get(CANONICAL_PAYMENT_REQUIRED_HEADER)
+        .expect("402 must carry the canonical PAYMENT-REQUIRED header")
+        .to_str()
+        .expect("header must be ASCII");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(header)
+        .expect("canonical challenge header must be standard base64");
+    serde_json::from_slice(&decoded).expect("canonical challenge must be JSON")
+}
+
+/// Build a canonical x402 v2 `PAYMENT-SIGNATURE` value exactly as the pay
+/// client's `build_payment_header` emits it: base64(standard) of a camelCase
+/// `PaymentSignatureEnvelope`. Field names are written as literals here so the
+/// test pins the wire shape independently of any gateway-side serde derive.
+fn canonical_payment_signature_header(scheme: &str, payload: serde_json::Value) -> String {
+    canonical_payment_signature_header_with(scheme, SOLANA_NETWORK, USDC_MINT, payload)
+}
+
+/// Like [`canonical_payment_signature_header`] but with caller-supplied
+/// `network` and `asset`, so tests can prove canonical inbound payments hit
+/// the same downstream accepted-field validation as legacy ones.
+fn canonical_payment_signature_header_with(
+    scheme: &str,
+    network: &str,
+    asset: &str,
+    payload: serde_json::Value,
+) -> String {
+    let envelope = serde_json::json!({
+        "x402Version": 2,
+        "accepted": {
+            "scheme": scheme,
+            "network": network,
+            "amount": TEST_PAYMENT_AMOUNT,
+            "asset": asset,
+            "payTo": TEST_RECIPIENT_WALLET,
+            "maxTimeoutSeconds": 300,
+            "extra": { "decimals": 6 }
+        },
+        "resource": {
+            "url": "/v1/chat/completions",
+            "description": "API access"
+        },
+        "payload": payload
+    });
+    base64::engine::general_purpose::STANDARD.encode(envelope.to_string())
+}
+
+/// The 402 response must carry the canonical v2 challenge in the
+/// `PAYMENT-REQUIRED` header with the exact camelCase field names the pay
+/// client's parser consumes — alongside the unchanged legacy body.
+#[tokio::test]
+async fn test_chat_402_carries_canonical_payment_required_header() {
+    let response = chat_402_response(test_app()).await;
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let canonical = decode_canonical_challenge(&response);
+
+    assert_eq!(canonical["x402Version"], 2, "canonical version field");
+    assert_eq!(canonical["resource"]["url"], "/v1/chat/completions");
+
+    let accepts = canonical["accepts"].as_array().expect("accepts array");
+    assert_eq!(accepts.len(), 1, "exact only (no escrow configured)");
+    let exact = &accepts[0];
+    assert_eq!(exact["scheme"], "exact");
+    assert_eq!(exact["network"], SOLANA_NETWORK);
+    assert_eq!(exact["asset"], USDC_MINT);
+    assert_eq!(exact["payTo"], TEST_RECIPIENT_WALLET);
+    assert_eq!(exact["maxTimeoutSeconds"], 300);
+    assert_eq!(exact["extra"]["decimals"], 6);
+    assert!(
+        exact["amount"].is_string(),
+        "amount must be an atomic-unit string"
+    );
+
+    // feePayer is DELIBERATELY absent: the gateway's exact verifier requires
+    // signatures[0] to verify against account_keys[0] and broadcasts without
+    // countersigning, so a server-fee-payer tx (empty fee-payer sig slot)
+    // would be rejected. Omitting it makes the pay client self-pay the SOL fee
+    // and produce a fully-signed tx the existing verifier accepts.
+    assert!(
+        exact["extra"].get("feePayer").is_none(),
+        "canonical challenge must not advertise a feePayer"
+    );
+
+    // No snake_case bleed-through into the canonical surface.
+    assert!(exact.get("pay_to").is_none());
+    assert!(exact.get("max_timeout_seconds").is_none());
+    assert!(canonical.get("x402_version").is_none());
+    assert!(canonical.get("cost_breakdown").is_none());
+
+    // The canonical body amount mirrors the legacy quote exactly.
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let legacy: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        canonical["accepts"][0]["amount"], legacy["accepts"][0]["amount"],
+        "canonical and legacy must quote the same atomic amount"
+    );
+}
+
+/// The escrow scheme must NOT be exposed through the canonical surface even
+/// when the gateway offers it on the legacy body.
+#[tokio::test]
+async fn test_chat_402_canonical_header_excludes_escrow() {
+    let response = chat_402_response(test_app_with_escrow()).await;
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let canonical = decode_canonical_challenge(&response);
+    let accepts = canonical["accepts"].as_array().expect("accepts array");
+    assert_eq!(
+        accepts.len(),
+        1,
+        "canonical surface must advertise exact only"
+    );
+    assert_eq!(accepts[0]["scheme"], "exact");
+
+    // Legacy body still advertises both schemes — unchanged.
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let legacy: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let legacy_accepts = legacy["accepts"].as_array().unwrap();
+    assert_eq!(legacy_accepts.len(), 2, "legacy keeps exact + escrow");
+    assert_eq!(legacy_accepts[1]["scheme"], "escrow");
+}
+
+/// Canonical challenge must quote the CONFIGURED mint (PR #531), never the
+/// compile-time constant.
+#[tokio::test]
+async fn test_chat_402_canonical_header_quotes_configured_mint() {
+    let response = chat_402_response(test_app_with_usdc_mint(TEST_DEVNET_USDC_MINT)).await;
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let canonical = decode_canonical_challenge(&response);
+    assert_eq!(
+        canonical["accepts"][0]["asset"], TEST_DEVNET_USDC_MINT,
+        "canonical asset must follow config.solana.usdc_mint"
+    );
+}
+
+/// Legacy-regression pin: the snake_case 402 body shape must stay EXACTLY as
+/// the published SDKs parse it — same top-level keys, same nested keys, no
+/// additions. The canonical layer is header-only.
+#[tokio::test]
+async fn test_chat_402_legacy_body_shape_unchanged() {
+    let response = chat_402_response(test_app()).await;
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let legacy: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // JSON object key order is not part of the wire contract, and
+    // `serde_json::Value` iteration order flips between alphabetical and
+    // declaration order depending on whether the `preserve_order` feature is
+    // unified into the build — so pin the exact KEY SETS order-insensitively
+    // (sorted) — any addition, removal, or rename still fails here.
+    let mut top_keys: Vec<&str> = legacy
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    top_keys.sort_unstable();
+    assert_eq!(
+        top_keys,
+        vec![
+            "accepts",
+            "cost_breakdown",
+            "error",
+            "resource",
+            "x402_version"
+        ],
+        "legacy 402 top-level keys must not change"
+    );
+    let mut resource_keys: Vec<&str> = legacy["resource"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    resource_keys.sort_unstable();
+    assert_eq!(resource_keys, vec!["method", "url"]);
+    let mut accept_keys: Vec<&str> = legacy["accepts"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    accept_keys.sort_unstable();
+    assert_eq!(
+        accept_keys,
+        vec![
+            "amount",
+            "asset",
+            "max_timeout_seconds",
+            "network",
+            "pay_to",
+            "scheme"
+        ],
+        "legacy accepts[] entry keys must not change"
+    );
+    assert_eq!(legacy["x402_version"], 2);
+}
+
+/// A pay-shaped canonical `PAYMENT-SIGNATURE` (v2 envelope, camelCase,
+/// payload.transaction) must decode, map into the legacy verification
+/// pipeline, and serve the request end-to-end through the real route.
+#[tokio::test]
+async fn test_chat_with_canonical_payment_signature_succeeds() {
+    let app = test_app_with_mock_provider();
+
+    let tx_b64 = base64::engine::general_purpose::STANDARD.encode(b"mock_signed_tx_bytes");
+    let header =
+        canonical_payment_signature_header("exact", serde_json::json!({ "transaction": tx_b64 }));
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("payment-signature", header)
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["object"], "chat.completion");
+    assert_eq!(json["choices"][0]["message"]["content"], "[mock response]");
+}
+
+/// An `exact`-scheme verifier that records the payload it was asked to verify,
+/// so tests can assert exactly what the canonical→legacy mapping handed to the
+/// verification pipeline.
+struct PayloadRecordingVerifier {
+    seen: Arc<std::sync::Mutex<Option<PaymentPayload>>>,
+}
+
+#[async_trait::async_trait]
+impl PaymentVerifier for PayloadRecordingVerifier {
+    fn network(&self) -> &str {
+        SOLANA_NETWORK
+    }
+
+    fn scheme(&self) -> &str {
+        "exact"
+    }
+
+    async fn verify_payment(
+        &self,
+        payload: &PaymentPayload,
+    ) -> Result<VerificationResult, X402Error> {
+        *self
+            .seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(payload.clone());
+        Ok(VerificationResult {
+            valid: true,
+            reason: None,
+            verified_amount: Some(2625),
+        })
+    }
+
+    async fn settle_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<SettlementResult, X402Error> {
+        Ok(SettlementResult {
+            success: true,
+            tx_signature: Some("MockSettledTxSig123".to_string()),
+            network: SOLANA_NETWORK.to_string(),
+            error: None,
+            verified_amount: None,
+            failure_kind: None,
+        })
+    }
+}
+
+/// The canonical inbound payload must reach the existing verifier mapped into
+/// the legacy `PaymentPayload` shape: scheme `exact`, `Direct` transaction
+/// carried verbatim, accepted fields and resource bound for route validation.
+#[tokio::test]
+async fn test_chat_canonical_payment_reaches_exact_verifier_with_mapped_payload() {
+    let seen: Arc<std::sync::Mutex<Option<PaymentPayload>>> = Arc::new(std::sync::Mutex::new(None));
+    let (app, state) =
+        test_app_with_mock_provider_and_exact_verifier(Arc::new(PayloadRecordingVerifier {
+            seen: seen.clone(),
+        }));
+
+    let tx_b64 = base64::engine::general_purpose::STANDARD.encode(b"mock_signed_tx_bytes");
+    let header =
+        canonical_payment_signature_header("exact", serde_json::json!({ "transaction": tx_b64 }));
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("payment-signature", header)
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("verifier must have been reached with the mapped payload");
+    assert_eq!(payload.x402_version, 2);
+    assert_eq!(payload.accepted.scheme, "exact");
+    assert_eq!(payload.accepted.network, SOLANA_NETWORK);
+    assert_eq!(payload.accepted.asset, USDC_MINT);
+    assert_eq!(payload.accepted.pay_to, TEST_RECIPIENT_WALLET);
+    // The mapped payload must bind to the CONFIGURED mint and recipient —
+    // the same values the route validation and the verifier enforce.
+    assert_eq!(
+        payload.accepted.asset, state.config.solana.usdc_mint,
+        "mapped asset must equal the configured mint"
+    );
+    assert_eq!(
+        payload.accepted.pay_to, state.config.solana.recipient_wallet,
+        "mapped pay_to must equal the configured recipient wallet"
+    );
+    assert_eq!(payload.accepted.amount, TEST_PAYMENT_AMOUNT);
+    assert_eq!(payload.accepted.escrow_program_id, None);
+    assert_eq!(payload.resource.url, "/v1/chat/completions");
+    assert_eq!(payload.resource.method, "POST");
+    match &payload.payload {
+        PayloadData::Direct(p) => assert_eq!(p.transaction, tx_b64),
+        PayloadData::Escrow(_) => panic!("canonical payment must map to Direct"),
+    }
+}
+
+/// The escrow scheme must be rejected on the canonical inbound surface — a
+/// canonical client cannot select escrow, and the gateway must fail closed
+/// rather than route it anywhere.
+#[tokio::test]
+async fn test_chat_canonical_escrow_scheme_rejected() {
+    let app = test_app_with_mock_provider();
+
+    let tx_b64 = base64::engine::general_purpose::STANDARD.encode(b"mock_signed_tx_bytes");
+    let header =
+        canonical_payment_signature_header("escrow", serde_json::json!({ "transaction": tx_b64 }));
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("payment-signature", header)
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "canonical escrow selection must be rejected, never served"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "invalid_payment");
+}
+
+/// A canonical signature-proof payload (`payload.signature`, client-broadcast
+/// model) must be rejected: the gateway's exact flow requires the signed
+/// transaction so IT controls broadcast (deferred settlement, #486).
+#[tokio::test]
+async fn test_chat_canonical_signature_proof_rejected() {
+    let app = test_app_with_mock_provider();
+
+    let header = canonical_payment_signature_header(
+        "exact",
+        serde_json::json!({ "signature": "5wZ2UM8fFakeBase58Signature1111111111111111" }),
+    );
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("payment-signature", header)
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "invalid_payment");
+}
+
+/// A v1 canonical envelope (x402Version: 1) must be rejected — the gateway
+/// only advertises and accepts the v2 canonical surface.
+#[tokio::test]
+async fn test_chat_canonical_v1_envelope_rejected() {
+    let app = test_app_with_mock_provider();
+
+    let tx_b64 = base64::engine::general_purpose::STANDARD.encode(b"mock_signed_tx_bytes");
+    // V1 X-PAYMENT shape per the pay client: scheme/network at the top level,
+    // no accepted/resource.
+    let envelope = serde_json::json!({
+        "x402Version": 1,
+        "scheme": "exact",
+        "network": "solana",
+        "payload": { "transaction": tx_b64 }
+    });
+    let header = base64::engine::general_purpose::STANDARD.encode(envelope.to_string());
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("payment-signature", header)
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "invalid_payment");
+}
+
+/// Legacy regression: the existing snake_case PAYMENT-SIGNATURE payload must
+/// keep working bit-for-bit alongside the canonical inbound path.
+#[tokio::test]
+async fn test_chat_legacy_payment_signature_still_succeeds_alongside_canonical() {
+    let app = test_app_with_mock_provider();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["object"], "chat.completion");
+}
+
+/// Replay: the SAME canonical PAYMENT-SIGNATURE envelope submitted twice
+/// through the real route against shared `AppState` must be rejected on the
+/// second attempt. The replay gate keys on the transaction string, which the
+/// canonical→legacy mapping carries verbatim — canonical payments get exactly
+/// the same replay protection as legacy ones.
+#[tokio::test]
+async fn test_chat_canonical_payment_replay_rejected() {
+    let app = test_app_with_mock_provider();
+
+    let tx_b64 = base64::engine::general_purpose::STANDARD.encode(b"canonical_replay_tx_bytes");
+    let header =
+        canonical_payment_signature_header("exact", serde_json::json!({ "transaction": tx_b64 }));
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let make_request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("payment-signature", header.clone())
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    };
+
+    let first = app.clone().oneshot(make_request()).await.unwrap();
+    assert_eq!(
+        first.status(),
+        StatusCode::OK,
+        "first canonical submission must succeed"
+    );
+
+    let second = app.oneshot(make_request()).await.unwrap();
+    assert_eq!(
+        second.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "replayed canonical envelope must be rejected"
+    );
+    let body = second.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "invalid_payment");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already been used"),
+        "second submission must hit the replay gate: {json}"
+    );
+}
+
+/// A canonical envelope quoting the WRONG mint must be rejected by the same
+/// downstream asset validation (H2) legacy payments hit — canonical inbound
+/// payments cannot bypass accepted-field validation. The chat route returns
+/// 400 `bad_request` for accepted-field mismatches (same as legacy; only
+/// resource/verification failures use 402).
+#[tokio::test]
+async fn test_chat_canonical_wrong_asset_rejected() {
+    let app = test_app_with_mock_provider();
+
+    let tx_b64 = base64::engine::general_purpose::STANDARD.encode(b"mock_signed_tx_bytes");
+    let header = canonical_payment_signature_header_with(
+        "exact",
+        SOLANA_NETWORK,
+        TEST_DEVNET_USDC_MINT, // config quotes the mainnet constant
+        serde_json::json!({ "transaction": tx_b64 }),
+    );
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("payment-signature", header)
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "wrong mint must be rejected, never verified"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "bad_request");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Payment asset is unsupported"),
+        "must hit the asset validation: {json}"
+    );
+}
+
+/// A canonical envelope quoting the WRONG network must be rejected by the
+/// same downstream network validation legacy payments hit.
+#[tokio::test]
+async fn test_chat_canonical_wrong_network_rejected() {
+    let app = test_app_with_mock_provider();
+
+    let tx_b64 = base64::engine::general_purpose::STANDARD.encode(b"mock_signed_tx_bytes");
+    let header = canonical_payment_signature_header_with(
+        "exact",
+        "eip155:8453", // Base — not the advertised Solana CAIP-2 network
+        USDC_MINT,
+        serde_json::json!({ "transaction": tx_b64 }),
+    );
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("payment-signature", header)
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "wrong network must be rejected, never verified"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "bad_request");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Payment network is unsupported"),
+        "must hit the network validation: {json}"
     );
 }

@@ -255,10 +255,20 @@ pub async fn proxy_service(
     // Validate resource URL matches this proxy endpoint
     let expected_url = format!("/v1/services/{service_id}/proxy");
     if payload.resource.url != expected_url {
-        return Err(GatewayError::InvalidPayment(format!(
-            "payment resource '{}' does not match this endpoint",
-            payload.resource.url
-        )));
+        // GHSA-cgqx-mg48-949v posture: `resource.url` is client-controlled
+        // and unbounded (the canonical envelope imposes no length cap on it),
+        // so it is never reflected to the client. Log a truncated copy
+        // server-side; the client gets a fixed string — the 402 challenge
+        // already tells it the correct resource.
+        let got: String = payload.resource.url.chars().take(256).collect();
+        warn!(
+            expected = %expected_url,
+            got = %got,
+            "payment resource URL mismatch (proxy)"
+        );
+        return Err(GatewayError::InvalidPayment(
+            "Payment resource does not match this endpoint.".to_string(),
+        ));
     }
 
     // Validate resource method is POST

@@ -11,6 +11,7 @@ export type SolvelaModelId =
   | "deepseek-reasoner"
   | "google-gemini-2-5-flash"
   | "google-gemini-2-5-flash-lite"
+  | "google-gemini-3-1-flash-lite"
   | "google-gemini-3-1-pro"
   | "openai-gpt-4-1"
   | "openai-gpt-4-1-mini"
@@ -153,6 +154,20 @@ export const MODELS = [
     supportsStreaming: true,
     supportsTools: false,
     supportsVision: false,
+    reasoning: false,
+    supportsStructuredOutput: false,
+  },
+  {
+    id: "google-gemini-3-1-flash-lite",
+    provider: "google",
+    modelId: "gemini-3.1-flash-lite",
+    displayName: "Gemini 3.1 Flash-Lite (Free)",
+    inputCostPerMillion: 0,
+    outputCostPerMillion: 0,
+    contextWindow: 1000000,
+    supportsStreaming: true,
+    supportsTools: true,
+    supportsVision: true,
     reasoning: false,
     supportsStructuredOutput: false,
   },
