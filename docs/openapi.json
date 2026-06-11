@@ -190,13 +190,14 @@
         "type": "object",
         "required": ["id", "type", "function"],
         "properties": {
-          "id": { "type": "string" },
+          "id": { "type": "string", "description": "Unique identifier for this tool call; echo it back as `tool_call_id` on the follow-up `role: tool` message." },
           "type": { "type": "string", "example": "function" },
           "function": {
             "type": "object",
+            "description": "The function the model wants invoked.",
             "required": ["name", "arguments"],
             "properties": {
-              "name": { "type": "string" },
+              "name": { "type": "string", "description": "Function name, matching a `tools[].function.name` from the request." },
               "arguments": { "type": "string", "description": "JSON-encoded function arguments." }
             }
           }
