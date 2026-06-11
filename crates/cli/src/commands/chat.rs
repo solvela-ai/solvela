@@ -3,32 +3,61 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
 use solvela_x402::types::{
-    PaymentAccept, PaymentPayload, PaymentRequired, Resource, SolanaPayload,
+    PaymentAccept, PaymentPayload, PaymentRequired, Resource, SolanaPayload, SOLANA_NETWORK,
+    USDC_MINT,
 };
 use zeroize::Zeroizing;
 
 use crate::commands::wallet::load_wallet;
 
+/// Returns true if an accept entry is payable by this CLI: the canonical
+/// Solana network AND the canonical USDC mint.
+///
+/// The CLI pins both client-side (matching all four SDK signers) so a
+/// malicious or misconfigured gateway advertising a foreign asset or network
+/// can never steer the wallet into signing a transfer of the wrong token —
+/// fail closed, never fall back to "first advertised entry".
+fn is_payable_accept(accept: &PaymentAccept) -> bool {
+    accept.network == SOLANA_NETWORK && accept.asset == USDC_MINT
+}
+
 /// Select the preferred payment scheme from the accepts list.
 ///
-/// If `override_scheme` is `Some`, the scheme with that name must be present in
-/// `accepts` or an error is returned. Otherwise the default preference is used:
-/// "escrow" (when a program ID is advertised) over "exact".
+/// Only entries on the canonical Solana network with the canonical USDC mint
+/// are eligible (see [`is_payable_accept`]). If `override_scheme` is `Some`,
+/// an eligible entry with that scheme name must be present or an error is
+/// returned. Otherwise the default preference is used: "escrow" (when a
+/// program ID is advertised) over "exact".
 fn select_payment_scheme<'a>(
     accepts: &'a [PaymentAccept],
     override_scheme: Option<&str>,
 ) -> Result<&'a PaymentAccept> {
     if let Some(scheme) = override_scheme {
-        return accepts
-            .iter()
-            .find(|a| a.scheme == scheme)
-            .with_context(|| format!("requested scheme '{scheme}' not advertised by gateway"));
+        let mut candidates = accepts.iter().filter(|a| a.scheme == scheme).peekable();
+        // `peek()` does NOT consume: the subsequent `find` still scans from the
+        // first scheme-matching entry. The two-step shape exists to keep the
+        // two distinct errors apart — "scheme not advertised at all" vs
+        // "advertised only with an unsupported network/asset".
+        if candidates.peek().is_none() {
+            anyhow::bail!("requested scheme '{scheme}' not advertised by gateway");
+        }
+        return candidates.find(|a| is_payable_accept(a)).with_context(|| {
+            format!(
+                "requested scheme '{scheme}' is only advertised with an unsupported \
+                 network/asset (expected Solana USDC mint {USDC_MINT}); refusing to sign"
+            )
+        });
     }
     accepts
         .iter()
-        .find(|a| a.scheme == "escrow" && a.escrow_program_id.is_some())
-        .or_else(|| accepts.first())
-        .context("gateway returned no accepted payment methods")
+        .find(|a| is_payable_accept(a) && a.scheme == "escrow" && a.escrow_program_id.is_some())
+        .or_else(|| accepts.iter().find(|a| is_payable_accept(a)))
+        .with_context(|| {
+            format!(
+                "gateway advertised no payment method on the Solana USDC mint {USDC_MINT}; \
+                 refusing to sign"
+            )
+        })
 }
 
 /// Generate a unique 32-byte service_id by hashing the request body + random nonce.
@@ -702,6 +731,101 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("escrow"),
             "error should mention the requested scheme"
+        );
+    }
+
+    /// An exact accept whose `asset` is NOT the canonical USDC mint (wSOL here).
+    /// A malicious or buggy gateway advertising this first must never have it
+    /// selected — the CLI pins the canonical Solana network + USDC mint
+    /// client-side, matching the four SDK signers.
+    fn make_foreign_asset_accept() -> PaymentAccept {
+        PaymentAccept {
+            asset: "So11111111111111111111111111111111111111112".to_string(),
+            ..make_exact_accept()
+        }
+    }
+
+    /// An exact accept on a foreign network (Ethereum mainnet CAIP-2 id).
+    fn make_foreign_network_accept() -> PaymentAccept {
+        PaymentAccept {
+            network: "eip155:1".to_string(),
+            ..make_exact_accept()
+        }
+    }
+
+    #[test]
+    fn test_select_payment_scheme_skips_foreign_mint_first_entry() {
+        let accepts = vec![make_foreign_asset_accept(), make_exact_accept()];
+        let selected = select_payment_scheme(&accepts, None).expect("valid USDC entry exists");
+        assert_eq!(
+            selected.asset, USDC_MINT,
+            "foreign-mint entry listed first must be skipped in favor of the USDC entry"
+        );
+    }
+
+    #[test]
+    fn test_select_payment_scheme_skips_foreign_network_first_entry() {
+        let accepts = vec![make_foreign_network_accept(), make_exact_accept()];
+        let selected = select_payment_scheme(&accepts, None).expect("valid USDC entry exists");
+        assert_eq!(selected.network, SOLANA_NETWORK);
+    }
+
+    #[test]
+    fn test_select_payment_scheme_prefers_escrow_among_valid_entries() {
+        // Escrow preference is kept, but only among canonical-mint entries.
+        let accepts = vec![
+            make_foreign_asset_accept(),
+            make_exact_accept(),
+            make_escrow_accept(),
+        ];
+        let selected = select_payment_scheme(&accepts, None).expect("valid entries exist");
+        assert_eq!(selected.scheme, "escrow");
+        assert_eq!(selected.asset, USDC_MINT);
+    }
+
+    #[test]
+    fn test_select_payment_scheme_all_foreign_errors() {
+        let mut foreign_escrow = make_escrow_accept();
+        foreign_escrow.asset = "So11111111111111111111111111111111111111112".to_string();
+        let accepts = vec![make_foreign_asset_accept(), foreign_escrow];
+        let result = select_payment_scheme(&accepts, None);
+        assert!(
+            result.is_err(),
+            "no canonical USDC entry must be a hard error, never a fallback selection"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains(USDC_MINT),
+            "error should name the expected USDC mint"
+        );
+    }
+
+    #[test]
+    fn test_select_payment_scheme_override_foreign_mint_errors() {
+        // --scheme exact, but the only exact entry carries a foreign mint.
+        let accepts = vec![make_foreign_asset_accept(), make_escrow_accept()];
+        let result = select_payment_scheme(&accepts, Some("exact"));
+        assert!(
+            result.is_err(),
+            "--scheme override must not select a foreign-mint entry"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains(USDC_MINT),
+            "error should name the expected USDC mint"
+        );
+    }
+
+    #[test]
+    fn test_select_payment_scheme_empty_accepts_errors() {
+        // A gateway advertising NO payment options must produce a clear,
+        // mint-naming error — never a panic or a silent default.
+        let result = select_payment_scheme(&[], None);
+        assert!(
+            result.is_err(),
+            "empty accepts list must be a hard error, never a selection"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains(USDC_MINT),
+            "error should name the expected USDC mint"
         );
     }
 

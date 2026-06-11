@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 use solvela_x402::types::{
     CostBreakdown, PaymentAccept, PaymentRequired, Resource, PLATFORM_FEE_PERCENT, SOLANA_NETWORK,
-    USDC_MINT, X402_VERSION,
+    X402_VERSION,
 };
 
 use crate::error::GatewayError;
@@ -215,7 +215,9 @@ pub async fn proxy_service(
                 scheme: "exact".to_string(),
                 network: SOLANA_NETWORK.to_string(),
                 amount: expected_atomic.to_string(),
-                asset: USDC_MINT.to_string(),
+                // Quote the CONFIGURED mint (what the verifier enforces),
+                // never the compile-time constant.
+                asset: state.config.solana.usdc_mint.clone(),
                 pay_to: state.config.solana.recipient_wallet.clone(),
                 max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
                 escrow_program_id: None,
@@ -279,11 +281,17 @@ pub async fn proxy_service(
         )));
     }
 
-    // Validate asset is USDC-SPL mint
-    if payload.accepted.asset != USDC_MINT {
+    // Validate asset is the CONFIGURED USDC-SPL mint — the same one the
+    // verifier enforces — not the compile-time constant.
+    if payload.accepted.asset != state.config.solana.usdc_mint {
+        // GHSA-cgqx-mg48-949v posture: `asset` is client-controlled — cap to
+        // the max base58 pubkey length (44 chars) before echoing/logging
+        // (mirrors the tx_prefix truncation in a2a/handler.rs; chars-based so
+        // a multibyte boundary can never panic).
+        let asset_prefix: String = payload.accepted.asset.chars().take(44).collect();
         return Err(GatewayError::BadRequest(format!(
-            "payment asset must be USDC mint '{USDC_MINT}', got '{}'",
-            payload.accepted.asset
+            "payment asset must be USDC mint '{}', got '{asset_prefix}'",
+            state.config.solana.usdc_mint
         )));
     }
 
@@ -646,6 +654,7 @@ pub async fn proxy_service(
 mod tests {
     use super::*;
     use crate::payment_util::extract_signer_from_base64_tx;
+    use solvela_x402::types::USDC_MINT;
 
     /// Convenience: total atomic cost only — most existing tests only care
     /// about the total, not the full breakdown.

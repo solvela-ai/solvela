@@ -124,12 +124,16 @@ async fn handle_new_request(
         data: None,
     })?;
 
-    // Build PaymentRequired (same structure as chat route)
+    // Build PaymentRequired (same structure as chat route). Quote the
+    // CONFIGURED mint — the one the verifier enforces — never the compile-time
+    // constant. The stored offer is also what `validate_submitted_against_offer`
+    // matches the submitted payment against, so quote and validation stay
+    // aligned by construction.
     let mut accepts = vec![solvela_x402::types::PaymentAccept {
         scheme: "exact".to_string(),
         network: solvela_x402::types::SOLANA_NETWORK.to_string(),
         amount: atomic_amount.clone(),
-        asset: solvela_x402::types::USDC_MINT.to_string(),
+        asset: state.config.solana.usdc_mint.clone(),
         pay_to: state.config.solana.recipient_wallet.clone(),
         max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
         escrow_program_id: None,
@@ -140,7 +144,7 @@ async fn handle_new_request(
             scheme: "escrow".to_string(),
             network: solvela_x402::types::SOLANA_NETWORK.to_string(),
             amount: atomic_amount,
-            asset: solvela_x402::types::USDC_MINT.to_string(),
+            asset: state.config.solana.usdc_mint.clone(),
             pay_to: state.config.solana.recipient_wallet.clone(),
             max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
             escrow_program_id: state.config.solana.escrow_program_id.clone(),
@@ -170,6 +174,15 @@ async fn handle_new_request(
     // without this, the agent paid for ≤max_tokens output but the provider
     // would be invoked with max_tokens=None and could return an unbounded
     // response, leaving the gateway to absorb the overrun.
+    //
+    // KNOWN WINDOW (stale offer across a mint-config change): the stored
+    // `payment_required` snapshot lives in Redis for TASK_TTL (600s). If the
+    // operator changes `solana.usdc_mint` and restarts within that window, a
+    // pre-change offer still validates against the OLD mint in
+    // `validate_submitted_against_offer`, then fails opaquely at the verifier
+    // (which enforces the NEW configured mint). Accepted: the window is short,
+    // mint changes are rare operator events, and the failure is a denial (no
+    // mis-charge). Revisit if offers ever become long-lived.
     let task_id = new_task_id();
     let record = TaskRecord {
         id: task_id.clone(),
@@ -1329,6 +1342,13 @@ supports_vision = false
     /// `new_task_id()` so task keys are unique and never collide across
     /// parallel runs.
     fn test_state_with_redis() -> Arc<AppState> {
+        test_state_with_redis_config(AppConfig::default())
+    }
+
+    /// Like [`test_state_with_redis`] but with a caller-supplied `AppConfig`,
+    /// so tests can override payment-relevant config (e.g. a non-default
+    /// `solana.usdc_mint`).
+    fn test_state_with_redis_config(config: AppConfig) -> Arc<AppState> {
         use crate::cache::{CacheConfig, ResponseCache};
 
         let redis_client =
@@ -1337,7 +1357,7 @@ supports_vision = false
             .expect("ResponseCache::from_client should not connect");
 
         Arc::new(AppState {
-            config: AppConfig::default(),
+            config,
             model_registry: ModelRegistry::from_toml(
                 r#"
 [models.test-model]
@@ -1481,6 +1501,57 @@ supports_vision = false
             result["id"].as_str().map(str::len).unwrap_or(0) > 0,
             "task id must be set"
         );
+    }
+
+    /// With a NON-default configured USDC mint, the A2A payment-required
+    /// metadata quotes the configured mint as `asset` — not the compile-time
+    /// mainnet constant (which the verifier would never accept on that
+    /// deployment).
+    #[tokio::test]
+    async fn new_request_payment_required_quotes_configured_usdc_mint() {
+        let devnet_mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+        let mut config = AppConfig::default();
+        config.solana.usdc_mint = devnet_mint.to_string();
+        let state = test_state_with_redis_config(config);
+        let params = user_msg_with_text("Hello world", Some("test-model"));
+
+        let result = handle_new_request(&state, &params)
+            .await
+            .expect("happy path must succeed with Redis");
+
+        let accepts = result["status"]["message"]["metadata"][x402_meta::REQUIRED_KEY]["accepts"]
+            .as_array()
+            .expect("accepts must be an array");
+        assert!(!accepts.is_empty());
+        for accept in accepts {
+            assert_eq!(
+                accept["asset"], devnet_mint,
+                "A2A payment quote must use the configured mint"
+            );
+        }
+    }
+
+    /// Default-config wire stability: with no mint override, the A2A payment
+    /// quote carries the mainnet USDC mint exactly (pinned as a literal).
+    #[tokio::test]
+    async fn new_request_payment_required_quotes_default_usdc_mint() {
+        let state = test_state_with_redis();
+        let params = user_msg_with_text("Hello world", Some("test-model"));
+
+        let result = handle_new_request(&state, &params)
+            .await
+            .expect("happy path must succeed with Redis");
+
+        let accepts = result["status"]["message"]["metadata"][x402_meta::REQUIRED_KEY]["accepts"]
+            .as_array()
+            .expect("accepts must be an array");
+        assert!(!accepts.is_empty());
+        for accept in accepts {
+            assert_eq!(
+                accept["asset"], "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "default config must quote the mainnet USDC mint byte-identically"
+            );
+        }
     }
 
     /// New request through the public dispatcher with a Redis-backed state.
@@ -1672,6 +1743,86 @@ supports_vision = false
         assert!(
             !err.message.contains("verifier"),
             "must not leak verifier internals: {}",
+            err.message
+        );
+    }
+
+    /// FULL two-step A2A flow under a NON-default configured mint: step 1
+    /// quotes the devnet mint; a step-2 submission echoing that devnet mint as
+    /// `accepted.asset` must get PAST `validate_submitted_against_offer`
+    /// (reaching facilitator verification — the empty facilitator then fails
+    /// with the sanitized verification message), NOT be rejected as an
+    /// offer mismatch. Every other payment_submitted test hardcodes the
+    /// mainnet constant, so without this test the offer-match path is
+    /// unguarded against the compile-time constant creeping back in.
+    #[tokio::test]
+    async fn payment_submitted_with_configured_devnet_mint_passes_offer_validation() {
+        let devnet_mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+        let mut config = AppConfig::default();
+        config.solana.usdc_mint = devnet_mint.to_string();
+        let state = test_state_with_redis_config(config);
+
+        // Step 1: new request → input-required task carrying the devnet offer.
+        let new_params = user_msg_with_text("test", Some("test-model"));
+        let task_value = handle_new_request(&state, &new_params).await.expect("task");
+        let task_id = task_value["id"].as_str().expect("id").to_string();
+
+        // Build the submission from the OFFER itself (scheme/network/asset/
+        // pay_to/amount), the way a compliant agent would.
+        let offer = task_value["status"]["message"]["metadata"][x402_meta::REQUIRED_KEY]["accepts"]
+            [0]
+        .clone();
+        assert_eq!(
+            offer["asset"], devnet_mint,
+            "offer must quote the configured mint"
+        );
+
+        let tx_raw = format!("test_tx_{}", uuid::Uuid::new_v4().simple());
+        let payload = json!({
+            "x402_version": solvela_x402::types::X402_VERSION,
+            "resource": {"url": "/v1/chat/completions", "method": "POST"},
+            "accepted": {
+                "scheme": offer["scheme"],
+                "network": offer["network"],
+                "amount": offer["amount"],
+                "asset": offer["asset"],
+                "pay_to": offer["pay_to"],
+                "max_timeout_seconds": offer["max_timeout_seconds"],
+            },
+            "payload": { "transaction": tx_raw }
+        });
+
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            x402_meta::STATUS_KEY.to_string(),
+            json!(x402_meta::PAYMENT_SUBMITTED),
+        );
+        metadata.insert(x402_meta::PAYLOAD_KEY.to_string(), payload);
+
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: "pay".to_string(),
+                }],
+                metadata: Some(metadata),
+            },
+            task_id: Some(task_id.clone()),
+        };
+
+        let err = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &params)
+            .await
+            .expect_err("empty facilitator must fail verification");
+        assert_eq!(err.code, ERR_PAYMENT_FAILED);
+        assert!(
+            !err.message.contains("does not match any offered"),
+            "devnet-mint submission must NOT be rejected at offer validation; got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("verification failed"),
+            "submission must reach facilitator verification (past the offer \
+             match); got: {}",
             err.message
         );
     }
