@@ -1332,6 +1332,15 @@ pub async fn chat_completions(
                                     raw_cost = cost,
                                     "skipping spend log: computed cost is NaN/∞/negative/overflow — refusing to write a corrupt ledger entry"
                                 );
+                                counter!("solvela_spend_log_skipped_total", "reason" => "corrupt_actual_cost")
+                                    .increment(1);
+                                // Intentionally do NOT release the budget
+                                // reservation here: the payment WAS collected
+                                // (settled), so keeping the Redis reservation at
+                                // the estimate is the correct, conservative
+                                // accounting — releasing it would let the
+                                // wallet's budget under-count collected spend.
+                                // Only the DB ledger row is skipped.
                                 return Ok(response);
                             };
                             let billed_atomic = spend_cost_atomic(realized_discount, cost_atomic);
@@ -1391,6 +1400,14 @@ pub async fn chat_completions(
                             raw_estimated = estimated_cost,
                             "skipping spend log: estimated_cost is NaN/∞/negative/overflow on usage-less semantic-hit fallback"
                         );
+                        counter!("solvela_spend_log_skipped_total", "reason" => "corrupt_estimate_semantic_hit")
+                            .increment(1);
+                        // Intentionally do NOT release the budget reservation
+                        // here: the payment WAS collected (settled), so keeping
+                        // the Redis reservation at the estimate is the correct,
+                        // conservative accounting — releasing it would let the
+                        // wallet's budget under-count collected spend. Only the
+                        // DB ledger row is skipped.
                         return Ok(response);
                     };
                     let billed_atomic = spend_cost_atomic(realized_discount, estimated_atomic);
@@ -1440,6 +1457,14 @@ pub async fn chat_completions(
                             raw_estimated = estimated_cost,
                             "skipping spend log: estimated_cost is NaN/∞/negative/overflow on streaming estimate fallback"
                         );
+                        counter!("solvela_spend_log_skipped_total", "reason" => "corrupt_estimate_fallback")
+                            .increment(1);
+                        // Intentionally do NOT release the budget reservation
+                        // here: the payment WAS collected (settled), so keeping
+                        // the Redis reservation at the estimate is the correct,
+                        // conservative accounting — releasing it would let the
+                        // wallet's budget under-count collected spend. Only the
+                        // DB ledger row is skipped.
                         return Ok(response);
                     };
                     let billed_atomic = spend_cost_atomic(realized_discount, estimated_atomic);
