@@ -24,7 +24,7 @@ Set `model` to a routing profile name instead of a specific model ID:
 | `auto` | `balanced`, `default` | Balanced cost and quality. **Recommended default.** |
 | `eco` | `cheap`, `budget` | Cheapest capable model per tier. |
 | `premium` | `best`, `quality` | Best available model regardless of cost. |
-| `free` | `oss`, `open` | Free-tier models only (`gpt-oss-120b`). |
+| `free` | `oss`, `open` | Free-tier model only (`google/gemini-3.1-flash-lite`). |
 
 You can also use model aliases as shortcuts to specific models:
 
@@ -79,10 +79,12 @@ Each (Profile, Tier) pair maps to a specific model:
 
 | Tier | eco | auto | premium | free |
 |------|-----|------|---------|------|
-| Simple | `deepseek/deepseek-chat` | `google/gemini-2.5-flash` | `openai/gpt-4o` | `openai/gpt-oss-120b` |
-| Medium | `google/gemini-2.5-flash-lite` | `xai/grok-code-fast-1` | `anthropic/claude-sonnet-4-6` | `openai/gpt-oss-120b` |
-| Complex | `deepseek/deepseek-chat` | `google/gemini-3.1-pro` | `anthropic/claude-opus-4-6` | `openai/gpt-oss-120b` |
-| Reasoning | `deepseek/deepseek-reasoner` | `xai/grok-4-fast-reasoning` | `openai/o3` | `openai/gpt-oss-120b` |
+| Simple | `deepseek/deepseek-chat` | `google/gemini-2.5-flash` | `openai/gpt-4o` | `google/gemini-3.1-flash-lite` |
+| Medium | `google/gemini-2.5-flash-lite` | `xai/grok-code-fast-1` | `anthropic/claude-sonnet-4-6` | `google/gemini-3.1-flash-lite` |
+| Complex | `deepseek/deepseek-chat` | `google/gemini-3.1-pro` | `anthropic/claude-opus-4-6` | `google/gemini-3.1-flash-lite` |
+| Reasoning | `deepseek/deepseek-reasoner` | `xai/grok-4-fast-reasoning` | `openai/o3` | `google/gemini-3.1-flash-lite` |
+
+> **`free` profile vs. the free tier:** the `free` profile is a routing choice — it sends every tier to the zero-cost model. Separately, any request whose estimated cost is zero (which is what routing to a zero-cost model produces) skips the 402 payment challenge entirely: no wallet or signature needed. Free-tier traffic is subject to per-IP and aggregate rate limits.
 
 ## Example: same prompt, different profiles
 

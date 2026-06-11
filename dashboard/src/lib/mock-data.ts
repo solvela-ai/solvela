@@ -40,13 +40,13 @@ export const SPEND_HISTORY: SpendDataPoint[] = [
 // ─── Mock model usage breakdown ───────────────────────────────────────────────
 
 export const MODEL_USAGE: ModelUsage[] = [
-  { model: "claude-sonnet-4-5",   provider: "anthropic", requests: 3842, spend: 97.84,  pct: 31 },
+  { model: "claude-sonnet-4-6",   provider: "anthropic", requests: 3842, spend: 97.84,  pct: 31 },
   { model: "gpt-4o-mini",         provider: "openai",    requests: 3104, spend: 22.37,  pct: 25 },
   { model: "gemini-2.5-flash",    provider: "google",    requests: 2187, spend: 11.42,  pct: 18 },
   { model: "gpt-4o",              provider: "openai",    requests:  991, spend: 58.63,  pct:  8 },
-  { model: "claude-opus-4",       provider: "anthropic", requests:  744, spend: 41.29,  pct:  6 },
-  { model: "deepseek-v3",         provider: "deepseek",  requests:  618, spend:  4.91,  pct:  5 },
-  { model: "gemini-2.5-pro",      provider: "google",    requests:  432, spend:  7.83,  pct:  3 },
+  { model: "claude-opus-4-6",     provider: "anthropic", requests:  744, spend: 41.29,  pct:  6 },
+  { model: "deepseek-chat",       provider: "deepseek",  requests:  618, spend:  4.91,  pct:  5 },
+  { model: "gemini-3.1-pro",      provider: "google",    requests:  432, spend:  7.83,  pct:  3 },
   { model: "grok-3-mini",         provider: "xai",       requests:  482, spend:  3.54,  pct:  4 },
 ];
 
@@ -55,7 +55,7 @@ export const MODEL_USAGE: ModelUsage[] = [
 export const WALLET_TXS: WalletTx[] = [
   {
     signature: "4xKp7r...9mRtQv",
-    model: "claude-sonnet-4-5",
+    model: "claude-sonnet-4-6",
     amount: "0.002625",
     timestamp: "2 min ago",
     status: "confirmed",
@@ -83,14 +83,14 @@ export const WALLET_TXS: WalletTx[] = [
   },
   {
     signature: "1dVzAf...3qUwLj",
-    model: "deepseek-v3",
+    model: "deepseek-chat",
     amount: "0.000084",
     timestamp: "5 hr ago",
     status: "confirmed",
   },
   {
     signature: "6eWxBg...7rVsKm",
-    model: "claude-opus-4",
+    model: "claude-opus-4-6",
     amount: "0.018340",
     timestamp: "7 hr ago",
     status: "confirmed",
