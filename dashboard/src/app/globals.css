@@ -21,10 +21,10 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-sans: 'Instrument Sans', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
-  --font-display: 'Archivo', system-ui, sans-serif;
-  --font-serif: 'Source Serif 4', Georgia, 'Times New Roman', Times, serif;
+  --font-display: 'Fraunces', Georgia, serif;
+  --font-serif: 'Fraunces', Georgia, 'Times New Roman', Times, serif;
   --text-xxs: 0.6875rem;       /* 11px — titlebar meta, small captions */
   --text-xxs--line-height: 1rem;
   --radius-sm: calc(var(--radius) - 4px);
@@ -874,4 +874,208 @@ pre::before {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--muted-foreground);
+}
+
+/* ==========================================================
+   v2 IDENTITY — editorial-brutalist additions (PR: design-system-v2)
+   ========================================================== */
+
+/* Fraunces display voices. "Wonk" is the signature headline voice;
+   "calm" is for large numerals and quieter display moments. */
+.display-wonk {
+  font-family: var(--font-display);
+  font-variation-settings: 'opsz' 144, 'SOFT' 0, 'WONK' 1;
+  font-weight: 540;
+  letter-spacing: -0.02em;
+  line-height: 0.98;
+}
+.display-calm {
+  font-family: var(--font-display);
+  font-variation-settings: 'opsz' 144, 'SOFT' 30, 'WONK' 0;
+  font-weight: 420;
+  letter-spacing: -0.01em;
+  line-height: 1.04;
+}
+
+/* Film-grain texture overlay. Pure CSS/SVG — no JS, no reflow.
+   Apply to a positioned section; sits above content but ignores input. */
+.grain::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.04;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Mono data-readout strip: a thin scrolling ticker of settlement events.
+   Marquee pauses on hover and never runs under reduced motion. */
+.readout-strip {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  white-space: nowrap;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+}
+.readout-strip__track {
+  display: inline-flex;
+  gap: 3rem;
+  padding-right: 3rem;
+  animation: readout-scroll 42s linear infinite;
+  will-change: transform;
+}
+.readout-strip:hover .readout-strip__track {
+  animation-play-state: paused;
+}
+@keyframes readout-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .readout-strip__track {
+    animation: none;
+  }
+}
+
+/* ==========================================================
+   v2 LANDING REBUILD — editorial-brutalist scroll choreography
+   (additive; gated utilities, all reduced-motion safe)
+   ========================================================== */
+
+/* Oversized editorial index numerals (Fraunces calm, hairline weight).
+   Used as the structural device down the "why agents pick solvela" column
+   and the lifecycle scene — a brutalist running count, not decoration. */
+.index-numeral {
+  font-family: var(--font-display);
+  font-variation-settings: 'opsz' 144, 'SOFT' 0, 'WONK' 1;
+  font-weight: 300;
+  line-height: 0.8;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+/* Hero backdrop v2 — the 48px grid, but the top quarter dissolves into the
+   header so the headline floats on near-black rather than ruled paper.
+   No gradient blob: just a vertical fade of the grid's own opacity. */
+.hero-grid-v2 {
+  position: relative;
+  background-color: var(--background);
+}
+.hero-grid-v2::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(90deg, rgba(222, 220, 209, 0.045) 1px, transparent 1px),
+    linear-gradient(rgba(222, 220, 209, 0.045) 1px, transparent 1px);
+  background-size: 56px 56px, 56px 56px;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0%, #000 22%, #000 78%, transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0%, #000 22%, #000 78%, transparent 100%);
+}
+
+/* A single bright hairline that crosses a section edge-to-edge — the
+   brutalist rule. Salmon-tipped on the left, fading to nothing on the right. */
+.rule-tipped {
+  height: 1px;
+  width: 100%;
+  background: linear-gradient(
+    90deg,
+    var(--accent-salmon) 0%,
+    var(--accent-salmon) 1.5%,
+    var(--border) 6%,
+    var(--border) 70%,
+    transparent 100%
+  );
+}
+
+/* Vertical measure tick column used between lifecycle beats. */
+.measure-ticks {
+  background-image: repeating-linear-gradient(
+    180deg,
+    var(--border) 0,
+    var(--border) 1px,
+    transparent 1px,
+    transparent 12px
+  );
+}
+
+/* Sticky scroll-scene stage. The pinned panel; children fade by data-state.
+   Under reduced motion the pin is released (position: static) so the whole
+   sequence simply stacks and is fully readable without scrolling tricks. */
+.scene-pin {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  min-height: 640px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .scene-pin {
+    position: static;
+    height: auto;
+    min-height: 0;
+  }
+}
+
+/* Beat copy crossfade inside the pinned stage (driven by data-active). */
+.scene-beat {
+  transition: opacity 0.5s ease, transform 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.scene-beat[data-active='false'] {
+  opacity: 0;
+  transform: translateY(14px);
+  pointer-events: none;
+}
+.scene-beat[data-active='true'] {
+  opacity: 1;
+  transform: translateY(0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .scene-beat {
+    transition: none;
+    opacity: 1 !important;
+    transform: none !important;
+    position: static !important;
+    pointer-events: auto !important;
+  }
+}
+
+/* Big claim slab hover — a brutalist fill-from-left wash, no rounded glow. */
+.claim-slab {
+  position: relative;
+  transition: color 0.2s ease;
+}
+.claim-slab::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent-salmon);
+  transform: scaleY(0);
+  transform-origin: top;
+  transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.claim-slab:hover::after,
+.claim-slab:focus-within::after {
+  transform: scaleY(1);
+}
+
+/* Provider marquee figure — the "25" set in display-calm at poster scale. */
+.poster-figure {
+  font-family: var(--font-display);
+  font-variation-settings: 'opsz' 144, 'SOFT' 0, 'WONK' 1;
+  font-weight: 560;
+  line-height: 0.82;
+  letter-spacing: -0.045em;
+  color: var(--heading-color);
+  font-variant-numeric: tabular-nums lining-nums;
 }

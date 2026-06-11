@@ -4,7 +4,8 @@ import { VERSION, GITHUB_URL, DOCS_URL, APP_URL, ESCROW_PROGRAM_ID } from './con
 export function LandingFooter() {
   return (
     <footer className="border-t border-border/60 bg-[var(--background)]">
-      <div className="mx-auto max-w-[1280px] px-6 py-14">
+      <div className="mx-auto max-w-[1320px] px-6 pb-14 pt-12">
+        <div className="rule-tipped mb-12" />
         <div className="grid gap-10 md:grid-cols-[minmax(0,1.1fr)_repeat(4,minmax(0,0.7fr))]">
           <div className="flex flex-col gap-3">
             <Link href="/" className="inline-flex items-center gap-2 text-foreground">
@@ -12,7 +13,7 @@ export function LandingFooter() {
                 aria-hidden
                 className="inline-block h-3 w-3 rounded-full bg-[var(--accent-salmon)]"
               />
-              <span className="font-display text-[18px] font-semibold">solvela</span>
+              <span className="display-wonk text-[22px] text-[var(--heading-color)]">solvela</span>
             </Link>
             <p className="max-w-[34ch] text-[13px] leading-[1.55] text-muted-foreground">
               Solana-native x402 gateway with trustless escrow. Built for agents,

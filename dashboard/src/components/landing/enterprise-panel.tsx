@@ -56,14 +56,15 @@ export function EnterprisePanel() {
       aria-labelledby="enterprise-heading"
       className="border-t border-border/60"
     >
-      <div className="mx-auto max-w-[1280px] px-6 py-16 lg:py-24">
+      <div className="mx-auto max-w-[1320px] px-6 py-16 lg:py-24">
+        <div className="rule-tipped mb-10" />
         <div className="flex flex-col gap-3 pb-10 sm:flex-row sm:items-end sm:justify-between">
           <div className="flex flex-col gap-3">
             <span className="eyebrow">for teams &amp; enterprise</span>
             <h2
               id="enterprise-heading"
-              className="font-display leading-[1.0] tracking-[-0.02em] text-foreground"
-              style={{ fontSize: 'clamp(2rem, 4vw, 3.25rem)', fontWeight: 600 }}
+              className="display-wonk max-w-[16ch] text-[var(--heading-color)]"
+              style={{ fontSize: 'clamp(2rem, 4.6vw, 4rem)' }}
             >
               Multi-tenant from the base layer.
             </h2>
@@ -116,7 +117,7 @@ function OrganizationsHeroCard() {
             foundation primitive
           </span>
         </div>
-        <h3 className="font-display text-[clamp(1.5rem,2.6vw,2rem)] font-semibold leading-[1.1] tracking-[-0.01em] text-foreground">
+        <h3 className="display-wonk text-[clamp(1.5rem,2.6vw,2rem)] text-[var(--heading-color)]">
           Organizations
         </h3>
         <p className="max-w-[42ch] text-[15px] leading-[1.55] text-muted-foreground">

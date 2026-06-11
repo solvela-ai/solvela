@@ -1,7 +1,9 @@
 import type { Metadata } from 'next'
-import { LandingTopStrip, LandingTicker } from '@/components/landing/landing-chrome'
+import { LandingTopStrip } from '@/components/landing/landing-chrome'
+import { SmoothScroll } from '@/components/motion/smooth-scroll'
 import { HeroPanel } from '@/components/landing/hero-panel'
-import { EscrowPanel } from '@/components/landing/escrow-panel'
+import { LifecycleScene } from '@/components/landing/lifecycle-scene'
+import { WhySolvela } from '@/components/landing/why-solvela'
 import { ProviderRow } from '@/components/landing/provider-row'
 import { EnterprisePanel } from '@/components/landing/enterprise-panel'
 import { SdkCtaPanel } from '@/components/landing/sdk-cta-panel'
@@ -44,14 +46,16 @@ export default async function LandingPage() {
     // forcing it here prevents OS-light users from falling through to the
     // (untested for landing) light-mode token set.
     <main className="dark min-h-screen bg-[var(--background)] text-foreground">
-      <LandingTopStrip />
-      <HeroPanel />
-      <LandingTicker />
-      <EscrowPanel />
-      <ProviderRow />
-      <EnterprisePanel />
-      <SdkCtaPanel preHighlighted={preHighlighted} />
-      <LandingFooter />
+      <SmoothScroll>
+        <LandingTopStrip />
+        <HeroPanel />
+        <LifecycleScene />
+        <WhySolvela />
+        <ProviderRow />
+        <EnterprisePanel />
+        <SdkCtaPanel preHighlighted={preHighlighted} />
+        <LandingFooter />
+      </SmoothScroll>
     </main>
   )
 }

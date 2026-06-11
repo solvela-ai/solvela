@@ -1,12 +1,11 @@
 import type { Metadata } from 'next'
-import { DM_Sans, JetBrains_Mono, Archivo, Source_Serif_4 } from 'next/font/google'
+import { Instrument_Sans, JetBrains_Mono, Fraunces } from 'next/font/google'
 import { ThemeProvider } from './providers/theme-provider'
 import { siteConfig } from '@/lib/theme-config'
 import './globals.css'
 
-const sans = DM_Sans({
+const sans = Instrument_Sans({
   subsets: ['latin'],
-  weight: ['400', '500', '600', '700'],
   variable: '--font-sans',
   display: 'swap',
 })
@@ -18,18 +17,20 @@ const mono = JetBrains_Mono({
   display: 'swap',
 })
 
-const display = Archivo({
+// Fraunces carries both display and serif duties: headlines pull the high
+// optical size with SOFT/WONK variation; metric numerals sit at text sizes.
+const display = Fraunces({
   subsets: ['latin'],
-  weight: ['600', '700', '900'],
   variable: '--font-display',
   display: 'swap',
+  axes: ['opsz', 'SOFT', 'WONK'],
 })
 
-const serif = Source_Serif_4({
+const serif = Fraunces({
   subsets: ['latin'],
-  weight: ['400', '500'],
   variable: '--font-serif',
   display: 'swap',
+  axes: ['opsz'],
 })
 
 export const metadata: Metadata = {
