@@ -596,6 +596,57 @@ pub(crate) fn spend_cost_atomic(
     }
 }
 
+/// Which spend-ledger arm fires for a delivered paid response.
+///
+/// Selection is pure so the four-way precedence is unit-testable in isolation
+/// from the route; the route's post-response logging block matches on this
+/// exhaustively, so a future variant is a compile error at the financial
+/// branch — never a silent fall-through. (That fall-through was a real bug:
+/// a delivered, settled STREAMING response has `usage == None` and no
+/// semantic-cost outcome, and the old three-arm `if/else` chain matched no
+/// logging arm at all — money collected on-chain never reached the spend
+/// ledger and the `check_budget` reservation was never reconciled.)
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SpendLogArm<'a> {
+    /// Post-delivery `exact` settle failed: payment was never collected and
+    /// the reservation was already released at the settle-failure branch.
+    /// Recording spend would charge the wallet's budget for an uncollected
+    /// payment.
+    SkipSettleFailed,
+    /// Provider reported usage — bill from the actual (capped) token counts.
+    ActualUsage(&'a Usage),
+    /// Usage-less semantic-cache hit (`cost_outcome` present): bill the
+    /// estimate, with the discount realised on escrow only
+    /// (`scheme_realized_discount`).
+    UsagelessSemanticHit,
+    /// Delivered + settled with NO usage and NO semantic hit — the streaming
+    /// path. Bill the estimate: it is the amount `check_budget` reserved and,
+    /// on `exact`, precisely what the agent settled on-chain.
+    EstimateFallback,
+}
+
+/// Select the spend-ledger arm for a delivered paid response.
+///
+/// Precedence: a failed post-delivery settle always wins (nothing was
+/// collected), then actual usage, then a usage-less semantic hit, and finally
+/// the estimate fallback — which guarantees every settled delivery records
+/// spend.
+pub(crate) fn select_spend_log_arm(
+    settle_after_deliver_failed: bool,
+    usage: Option<&Usage>,
+    semantic_hit: bool,
+) -> SpendLogArm<'_> {
+    if settle_after_deliver_failed {
+        SpendLogArm::SkipSettleFailed
+    } else if let Some(u) = usage {
+        SpendLogArm::ActualUsage(u)
+    } else if semantic_hit {
+        SpendLogArm::UsagelessSemanticHit
+    } else {
+        SpendLogArm::EstimateFallback
+    }
+}
+
 /// The full (undiscounted) all-in price to charge for a semantic-cache hit, in
 /// atomic USDC, or `None` if no positive price can be derived.
 ///
@@ -1650,6 +1701,78 @@ supports_vision = false
         assert!(PaymentScheme::from_accepted_str("Escrow").is_err());
         assert!(PaymentScheme::from_accepted_str("escrow ").is_err());
         assert!(PaymentScheme::from_accepted_str("escr0w").is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // select_spend_log_arm — exhaustive truth table. The fourth arm
+    // (EstimateFallback) is the streaming fix: a delivered, settled response
+    // with no usage and no semantic hit MUST still record spend.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn select_spend_log_arm_exhaustive_truth_table() {
+        let usage = Usage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+        };
+        // (settle_failed, usage, semantic_hit) → expected arm, all 8 combos.
+        // SkipSettleFailed wins unconditionally (payment never collected),
+        // then ActualUsage, then UsagelessSemanticHit, then EstimateFallback.
+        for (settle_failed, has_usage, semantic_hit) in [
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+            (true, true, true),
+        ] {
+            let arm =
+                select_spend_log_arm(settle_failed, has_usage.then_some(&usage), semantic_hit);
+            assert!(
+                matches!(arm, SpendLogArm::SkipSettleFailed),
+                "settle-after-deliver failure must always skip spend logging \
+                 (usage={has_usage}, hit={semantic_hit}), got {arm:?}"
+            );
+        }
+        for semantic_hit in [false, true] {
+            let arm = select_spend_log_arm(false, Some(&usage), semantic_hit);
+            assert!(
+                matches!(arm, SpendLogArm::ActualUsage(u) if u.completion_tokens == 5),
+                "provider usage must win over a semantic hit (hit={semantic_hit}), got {arm:?}"
+            );
+        }
+        assert!(
+            matches!(
+                select_spend_log_arm(false, None, true),
+                SpendLogArm::UsagelessSemanticHit
+            ),
+            "usage-less semantic hit must bill the (scheme-gated) discounted estimate"
+        );
+        assert!(
+            matches!(
+                select_spend_log_arm(false, None, false),
+                SpendLogArm::EstimateFallback
+            ),
+            "a settled delivery with no usage and no hit (streaming) must bill \
+             the estimate — never fall through unlogged"
+        );
+    }
+
+    #[test]
+    fn estimate_fallback_bills_exactly_the_reservation() {
+        // In the EstimateFallback arm `cost_outcome` is None, so
+        // `scheme_realized_discount` is None for BOTH schemes and
+        // `spend_cost_atomic` is the identity: billed == reserved estimate ==
+        // (for exact) the amount settled on-chain. Pin that identity so the
+        // ledger can never drift from the money actually collected.
+        let estimate_atomic = 2625_u64;
+        for scheme in [PaymentScheme::Exact, PaymentScheme::Escrow] {
+            let realized = scheme_realized_discount(scheme, None);
+            assert_eq!(
+                spend_cost_atomic(realized, estimate_atomic),
+                estimate_atomic,
+                "estimate-fallback billing must equal the reservation on {scheme:?}"
+            );
+        }
     }
 
     // -------------------------------------------------------------------------
