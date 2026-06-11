@@ -35,11 +35,15 @@
 //!   field absent the pay client self-pays the SOL fee and submits a
 //!   fully-signed transaction the existing verifier accepts.
 //!
-//! Unlike the legacy types, the inbound canonical types do NOT use
+//! Unlike the legacy types, the inbound canonical ENVELOPE types do NOT use
 //! `deny_unknown_fields`: the x402 v2 spec (§5.1.2) lets clients echo and
 //! append envelope fields, and the mapping below copies ONLY the validated,
 //! known fields into [`PaymentPayload`] — unknown keys are dropped at the
-//! boundary and can never propagate into gateway logic.
+//! boundary and can never propagate into gateway logic. The one exception is
+//! the `payload` proof object: its variants ([`CanonicalTransactionProof`],
+//! [`CanonicalSignatureProof`]) DO use `deny_unknown_fields` so an ambiguous
+//! proof carrying both `transaction` and `signature` fails the parse instead
+//! of silently resolving to one variant (see [`CanonicalProof`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -136,8 +140,10 @@ pub struct CanonicalAccept {
 #[serde(rename_all = "camelCase")]
 pub struct CanonicalPaymentRequired {
     pub x402_version: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource: Option<CanonicalResource>,
+    /// Always populated on the outbound challenge (the pay client binds its
+    /// payment to it). Only the INBOUND envelope ([`CanonicalPaymentEnvelope`])
+    /// legitimately treats resource as optional.
+    pub resource: CanonicalResource,
     pub accepts: Vec<CanonicalAccept>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -173,33 +179,67 @@ impl CanonicalPaymentRequired {
         }
 
         Some(Self {
+            // The canonical surface is pinned to v2 regardless of the legacy
+            // `X402_VERSION` constant: this field is the canonical protocol
+            // version the pay client negotiates on, not Solvela's legacy
+            // wire-format version, and the two evolve independently.
             x402_version: CANONICAL_X402_VERSION,
-            resource: Some(CanonicalResource {
+            resource: CanonicalResource {
                 url: legacy.resource.url.clone(),
                 description: None,
                 mime_type: None,
-            }),
+            },
             accepts,
-            error: Some(legacy.error.clone()),
+            // Deliberately None: the pay client never parses `error`, and the
+            // legacy body's gateway prose ("Payment required") doesn't belong
+            // in the canonical header. The legacy body keeps carrying it.
+            error: None,
         })
     }
 }
 
+/// Transaction proof body (`payload.transaction`).
+///
+/// `deny_unknown_fields` is load-bearing: serde cannot apply it to inline
+/// struct variants of an untagged enum, so each [`CanonicalProof`] variant
+/// wraps a dedicated struct instead (mirroring the legacy
+/// [`crate::payment::EscrowPayload`]/[`crate::payment::SolanaPayload`]
+/// disambiguation). An ambiguous payload carrying BOTH `transaction` and
+/// `signature` then fails BOTH variants — and therefore the whole envelope
+/// parse — instead of silently deserializing as `Transaction` and dropping
+/// the `signature` key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalTransactionProof {
+    /// Base64-encoded serialized signed transaction.
+    pub transaction: String,
+}
+
+/// Signature proof body (`payload.signature`) — the client-broadcast trust
+/// model. Parsed so it can be rejected with a precise error; see
+/// [`CanonicalProof`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalSignatureProof {
+    /// Base58-encoded transaction signature.
+    pub signature: String,
+}
+
 /// Canonical payment proof — mirrors pay-kit `PaymentProof` (untagged).
+///
+/// Variant ORDER is load-bearing: `#[serde(untagged)]` tries variants in
+/// declaration order, and `Transaction` (the only proof the gateway accepts)
+/// must be tried before `Signature`. Both inner structs carry
+/// `deny_unknown_fields`, so the ambiguous both-keys payload fails both
+/// variants rather than resolving by order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CanonicalProof {
     /// Client sends signed transaction bytes for the gateway to broadcast.
-    Transaction {
-        /// Base64-encoded serialized signed transaction.
-        transaction: String,
-    },
+    Transaction(CanonicalTransactionProof),
     /// Client broadcast itself and sends the confirmed signature. NOT
     /// accepted by the mapping below (the gateway must control broadcast).
-    Signature {
-        /// Base58-encoded transaction signature.
-        signature: String,
-    },
+    Signature(CanonicalSignatureProof),
 }
 
 /// Canonical v2 payment envelope carried (base64-encoded) in the
@@ -256,13 +296,18 @@ impl CanonicalPaymentEnvelope {
             .ok_or(CanonicalPaymentError::MissingResource)?;
 
         let transaction = match self.payload {
-            CanonicalProof::Transaction { transaction } => transaction,
-            CanonicalProof::Signature { .. } => {
+            CanonicalProof::Transaction(proof) => proof.transaction,
+            CanonicalProof::Signature(_) => {
                 return Err(CanonicalPaymentError::UnsupportedProof);
             }
         };
 
         Ok(PaymentPayload {
+            // Deliberately the legacy constant, NOT echoed from the inbound
+            // envelope: the legacy field is u8 while the canonical one is
+            // u64, and the version gate above guarantees only v2 envelopes
+            // reach this point — echoing would just be a lossy cast of a
+            // value already proven equal to 2.
             x402_version: X402_VERSION,
             resource: Resource {
                 url: resource.url,
@@ -359,8 +404,10 @@ mod tests {
                 "payTo": "6cvgmdrsVxyiuPzqMCSBnS7fAmA5Mk2VG4BcfVhC8jdC",
                 "maxTimeoutSeconds": 300,
                 "extra": { "decimals": 6 }
-            }],
-            "error": "Payment required"
+            }]
+            // NOTE: no `error` key — the pay client never parses it and the
+            // legacy body's prose stays out of the canonical header
+            // (`from_payment_required` sets `error: None`).
         });
         assert_eq!(value, expected, "canonical challenge wire shape drifted");
     }
@@ -469,7 +516,7 @@ mod tests {
         let envelope_json = serde_json::json!({
             "x402Version": 2,
             "accepted": advertised,
-            "resource": serde_json::to_value(canonical.resource.as_ref().unwrap()).unwrap(),
+            "resource": serde_json::to_value(&canonical.resource).unwrap(),
             "payload": { "transaction": "dGVzdA==" }
         });
         let envelope: CanonicalPaymentEnvelope = serde_json::from_value(envelope_json).unwrap();
@@ -561,6 +608,62 @@ mod tests {
             }
             other => panic!("expected UnsupportedScheme, got {other:?}"),
         }
+    }
+
+    /// An ambiguous proof carrying BOTH `transaction` and `signature` must
+    /// fail to parse outright — at the proof level and therefore at the
+    /// envelope level — never silently drop one key and pick a variant.
+    /// (`deny_unknown_fields` on both proof structs makes each variant reject
+    /// the other's key; mirrors the legacy `EscrowPayload`/`SolanaPayload`
+    /// disambiguation in `crate::payment`.)
+    #[test]
+    fn ambiguous_proof_with_both_keys_fails_to_parse() {
+        let ambiguous = serde_json::json!({ "transaction": "a", "signature": "b" });
+        assert!(
+            serde_json::from_value::<CanonicalProof>(ambiguous.clone()).is_err(),
+            "a proof with both `transaction` and `signature` must not parse"
+        );
+
+        let envelope_json = serde_json::json!({
+            "x402Version": 2,
+            "accepted": {
+                "scheme": "exact",
+                "network": SOLANA_NETWORK,
+                "amount": "2625",
+                "asset": USDC_MINT,
+                "payTo": "6cvgmdrsVxyiuPzqMCSBnS7fAmA5Mk2VG4BcfVhC8jdC",
+                "maxTimeoutSeconds": 300
+            },
+            "resource": { "url": "/v1/chat/completions" },
+            "payload": ambiguous
+        });
+        assert!(
+            serde_json::from_value::<CanonicalPaymentEnvelope>(envelope_json).is_err(),
+            "an envelope with an ambiguous proof must fail at the envelope parse"
+        );
+    }
+
+    /// Future canonical versions must be rejected too — the v2 gate is an
+    /// equality check, not a lower bound (`envelope_rejects_non_v2_version`
+    /// covers the v1 side).
+    #[test]
+    fn envelope_rejects_future_version() {
+        let envelope_json = serde_json::json!({
+            "x402Version": 3,
+            "accepted": {
+                "scheme": "exact",
+                "network": SOLANA_NETWORK,
+                "amount": "2625",
+                "asset": USDC_MINT,
+                "payTo": "6cvgmdrsVxyiuPzqMCSBnS7fAmA5Mk2VG4BcfVhC8jdC",
+                "maxTimeoutSeconds": 300
+            },
+            "resource": { "url": "/v1/chat/completions" },
+            "payload": { "transaction": "dGVzdA==" }
+        });
+        let envelope: CanonicalPaymentEnvelope = serde_json::from_value(envelope_json).unwrap();
+        let err = envelope.into_payment_payload().unwrap_err();
+        assert!(matches!(err, CanonicalPaymentError::UnsupportedVersion(3)));
     }
 
     #[test]

@@ -587,7 +587,21 @@ pub async fn chat_completions(
     run_prompt_guard(&req.messages)?;
 
     // Step 4: Payment present — try to decode and verify via Facilitator
-    let payment_payload = decode_payment_from_header(payment_header.unwrap());
+    let payment_payload = match decode_payment_from_header(payment_header.unwrap()) {
+        Ok(payload) => Some(payload),
+        Err(reason) => {
+            // Canonical-surface rejections (unsupported scheme / proof /
+            // version, missing accepted/resource) and garbled headers are
+            // distinct, money-relevant failures — log the SPECIFIC reason
+            // server-side so they are never silently conflated. The client
+            // receives only the fixed string in the `None` arm below
+            // (GHSA-cgqx-mg48-949v: never reflect the parse error; the only
+            // attacker-controlled bytes in `reason` are the 32-char-capped
+            // scheme echo from `CanonicalPaymentError::UnsupportedScheme`).
+            warn!(error = %reason, "PAYMENT-SIGNATURE header decode failed");
+            None
+        }
+    };
 
     // Track escrow-specific info for post-response claim
     let payment_scheme: PaymentScheme;

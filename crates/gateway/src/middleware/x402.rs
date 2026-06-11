@@ -6,7 +6,7 @@ use axum::{
     response::Response,
 };
 use base64::Engine;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use solvela_x402::types::{CanonicalPaymentEnvelope, PaymentPayload};
 
@@ -92,7 +92,16 @@ pub async fn extract_payment(
                 Err(e) => {
                     // If header is present but invalid, still let the request through.
                     // The route handler will see no PaymentInfo and return 402.
-                    warn!(error = %e, "failed to decode payment signature header");
+                    //
+                    // The decode-failure detail can embed (length-capped)
+                    // attacker-controlled bytes — e.g. the canonical
+                    // envelope's rejected scheme — so the indexed warn! stays
+                    // a fixed string and the detail is demoted to debug!. The
+                    // paying routes (routes/chat, routes/proxy) log the same
+                    // failure WITH its reason at warn! when they hard-fail
+                    // the request, so the reason is never lost.
+                    warn!("failed to decode payment signature header");
+                    debug!(error = %e, "payment signature decode failure detail");
                 }
             }
         }

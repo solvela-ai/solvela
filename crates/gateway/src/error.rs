@@ -218,6 +218,7 @@ fn attach_canonical_challenge_header(response: &mut Response, payment_required: 
         Err(e) => {
             tracing::warn!(
                 error = %e,
+                resource = %payment_required.resource.url,
                 "failed to serialize canonical x402 challenge — 402 sent without PAYMENT-REQUIRED header"
             );
             return;
@@ -234,6 +235,7 @@ fn attach_canonical_challenge_header(response: &mut Response, payment_required: 
         Err(e) => {
             tracing::warn!(
                 error = %e,
+                resource = %payment_required.resource.url,
                 "failed to encode canonical x402 challenge header — 402 sent without PAYMENT-REQUIRED header"
             );
         }
@@ -474,10 +476,22 @@ mod tests {
     /// that "uniformizes" the response shape is loud.
     #[tokio::test]
     async fn test_payment_challenge_emits_top_level_payment_required() {
-        let (status, json) = error_response(GatewayError::PaymentChallenge(Box::new(
-            build_test_payment_required(),
-        )))
-        .await;
+        let response =
+            GatewayError::PaymentChallenge(Box::new(build_test_payment_required())).into_response();
+        let status = response.status();
+
+        // The same 402 must ALSO carry the canonical x402 v2 challenge in the
+        // PAYMENT-REQUIRED header (the legacy body offers `exact`, so the
+        // canonical projection exists).
+        assert!(
+            response
+                .headers()
+                .contains_key(CANONICAL_PAYMENT_REQUIRED_HEADER),
+            "402 challenge must carry the canonical PAYMENT-REQUIRED header"
+        );
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
 
@@ -500,6 +514,30 @@ mod tests {
             !json["error"].is_object(),
             "PaymentChallenge must NOT wrap the PaymentRequired in the OpenAI envelope; \
              got top-level `error` as object: {json}"
+        );
+    }
+
+    /// When the legacy challenge offers NO `exact` scheme (escrow-only), the
+    /// canonical PAYMENT-REQUIRED header must be ABSENT — never advertise a
+    /// challenge canonical clients cannot satisfy (fail closed). Pinned at
+    /// the `IntoResponse` boundary because that is where header emission is
+    /// decided; the chat route today always offers `exact`, so no real route
+    /// can produce an exact-less challenge.
+    #[tokio::test]
+    async fn test_payment_challenge_escrow_only_omits_canonical_header() {
+        let mut payment_required = build_test_payment_required();
+        for accept in &mut payment_required.accepts {
+            accept.scheme = "escrow".to_string();
+        }
+
+        let response = GatewayError::PaymentChallenge(Box::new(payment_required)).into_response();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert!(
+            !response
+                .headers()
+                .contains_key(CANONICAL_PAYMENT_REQUIRED_HEADER),
+            "an exact-less 402 must NOT carry the canonical PAYMENT-REQUIRED header"
         );
     }
 

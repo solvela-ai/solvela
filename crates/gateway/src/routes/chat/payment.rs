@@ -14,16 +14,21 @@ use crate::middleware::x402::decode_payment_header;
 use crate::payment_util::extract_payer_wallet;
 use crate::AppState;
 
-/// Try to decode a `PaymentPayload` from the `PAYMENT-SIGNATURE` header.
+/// Decode a `PaymentPayload` from the `PAYMENT-SIGNATURE` header.
 ///
-/// Returns `None` if decoding fails -- this is intentional for backwards
-/// compatibility with raw string headers used in tests (e.g., "fake-payment-for-testing").
+/// Returns the specific decode-failure reason on `Err` so the route can log
+/// it server-side: canonical-surface rejections (unsupported scheme / proof /
+/// version, missing `accepted`/`resource`) are distinct, money-relevant
+/// errors that must never be swallowed into a silent `None` and become
+/// indistinguishable from a garbled header. The client-facing message stays
+/// a FIXED string at the call site (GHSA-cgqx-mg48-949v: never reflect the
+/// parse error).
 ///
 /// Delegates to the shared `decode_payment_header` in the x402 middleware.
 pub(crate) fn decode_payment_from_header(
     header: &str,
-) -> Option<solvela_x402::types::PaymentPayload> {
-    decode_payment_header(header).ok()
+) -> Result<solvela_x402::types::PaymentPayload, String> {
+    decode_payment_header(header)
 }
 
 /// Extract wallet address and transaction signature from the payment header.
@@ -34,7 +39,7 @@ pub(crate) fn decode_payment_from_header(
 /// (fee payer). Falls back to "unknown" if extraction fails.
 pub(crate) fn extract_payment_info(header: &str) -> (String, Option<String>) {
     match decode_payment_from_header(header) {
-        Some(payload) => {
+        Ok(payload) => {
             let wallet = extract_payer_wallet(&payload);
             let tx_sig = match &payload.payload {
                 solvela_x402::types::PayloadData::Direct(p) => Some(p.transaction.clone()),
@@ -42,7 +47,11 @@ pub(crate) fn extract_payment_info(header: &str) -> (String, Option<String>) {
             };
             (wallet, tx_sig)
         }
-        None => ("unknown".to_string(), None),
+        // Attribution-only fallback: this function feeds the spend log /
+        // metrics labels, and the route has already hard-failed any header
+        // that does not decode — so `Err` is unreachable on the paid path
+        // and "unknown" can never mask a billing decision.
+        Err(_) => ("unknown".to_string(), None),
     }
 }
 
@@ -247,7 +256,7 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&json);
 
         let result = decode_payment_from_header(&encoded);
-        assert!(result.is_some());
+        assert!(result.is_ok());
         let decoded = result.unwrap();
         assert_eq!(decoded.x402_version, 2);
         assert_eq!(decoded.accepted.scheme, "exact");
@@ -277,14 +286,50 @@ mod tests {
         let json_str = serde_json::to_string(&payload).unwrap();
 
         let result = decode_payment_from_header(&json_str);
-        assert!(result.is_some());
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn test_decode_payment_from_header_invalid_returns_none() {
-        assert!(decode_payment_from_header("garbage-data").is_none());
-        assert!(decode_payment_from_header("").is_none());
-        assert!(decode_payment_from_header("fake-payment-for-testing").is_none());
+    fn test_decode_payment_from_header_invalid_returns_err() {
+        assert!(decode_payment_from_header("garbage-data").is_err());
+        assert!(decode_payment_from_header("").is_err());
+        assert!(decode_payment_from_header("fake-payment-for-testing").is_err());
+    }
+
+    /// A canonical v2 envelope that the fail-closed mapping REJECTS (here:
+    /// escrow scheme) must surface as a hard `Err` carrying the specific
+    /// canonical rejection reason — never the generic garbled-header message,
+    /// and never a silent `None`-equivalent. The route logs this reason at
+    /// `warn!` before returning its fixed client-facing 402.
+    #[test]
+    fn test_decode_payment_from_header_canonical_rejection_surfaces_reason() {
+        use base64::Engine;
+        let envelope = serde_json::json!({
+            "x402Version": 2,
+            "accepted": {
+                "scheme": "escrow",
+                "network": solvela_x402::types::SOLANA_NETWORK,
+                "amount": "2625",
+                "asset": solvela_x402::types::USDC_MINT,
+                "payTo": "TestWallet",
+                "maxTimeoutSeconds": 300
+            },
+            "resource": { "url": "/v1/chat/completions" },
+            "payload": { "transaction": "dGVzdA==" }
+        });
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(envelope.to_string().as_bytes());
+
+        let err = decode_payment_from_header(&encoded)
+            .expect_err("canonical escrow selection must be a hard error");
+        assert!(
+            err.contains("canonical x402 payment rejected"),
+            "rejection reason must be surfaced, got: {err}"
+        );
+        assert!(
+            !err.contains("not valid base64 or JSON"),
+            "must be distinguishable from a garbled header: {err}"
+        );
     }
 
     // =========================================================================
