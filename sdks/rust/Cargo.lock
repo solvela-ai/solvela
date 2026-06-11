@@ -3360,7 +3360,6 @@ dependencies = [
  "solvela-client-cli-args",
  "solvela-protocol",
  "tokio",
- "tracing",
  "tracing-subscriber",
 ]
 
@@ -3384,7 +3383,6 @@ dependencies = [
  "axum",
  "clap",
  "reqwest",
- "serde",
  "serde_json",
  "solana-sdk",
  "solvela-client",
