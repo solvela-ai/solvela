@@ -10,10 +10,22 @@ description: Async-first Python client for Solvela with built-in Solana signing 
 - **Source:** [`sdks/python/`](https://github.com/solvela-ai/solvela/tree/main/sdks/python) in the monorepo
 - **Python:** 3.10+
 
+## Status
+
+<Note>
+`solvela-sdk@0.3.0` adds opt-in escrow-program-id pinning
+(`EscrowProgramMismatchError` is raised when the gateway advertises an escrow
+program that does not match the configured one) and converts post-signing 402s
+to `PaymentRejectedError` on both the non-streaming and streaming paths, exactly
+like the Go and TypeScript SDKs. It is wire-aligned with the production gateway
+at `api.solvela.ai`. Pin to `>=0.3.0` — `solvela-sdk@0.2.0` predates the
+Apache-2.0 relicense and these payment-path fixes.
+</Note>
+
 ## Installation
 
 ```bash
-pip install solvela-sdk
+pip install "solvela-sdk>=0.3.0"
 ```
 
 Solana wallet, keypair signing, and RPC integration are built in — no extras required.
