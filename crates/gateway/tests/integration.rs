@@ -10995,3 +10995,564 @@ async fn test_chat_canonical_wrong_network_rejected() {
         "must hit the network validation: {json}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Client-facing payment receipts (settlement-platform P2)
+//
+// Every PAID, delivered + settled request that writes a spend row must also
+// write a `receipts` row (the #541 streaming-spend-log bug class) and
+// advertise it via the `x-solvela-receipt` response header. The header is
+// emitted ONLY when receipt storage (PostgreSQL) is configured — a header
+// promising an unfetchable receipt would be a lie (rule 12 graceful
+// degradation). Free-tier ($0) requests produce no payment and no receipt.
+//
+// The receipt id is capability-by-unguessable-UUID: GET /v1/receipts/{id} is
+// public, 404s identically on unknown AND malformed ids (no existence oracle),
+// and there is deliberately no listing endpoint.
+//
+// The DB-backed tests below self-skip when Postgres is unavailable (same
+// pattern as `test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e`).
+// ---------------------------------------------------------------------------
+
+/// Compose-default DATABASE_URL fallback (docker-compose.yml credentials) so
+/// the receipts round-trip tests run against a default `docker compose up -d`
+/// stack even when the env var is unset.
+const COMPOSE_DEFAULT_DATABASE_URL: &str =
+    "postgres://solvela:solvela_dev_password@localhost:5432/solvela";
+
+/// Dedicated database for the receipts suite, recreated fresh once per test
+/// process — immune to migration-checksum drift and stale rows in the shared
+/// dev database.
+const RECEIPTS_TEST_DB_NAME: &str = "solvela_receipts_test";
+
+/// Resolve (once per process) the URL of a freshly-recreated, dedicated test
+/// database. `None` (self-skip) when Postgres is unavailable.
+async fn receipts_test_db_url() -> Option<String> {
+    static URL: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
+    URL.get_or_init(|| async {
+        let admin_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| COMPOSE_DEFAULT_DATABASE_URL.to_string());
+        let admin_pool = match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skipping receipts tests: Postgres unavailable ({e})");
+                return None;
+            }
+        };
+        // DROP/CREATE DATABASE must run as simple (non-prepared) statements;
+        // sqlx 0.9's `raw_sql` requires 'static literals (SqlSafeStr), so the
+        // database name is spelled out (it must match RECEIPTS_TEST_DB_NAME).
+        if let Err(e) = sqlx::raw_sql("DROP DATABASE IF EXISTS solvela_receipts_test WITH (FORCE)")
+            .execute(&admin_pool)
+            .await
+        {
+            eprintln!("skipping receipts tests: cannot drop test database ({e})");
+            return None;
+        }
+        if let Err(e) = sqlx::raw_sql("CREATE DATABASE solvela_receipts_test")
+            .execute(&admin_pool)
+            .await
+        {
+            eprintln!("skipping receipts tests: cannot create test database ({e})");
+            return None;
+        }
+        admin_pool.close().await;
+
+        let mut url = match url::Url::parse(&admin_url) {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("skipping receipts tests: unparseable DATABASE_URL ({e})");
+                return None;
+            }
+        };
+        url.set_path(RECEIPTS_TEST_DB_NAME);
+        Some(url.to_string())
+    })
+    .await
+    .clone()
+}
+
+/// Open a PER-TEST pool (each `#[tokio::test]` has its own runtime, so pools
+/// must not be shared across tests) on the dedicated test database and apply
+/// migrations; `None` (self-skip) when unavailable.
+async fn try_receipts_db_pool() -> Option<sqlx::PgPool> {
+    let url = receipts_test_db_url().await?;
+    let pool = match sqlx::PgPool::connect(&url).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("skipping receipts test: test database connect failed ({e})");
+            return None;
+        }
+    };
+    // Concurrent test tasks serialize here via sqlx's migration advisory lock.
+    if let Err(e) = sqlx::migrate!("../../migrations").run(&pool).await {
+        eprintln!("skipping receipts test: migrations failed ({e})");
+        return None;
+    }
+    Some(pool)
+}
+
+/// DB-backed app: mirrors [`test_app_with_provider_registry_and_exact_verifier`]
+/// but with `db_pool: Some(pool)` (and a Postgres-backed `UsageTracker`), so
+/// receipts are persisted and the `x-solvela-receipt` header is emitted.
+fn test_app_with_db_pool(
+    providers: ProviderRegistry,
+    exact_verifier: Arc<dyn PaymentVerifier>,
+    pool: sqlx::PgPool,
+) -> (axum::Router, Arc<AppState>) {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML)
+        .unwrap()
+        .with_gateway_recipient(TEST_RECIPIENT_WALLET)
+        .unwrap();
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![exact_verifier]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers,
+        facilitator,
+        usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: Some(pool),
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+    });
+    let router = build_router(
+        Arc::clone(&state),
+        RateLimiter::new(RateLimitConfig::default()),
+    );
+    (router, state)
+}
+
+/// Parse the captured JSON tracing output and return the `fields` object of
+/// every `"receipt logged"` event (one per `record_receipt` call) — the same
+/// capture mechanism the #541 spend-log tests use.
+fn receipt_logged_events(capture: &CaptureWriter) -> Vec<serde_json::Value> {
+    let bytes = capture.0.lock().unwrap().clone();
+    String::from_utf8(bytes)
+        .expect("captured tracing output is UTF-8")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|v| v["fields"]["message"] == "receipt logged")
+        .map(|v| v["fields"].clone())
+        .collect()
+}
+
+/// Extract the `/v1/receipts/{uuid}` path from the response header.
+fn receipt_header_path(response: &axum::response::Response) -> String {
+    let value = response
+        .headers()
+        .get("x-solvela-receipt")
+        .expect("paid response must carry the x-solvela-receipt header")
+        .to_str()
+        .expect("x-solvela-receipt header is ASCII")
+        .to_string();
+    assert!(
+        value.starts_with("/v1/receipts/"),
+        "receipt header must be the receipt path, got: {value}"
+    );
+    value
+}
+
+/// GET a receipt path through the real router; returns (status, JSON body).
+async fn get_receipt_json(app: &axum::Router, path: &str) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|e| panic!("receipt GET body is not JSON ({e})"));
+    (status, json)
+}
+
+/// Poll GET {path} until the fire-and-forget receipt write lands (bounded).
+async fn poll_receipt_until_ok(app: &axum::Router, path: &str) -> serde_json::Value {
+    for _ in 0..50 {
+        let (status, json) = get_receipt_json(app, path).await;
+        if status == StatusCode::OK {
+            return json;
+        }
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "while polling, only 404 (write not yet landed) is acceptable: {json}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("receipt at {path} never became fetchable — fire-and-forget write lost");
+}
+
+/// Send a paid chat request through a DB-backed app and return the response.
+async fn paid_chat_response(
+    app: &axum::Router,
+    body: &serde_json::Value,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// A paid NON-STREAMING chat completion must emit the receipt header and the
+/// GET round-trip must return the stored receipt with the amounts that were
+/// ACTUALLY billed (mock usage 10 in / 5 out on gpt-4o: provider 25 + 50 = 75
+/// atomic; total 75 × 1.05 = 78.75 → the registry's 6-dp formatting yields 79;
+/// fee string "0.000004"). Atomic integers are canonical; decimal strings are
+/// derived.
+#[tokio::test]
+async fn paid_non_streaming_chat_emits_receipt_header_and_get_round_trip() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let (app, _state) =
+        test_app_with_db_pool(mock_provider_registry(), Arc::new(AlwaysPassVerifier), pool);
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let response = paid_chat_response(&app, &body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let path = receipt_header_path(&response);
+
+    let receipt = poll_receipt_until_ok(&app, &path).await;
+    assert_eq!(receipt["model"], "openai/gpt-4o");
+    assert_eq!(receipt["payment_scheme"], "exact");
+    // The mock payment tx is not a decodable Solana tx, so the payer falls
+    // back to the same "unknown" sentinel the spend ledger records.
+    assert_eq!(receipt["payer_wallet"], "unknown");
+    assert!(receipt["tx_signature"].is_string());
+    assert!(receipt["receipt_id"].is_string());
+    assert!(receipt["created_at"].is_string());
+
+    // Exact atomic pins (canonical units) — must equal what was billed.
+    assert_eq!(receipt["amount_paid_atomic"], 79);
+    assert_eq!(receipt["cost_breakdown"]["provider_cost_atomic"], 75);
+    assert_eq!(receipt["cost_breakdown"]["platform_fee_atomic"], 4);
+    assert_eq!(receipt["cost_breakdown"]["total_atomic"], 79);
+    // Cross-check against the registry single source of truth (same derivation
+    // the billing path uses), so the literal pin can never silently drift.
+    assert_eq!(
+        receipt["amount_paid_atomic"].as_u64(),
+        Some(registry_quote_atomic("openai/gpt-4o", 10, 5)),
+        "receipt amount must equal the registry-billed amount"
+    );
+    // Derived decimal strings.
+    assert_eq!(receipt["amount_paid_usdc"], "0.000079");
+    assert_eq!(receipt["cost_breakdown"]["provider_cost_usdc"], "0.000075");
+    assert_eq!(receipt["cost_breakdown"]["platform_fee_usdc"], "0.000004");
+    assert_eq!(receipt["cost_breakdown"]["total_usdc"], "0.000079");
+    assert_eq!(receipt["cost_breakdown"]["currency"], "USDC");
+    // Chat receipts carry no vendor settlement.
+    assert!(
+        receipt.get("vendor").is_none(),
+        "chat receipts must not carry vendor fields: {receipt}"
+    );
+}
+
+/// A paid STREAMING chat completion (the #541 bug class) must also produce a
+/// receipt. The header must be decided BEFORE the SSE body starts (it is on
+/// the response head), and the stored amounts are the ESTIMATE — the same
+/// figure the spend ledger bills and (on `exact`) the agent settled on-chain.
+#[tokio::test]
+async fn paid_streaming_chat_emits_receipt_header_and_records_estimate() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+        "stream": true,
+    });
+    // The 402 amount is the observable proxy for the reservation/estimate
+    // through the real path (see the #500 reservation tests).
+    let reserved_atomic = quote_402_amount_atomic(&body.to_string()).await;
+
+    let (app, _state) =
+        test_app_with_db_pool(mock_provider_registry(), Arc::new(AlwaysPassVerifier), pool);
+    let response = paid_chat_response(&app, &body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .expect("streaming response has content-type")
+        .to_str()
+        .unwrap();
+    assert!(
+        content_type.contains("text/event-stream"),
+        "must be an SSE response, got {content_type}"
+    );
+    // Header present on the response HEAD — decided before the body streams.
+    let path = receipt_header_path(&response);
+
+    let receipt = poll_receipt_until_ok(&app, &path).await;
+    assert_eq!(receipt["payment_scheme"], "exact");
+    assert_eq!(
+        receipt["amount_paid_atomic"].as_u64(),
+        Some(reserved_atomic),
+        "streaming receipt must record the billed estimate (the 402-quoted amount)"
+    );
+    assert_eq!(
+        receipt["cost_breakdown"]["total_atomic"].as_u64(),
+        Some(reserved_atomic),
+        "streaming receipt breakdown total must equal the quoted estimate"
+    );
+    assert!(
+        receipt.get("vendor").is_none(),
+        "chat receipts must not carry vendor fields"
+    );
+}
+
+/// Free-tier ($0) requests produce no payment and therefore no receipt — the
+/// header must be ABSENT even with receipt storage configured.
+#[tokio::test]
+async fn free_tier_request_emits_no_receipt_header() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let (app, _state) =
+        test_app_with_db_pool(mock_provider_registry(), Arc::new(AlwaysPassVerifier), pool);
+
+    let body = serde_json::json!({
+        "model": "google/gemini-3.1-flash-lite",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers().get("x-solvela-receipt").is_none(),
+        "a free-tier ($0) response must not advertise a receipt"
+    );
+}
+
+/// With NO database configured (rule 12 graceful degradation) a paid response
+/// must NOT emit the receipt header — never promise a receipt that can't be
+/// fetched.
+#[tokio::test]
+async fn dbless_paid_request_emits_no_receipt_header() {
+    let app = test_app_with_mock_provider();
+
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+    let response = paid_chat_response(&app, &body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers().get("x-solvela-receipt").is_none(),
+        "a DB-less gateway must not advertise unfetchable receipts"
+    );
+}
+
+/// Unknown receipt id → 404 `not_found`, nothing more (the id is the bearer
+/// capability; the 404 is the only signal).
+#[tokio::test]
+async fn get_receipt_unknown_id_returns_404() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let (app, _state) =
+        test_app_with_db_pool(mock_provider_registry(), Arc::new(AlwaysPassVerifier), pool);
+
+    let path = format!("/v1/receipts/{}", uuid::Uuid::new_v4());
+    let (status, json) = get_receipt_json(&app, &path).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json["error"]["type"], "not_found");
+}
+
+/// A malformed (non-UUID) id must 404 with the SAME body as an unknown id —
+/// no existence/format oracle.
+#[tokio::test]
+async fn get_receipt_invalid_id_returns_same_404_as_unknown() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let (app, _state) =
+        test_app_with_db_pool(mock_provider_registry(), Arc::new(AlwaysPassVerifier), pool);
+
+    let unknown_path = format!("/v1/receipts/{}", uuid::Uuid::new_v4());
+    let (unknown_status, unknown_json) = get_receipt_json(&app, &unknown_path).await;
+    let (invalid_status, invalid_json) = get_receipt_json(&app, "/v1/receipts/not-a-uuid").await;
+
+    assert_eq!(invalid_status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        invalid_status, unknown_status,
+        "malformed and unknown ids must be indistinguishable"
+    );
+    assert_eq!(
+        invalid_json, unknown_json,
+        "malformed and unknown ids must return identical bodies (no format oracle)"
+    );
+}
+
+/// With no database configured the GET route returns an honest 503 (`service_unavailable`)
+/// — receipts cannot exist on this gateway, which is a service-configuration
+/// fact, not a statement about any particular id.
+#[tokio::test]
+async fn get_receipt_without_database_returns_503() {
+    let app = test_app();
+    let path = format!("/v1/receipts/{}", uuid::Uuid::new_v4());
+    let (status, json) = get_receipt_json(&app, &path).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json["error"]["type"], "service_unavailable");
+}
+
+/// A settled paid request to a VENDOR-wallet marketplace service must record a
+/// receipt carrying the vendor settlement + fee receivable — written at
+/// SETTLEMENT time (the vendor was just paid on-chain), so it must exist even
+/// though the upstream fetch then fails on the unresolvable test endpoint.
+/// $0.02 listed price: the agent pays exactly 20_000 atomic (no 5% on top —
+/// vendor absorbs), receivable = 1_000 atomic.
+#[tokio::test]
+async fn vendor_paid_proxy_request_records_receipt_with_fee_receivable() {
+    use tracing::instrument::WithSubscriber;
+
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let recorded_recipient = Arc::new(std::sync::Mutex::new(None));
+    let (app, _state) = test_app_with_db_pool(
+        ProviderRegistry::from_env(reqwest::Client::new()),
+        Arc::new(VendorRecipientRecordingVerifier {
+            recorded_recipient: Arc::clone(&recorded_recipient),
+        }),
+        pool,
+    );
+    register_vendor_service(&app, "vendor-receipt-api").await;
+
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/vendor-receipt-api/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header_with(
+                        "/v1/services/vendor-receipt-api/proxy",
+                        USDC_MINT,
+                        TEST_VENDOR_WALLET_B58,
+                    ),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "payment must have been accepted"
+    );
+    let response_status = response.status();
+
+    // The spend row is the P1 baseline; the receipt rides the same write
+    // point. Asserting both makes a settlement-stage failure diagnosable.
+    let spend_events = spend_logged_events(&capture);
+    assert_eq!(
+        spend_events.len(),
+        1,
+        "vendor settlement must have recorded its spend entry \
+         (response status {response_status}): {spend_events:?}"
+    );
+
+    // Exactly one receipt allocated, synchronously observable through the
+    // real route (fire-and-forget write happens in the background).
+    let events = receipt_logged_events(&capture);
+    assert_eq!(
+        events.len(),
+        1,
+        "a settled vendor request must allocate exactly one receipt (got {})",
+        events.len()
+    );
+    assert_eq!(events[0]["vendor_wallet"], TEST_VENDOR_WALLET_B58);
+    assert_eq!(events[0]["amount_paid_atomic"].as_u64(), Some(20_000));
+
+    let receipt_id = events[0]["receipt_id"]
+        .as_str()
+        .expect("receipt logged event carries receipt_id");
+    let path = format!("/v1/receipts/{receipt_id}");
+    let receipt = poll_receipt_until_ok(&app, &path).await;
+
+    assert_eq!(receipt["model"], "vendor-receipt-api");
+    assert_eq!(receipt["payment_scheme"], "exact");
+    // Agent-facing amounts: pays exactly the listed price, zero fee (rule #5 —
+    // the breakdown stays truthful to what the AGENT pays; the 5% is the
+    // vendor's off-chain receivable below).
+    assert_eq!(receipt["amount_paid_atomic"], 20_000);
+    assert_eq!(receipt["cost_breakdown"]["provider_cost_atomic"], 20_000);
+    assert_eq!(receipt["cost_breakdown"]["platform_fee_atomic"], 0);
+    assert_eq!(receipt["cost_breakdown"]["total_atomic"], 20_000);
+    assert_eq!(receipt["amount_paid_usdc"], "0.020000");
+    // Vendor settlement evidence (the P1 fee-receivable trail).
+    assert_eq!(receipt["vendor"]["vendor_wallet"], TEST_VENDOR_WALLET_B58);
+    assert_eq!(receipt["vendor"]["settled_atomic"], 20_000);
+    assert_eq!(receipt["vendor"]["fee_receivable_atomic"], 1_000);
+    assert_eq!(receipt["vendor"]["settled_usdc"], "0.020000");
+    assert_eq!(receipt["vendor"]["fee_receivable_usdc"], "0.001000");
+}

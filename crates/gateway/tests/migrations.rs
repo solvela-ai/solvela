@@ -27,18 +27,22 @@ const EXPECTED_TABLES: &[&str] = &[
     "audit_logs",
     "team_budgets",
     "tenant_budgets", // migration 011
+    "receipts",       // migration 013
 ];
 
 /// Columns whose presence proves the right ALTER TABLE migrations ran.
 const EXPECTED_COLUMNS: &[(&str, &str)] = &[
-    ("spend_logs", "request_id"),            // migration 003
-    ("spend_logs", "session_id"),            // migration 003
-    ("spend_logs", "tenant"),                // migration 010
-    ("escrow_claim_queue", "next_retry_at"), // migration 004
-    ("wallet_budgets", "updated_at"),        // migration 001
-    ("wallet_budgets", "hourly_limit_usdc"), // migration 007
-    ("wallet_budgets", "require_tenant"),    // migration 011
-    ("tenant_budgets", "hourly_limit_usdc"), // migration 011
+    ("spend_logs", "request_id"),                 // migration 003
+    ("spend_logs", "session_id"),                 // migration 003
+    ("spend_logs", "tenant"),                     // migration 010
+    ("escrow_claim_queue", "next_retry_at"),      // migration 004
+    ("wallet_budgets", "updated_at"),             // migration 001
+    ("wallet_budgets", "hourly_limit_usdc"),      // migration 007
+    ("wallet_budgets", "require_tenant"),         // migration 011
+    ("tenant_budgets", "hourly_limit_usdc"),      // migration 011
+    ("spend_logs", "vendor_wallet"),              // migration 012
+    ("receipts", "amount_paid_atomic"),           // migration 013
+    ("receipts", "vendor_fee_receivable_atomic"), // migration 013
 ];
 
 #[tokio::test]

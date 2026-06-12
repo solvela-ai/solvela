@@ -11,6 +11,7 @@ pub mod nonce;
 pub mod orgs;
 pub mod pricing;
 pub mod proxy;
+pub mod receipts;
 pub mod services;
 pub mod stats;
 pub mod supported;

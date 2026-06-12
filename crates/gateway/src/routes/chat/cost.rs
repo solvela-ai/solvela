@@ -33,6 +33,16 @@ impl PaymentScheme {
             other => Err(format!("unknown payment scheme: {other}")),
         }
     }
+
+    /// The canonical `accepted.scheme` wire string for this scheme — the
+    /// inverse of [`from_accepted_str`], used when recording the scheme on a
+    /// client-facing receipt.
+    pub(crate) fn as_accepted_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Escrow => "escrow",
+        }
+    }
 }
 
 /// Hard ceiling on `completion_tokens` when neither the request nor the model
@@ -1701,6 +1711,19 @@ supports_vision = false
         assert!(PaymentScheme::from_accepted_str("Escrow").is_err());
         assert!(PaymentScheme::from_accepted_str("escrow ").is_err());
         assert!(PaymentScheme::from_accepted_str("escr0w").is_err());
+    }
+
+    #[test]
+    fn payment_scheme_as_accepted_str_round_trips() {
+        // The receipt records `as_accepted_str`; it must stay the exact
+        // inverse of the boundary parser so a recorded scheme is always a
+        // valid wire scheme.
+        for scheme in [PaymentScheme::Exact, PaymentScheme::Escrow] {
+            assert_eq!(
+                PaymentScheme::from_accepted_str(scheme.as_accepted_str()),
+                Ok(scheme)
+            );
+        }
     }
 
     // -------------------------------------------------------------------------

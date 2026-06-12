@@ -13,6 +13,7 @@ pub mod middleware;
 pub mod orgs;
 pub mod payment_util;
 pub mod providers;
+pub mod receipts;
 pub mod routes;
 pub mod secret;
 pub mod security;
@@ -257,6 +258,10 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .route(
             "/v1/services/{service_id}/proxy",
             post(routes::proxy::proxy_service),
+        )
+        .route(
+            "/v1/receipts/{receipt_id}",
+            get(routes::receipts::get_receipt),
         )
         .route("/v1/supported", get(routes::supported::supported))
         .route("/v1/nonce", get(routes::nonce::get_nonce))
@@ -513,6 +518,9 @@ fn build_cors() -> CorsLayer {
             "x-solvela-fallback"
                 .parse()
                 .expect("'x-solvela-fallback' is a valid header name"),
+            "x-solvela-receipt"
+                .parse()
+                .expect("'x-solvela-receipt' is a valid header name"),
             // Legacy x-rcr-* headers (backward compat)
             "x-rcr-request-id"
                 .parse()

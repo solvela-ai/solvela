@@ -27,6 +27,7 @@ use solvela_router::scorer;
 
 use crate::error::GatewayError;
 use crate::middleware::prompt_guard::{self, GuardResult, PromptGuardConfig};
+use crate::receipts;
 use crate::routes::debug_headers::{is_debug_enabled, PaymentStatus};
 use crate::usage::SpendLogEntry;
 use crate::AppState;
@@ -623,6 +624,11 @@ pub async fn chat_completions(
     let wallet_address: String;
     let tx_signature: Option<String>;
     let estimated_cost: f64;
+    // P2 receipts: the estimate's full CostBreakdown (the C1 `expected_cost`
+    // the 402 quote, payment validation, and budget reservation all derive
+    // from). The streaming / usage-less receipt arms record THIS breakdown —
+    // the same figure the spend ledger bills on those paths.
+    let estimated_cost_breakdown: solvela_protocol::CostBreakdown;
     let budget_reservation: crate::usage::BudgetReservation;
 
     match payment_payload {
@@ -895,6 +901,7 @@ pub async fn chat_completions(
             estimated_cost = expected_cost.total.parse::<f64>().map_err(|_| {
                 GatewayError::Internal("failed to parse estimated cost as f64".to_string())
             })?;
+            estimated_cost_breakdown = expected_cost;
 
             // GHSA-86cr-h3rx-vj6j: budget-enforcement guard. A corrupted model
             // registry entry can produce NaN or ±Infinity in the cost total. NaN
@@ -1303,13 +1310,16 @@ pub async fn chat_completions(
                         .model_registry
                         .estimate_cost(&req.model, u.prompt_tokens, u.completion_tokens)
                         .and_then(|c| {
-                            c.total.parse::<f64>().map_err(|e| {
+                            // Keep the full breakdown alongside the parsed
+                            // total: the P2 receipt records the same pricing
+                            // computation the bill derives from.
+                            c.total.parse::<f64>().map(|total| (c, total)).map_err(|e| {
                                 solvela_router::models::ModelRegistryError::ParseError(
                                     e.to_string(),
                                 )
                             })
                         }) {
-                        Ok(cost) => {
+                        Ok((actual_cost_breakdown, cost)) => {
                             // On an ESCROW semantic-cache hit the agent is billed the
                             // discounted price, so the spend ledger must record that —
                             // not the full computed `cost`. On the exact scheme
@@ -1370,6 +1380,21 @@ pub async fn chat_completions(
                                 estimated_cost_usdc: Some(estimated_cost),
                                 vendor: None,
                             });
+                            // P2 receipt: same write point as the spend row —
+                            // every paid completion that records spend records
+                            // a receipt (and advertises it via the header).
+                            emit_chat_receipt(
+                                &state,
+                                &mut response,
+                                ChatReceiptInputs {
+                                    model: &req.model,
+                                    scheme: payment_scheme,
+                                    tx_signature: &tx_signature,
+                                    payer_wallet: &wallet_address,
+                                    amount_paid_atomic: billed_atomic,
+                                    breakdown: &actual_cost_breakdown,
+                                },
+                            );
                         }
                         Err(e) => {
                             warn!(
@@ -1431,6 +1456,21 @@ pub async fn chat_completions(
                         estimated_cost_usdc: Some(estimated_cost),
                         vendor: None,
                     });
+                    // P2 receipt: billed amount mirrors the ledger (discounted
+                    // on an escrow semantic hit); the breakdown is the C1
+                    // estimate the reservation/settlement derived from.
+                    emit_chat_receipt(
+                        &state,
+                        &mut response,
+                        ChatReceiptInputs {
+                            model: &req.model,
+                            scheme: payment_scheme,
+                            tx_signature: &tx_signature,
+                            payer_wallet: &wallet_address,
+                            amount_paid_atomic: billed_atomic,
+                            breakdown: &estimated_cost_breakdown,
+                        },
+                    );
                 }
                 SpendLogArm::EstimateFallback => {
                     // Delivered + settled, but usage AND cost_outcome are both
@@ -1492,6 +1532,23 @@ pub async fn chat_completions(
                         estimated_cost_usdc: Some(estimated_cost),
                         vendor: None,
                     });
+                    // P2 receipt — the STREAMING arm (the #541 bug class):
+                    // every settled streaming completion records a receipt at
+                    // the billed estimate. `response` is the constructed (not
+                    // yet transmitted) SSE response, so the receipt header is
+                    // decided BEFORE the body starts.
+                    emit_chat_receipt(
+                        &state,
+                        &mut response,
+                        ChatReceiptInputs {
+                            model: &req.model,
+                            scheme: payment_scheme,
+                            tx_signature: &tx_signature,
+                            payer_wallet: &wallet_address,
+                            amount_paid_atomic: billed_atomic,
+                            breakdown: &estimated_cost_breakdown,
+                        },
+                    );
                 }
             }
 
@@ -1566,6 +1623,87 @@ pub async fn chat_completions(
             Err(GatewayError::Internal(msg))
         }
     }
+}
+
+/// Inputs for one chat-path receipt (settlement-platform P2). Groups the
+/// money-relevant fields so [`emit_chat_receipt`] stays a single, reviewable
+/// signature across the three spend-log arms.
+struct ChatReceiptInputs<'a> {
+    model: &'a str,
+    scheme: PaymentScheme,
+    tx_signature: &'a Option<String>,
+    payer_wallet: &'a str,
+    /// Amount actually billed (mirrors the spend ledger: discounted on an
+    /// escrow semantic-cache hit, full otherwise), atomic USDC.
+    amount_paid_atomic: u64,
+    /// The registry CostBreakdown that produced the bill (actual usage on the
+    /// non-streaming arm; the C1 estimate on the usage-less/streaming arms).
+    breakdown: &'a solvela_protocol::CostBreakdown,
+}
+
+/// Allocate, persist (fire-and-forget), and advertise a client-facing receipt
+/// for a PAID chat completion.
+///
+/// Called at exactly the points where spend logging fires — every paid
+/// completion that writes a spend row writes a receipt row (the #541
+/// streaming bug class). For STREAMING responses this runs while the SSE
+/// `Response` is constructed but not yet transmitted, so the
+/// `x-solvela-receipt` header is decided BEFORE the body starts; the recorded
+/// amounts are the same estimate the spend ledger bills on that path.
+///
+/// Fail-closed, never over-promise:
+/// - no `DATABASE_URL` → no receipt row and NO header (rule 12 graceful
+///   degradation — never advertise an unfetchable receipt);
+/// - a breakdown string that fails the checked atomic conversion → skip the
+///   receipt (counter + warn), header not emitted; the spend row and billing
+///   are unaffected.
+fn emit_chat_receipt(
+    state: &Arc<AppState>,
+    response: &mut Response,
+    inputs: ChatReceiptInputs<'_>,
+) {
+    if state.db_pool.is_none() {
+        return;
+    }
+    // Convert the breakdown's decimal strings to canonical atomic units via
+    // the same checked conversion the 402 quote uses (rejects empty/
+    // non-numeric/negative/overflow — solvela-fintech fail-closed rule).
+    let atomic = |decimal: &str| -> Option<u64> {
+        usdc_atomic_amount_checked(decimal)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+    };
+    let (Some(provider_cost_atomic), Some(platform_fee_atomic), Some(total_atomic)) = (
+        atomic(&inputs.breakdown.provider_cost),
+        atomic(&inputs.breakdown.platform_fee),
+        atomic(&inputs.breakdown.total),
+    ) else {
+        counter!("solvela_receipt_skipped_total", "reason" => "corrupt_breakdown").increment(1);
+        warn!(
+            model = %inputs.model,
+            provider_cost = %inputs.breakdown.provider_cost,
+            platform_fee = %inputs.breakdown.platform_fee,
+            total = %inputs.breakdown.total,
+            "skipping receipt: cost breakdown failed the checked atomic conversion — header not emitted"
+        );
+        return;
+    };
+    let record = receipts::ReceiptRecord {
+        receipt_id: uuid::Uuid::new_v4(),
+        model: inputs.model.to_string(),
+        payment_scheme: inputs.scheme.as_accepted_str().to_string(),
+        tx_signature: inputs.tx_signature.clone(),
+        payer_wallet: inputs.payer_wallet.to_string(),
+        amount_paid_atomic: inputs.amount_paid_atomic,
+        provider_cost_atomic,
+        platform_fee_atomic,
+        total_atomic,
+        // Chat-path receipts never carry vendor settlement — that is the
+        // services-proxy P1 path.
+        vendor: None,
+    };
+    let path = receipts::record_receipt(state.db_pool.as_ref(), record);
+    receipts::insert_receipt_header(response, &path);
 }
 
 /// Resolve model ID from aliases, smart routing profiles, or direct model IDs.

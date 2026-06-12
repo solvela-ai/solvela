@@ -529,3 +529,86 @@ async fn unknown_model_404_conforms_to_error_schema() {
         "spec documents `model_not_found` for an unknown model: {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GET /v1/receipts/{receipt_id} — settlement-platform P2 contract checks
+// ---------------------------------------------------------------------------
+
+/// With no database configured the receipts route returns an honest 503 whose
+/// body conforms to the standard `Error` envelope with `error.type` =
+/// `service_unavailable` (the spec's documented DB-less behavior).
+#[tokio::test]
+async fn receipts_dbless_503_conforms_to_error_schema() {
+    let response = quote_app()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/receipts/{}", uuid::Uuid::new_v4()))
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body = response_json(response).await;
+    assert_conforms(
+        &component_validator("Error"),
+        &body,
+        "GET /v1/receipts/{id} 503 DB-less body",
+    );
+    assert_eq!(
+        body["error"]["type"], "service_unavailable",
+        "spec documents `service_unavailable` for a DB-less receipts route: {body}"
+    );
+}
+
+/// The `gateway::receipts::Receipt` wire type is exactly what the GET route
+/// serializes; validating constructed samples (vendor and plain) against the
+/// spec's `Receipt` schema pins the wire shape without a live database.
+#[test]
+fn receipt_wire_type_conforms_to_receipt_schema() {
+    let validator = component_validator("Receipt");
+
+    let plain = gateway::receipts::Receipt {
+        receipt_id: uuid::Uuid::new_v4(),
+        created_at: chrono::Utc::now(),
+        model: "openai/gpt-4o".to_string(),
+        payment_scheme: "exact".to_string(),
+        tx_signature: Some("base64-signed-tx".to_string()),
+        payer_wallet: "AgentWallet11111111111111111111111111111111".to_string(),
+        amount_paid_atomic: 2625,
+        amount_paid_usdc: "0.002625".to_string(),
+        cost_breakdown: gateway::receipts::ReceiptCostBreakdown {
+            provider_cost_atomic: 2500,
+            provider_cost_usdc: "0.002500".to_string(),
+            platform_fee_atomic: 125,
+            platform_fee_usdc: "0.000125".to_string(),
+            total_atomic: 2625,
+            total_usdc: "0.002625".to_string(),
+            currency: "USDC".to_string(),
+        },
+        vendor: None,
+    };
+    assert_conforms(
+        &validator,
+        &serde_json::to_value(&plain).expect("serialize plain receipt"),
+        "plain (no-vendor) Receipt wire shape",
+    );
+
+    let vendor = gateway::receipts::Receipt {
+        vendor: Some(gateway::receipts::ReceiptVendor {
+            vendor_wallet: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            settled_atomic: 20_000,
+            settled_usdc: "0.020000".to_string(),
+            fee_receivable_atomic: 1_000,
+            fee_receivable_usdc: "0.001000".to_string(),
+        }),
+        tx_signature: None,
+        ..plain
+    };
+    assert_conforms(
+        &validator,
+        &serde_json::to_value(&vendor).expect("serialize vendor receipt"),
+        "vendor-settled Receipt wire shape",
+    );
+}
