@@ -48,8 +48,20 @@ export class PaymentRequiredError extends ClientError {
   }
 }
 
+/**
+ * Raised when the gateway returns a 402 AFTER a signed payment was attached —
+ * a post-signing rejection, distinct from the initial PaymentRequiredError
+ * challenge. `paymentRequired` carries the second 402 body (cost breakdown,
+ * accepted schemes, gateway error message) so callers can inspect WHY the
+ * payment was rejected — replay nonce, expired signature, balance issue —
+ * instead of a bare reason string. Optional for backward compatibility with
+ * callers constructing this error from a message only.
+ */
 export class PaymentRejectedError extends ClientError {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    public readonly paymentRequired?: PaymentRequired,
+  ) {
     super(message);
     this.name = 'PaymentRejectedError';
   }
