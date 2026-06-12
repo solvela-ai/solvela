@@ -13,6 +13,7 @@ pub mod middleware;
 pub mod orgs;
 pub mod payment_util;
 pub mod providers;
+pub mod receipts;
 pub mod routes;
 pub mod secret;
 pub mod security;
@@ -127,6 +128,17 @@ pub struct AppState {
     /// [`FREE_TIER_GLOBAL_RPM_DEFAULT`](crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT);
     /// override via `SOLVELA_FREE_TIER_GLOBAL_RPM`.
     pub free_global_cap: FreeTierGlobalCap,
+    /// Per-client (IP) rate limiter for the public, unauthenticated
+    /// `GET /v1/receipts/{id}` route.
+    ///
+    /// Same in-handler pattern as [`free_rate_limiter`](Self::free_rate_limiter):
+    /// every receipts GET is a DB query gated only by an unguessable-UUID
+    /// capability, so this cap bounds enumeration/scanning per peer IP, STRICTER
+    /// than the generic outer limiter ([`RateLimitConfig::receipts_default`]).
+    /// Keyed on the TCP peer IP, never a client-supplied header
+    /// (GHSA-6ggq-cvwx-4f67); absent `ConnectInfo` falls back to the shared
+    /// stricter "unknown" bucket.
+    pub receipts_rate_limiter: RateLimiter,
 }
 
 impl AppState {
@@ -257,6 +269,10 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .route(
             "/v1/services/{service_id}/proxy",
             post(routes::proxy::proxy_service),
+        )
+        .route(
+            "/v1/receipts/{receipt_id}",
+            get(routes::receipts::get_receipt),
         )
         .route("/v1/supported", get(routes::supported::supported))
         .route("/v1/nonce", get(routes::nonce::get_nonce))
@@ -513,6 +529,9 @@ fn build_cors() -> CorsLayer {
             "x-solvela-fallback"
                 .parse()
                 .expect("'x-solvela-fallback' is a valid header name"),
+            "x-solvela-receipt"
+                .parse()
+                .expect("'x-solvela-receipt' is a valid header name"),
             // Legacy x-rcr-* headers (backward compat)
             "x-rcr-request-id"
                 .parse()

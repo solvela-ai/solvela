@@ -91,6 +91,24 @@ impl RateLimitConfig {
             unknown_max_requests: 2,
         }
     }
+
+    /// Default rate-limit budget for the public, unauthenticated
+    /// `GET /v1/receipts/{id}` route.
+    ///
+    /// Every receipts GET is a database query keyed by an unguessable UUID
+    /// capability, so the threat is enumeration/scanning, not legitimate use:
+    /// an agent fetches its own receipt once (maybe a handful of times across
+    /// retries). 20 per 60s window per client IP is generous for real agents
+    /// and hostile to scanners; it is STRICTER than the generic outer limiter
+    /// (60/min) which still applies first. The `unknown` bucket (no
+    /// `ConnectInfo`) is stricter still, matching the free-tier policy.
+    pub fn receipts_default() -> Self {
+        Self {
+            max_requests: 20,
+            window: Duration::from_secs(60),
+            unknown_max_requests: 5,
+        }
+    }
 }
 
 /// Per-client rate limit state.
@@ -649,6 +667,21 @@ mod tests {
         assert_eq!(free.max_requests, 5);
         assert_eq!(free.unknown_max_requests, 2);
         assert_eq!(free.window, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_receipts_default_is_stricter_than_paid() {
+        let receipts = RateLimitConfig::receipts_default();
+        let paid = RateLimitConfig::default();
+        assert!(
+            receipts.max_requests < paid.max_requests,
+            "receipts per-IP limit ({}) must be stricter than the generic outer limit ({})",
+            receipts.max_requests,
+            paid.max_requests
+        );
+        assert_eq!(receipts.max_requests, 20);
+        assert_eq!(receipts.unknown_max_requests, 5);
+        assert_eq!(receipts.window, Duration::from_secs(60));
     }
 
     #[test]

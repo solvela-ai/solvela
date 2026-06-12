@@ -33,6 +33,12 @@
         "responses": {
           "200": {
             "description": "Chat completion (or an SSE stream when `stream` is true).",
+            "headers": {
+              "X-Solvela-Receipt": {
+                "description": "Path of the retrievable payment receipt (`/v1/receipts/{receipt_id}`) for this PAID completion. Present only when the request settled a payment AND the gateway has receipt storage configured; absent on free-tier ($0) responses and on gateways without a database. For SSE streams the header is decided before the body starts. The UUIDv4 id is a bearer capability — anyone holding it can read the receipt.",
+                "schema": { "type": "string" }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/ChatCompletionResponse" }
@@ -102,6 +108,59 @@
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/ModelList" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/receipts/{receipt_id}": {
+      "get": {
+        "operationId": "getReceipt",
+        "summary": "Fetch a payment receipt by id",
+        "description": "Returns the client-facing receipt for a paid request: payer wallet, payment scheme, transaction reference, and the amounts actually charged (atomic USDC integers are canonical; decimal strings are derived). The unguessable UUIDv4 receipt id — issued in the `X-Solvela-Receipt` response header on paid responses — is the only credential: treat it as a bearer capability. Unknown and malformed ids both return the same 404, and there is no listing endpoint. Free ($0) requests produce no payment and therefore no receipt.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "receipt_id",
+            "in": "path",
+            "required": true,
+            "description": "UUIDv4 receipt id from the `X-Solvela-Receipt` header.",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The receipt.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Receipt" }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or malformed receipt id (`error.type` = `not_found`). The two cases are deliberately indistinguishable.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited (`error.type`: `rate_limit_exceeded`). This public route carries a stricter per-client-IP cap than the generic limiter (default 20/min) to bound receipt-id scanning. Honor `retry-after` before retrying.",
+            "headers": {
+              "retry-after": { "description": "Seconds until the rate-limit window resets.", "schema": { "type": "integer" } },
+              "x-ratelimit-limit": { "description": "Requests allowed per window.", "schema": { "type": "integer" } },
+              "x-ratelimit-remaining": { "description": "Requests remaining in the current window (always 0 on a 429).", "schema": { "type": "integer" } },
+              "x-ratelimit-reset": { "description": "Seconds until the window resets.", "schema": { "type": "integer" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "503": {
+            "description": "Receipt storage is not configured on this gateway (`error.type` = `service_unavailable`) — receipts cannot exist here at all, so no per-id 404 is implied.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
               }
             }
           }
@@ -320,6 +379,49 @@
           }
         }
       },
+      "Receipt": {
+        "type": "object",
+        "description": "Client-facing payment receipt for a paid request. Atomic-USDC integers (6 decimals) are canonical; the `*_usdc` decimal strings are derived from them. `amount_paid_atomic` is what the payer was actually billed and equals `cost_breakdown.total_atomic` except when an escrow semantic-cache discount realised on-chain. It is the billed amount from the gateway ledger's perspective — identical to the spend ledger — and can differ from the raw on-chain transfer amount when an agent overpays the 402 quote.",
+        "required": ["receipt_id", "created_at", "model", "payment_scheme", "payer_wallet", "amount_paid_atomic", "amount_paid_usdc", "cost_breakdown"],
+        "properties": {
+          "receipt_id": { "type": "string", "format": "uuid" },
+          "created_at": { "type": "string", "format": "date-time", "description": "When the receipt was recorded (request completion time, UTC)." },
+          "model": { "type": "string", "description": "Model ID (chat path) or marketplace service ID (services proxy path).", "example": "openai/gpt-4o" },
+          "payment_scheme": { "type": "string", "description": "x402 scheme that settled the payment.", "example": "exact" },
+          "tx_signature": { "type": "string", "description": "Payment transaction reference as recorded on the spend ledger (the signed transaction carried in the payment payload). Absent when no reference was extractable." },
+          "payer_wallet": { "type": "string", "description": "Payer wallet (base58 pubkey) extracted from the signed payment." },
+          "amount_paid_atomic": { "type": "integer", "minimum": 0, "description": "Amount actually billed, atomic USDC. Canonical." },
+          "amount_paid_usdc": { "type": "string", "example": "0.002625" },
+          "cost_breakdown": { "$ref": "#/components/schemas/ReceiptCostBreakdown" },
+          "vendor": { "$ref": "#/components/schemas/ReceiptVendorSettlement" }
+        }
+      },
+      "ReceiptCostBreakdown": {
+        "type": "object",
+        "description": "Agent-facing cost breakdown that produced the bill: provider cost + platform fee = total. On vendor-settled services the agent fee is 0 (the vendor absorbs the 5% — see `vendor`).",
+        "required": ["provider_cost_atomic", "provider_cost_usdc", "platform_fee_atomic", "platform_fee_usdc", "total_atomic", "total_usdc", "currency"],
+        "properties": {
+          "provider_cost_atomic": { "type": "integer", "minimum": 0 },
+          "provider_cost_usdc": { "type": "string", "example": "0.002500" },
+          "platform_fee_atomic": { "type": "integer", "minimum": 0 },
+          "platform_fee_usdc": { "type": "string", "example": "0.000125" },
+          "total_atomic": { "type": "integer", "minimum": 0 },
+          "total_usdc": { "type": "string", "example": "0.002625" },
+          "currency": { "type": "string", "example": "USDC" }
+        }
+      },
+      "ReceiptVendorSettlement": {
+        "type": "object",
+        "description": "Vendor-settlement evidence, present only when the request hit a marketplace service with a per-service `vendor_wallet`: the agent's transfer settled `settled_atomic` directly to the vendor on-chain, and Solvela's 5% platform fee is recorded as an off-chain receivable against the vendor (never charged to the agent).",
+        "required": ["vendor_wallet", "settled_atomic", "settled_usdc", "fee_receivable_atomic", "fee_receivable_usdc"],
+        "properties": {
+          "vendor_wallet": { "type": "string", "description": "Vendor wallet (base58 pubkey) the payment settled to." },
+          "settled_atomic": { "type": "integer", "minimum": 0 },
+          "settled_usdc": { "type": "string", "example": "0.020000" },
+          "fee_receivable_atomic": { "type": "integer", "minimum": 0 },
+          "fee_receivable_usdc": { "type": "string", "example": "0.001000" }
+        }
+      },
       "Error": {
         "type": "object",
         "required": ["error"],
@@ -330,7 +432,7 @@
             "properties": {
               "type": {
                 "type": "string",
-                "description": "Machine-readable error kind. Known values: `bad_request`, `model_not_found`, `payment_required`, `invalid_payment`, `settlement_failed`, `forbidden`, `unsupported_media_type`, `rate_limited`, `rate_limit_exceeded`, `provider_error`, `upstream_unavailable`, `internal_error`. New values may be added; treat unknown values as retriable-or-not by HTTP status.",
+                "description": "Machine-readable error kind. Known values: `bad_request`, `model_not_found`, `not_found`, `payment_required`, `invalid_payment`, `settlement_failed`, `forbidden`, `unsupported_media_type`, `rate_limited`, `rate_limit_exceeded`, `provider_error`, `upstream_unavailable`, `service_unavailable`, `internal_error`. New values may be added; treat unknown values as retriable-or-not by HTTP status.",
                 "example": "invalid_payment"
               },
               "message": { "type": "string" }

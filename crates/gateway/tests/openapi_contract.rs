@@ -237,6 +237,15 @@ impl LLMProvider for MockProvider {
 
 /// Build the full router with a caller-supplied provider registry.
 fn contract_app(providers: ProviderRegistry) -> axum::Router {
+    contract_app_with_db(providers, None)
+}
+
+/// [`contract_app`] with a caller-supplied `db_pool`, for routes whose
+/// contract depends on storage being configured (the receipts 404).
+fn contract_app_with_db(
+    providers: ProviderRegistry,
+    db_pool: Option<sqlx::PgPool>,
+) -> axum::Router {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).expect("test models toml");
     let facilitator =
         solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
@@ -257,7 +266,7 @@ fn contract_app(providers: ProviderRegistry) -> axum::Router {
         escrow_claimer: None,
         fee_payer_pool: None,
         nonce_pool: None,
-        db_pool: None,
+        db_pool,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -268,6 +277,7 @@ fn contract_app(providers: ProviderRegistry) -> axum::Router {
         prometheus_handle: None,
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: RateLimiter::new(RateLimitConfig::receipts_default()),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -527,5 +537,130 @@ async fn unknown_model_404_conforms_to_error_schema() {
     assert_eq!(
         body["error"]["type"], "model_not_found",
         "spec documents `model_not_found` for an unknown model: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/receipts/{receipt_id} — settlement-platform P2 contract checks
+// ---------------------------------------------------------------------------
+
+/// With no database configured the receipts route returns an honest 503 whose
+/// body conforms to the standard `Error` envelope with `error.type` =
+/// `service_unavailable` (the spec's documented DB-less behavior).
+#[tokio::test]
+async fn receipts_dbless_503_conforms_to_error_schema() {
+    let response = quote_app()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/receipts/{}", uuid::Uuid::new_v4()))
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body = response_json(response).await;
+    assert_conforms(
+        &component_validator("Error"),
+        &body,
+        "GET /v1/receipts/{id} 503 DB-less body",
+    );
+    assert_eq!(
+        body["error"]["type"], "service_unavailable",
+        "spec documents `service_unavailable` for a DB-less receipts route: {body}"
+    );
+}
+
+/// A malformed receipt id on a storage-configured gateway → HTTP 404 with the
+/// standard error envelope (`error.type` = `not_found`), conforming to the
+/// spec's `Error` schema (mirrors `unknown_model_404_conforms_to_error_schema`).
+///
+/// The spec documents one indistinguishable 404 for unknown AND malformed
+/// ids; the malformed-id arm rejects before any query is issued, so a LAZY
+/// pool (never connected — the URL points at a closed port) is enough to put
+/// the route into its storage-configured mode without a live Postgres. This
+/// keeps the contract check deterministic in every CI environment.
+#[tokio::test]
+async fn receipts_404_conforms_to_error_schema() {
+    let lazy_pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://contract:contract@127.0.0.1:1/never_connected")
+        .expect("lazy pool construction does not connect");
+    let app = contract_app_with_db(
+        ProviderRegistry::from_env(reqwest::Client::new()),
+        Some(lazy_pool),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/receipts/not-a-uuid")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = response_json(response).await;
+    assert_conforms(
+        &component_validator("Error"),
+        &body,
+        "GET /v1/receipts/{id} 404 body",
+    );
+    assert_eq!(
+        body["error"]["type"], "not_found",
+        "spec documents `not_found` for an unknown/malformed receipt id: {body}"
+    );
+}
+
+/// The `gateway::receipts::Receipt` wire type is exactly what the GET route
+/// serializes; validating constructed samples (vendor and plain) against the
+/// spec's `Receipt` schema pins the wire shape without a live database.
+#[test]
+fn receipt_wire_type_conforms_to_receipt_schema() {
+    let validator = component_validator("Receipt");
+
+    let plain = gateway::receipts::Receipt {
+        receipt_id: uuid::Uuid::new_v4(),
+        created_at: chrono::Utc::now(),
+        model: "openai/gpt-4o".to_string(),
+        payment_scheme: "exact".to_string(),
+        tx_signature: Some("base64-signed-tx".to_string()),
+        payer_wallet: "AgentWallet11111111111111111111111111111111".to_string(),
+        amount_paid_atomic: 2625,
+        amount_paid_usdc: "0.002625".to_string(),
+        cost_breakdown: gateway::receipts::ReceiptCostBreakdown {
+            provider_cost_atomic: 2500,
+            provider_cost_usdc: "0.002500".to_string(),
+            platform_fee_atomic: 125,
+            platform_fee_usdc: "0.000125".to_string(),
+            total_atomic: 2625,
+            total_usdc: "0.002625".to_string(),
+            currency: "USDC".to_string(),
+        },
+        vendor: None,
+    };
+    assert_conforms(
+        &validator,
+        &serde_json::to_value(&plain).expect("serialize plain receipt"),
+        "plain (no-vendor) Receipt wire shape",
+    );
+
+    let vendor = gateway::receipts::Receipt {
+        vendor: Some(gateway::receipts::ReceiptVendor {
+            vendor_wallet: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            settled_atomic: 20_000,
+            settled_usdc: "0.020000".to_string(),
+            fee_receivable_atomic: 1_000,
+            fee_receivable_usdc: "0.001000".to_string(),
+        }),
+        tx_signature: None,
+        ..plain
+    };
+    assert_conforms(
+        &validator,
+        &serde_json::to_value(&vendor).expect("serialize vendor receipt"),
+        "vendor-settled Receipt wire shape",
     );
 }

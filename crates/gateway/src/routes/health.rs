@@ -165,6 +165,9 @@ supports_vision = false
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::free_default(),
             ),
+            receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::receipts_default(),
+            ),
             free_global_cap: crate::middleware::rate_limit::FreeTierGlobalCap::new(
                 crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT,
             ),
@@ -243,6 +246,9 @@ supports_vision = false
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::free_default(),
+            ),
+            receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::receipts_default(),
             ),
             free_global_cap: crate::middleware::rate_limit::FreeTierGlobalCap::new(
                 crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT,

@@ -680,6 +680,11 @@ async fn main() -> anyhow::Result<()> {
         dev_bypass_payment,
         free_rate_limiter: free_rate_limiter.clone(),
         free_global_cap,
+        // Public receipts GET: fixed stricter per-IP cap (20/min). Deliberately
+        // NOT env-tunable — the receipt id is already an unguessable capability,
+        // so the cap only needs to bound scan/enumeration throughput; tune
+        // `RateLimitConfig::receipts_default` in code if that ever changes.
+        receipts_rate_limiter: RateLimiter::new(RateLimitConfig::receipts_default()),
     });
 
     // ── Shutdown signal for background tasks ────────────────────────────────

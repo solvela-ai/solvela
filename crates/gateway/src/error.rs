@@ -88,6 +88,23 @@ pub enum GatewayError {
     #[error("rate limited")]
     RateLimited,
 
+    /// A resource (currently a receipt) does not exist. Maps to 404 with the
+    /// generic `not_found` error type — distinct from `ModelNotFound`, whose
+    /// `model_not_found` type is model/service-catalog specific. For the
+    /// receipts route the inner message MUST be a fixed string used for both
+    /// unknown and malformed ids (no existence/format oracle — the UUID is a
+    /// bearer capability).
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    /// A feature this route depends on is not configured on this gateway
+    /// (currently: receipt storage with no `DATABASE_URL`). Maps to 503
+    /// Service Unavailable — distinct from `UpstreamUnavailable`, which means
+    /// a transient provider outage. The inner message is forwarded verbatim
+    /// and must stay free of internal detail.
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
+
     /// No provider could fulfil the request (every provider in the fallback
     /// chain failed or its circuit is open). Maps to 503 Service Unavailable —
     /// a RETRYABLE status, distinct from the 500 used for genuine internal
@@ -163,6 +180,12 @@ impl IntoResponse for GatewayError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limited",
                 "Too many requests".to_string(),
+            ),
+            GatewayError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg.clone()),
+            GatewayError::ServiceUnavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                msg.clone(),
             ),
             GatewayError::UpstreamUnavailable(msg) => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -358,6 +381,33 @@ mod tests {
         let (status, json) = error_response(GatewayError::RateLimited).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(json["error"]["type"], "rate_limited");
+    }
+
+    #[tokio::test]
+    async fn test_not_found_returns_404() {
+        // Receipts route: unknown AND malformed ids share one fixed message.
+        let (status, json) =
+            error_response(GatewayError::NotFound("receipt not found".to_string())).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["error"]["type"], "not_found");
+        assert_eq!(json["error"]["message"], "receipt not found");
+    }
+
+    #[tokio::test]
+    async fn test_service_unavailable_returns_503() {
+        // Receipts route with no DATABASE_URL: an honest 503, distinct from
+        // `upstream_unavailable` (transient provider outage).
+        let (status, json) = error_response(GatewayError::ServiceUnavailable(
+            "receipts are not available: this gateway has no receipt storage configured"
+                .to_string(),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["error"]["type"], "service_unavailable");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no receipt storage"));
     }
 
     #[tokio::test]

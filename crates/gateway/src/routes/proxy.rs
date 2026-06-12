@@ -14,6 +14,7 @@ use axum::response::{IntoResponse, Response};
 use metrics::{counter, histogram};
 use serde_json::json;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use solvela_x402::types::{
     CostBreakdown, PaymentAccept, PaymentRequired, Resource, PLATFORM_FEE_PERCENT, SOLANA_NETWORK,
@@ -23,6 +24,7 @@ use solvela_x402::types::{
 use crate::error::GatewayError;
 use crate::middleware::x402::decode_payment_header;
 use crate::payment_util::extract_payer_wallet;
+use crate::receipts;
 use crate::security;
 use crate::usage::{SpendLogEntry, VendorSettlement};
 use crate::AppState;
@@ -165,6 +167,47 @@ impl PaymentTarget {
         match self {
             Self::Gateway { .. } => None,
             Self::Vendor { settlement, .. } => Some(settlement),
+        }
+    }
+
+    /// Build the client-facing receipt record (settlement-platform P2) for
+    /// this settlement target. The amounts are AGENT-facing (rule #5 — the
+    /// breakdown stays truthful to what the agent pays): on the vendor path
+    /// the fee shown is 0 (the vendor absorbs it; the 5% rides as the
+    /// receivable inside `vendor`), on the gateway path the fee is on top.
+    ///
+    /// `scheme` passed the scheme/payload-variant check and was settled by
+    /// the facilitator; it is still client-originated, so it is capped before
+    /// recording.
+    fn receipt_record(
+        &self,
+        service_id: &str,
+        scheme: &str,
+        tx_signature: Option<String>,
+        payer_wallet: String,
+    ) -> receipts::ReceiptRecord {
+        // Definitionally consistent on both variants — the provider/vendor leg
+        // is what the agent pays minus the agent-facing fee (Gateway: total −
+        // 5% fee = provider cost; Vendor: listed price − 0). Computed here, not
+        // caller-supplied, so a call site can never record an inconsistent
+        // provider/total pair. `expected_atomic ≥ agent_fee_atomic` holds by
+        // construction (Gateway totals come from `compute_service_cost`, where
+        // total = provider + fee).
+        let provider_cost_atomic = self.expected_atomic() - self.agent_fee_atomic();
+        receipts::ReceiptRecord {
+            receipt_id: Uuid::new_v4(),
+            model: service_id.to_string(),
+            payment_scheme: scheme.chars().take(16).collect(),
+            tx_signature,
+            payer_wallet,
+            amount_paid_atomic: self.expected_atomic(),
+            provider_cost_atomic,
+            platform_fee_atomic: self.agent_fee_atomic(),
+            total_atomic: self.expected_atomic(),
+            vendor: match self {
+                Self::Gateway { .. } => None,
+                Self::Vendor { settlement, .. } => Some(settlement.clone()),
+            },
         }
     }
 }
@@ -649,6 +692,17 @@ pub async fn proxy_service(
     //   settled requests whose upstream then times out or is unreachable.
     // - Non-vendor services keep the legacy post-upstream write below,
     //   byte-for-byte today's behavior.
+    // P2 receipt: built from the same settlement facts as the spend entry and
+    // written at the same point(s) — vendor services NOW (the vendor was just
+    // paid on-chain), plain services post-upstream below — so every paid
+    // request that writes a spend row also writes a receipt row.
+    let receipt_record = payment_target.receipt_record(
+        &service_id,
+        &payload.accepted.scheme,
+        tx_signature.clone(),
+        wallet_address.clone(),
+    );
+
     let spend_entry = SpendLogEntry {
         wallet_address,
         model: service_id.clone(),
@@ -673,11 +727,16 @@ pub async fn proxy_service(
         estimated_cost_usdc: None,
         vendor: payment_target.into_vendor_settlement(),
     };
-    let deferred_spend_entry = if spend_entry.vendor.is_some() {
+    // `receipt_header_path` is `Some` once a retrievable receipt exists (DB
+    // configured AND the row write was dispatched); it is attached to every
+    // response built after that point. With no DATABASE_URL it stays `None`
+    // and no header is ever emitted (never promise an unfetchable receipt).
+    let (deferred_spend_entry, mut receipt_header_path) = if spend_entry.vendor.is_some() {
         state.usage.log_spend(spend_entry);
-        None
+        let path = receipts::record_receipt(state.db_pool.as_ref(), receipt_record);
+        (None, path)
     } else {
-        Some(spend_entry)
+        (Some((spend_entry, receipt_record)), None)
     };
 
     // Step 5: SSRF check — resolve DNS once, validate all addresses are public,
@@ -761,13 +820,20 @@ pub async fn proxy_service(
                 error = %e,
                 "upstream service timed out"
             );
-            return Ok((
+            // Vendor services already settled AND recorded their receipt at
+            // settlement time above, so the paid (504) response still carries
+            // it. Plain services have not written spend or receipt yet —
+            // `receipt_header_path` is `None` and no header is emitted
+            // (mirrors the legacy spend-log behavior on this arm).
+            let mut response = (
                 StatusCode::GATEWAY_TIMEOUT,
                 axum::Json(json!({
                     "error": "upstream service timed out"
                 })),
             )
-                .into_response());
+                .into_response();
+            receipts::insert_receipt_header(&mut response, &receipt_header_path);
+            return Ok(response);
         }
         Err(e) => {
             warn!(
@@ -775,23 +841,27 @@ pub async fn proxy_service(
                 error = %e,
                 "failed to reach upstream service"
             );
-            return Ok((
+            // Same receipt-header semantics as the timeout arm above.
+            let mut response = (
                 StatusCode::BAD_GATEWAY,
                 axum::Json(json!({
                     "error": "service unreachable"
                 })),
             )
-                .into_response());
+                .into_response();
+            receipts::insert_receipt_header(&mut response, &receipt_header_path);
+            return Ok(response);
         }
     };
 
     let upstream_status = upstream_response.status();
 
-    // Step 7: Fire-and-forget spend log (log_spend internally uses
+    // Step 7: Fire-and-forget spend log + receipt (both internally use
     // tokio::spawn). Non-vendor services only — vendor services already
     // logged at settlement time above (one row per request either way).
-    if let Some(entry) = deferred_spend_entry {
+    if let Some((entry, record)) = deferred_spend_entry {
         state.usage.log_spend(entry);
+        receipt_header_path = receipts::record_receipt(state.db_pool.as_ref(), record);
     }
 
     // Handle upstream response based on status
@@ -801,13 +871,15 @@ pub async fn proxy_service(
             upstream_status = %upstream_status,
             "upstream service returned server error"
         );
-        return Ok((
+        let mut response = (
             StatusCode::BAD_GATEWAY,
             axum::Json(json!({
                 "error": "upstream service error"
             })),
         )
-            .into_response());
+            .into_response();
+        receipts::insert_receipt_header(&mut response, &receipt_header_path);
+        return Ok(response);
     }
 
     // For 2xx and 4xx, forward the response as-is
@@ -824,9 +896,11 @@ pub async fn proxy_service(
         builder = builder.header("content-type", ct);
     }
 
-    builder
+    let mut response = builder
         .body(Body::from(response_bytes))
-        .map_err(|e| GatewayError::Internal(format!("failed to build response: {e}")))
+        .map_err(|e| GatewayError::Internal(format!("failed to build response: {e}")))?;
+    receipts::insert_receipt_header(&mut response, &receipt_header_path);
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -1144,6 +1218,7 @@ mod tests {
             prometheus_handle: None,
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(crate::middleware::rate_limit::RateLimitConfig::free_default()),
+            receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(crate::middleware::rate_limit::RateLimitConfig::receipts_default()),
             free_global_cap: crate::middleware::rate_limit::FreeTierGlobalCap::new(crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
 
@@ -1292,6 +1367,9 @@ mod tests {
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::free_default(),
+            ),
+            receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::receipts_default(),
             ),
             free_global_cap: crate::middleware::rate_limit::FreeTierGlobalCap::new(
                 crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT,
@@ -1804,6 +1882,85 @@ mod tests {
             matches!(err, GatewayError::PaymentChallenge(_)),
             "non-vendor path must keep today's behavior, got {err:?}"
         );
+    }
+
+    // ── Receipt records (settlement-platform P2) ──────────────────────────
+    //
+    // The plain-service receipt write fires post-upstream (step 7), which the
+    // SSRF guard makes unreachable in tests (no public upstream); the record
+    // CONTENT is pinned here at the unit level, and the vendor-path wiring is
+    // pinned end-to-end in `tests/integration.rs`
+    // (`vendor_paid_proxy_request_records_receipt_with_fee_receivable`).
+
+    /// A vendor-path receipt must carry the vendor settlement + receivable,
+    /// bill the agent exactly the listed price, and show a ZERO agent fee
+    /// (vendor absorbs — rule #5 truthful breakdown).
+    #[test]
+    fn receipt_record_vendor_carries_receivable_and_zero_agent_fee() {
+        let target = PaymentTarget::Vendor {
+            price_atomic: 20_000,
+            settlement: VendorSettlement {
+                vendor_wallet: TEST_VENDOR_WALLET.to_string(),
+                settled_atomic: 20_000,
+                fee_receivable_atomic: 1_000,
+            },
+        };
+        let record = target.receipt_record(
+            "vendor-svc",
+            "exact",
+            Some("tx".to_string()),
+            "payer".to_string(),
+        );
+        assert_eq!(record.model, "vendor-svc");
+        assert_eq!(record.payment_scheme, "exact");
+        assert_eq!(record.amount_paid_atomic, 20_000);
+        assert_eq!(record.provider_cost_atomic, 20_000);
+        assert_eq!(record.platform_fee_atomic, 0, "vendor absorbs the 5%");
+        assert_eq!(record.total_atomic, 20_000);
+        let vendor = record.vendor.expect("vendor receipt carries settlement");
+        assert_eq!(vendor.vendor_wallet, TEST_VENDOR_WALLET);
+        assert_eq!(vendor.settled_atomic, 20_000);
+        assert_eq!(vendor.fee_receivable_atomic, 1_000);
+    }
+
+    /// A plain (gateway-recipient) receipt bills `price × 1.05` with the 5%
+    /// fee on top and carries NO vendor fields.
+    #[test]
+    fn receipt_record_plain_service_has_fee_on_top_and_no_vendor_fields() {
+        let target = PaymentTarget::Gateway {
+            total_atomic: 10_500,
+            fee_atomic: 500,
+        };
+        let record = target.receipt_record(
+            "plain-svc",
+            "exact",
+            Some("tx".to_string()),
+            "payer".to_string(),
+        );
+        assert_eq!(record.amount_paid_atomic, 10_500);
+        assert_eq!(record.provider_cost_atomic, 10_000);
+        assert_eq!(record.platform_fee_atomic, 500);
+        assert_eq!(record.total_atomic, 10_500);
+        assert!(
+            record.vendor.is_none(),
+            "plain services must not carry vendor settlement fields"
+        );
+    }
+
+    /// A client-originated scheme string is capped before recording.
+    #[test]
+    fn receipt_record_caps_scheme_length() {
+        let target = PaymentTarget::Gateway {
+            total_atomic: 10_500,
+            fee_atomic: 500,
+        };
+        let record = target.receipt_record(
+            "svc",
+            "a-very-long-unknown-scheme-string",
+            None,
+            "payer".to_string(),
+        );
+        assert_eq!(record.payment_scheme.chars().count(), 16);
     }
 
     #[tokio::test]
