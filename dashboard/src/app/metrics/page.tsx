@@ -109,7 +109,7 @@ export default async function MetricsPage() {
           <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-text-tertiary">
             solvela / public metrics
           </p>
-          <h1 className="font-display text-4xl md:text-5xl font-semibold leading-tight">
+          <h1 className="display-wonk text-4xl md:text-5xl leading-tight text-[var(--heading-color)]">
             What&rsquo;s actually shipped.
           </h1>
           <p className="max-w-[60ch] text-[15px] leading-[1.6] text-muted-foreground">

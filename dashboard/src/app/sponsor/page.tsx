@@ -128,7 +128,7 @@ export default function SponsorPage() {
           <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-text-tertiary">
             solvela / sponsor
           </p>
-          <h1 className="font-display text-4xl md:text-5xl font-semibold leading-tight">
+          <h1 className="display-wonk text-4xl md:text-5xl leading-tight text-[var(--heading-color)]">
             Keep the gateway lit.
           </h1>
           <p className="max-w-[60ch] text-[15px] leading-[1.6] text-muted-foreground">

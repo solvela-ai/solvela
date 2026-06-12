@@ -102,13 +102,28 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
 
   if (!page) return {}
 
-  const tree = source.pageTree
-  const section = findSectionName(tree, page.url)
   const title = page.data.title
   const description = page.data.description
+
+  // Point OG/Twitter at the dynamic docs image route (see src/app/docs/og).
+  // slug is the page path under /docs; empty for the docs root.
+  const slugPath = (slug ?? []).join('/')
+  const ogImage = `/docs/og${slugPath ? `?slug=${encodeURIComponent(slugPath)}` : ''}`
 
   return {
     title,
     description,
+    openGraph: {
+      title,
+      description,
+      images: [{ url: ogImage, width: 1200, height: 630 }],
+      type: 'article',
+    },
+    twitter: {
+      card: 'summary_large_image',
+      title,
+      description,
+      images: [ogImage],
+    },
   }
 }
