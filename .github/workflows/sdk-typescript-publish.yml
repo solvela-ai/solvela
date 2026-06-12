@@ -83,7 +83,24 @@ jobs:
           LOCAL_SHA=$(shasum -a 256 "$LOCAL_TARBALL" | awk '{print $1}')
           echo "Local tarball SHA256: $LOCAL_SHA"
 
-          TARBALL_URL=$(npm view "${PKG_NAME}@${PKG_VERSION}" dist.tarball)
+          # npm's read path can lag the publish by seconds-to-minutes: the
+          # 0.3.0 release hit a 404 from `npm view` ~1s after a correct,
+          # provenance-signed publish and this step went red on the race.
+          # Poll for visibility within a ~5-minute budget before fetching,
+          # mirroring sdk-rust-publish.yml's crates.io visibility loop.
+          TARBALL_URL=""
+          for i in $(seq 1 30); do
+            TARBALL_URL=$(npm view "${PKG_NAME}@${PKG_VERSION}" dist.tarball 2>/dev/null || true)
+            if [ -n "$TARBALL_URL" ]; then
+              break
+            fi
+            echo "Attempt $i/30: ${PKG_NAME}@${PKG_VERSION} not visible on the registry yet; sleeping 10s"
+            sleep 10
+          done
+          if [ -z "$TARBALL_URL" ]; then
+            echo "ERROR: ${PKG_NAME}@${PKG_VERSION} not visible on the registry after ~5 minutes"
+            exit 1
+          fi
           echo "Registry tarball URL: $TARBALL_URL"
           curl -fsSL "$TARBALL_URL" -o registry.tgz
           REGISTRY_SHA=$(shasum -a 256 registry.tgz | awk '{print $1}')
