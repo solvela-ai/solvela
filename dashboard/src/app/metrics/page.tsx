@@ -62,7 +62,7 @@ const PUBLISHED_ARTIFACTS = [
   { kind: 'crate', name: 'solvela-escrow-tx', registry: 'crates.io', version: '0.2.0', license: 'Apache-2.0' },
   { kind: 'sdk',   name: 'solvela-sdk',       registry: 'PyPI',      version: '0.2.0', license: 'MIT' },
   { kind: 'sdk',   name: '@solvela/sdk',      registry: 'npm',       version: '0.2.4', license: 'Apache-2.0' },
-  { kind: 'sdk',   name: 'solvela-go',        registry: 'go modules',version: '0.1.0', license: 'MIT' },
+  { kind: 'sdk',   name: 'solvela/sdks/go',   registry: 'go modules',version: '0.2.0', license: 'Apache-2.0' },
   { kind: 'sdk',   name: 'solvela-client',    registry: 'crates.io', version: '0.2.5', license: 'Apache-2.0' },
 ] as const;
 
@@ -70,7 +70,7 @@ const LICENSE_LINES = [
   { component: 'Gateway', license: 'BUSL-1.1', note: 'Change Date 2030-05-02 → MIT' },
   { component: 'Protocol / x402 / router / CLI', license: 'Apache-2.0', note: 'patent grant included; pre-relicense crates flip from MIT on next publish' },
   { component: 'Escrow program (Anchor)', license: 'Apache-2.0', note: 'on-chain neutral' },
-  { component: 'SDKs (Python / TS / Go / Rust)', license: 'Apache-2.0 / MIT', note: 'TS + Rust published under Apache-2.0; Python flips from MIT on next publish; Go SDK is MIT' },
+  { component: 'SDKs (Python / TS / Go / Rust)', license: 'Apache-2.0', note: 'TS + Rust published under Apache-2.0; Go Apache-2.0 from sdks/go/v0.2.0; Python flips from MIT on next publish' },
 ];
 
 export const metadata: Metadata = {
