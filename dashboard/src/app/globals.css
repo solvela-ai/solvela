@@ -1079,3 +1079,41 @@ pre::before {
   color: var(--heading-color);
   font-variant-numeric: tabular-nums lining-nums;
 }
+
+/* ==========================================================
+   Interface polish pass (make-interfaces-feel-better)
+   ========================================================== */
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Short display headlines: avoid one-word orphan lines. */
+.display-wonk,
+.display-calm,
+.prose :is(h1, h2, h3) {
+  text-wrap: balance;
+}
+
+/* Body-adjacent short text reads better with pretty wrapping;
+   long prose, code, and tables are deliberately excluded. */
+.prose :is(p, li, figcaption) {
+  text-wrap: pretty;
+}
+
+/* Neutral inset outline keeps doc images from bleeding into the
+   surface. Neutral alpha only — never brand-tinted. */
+:root,
+.dark {
+  --img-outline: rgba(255, 255, 255, 0.08);
+}
+@media (prefers-color-scheme: light) {
+  :root:not(.dark) {
+    --img-outline: rgba(0, 0, 0, 0.08);
+  }
+}
+.prose img {
+  outline: 1px solid var(--img-outline);
+  outline-offset: -1px;
+}

@@ -93,7 +93,7 @@ export function HeroPanel() {
             >
               <a
                 href={QUICKSTART_URL}
-                className="group inline-flex items-center gap-2 rounded-md bg-foreground px-5 py-3 font-mono text-[12px] uppercase tracking-[0.16em] text-[var(--primary-foreground)] transition-all duration-150 hover:-translate-y-[1px] hover:bg-[var(--heading-color)] active:translate-y-0"
+                className="group inline-flex items-center gap-2 rounded-md bg-foreground px-5 py-3 font-mono text-[12px] uppercase tracking-[0.16em] text-[var(--primary-foreground)] transition-[transform,background-color] duration-150 hover:-translate-y-[1px] hover:bg-[var(--heading-color)] active:translate-y-0"
               >
                 start building
                 <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />

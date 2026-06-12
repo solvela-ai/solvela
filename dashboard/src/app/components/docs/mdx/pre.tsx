@@ -42,7 +42,9 @@ export function Pre({ children, className, 'data-language': language, ...props }
         <button
           onClick={handleCopy}
           className={cn(
-            'absolute top-2 right-2 flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-all',
+            // after:-inset-2 grows the hit area toward the 44px target without
+            // changing the visible chip; transition props listed explicitly.
+            'absolute top-2 right-2 flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-[color,background-color,border-color,opacity] after:absolute after:-inset-2 after:content-[""]',
             'text-muted-foreground hover:text-foreground',
             'bg-background/80 hover:bg-background border border-border/50',
             'opacity-60 hover:opacity-100',

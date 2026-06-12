@@ -222,7 +222,7 @@ export function SdkCtaPanel({ preHighlighted }: SdkCtaPanelProps) {
               </div>
               <a
                 href={QUICKSTART_URL}
-                className="inline-flex items-center gap-2 self-start rounded-md bg-[var(--accent-salmon)] px-5 py-3 font-mono text-[12px] uppercase tracking-[0.16em] text-[var(--color-bg-inset)] shadow-[0_0_0_0_transparent] transition-all duration-200 hover:-translate-y-[1px] hover:bg-[var(--accent-salmon-hover)] hover:shadow-[0_8px_24px_-10px_var(--tint-salmon-drop)] active:translate-y-0 sm:self-auto"
+                className="inline-flex items-center gap-2 self-start rounded-md bg-[var(--accent-salmon)] px-5 py-3 font-mono text-[12px] uppercase tracking-[0.16em] text-[var(--color-bg-inset)] shadow-[0_0_0_0_transparent] transition-[transform,background-color,box-shadow] duration-200 hover:-translate-y-[1px] hover:bg-[var(--accent-salmon-hover)] hover:shadow-[0_8px_24px_-10px_var(--tint-salmon-drop)] active:translate-y-0 sm:self-auto"
               >
                 open quickstart
                 <ArrowRight className="h-3.5 w-3.5" />
