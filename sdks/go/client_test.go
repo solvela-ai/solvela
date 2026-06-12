@@ -1251,7 +1251,10 @@ func TestChatPaymentRejectedAfterSign(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Always return 402 — the gateway "rejects" both the probe and the
 		// signed retry. The double-402 guard in sendWithPayment must catch
-		// the second 402 and return PaymentRejectedError.
+		// the second 402 and return PaymentRejectedError. The post-signing
+		// rejection (Payment-Signature attached) carries a distinguishing
+		// body so the test can prove the SECOND 402's parsed body — not the
+		// initial challenge — flows into PaymentRejectedError.PaymentRequired.
 		pr := PaymentRequired{
 			X402Version:   X402Version,
 			CostBreakdown: CostBreakdown{Total: "100"},
@@ -1259,6 +1262,11 @@ func TestChatPaymentRejectedAfterSign(t *testing.T) {
 			Accepts: []PaymentAccept{
 				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "100", PayTo: "recipient"},
 			},
+		}
+		if r.Header.Get("Payment-Signature") != "" {
+			pr.Error = "replay nonce already used"
+			pr.CostBreakdown.Total = "105"
+			pr.Accepts[0].Amount = "105"
 		}
 		w.WriteHeader(402)
 		json.NewEncoder(w).Encode(pr)
@@ -1289,6 +1297,19 @@ func TestChatPaymentRejectedAfterSign(t *testing.T) {
 	if pre.Reason == "" {
 		t.Error("PaymentRejectedError.Reason should be non-empty")
 	}
+	// The second 402's parsed body must be carried on the error so callers
+	// can inspect the rejection's cost breakdown / accepts without
+	// re-parsing the response.
+	if pre.PaymentRequired == nil {
+		t.Fatal("PaymentRejectedError.PaymentRequired should carry the second 402 body")
+	}
+	if pre.PaymentRequired.Error != "replay nonce already used" {
+		t.Errorf("PaymentRequired.Error: got %q, want %q (second 402 body, not the initial challenge)",
+			pre.PaymentRequired.Error, "replay nonce already used")
+	}
+	if got := pre.PaymentRequired.Accepts[0].Amount; got != "105" {
+		t.Errorf("PaymentRequired.Accepts[0].Amount: got %q, want %q", got, "105")
+	}
 }
 
 // TestChatStreamPaymentRejectedAfterSign drives the streaming path against a
@@ -1303,7 +1324,10 @@ func TestChatStreamPaymentRejectedAfterSign(t *testing.T) {
 	var serverURL string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Always 402 — the probe gets the price challenge, and the signed
-		// streaming follow-up is rejected with a second 402.
+		// streaming follow-up is rejected with a second 402 carrying a
+		// distinguishing body, so the test can prove the SECOND 402's parsed
+		// body flows into PaymentRejectedError.PaymentRequired on the
+		// streaming path too.
 		pr := PaymentRequired{
 			X402Version:   X402Version,
 			CostBreakdown: CostBreakdown{Total: "100"},
@@ -1311,6 +1335,11 @@ func TestChatStreamPaymentRejectedAfterSign(t *testing.T) {
 			Accepts: []PaymentAccept{
 				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "100", PayTo: "recipient"},
 			},
+		}
+		if r.Header.Get("Payment-Signature") != "" {
+			pr.Error = "payment signature expired"
+			pr.CostBreakdown.Total = "210"
+			pr.Accepts[0].Amount = "210"
 		}
 		w.WriteHeader(402)
 		json.NewEncoder(w).Encode(pr)
@@ -1341,6 +1370,19 @@ func TestChatStreamPaymentRejectedAfterSign(t *testing.T) {
 	}
 	if rejErr.Reason == "" {
 		t.Error("PaymentRejectedError.Reason should be non-empty")
+	}
+	// The second 402's parsed body must be carried across the
+	// PaymentRequiredError -> PaymentRejectedError conversion so streaming
+	// callers see the same rejection detail as non-streaming callers.
+	if rejErr.PaymentRequired == nil {
+		t.Fatal("PaymentRejectedError.PaymentRequired should carry the second 402 body")
+	}
+	if rejErr.PaymentRequired.Error != "payment signature expired" {
+		t.Errorf("PaymentRequired.Error: got %q, want %q (second 402 body, not the initial challenge)",
+			rejErr.PaymentRequired.Error, "payment signature expired")
+	}
+	if got := rejErr.PaymentRequired.Accepts[0].Amount; got != "210" {
+		t.Errorf("PaymentRequired.Accepts[0].Amount: got %q, want %q", got, "210")
 	}
 	// The post-signing rejection must NOT also match the pre-signing
 	// challenge type — callers branch on the distinction.

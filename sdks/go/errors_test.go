@@ -52,9 +52,43 @@ func TestPaymentRequiredError(t *testing.T) {
 }
 
 func TestPaymentRejectedError(t *testing.T) {
+	// Back-compat pin: Reason-only construction (the historical shape) must
+	// keep working, with PaymentRequired defaulting to nil and Error()
+	// unchanged for existing consumers.
 	err := &PaymentRejectedError{Reason: "invalid signature"}
 	if err.Error() != "payment rejected: invalid signature" {
 		t.Errorf("got %q", err.Error())
+	}
+	if err.PaymentRequired != nil {
+		t.Error("Reason-only construction should leave PaymentRequired nil")
+	}
+}
+
+func TestPaymentRejectedErrorWithPaymentRequired(t *testing.T) {
+	pr := &PaymentRequired{
+		Error:         "replay nonce already used",
+		CostBreakdown: CostBreakdown{Total: "1050"},
+		Accepts: []PaymentAccept{
+			{Scheme: SchemeExact, Network: SolanaNetwork, Asset: USDCMint, Amount: "1050", PayTo: "recipient"},
+		},
+	}
+	err := &PaymentRejectedError{Reason: "payment rejected after signing", PaymentRequired: pr}
+
+	// Error() string is unchanged by the new field — existing consumers that
+	// match on the message must not break.
+	if err.Error() != "payment rejected: payment rejected after signing" {
+		t.Errorf("got %q", err.Error())
+	}
+	// Round-trip: the same pointer should be retrievable so callers can
+	// inspect the rejection's cost breakdown / accepts without re-parsing.
+	if err.PaymentRequired != pr {
+		t.Error("PaymentRequired field should round-trip the supplied pointer")
+	}
+	if err.PaymentRequired.Error != "replay nonce already used" {
+		t.Errorf("PaymentRequired.Error: got %q", err.PaymentRequired.Error)
+	}
+	if err.PaymentRequired.Accepts[0].Amount != "1050" {
+		t.Errorf("PaymentRequired.Accepts[0].Amount: got %q", err.PaymentRequired.Accepts[0].Amount)
 	}
 }
 
