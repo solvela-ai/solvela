@@ -457,7 +457,27 @@ impl UsageTracker {
                 .await;
 
                 if let Err(e) = result {
-                    warn!(error = %e, "failed to write spend log to database");
+                    // A vendor row carries Solvela's 5% fee receivable
+                    // (settlement-platform P1): the agent already settled to
+                    // the vendor on-chain, so a lost row is revenue that can
+                    // no longer be invoiced. Emit every field needed to
+                    // reconcile the receivable by hand, and count the failure
+                    // so it can be alerted on. (On this path `model` carries
+                    // the marketplace service id — see `routes/proxy.rs`.)
+                    if let Some(vendor) = &db_entry.vendor {
+                        metrics::counter!("solvela_vendor_receivable_write_failures_total")
+                            .increment(1);
+                        error!(
+                            error = %e,
+                            vendor_wallet = %vendor.vendor_wallet,
+                            settled_atomic = vendor.settled_atomic,
+                            fee_receivable_atomic = vendor.fee_receivable_atomic,
+                            service_id = %db_entry.model,
+                            "failed to write vendor spend log to database — fee receivable may be lost"
+                        );
+                    } else {
+                        warn!(error = %e, "failed to write spend log to database");
+                    }
                 }
             });
         }
