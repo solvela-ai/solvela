@@ -185,8 +185,15 @@ impl PaymentTarget {
         scheme: &str,
         tx_signature: Option<String>,
         payer_wallet: String,
-        provider_cost_atomic: u64,
     ) -> receipts::ReceiptRecord {
+        // Definitionally consistent on both variants — the provider/vendor leg
+        // is what the agent pays minus the agent-facing fee (Gateway: total −
+        // 5% fee = provider cost; Vendor: listed price − 0). Computed here, not
+        // caller-supplied, so a call site can never record an inconsistent
+        // provider/total pair. `expected_atomic ≥ agent_fee_atomic` holds by
+        // construction (Gateway totals come from `compute_service_cost`, where
+        // total = provider + fee).
+        let provider_cost_atomic = self.expected_atomic() - self.agent_fee_atomic();
         receipts::ReceiptRecord {
             receipt_id: Uuid::new_v4(),
             model: service_id.to_string(),
@@ -694,7 +701,6 @@ pub async fn proxy_service(
         &payload.accepted.scheme,
         tx_signature.clone(),
         wallet_address.clone(),
-        provider_atomic,
     );
 
     let spend_entry = SpendLogEntry {
@@ -1900,7 +1906,6 @@ mod tests {
             "exact",
             Some("tx".to_string()),
             "payer".to_string(),
-            20_000,
         );
         assert_eq!(record.model, "vendor-svc");
         assert_eq!(record.payment_scheme, "exact");
@@ -1927,7 +1932,6 @@ mod tests {
             "exact",
             Some("tx".to_string()),
             "payer".to_string(),
-            10_000,
         );
         assert_eq!(record.amount_paid_atomic, 10_500);
         assert_eq!(record.provider_cost_atomic, 10_000);
@@ -1951,7 +1955,6 @@ mod tests {
             "a-very-long-unknown-scheme-string",
             None,
             "payer".to_string(),
-            10_000,
         );
         assert_eq!(record.payment_scheme.chars().count(), 16);
     }

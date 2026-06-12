@@ -10,11 +10,11 @@ use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::Json;
-use tracing::warn;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::error::GatewayError;
-use crate::receipts::{self, Receipt};
+use crate::receipts::{self, Receipt, ReceiptError};
 use crate::AppState;
 
 /// Fixed 404 body shared by unknown and malformed ids — the single signal.
@@ -48,8 +48,29 @@ pub async fn get_receipt(
         Ok(None) => Err(GatewayError::NotFound(RECEIPT_NOT_FOUND.to_string())),
         Err(e) => {
             // Database/corruption detail stays server-side; the client gets
-            // the generic 500 envelope.
-            warn!(error = %e, "failed to load receipt");
+            // the generic 500 envelope. Severity is split by variant: a DB
+            // error is infrastructure (error!), a Corrupt row is a
+            // data-integrity violation fetch_receipt refused to serve (warn!).
+            match &e {
+                ReceiptError::Database(_) => {
+                    metrics::counter!("solvela_receipt_read_failures_total", "reason" => "db_error")
+                        .increment(1);
+                    error!(
+                        error = %e,
+                        receipt_id = %receipt_id,
+                        "failed to load receipt — database error"
+                    );
+                }
+                ReceiptError::Corrupt(_) => {
+                    metrics::counter!("solvela_receipt_read_failures_total", "reason" => "corrupt")
+                        .increment(1);
+                    warn!(
+                        error = %e,
+                        receipt_id = %receipt_id,
+                        "failed to load receipt — stored row violates a receipt invariant"
+                    );
+                }
+            }
             Err(GatewayError::Internal("failed to load receipt".to_string()))
         }
     }

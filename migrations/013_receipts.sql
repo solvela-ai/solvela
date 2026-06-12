@@ -45,5 +45,14 @@ CREATE TABLE IF NOT EXISTS receipts (
     vendor_settled_atomic BIGINT
         CHECK (vendor_settled_atomic IS NULL OR vendor_settled_atomic >= 0),
     vendor_fee_receivable_atomic BIGINT
-        CHECK (vendor_fee_receivable_atomic IS NULL OR vendor_fee_receivable_atomic >= 0)
+        CHECK (vendor_fee_receivable_atomic IS NULL OR vendor_fee_receivable_atomic >= 0),
+    -- The three vendor columns travel together: all NULL (chat path, plain
+    -- services) or all non-NULL (vendor-settled services). A half-written
+    -- vendor row (e.g. a receivable without its wallet) is uninvoiceable
+    -- corruption — reject it at the DB layer. fetch_receipt's read-time
+    -- Corrupt check stays as defense in depth.
+    CONSTRAINT receipts_vendor_co_nullability CHECK (
+        (vendor_wallet IS NULL) = (vendor_settled_atomic IS NULL)
+        AND (vendor_wallet IS NULL) = (vendor_fee_receivable_atomic IS NULL)
+    )
 );

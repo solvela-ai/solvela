@@ -93,6 +93,9 @@ pub struct Receipt {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tx_signature: Option<String>,
     pub payer_wallet: String,
+    /// The BILLED amount from the gateway ledger's perspective — identical to
+    /// the spend ledger — which can differ from the raw on-chain transfer when
+    /// an agent overpays the 402 quote (`client_amount` > expected).
     pub amount_paid_atomic: u64,
     pub amount_paid_usdc: String,
     pub cost_breakdown: ReceiptCostBreakdown,
@@ -251,6 +254,15 @@ pub fn record_receipt(pool: Option<&sqlx::PgPool>, record: ReceiptRecord) -> Opt
 pub fn insert_receipt_header(response: &mut axum::response::Response, path: &Option<String>) {
     let Some(path) = path else { return };
     let Ok(value) = axum::http::HeaderValue::from_str(path) else {
+        // Unreachable today (`receipt_path` yields ASCII `/v1/receipts/{uuid}`),
+        // but if it ever fires the receipt row was already written and is now
+        // stranded — the client never learns the id. Make that loud, not silent.
+        metrics::counter!("solvela_receipt_write_failures_total", "reason" => "invalid_header_value")
+            .increment(1);
+        error!(
+            path = %path,
+            "receipt path is not a valid header value — written receipt not advertised"
+        );
         return;
     };
     response

@@ -1303,7 +1303,17 @@ pub async fn chat_completions(
                 cost_outcome.is_some(),
             ) {
                 SpendLogArm::SkipSettleFailed => {
-                    // No-op: reservation already released, no spend to record.
+                    // No spend: reservation already released at the settle-failure
+                    // branch above, nothing was collected.
+                    //
+                    // No receipt either: the payment was NOT collected on-chain
+                    // (the post-delivery `exact` settle failed), so a receipt
+                    // header would promise audit evidence of a payment that
+                    // didn't happen. The settle-failure branch already counted
+                    // `solvela_payments_total{status="settle_after_deliver_failed"}`;
+                    // this counter completes the receipt-skip taxonomy.
+                    counter!("solvela_receipt_skipped_total", "reason" => "settle_failed")
+                        .increment(1);
                 }
                 SpendLogArm::ActualUsage(u) => {
                     match state
@@ -1403,6 +1413,16 @@ pub async fn chat_completions(
                                 wallet = %wallet_address,
                                 "failed to compute actual cost — skipping spend log to avoid $0 entry"
                             );
+                            // P2 receipt: intentionally OMITTED so receipts stay
+                            // lock-step with the spend ledger (no spend row → no
+                            // receipt; a receipt here would attest to a bill the
+                            // ledger never recorded). The exact payment DID
+                            // settle, so this settled-but-unledgered arm is a
+                            // known pre-existing gap (#541 family — the spend
+                            // half is deliberately left unchanged here); the
+                            // counter makes the receipt gap observable.
+                            counter!("solvela_receipt_skipped_total", "reason" => "cost_estimation_error")
+                                .increment(1);
                         }
                     }
                 }
@@ -1635,6 +1655,11 @@ struct ChatReceiptInputs<'a> {
     payer_wallet: &'a str,
     /// Amount actually billed (mirrors the spend ledger: discounted on an
     /// escrow semantic-cache hit, full otherwise), atomic USDC.
+    ///
+    /// This is the BILLED amount from the gateway ledger's perspective —
+    /// identical to the spend ledger — and can differ from the raw on-chain
+    /// transfer when an agent overpays the 402 quote (`client_amount` >
+    /// expected): the receipt records what was billed, not what moved.
     amount_paid_atomic: u64,
     /// The registry CostBreakdown that produced the bill (actual usage on the
     /// non-streaming arm; the C1 estimate on the usage-less/streaming arms).

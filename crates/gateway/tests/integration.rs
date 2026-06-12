@@ -11556,3 +11556,73 @@ async fn vendor_paid_proxy_request_records_receipt_with_fee_receivable() {
     assert_eq!(receipt["vendor"]["settled_usdc"], "0.020000");
     assert_eq!(receipt["vendor"]["fee_receivable_usdc"], "0.001000");
 }
+
+/// Raw INSERT into `receipts` with the given vendor-column triple (all other
+/// columns valid) — exercises the migration-013 constraints directly.
+async fn insert_receipt_row(
+    pool: &sqlx::PgPool,
+    vendor_wallet: Option<&str>,
+    vendor_settled: Option<i64>,
+    vendor_fee: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT INTO receipts (id, model, payment_scheme, payer_wallet, amount_paid_atomic, provider_cost_atomic, platform_fee_atomic, total_atomic, vendor_wallet, vendor_settled_atomic, vendor_fee_receivable_atomic)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind("co-nullability-guard")
+    .bind("exact")
+    .bind("payer")
+    .bind(20_000i64)
+    .bind(20_000i64)
+    .bind(0i64)
+    .bind(20_000i64)
+    .bind(vendor_wallet)
+    .bind(vendor_settled)
+    .bind(vendor_fee)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+/// Migration-013 guard: the table-level `receipts_vendor_co_nullability`
+/// CHECK must reject every half-written vendor row at the DB layer — the
+/// three vendor columns travel together (all NULL or all non-NULL; a
+/// receivable without its wallet is uninvoiceable evidence). This eliminates
+/// the partial-vendor-row corruption class at the source; `fetch_receipt`'s
+/// read-time Corrupt check stays as defense in depth.
+#[tokio::test]
+async fn receipts_vendor_co_nullability_check_rejects_partial_vendor_insert() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+
+    // Every partial combination (one or two of the three set) must be rejected.
+    let partials: &[(Option<&str>, Option<i64>, Option<i64>)] = &[
+        (Some("vendorwallet"), None, None),
+        (None, Some(20_000), None),
+        (None, None, Some(1_000)),
+        (Some("vendorwallet"), Some(20_000), None),
+        (Some("vendorwallet"), None, Some(1_000)),
+        (None, Some(20_000), Some(1_000)),
+    ];
+    for (wallet, settled, fee) in partials {
+        let err = insert_receipt_row(&pool, *wallet, *settled, *fee)
+            .await
+            .expect_err("partial vendor row must be rejected by the co-nullability CHECK");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("receipts_vendor_co_nullability"),
+            "rejection for ({wallet:?}, {settled:?}, {fee:?}) must come from the \
+             co-nullability CHECK, got: {msg}"
+        );
+    }
+
+    // The two legal shapes still insert.
+    insert_receipt_row(&pool, None, None, None)
+        .await
+        .expect("all-NULL vendor columns (chat / plain-service receipt) must insert");
+    insert_receipt_row(&pool, Some("vendorwallet"), Some(20_000), Some(1_000))
+        .await
+        .expect("all-non-NULL vendor columns (vendor receipt) must insert");
+}

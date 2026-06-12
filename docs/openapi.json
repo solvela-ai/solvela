@@ -371,7 +371,7 @@
       },
       "Receipt": {
         "type": "object",
-        "description": "Client-facing payment receipt for a paid request. Atomic-USDC integers (6 decimals) are canonical; the `*_usdc` decimal strings are derived from them. `amount_paid_atomic` is what the payer was actually billed and equals `cost_breakdown.total_atomic` except when an escrow semantic-cache discount realised on-chain.",
+        "description": "Client-facing payment receipt for a paid request. Atomic-USDC integers (6 decimals) are canonical; the `*_usdc` decimal strings are derived from them. `amount_paid_atomic` is what the payer was actually billed and equals `cost_breakdown.total_atomic` except when an escrow semantic-cache discount realised on-chain. It is the billed amount from the gateway ledger's perspective — identical to the spend ledger — and can differ from the raw on-chain transfer amount when an agent overpays the 402 quote.",
         "required": ["receipt_id", "created_at", "model", "payment_scheme", "payer_wallet", "amount_paid_atomic", "amount_paid_usdc", "cost_breakdown"],
         "properties": {
           "receipt_id": { "type": "string", "format": "uuid" },
