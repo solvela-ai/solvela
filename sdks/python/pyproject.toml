@@ -1,6 +1,6 @@
 [project]
 name = "solvela-sdk"
-version = "0.2.0"
+version = "0.3.0"
 description = "Solana-native payment gateway for AI agents — pay for LLM calls with USDC, no API keys"
 readme = "README.md"
 requires-python = ">=3.10"
