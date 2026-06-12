@@ -156,10 +156,23 @@ async fn main() -> anyhow::Result<()> {
     // Load service registry from config file
     let services_toml = std::fs::read_to_string("config/services.toml")
         .unwrap_or_else(|_| include_str!("../../../config/services.toml").to_string());
-    let service_registry_inner = ServiceRegistry::from_toml(&services_toml).unwrap_or_else(|e| {
-        warn!(error = %e, "failed to parse services.toml, using empty registry");
-        ServiceRegistry::empty()
-    });
+    // Attach the gateway's global recipient so registration (load-time AND
+    // the runtime admin route) rejects a vendor_wallet equal to it — the
+    // degenerate case would silently undercharge agents 5% and have the
+    // gateway invoice itself for the receivable. A conflicting entry fails
+    // the load like any other invalid entry (empty registry, loud warn).
+    let service_registry_inner = ServiceRegistry::from_toml(&services_toml)
+        .and_then(|registry| registry.with_gateway_recipient(&app_config.solana.recipient_wallet))
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "failed to load services.toml, using empty registry");
+            ServiceRegistry::empty()
+                .with_gateway_recipient(&app_config.solana.recipient_wallet)
+                .unwrap_or_else(|_| {
+                    // Unreachable: an empty registry has no vendor wallets to
+                    // conflict. Kept non-panicking per the no-unwrap rule.
+                    ServiceRegistry::empty()
+                })
+        });
     info!(
         services = service_registry_inner.all().len(),
         "loaded service registry"

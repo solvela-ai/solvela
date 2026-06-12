@@ -442,7 +442,12 @@ fn test_app() -> axum::Router {
 /// recording failures on the `ProviderHealthTracker`).
 fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
-    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    // Mirror production wiring (`main.rs`): the registry knows the gateway's
+    // global recipient so registration can reject a conflicting vendor_wallet.
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML)
+        .unwrap()
+        .with_gateway_recipient(TEST_RECIPIENT_WALLET)
+        .unwrap();
 
     // Use the always-pass mock verifier so tests exercise the full request path
     let facilitator =
@@ -1966,6 +1971,36 @@ fn valid_escrow_payment_header_for_payer(resource_url: &str, agent_pubkey: &str)
             deposit_tx: base64::engine::general_purpose::STANDARD.encode(b"mock_deposit_tx_bytes"),
             service_id: base64::engine::general_purpose::STANDARD.encode([0u8; 32]),
             agent_pubkey: agent_pubkey.to_string(),
+        }),
+    };
+    let json = serde_json::to_vec(&payload).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(&json)
+}
+
+/// Like [`valid_escrow_payment_header`] but with a caller-supplied `pay_to`,
+/// so vendor-recipient tests can address the escrow payment to the service's
+/// `vendor_wallet` and prove the scheme fails closed downstream of the
+/// recipient-equality gate.
+fn valid_escrow_payment_header_with_pay_to(resource_url: &str, pay_to: &str) -> String {
+    let payload = PaymentPayload {
+        x402_version: 2,
+        resource: Resource {
+            url: resource_url.to_string(),
+            method: "POST".to_string(),
+        },
+        accepted: PaymentAccept {
+            scheme: "escrow".to_string(),
+            network: SOLANA_NETWORK.to_string(),
+            amount: TEST_PAYMENT_AMOUNT.to_string(),
+            asset: USDC_MINT.to_string(),
+            pay_to: pay_to.to_string(),
+            max_timeout_seconds: 300,
+            escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
+        },
+        payload: PayloadData::Escrow(EscrowPayload {
+            deposit_tx: base64::engine::general_purpose::STANDARD.encode(b"mock_deposit_tx_bytes"),
+            service_id: base64::engine::general_purpose::STANDARD.encode([0u8; 32]),
+            agent_pubkey: "11111111111111111111111111111111".to_string(),
         }),
     };
     let json = serde_json::to_vec(&payload).unwrap();
@@ -7939,12 +7974,22 @@ impl PaymentVerifier for VendorRecipientRecordingVerifier {
 /// Register a vendor-wallet service ($0.02/request) through the REAL
 /// admin-token route and return the 201 response body.
 async fn register_vendor_service(app: &axum::Router, id: &str) -> serde_json::Value {
+    register_vendor_service_priced(app, id, 0.02).await
+}
+
+/// Like [`register_vendor_service`] but with a caller-supplied price, for
+/// boundary pricing (e.g. the sub-$0.00002 fee floor).
+async fn register_vendor_service_priced(
+    app: &axum::Router,
+    id: &str,
+    price_usdc: f64,
+) -> serde_json::Value {
     let body = serde_json::json!({
         "id": id,
         "name": "Vendor Data API",
         "endpoint": "https://vendor-api.example.com/v1/data",
         "category": "data",
-        "price_per_request_usdc": 0.02,
+        "price_per_request_usdc": price_usdc,
         "vendor_wallet": TEST_VENDOR_WALLET_B58,
     });
     let response = app
@@ -8229,6 +8274,199 @@ async fn test_vendor_paid_request_records_fee_receivable_spend_log() {
     assert!(
         (logged_usdc - 0.02).abs() < 1e-9,
         "agent spend must equal the listed price, got {logged_usdc}"
+    );
+}
+
+/// Round-2 item 6: an ESCROW-scheme payment to a vendor_wallet service must
+/// fail CLOSED through the real route. The escrow verifier wired here would
+/// PASS plain `verify_payment` — so the rejection can only come from the
+/// vendor path routing through `verify_and_settle_to`, whose default
+/// recipient-override hook fails closed (`RecipientOverrideUnsupported`;
+/// the escrow verifier's vendor split is P4 and unimplemented). A refactor
+/// that routed escrow+vendor through plain `verify_and_settle` would settle
+/// this payment against the WRONG recipient model and fail this test.
+#[tokio::test]
+async fn test_proxy_vendor_service_escrow_payment_fails_closed() {
+    use tracing::instrument::WithSubscriber;
+
+    let app = test_app_with_provider_registry_and_escrow_verifier(
+        ProviderRegistry::from_env(reqwest::Client::new()),
+        Arc::new(AlwaysPassEscrowVerifier),
+    );
+    register_vendor_service(&app, "vendor-data-api").await;
+
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/vendor-data-api/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    // Escrow scheme, correctly addressed to the vendor wallet
+                    // — it passes every pre-verification gate and must be
+                    // stopped by the fail-closed verifier dispatch itself.
+                    valid_escrow_payment_header_with_pay_to(
+                        "/v1/services/vendor-data-api/proxy",
+                        TEST_VENDOR_WALLET_B58,
+                    ),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+
+    // `GatewayError::InvalidPayment` maps to 402 with the sanitized
+    // verification-failure message (GHSA-cgqx-mg48-949v).
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "escrow payment to a vendor service must be rejected, not settled"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["type"], "invalid_payment");
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("Payment verification failed"),
+        "rejection must be the fail-closed verification error, got: {message}"
+    );
+
+    // Fail-closed means NO settlement: no spend entry and no vendor
+    // receivable may have been recorded for the rejected payment.
+    let events = spend_logged_events(&capture);
+    assert!(
+        events.is_empty(),
+        "a rejected escrow payment must not record spend/receivables, got {events:?}"
+    );
+}
+
+/// Round-2 item 9 (integration half): a vendor service priced at $0.000019
+/// (19 atomic → 5% fee floors to 0) settles with a VendorSettlement whose
+/// `fee_receivable_atomic` is ZERO — sub-$0.00002 services legitimately
+/// record no receivable, rather than being rejected or rounded up.
+#[tokio::test]
+async fn test_vendor_fee_floor_service_records_zero_receivable() {
+    use tracing::instrument::WithSubscriber;
+
+    let recorded_recipient = Arc::new(std::sync::Mutex::new(None));
+    let (app, _state) = test_app_with_provider_registry_and_exact_verifier(
+        ProviderRegistry::from_env(reqwest::Client::new()),
+        Arc::new(VendorRecipientRecordingVerifier {
+            recorded_recipient: Arc::clone(&recorded_recipient),
+        }),
+    );
+    register_vendor_service_priced(&app, "tiny-vendor-api", 0.000019).await;
+
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/tiny-vendor-api/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header_with(
+                        "/v1/services/tiny-vendor-api/proxy",
+                        USDC_MINT,
+                        TEST_VENDOR_WALLET_B58,
+                    ),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "payment must have been accepted"
+    );
+
+    let events = spend_logged_events(&capture);
+    assert_eq!(events.len(), 1, "exactly one spend entry, got {events:?}");
+    assert_eq!(events[0]["vendor_wallet"], TEST_VENDOR_WALLET_B58);
+    // $0.000019 = 19 atomic settled; floor(19 × 105/100) − 19 = 0 receivable.
+    assert_eq!(events[0]["vendor_settled_atomic"].as_i64(), Some(19));
+    assert_eq!(
+        events[0]["vendor_fee_receivable_atomic"].as_i64(),
+        Some(0),
+        "fee floor: the 5% on 19 atomic must round DOWN to a zero receivable"
+    );
+}
+
+/// Round-2 item 3 (rejection route, through the real admin route): a
+/// vendor_wallet equal to the gateway's own recipient wallet must be
+/// rejected at registration — the degenerate case would quote the agent NO
+/// fee (vendor absorbs) while booking a receivable the gateway invoices to
+/// itself, silently undercharging 5%.
+#[tokio::test]
+async fn test_register_service_rejects_vendor_wallet_equal_to_gateway_recipient() {
+    let (app, state) = test_app_with_state();
+
+    // The stock test fixture recipient (`TEST_RECIPIENT_WALLET`) is a 46-char
+    // non-pubkey string that the route's 44-char cap would reject before the
+    // registry guard. Swap in a registry whose known gateway recipient is a
+    // VALID pubkey so this test exercises the equality guard itself.
+    {
+        let mut registry = state.service_registry.write().await;
+        *registry = ServiceRegistry::empty()
+            .with_gateway_recipient(TEST_VENDOR_WALLET_B58)
+            .expect("empty registry cannot conflict");
+    }
+
+    let body = serde_json::json!({
+        "id": "self-paying-api",
+        "name": "Self Paying API",
+        "endpoint": "https://vendor-api.example.com/v1/data",
+        "category": "data",
+        "price_per_request_usdc": 0.02,
+        "vendor_wallet": TEST_VENDOR_WALLET_B58,
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/register")
+                .header("content-type", "application/json")
+                .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let resp_body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("global recipient wallet"),
+        "error must name the recipient-equality guard, got: {error}"
+    );
+
+    let registry = state.service_registry.read().await;
+    assert!(
+        registry.get("self-paying-api").is_none(),
+        "the conflicting entry must not be registered"
     );
 }
 

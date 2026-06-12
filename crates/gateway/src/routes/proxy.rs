@@ -109,6 +109,66 @@ fn compute_service_cost(price_usdc: f64) -> Result<ServiceCost, String> {
     })
 }
 
+/// Where a paid service request settles, with the amounts attached to each leg.
+///
+/// "Vendor-Settlement Fee Mechanics" RFC (2026-06-12, mechanism C / record +
+/// invoice, VENDOR ABSORBS the fee). Modeling the two paths as an enum (rather
+/// than a tuple of loosely-coupled values) makes it a compile error to mix the
+/// gateway's fee-on-top amounts with the vendor's fee-absorbed ones.
+#[derive(Debug, Clone)]
+enum PaymentTarget {
+    /// Today's default: the agent pays `price × 1.05` to the gateway's global
+    /// recipient wallet; the 5% is collected on-chain in the same transfer.
+    Gateway { total_atomic: u64, fee_atomic: u64 },
+    /// Settlement-platform P1: the agent pays EXACTLY the listed price to the
+    /// service's `vendor_wallet`; Solvela's 5% is never charged to the agent —
+    /// it is recorded as an off-chain receivable against the vendor
+    /// (`VendorSettlement`, spend_logs).
+    Vendor {
+        price_atomic: u64,
+        settlement: VendorSettlement,
+    },
+}
+
+impl PaymentTarget {
+    /// Atomic USDC amount the AGENT must pay (quoted in the 402 and enforced
+    /// against the payment header's `amount`).
+    fn expected_atomic(&self) -> u64 {
+        match self {
+            Self::Gateway { total_atomic, .. } => *total_atomic,
+            Self::Vendor { price_atomic, .. } => *price_atomic,
+        }
+    }
+
+    /// Fee charged to the AGENT, in atomic USDC — zero on the vendor path
+    /// (the vendor absorbs it; rule #5: the cost_breakdown stays truthful to
+    /// what the agent pays).
+    fn agent_fee_atomic(&self) -> u64 {
+        match self {
+            Self::Gateway { fee_atomic, .. } => *fee_atomic,
+            Self::Vendor { .. } => 0,
+        }
+    }
+
+    /// Agent-facing fee rate for the 402 `cost_breakdown`. Keeping `5` next
+    /// to a `0.000000` fee would contradict the amounts on the vendor path.
+    fn agent_fee_percent(&self) -> u8 {
+        match self {
+            Self::Gateway { .. } => PLATFORM_FEE_PERCENT,
+            Self::Vendor { .. } => 0,
+        }
+    }
+
+    /// The vendor-settlement record to attach to the spend log; `None` on the
+    /// gateway path. Consumes the target — call once, when building the entry.
+    fn into_vendor_settlement(self) -> Option<VendorSettlement> {
+        match self {
+            Self::Gateway { .. } => None,
+            Self::Vendor { settlement, .. } => Some(settlement),
+        }
+    }
+}
+
 /// POST /v1/services/{service_id}/proxy — proxy a paid request to an external service.
 ///
 /// Flow:
@@ -194,44 +254,50 @@ pub async fn proxy_service(
     // Services without a vendor wallet keep today's behavior unchanged:
     // `price × 1.05` paid to the gateway's global recipient.
     //
-    // `agent_fee_atomic` is what the AGENT is charged as a fee — zero on the
-    // vendor path — and is what the 402 `cost_breakdown` must show (rule #5:
-    // the breakdown stays truthful to what the agent pays).
-    let (pay_to_wallet, expected_atomic, agent_fee_atomic, vendor_settlement) =
-        match service.vendor_wallet.as_deref() {
-            Some(vendor_wallet) => {
-                // Fail closed before quoting or charging: the receivable
-                // ledger columns are BIGINT, so a priced amount that cannot
-                // be represented as i64 must reject the request, not get
-                // recorded wrapped or skipped.
-                let settled_atomic = i64::try_from(provider_atomic).map_err(|_| {
-                    GatewayError::Internal(format!(
-                        "service '{service_id}' price exceeds the recordable range"
-                    ))
-                })?;
-                let fee_receivable_atomic = i64::try_from(fee_atomic).map_err(|_| {
-                    GatewayError::Internal(format!(
-                        "service '{service_id}' fee exceeds the recordable range"
-                    ))
-                })?;
-                (
-                    vendor_wallet.to_string(),
-                    provider_atomic,
-                    0u64,
-                    Some(VendorSettlement {
-                        vendor_wallet: vendor_wallet.to_string(),
-                        settled_atomic,
-                        fee_receivable_atomic,
-                    }),
-                )
+    // See `PaymentTarget`: the vendor path quotes the agent ZERO fee (the
+    // vendor absorbs it) and the 402 `cost_breakdown` must show exactly what
+    // the agent pays (rule #5).
+    let (pay_to_wallet, payment_target) = match service.vendor_wallet.as_deref() {
+        Some(vendor_wallet) => {
+            // AUTHORITATIVE pre-quote guard (fail closed before quoting or
+            // charging): the receivable ledger columns are BIGINT, so a
+            // priced amount that cannot be represented as i64 must reject
+            // the request up front — never quote a 402 the ledger cannot
+            // record. The single u64 → i64 conversion at the sqlx bind site
+            // (`usage.rs::log_spend`) is a belt-and-braces re-check that
+            // logs a reconcilable loss event instead of panicking; this
+            // guard is what makes that arm unreachable.
+            if i64::try_from(provider_atomic).is_err() {
+                return Err(GatewayError::Internal(format!(
+                    "service '{service_id}' price exceeds the recordable range"
+                )));
             }
-            None => (
-                state.config.solana.recipient_wallet.clone(),
+            if i64::try_from(fee_atomic).is_err() {
+                return Err(GatewayError::Internal(format!(
+                    "service '{service_id}' fee exceeds the recordable range"
+                )));
+            }
+            (
+                vendor_wallet.to_string(),
+                PaymentTarget::Vendor {
+                    price_atomic: provider_atomic,
+                    settlement: VendorSettlement {
+                        vendor_wallet: vendor_wallet.to_string(),
+                        settled_atomic: provider_atomic,
+                        fee_receivable_atomic: fee_atomic,
+                    },
+                },
+            )
+        }
+        None => (
+            state.config.solana.recipient_wallet.clone(),
+            PaymentTarget::Gateway {
                 total_atomic,
                 fee_atomic,
-                None,
-            ),
-        };
+            },
+        ),
+    };
+    let expected_atomic = payment_target.expected_atomic();
 
     // Step 3: Check for payment header.
     // Non-ASCII bytes in header value must produce 400, not a silent 402.
@@ -252,11 +318,11 @@ pub async fn proxy_service(
         info!(service_id = %service_id, "no payment signature, returning 402");
 
         // Format cost breakdown from integer-derived values for display.
-        // On the vendor path `agent_fee_atomic` is 0 and the total equals the
+        // On the vendor path the agent fee is 0 and the total equals the
         // provider price — the breakdown reflects what the AGENT pays, not
         // the off-chain receivable the vendor owes.
         let provider_usdc = provider_atomic as f64 / 1_000_000.0;
-        let fee_usdc = agent_fee_atomic as f64 / 1_000_000.0;
+        let fee_usdc = payment_target.agent_fee_atomic() as f64 / 1_000_000.0;
         let total_usdc = expected_atomic as f64 / 1_000_000.0;
 
         let payment_required = PaymentRequired {
@@ -284,13 +350,9 @@ pub async fn proxy_service(
                 total: format!("{total_usdc:.6}"),
                 currency: "USDC".to_string(),
                 // Agent-facing fee rate: 0 on the vendor path (the vendor
-                // absorbs the 5%, invoiced off-chain), 5 otherwise. Keeping
-                // `5` next to a `0.000000` fee would contradict the amounts.
-                fee_percent: if vendor_settlement.is_some() {
-                    0
-                } else {
-                    PLATFORM_FEE_PERCENT
-                },
+                // absorbs the 5%, invoiced off-chain), 5 otherwise — see
+                // `PaymentTarget::agent_fee_percent`.
+                fee_percent: payment_target.agent_fee_percent(),
             },
             error: "Payment required".to_string(),
         };
@@ -521,14 +583,14 @@ pub async fn proxy_service(
     // (`RecipientOverrideUnsupported`) for any verifier that does not support
     // recipient override (e.g. the escrow scheme, whose vendor split is P4).
     // Non-vendor services keep today's `verify_and_settle` path unchanged.
-    let settlement_outcome = match &vendor_settlement {
-        Some(_) => {
+    let settlement_outcome = match &payment_target {
+        PaymentTarget::Vendor { .. } => {
             state
                 .facilitator
                 .verify_and_settle_to(&payload, &pay_to_wallet)
                 .await
         }
-        None => state.facilitator.verify_and_settle(&payload).await,
+        PaymentTarget::Gateway { .. } => state.facilitator.verify_and_settle(&payload).await,
     };
     match settlement_outcome {
         Ok(settlement) if !settlement.success => {
@@ -609,7 +671,7 @@ pub async fn proxy_service(
         // reservation is committed and log_spend increments by the full
         // cost. None preserves the legacy behavior here.
         estimated_cost_usdc: None,
-        vendor: vendor_settlement,
+        vendor: payment_target.into_vendor_settlement(),
     };
     let deferred_spend_entry = if spend_entry.vendor.is_some() {
         state.usage.log_spend(spend_entry);
@@ -1541,6 +1603,15 @@ mod tests {
     /// `vendor_wallet` is the caller's choice, and a configured global
     /// recipient of `TEST_GLOBAL_RECIPIENT`.
     fn make_state_with_vendor_service(vendor_wallet: Option<&str>) -> Arc<AppState> {
+        make_state_with_vendor_service_priced(vendor_wallet, 0.01)
+    }
+
+    /// Like [`make_state_with_vendor_service`] but with a caller-supplied
+    /// `price_per_request_usdc`, for boundary pricing (fee floor, i64 range).
+    fn make_state_with_vendor_service_priced(
+        vendor_wallet: Option<&str>,
+        price_usdc: f64,
+    ) -> Arc<AppState> {
         make_state_with_entry(
             ServiceEntry {
                 id: "test-svc".to_string(),
@@ -1554,7 +1625,7 @@ mod tests {
                 chains: vec!["solana".to_string()],
                 source: "api".to_string(),
                 healthy: None,
-                price_per_request_usdc: Some(0.01),
+                price_per_request_usdc: Some(price_usdc),
                 vendor_wallet: vendor_wallet.map(String::from),
             },
             TEST_GLOBAL_RECIPIENT,
@@ -1661,6 +1732,77 @@ mod tests {
         assert!(
             matches!(err, GatewayError::InvalidPayment(ref m) if m.contains("verification failed")),
             "expected to reach (and fail at) verification, got {err:?}"
+        );
+    }
+
+    /// Fee floor (round-2 item 9, unit half): a $0.000019 service prices to
+    /// 19 atomic; `19 × 105 / 100 = 19` (integer floor), so the receivable is
+    /// legitimately ZERO. Pins that sub-$0.00002 services round the 5% down
+    /// to nothing rather than up to 1 atomic.
+    #[test]
+    fn test_compute_service_cost_fee_floor_sub_cent_price_has_zero_fee() {
+        let cost = compute_service_cost(0.000019).unwrap();
+        assert_eq!(cost.provider_atomic, 19);
+        assert_eq!(cost.fee_atomic, 0, "floor(19 × 5 / 100) must be 0");
+        assert_eq!(cost.total_atomic, 19);
+    }
+
+    /// Fee floor through the handler: the vendor 402 for a $0.000019 service
+    /// advertises amount "19", platform_fee "0.000000", and fee_percent 0 —
+    /// the agent-facing quote stays truthful at the rounding floor.
+    #[tokio::test]
+    async fn proxy_vendor_402_fee_floor_advertises_zero_fee() {
+        let state = make_state_with_vendor_service_priced(Some(TEST_VENDOR_WALLET), 0.000019);
+        let err = call_expect_err(state, "test-svc", HeaderMap::new()).await;
+        match err {
+            GatewayError::PaymentChallenge(pr) => {
+                assert_eq!(pr.accepts[0].pay_to, TEST_VENDOR_WALLET);
+                assert_eq!(pr.accepts[0].amount, "19");
+                assert_eq!(pr.cost_breakdown.provider_cost, "0.000019");
+                assert_eq!(pr.cost_breakdown.platform_fee, "0.000000");
+                assert_eq!(pr.cost_breakdown.total, "0.000019");
+                assert_eq!(pr.cost_breakdown.fee_percent, 0);
+            }
+            other => panic!("expected PaymentChallenge, got {other:?}"),
+        }
+    }
+
+    /// Round-2 item 7: a vendor service priced so `provider_atomic` exceeds
+    /// `i64::MAX` (registration only requires price > 0, and
+    /// `validate_price_usdc` allows up to ~u64::MAX/1e6) must fail CLOSED
+    /// with an Internal error BEFORE any 402 is quoted — never quote an
+    /// amount the BIGINT receivable ledger cannot record.
+    #[tokio::test]
+    async fn proxy_vendor_service_unrecordable_price_fails_closed_before_402() {
+        // 1.0e13 USDC → 1.0e19 atomic: within the u64 pricing cap
+        // (~1.8446e13 USDC) but beyond i64::MAX (~9.22e18 atomic).
+        let state = make_state_with_vendor_service_priced(Some(TEST_VENDOR_WALLET), 1.0e13);
+        let err = call_expect_err(state, "test-svc", HeaderMap::new()).await;
+        match err {
+            GatewayError::Internal(msg) => {
+                assert!(
+                    msg.contains("recordable range"),
+                    "error must name the recordable-range guard, got: {msg}"
+                );
+            }
+            GatewayError::PaymentChallenge(pr) => panic!(
+                "must fail closed BEFORE quoting a 402, but quoted amount {}",
+                pr.accepts[0].amount
+            ),
+            other => panic!("expected Internal from the pre-quote guard, got {other:?}"),
+        }
+    }
+
+    /// Same price on a NON-vendor service stays on the legacy gateway path
+    /// (no receivable ledger involved) — pins that the new guard is scoped
+    /// to the vendor path and does not change plain-service behavior.
+    #[tokio::test]
+    async fn proxy_plain_service_huge_price_still_quotes_402() {
+        let state = make_state_with_vendor_service_priced(None, 1.0e13);
+        let err = call_expect_err(state, "test-svc", HeaderMap::new()).await;
+        assert!(
+            matches!(err, GatewayError::PaymentChallenge(_)),
+            "non-vendor path must keep today's behavior, got {err:?}"
         );
     }
 

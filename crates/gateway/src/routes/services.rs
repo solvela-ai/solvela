@@ -61,6 +61,9 @@ pub async fn list_services(
             // useful reconnaissance for availability attacks. Operators
             // can query health via a dedicated admin-protected endpoint
             // (TODO: add `GET /v1/admin/services/health`).
+            // `svc.vendor_wallet` is deliberately omitted too: settlement
+            // recipients are a vendor/operator concern, not public-listing
+            // data — the payer learns the pay_to from the 402 challenge.
             json!({
                 "id": svc.id,
                 "name": svc.name,

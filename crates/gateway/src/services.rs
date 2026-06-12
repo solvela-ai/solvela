@@ -53,6 +53,14 @@ pub enum RegistrationError {
 
     #[error("vendor_wallet is only supported on external services")]
     VendorWalletOnInternalService,
+
+    #[error(
+        "vendor_wallet must differ from the gateway's global recipient wallet: \
+         a vendor service is quoted WITHOUT the 5% agent-side fee (vendor \
+         absorbs), so pointing it at the gateway's own wallet would undercharge \
+         the agent and have the gateway invoice itself for the receivable"
+    )]
+    VendorWalletIsGatewayRecipient,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +155,16 @@ pub struct ServiceEntry {
 #[derive(Debug, Clone)]
 pub struct ServiceRegistry {
     services: Vec<ServiceEntry>,
+    /// The gateway's global recipient wallet, when known (set via
+    /// [`ServiceRegistry::with_gateway_recipient`] at startup; `None` in
+    /// registries built without one, e.g. bare test fixtures).
+    ///
+    /// When present, `register()` (and the startup re-validation) rejects any
+    /// `vendor_wallet` equal to it: a "vendor" pointing at the gateway's own
+    /// wallet would be quoted vendor-absorbs (agent pays NO 5% on top) while
+    /// the receivable is invoiced to... the gateway itself — a silent 5%
+    /// undercharge. See [`RegistrationError::VendorWalletIsGatewayRecipient`].
+    gateway_recipient: Option<String>,
 }
 
 impl ServiceRegistry {
@@ -154,7 +172,36 @@ impl ServiceRegistry {
     pub fn empty() -> Self {
         Self {
             services: Vec::new(),
+            gateway_recipient: None,
         }
+    }
+
+    /// Attach the gateway's global recipient wallet and re-validate every
+    /// already-loaded entry against it.
+    ///
+    /// Call once at startup, after config is final (see `main.rs`). Returns
+    /// `Err(ServiceRegistryError::InvalidEntry)` naming the offending service
+    /// if any loaded `vendor_wallet` equals the recipient — fail-closed at
+    /// load, never at quote time. An empty `recipient_wallet` (unconfigured
+    /// dev mode) disables the check: no valid base58 `vendor_wallet` can ever
+    /// equal the empty string anyway.
+    pub fn with_gateway_recipient(
+        mut self,
+        recipient_wallet: &str,
+    ) -> Result<Self, ServiceRegistryError> {
+        if recipient_wallet.is_empty() {
+            return Ok(self);
+        }
+        for entry in &self.services {
+            if entry.vendor_wallet.as_deref() == Some(recipient_wallet) {
+                return Err(ServiceRegistryError::InvalidEntry {
+                    id: entry.id.clone(),
+                    source: RegistrationError::VendorWalletIsGatewayRecipient,
+                });
+            }
+        }
+        self.gateway_recipient = Some(recipient_wallet.to_string());
+        Ok(self)
     }
 
     /// Parse a TOML string (content of `services.toml`) into a registry.
@@ -196,7 +243,10 @@ impl ServiceRegistry {
         // Stable alphabetical order so response is deterministic.
         services.sort_by(|a, b| a.id.cmp(&b.id));
 
-        Ok(Self { services })
+        Ok(Self {
+            services,
+            gateway_recipient: None,
+        })
     }
 
     /// Return all registered services.
@@ -225,6 +275,20 @@ impl ServiceRegistry {
     /// `Err(RegistrationError)` if validation fails or the ID is taken.
     pub fn register(&mut self, entry: ServiceEntry) -> Result<(), RegistrationError> {
         validate_entry(&entry)?;
+
+        // Degenerate-recipient guard: a vendor_wallet equal to the gateway's
+        // own recipient wallet silently undercharges the agent 5% (vendor
+        // quotes drop the agent-side fee) and books a receivable the gateway
+        // would invoice to itself. Only enforceable when the registry knows
+        // the recipient — see `with_gateway_recipient`.
+        if let (Some(recipient), Some(vendor_wallet)) = (
+            self.gateway_recipient.as_deref(),
+            entry.vendor_wallet.as_deref(),
+        ) {
+            if vendor_wallet == recipient {
+                return Err(RegistrationError::VendorWalletIsGatewayRecipient);
+            }
+        }
 
         // Check uniqueness against the current registry.
         if self.services.iter().any(|s| s.id == entry.id) {
@@ -804,6 +868,89 @@ vendor_wallet = "{VALID_VENDOR_WALLET}"
             registry.register(entry),
             Err(RegistrationError::VendorWalletOnInternalService)
         );
+    }
+
+    // ── vendor_wallet == gateway recipient (degenerate-recipient guard) ─────
+
+    /// Stand-in for the gateway's configured global recipient wallet. Must be
+    /// a VALID base58 pubkey (distinct from `VALID_VENDOR_WALLET`) so the
+    /// equality guard — not the pubkey-format check — is what rejects.
+    const GATEWAY_RECIPIENT: &str = "So11111111111111111111111111111111111111112";
+
+    /// `register()` on a recipient-aware registry must reject a vendor_wallet
+    /// equal to the gateway's own recipient: the degenerate case silently
+    /// undercharges the agent 5% and has the gateway invoice itself.
+    #[test]
+    fn register_rejects_vendor_wallet_equal_to_gateway_recipient() {
+        let mut registry = ServiceRegistry::empty()
+            .with_gateway_recipient(GATEWAY_RECIPIENT)
+            .expect("empty registry cannot conflict");
+        let entry = external_entry_with_vendor_wallet(Some(GATEWAY_RECIPIENT.to_string()));
+        assert_eq!(
+            registry.register(entry),
+            Err(RegistrationError::VendorWalletIsGatewayRecipient)
+        );
+        assert!(
+            registry.get("vendor-svc").is_none(),
+            "rejected entry must not be registered"
+        );
+    }
+
+    /// A distinct vendor_wallet still registers fine on a recipient-aware
+    /// registry — the guard only fires on equality.
+    #[test]
+    fn register_accepts_distinct_vendor_wallet_with_gateway_recipient_set() {
+        let mut registry = ServiceRegistry::empty()
+            .with_gateway_recipient(GATEWAY_RECIPIENT)
+            .expect("empty registry cannot conflict");
+        let entry = external_entry_with_vendor_wallet(Some(VALID_VENDOR_WALLET.to_string()));
+        assert!(registry.register(entry).is_ok());
+    }
+
+    /// `with_gateway_recipient` re-validates TOML-loaded entries: a
+    /// services.toml whose vendor_wallet equals the configured recipient must
+    /// fail the startup attach, naming the offending service.
+    #[test]
+    fn with_gateway_recipient_rejects_toml_loaded_conflicting_vendor_wallet() {
+        let toml = format!(
+            r#"
+[services.self-paying-svc]
+name = "Self Paying"
+endpoint = "https://vendor.example.com/api"
+category = "data"
+x402_enabled = true
+internal = false
+pricing_label = "$0.01/request"
+price_per_request_usdc = 0.01
+vendor_wallet = "{VALID_VENDOR_WALLET}"
+"#
+        );
+        let registry = ServiceRegistry::from_toml(&toml).expect("valid TOML must load");
+        // Attaching the SAME wallet as the gateway recipient must reject.
+        let err = registry
+            .clone()
+            .with_gateway_recipient(VALID_VENDOR_WALLET)
+            .expect_err("conflicting vendor_wallet must fail the recipient attach");
+        match err {
+            ServiceRegistryError::InvalidEntry { id, source } => {
+                assert_eq!(id, "self-paying-svc");
+                assert_eq!(source, RegistrationError::VendorWalletIsGatewayRecipient);
+            }
+            other => panic!("expected InvalidEntry, got {other:?}"),
+        }
+        // A different recipient attaches fine.
+        assert!(registry.with_gateway_recipient(GATEWAY_RECIPIENT).is_ok());
+    }
+
+    /// An EMPTY recipient (unconfigured dev mode) disables the guard rather
+    /// than rejecting every vendor service — no base58 pubkey equals "".
+    #[test]
+    fn with_gateway_recipient_empty_recipient_disables_guard() {
+        let mut registry = ServiceRegistry::empty()
+            .with_gateway_recipient("")
+            .expect("empty recipient must be accepted");
+        let entry = external_entry_with_vendor_wallet(Some(VALID_VENDOR_WALLET.to_string()));
+        assert!(registry.register(entry).is_ok());
     }
 
     #[test]

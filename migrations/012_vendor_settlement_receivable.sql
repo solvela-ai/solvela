@@ -9,7 +9,10 @@
 -- All three columns are NULL for non-vendor rows (chat path, plain proxy
 -- services, free tier).
 
-ALTER TABLE spend_logs ADD COLUMN IF NOT EXISTS vendor_wallet TEXT;
+-- Base58 32-byte Solana pubkeys are at most 44 characters; anything longer
+-- can never be a payable wallet, so the column refuses it outright.
+ALTER TABLE spend_logs ADD COLUMN IF NOT EXISTS vendor_wallet TEXT
+    CHECK (char_length(vendor_wallet) <= 44);
 ALTER TABLE spend_logs ADD COLUMN IF NOT EXISTS vendor_settled_atomic BIGINT
     CHECK (vendor_settled_atomic IS NULL OR vendor_settled_atomic >= 0);
 ALTER TABLE spend_logs ADD COLUMN IF NOT EXISTS vendor_fee_receivable_atomic BIGINT
