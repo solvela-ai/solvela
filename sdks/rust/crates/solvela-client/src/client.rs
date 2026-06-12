@@ -324,7 +324,9 @@ impl SolvelaClient {
     /// # Errors
     ///
     /// Returns `ClientError::Gateway` for non-200/402 responses,
-    /// `ClientError::Signing` if payment signing fails, or
+    /// `ClientError::Signing` if payment signing fails,
+    /// `ClientError::PaymentRejected` if the gateway returns 402 again after
+    /// a signed payment was attached (same semantics as [`Self::chat`]), or
     /// `ClientError::StreamError` if SSE parsing fails.
     pub async fn chat_stream(
         &self,
@@ -376,12 +378,12 @@ impl SolvelaClient {
         // Build the streaming request based on probe result
         effective_req.stream = true;
 
-        let request_builder = match status {
+        let (request_builder, payment_attached) = match status {
             StatusCode::OK => {
                 debug!("gateway returned 200 directly (free/cached model), opening SSE stream");
                 // Discard probe body — we only needed the status
                 drop(probe_resp);
-                self.http.post(&url).json(&effective_req)
+                (self.http.post(&url).json(&effective_req), false)
             }
             StatusCode::PAYMENT_REQUIRED => {
                 debug!("gateway returned 402, signing payment for stream");
@@ -391,10 +393,13 @@ impl SolvelaClient {
 
                 let payment_header = self.sign_payment_for_402(&payment_required).await?;
 
-                self.http
-                    .post(&url)
-                    .header("PAYMENT-SIGNATURE", &payment_header)
-                    .json(&effective_req)
+                (
+                    self.http
+                        .post(&url)
+                        .header("PAYMENT-SIGNATURE", &payment_header)
+                        .json(&effective_req),
+                    true,
+                )
             }
             _ => {
                 let body = probe_resp.text().await.unwrap_or_default();
@@ -408,6 +413,19 @@ impl SolvelaClient {
         let stream_resp = request_builder.send().await?;
         let stream_status = stream_resp.status();
         if !stream_status.is_success() {
+            // Mirror the non-streaming path (`pay_and_resend_with_amount`): a
+            // 402 on a request that carried a signed payment means the gateway
+            // rejected the payment itself — surface PaymentRejected with the
+            // second 402 body, never a generic Gateway error. The conversion
+            // is guarded on `payment_attached` so a pre-signing 402 challenge
+            // is unaffected. Unified semantics with the Python and Go SDKs.
+            if payment_attached && stream_status == StatusCode::PAYMENT_REQUIRED {
+                // `?` (not unwrap_or_default) is deliberate: a truncated
+                // rejection body is a transport failure, mirroring the
+                // non-streaming body read in pay_and_resend_with_amount.
+                let body = stream_resp.text().await?;
+                return Err(ClientError::PaymentRejected(body));
+            }
             let body = stream_resp.text().await.unwrap_or_default();
             return Err(ClientError::Gateway {
                 status: stream_status.as_u16(),
@@ -1847,6 +1865,140 @@ data: [DONE]\n\n";
         match result {
             Err(ClientError::Signing(_)) => {} // expected
             Err(other) => panic!("expected Signing error, got {other:?}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chat_stream_post_signing_402_maps_to_payment_rejected() {
+        // Parity with the non-streaming path (`pay_and_resend_with_amount`)
+        // and the Python/Go SDKs: when the gateway returns 402 AGAIN on the
+        // streaming request that carried a signed payment, the error is
+        // PaymentRejected carrying the second 402 body — never a generic
+        // Gateway { status: 402 }.
+        let mock_server = MockServer::start().await;
+        mount_solana_rpc(&mock_server).await;
+
+        // Signed streaming POST (PAYMENT-SIGNATURE present) → second 402.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::header_exists("PAYMENT-SIGNATURE"))
+            .respond_with(
+                ResponseTemplate::new(402)
+                    .set_body_string("payment verification failed: invalid signature"),
+            )
+            .with_priority(1)
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        // Probe (no payment header) → 402 challenge.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(402).set_body_json(sample_payment_required()))
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                rpc_url: format!("{}/", mock_server.uri()),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let result = client.chat_stream(sample_chat_request()).await;
+        match result {
+            Err(ClientError::PaymentRejected(body)) => {
+                assert!(
+                    body.contains("payment verification failed"),
+                    "PaymentRejected must carry the second 402 body, got: {body}"
+                );
+            }
+            Err(other) => panic!("expected PaymentRejected, got {other:?}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chat_stream_initial_402_without_compatible_scheme_unchanged() {
+        // Pre-signing challenge handling must NOT be touched by the
+        // PaymentRejected conversion: a probe 402 whose accepts cannot be
+        // signed still surfaces as NoCompatibleScheme, and no paid request is
+        // ever sent (the mock's expect(1) verifies only the probe arrived).
+        let mock_server = MockServer::start().await;
+
+        let mut pr = sample_payment_required();
+        pr.accepts[0].scheme = "unknown".to_string();
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(402).set_body_json(&pr))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let result = client.chat_stream(sample_chat_request()).await;
+        match result {
+            Err(ClientError::NoCompatibleScheme) => {} // expected
+            Err(other) => panic!("expected NoCompatibleScheme, got {other:?}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chat_stream_post_signing_500_stays_gateway_error() {
+        // The PaymentRejected conversion is scoped to 402 only: a post-signing
+        // NON-402 failure on the streaming POST must still surface as
+        // Gateway { status: 500 } with the body verbatim.
+        let mock_server = MockServer::start().await;
+        mount_solana_rpc(&mock_server).await;
+
+        // Signed streaming POST (PAYMENT-SIGNATURE present) → 500.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::header_exists("PAYMENT-SIGNATURE"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal server error"))
+            .with_priority(1)
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        // Probe (no payment header) → 402 challenge.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(402).set_body_json(sample_payment_required()))
+            .mount(&mock_server)
+            .await;
+
+        let client = SolvelaClient::new(
+            test_wallet(),
+            ClientConfig {
+                gateway_url: mock_server.uri(),
+                rpc_url: format!("{}/", mock_server.uri()),
+                ..ClientConfig::default()
+            },
+        )
+        .unwrap();
+
+        let result = client.chat_stream(sample_chat_request()).await;
+        match result {
+            Err(ClientError::Gateway { status, message }) => {
+                assert_eq!(status, 500);
+                assert_eq!(message, "internal server error");
+            }
+            Err(other) => panic!("expected Gateway 500, got {other:?}"),
             Ok(_) => panic!("expected error, got Ok"),
         }
     }

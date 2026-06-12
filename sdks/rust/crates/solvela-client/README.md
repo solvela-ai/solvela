@@ -45,9 +45,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`SolvelaClient::chat_stream` runs the same flow as an SSE stream. `ClientBuilder`
-exposes escrow preference, a max-payment cap, response caching, sessions, quality
-retries, and a free-fallback model.
+`SolvelaClient::chat_stream` runs the same flow as an SSE stream. If the gateway
+returns 402 *again* after a signed payment was attached, both `chat` and
+`chat_stream` return `ClientError::PaymentRejected` carrying the rejection body —
+distinguishing "signed and rejected" from a pre-signing 402 challenge on both
+paths (same semantics as the Python and Go SDKs). `ClientBuilder` exposes escrow
+preference, a max-payment cap, response caching, sessions, quality retries, and
+a free-fallback model.
 
 Part of the Solvela Rust client SDK workspace. For the CLI, the localhost proxy,
 and the full picture see the
