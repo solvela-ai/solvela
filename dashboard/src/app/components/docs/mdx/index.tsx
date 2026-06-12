@@ -20,6 +20,11 @@ import { LinkMap } from './link-map'
 import { TierCards } from './tier-cards'
 import { UpgradeCta } from './upgrade-cta'
 
+// Shared diagram components (also used on the landing page)
+import { A2ADiagram } from '@/components/landing/a2a-diagram'
+import { RouterCacheDiagram } from '@/components/landing/router-cache-diagram'
+import { ArchitectureDiagram } from '@/components/landing/architecture-diagram'
+
 // Re-export for direct imports
 export { Card, CardGroup } from './card'
 export { Info, Tip, Warning, Note, Check } from './callout'
@@ -36,6 +41,9 @@ export { FlowSteps } from './flow-steps'
 export { LinkMap } from './link-map'
 export { TierCards } from './tier-cards'
 export { UpgradeCta } from './upgrade-cta'
+export { A2ADiagram } from '@/components/landing/a2a-diagram'
+export { RouterCacheDiagram } from '@/components/landing/router-cache-diagram'
+export { ArchitectureDiagram } from '@/components/landing/architecture-diagram'
 
 export function getMDXComponents(): MDXComponents {
   return {
@@ -70,6 +78,10 @@ export function getMDXComponents(): MDXComponents {
     RequestExample,
     ResponseExample,
     CodeGroup,
+    // Shared diagrams
+    A2ADiagram,
+    RouterCacheDiagram,
+    ArchitectureDiagram,
 
     // HTML element overrides
     h1: ({ children, id }) => (

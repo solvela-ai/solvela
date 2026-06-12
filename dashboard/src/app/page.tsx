@@ -2,6 +2,8 @@ import type { Metadata } from 'next'
 import { LandingTopStrip } from '@/components/landing/landing-chrome'
 import { SmoothScroll } from '@/components/motion/smooth-scroll'
 import { HeroPanel } from '@/components/landing/hero-panel'
+import { A2ASection } from '@/components/landing/a2a-section'
+import { ArchitectureSection } from '@/components/landing/architecture-section'
 import { LifecycleScene } from '@/components/landing/lifecycle-scene'
 import { WhySolvela } from '@/components/landing/why-solvela'
 import { ProviderRow } from '@/components/landing/provider-row'
@@ -49,10 +51,12 @@ export default async function LandingPage() {
       <SmoothScroll>
         <LandingTopStrip />
         <HeroPanel />
+        <A2ASection />
         <LifecycleScene />
         <WhySolvela />
         <ProviderRow />
         <EnterprisePanel />
+        <ArchitectureSection />
         <SdkCtaPanel preHighlighted={preHighlighted} />
         <LandingFooter />
       </SmoothScroll>

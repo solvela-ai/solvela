@@ -8,6 +8,8 @@ The gateway caches LLM completions in Redis in two tiers. Tier 1 is an exact-mat
 
 Streaming requests (`stream: true`) are never cached by either tier.
 
+<RouterCacheDiagram />
+
 ## Exact-match tier
 
 The cache key is a SHA-256 hash over the request content:
