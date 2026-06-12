@@ -79,6 +79,7 @@ async fn log_spend_writes_redis_hourly_daily_monthly_counters(pool: PgPool) {
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        vendor: None,
     });
 
     let hour_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H"));
@@ -129,6 +130,7 @@ async fn log_spend_accumulates_across_calls(pool: PgPool) {
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        vendor: None,
     };
     tracker.log_spend(entry.clone());
     tracker.log_spend(entry.clone());
@@ -181,6 +183,7 @@ async fn log_spend_zero_cost_no_reservation_skips_redis_but_writes_db(pool: PgPo
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        vendor: None,
     });
 
     // The DB row must be written (observability). Poll for it.
@@ -232,6 +235,7 @@ async fn log_spend_zero_cost_no_reservation_skips_redis_but_writes_db(pool: PgPo
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        vendor: None,
     });
     let day_val = wait_for_key(&client, &day_key)
         .await
@@ -606,6 +610,7 @@ async fn log_spend_writes_team_counters_when_wallet_in_team(pool: PgPool) {
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        vendor: None,
     });
 
     let now = Utc::now();
@@ -1316,6 +1321,7 @@ async fn tenant_counter_reconciles_estimate_to_actual(pool: PgPool) {
         // counters.
         tenant_enforced: true,
         estimated_cost_usdc: Some(estimated),
+        vendor: None,
     });
 
     // Poll until the tenant counter settles to the actual.
@@ -1362,6 +1368,7 @@ async fn log_spend_writes_tenant_counters_with_correct_key(pool: PgPool) {
         // Tenant enforcement was active for this request → reconcile counters.
         tenant_enforced: true,
         estimated_cost_usdc: None,
+        vendor: None,
     });
 
     let tenant_day_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%d"));
@@ -1567,6 +1574,7 @@ async fn tenant_counters_reconcile_all_three_windows(pool: PgPool) {
         tenant: Some(tenant.to_string()),
         tenant_enforced: true,
         estimated_cost_usdc: Some(estimated),
+        vendor: None,
     });
 
     // Each of the three windows must settle to the actual.
@@ -1642,6 +1650,7 @@ async fn tenant_cap_escape_blocked_end_to_end(pool: PgPool) {
         tenant: Some(tenant.to_string()),
         tenant_enforced: true,
         estimated_cost_usdc: Some(estimated),
+        vendor: None,
     });
 
     // Wait for the counter to settle to the actual (0.90).
@@ -1706,6 +1715,7 @@ async fn log_spend_skips_tenant_counter_when_not_enforced(pool: PgPool) {
         tenant: Some(tenant.to_string()),
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        vendor: None,
     });
 
     // Wallet daily counter must materialize (wallet accounting unaffected).
@@ -1754,6 +1764,7 @@ async fn wallet_daily_counter_unchanged_by_tag_on_unenforced_wallet(pool: PgPool
         // Unenforced wallet → Skip path → tenant_enforced is false either way.
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        vendor: None,
     };
     tracker.log_spend(mk(&wallet_untagged, None));
     tracker.log_spend(mk(&wallet_tagged, Some("acme".to_string())));
@@ -2019,6 +2030,7 @@ async fn skip_path_reservation_flag_suppresses_tenant_counter_through_real_path(
         // Sourced from the real reservation, NOT hard-coded.
         tenant_enforced: reservation.tenant_enforced(),
         estimated_cost_usdc: Some(0.0050),
+        vendor: None,
     });
 
     // The wallet daily counter must materialize (wallet accounting unaffected)...

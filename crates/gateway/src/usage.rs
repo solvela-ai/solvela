@@ -287,6 +287,35 @@ pub struct SpendLogEntry {
     /// counters were not pre-committed (legacy / proxy / test paths) and
     /// `log_spend` increments by `cost_usdc` directly.
     pub estimated_cost_usdc: Option<f64>,
+    /// Vendor-settlement record for marketplace services with a per-service
+    /// `vendor_wallet` (settlement-platform P1). `None` on every other path.
+    pub vendor: Option<VendorSettlement>,
+}
+
+/// Fee-receivable record for a vendor-settled marketplace request.
+///
+/// Settlement-platform P1, "Vendor-Settlement Fee Mechanics" RFC (2026-06-12,
+/// mechanism C / record + invoice, vendor absorbs): the agent's single
+/// transfer settles `settled_atomic` directly to `vendor_wallet`; Solvela's 5%
+/// platform fee is never charged on-chain on this path — it is recorded here
+/// (atomic units, integer math) and invoiced to the vendor off-chain.
+///
+/// All three fields travel together: a receivable without its vendor wallet
+/// (or vice versa) would be uninvoiceable, so the spend entry carries this as
+/// a single `Option`.
+#[derive(Debug, Clone)]
+pub struct VendorSettlement {
+    /// Vendor wallet (base58 pubkey) the payment settled to on-chain.
+    pub vendor_wallet: String,
+    /// Amount settled to the vendor, in atomic USDC (6 decimals). `i64` to
+    /// match the Postgres `BIGINT` column; the proxy fails closed before
+    /// charging if the priced amount cannot be represented.
+    pub settled_atomic: i64,
+    /// Solvela's 5% fee receivable in atomic USDC, computed as
+    /// `floor(settled × 105 / 100) − settled` (the canonical platform-fee
+    /// formula; equivalent to `floor(settled × 5 / 100)`, i.e. the receivable
+    /// rounds DOWN — see `compute_service_cost` in `routes/proxy.rs`).
+    pub fee_receivable_atomic: i64,
 }
 
 /// Error types for usage tracking.
@@ -389,6 +418,14 @@ impl UsageTracker {
             tx_signature = entry.tx_signature.as_deref().unwrap_or("none"),
             request_id = entry.request_id.as_deref().unwrap_or("none"),
             session_prefix = %session_prefix,
+            vendor_wallet = entry
+                .vendor
+                .as_ref()
+                .map(|v| v.vendor_wallet.as_str())
+                .unwrap_or("none"),
+            vendor_settled_atomic = entry.vendor.as_ref().map_or(0, |v| v.settled_atomic),
+            vendor_fee_receivable_atomic =
+                entry.vendor.as_ref().map_or(0, |v| v.fee_receivable_atomic),
             "spend logged"
         );
 
@@ -398,8 +435,8 @@ impl UsageTracker {
             let db_entry = entry.clone();
             tokio::spawn(async move {
                 let result = sqlx::query(
-                    r#"INSERT INTO spend_logs (id, wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, request_id, session_id, tenant, created_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+                    r#"INSERT INTO spend_logs (id, wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, request_id, session_id, tenant, vendor_wallet, vendor_settled_atomic, vendor_fee_receivable_atomic, created_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
                 )
                 .bind(id)
                 .bind(&db_entry.wallet_address)
@@ -412,6 +449,9 @@ impl UsageTracker {
                 .bind(&db_entry.request_id)
                 .bind(&db_entry.session_id)
                 .bind(&db_entry.tenant)
+                .bind(db_entry.vendor.as_ref().map(|v| v.vendor_wallet.clone()))
+                .bind(db_entry.vendor.as_ref().map(|v| v.settled_atomic))
+                .bind(db_entry.vendor.as_ref().map(|v| v.fee_receivable_atomic))
                 .bind(created_at)
                 .execute(&pool)
                 .await;
@@ -1937,6 +1977,7 @@ mod tests {
             tenant: None,
             tenant_enforced: false,
             estimated_cost_usdc: None,
+            vendor: None,
         });
     }
 

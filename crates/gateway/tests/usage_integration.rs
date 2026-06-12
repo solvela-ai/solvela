@@ -183,6 +183,7 @@ async fn log_spend_persists_row_when_db_configured(pool: PgPool) {
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        vendor: None,
     });
 
     // Fire-and-forget: poll briefly for the row to land.
@@ -232,6 +233,72 @@ async fn log_spend_persists_row_when_db_configured(pool: PgPool) {
     assert_eq!(row.6.as_deref(), Some("req-abc"));
 }
 
+/// (e, DB layer) a vendor-settled spend entry must persist the vendor wallet,
+/// the settled amount, and the 5% fee receivable (atomic units) so the
+/// off-chain invoice can be aggregated per vendor (settlement-platform P1,
+/// "Vendor-Settlement Fee Mechanics" RFC, 2026-06-12).
+#[sqlx::test(migrations = "../../migrations")]
+async fn log_spend_persists_vendor_fee_receivable(pool: PgPool) {
+    let tracker = UsageTracker::new(Some(pool.clone()), None);
+
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: WALLET_A.to_string(),
+        model: "vendor-data-api".to_string(),
+        provider: "external-service".to_string(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usdc: 0.02,
+        tx_signature: Some("vendor-settle-sig".to_string()),
+        request_id: None,
+        session_id: None,
+        tenant: None,
+        tenant_enforced: false,
+        estimated_cost_usdc: None,
+        vendor: Some(gateway::usage::VendorSettlement {
+            vendor_wallet: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            settled_atomic: 20_000,
+            // floor(20_000 × 105 / 100) − 20_000
+            fee_receivable_atomic: 1_000,
+        }),
+    });
+
+    // Fire-and-forget: poll briefly for the row to land.
+    let mut found = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM spend_logs WHERE wallet_address = $1")
+                .bind(WALLET_A)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        if count == 1 {
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "log_spend should have persisted exactly one row within 1s"
+    );
+
+    let row: (Option<String>, Option<i64>, Option<i64>) = sqlx::query_as(
+        r#"SELECT vendor_wallet, vendor_settled_atomic, vendor_fee_receivable_atomic
+           FROM spend_logs WHERE wallet_address = $1"#,
+    )
+    .bind(WALLET_A)
+    .fetch_one(&pool)
+    .await
+    .expect("read back vendor columns");
+
+    assert_eq!(
+        row.0.as_deref(),
+        Some("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM")
+    );
+    assert_eq!(row.1, Some(20_000));
+    assert_eq!(row.2, Some(1_000));
+}
+
 #[tokio::test]
 async fn log_spend_with_no_backends_does_not_panic() {
     // Pure smoke: emits a tracing event without touching DB or Redis.
@@ -249,6 +316,7 @@ async fn log_spend_with_no_backends_does_not_panic() {
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        vendor: None,
     });
 }
 

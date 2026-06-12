@@ -7836,6 +7836,7 @@ async fn test_services_list_includes_registered_services() {
                 source: "api".to_string(),
                 healthy: None,
                 price_per_request_usdc: Some(0.05),
+                vendor_wallet: None,
             })
             .unwrap();
     }
@@ -7864,6 +7865,371 @@ async fn test_services_list_includes_registered_services() {
     assert_eq!(runtime_svc["name"], "Runtime Service");
     assert_eq!(runtime_svc["source"], "api");
     assert_eq!(runtime_svc["category"], "compute");
+}
+
+// ---------------------------------------------------------------------------
+// Per-service vendor_wallet (settlement-platform P1)
+//
+// "Vendor-Settlement Fee Mechanics" RFC (2026-06-12): mechanism C
+// (record + invoice) with vendor-absorbs semantics — the agent pays exactly
+// the listed price to the vendor wallet; Solvela's 5% is recorded in
+// spend_logs as an off-chain receivable, never charged to the agent.
+// ---------------------------------------------------------------------------
+
+/// Valid base58 32-byte Solana pubkey used as the vendor wallet in tests.
+const TEST_VENDOR_WALLET_B58: &str = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+
+/// An `exact` verifier that supports the per-request recipient override
+/// (`verify_payment_to`) and records the recipient it was asked to verify
+/// against, so a test can prove the vendor wallet — not the gateway's static
+/// recipient — reached verification through the real route.
+struct VendorRecipientRecordingVerifier {
+    recorded_recipient: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+#[async_trait::async_trait]
+impl PaymentVerifier for VendorRecipientRecordingVerifier {
+    fn network(&self) -> &str {
+        SOLANA_NETWORK
+    }
+
+    fn scheme(&self) -> &str {
+        "exact"
+    }
+
+    async fn verify_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<VerificationResult, X402Error> {
+        Ok(VerificationResult {
+            valid: true,
+            reason: None,
+            verified_amount: Some(20_000),
+        })
+    }
+
+    async fn verify_payment_to(
+        &self,
+        _payload: &PaymentPayload,
+        expected_recipient: &str,
+    ) -> Result<VerificationResult, X402Error> {
+        *self.recorded_recipient.lock().unwrap() = Some(expected_recipient.to_string());
+        Ok(VerificationResult {
+            valid: true,
+            reason: None,
+            verified_amount: Some(20_000),
+        })
+    }
+
+    async fn settle_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<SettlementResult, X402Error> {
+        Ok(SettlementResult {
+            success: true,
+            tx_signature: Some("VendorSettleSig".to_string()),
+            network: SOLANA_NETWORK.to_string(),
+            error: None,
+            verified_amount: None,
+            failure_kind: None,
+        })
+    }
+}
+
+/// Register a vendor-wallet service ($0.02/request) through the REAL
+/// admin-token route and return the 201 response body.
+async fn register_vendor_service(app: &axum::Router, id: &str) -> serde_json::Value {
+    let body = serde_json::json!({
+        "id": id,
+        "name": "Vendor Data API",
+        "endpoint": "https://vendor-api.example.com/v1/data",
+        "category": "data",
+        "price_per_request_usdc": 0.02,
+        "vendor_wallet": TEST_VENDOR_WALLET_B58,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/register")
+                .header("content-type", "application/json")
+                .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "vendor service registration must succeed"
+    );
+    let resp_body = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&resp_body).unwrap()
+}
+
+/// (b) runtime registration with a vendor_wallet succeeds and the wallet is
+/// echoed on the created entry.
+#[tokio::test]
+async fn test_register_service_with_vendor_wallet_creates_entry() {
+    let (app, state) = test_app_with_state();
+
+    let json = register_vendor_service(&app, "vendor-data-api").await;
+    assert_eq!(json["id"], "vendor-data-api");
+    assert_eq!(json["vendor_wallet"], TEST_VENDOR_WALLET_B58);
+
+    let registry = state.service_registry.read().await;
+    assert_eq!(
+        registry
+            .get("vendor-data-api")
+            .unwrap()
+            .vendor_wallet
+            .as_deref(),
+        Some(TEST_VENDOR_WALLET_B58)
+    );
+}
+
+/// (b) runtime registration with an INVALID vendor_wallet is rejected (400)
+/// and nothing is registered — fail closed.
+#[tokio::test]
+async fn test_register_service_rejects_invalid_vendor_wallet() {
+    let (app, state) = test_app_with_state();
+
+    let body = serde_json::json!({
+        "id": "bad-vendor-api",
+        "name": "Bad Vendor API",
+        "endpoint": "https://vendor-api.example.com/v1/data",
+        "category": "data",
+        "price_per_request_usdc": 0.02,
+        "vendor_wallet": "not-a-valid-pubkey",
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/register")
+                .header("content-type", "application/json")
+                .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let resp_body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+    assert!(
+        json["error"].as_str().unwrap().contains("vendor_wallet"),
+        "error must name vendor_wallet, got: {}",
+        json["error"]
+    );
+
+    let registry = state.service_registry.read().await;
+    assert!(
+        registry.get("bad-vendor-api").is_none(),
+        "an invalid vendor_wallet must not register anything"
+    );
+}
+
+/// (c) the 402 challenge for a vendor service advertises pay_to = vendor
+/// wallet and amount = listed price (20_000 atomic, NOT ×1.05), with a
+/// cost_breakdown truthful to what the agent pays: platform_fee 0.
+#[tokio::test]
+async fn test_proxy_402_for_vendor_service_advertises_vendor_wallet_and_price() {
+    let (app, _state) = test_app_with_state();
+    register_vendor_service(&app, "vendor-data-api").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/vendor-data-api/proxy")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payment_info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let accepts = payment_info["accepts"].as_array().unwrap();
+    assert_eq!(accepts[0]["pay_to"], TEST_VENDOR_WALLET_B58);
+    assert_eq!(accepts[0]["amount"], "20000");
+
+    let cost = &payment_info["cost_breakdown"];
+    assert_eq!(cost["provider_cost"], "0.020000");
+    assert_eq!(cost["platform_fee"], "0.000000");
+    assert_eq!(cost["total"], "0.020000");
+    assert_eq!(cost["fee_percent"], 0);
+}
+
+/// (d) a payment addressed to the gateway's GLOBAL recipient must be rejected
+/// for a vendor service — hard equality against the per-service recipient.
+#[tokio::test]
+async fn test_proxy_vendor_service_rejects_payment_to_global_recipient() {
+    let (app, _state) = test_app_with_state();
+    register_vendor_service(&app, "vendor-data-api").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/vendor-data-api/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    // pay_to = global recipient — wrong for a vendor service.
+                    valid_payment_header("/v1/services/vendor-data-api/proxy"),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("pay_to") && message.contains(TEST_VENDOR_WALLET_B58),
+        "rejection must name the expected vendor wallet, got: {message}"
+    );
+}
+
+/// (d) vice versa: a payment addressed to a vendor wallet must be rejected
+/// for a PLAIN service whose recipient is the global wallet (regression
+/// guard for today's behavior).
+#[tokio::test]
+async fn test_proxy_plain_service_rejects_payment_to_vendor_wallet() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/web-search/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header_with(
+                        "/v1/services/web-search/proxy",
+                        USDC_MINT,
+                        TEST_VENDOR_WALLET_B58,
+                    ),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("pay_to") && message.contains(TEST_RECIPIENT_WALLET),
+        "rejection must name the global recipient, got: {message}"
+    );
+}
+
+/// (e) a settled paid request to a vendor service must write the
+/// fee-receivable spend entry — observed through the REAL route via the
+/// synchronous `info!("spend logged")` event (the same capture mechanism the
+/// #541 streaming tests use; a missing production write fails this test).
+///
+/// Also proves the per-service recipient threads into verification: the
+/// verifier's `verify_payment_to` must be called with the VENDOR wallet.
+///
+/// The receivable is recorded at SETTLEMENT time (the vendor was just paid
+/// on-chain), so the entry must exist even though the upstream fetch then
+/// fails on the unresolvable test endpoint.
+#[tokio::test]
+async fn test_vendor_paid_request_records_fee_receivable_spend_log() {
+    use tracing::instrument::WithSubscriber;
+
+    let recorded_recipient = Arc::new(std::sync::Mutex::new(None));
+    let (app, _state) = test_app_with_provider_registry_and_exact_verifier(
+        ProviderRegistry::from_env(reqwest::Client::new()),
+        Arc::new(VendorRecipientRecordingVerifier {
+            recorded_recipient: Arc::clone(&recorded_recipient),
+        }),
+    );
+    register_vendor_service(&app, "vendor-data-api").await;
+
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/vendor-data-api/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header_with(
+                        "/v1/services/vendor-data-api/proxy",
+                        USDC_MINT,
+                        TEST_VENDOR_WALLET_B58,
+                    ),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+
+    // Payment was accepted and settled — whatever the upstream outcome, this
+    // must not be a payment rejection.
+    assert_ne!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "payment must have been accepted"
+    );
+
+    // Verification ran against the per-service vendor wallet.
+    assert_eq!(
+        recorded_recipient.lock().unwrap().as_deref(),
+        Some(TEST_VENDOR_WALLET_B58),
+        "verify_payment_to must receive the vendor wallet as expected recipient"
+    );
+
+    // Exactly one spend entry, carrying the vendor receivable record.
+    let events = spend_logged_events(&capture);
+    assert_eq!(
+        events.len(),
+        1,
+        "a settled vendor-service request MUST write exactly one spend entry \
+         (got {}): the vendor was paid on-chain, so the 5% receivable must be \
+         recorded",
+        events.len()
+    );
+    assert_eq!(events[0]["vendor_wallet"], TEST_VENDOR_WALLET_B58);
+    // $0.02 listed price = 20_000 atomic settled to the vendor; receivable =
+    // floor(20_000 × 105 / 100) − 20_000 = 1_000 atomic.
+    assert_eq!(events[0]["vendor_settled_atomic"].as_i64(), Some(20_000));
+    assert_eq!(
+        events[0]["vendor_fee_receivable_atomic"].as_i64(),
+        Some(1_000)
+    );
+    // The agent-paid cost is the listed price — no 5% on top.
+    let logged_usdc = events[0]["cost_usdc"].as_f64().unwrap();
+    assert!(
+        (logged_usdc - 0.02).abs() < 1e-9,
+        "agent spend must equal the listed price, got {logged_usdc}"
+    );
 }
 
 // ---------------------------------------------------------------------------

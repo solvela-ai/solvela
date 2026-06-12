@@ -24,7 +24,7 @@ use crate::error::GatewayError;
 use crate::middleware::x402::decode_payment_header;
 use crate::payment_util::extract_payer_wallet;
 use crate::security;
-use crate::usage::SpendLogEntry;
+use crate::usage::{SpendLogEntry, VendorSettlement};
 use crate::AppState;
 
 /// Upstream request timeout for external service proxying.
@@ -174,13 +174,64 @@ pub async fn proxy_service(
     let ServiceCost {
         provider_atomic,
         fee_atomic,
-        total_atomic: expected_atomic,
+        total_atomic,
     } = compute_service_cost(price_usdc).map_err(|e| {
         warn!(service_id = %service_id, error = %e, "invalid service pricing");
         GatewayError::Internal(format!(
             "service '{service_id}' has invalid price_per_request_usdc"
         ))
     })?;
+
+    // Per-service settlement recipient (settlement-platform P1).
+    //
+    // "Vendor-Settlement Fee Mechanics" RFC (2026-06-12, mechanism C / record
+    // + invoice, VENDOR ABSORBS the fee): for a service with a
+    // `vendor_wallet`, the agent pays EXACTLY the listed price
+    // (`provider_atomic`, no 5% on top) in a single transfer addressed to the
+    // vendor wallet, and Solvela's 5% (`fee_atomic`, the canonical
+    // `floor(price × 105 / 100) − price` from `compute_service_cost`) is
+    // recorded as an off-chain receivable against the vendor in spend_logs.
+    // Services without a vendor wallet keep today's behavior unchanged:
+    // `price × 1.05` paid to the gateway's global recipient.
+    //
+    // `agent_fee_atomic` is what the AGENT is charged as a fee — zero on the
+    // vendor path — and is what the 402 `cost_breakdown` must show (rule #5:
+    // the breakdown stays truthful to what the agent pays).
+    let (pay_to_wallet, expected_atomic, agent_fee_atomic, vendor_settlement) =
+        match service.vendor_wallet.as_deref() {
+            Some(vendor_wallet) => {
+                // Fail closed before quoting or charging: the receivable
+                // ledger columns are BIGINT, so a priced amount that cannot
+                // be represented as i64 must reject the request, not get
+                // recorded wrapped or skipped.
+                let settled_atomic = i64::try_from(provider_atomic).map_err(|_| {
+                    GatewayError::Internal(format!(
+                        "service '{service_id}' price exceeds the recordable range"
+                    ))
+                })?;
+                let fee_receivable_atomic = i64::try_from(fee_atomic).map_err(|_| {
+                    GatewayError::Internal(format!(
+                        "service '{service_id}' fee exceeds the recordable range"
+                    ))
+                })?;
+                (
+                    vendor_wallet.to_string(),
+                    provider_atomic,
+                    0u64,
+                    Some(VendorSettlement {
+                        vendor_wallet: vendor_wallet.to_string(),
+                        settled_atomic,
+                        fee_receivable_atomic,
+                    }),
+                )
+            }
+            None => (
+                state.config.solana.recipient_wallet.clone(),
+                total_atomic,
+                fee_atomic,
+                None,
+            ),
+        };
 
     // Step 3: Check for payment header.
     // Non-ASCII bytes in header value must produce 400, not a silent 402.
@@ -200,9 +251,12 @@ pub async fn proxy_service(
         counter!("solvela_payments_total", "status" => "none").increment(1);
         info!(service_id = %service_id, "no payment signature, returning 402");
 
-        // Format cost breakdown from integer-derived values for display
+        // Format cost breakdown from integer-derived values for display.
+        // On the vendor path `agent_fee_atomic` is 0 and the total equals the
+        // provider price — the breakdown reflects what the AGENT pays, not
+        // the off-chain receivable the vendor owes.
         let provider_usdc = provider_atomic as f64 / 1_000_000.0;
-        let fee_usdc = fee_atomic as f64 / 1_000_000.0;
+        let fee_usdc = agent_fee_atomic as f64 / 1_000_000.0;
         let total_usdc = expected_atomic as f64 / 1_000_000.0;
 
         let payment_required = PaymentRequired {
@@ -218,7 +272,9 @@ pub async fn proxy_service(
                 // Quote the CONFIGURED mint (what the verifier enforces),
                 // never the compile-time constant.
                 asset: state.config.solana.usdc_mint.clone(),
-                pay_to: state.config.solana.recipient_wallet.clone(),
+                // Per-service recipient: the vendor wallet when configured,
+                // the gateway's global recipient otherwise.
+                pay_to: pay_to_wallet.clone(),
                 max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
                 escrow_program_id: None,
             }],
@@ -227,7 +283,14 @@ pub async fn proxy_service(
                 platform_fee: format!("{fee_usdc:.6}"),
                 total: format!("{total_usdc:.6}"),
                 currency: "USDC".to_string(),
-                fee_percent: PLATFORM_FEE_PERCENT,
+                // Agent-facing fee rate: 0 on the vendor path (the vendor
+                // absorbs the 5%, invoiced off-chain), 5 otherwise. Keeping
+                // `5` next to a `0.000000` fee would contradict the amounts.
+                fee_percent: if vendor_settlement.is_some() {
+                    0
+                } else {
+                    PLATFORM_FEE_PERCENT
+                },
             },
             error: "Payment required".to_string(),
         };
@@ -305,11 +368,17 @@ pub async fn proxy_service(
         )));
     }
 
-    // Validate pay_to matches the gateway's recipient wallet
-    if payload.accepted.pay_to != state.config.solana.recipient_wallet {
+    // Validate pay_to matches this service's expected recipient — the vendor
+    // wallet when configured, the gateway's global recipient otherwise. Hard
+    // equality both ways: a vendor service paid to the global wallet is
+    // rejected, and vice versa.
+    if payload.accepted.pay_to != pay_to_wallet {
+        // GHSA-cgqx-mg48-949v posture: `pay_to` is client-controlled — cap to
+        // the max base58 pubkey length before echoing (mirrors the asset
+        // truncation above).
+        let pay_to_prefix: String = payload.accepted.pay_to.chars().take(44).collect();
         return Err(GatewayError::BadRequest(format!(
-            "payment pay_to must be '{}', got '{}'",
-            state.config.solana.recipient_wallet, payload.accepted.pay_to
+            "payment pay_to must be '{pay_to_wallet}', got '{pay_to_prefix}'"
         )));
     }
 
@@ -445,7 +514,23 @@ pub async fn proxy_service(
     // `success` flag is `false` (e.g. RPC confirmation timed out). We mirror that
     // here so an unconfirmed transaction cannot be forwarded to the upstream
     // service as a paid request.
-    match state.facilitator.verify_and_settle(&payload).await {
+    //
+    // Vendor-wallet services verify against the PER-SERVICE recipient via
+    // `verify_and_settle_to` — the verifier re-derives the expected ATA from
+    // the vendor wallet and enforces hard equality, and fails closed
+    // (`RecipientOverrideUnsupported`) for any verifier that does not support
+    // recipient override (e.g. the escrow scheme, whose vendor split is P4).
+    // Non-vendor services keep today's `verify_and_settle` path unchanged.
+    let settlement_outcome = match &vendor_settlement {
+        Some(_) => {
+            state
+                .facilitator
+                .verify_and_settle_to(&payload, &pay_to_wallet)
+                .await
+        }
+        None => state.facilitator.verify_and_settle(&payload).await,
+    };
+    match settlement_outcome {
         Ok(settlement) if !settlement.success => {
             counter!("solvela_payments_total", "status" => "failed").increment(1);
             warn!(
@@ -491,6 +576,47 @@ pub async fn proxy_service(
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
+
+    // Build the spend entry once (fire-and-forget: log_spend spawns its own
+    // writes, never awaited on the hot path).
+    //
+    // WHEN it is logged differs by path:
+    // - Vendor services log NOW, at settlement time: the 5% receivable is owed
+    //   on SETTLED volume (the vendor was just paid on-chain), so deferring
+    //   the record past the upstream call would silently drop receivables for
+    //   settled requests whose upstream then times out or is unreachable.
+    // - Non-vendor services keep the legacy post-upstream write below,
+    //   byte-for-byte today's behavior.
+    let spend_entry = SpendLogEntry {
+        wallet_address,
+        model: service_id.clone(),
+        provider: "external-service".to_string(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usdc: expected_atomic as f64 / 1_000_000.0,
+        tx_signature,
+        request_id: request_id.clone(),
+        session_id: None,
+        // PR1 keeps the service-marketplace proxy minimal: it does not read the
+        // x-tenant header. Per-tenant attribution for the proxy path can be
+        // added later; None leaves these rows untagged for now.
+        tenant: None,
+        // No tenant tag is read on the proxy path, so no per-tenant bucket is
+        // enforced — never reconcile per-tenant counters here.
+        tenant_enforced: false,
+        // Service-marketplace proxy doesn't go through `check_budget`
+        // (it has flat per-request pricing, not per-wallet budgets), so no
+        // reservation is committed and log_spend increments by the full
+        // cost. None preserves the legacy behavior here.
+        estimated_cost_usdc: None,
+        vendor: vendor_settlement,
+    };
+    let deferred_spend_entry = if spend_entry.vendor.is_some() {
+        state.usage.log_spend(spend_entry);
+        None
+    } else {
+        Some(spend_entry)
+    };
 
     // Step 5: SSRF check — resolve DNS once, validate all addresses are public,
     // then pin the validated IP into a per-request reqwest client. This eliminates
@@ -599,31 +725,12 @@ pub async fn proxy_service(
 
     let upstream_status = upstream_response.status();
 
-    // Step 7: Fire-and-forget spend log (log_spend internally uses tokio::spawn)
-    let total_cost_usdc = expected_atomic as f64 / 1_000_000.0;
-    state.usage.log_spend(SpendLogEntry {
-        wallet_address,
-        model: service_id.clone(),
-        provider: "external-service".to_string(),
-        input_tokens: 0,
-        output_tokens: 0,
-        cost_usdc: total_cost_usdc,
-        tx_signature,
-        request_id: request_id.clone(),
-        session_id: None,
-        // PR1 keeps the service-marketplace proxy minimal: it does not read the
-        // x-tenant header. Per-tenant attribution for the proxy path can be
-        // added later; None leaves these rows untagged for now.
-        tenant: None,
-        // No tenant tag is read on the proxy path, so no per-tenant bucket is
-        // enforced — never reconcile per-tenant counters here.
-        tenant_enforced: false,
-        // Service-marketplace proxy doesn't go through `check_budget`
-        // (it has flat per-request pricing, not per-wallet budgets), so no
-        // reservation is committed and log_spend increments by the full
-        // cost. None preserves the legacy behavior here.
-        estimated_cost_usdc: None,
-    });
+    // Step 7: Fire-and-forget spend log (log_spend internally uses
+    // tokio::spawn). Non-vendor services only — vendor services already
+    // logged at settlement time above (one row per request either way).
+    if let Some(entry) = deferred_spend_entry {
+        state.usage.log_spend(entry);
+    }
 
     // Handle upstream response based on status
     if upstream_status.is_server_error() {
@@ -944,6 +1051,7 @@ mod tests {
             source: "api".to_string(),
             healthy: None,
             price_per_request_usdc: Some(0.01),
+            vendor_wallet: None,
         })
         .expect("valid test service entry"); // safe: known-good test data
 
@@ -1046,6 +1154,38 @@ mod tests {
         x402_enabled: bool,
         healthy: Option<bool>,
     ) -> Arc<AppState> {
+        // Endpoint shape must match the validator's rule: internal services
+        // use a relative path; external services use an absolute https URL.
+        let endpoint = if internal {
+            "/v1/test".to_string()
+        } else {
+            "https://test.example.com/api".to_string()
+        };
+        make_state_with_entry(
+            ServiceEntry {
+                id: "test-svc".to_string(),
+                name: "Test Service".to_string(),
+                category: "test".to_string(),
+                endpoint,
+                x402_enabled,
+                internal,
+                description: None,
+                pricing_label: "per-request".to_string(),
+                chains: vec!["solana".to_string()],
+                source: "api".to_string(),
+                healthy,
+                price_per_request_usdc: price,
+                vendor_wallet: None,
+            },
+            // AppConfig::default() leaves recipient_wallet empty — the legacy
+            // tests above build payloads with `pay_to: String::new()`.
+            "",
+        )
+    }
+
+    /// Construct an AppState from a fully-specified service entry and a
+    /// configured global recipient wallet.
+    fn make_state_with_entry(entry: ServiceEntry, recipient_wallet: &str) -> Arc<AppState> {
         use crate::config::AppConfig;
         use crate::providers::health::{CircuitBreakerConfig, ProviderHealthTracker};
         use crate::providers::ProviderRegistry;
@@ -1055,31 +1195,13 @@ mod tests {
         use solvela_x402::facilitator::Facilitator;
 
         let mut reg = ServiceRegistry::empty();
-        // Endpoint shape must match the validator's rule: internal services
-        // use a relative path; external services use an absolute https URL.
-        let endpoint = if internal {
-            "/v1/test".to_string()
-        } else {
-            "https://test.example.com/api".to_string()
-        };
-        reg.register(ServiceEntry {
-            id: "test-svc".to_string(),
-            name: "Test Service".to_string(),
-            category: "test".to_string(),
-            endpoint,
-            x402_enabled,
-            internal,
-            description: None,
-            pricing_label: "per-request".to_string(),
-            chains: vec!["solana".to_string()],
-            source: "api".to_string(),
-            healthy,
-            price_per_request_usdc: price,
-        })
-        .expect("valid test service entry");
+        reg.register(entry).expect("valid test service entry");
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = recipient_wallet.to_string();
 
         Arc::new(AppState {
-            config: AppConfig::default(),
+            config,
             model_registry: ModelRegistry::from_toml(
                 "[models.placeholder]\nprovider=\"t\"\nmodel_id=\"t\"\ndisplay_name=\"T\"\n\
                  input_cost_per_million=1.0\noutput_cost_per_million=1.0\ncontext_window=4096\n\
@@ -1405,6 +1527,141 @@ mod tests {
             }
             other => panic!("expected InvalidPayment from empty facilitator, got {other:?}"),
         }
+    }
+
+    // ── Per-service vendor_wallet recipient (settlement-platform P1) ──────
+
+    /// Vendor wallet used by the vendor-recipient tests (valid base58 pubkey).
+    const TEST_VENDOR_WALLET: &str = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+    /// Global recipient configured on the gateway in vendor tests (valid
+    /// base58 pubkey, distinct from the vendor wallet).
+    const TEST_GLOBAL_RECIPIENT: &str = "So11111111111111111111111111111111111111112";
+
+    /// State with one external service ("test-svc", $0.01) whose
+    /// `vendor_wallet` is the caller's choice, and a configured global
+    /// recipient of `TEST_GLOBAL_RECIPIENT`.
+    fn make_state_with_vendor_service(vendor_wallet: Option<&str>) -> Arc<AppState> {
+        make_state_with_entry(
+            ServiceEntry {
+                id: "test-svc".to_string(),
+                name: "Test Service".to_string(),
+                category: "test".to_string(),
+                endpoint: "https://test.example.com/api".to_string(),
+                x402_enabled: true,
+                internal: false,
+                description: None,
+                pricing_label: "per-request".to_string(),
+                chains: vec!["solana".to_string()],
+                source: "api".to_string(),
+                healthy: None,
+                price_per_request_usdc: Some(0.01),
+                vendor_wallet: vendor_wallet.map(String::from),
+            },
+            TEST_GLOBAL_RECIPIENT,
+        )
+    }
+
+    /// (c) 402 challenge: a vendor_wallet service must advertise the vendor
+    /// wallet as `pay_to` and the LISTED PRICE as the amount (vendor absorbs
+    /// the fee — the agent is never charged the 5% on this path), with a
+    /// cost_breakdown that stays truthful to what the agent pays (rule #5):
+    /// platform_fee = 0, total = provider price.
+    #[tokio::test]
+    async fn proxy_402_advertises_vendor_wallet_as_pay_to() {
+        let state = make_state_with_vendor_service(Some(TEST_VENDOR_WALLET));
+        let err = call_expect_err(state, "test-svc", HeaderMap::new()).await;
+        match err {
+            GatewayError::PaymentChallenge(pr) => {
+                assert_eq!(pr.accepts[0].pay_to, TEST_VENDOR_WALLET);
+                // $0.01 listed price = 10_000 atomic — NOT 10_500 (no 5% on top).
+                assert_eq!(pr.accepts[0].amount, "10000");
+                assert_eq!(pr.cost_breakdown.provider_cost, "0.010000");
+                assert_eq!(pr.cost_breakdown.platform_fee, "0.000000");
+                assert_eq!(pr.cost_breakdown.total, "0.010000");
+                assert_eq!(pr.cost_breakdown.fee_percent, 0);
+            }
+            other => panic!("expected PaymentChallenge, got {other:?}"),
+        }
+    }
+
+    /// (c) fallback: without a vendor_wallet the 402 advertises the global
+    /// recipient and `price × 1.05` — byte-for-byte today's behavior.
+    #[tokio::test]
+    async fn proxy_402_advertises_global_recipient_without_vendor_wallet() {
+        let state = make_state_with_vendor_service(None);
+        let err = call_expect_err(state, "test-svc", HeaderMap::new()).await;
+        match err {
+            GatewayError::PaymentChallenge(pr) => {
+                assert_eq!(pr.accepts[0].pay_to, TEST_GLOBAL_RECIPIENT);
+                assert_eq!(pr.accepts[0].amount, "10500");
+                assert_eq!(pr.cost_breakdown.provider_cost, "0.010000");
+                assert_eq!(pr.cost_breakdown.platform_fee, "0.000500");
+                assert_eq!(pr.cost_breakdown.total, "0.010500");
+                assert_eq!(pr.cost_breakdown.fee_percent, PLATFORM_FEE_PERCENT);
+            }
+            other => panic!("expected PaymentChallenge, got {other:?}"),
+        }
+    }
+
+    /// (d) wrong amount on the vendor path: anything below the listed price
+    /// is insufficient (the vendor threshold is `price`, not `price × 1.05`).
+    #[tokio::test]
+    async fn proxy_vendor_service_rejects_amount_below_price() {
+        let state = make_state_with_vendor_service(Some(TEST_VENDOR_WALLET));
+        let mut p = valid_payload("test-svc");
+        p.accepted.pay_to = TEST_VENDOR_WALLET.to_string();
+        p.accepted.amount = "9999".to_string(); // expected is 10_000
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m)
+                if m.contains("insufficient") && m.contains("10000")),
+            "expected insufficient-amount rejection at the listed price, got {err:?}"
+        );
+    }
+
+    /// (d) a payment addressed to the GLOBAL recipient must be rejected for a
+    /// vendor_wallet service — hard equality against the per-service recipient.
+    #[tokio::test]
+    async fn proxy_vendor_service_rejects_pay_to_global_recipient() {
+        let state = make_state_with_vendor_service(Some(TEST_VENDOR_WALLET));
+        let mut p = valid_payload("test-svc");
+        p.accepted.pay_to = TEST_GLOBAL_RECIPIENT.to_string();
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m)
+                if m.contains("pay_to") && m.contains(TEST_VENDOR_WALLET)),
+            "expected pay_to mismatch naming the vendor wallet, got {err:?}"
+        );
+    }
+
+    /// (d) vice versa: a payment addressed to the VENDOR wallet must be
+    /// rejected for a service without a vendor_wallet.
+    #[tokio::test]
+    async fn proxy_global_service_rejects_pay_to_vendor_wallet() {
+        let state = make_state_with_vendor_service(None);
+        let mut p = valid_payload("test-svc");
+        p.accepted.pay_to = TEST_VENDOR_WALLET.to_string();
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::BadRequest(ref m)
+                if m.contains("pay_to") && m.contains(TEST_GLOBAL_RECIPIENT)),
+            "expected pay_to mismatch naming the global recipient, got {err:?}"
+        );
+    }
+
+    /// A payment addressed to the vendor wallet must clear the recipient
+    /// equality gate and reach verification (which fails here only because
+    /// the test facilitator has no verifiers).
+    #[tokio::test]
+    async fn proxy_vendor_service_pay_to_vendor_reaches_verification() {
+        let state = make_state_with_vendor_service(Some(TEST_VENDOR_WALLET));
+        let mut p = valid_payload("test-svc");
+        p.accepted.pay_to = TEST_VENDOR_WALLET.to_string();
+        let err = call_expect_err(state, "test-svc", make_headers_with_payment(&p)).await;
+        assert!(
+            matches!(err, GatewayError::InvalidPayment(ref m) if m.contains("verification failed")),
+            "expected to reach (and fail at) verification, got {err:?}"
+        );
     }
 
     #[tokio::test]
