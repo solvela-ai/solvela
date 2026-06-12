@@ -222,51 +222,19 @@ impl SolanaVerifier {
             })
     }
 
-    /// Send a JSON-RPC request to the Solana cluster.
-    async fn rpc_request(
+    /// Shared verification body for [`PaymentVerifier::verify_payment`] and
+    /// [`PaymentVerifier::verify_payment_to`]: identical checks, with the
+    /// expected recipient supplied by the caller.
+    ///
+    /// The recipient check stays HARD equality (ATA-derived, with the legacy
+    /// raw-wallet fallback): a transfer to any other wallet — including the
+    /// gateway's own global recipient when a vendor wallet is expected — is
+    /// rejected as [`Error::WrongRecipient`].
+    async fn verify_payment_against(
         &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, Error> {
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        });
-
-        let response = self
-            .http_client
-            .post(&self.rpc_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| Error::Rpc(e.to_string()))?;
-
-        let result: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| Error::Rpc(e.to_string()))?;
-
-        if let Some(error) = result.get("error") {
-            return Err(Error::Rpc(error.to_string()));
-        }
-
-        Ok(result)
-    }
-}
-
-#[async_trait]
-impl PaymentVerifier for SolanaVerifier {
-    fn network(&self) -> &str {
-        SOLANA_NETWORK
-    }
-
-    fn scheme(&self) -> &str {
-        "exact"
-    }
-
-    async fn verify_payment(&self, payload: &PaymentPayload) -> Result<VerificationResult, Error> {
+        payload: &PaymentPayload,
+        expected_recipient: &Pubkey,
+    ) -> Result<VerificationResult, Error> {
         info!(
             network = SOLANA_NETWORK,
             resource = %payload.resource.url,
@@ -304,17 +272,21 @@ impl PaymentVerifier for SolanaVerifier {
         //
         // SPL token transfers go between token accounts (ATAs), not wallet addresses.
         // The destination in the transaction is an ATA — we must derive the expected
-        // ATA from our recipient wallet + USDC mint and compare, not compare against
-        // the raw wallet pubkey directly.
-        let expected_ata = derive_ata(&self.recipient, &self.usdc_mint, &Pubkey::TOKEN_PROGRAM_ID)
-            .ok_or_else(|| {
-                Error::InvalidTransaction("failed to derive expected ATA address".to_string())
-            })?;
+        // ATA from the expected recipient wallet + USDC mint and compare, not compare
+        // against the raw wallet pubkey directly.
+        let expected_ata = derive_ata(
+            expected_recipient,
+            &self.usdc_mint,
+            &Pubkey::TOKEN_PROGRAM_ID,
+        )
+        .ok_or_else(|| {
+            Error::InvalidTransaction("failed to derive expected ATA address".to_string())
+        })?;
 
         if transfer.destination != expected_ata {
             // Also accept if destination == raw recipient (some older integrations
             // use the wallet address directly for wrapped SOL / native accounts).
-            if transfer.destination != self.recipient {
+            if transfer.destination != *expected_recipient {
                 return Err(Error::WrongRecipient {
                     expected: expected_ata.to_string(),
                     actual: transfer.destination.to_string(),
@@ -384,7 +356,7 @@ impl PaymentVerifier for SolanaVerifier {
         info!(
             required_amount,
             actual_amount = transfer.amount,
-            recipient = %self.recipient,
+            recipient = %expected_recipient,
             "payment verification passed"
         );
 
@@ -393,6 +365,69 @@ impl PaymentVerifier for SolanaVerifier {
             reason: None,
             verified_amount: Some(transfer.amount),
         })
+    }
+
+    /// Send a JSON-RPC request to the Solana cluster.
+    async fn rpc_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        });
+
+        let response = self
+            .http_client
+            .post(&self.rpc_url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Rpc(e.to_string()))?;
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| Error::Rpc(e.to_string()))?;
+
+        if let Some(error) = result.get("error") {
+            return Err(Error::Rpc(error.to_string()));
+        }
+
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl PaymentVerifier for SolanaVerifier {
+    fn network(&self) -> &str {
+        SOLANA_NETWORK
+    }
+
+    fn scheme(&self) -> &str {
+        "exact"
+    }
+
+    async fn verify_payment(&self, payload: &PaymentPayload) -> Result<VerificationResult, Error> {
+        self.verify_payment_against(payload, &self.recipient).await
+    }
+
+    async fn verify_payment_to(
+        &self,
+        payload: &PaymentPayload,
+        expected_recipient: &str,
+    ) -> Result<VerificationResult, Error> {
+        // Fail closed before any destination comparison: an unparseable
+        // expected recipient must never degrade into accepting (or comparing
+        // against) anything else. Registry validation should make this
+        // unreachable, but the verifier re-checks at its own boundary.
+        let expected = Pubkey::from_str(expected_recipient).map_err(|e| {
+            Error::InvalidTransaction(format!("invalid expected recipient pubkey: {e}"))
+        })?;
+        self.verify_payment_against(payload, &expected).await
     }
 
     async fn settle_payment(&self, payload: &PaymentPayload) -> Result<SettlementResult, Error> {
@@ -1109,6 +1144,131 @@ mod tests {
         // classifier unit tests in solana_rpc.rs).
         assert_eq!(result.failure_kind, Some(SettlementFailureKind::Submission));
         assert!(result.error.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-request recipient override (verify_payment_to) — settlement P1
+    // -----------------------------------------------------------------------
+
+    /// Distinct vendor recipient for override tests (wrapped-SOL mint pubkey —
+    /// any valid base58 32-byte key works; only inequality with
+    /// `TEST_RECIPIENT` matters).
+    const TEST_VENDOR_RECIPIENT: &str = "So11111111111111111111111111111111111111112";
+
+    /// Signed USDC `TransferChecked` payload paying `destination` (raw wallet
+    /// form, accepted by the verifier's raw-recipient fallback branch).
+    fn signed_transfer_checked_payload_to(destination: &str) -> PaymentPayload {
+        let signer = test_signer_pubkey();
+        let destination = Pubkey::from_str(destination).expect("valid pubkey");
+        let usdc_mint = Pubkey::from_str(TEST_USDC_MINT).expect("valid pubkey");
+        let msg = build_spl_transfer_checked_message(&signer, &destination, &usdc_mint, 5000, 6);
+        let tx = encode_base64(&wrap_in_transaction(&msg));
+        PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/services/test-svc/proxy".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "exact".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "5000".to_string(),
+                asset: TEST_USDC_MINT.to_string(),
+                pay_to: destination.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Direct(SolanaPayload { transaction: tx }),
+        }
+    }
+
+    /// Verifier whose STATIC recipient is `TEST_RECIPIENT` and whose RPC URL is
+    /// unroutable, so a verification that clears every static check fails at
+    /// the final `simulateTransaction` step with `Error::Rpc`.
+    fn unroutable_rpc_verifier() -> SolanaVerifier {
+        SolanaVerifier::new(
+            "http://127.0.0.1:1",
+            TEST_RECIPIENT,
+            TEST_USDC_MINT,
+            reqwest::Client::new(),
+        )
+        .expect("verifier")
+    }
+
+    /// With the override, a transfer paying the vendor recipient must clear
+    /// the destination check even though the verifier's static recipient is
+    /// different — proven by verification proceeding all the way to the RPC
+    /// simulation step (which fails on the unroutable URL).
+    #[tokio::test]
+    async fn verify_payment_to_accepts_transfer_to_override_recipient() {
+        let verifier = unroutable_rpc_verifier();
+        let payload = signed_transfer_checked_payload_to(TEST_VENDOR_RECIPIENT);
+
+        let err = verifier
+            .verify_payment_to(&payload, TEST_VENDOR_RECIPIENT)
+            .await
+            .expect_err("must reach (and fail at) the RPC simulation step");
+
+        assert!(
+            matches!(err, Error::Rpc(_)),
+            "expected Rpc error from the simulation step (recipient gate cleared), got {err:?}"
+        );
+    }
+
+    /// A transfer paying the GLOBAL recipient must be rejected when the
+    /// service expects the vendor wallet — hard equality, exactly like any
+    /// other wrong recipient.
+    #[tokio::test]
+    async fn verify_payment_to_rejects_transfer_to_global_recipient() {
+        let verifier = unroutable_rpc_verifier();
+        let payload = signed_transfer_checked_payload_to(TEST_RECIPIENT);
+
+        let err = verifier
+            .verify_payment_to(&payload, TEST_VENDOR_RECIPIENT)
+            .await
+            .expect_err("payment to the global recipient must be rejected for a vendor service");
+
+        assert!(
+            matches!(err, Error::WrongRecipient { .. }),
+            "expected WrongRecipient, got {err:?}"
+        );
+    }
+
+    /// Without the override, `verify_payment` keeps enforcing the verifier's
+    /// static recipient — a transfer to a vendor wallet stays rejected
+    /// (byte-for-byte fallback behavior for services without vendor_wallet).
+    #[tokio::test]
+    async fn verify_payment_still_rejects_transfer_to_vendor_recipient() {
+        let verifier = unroutable_rpc_verifier();
+        let payload = signed_transfer_checked_payload_to(TEST_VENDOR_RECIPIENT);
+
+        let err = verifier
+            .verify_payment(&payload)
+            .await
+            .expect_err("payment to a non-global recipient must be rejected without override");
+
+        assert!(
+            matches!(err, Error::WrongRecipient { .. }),
+            "expected WrongRecipient, got {err:?}"
+        );
+    }
+
+    /// An unparseable override recipient must fail closed before any
+    /// destination comparison.
+    #[tokio::test]
+    async fn verify_payment_to_rejects_unparseable_recipient() {
+        let verifier = unroutable_rpc_verifier();
+        let payload = signed_transfer_checked_payload_to(TEST_RECIPIENT);
+
+        let err = verifier
+            .verify_payment_to(&payload, "not-a-valid-pubkey")
+            .await
+            .expect_err("invalid expected recipient must be rejected");
+
+        assert!(
+            matches!(err, Error::InvalidTransaction(_)),
+            "expected InvalidTransaction, got {err:?}"
+        );
     }
 
     // -----------------------------------------------------------------------

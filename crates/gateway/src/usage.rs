@@ -287,6 +287,38 @@ pub struct SpendLogEntry {
     /// counters were not pre-committed (legacy / proxy / test paths) and
     /// `log_spend` increments by `cost_usdc` directly.
     pub estimated_cost_usdc: Option<f64>,
+    /// Vendor-settlement record for marketplace services with a per-service
+    /// `vendor_wallet` (settlement-platform P1). `None` on every other path.
+    pub vendor: Option<VendorSettlement>,
+}
+
+/// Fee-receivable record for a vendor-settled marketplace request.
+///
+/// Settlement-platform P1, "Vendor-Settlement Fee Mechanics" RFC (2026-06-12,
+/// mechanism C / record + invoice, vendor absorbs): the agent's single
+/// transfer settles `settled_atomic` directly to `vendor_wallet`; Solvela's 5%
+/// platform fee is never charged on-chain on this path — it is recorded here
+/// (atomic units, integer math) and invoiced to the vendor off-chain.
+///
+/// All three fields travel together: a receivable without its vendor wallet
+/// (or vice versa) would be uninvoiceable, so the spend entry carries this as
+/// a single `Option`.
+#[derive(Debug, Clone)]
+pub struct VendorSettlement {
+    /// Vendor wallet (base58 pubkey) the payment settled to on-chain.
+    pub vendor_wallet: String,
+    /// Amount settled to the vendor, in atomic USDC (6 decimals). `u64` —
+    /// semantically non-negative, like every other atomic amount on the money
+    /// path. The Postgres columns are `BIGINT`; the proxy fails closed BEFORE
+    /// quoting if the priced amount cannot be represented as `i64` (see the
+    /// pre-quote guard in `routes/proxy.rs`), and `log_spend` performs the
+    /// single `i64::try_from` at the bind site.
+    pub settled_atomic: u64,
+    /// Solvela's 5% fee receivable in atomic USDC, computed as
+    /// `floor(settled × 105 / 100) − settled` (the canonical platform-fee
+    /// formula; equivalent to `floor(settled × 5 / 100)`, i.e. the receivable
+    /// rounds DOWN — see `compute_service_cost` in `routes/proxy.rs`).
+    pub fee_receivable_atomic: u64,
 }
 
 /// Error types for usage tracking.
@@ -389,6 +421,14 @@ impl UsageTracker {
             tx_signature = entry.tx_signature.as_deref().unwrap_or("none"),
             request_id = entry.request_id.as_deref().unwrap_or("none"),
             session_prefix = %session_prefix,
+            vendor_wallet = entry
+                .vendor
+                .as_ref()
+                .map(|v| v.vendor_wallet.as_str())
+                .unwrap_or("none"),
+            vendor_settled_atomic = entry.vendor.as_ref().map_or(0, |v| v.settled_atomic),
+            vendor_fee_receivable_atomic =
+                entry.vendor.as_ref().map_or(0, |v| v.fee_receivable_atomic),
             "spend logged"
         );
 
@@ -397,9 +437,38 @@ impl UsageTracker {
             let pool = pool.clone();
             let db_entry = entry.clone();
             tokio::spawn(async move {
+                // The ONE u64 → BIGINT conversion on the vendor-receivable
+                // path. The proxy's pre-quote guard (`routes/proxy.rs`)
+                // already rejected any request whose amounts exceed i64, so
+                // the Err arm is unreachable in practice — but a money write
+                // is never skipped silently: on Err we emit the same
+                // reconcilable vendor-loss event (counter + full fields) the
+                // INSERT-failure path uses, instead of panicking.
+                let vendor_bind: Option<(&str, i64, i64)> = match &db_entry.vendor {
+                    None => None,
+                    Some(v) => match (
+                        i64::try_from(v.settled_atomic),
+                        i64::try_from(v.fee_receivable_atomic),
+                    ) {
+                        (Ok(settled), Ok(fee)) => Some((v.vendor_wallet.as_str(), settled, fee)),
+                        _ => {
+                            metrics::counter!("solvela_vendor_receivable_write_failures_total")
+                                .increment(1);
+                            error!(
+                                vendor_wallet = %v.vendor_wallet,
+                                settled_atomic = v.settled_atomic,
+                                fee_receivable_atomic = v.fee_receivable_atomic,
+                                service_id = %db_entry.model,
+                                "vendor settlement amounts exceed the BIGINT range — \
+                                 spend row not written, fee receivable may be lost"
+                            );
+                            return;
+                        }
+                    },
+                };
                 let result = sqlx::query(
-                    r#"INSERT INTO spend_logs (id, wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, request_id, session_id, tenant, created_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+                    r#"INSERT INTO spend_logs (id, wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, request_id, session_id, tenant, vendor_wallet, vendor_settled_atomic, vendor_fee_receivable_atomic, created_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
                 )
                 .bind(id)
                 .bind(&db_entry.wallet_address)
@@ -412,12 +481,35 @@ impl UsageTracker {
                 .bind(&db_entry.request_id)
                 .bind(&db_entry.session_id)
                 .bind(&db_entry.tenant)
+                .bind(vendor_bind.map(|(wallet, _, _)| wallet.to_string()))
+                .bind(vendor_bind.map(|(_, settled, _)| settled))
+                .bind(vendor_bind.map(|(_, _, fee)| fee))
                 .bind(created_at)
                 .execute(&pool)
                 .await;
 
                 if let Err(e) = result {
-                    warn!(error = %e, "failed to write spend log to database");
+                    // A vendor row carries Solvela's 5% fee receivable
+                    // (settlement-platform P1): the agent already settled to
+                    // the vendor on-chain, so a lost row is revenue that can
+                    // no longer be invoiced. Emit every field needed to
+                    // reconcile the receivable by hand, and count the failure
+                    // so it can be alerted on. (On this path `model` carries
+                    // the marketplace service id — see `routes/proxy.rs`.)
+                    if let Some(vendor) = &db_entry.vendor {
+                        metrics::counter!("solvela_vendor_receivable_write_failures_total")
+                            .increment(1);
+                        error!(
+                            error = %e,
+                            vendor_wallet = %vendor.vendor_wallet,
+                            settled_atomic = vendor.settled_atomic,
+                            fee_receivable_atomic = vendor.fee_receivable_atomic,
+                            service_id = %db_entry.model,
+                            "failed to write vendor spend log to database — fee receivable may be lost"
+                        );
+                    } else {
+                        warn!(error = %e, "failed to write spend log to database");
+                    }
                 }
             });
         }
@@ -1937,6 +2029,7 @@ mod tests {
             tenant: None,
             tenant_enforced: false,
             estimated_cost_usdc: None,
+            vendor: None,
         });
     }
 

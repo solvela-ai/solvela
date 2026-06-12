@@ -61,6 +61,9 @@ pub async fn list_services(
             // useful reconnaissance for availability attacks. Operators
             // can query health via a dedicated admin-protected endpoint
             // (TODO: add `GET /v1/admin/services/health`).
+            // `svc.vendor_wallet` is deliberately omitted too: settlement
+            // recipients are a vendor/operator concern, not public-listing
+            // data — the payer learns the pay_to from the 402 challenge.
             json!({
                 "id": svc.id,
                 "name": svc.name,
@@ -100,6 +103,11 @@ pub struct RegisterServiceRequest {
     #[serde(default)]
     pub pricing_label: Option<String>,
     pub price_per_request_usdc: Option<f64>,
+    /// Per-service payment recipient (vendor-absorbs fee semantics — see
+    /// `ServiceEntry::vendor_wallet` and the "Vendor-Settlement Fee Mechanics"
+    /// RFC, 2026-06-12). Validated as a Solana pubkey by the registry.
+    #[serde(default)]
+    pub vendor_wallet: Option<String>,
 }
 
 /// POST /v1/services/register — register a new external service at runtime.
@@ -176,6 +184,18 @@ pub async fn register_service(
                 .into_response();
         }
     }
+    // Base58 32-byte pubkeys are at most 44 characters; cap before the
+    // registry's full pubkey validation so an oversized value is rejected
+    // cheaply (mirrors the other field-length guards above).
+    if let Some(ref vendor_wallet) = body.vendor_wallet {
+        if vendor_wallet.len() > 44 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "vendor_wallet must be at most 44 characters" })),
+            )
+                .into_response();
+        }
+    }
 
     // Validate endpoint is not a private/internal network address (SSRF prevention)
     match security::is_private_endpoint(&body.endpoint).await {
@@ -217,6 +237,7 @@ pub async fn register_service(
         source: "api".to_string(),
         healthy: None,
         price_per_request_usdc: body.price_per_request_usdc,
+        vendor_wallet: body.vendor_wallet,
     };
 
     // Acquire write lock and register

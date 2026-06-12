@@ -37,3 +37,21 @@
 # category = "search"
 # x402_enabled = true
 # internal = false
+#
+# ── Vendor-settled services (settlement-platform P1) ────────────────
+#
+# `vendor_wallet` (optional, external services only) makes the agent pay the
+# listed `price_per_request_usdc` directly to the vendor's wallet — no 5%
+# fee-on-top. Solvela's 5% is recorded in spend_logs as an off-chain
+# receivable against the vendor (vendor absorbs; see the
+# "Vendor-Settlement Fee Mechanics" RFC, 2026-06-12). The value must be a
+# valid base58 Solana pubkey; the gateway fails closed at load time otherwise.
+#
+# [services.vendor-data-api]
+# name = "Vendor Data API"
+# endpoint = "https://api.vendor.example.com/v1/data"    # PLACEHOLDER — do not enable
+# category = "data"
+# x402_enabled = true
+# internal = false
+# price_per_request_usdc = 0.02
+# vendor_wallet = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"  # PLACEHOLDER

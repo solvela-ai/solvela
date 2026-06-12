@@ -5,12 +5,14 @@
 //! are left for a follow-up — they require a fresh Redis instance per test
 //! and a different fixture story.
 
+use std::sync::Arc;
+
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use gateway::usage::{
     get_stats_by_day, get_stats_by_model, get_wallet_stats, BudgetConfig, SpendLogEntry,
-    UsageError, UsageTracker,
+    UsageError, UsageTracker, VendorSettlement,
 };
 
 const WALLET_A: &str = "DZNuWFpYwzEAcyaMQzqgbxA4d1f4Yq8EU2YbLPLYxNTw";
@@ -183,6 +185,7 @@ async fn log_spend_persists_row_when_db_configured(pool: PgPool) {
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        vendor: None,
     });
 
     // Fire-and-forget: poll briefly for the row to land.
@@ -232,6 +235,72 @@ async fn log_spend_persists_row_when_db_configured(pool: PgPool) {
     assert_eq!(row.6.as_deref(), Some("req-abc"));
 }
 
+/// (e, DB layer) a vendor-settled spend entry must persist the vendor wallet,
+/// the settled amount, and the 5% fee receivable (atomic units) so the
+/// off-chain invoice can be aggregated per vendor (settlement-platform P1,
+/// "Vendor-Settlement Fee Mechanics" RFC, 2026-06-12).
+#[sqlx::test(migrations = "../../migrations")]
+async fn log_spend_persists_vendor_fee_receivable(pool: PgPool) {
+    let tracker = UsageTracker::new(Some(pool.clone()), None);
+
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: WALLET_A.to_string(),
+        model: "vendor-data-api".to_string(),
+        provider: "external-service".to_string(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usdc: 0.02,
+        tx_signature: Some("vendor-settle-sig".to_string()),
+        request_id: None,
+        session_id: None,
+        tenant: None,
+        tenant_enforced: false,
+        estimated_cost_usdc: None,
+        vendor: Some(gateway::usage::VendorSettlement {
+            vendor_wallet: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            settled_atomic: 20_000,
+            // floor(20_000 × 105 / 100) − 20_000
+            fee_receivable_atomic: 1_000,
+        }),
+    });
+
+    // Fire-and-forget: poll briefly for the row to land.
+    let mut found = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM spend_logs WHERE wallet_address = $1")
+                .bind(WALLET_A)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        if count == 1 {
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "log_spend should have persisted exactly one row within 1s"
+    );
+
+    let row: (Option<String>, Option<i64>, Option<i64>) = sqlx::query_as(
+        r#"SELECT vendor_wallet, vendor_settled_atomic, vendor_fee_receivable_atomic
+           FROM spend_logs WHERE wallet_address = $1"#,
+    )
+    .bind(WALLET_A)
+    .fetch_one(&pool)
+    .await
+    .expect("read back vendor columns");
+
+    assert_eq!(
+        row.0.as_deref(),
+        Some("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM")
+    );
+    assert_eq!(row.1, Some(20_000));
+    assert_eq!(row.2, Some(1_000));
+}
+
 #[tokio::test]
 async fn log_spend_with_no_backends_does_not_panic() {
     // Pure smoke: emits a tracing event without touching DB or Redis.
@@ -249,6 +318,7 @@ async fn log_spend_with_no_backends_does_not_panic() {
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        vendor: None,
     });
 }
 
@@ -353,4 +423,162 @@ async fn get_stats_filters_outside_window(pool: PgPool) {
         "30-day-old row must be filtered out by the 7-day window"
     );
     assert!((stats.total_cost - 0.001).abs() < 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// Vendor fee-receivable write-failure observability (review round 1,
+// silent-failure-hunter Critical on the P1 vendor_wallet PR).
+//
+// A vendor spend row that fails to INSERT is revenue silently lost: the agent
+// already settled to the vendor on-chain, and Solvela's 5% receivable exists
+// ONLY in that row. The failure branch must emit an event carrying every field
+// needed to reconcile the receivable by hand; non-vendor rows keep the
+// existing single warn.
+// ---------------------------------------------------------------------------
+
+/// A `MakeWriter` capturing formatted tracing output into a shared buffer
+/// (same mechanism as the #541 streaming spend-log tests in integration.rs).
+#[derive(Clone, Default)]
+struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = CaptureWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Poll the capture buffer (the events are emitted inside `log_spend`'s
+/// fire-and-forget `tokio::spawn`) until at least one JSON event whose
+/// `fields.message` equals `message` appears, or ~2s elapse. Returns every
+/// matching event (full JSON, so callers can assert on `level` too).
+async fn wait_for_events(capture: &CaptureWriter, message: &str) -> Vec<serde_json::Value> {
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let bytes = capture.0.lock().unwrap().clone();
+        let events: Vec<serde_json::Value> = String::from_utf8(bytes)
+            .expect("captured tracing output is UTF-8")
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|v| v["fields"]["message"] == message)
+            .collect();
+        if !events.is_empty() {
+            return events;
+        }
+    }
+    Vec::new()
+}
+
+fn vendor_failure_entry(vendor: Option<VendorSettlement>) -> SpendLogEntry {
+    SpendLogEntry {
+        wallet_address: WALLET_A.to_string(),
+        model: "vendor-data-api".to_string(),
+        provider: "external-service".to_string(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usdc: 0.02,
+        tx_signature: Some("tx-vendor-fail".to_string()),
+        request_id: Some("req-vendor-fail".to_string()),
+        session_id: None,
+        tenant: None,
+        tenant_enforced: false,
+        estimated_cost_usdc: None,
+        vendor,
+    }
+}
+
+/// A failed INSERT of a VENDOR row must emit an ERROR event with every field
+/// needed to reconcile the lost receivable (vendor wallet, settled +
+/// receivable atomic amounts, service id), and a failed non-vendor row must
+/// keep the existing plain warn with no vendor fields.
+///
+/// The failure events fire inside the fire-and-forget `tokio::spawn`, which
+/// does not inherit a thread-local subscriber — so this test installs a
+/// process-GLOBAL JSON capture subscriber. It is the only test in this binary
+/// that sets one; events from concurrently running tests are filtered out by
+/// message in `wait_for_events`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn log_spend_vendor_insert_failure_emits_reconcilable_loss_event(pool: PgPool) {
+    // Break the INSERT target. `#[sqlx::test]` provisions a dedicated
+    // database for this test, so the rename is fully isolated.
+    sqlx::query("ALTER TABLE spend_logs RENAME TO spend_logs_broken")
+        .execute(&pool)
+        .await
+        .expect("rename spend_logs out of the way");
+
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("no other test in this binary installs a global subscriber");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), None);
+
+    // 1) Vendor row → dedicated ERROR event with reconciliation fields.
+    tracker.log_spend(vendor_failure_entry(Some(VendorSettlement {
+        vendor_wallet: WALLET_B.to_string(),
+        settled_atomic: 20_000,
+        fee_receivable_atomic: 1_000,
+    })));
+
+    let events = wait_for_events(
+        &capture,
+        "failed to write vendor spend log to database — fee receivable may be lost",
+    )
+    .await;
+    assert_eq!(
+        events.len(),
+        1,
+        "a failed vendor INSERT must emit exactly one receivable-loss event \
+         (got {}): the vendor was already paid on-chain and the 5% receivable \
+         exists only in the lost row",
+        events.len()
+    );
+    let fields = &events[0]["fields"];
+    assert_eq!(
+        events[0]["level"], "ERROR",
+        "receivable loss is error-level"
+    );
+    assert_eq!(fields["vendor_wallet"], WALLET_B);
+    assert_eq!(fields["settled_atomic"].as_i64(), Some(20_000));
+    assert_eq!(fields["fee_receivable_atomic"].as_i64(), Some(1_000));
+    assert_eq!(
+        fields["service_id"], "vendor-data-api",
+        "vendor rows come from the service proxy path, where model == service id"
+    );
+    assert!(
+        fields["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "the DB error must be carried on the event"
+    );
+
+    // 2) Non-vendor row → the existing single warn, unchanged, no vendor fields.
+    tracker.log_spend(vendor_failure_entry(None));
+
+    let warns = wait_for_events(&capture, "failed to write spend log to database").await;
+    assert_eq!(
+        warns.len(),
+        1,
+        "a failed non-vendor INSERT keeps the existing single warn (got {})",
+        warns.len()
+    );
+    assert_eq!(warns[0]["level"], "WARN");
+    assert!(
+        warns[0]["fields"].get("vendor_wallet").is_none(),
+        "the non-vendor warn must not grow vendor fields"
+    );
 }

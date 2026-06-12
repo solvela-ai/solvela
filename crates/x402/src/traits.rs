@@ -24,6 +24,32 @@ pub trait PaymentVerifier: Send + Sync {
     /// - Transaction simulation succeeds
     async fn verify_payment(&self, payload: &PaymentPayload) -> Result<VerificationResult, Error>;
 
+    /// Verify a payment against a CALLER-SUPPLIED expected recipient instead
+    /// of the verifier's statically-configured one.
+    ///
+    /// Used by the service marketplace's per-service `vendor_wallet`
+    /// (settlement-platform P1): a service with a vendor wallet must be paid
+    /// to that wallet, not the gateway's global recipient, with the same hard
+    /// recipient-equality check `verify_payment` applies.
+    ///
+    /// The default implementation FAILS CLOSED with
+    /// [`Error::RecipientOverrideUnsupported`]: a verifier that has not
+    /// implemented per-request recipient override must never silently verify
+    /// against its static recipient when the caller asked for a different one
+    /// — that would misdirect funds.
+    async fn verify_payment_to(
+        &self,
+        payload: &PaymentPayload,
+        expected_recipient: &str,
+    ) -> Result<VerificationResult, Error> {
+        let _ = (payload, expected_recipient);
+        Err(Error::RecipientOverrideUnsupported(format!(
+            "{}/{}",
+            self.network(),
+            self.scheme()
+        )))
+    }
+
     /// Settle a verified payment by broadcasting the transaction on-chain.
     ///
     /// Steps:
@@ -77,4 +103,10 @@ pub enum Error {
 
     #[error("payload type mismatch: {0}")]
     PayloadMismatch(String),
+
+    #[error(
+        "verifier {0} does not support per-request recipient override; \
+         refusing to verify against its static recipient"
+    )]
+    RecipientOverrideUnsupported(String),
 }

@@ -89,6 +89,45 @@ impl Facilitator {
         // Then settle
         verifier.settle_payment(payload).await
     }
+
+    /// Verify a payment against a caller-supplied expected recipient, then
+    /// settle it.
+    ///
+    /// Per-service `vendor_wallet` variant of [`Facilitator::verify_and_settle`]
+    /// (settlement-platform P1): verification runs through
+    /// [`PaymentVerifier::verify_payment_to`], whose default implementation
+    /// fails closed when a verifier does not support recipient override — a
+    /// vendor-addressed payment is never silently verified against the
+    /// gateway's static recipient.
+    pub async fn verify_and_settle_to(
+        &self,
+        payload: &PaymentPayload,
+        expected_recipient: &str,
+    ) -> Result<SettlementResult, Error> {
+        let network = &payload.accepted.network;
+        let scheme = &payload.accepted.scheme;
+        info!(
+            network,
+            scheme, expected_recipient, "routing vendor-recipient settlement to chain verifier"
+        );
+
+        let verifier = self.verifier_for(network, scheme)?;
+
+        // Verify first — against the per-request recipient.
+        let verification = verifier
+            .verify_payment_to(payload, expected_recipient)
+            .await?;
+        if !verification.valid {
+            return Err(Error::InvalidTransaction(
+                verification
+                    .reason
+                    .unwrap_or_else(|| "verification failed".to_string()),
+            ));
+        }
+
+        // Then settle
+        verifier.settle_payment(payload).await
+    }
 }
 
 #[cfg(test)]
@@ -279,5 +318,106 @@ mod tests {
 
         let result = facilitator.verify(&payload).await;
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-request recipient override (settlement-platform P1, vendor_wallet)
+    // -----------------------------------------------------------------------
+
+    /// A verifier that supports the per-request recipient override and records
+    /// the recipient it was asked to verify against.
+    struct RecipientRecordingVerifier {
+        recorded: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PaymentVerifier for RecipientRecordingVerifier {
+        fn network(&self) -> &str {
+            SOLANA_NETWORK
+        }
+
+        fn scheme(&self) -> &str {
+            "exact"
+        }
+
+        async fn verify_payment(
+            &self,
+            _payload: &PaymentPayload,
+        ) -> Result<VerificationResult, Error> {
+            Ok(VerificationResult {
+                valid: true,
+                reason: None,
+                verified_amount: Some(1000),
+            })
+        }
+
+        async fn verify_payment_to(
+            &self,
+            _payload: &PaymentPayload,
+            expected_recipient: &str,
+        ) -> Result<VerificationResult, Error> {
+            *self.recorded.lock().expect("test mutex") = Some(expected_recipient.to_string());
+            Ok(VerificationResult {
+                valid: true,
+                reason: None,
+                verified_amount: Some(1000),
+            })
+        }
+
+        async fn settle_payment(
+            &self,
+            _payload: &PaymentPayload,
+        ) -> Result<SettlementResult, Error> {
+            Ok(SettlementResult {
+                success: true,
+                tx_signature: Some("MockVendorSettleSig".to_string()),
+                network: SOLANA_NETWORK.to_string(),
+                error: None,
+                verified_amount: None,
+                failure_kind: None,
+            })
+        }
+    }
+
+    /// `verify_and_settle_to` must verify against the caller-supplied expected
+    /// recipient (a marketplace service's vendor wallet), not the verifier's
+    /// statically-configured one, and then settle.
+    #[tokio::test]
+    async fn verify_and_settle_to_passes_recipient_override_to_verifier() {
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let facilitator = Facilitator::new(vec![Arc::new(RecipientRecordingVerifier {
+            recorded: std::sync::Arc::clone(&recorded),
+        })]);
+        let payload = make_test_payload();
+
+        let result = facilitator
+            .verify_and_settle_to(&payload, "VendorWalletPubkey")
+            .await
+            .expect("override-supporting verifier must verify and settle");
+
+        assert!(result.success);
+        assert_eq!(
+            recorded.lock().expect("test mutex").as_deref(),
+            Some("VendorWalletPubkey"),
+            "verification must run against the per-request recipient"
+        );
+    }
+
+    /// A verifier that does not implement the override must FAIL CLOSED via
+    /// the trait's default `verify_payment_to` — never silently verify against
+    /// its statically-configured recipient.
+    #[tokio::test]
+    async fn verify_and_settle_to_fails_closed_when_override_unsupported() {
+        let facilitator = Facilitator::new(vec![Arc::new(MockVerifier)]);
+        let payload = make_test_payload();
+
+        let result = facilitator
+            .verify_and_settle_to(&payload, "VendorWalletPubkey")
+            .await;
+
+        assert!(
+            matches!(result, Err(Error::RecipientOverrideUnsupported(_))),
+            "default verify_payment_to must fail closed, got {result:?}"
+        );
     }
 }

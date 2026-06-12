@@ -5,6 +5,7 @@
 //! Supports runtime registration via `register()` for the admin API.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -46,6 +47,20 @@ pub enum RegistrationError {
 
     #[error("price_per_request_usdc must be greater than 0")]
     InvalidPrice,
+
+    #[error("vendor_wallet must be a valid base58-encoded 32-byte Solana pubkey")]
+    InvalidVendorWallet,
+
+    #[error("vendor_wallet is only supported on external services")]
+    VendorWalletOnInternalService,
+
+    #[error(
+        "vendor_wallet must differ from the gateway's global recipient wallet: \
+         a vendor service is quoted WITHOUT the 5% agent-side fee (vendor \
+         absorbs), so pointing it at the gateway's own wallet would undercharge \
+         the agent and have the gateway invoice itself for the receivable"
+    )]
+    VendorWalletIsGatewayRecipient,
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +81,8 @@ struct RawServiceEntry {
     pub pricing_label: Option<String>,
     #[serde(default)]
     pub price_per_request_usdc: Option<f64>,
+    #[serde(default)]
+    pub vendor_wallet: Option<String>,
 }
 
 /// Outer TOML wrapper: `[services.<id>]` tables.
@@ -108,6 +125,22 @@ pub struct ServiceEntry {
     /// Flat per-request price in USDC (used by external services).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price_per_request_usdc: Option<f64>,
+    /// Per-service payment recipient (base58 Solana wallet pubkey).
+    ///
+    /// Settlement-platform P1, per the "Vendor-Settlement Fee Mechanics" RFC
+    /// (2026-06-12, mechanism C / record + invoice, **vendor absorbs** the fee):
+    /// when set, the agent pays EXACTLY `price_per_request_usdc` (no 5%
+    /// fee-on-top) in a single transfer addressed to this wallet, and
+    /// Solvela's 5% platform fee is RECORDED as an off-chain receivable
+    /// against the vendor (spend_logs), never charged to the agent. When
+    /// `None`, today's behavior applies unchanged: `price × 1.05` paid to the
+    /// gateway's global recipient wallet.
+    ///
+    /// Validated as a base58 32-byte Solana pubkey at load/registration time
+    /// (fail closed) and only permitted on external services — the internal
+    /// chat pipeline does not honor it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_wallet: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +155,16 @@ pub struct ServiceEntry {
 #[derive(Debug, Clone)]
 pub struct ServiceRegistry {
     services: Vec<ServiceEntry>,
+    /// The gateway's global recipient wallet, when known (set via
+    /// [`ServiceRegistry::with_gateway_recipient`] at startup; `None` in
+    /// registries built without one, e.g. bare test fixtures).
+    ///
+    /// When present, `register()` (and the startup re-validation) rejects any
+    /// `vendor_wallet` equal to it: a "vendor" pointing at the gateway's own
+    /// wallet would be quoted vendor-absorbs (agent pays NO 5% on top) while
+    /// the receivable is invoiced to... the gateway itself — a silent 5%
+    /// undercharge. See [`RegistrationError::VendorWalletIsGatewayRecipient`].
+    gateway_recipient: Option<String>,
 }
 
 impl ServiceRegistry {
@@ -129,7 +172,36 @@ impl ServiceRegistry {
     pub fn empty() -> Self {
         Self {
             services: Vec::new(),
+            gateway_recipient: None,
         }
+    }
+
+    /// Attach the gateway's global recipient wallet and re-validate every
+    /// already-loaded entry against it.
+    ///
+    /// Call once at startup, after config is final (see `main.rs`). Returns
+    /// `Err(ServiceRegistryError::InvalidEntry)` naming the offending service
+    /// if any loaded `vendor_wallet` equals the recipient — fail-closed at
+    /// load, never at quote time. An empty `recipient_wallet` (unconfigured
+    /// dev mode) disables the check: no valid base58 `vendor_wallet` can ever
+    /// equal the empty string anyway.
+    pub fn with_gateway_recipient(
+        mut self,
+        recipient_wallet: &str,
+    ) -> Result<Self, ServiceRegistryError> {
+        if recipient_wallet.is_empty() {
+            return Ok(self);
+        }
+        for entry in &self.services {
+            if entry.vendor_wallet.as_deref() == Some(recipient_wallet) {
+                return Err(ServiceRegistryError::InvalidEntry {
+                    id: entry.id.clone(),
+                    source: RegistrationError::VendorWalletIsGatewayRecipient,
+                });
+            }
+        }
+        self.gateway_recipient = Some(recipient_wallet.to_string());
+        Ok(self)
     }
 
     /// Parse a TOML string (content of `services.toml`) into a registry.
@@ -159,6 +231,7 @@ impl ServiceRegistry {
                 source: "config".to_string(),
                 healthy: None,
                 price_per_request_usdc: raw.price_per_request_usdc,
+                vendor_wallet: raw.vendor_wallet,
             };
             validate_entry(&entry).map_err(|source| ServiceRegistryError::InvalidEntry {
                 id: id.clone(),
@@ -170,7 +243,10 @@ impl ServiceRegistry {
         // Stable alphabetical order so response is deterministic.
         services.sort_by(|a, b| a.id.cmp(&b.id));
 
-        Ok(Self { services })
+        Ok(Self {
+            services,
+            gateway_recipient: None,
+        })
     }
 
     /// Return all registered services.
@@ -199,6 +275,20 @@ impl ServiceRegistry {
     /// `Err(RegistrationError)` if validation fails or the ID is taken.
     pub fn register(&mut self, entry: ServiceEntry) -> Result<(), RegistrationError> {
         validate_entry(&entry)?;
+
+        // Degenerate-recipient guard: a vendor_wallet equal to the gateway's
+        // own recipient wallet silently undercharges the agent 5% (vendor
+        // quotes drop the agent-side fee) and books a receivable the gateway
+        // would invoice to itself. Only enforceable when the registry knows
+        // the recipient — see `with_gateway_recipient`.
+        if let (Some(recipient), Some(vendor_wallet)) = (
+            self.gateway_recipient.as_deref(),
+            entry.vendor_wallet.as_deref(),
+        ) {
+            if vendor_wallet == recipient {
+                return Err(RegistrationError::VendorWalletIsGatewayRecipient);
+            }
+        }
 
         // Check uniqueness against the current registry.
         if self.services.iter().any(|s| s.id == entry.id) {
@@ -260,6 +350,21 @@ fn validate_entry(entry: &ServiceEntry) -> Result<(), RegistrationError> {
         match entry.price_per_request_usdc {
             Some(price) if price > 0.0 => {}
             _ => return Err(RegistrationError::InvalidPrice),
+        }
+    }
+
+    // vendor_wallet — fail closed on anything that is not a base58 32-byte
+    // Solana pubkey: an invalid recipient must reject the entry at load /
+    // registration time, never surface later as an unpayable 402 quote or a
+    // misdirected transfer. Internal services reject it outright: the chat
+    // pipeline does not honor vendor settlement, so accepting it there would
+    // let config claim a vendor gets paid while the gateway pays itself.
+    if let Some(ref vendor_wallet) = entry.vendor_wallet {
+        if entry.internal {
+            return Err(RegistrationError::VendorWalletOnInternalService);
+        }
+        if solvela_x402::solana_types::Pubkey::from_str(vendor_wallet).is_err() {
+            return Err(RegistrationError::InvalidVendorWallet);
         }
     }
 
@@ -427,6 +532,7 @@ internal = true
             source: "api".to_string(),
             healthy: None,
             price_per_request_usdc: Some(0.01),
+            vendor_wallet: None,
         };
         assert!(registry.register(entry).is_ok());
         assert_eq!(registry.all().len(), 1);
@@ -449,6 +555,7 @@ internal = true
             source: "api".to_string(),
             healthy: None,
             price_per_request_usdc: Some(0.01),
+            vendor_wallet: None,
         };
         registry.register(entry.clone()).unwrap();
         let result = registry.register(entry);
@@ -474,6 +581,7 @@ internal = true
             source: "api".to_string(),
             healthy: None,
             price_per_request_usdc: Some(0.01),
+            vendor_wallet: None,
         };
         assert_eq!(
             registry.register(entry),
@@ -497,6 +605,7 @@ internal = true
             source: "api".to_string(),
             healthy: None,
             price_per_request_usdc: Some(0.01),
+            vendor_wallet: None,
         };
         assert_eq!(registry.register(entry), Err(RegistrationError::InvalidId));
     }
@@ -517,6 +626,7 @@ internal = true
             source: "api".to_string(),
             healthy: None,
             price_per_request_usdc: None,
+            vendor_wallet: None,
         };
         assert_eq!(
             registry.register(entry),
@@ -591,6 +701,256 @@ price_per_request_usdc = 0.001
             }
             other => panic!("expected InvalidEntry, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // vendor_wallet (settlement-platform P1: per-service payment recipient)
+    // -----------------------------------------------------------------------
+
+    /// A valid base58 Solana pubkey (the exact-scheme golden vector's pay_to).
+    const VALID_VENDOR_WALLET: &str = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+
+    #[test]
+    fn from_toml_parses_vendor_wallet() {
+        let toml = format!(
+            r#"
+[services.vendor-svc]
+name = "Vendor Service"
+endpoint = "https://vendor.example.com/api"
+category = "data"
+x402_enabled = true
+internal = false
+pricing_label = "$0.01/request"
+price_per_request_usdc = 0.01
+vendor_wallet = "{VALID_VENDOR_WALLET}"
+"#
+        );
+        let registry = ServiceRegistry::from_toml(&toml).expect("valid vendor_wallet must load");
+        assert_eq!(
+            registry.get("vendor-svc").unwrap().vendor_wallet.as_deref(),
+            Some(VALID_VENDOR_WALLET)
+        );
+    }
+
+    #[test]
+    fn vendor_wallet_defaults_to_none_when_absent() {
+        let registry = ServiceRegistry::from_toml(SAMPLE_TOML).unwrap();
+        for svc in registry.all() {
+            assert_eq!(
+                svc.vendor_wallet, None,
+                "service '{}' must default to no vendor wallet",
+                svc.id
+            );
+        }
+    }
+
+    /// Fail closed at load time: a vendor_wallet that is not a valid Solana
+    /// pubkey must reject the whole registry, not surface later as an
+    /// unpayable 402 or a misdirected transfer.
+    #[test]
+    fn from_toml_rejects_invalid_vendor_wallet() {
+        let bad = r#"
+[services.bad-vendor]
+name = "Bad Vendor"
+endpoint = "https://vendor.example.com/api"
+category = "data"
+x402_enabled = true
+internal = false
+pricing_label = "$0.01/request"
+price_per_request_usdc = 0.01
+vendor_wallet = "not-a-valid-pubkey"
+"#;
+        let err = ServiceRegistry::from_toml(bad).expect_err("must reject invalid vendor_wallet");
+        match err {
+            ServiceRegistryError::InvalidEntry { id, source } => {
+                assert_eq!(id, "bad-vendor");
+                assert_eq!(source, RegistrationError::InvalidVendorWallet);
+            }
+            other => panic!("expected InvalidEntry, got {other:?}"),
+        }
+    }
+
+    /// Valid base58 but not 32 bytes — must also reject.
+    #[test]
+    fn from_toml_rejects_short_base58_vendor_wallet() {
+        let bad = r#"
+[services.short-vendor]
+name = "Short Vendor"
+endpoint = "https://vendor.example.com/api"
+category = "data"
+x402_enabled = true
+internal = false
+pricing_label = "$0.01/request"
+price_per_request_usdc = 0.01
+vendor_wallet = "abc"
+"#;
+        let err = ServiceRegistry::from_toml(bad).expect_err("must reject short vendor_wallet");
+        match err {
+            ServiceRegistryError::InvalidEntry { source, .. } => {
+                assert_eq!(source, RegistrationError::InvalidVendorWallet);
+            }
+            other => panic!("expected InvalidEntry, got {other:?}"),
+        }
+    }
+
+    /// vendor_wallet on an internal service would be silently ignored by the
+    /// chat pipeline (this P1 only wires the proxy path) — reject it outright
+    /// so config cannot claim a vendor gets paid when the gateway pays itself.
+    #[test]
+    fn from_toml_rejects_vendor_wallet_on_internal_service() {
+        let bad = format!(
+            r#"
+[services.internal-vendor]
+name = "Internal With Vendor"
+endpoint = "/v1/chat/completions"
+category = "intelligence"
+x402_enabled = true
+internal = true
+vendor_wallet = "{VALID_VENDOR_WALLET}"
+"#
+        );
+        let err = ServiceRegistry::from_toml(&bad)
+            .expect_err("must reject vendor_wallet on internal service");
+        match err {
+            ServiceRegistryError::InvalidEntry { source, .. } => {
+                assert_eq!(source, RegistrationError::VendorWalletOnInternalService);
+            }
+            other => panic!("expected InvalidEntry, got {other:?}"),
+        }
+    }
+
+    fn external_entry_with_vendor_wallet(vendor_wallet: Option<String>) -> ServiceEntry {
+        ServiceEntry {
+            id: "vendor-svc".to_string(),
+            name: "Vendor Service".to_string(),
+            category: "data".to_string(),
+            endpoint: "https://vendor.example.com/api".to_string(),
+            x402_enabled: true,
+            internal: false,
+            description: None,
+            pricing_label: "$0.01/request".to_string(),
+            chains: vec!["solana".to_string()],
+            source: "api".to_string(),
+            healthy: None,
+            price_per_request_usdc: Some(0.01),
+            vendor_wallet,
+        }
+    }
+
+    #[test]
+    fn register_accepts_valid_vendor_wallet() {
+        let mut registry = ServiceRegistry::empty();
+        let entry = external_entry_with_vendor_wallet(Some(VALID_VENDOR_WALLET.to_string()));
+        assert!(registry.register(entry).is_ok());
+        assert_eq!(
+            registry.get("vendor-svc").unwrap().vendor_wallet.as_deref(),
+            Some(VALID_VENDOR_WALLET)
+        );
+    }
+
+    #[test]
+    fn register_rejects_invalid_vendor_wallet() {
+        let mut registry = ServiceRegistry::empty();
+        let entry = external_entry_with_vendor_wallet(Some("0OIl-not-base58".to_string()));
+        assert_eq!(
+            registry.register(entry),
+            Err(RegistrationError::InvalidVendorWallet)
+        );
+    }
+
+    #[test]
+    fn register_rejects_vendor_wallet_on_internal_service() {
+        let mut registry = ServiceRegistry::empty();
+        let mut entry = external_entry_with_vendor_wallet(Some(VALID_VENDOR_WALLET.to_string()));
+        entry.internal = true;
+        entry.endpoint = "/v1/test".to_string();
+        assert_eq!(
+            registry.register(entry),
+            Err(RegistrationError::VendorWalletOnInternalService)
+        );
+    }
+
+    // ── vendor_wallet == gateway recipient (degenerate-recipient guard) ─────
+
+    /// Stand-in for the gateway's configured global recipient wallet. Must be
+    /// a VALID base58 pubkey (distinct from `VALID_VENDOR_WALLET`) so the
+    /// equality guard — not the pubkey-format check — is what rejects.
+    const GATEWAY_RECIPIENT: &str = "So11111111111111111111111111111111111111112";
+
+    /// `register()` on a recipient-aware registry must reject a vendor_wallet
+    /// equal to the gateway's own recipient: the degenerate case silently
+    /// undercharges the agent 5% and has the gateway invoice itself.
+    #[test]
+    fn register_rejects_vendor_wallet_equal_to_gateway_recipient() {
+        let mut registry = ServiceRegistry::empty()
+            .with_gateway_recipient(GATEWAY_RECIPIENT)
+            .expect("empty registry cannot conflict");
+        let entry = external_entry_with_vendor_wallet(Some(GATEWAY_RECIPIENT.to_string()));
+        assert_eq!(
+            registry.register(entry),
+            Err(RegistrationError::VendorWalletIsGatewayRecipient)
+        );
+        assert!(
+            registry.get("vendor-svc").is_none(),
+            "rejected entry must not be registered"
+        );
+    }
+
+    /// A distinct vendor_wallet still registers fine on a recipient-aware
+    /// registry — the guard only fires on equality.
+    #[test]
+    fn register_accepts_distinct_vendor_wallet_with_gateway_recipient_set() {
+        let mut registry = ServiceRegistry::empty()
+            .with_gateway_recipient(GATEWAY_RECIPIENT)
+            .expect("empty registry cannot conflict");
+        let entry = external_entry_with_vendor_wallet(Some(VALID_VENDOR_WALLET.to_string()));
+        assert!(registry.register(entry).is_ok());
+    }
+
+    /// `with_gateway_recipient` re-validates TOML-loaded entries: a
+    /// services.toml whose vendor_wallet equals the configured recipient must
+    /// fail the startup attach, naming the offending service.
+    #[test]
+    fn with_gateway_recipient_rejects_toml_loaded_conflicting_vendor_wallet() {
+        let toml = format!(
+            r#"
+[services.self-paying-svc]
+name = "Self Paying"
+endpoint = "https://vendor.example.com/api"
+category = "data"
+x402_enabled = true
+internal = false
+pricing_label = "$0.01/request"
+price_per_request_usdc = 0.01
+vendor_wallet = "{VALID_VENDOR_WALLET}"
+"#
+        );
+        let registry = ServiceRegistry::from_toml(&toml).expect("valid TOML must load");
+        // Attaching the SAME wallet as the gateway recipient must reject.
+        let err = registry
+            .clone()
+            .with_gateway_recipient(VALID_VENDOR_WALLET)
+            .expect_err("conflicting vendor_wallet must fail the recipient attach");
+        match err {
+            ServiceRegistryError::InvalidEntry { id, source } => {
+                assert_eq!(id, "self-paying-svc");
+                assert_eq!(source, RegistrationError::VendorWalletIsGatewayRecipient);
+            }
+            other => panic!("expected InvalidEntry, got {other:?}"),
+        }
+        // A different recipient attaches fine.
+        assert!(registry.with_gateway_recipient(GATEWAY_RECIPIENT).is_ok());
+    }
+
+    /// An EMPTY recipient (unconfigured dev mode) disables the guard rather
+    /// than rejecting every vendor service — no base58 pubkey equals "".
+    #[test]
+    fn with_gateway_recipient_empty_recipient_disables_guard() {
+        let mut registry = ServiceRegistry::empty()
+            .with_gateway_recipient("")
+            .expect("empty recipient must be accepted");
+        let entry = external_entry_with_vendor_wallet(Some(VALID_VENDOR_WALLET.to_string()));
+        assert!(registry.register(entry).is_ok());
     }
 
     #[test]

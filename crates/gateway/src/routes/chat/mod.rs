@@ -515,6 +515,7 @@ pub async fn chat_completions(
                     tenant: tenant.clone(),
                     tenant_enforced: false,
                     estimated_cost_usdc: None,
+                    vendor: None,
                 });
                 Ok(result.response)
             }
@@ -1367,6 +1368,7 @@ pub async fn chat_completions(
                                 // so the Skip path never accumulates per-tenant spend.
                                 tenant_enforced: budget_reservation.tenant_enforced(),
                                 estimated_cost_usdc: Some(estimated_cost),
+                                vendor: None,
                             });
                         }
                         Err(e) => {
@@ -1427,6 +1429,7 @@ pub async fn chat_completions(
                         // counters only when a provisioned bucket was enforced.
                         tenant_enforced: budget_reservation.tenant_enforced(),
                         estimated_cost_usdc: Some(estimated_cost),
+                        vendor: None,
                     });
                 }
                 SpendLogArm::EstimateFallback => {
@@ -1487,6 +1490,7 @@ pub async fn chat_completions(
                         // counters only when a provisioned bucket was enforced.
                         tenant_enforced: budget_reservation.tenant_enforced(),
                         estimated_cost_usdc: Some(estimated_cost),
+                        vendor: None,
                     });
                 }
             }
