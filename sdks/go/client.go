@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -222,7 +223,10 @@ func (c *SolvelaClient) Chat(ctx context.Context, request *ChatRequest) (*ChatRe
 // the payment, and the streaming request is then re-sent with the
 // Payment-Signature header attached. If no [Signer] is configured and a 402 is
 // returned, this method surfaces a [PaymentRequiredError] rather than silently
-// streaming an unauthenticated request.
+// streaming an unauthenticated request. If the gateway returns a second 402
+// AFTER a signed payment was attached to the streaming request, that is a
+// post-signing rejection and surfaces as a [PaymentRejectedError] — the same
+// distinction the non-streaming [SolvelaClient.Chat] path makes.
 func (c *SolvelaClient) ChatStream(ctx context.Context, request *ChatRequest) (<-chan ChatChunkOrError, error) {
 	model := request.Model
 
@@ -280,6 +284,17 @@ func (c *SolvelaClient) ChatStream(ctx context.Context, request *ChatRequest) (<
 	ch, err := c.transport.SendChatStream(streamCtx, effectiveReq, sig, nil)
 	if err != nil {
 		cancel()
+		// A 402 on the streaming POST after a Payment-Signature was attached
+		// is a *post-signing* rejection, not a fresh challenge. Convert it to
+		// PaymentRejectedError exactly as sendWithPayment does for the
+		// non-streaming path (and as the canonical Python client does in
+		// chat_stream), so callers can distinguish "needs signing" from
+		// "signed and rejected". The sig guard keeps a pre-signing 402
+		// surfacing as PaymentRequiredError.
+		var prErr *PaymentRequiredError
+		if sig != "" && errors.As(err, &prErr) {
+			return nil, &PaymentRejectedError{Reason: "payment rejected after signing (streaming)"}
+		}
 		return nil, err
 	}
 

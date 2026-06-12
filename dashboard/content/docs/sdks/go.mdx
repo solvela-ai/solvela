@@ -218,7 +218,7 @@ for chunk := range ch {
 fmt.Println()
 ```
 
-`ChatStream` runs the same preflight payment handshake as `Chat` — a `Signer` is required for paid streaming, otherwise the call returns `*PaymentRequiredError` before opening the stream. A post-signing 402 on the streaming POST surfaces as `*PaymentRequiredError` (unlike the non-streaming path, it is not converted to `*PaymentRejectedError`).
+`ChatStream` runs the same preflight payment handshake as `Chat` — a `Signer` is required for paid streaming, otherwise the call returns `*PaymentRequiredError` before opening the stream. A post-signing 402 on the streaming POST is converted to `*PaymentRejectedError`, exactly like the non-streaming path — `errors.As(err, &rejErr)` distinguishes "signed and rejected" from a pre-signing `*PaymentRequiredError` challenge on both paths.
 
 ## Models and pricing
 

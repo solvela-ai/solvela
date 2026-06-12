@@ -1291,6 +1291,108 @@ func TestChatPaymentRejectedAfterSign(t *testing.T) {
 	}
 }
 
+// TestChatStreamPaymentRejectedAfterSign drives the streaming path against a
+// gateway that returns 402 on both the non-streaming probe AND the post-sign
+// streaming POST. Once the SDK has signed and attached a Payment-Signature,
+// a second 402 is a *post-signing* rejection and must surface as
+// *PaymentRejectedError — the same conversion sendWithPayment performs on the
+// non-streaming path — not the bare *PaymentRequiredError the transport
+// returns for any 402. Mirrors the canonical Python semantics
+// (client.py chat_stream: second 402 after signing → PaymentRejectedError).
+func TestChatStreamPaymentRejectedAfterSign(t *testing.T) {
+	var serverURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Always 402 — the probe gets the price challenge, and the signed
+		// streaming follow-up is rejected with a second 402.
+		pr := PaymentRequired{
+			X402Version:   X402Version,
+			CostBreakdown: CostBreakdown{Total: "100"},
+			Resource:      Resource{URL: serverURL + "/v1/chat/completions", Method: "POST"},
+			Accepts: []PaymentAccept{
+				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "100", PayTo: "recipient"},
+			},
+		}
+		w.WriteHeader(402)
+		json.NewEncoder(w).Encode(pr)
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	wallet, _, _ := CreateWallet()
+	client, err := NewClient(wallet, fakeStreamSigner{},
+		WithGatewayURL(server.URL),
+		WithMaxPaymentAmount(1000),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+
+	_, err = client.ChatStream(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected PaymentRejectedError, got nil")
+	}
+	var rejErr *PaymentRejectedError
+	if !errors.As(err, &rejErr) {
+		t.Fatalf("expected *PaymentRejectedError, got %T: %v", err, err)
+	}
+	if rejErr.Reason == "" {
+		t.Error("PaymentRejectedError.Reason should be non-empty")
+	}
+	// The post-signing rejection must NOT also match the pre-signing
+	// challenge type — callers branch on the distinction.
+	var reqErr *PaymentRequiredError
+	if errors.As(err, &reqErr) {
+		t.Errorf("post-signing 402 must not surface as *PaymentRequiredError: %v", err)
+	}
+}
+
+// TestChatStream402WithoutSignerStaysPaymentRequired pins the pre-signing
+// challenge path: with no signer configured, a streaming-call 402 means
+// "needs payment" and must still surface as *PaymentRequiredError. The
+// rejected-after-signing conversion only applies once a Payment-Signature
+// was actually attached — do not break the challenge path.
+func TestChatStream402WithoutSignerStaysPaymentRequired(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pr := PaymentRequired{
+			X402Version:   X402Version,
+			CostBreakdown: CostBreakdown{Total: "1000", Currency: "USDC"},
+			Accepts: []PaymentAccept{
+				{Scheme: "exact", Network: SolanaNetwork, Asset: USDCMint, Amount: "1000", PayTo: "recipient123"},
+			},
+		}
+		w.WriteHeader(402)
+		json.NewEncoder(w).Encode(pr)
+	}))
+	defer server.Close()
+
+	wallet, _, _ := CreateWallet()
+	client, err := NewClient(wallet, nil, WithGatewayURL(server.URL)) // no signer
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	defer client.Close()
+
+	_, err = client.ChatStream(context.Background(), &ChatRequest{
+		Model:    "gpt-4",
+		Messages: []ChatMessage{{Role: RoleUser, Content: "Hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected PaymentRequiredError, got nil")
+	}
+	var reqErr *PaymentRequiredError
+	if !errors.As(err, &reqErr) {
+		t.Fatalf("expected *PaymentRequiredError, got %T: %v", err, err)
+	}
+	var rejErr *PaymentRejectedError
+	if errors.As(err, &rejErr) {
+		t.Errorf("pre-signing 402 must not surface as *PaymentRejectedError: %v", err)
+	}
+}
+
 // TestClientEscrowProgramMismatch verifies the escrow-program pin rejects a 402
 // whose advertised escrow program differs from the configured pin, before any
 // deposit is signed. Mirrors TestClientRecipientMismatch for the escrow path.
