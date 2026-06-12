@@ -11,8 +11,11 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { url: `${DOCS}/docs`, lastModified: now, changeFrequency: 'weekly', priority: 0.9 },
     { url: `${DOCS}/docs/quickstart`, lastModified: now, priority: 0.8 },
     { url: `${DOCS}/docs/concepts/x402`, lastModified: now, priority: 0.7 },
+    { url: `${DOCS}/docs/concepts/a2a`, lastModified: now, priority: 0.7 },
     { url: `${DOCS}/docs/concepts/escrow`, lastModified: now, priority: 0.7 },
     { url: `${DOCS}/docs/concepts/smart-router`, lastModified: now, priority: 0.7 },
+    { url: `${DOCS}/docs/concepts/free-tier`, lastModified: now, priority: 0.7 },
+    { url: `${DOCS}/docs/concepts/response-cache`, lastModified: now, priority: 0.7 },
     { url: `${DOCS}/docs/api`, lastModified: now, priority: 0.7 },
     { url: `${DOCS}/docs/sdks`, lastModified: now, priority: 0.6 },
   ]

@@ -1,0 +1,96 @@
+---
+title: Response Cache
+description: Two-tier Redis response caching — deterministic exact match plus an optional embedding-similarity tier with discounted pricing
+---
+
+
+The gateway caches LLM completions in Redis in two tiers. Tier 1 is an exact-match cache keyed by a SHA-256 hash of the request — deterministic, zero false positives by construction. Tier 2 is an optional semantic cache that matches paraphrases by embedding similarity and bills a discounted price on a hit. Tier 2 is **off by default**.
+
+Streaming requests (`stream: true`) are never cached by either tier.
+
+## Exact-match tier
+
+The cache key is a SHA-256 hash over the request content:
+
+```
+key = "solvela:cache:" + SHA256(model ‖ messages_json ‖ tools_json ‖ tool_choice_json ‖ temperature)
+```
+
+Because the key is a hash of the normalized request, a hit can only come from a content-equivalent request — one that normalizes to the same bytes. There are no false positives by construction: two genuinely different prompts always produce different keys.
+
+| In the cache key | Not in the cache key |
+|------------------|----------------------|
+| `model` | `max_tokens` |
+| `messages` (content + order) | `top_p` |
+| `tools` | `stream` (gated separately — streams bypass the cache) |
+| `tool_choice` | Payer wallet address |
+| `temperature` | |
+
+Details that matter:
+
+- **Message order is significant.** Messages are part of the conversation, so they are not sorted before hashing — the same content in a different order is a different key.
+- **Tool spec is part of the key.** `tools` and `tool_choice` materially change the response shape (`tool_calls` vs prose), so requests that differ only in their tool spec never collide.
+- **The key is wire-shape independent.** The same text prompt sent as a bare JSON string and as a text-parts array hashes to the same key, so a curl client and an array-shaped agent share hits for text-identical prompts.
+- **Images are keyed by content.** For multimodal messages, each image URL is substituted with a short stable representation before hashing: `http(s)` URLs verbatim, `data:` URIs as a hash of the declared media type plus the base64 payload. Distinct images produce distinct keys; the same image is stable; a multi-megabyte payload is never hashed into the key verbatim.
+
+### Wallet-agnostic by design
+
+Cache keys contain no payer identity. If wallet A and wallet B send identical prompts, wallet B receives the response cached for wallet A. **Both wallets pay the gateway's 402 fee** — payment verification runs before the cache check — but the upstream LLM is only charged once. This is an intentional trade-off: prompt deduplication lowers upstream costs and improves margin, at the cost of cross-wallet response sharing. If per-wallet isolation were ever required, the payer address would have to be added to the cache key.
+
+### TTL and Redis dependency
+
+- Default TTL is **600 seconds (10 minutes)**.
+- Cache writes are fire-and-forget (`tokio::spawn`) — they never block the request path.
+- Responses without a `usage` block are refused on write and evicted on read, because settlement reconciliation requires usage data.
+
+Redis is optional. When Redis is unreachable, cache reads simply miss and every request goes upstream — requests still succeed. (Transaction replay protection, which shares the same Redis client, degrades to an in-memory LRU bounded to 10,000 entries, with a warning logged.)
+
+## Semantic tier (optional)
+
+Where the exact tier matches identical requests, the semantic tier matches by **prompt-embedding similarity**: a paraphrase of a previously answered prompt can hit. Lookups run as a single KNN vector query over a RediSearch HNSW cosine index.
+
+Requirements beyond the exact tier:
+
+- Redis with the **RediSearch module** (redis-stack).
+- The local `bge-small-en-v1.5` embedding model, auto-downloaded by `fastembed` on first run (~133 MB).
+
+A candidate is returned only if cosine similarity meets the configured threshold. Hits are hard-gated to the **same model** and the **same `temperature`/`top_p`** — an answer sampled under one regime is never served for another. Like the exact tier, stored entries hold no payer identity. Prompts longer than 2,000 characters are neither cached nor served from this tier (the embedder truncates at 512 tokens, which could collide distinct long prompts); they fall through to a normal upstream call.
+
+### Discounted pricing on semantic hits
+
+A semantic hit bills `hit_price_percent` of the full all-in price (provider cost + 5% platform fee). The default is `30` — pay 30%, a 70% discount. A hit costs the gateway no upstream call, so the discounted amount is gateway revenue minus the sub-cent embedding cost.
+
+<Note>
+  The discount is realised on the **escrow** payment scheme only: the gateway claims the discounted fraction from the deposit and refunds the remainder. The direct-transfer `exact` scheme settles the full amount up front, so no discount applies there.
+</Note>
+
+### Configuration
+
+All fields live under `[cache.semantic]`:
+
+```toml title="config/default.toml"
+[cache.semantic]
+enabled = false
+threshold = 0.85
+hit_price_percent = 30
+ttl_secs = 600
+# model_cache_dir = "/var/lib/solvela/fastembed"
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enable the semantic tier. Off by default — enabling it is the only behavior change. |
+| `threshold` | `0.85` | Minimum cosine similarity for a hit, in `(0.0, 1.0]`. PoC data put paraphrases ≥ 0.89 and unrelated prompts ≤ 0.59. |
+| `hit_price_percent` | `30` | Percent of the full price billed on a hit, in `1..=100`. |
+| `ttl_secs` | `600` | TTL in seconds for stored semantic entries. Must be ≥ 1. |
+| `model_cache_dir` | unset | Explicit on-disk directory for the embedding model. Unset → `fastembed`'s default `./.fastembed_cache`. |
+
+<Warning>
+  When the tier is enabled, invalid values are **fatal at startup**, not silently degraded: `threshold` outside `(0.0, 1.0]`, `hit_price_percent` outside `1..=100`, or `ttl_secs = 0` all refuse to boot. A misconfigured running cache is an operator error, distinct from Redis being unavailable (which degrades gracefully).
+</Warning>
+
+## See also
+
+- [Escrow System](/docs/concepts/escrow) — how the semantic discount is claimed and refunded on-chain
+- [x402 Protocol](/docs/concepts/x402) — the payment flow that runs before any cache check
+- [Pricing](/docs/concepts/pricing) — model pricing and the 5% platform fee

@@ -16,10 +16,10 @@ description: Go client for Solvela with functional-option configuration and tran
 go get github.com/solvela-ai/solvela/sdks/go
 ```
 
-The SDK depends only on the standard library plus `github.com/mr-tron/base58`. No Solana SDK is pulled in by default — that decision is left to the `Signer` implementation you plug in.
+The SDK depends only on the standard library plus `github.com/mr-tron/base58` and `filippo.io/edwards25519`. No full Solana SDK is pulled in — the built-in `KeypairSigner` builds transactions over raw Solana JSON-RPC.
 
 <Note>
-  **`UnimplementedSigner` is a stub.** The signer shipped in `solvela-go` returns an error from `SignPayment` — it exists so the package compiles, not so it signs. To make paid requests, implement the `Signer` interface yourself (see [Custom signers](#custom-signers)) or call the gateway through the Python or TypeScript SDK, which ship working keypair signers.
+  **`KeypairSigner` signs `escrow` only.** The default signer (`solvela.NewKeypairSigner(wallet, rpcURL)`) builds real on-chain escrow deposits, and scheme selection automatically prefers `escrow` for it (via the optional `SchemeCapable` interface). The `exact` (direct USDC-SPL transfer) scheme is intentionally unimplemented in Go — `SignPayment` returns a clear error rather than silently substituting another scheme. For exact-scheme payments, use the Rust SDK or supply a custom `Signer` (see [Custom signers](#custom-signers)).
 </Note>
 
 ## Quick start
@@ -79,6 +79,7 @@ client, err := solvela.NewClient(wallet, signer,
 	solvela.WithTimeout(60*time.Second),                  // default: 180s
 	solvela.WithMaxPaymentAmount(10_000_000),             // per-call cap: 10 USDC atomic
 	solvela.WithExpectedRecipient("recipient-wallet-pub"),// if set, gateway must pay-to this
+	solvela.WithExpectedEscrowProgram(solvela.MainnetEscrowProgramID), // escrow program pin (this is the default)
 	solvela.WithCache(true),                              // opt-in response caching
 	solvela.WithSessions(true),                           // opt-in three-strike escalation
 	solvela.WithSessionTTL(30*time.Minute),
@@ -95,6 +96,8 @@ client, err := solvela.NewClient(wallet, signer,
 | `WithTimeout(d)` | Override the 180s default HTTP timeout. |
 | `WithMaxPaymentAmount(atomic)` | Cap each signed payment. Default: 10 USDC (`10_000_000` atomic units). |
 | `WithExpectedRecipient(addr)` | Refuse 402s whose `pay_to` doesn't match. |
+| `WithExpectedEscrowProgram(id)` | Pin the escrow program ID the client will sign deposits against. Default: `MainnetEscrowProgramID`. |
+| `DisableEscrowProgramPin()` | Clear the escrow-program pin, allowing any advertised program ID. Prefer `WithExpectedEscrowProgram` for non-default deployments. |
 | `WithCache(bool)` / `WithSessions(bool)` | Toggle in-memory caches. Default: both off. |
 | `WithSessionTTL(d)` | Lifetime of session entries when sessions are on. |
 | `WithQualityCheck(bool)` / `WithMaxQualityRetries(n)` | Retry on empty/repetitive/truncated responses. |
@@ -106,6 +109,7 @@ client, err := solvela.NewClient(wallet, signer,
 - Non-loopback `gateway_url` must use `https://`. Plaintext `http://` to a remote host returns `*ClientError` from `NewClient`.
 - Unknown payment schemes from the gateway raise `*ClientError` at JSON decode time rather than silently mis-branching downstream.
 - `MaxPaymentAmount` defaults to 10 USDC (atomic) — a misbehaving gateway cannot drain the wallet on a single call.
+- `ExpectedEscrowProgram` is pinned to `MainnetEscrowProgramID` by default, so an escrow deposit is never signed against an unexpected program — a mismatching 402 returns `*EscrowProgramMismatchError` before signing. Repoint with `WithExpectedEscrowProgram` or clear with `DisableEscrowProgramPin`.
 - The HTTP client refuses redirects to keep the `Payment-Signature` header from leaking to a third party.
 
 ## The chat flow
@@ -158,8 +162,8 @@ client, err := solvela.NewClient(wallet, signer,
     	log.Fatal(err)
     }
 
-    // Implement your own Signer — see the Custom signers section below.
-    signer := myKeypairSigner{wallet: wallet}
+    // The built-in KeypairSigner signs escrow-scheme payments.
+    signer := solvela.NewKeypairSigner(wallet, "https://api.mainnet-beta.solana.com")
 
     client, err := solvela.NewClient(wallet, signer,
     	solvela.WithGatewayURL("https://api.solvela.ai"),
@@ -214,7 +218,7 @@ for chunk := range ch {
 fmt.Println()
 ```
 
-`ChatStream` runs the same preflight payment handshake as `Chat` — a `Signer` is required for paid streaming, otherwise the call returns `*PaymentRequiredError` before opening the stream. A post-signing 402 on the streaming POST is converted to `*PaymentRejectedError`.
+`ChatStream` runs the same preflight payment handshake as `Chat` — a `Signer` is required for paid streaming, otherwise the call returns `*PaymentRequiredError` before opening the stream. A post-signing 402 on the streaming POST surfaces as `*PaymentRequiredError` (unlike the non-streaming path, it is not converted to `*PaymentRejectedError`).
 
 ## Models and pricing
 
@@ -281,6 +285,7 @@ if err != nil {
 | `*PaymentRejectedError` | Gateway returns 402 *again* after a signed retry. Carries `Reason`. |
 | `*AmountExceedsMaxError` | Gateway's quoted amount exceeds the configured `MaxPaymentAmount`. Carries `Amount` and `MaxAmount`. |
 | `*RecipientMismatchError` | Gateway's `pay_to` doesn't match the configured `ExpectedRecipient`. |
+| `*EscrowProgramMismatchError` | The 402's escrow program ID doesn't match the configured `ExpectedEscrowProgram` pin. Returned before any escrow deposit is signed. Carries `Expected` and `Actual`. |
 | `*InsufficientBalanceError` | Wallet balance is too low for the quoted amount. Carries `Have` / `Need`. |
 | `*GatewayError` | Non-200/402 HTTP response. Carries `Status` and `Message`. |
 | `*SignerError` | The configured `Signer` failed to build or sign the payment transaction. |
@@ -337,7 +342,7 @@ wg.Wait()
 
 ## Custom signers
 
-`solvela-go` ships only the `UnimplementedSigner` stub. To send paid requests, implement the `Signer` interface yourself:
+The built-in `KeypairSigner` signs `escrow`-scheme payments only. To sign `exact`-scheme payments — or to plug in HSM-backed signing or a custodial backend — implement the `Signer` interface yourself:
 
 ```go
 type Signer interface {
@@ -383,7 +388,7 @@ Wire amounts (`PaymentAccept.Amount`) are decimal strings in atomic USDC units (
 
 ## Smoke harness
 
-A 100-line smoke test in [`sdks/go/scripts/smoke/main.go`](https://github.com/solvela-ai/solvela/blob/main/sdks/go/scripts/smoke/main.go) exercises the wire contract against a live gateway: it lists models, asserts at least one reports streaming + paid input pricing, and issues an unsigned chat to verify the 402 round-trip parses cleanly. Run it before tagging a release:
+A smoke test in [`sdks/go/scripts/smoke/main.go`](https://github.com/solvela-ai/solvela/blob/main/sdks/go/scripts/smoke/main.go) exercises the wire contract against a live gateway: it lists models, asserts at least one reports streaming + paid input pricing, and issues an unsigned chat to verify the 402 round-trip parses cleanly. Run it before tagging a release:
 
 ```bash
 SOLVELA_GATEWAY_URL=https://staging.solvela.ai go run ./scripts/smoke

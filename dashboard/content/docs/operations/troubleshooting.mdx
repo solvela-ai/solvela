@@ -9,7 +9,7 @@ description: Common issues, debug headers, and diagnostics
 |---------|-------|-----|
 | Paid chat requests return 500 with `error.type = "internal_error"` and `"all providers failed"` | No upstream provider API key configured for the resolved model's provider | Set at least one matching provider key in `.env` (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`) and restart the gateway |
 | 402 response but SDK does not auto-pay | Wallet key env var not set, or read under the wrong name (the CLI reads `SOLANA_WALLET_KEY`; the TypeScript/Python SDK examples read `SOLANA_PRIVATE_KEY` — the env var name is whatever you pass to `Wallet.fromEnv()` / `Wallet.from_env()`) | Set the env var your code reads and verify the value is a base58-encoded Solana keypair |
-| 402 returned with `accepts[0].amount: "0"` | Using a free model (`gpt-oss-120b`) | Free models do not require payment; remove the `PAYMENT-SIGNATURE` header |
+| Free-model request served at $0 even with a `PAYMENT-SIGNATURE` header | Using a free model (`google/gemini-3.1-flash-lite`) — zero-cost requests skip the 402 challenge entirely and any payment header is ignored | Expected behavior; no payment is needed for free models |
 | Redis connection refused | Redis not running | Run `docker compose up -d redis` |
 | 402 `"transaction has already been used; each payment signature may only be submitted once"` | Same transaction signature submitted twice | Generate a new transaction for each request |
 | 400 `"payment amount insufficient: paid N but cost is M atomic USDC"` | Signed amount less than the quoted price | Fetch a fresh 402, use `accepts[0].amount` exactly (atomic units: 1 USDC = 1,000,000) |
@@ -23,7 +23,7 @@ description: Common issues, debug headers, and diagnostics
 | Wallet stats returns 503 | PostgreSQL not configured | Set `DATABASE_URL` in `.env` |
 | CORS errors in browser | Origin not in allowlist | Add your domain to `SOLVELA_CORS_ORIGINS` (or `RCR_CORS_ORIGINS` for backward compat) |
 | Slow responses (>10s) | Provider latency or network issues | Check `solvela_provider_request_duration_seconds` metric; try a different provider |
-| "circuit breaker open" in escrow health | >50% claim failures in 5-minute window | Wait 1 minute for auto-reset; check fee payer balance and RPC connectivity |
+| "claim circuit breaker OPENED" in gateway logs | >50% claim failures in 5-minute window (minimum 4 samples) | Wait 1 minute for auto-reset; check fee payer balance and RPC connectivity |
 
 ## Debug Headers
 
@@ -78,14 +78,14 @@ curl -s http://localhost:8402/v1/escrow/health \
 
 Key fields to check:
 
-- `claims_failed > 0`: some claims are failing; check fee payer balance
-- `circuit_breaker_open: true`: claiming is paused; check RPC connectivity
-- `queue_depth > 50`: claim processing is falling behind
-- `fee_payers_healthy < fee_payers_total`: some fee payer keys are in cooldown
+- `status`: `"ok"`, `"degraded"` (claim processor not running or no fee payer wallets), or `"down"` (escrow disabled)
+- `claims.failed > 0`: some claims are failing; check fee payer balance
+- `claims.pending_in_queue > 50`: claim processing is falling behind
+- `fee_payer_wallets == 0`: no fee payer keys loaded — claims cannot be submitted
 
 ## CLI Diagnostics
 
-The `solvela doctor` command runs a comprehensive check:
+The `solvela doctor` command runs a quick diagnostic:
 
 ```bash
 cargo run -p solvela-cli -- doctor
@@ -93,14 +93,12 @@ cargo run -p solvela-cli -- doctor
 
 Checks performed:
 
-1. **Wallet loaded** -- verifies `SOLANA_WALLET_KEY` is valid
-2. **Gateway reachable** -- connects to the gateway's `/health` endpoint
-3. **Models available** -- fetches model list from `/v1/models`
-4. **RPC connected** -- verifies Solana RPC connectivity
-5. **Balance check** -- queries USDC-SPL balance
-6. **Payment flow** -- sends a test request and verifies the 402/200 cycle
+1. **Gateway reachable** -- connects to the gateway's `/health` endpoint (`OK` / `ERROR` / `FAIL`)
+2. **Wallet file** -- checks that `~/.solvela/wallet.json` exists (`FOUND` / `NOT FOUND`); it does not validate the key
+3. **Models available** -- fetches the model list from `/v1/models` (`OK (N models)` / `UNAVAILABLE`)
+4. **`SOLANA_WALLET_KEY`** -- reports whether the env var is set (`SET` / `NOT SET`)
 
-Each check reports PASS, FAIL, WARN, or SKIP.
+It does not test Solana RPC connectivity, USDC balance, or the 402/200 payment cycle — use `solvela wallet status` and a real request for those.
 
 ## Log Levels
 
@@ -148,7 +146,7 @@ psql postgres://solvela:solvela_dev_password@localhost:5432/solvela \
 
 # Check spend logs
 psql postgres://solvela:solvela_dev_password@localhost:5432/solvela \
-  -c "SELECT COUNT(*) FROM spend_log"
+  -c "SELECT COUNT(*) FROM spend_logs"
 ```
 
 ## Redis Troubleshooting

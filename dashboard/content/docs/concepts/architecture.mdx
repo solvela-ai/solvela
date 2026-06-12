@@ -63,11 +63,11 @@ Defines every available model: provider, context window, pricing, routing tier a
 </Accordion>
 
 <Accordion title="default.toml — gateway settings">
-Controls server bind address, timeout values, rate limit defaults, caching TTLs, and feature flags.
+Controls server bind address and port, Solana RPC URL and USDC mint, fee-payer balance monitor thresholds, and semantic-cache settings.
 </Accordion>
 
-<Accordion title="services.toml — external service config">
-Provider API base URLs, Facilitator endpoint, and Redis/PostgreSQL connection strings. Override via environment variables in production.
+<Accordion title="services.toml — x402 service marketplace registry">
+Registry of x402-compatible services available through the gateway. The marketplace phase is not yet wired in, so all entries ship commented out.
 </Accordion>
 
 ## Key Architectural Rules
@@ -94,7 +94,7 @@ Provider API base URLs, Facilitator endpoint, and Redis/PostgreSQL connection st
 </Steps>
 
 <Warning>
-PostgreSQL and Redis are optional but strongly recommended in production. Without Redis, replay protection and response caching are disabled. Without PostgreSQL, usage logs and spend tracking are lost.
+PostgreSQL and Redis are optional but strongly recommended in production. Without Redis, response caching is disabled and replay protection degrades to an in-memory LRU with TTL (single-instance only). Without PostgreSQL, usage logs and spend tracking are lost.
 </Warning>
 
 ## Provider Support
@@ -105,9 +105,9 @@ The `providers/` module inside `gateway` contains an adapter for each upstream L
 |----------|--------|
 | OpenAI | GPT-4o, o3, o4-mini, and more |
 | Anthropic | Claude Sonnet, Claude Opus, Claude Haiku |
-| Google | Gemini 2.0 Flash, Gemini 2.5 Pro |
-| xAI | Grok-3, Grok-3-mini |
-| DeepSeek | DeepSeek-V3, DeepSeek-R1 |
+| Google | Gemini 3.1 Pro, Gemini 2.5 Flash, Gemini 3.1 Flash-Lite |
+| xAI | Grok 4 Fast, Grok Code Fast, Grok 3, Grok 3 Mini |
+| DeepSeek | DeepSeek V3.2 Chat, V3.2 Reasoner, Coder V3 |
 
 <Tip>
 All providers accept the same OpenAI-compatible request format. Switching models or providers requires only changing the `model` field — no client code changes needed.

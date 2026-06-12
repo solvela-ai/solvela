@@ -1,0 +1,273 @@
+---
+title: A2A Protocol
+description: Agent-to-Agent JSON-RPC adapter with x402 payment metadata over Solana USDC-SPL
+---
+
+
+Solvela exposes an A2A (Agent-to-Agent) endpoint so autonomous agents can discover the gateway, get a price quote, and pay — all over JSON-RPC 2.0 instead of raw HTTP 402 handshakes. The A2A layer is a protocol adapter, not new payment logic: it translates `message/send` calls into the same x402 verification and chat pipeline used by `POST /v1/chat/completions`.
+
+Two routes:
+
+| Route | Purpose |
+|-------|---------|
+| `GET /.well-known/agent.json` | AgentCard discovery — advertises AP2 + x402 extensions |
+| `POST /a2a` | JSON-RPC 2.0 endpoint — `message/send` is the only method |
+
+A2A is **text-only today**. Messages carrying image `data` parts (`contentType` starting with `image/`) are rejected with an invalid-params error before any paid work happens.
+
+<Note>
+  The A2A task store lives in Redis. If Redis is not configured, new `message/send` requests fail with an internal error (`-32603`) rather than issuing a task ID a client could pay against but never redeem. Task records expire after 10 minutes.
+</Note>
+
+## AgentCard discovery
+
+Agents discover Solvela by fetching `GET /.well-known/agent.json`. The card advertises the AP2 extension (merchant role) and the x402 extension (Solana USDC-SPL settlement). A representative trimmed response:
+
+```json
+{
+  "name": "Solvela",
+  "description": "Solana-native AI agent payment gateway — pay for LLM API calls with USDC-SPL via x402",
+  "version": "0.1.0",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false,
+    "extensions": [
+      {
+        "uri": "https://github.com/google-agentic-commerce/ap2/tree/v0.1",
+        "description": "AP2 merchant for AI agent LLM payments",
+        "required": true,
+        "params": { "roles": ["merchant"] }
+      },
+      {
+        "uri": "https://github.com/google-a2a/a2a-x402/v0.1",
+        "description": "x402 on-chain settlement via Solana USDC-SPL",
+        "required": true,
+        "params": {
+          "network": "solana",
+          "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "schemes": ["exact", "escrow"]
+        }
+      }
+    ]
+  },
+  "skills": [
+    {
+      "id": "chat-completion",
+      "name": "Chat Completion",
+      "description": "Proxy AI chat completions to multiple LLM providers (OpenAI, Anthropic, Google, xAI, DeepSeek)",
+      "inputModes": ["text"],
+      "outputModes": ["text"]
+    }
+  ]
+}
+```
+
+Two details matter for payment construction:
+
+- `params.asset` is the **configured** USDC mint — the one the verifier actually enforces — never a compile-time constant. Build your payment against the mint the card advertises.
+- `params.schemes` contains `"exact"` always, and `"escrow"` only when the gateway has escrow configured.
+
+If the client sends an `x-a2a-extensions` header, the gateway echoes the x402 extension URI back in the same header on every `/a2a` response.
+
+## The message/send flow
+
+The payment flow is two `message/send` calls against the same task.
+
+<Steps>
+  <Step>
+    **First call — no `taskId` — get a payment quote**
+
+    The agent sends its prompt as a text part. An optional `metadata.model` hint accepts the same values as the REST route — routing profiles (`auto`, `eco`, `premium`), aliases (`sonnet`, `gpt5`), or direct model IDs. It defaults to `auto`.
+
+    ```json title="Request"
+    {
+      "jsonrpc": "2.0",
+      "method": "message/send",
+      "id": 1,
+      "params": {
+        "message": {
+          "role": "user",
+          "parts": [{ "kind": "text", "text": "What is x402?" }],
+          "metadata": { "model": "auto" }
+        }
+      }
+    }
+    ```
+
+    The gateway resolves the model, estimates cost (output capped at 1,000 tokens for the quote), stores a task record, and returns a Task in `input-required` state. The `x402.payment.required` metadata value is the same `PaymentRequired` object the REST route returns in a 402 body:
+
+    ```json title="Response"
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "id": "a2a_3f2c9a1b...",
+        "status": {
+          "state": "input-required",
+          "message": {
+            "role": "agent",
+            "parts": [
+              { "kind": "text", "text": "Payment required to process this request." }
+            ],
+            "metadata": {
+              "x402.payment.status": "payment-required",
+              "x402.payment.required": {
+                "x402_version": 2,
+                "resource": { "url": "/v1/chat/completions", "method": "POST" },
+                "accepts": [
+                  {
+                    "scheme": "exact",
+                    "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+                    "amount": "315",
+                    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "pay_to": "<gateway-wallet>",
+                    "max_timeout_seconds": 300
+                  }
+                ],
+                "cost_breakdown": {
+                  "provider_cost": "0.000300",
+                  "platform_fee": "0.000015",
+                  "total": "0.000315",
+                  "currency": "USDC",
+                  "fee_percent": 5
+                },
+                "error": "Payment required"
+              }
+            }
+          }
+        }
+      }
+    }
+    ```
+
+    When escrow is configured, `accepts` also contains a `"escrow"` entry with an `escrow_program_id` field, exactly as on the REST path.
+  </Step>
+  <Step>
+    **Agent signs a Solana transaction**
+
+    For the `exact` scheme, the agent builds and signs a USDC-SPL transfer of `amount` (atomic units) to `pay_to`. For `escrow`, it builds a deposit transaction — see [Escrow System](/docs/concepts/escrow).
+  </Step>
+  <Step>
+    **Second call — with `taskId` — submit the payment**
+
+    The agent resends `message/send` with the `taskId` from step 1 and two metadata keys: `x402.payment.status` set to `payment-submitted`, and `x402.payment.payload` carrying the same `PaymentPayload` JSON the REST path sends in the `payment-signature` header (here as plain JSON, not base64):
+
+    ```json title="Request"
+    {
+      "jsonrpc": "2.0",
+      "method": "message/send",
+      "id": 2,
+      "params": {
+        "taskId": "a2a_3f2c9a1b...",
+        "message": {
+          "role": "user",
+          "parts": [{ "kind": "text", "text": "Payment attached." }],
+          "metadata": {
+            "x402.payment.status": "payment-submitted",
+            "x402.payment.payload": {
+              "x402_version": 2,
+              "resource": { "url": "/v1/chat/completions", "method": "POST" },
+              "accepted": {
+                "scheme": "exact",
+                "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+                "amount": "315",
+                "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                "pay_to": "<gateway-wallet>",
+                "max_timeout_seconds": 300
+              },
+              "payload": {
+                "transaction": "<base64-encoded-signed-tx>"
+              }
+            }
+          }
+        }
+      }
+    }
+    ```
+
+    The gateway runs replay protection, validates the submitted `accepted` against the stored offer, verifies and settles the payment on-chain, runs the prompt guard, then proxies to the LLM provider with the same `max_tokens` cap that priced the quote. The response is a `completed` Task with the chat output as both the status message and an artifact, plus a settlement receipt:
+
+    ```json title="Response"
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "id": "a2a_3f2c9a1b...",
+        "status": {
+          "state": "completed",
+          "message": {
+            "role": "agent",
+            "parts": [
+              { "kind": "text", "text": "x402 is an HTTP-native payment protocol..." }
+            ],
+            "metadata": {
+              "x402.payment.status": "payment-completed",
+              "x402.payment.receipts": { "tx_signature": "<solana-tx-signature>" }
+            }
+          }
+        },
+        "artifacts": [
+          {
+            "parts": [
+              { "kind": "text", "text": "x402 is an HTTP-native payment protocol..." }
+            ]
+          }
+        ]
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Payment metadata keys
+
+All x402 state rides in message `metadata` under namespaced keys:
+
+| Key | Direction | Value |
+|-----|-----------|-------|
+| `x402.payment.status` | both | One of `payment-required`, `payment-submitted`, `payment-completed`, `payment-failed` |
+| `x402.payment.required` | gateway → agent | The `PaymentRequired` object (same shape as the REST 402 body) |
+| `x402.payment.payload` | agent → gateway | The `PaymentPayload` object (same shape as the REST `payment-signature` header, unencoded) |
+| `x402.payment.receipts` | gateway → agent | `{ "tx_signature": "..." }` settlement receipt |
+
+## Task state machine
+
+Task states serialize in kebab-case: `input-required`, `working`, `completed`, `failed`. Valid transitions as implemented:
+
+| From | To |
+|------|----|
+| `input-required` | `working`, `completed`, `failed` |
+| `working` | `completed`, `failed` |
+| `completed` | — (terminal) |
+| `failed` | — (terminal) |
+
+The synchronous flow today goes `input-required` → `completed` directly; `working` is reserved for future async processing. Task records (state, original message, the quoted `PaymentRequired` snapshot, the model and `max_tokens` cap) live in Redis with a 10-minute TTL — paying after expiry yields a task-not-found error.
+
+## Error codes
+
+JSON-RPC errors are returned with HTTP 200 and an `error` object:
+
+| Code | Meaning |
+|------|---------|
+| `-32700` | Invalid JSON-RPC version (must be `"2.0"`) |
+| `-32601` | Method not found (only `message/send` is supported) |
+| `-32602` | Invalid params (missing text part, image parts, malformed payment metadata) |
+| `-32603` | Internal error (e.g. task store unavailable — no Redis) |
+| `-32000` | Task not found or expired |
+| `-32001` | Payment failed (replay detected, offer mismatch, verification or settlement failure) |
+| `-32002` | Provider error |
+| `-32003` | Model not found |
+
+## Same x402 verification as the REST path
+
+A2A adds no payment logic of its own. On the payment-submitted path the gateway reuses the REST pipeline piece by piece:
+
+- **Replay protection** — the transaction is checked against the same Redis replay set as REST payments. Without Redis, durable-nonce transactions are denied outright (their 24-hour replay window exceeds what the in-memory fallback can cover); regular transactions fall back to in-memory replay protection.
+- **Offer validation** — the submitted `accepted` must match an offer from the original quote on `(scheme, network, asset, pay_to)`, and the submitted amount (compared as integers) must be at least the quoted amount. This prevents a client from having the verifier check the on-chain transfer against a self-supplied lower amount.
+- **Settlement** — verification and settlement go through the same facilitator as the REST path. Deterministic on-chain rejections are reported as not-retryable (with the numeric program error code); transient submission or timeout failures are reported as retryable.
+- **Prompt guard** — the same injection/jailbreak/PII checks as the chat route run after payment is verified (never on the unpaid quote path, so anonymous callers cannot force the scans for free).
+- **Output cap** — the provider is called with the same `max_tokens` cap (1,000) that priced the quote, so actual output cannot exceed what the agent paid for.
+
+One A2A-specific restriction: wallets provisioned with per-tenant budgeting (`require_tenant`) are rejected on the A2A path with a payment-failed error before any settlement — those wallets must use `POST /v1/chat/completions`, where per-tenant budget enforcement runs.
+
+See [x402 Protocol](/docs/concepts/x402) for the underlying payment flow and [Escrow System](/docs/concepts/escrow) for the escrow scheme.
