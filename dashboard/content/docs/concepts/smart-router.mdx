@@ -6,7 +6,9 @@ description: Automatic model selection based on request complexity across 15 dim
 
 The smart router classifies each request's complexity and routes it to the most appropriate model based on a routing profile you specify. This saves cost on simple requests while ensuring complex ones get capable models.
 
-The router is pure rule-based logic with no external calls. Classification takes under 1 microsecond.
+The router is pure rule-based logic — deterministic, with zero external calls.
+
+<RouterCacheDiagram />
 
 ## How to use it
 

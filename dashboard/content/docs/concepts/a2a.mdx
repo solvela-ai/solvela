@@ -6,6 +6,8 @@ description: Agent-to-Agent JSON-RPC adapter with x402 payment metadata over Sol
 
 Solvela exposes an A2A (Agent-to-Agent) endpoint so autonomous agents can discover the gateway, get a price quote, and pay — all over JSON-RPC 2.0 instead of raw HTTP 402 handshakes. The A2A layer is a protocol adapter, not new payment logic: it translates `message/send` calls into the same x402 verification and chat pipeline used by `POST /v1/chat/completions`.
 
+<A2ADiagram />
+
 Two routes:
 
 | Route | Purpose |

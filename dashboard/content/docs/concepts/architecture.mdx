@@ -3,6 +3,8 @@ title: Architecture
 description: How Solvela is structured
 ---
 
+<ArchitectureDiagram />
+
 Solvela is a Rust workspace composed of five focused crates, an on-chain Anchor escrow program, a set of multi-language SDKs, and a Next.js dashboard. Every inbound HTTP request is handled by a single binary — the gateway — which delegates to the other crates for routing logic, payment verification, and shared wire types.
 
 ## Workspace Crates
