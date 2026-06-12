@@ -108,7 +108,6 @@ export function EscrowDiagramAnimated({ beat, loopKey }: Props) {
         x={268}
         y={138}
         label="escrow pda"
-        sublabel="9neDHouX…"
         fill="url(#esc-escrow)"
         dot={C.accentGold}
         dashed
@@ -127,19 +126,53 @@ export function EscrowDiagramAnimated({ beat, loopKey }: Props) {
       {/* Balance labels below each cube */}
       <BalanceLabel x={116} y={238} label="balance" value={agentBalance} />
       <BalanceLabel
-        x={322}
-        y={288}
-        label="held"
-        value={escrowBalance}
-        valueColor={beat === 1 || beat === 2 || beat === 3 ? C.accentGold : C.neutralText}
-      />
-      <BalanceLabel
         x={524}
         y={238}
         label="credited"
         value={providerCredit}
         valueColor={providerCredit === '0.0000' ? C.neutralText : C.accentGold}
       />
+
+      {/* Escrow PDA caption — the program-id and the held amount live BELOW the
+          cube as a clean stacked block so nothing overprints the dashed face.
+          (Cube bottom edge sits at y≈200; this block starts well clear of it.) */}
+      <g transform="translate(322, 246)" textAnchor="middle">
+        <text
+          x="0"
+          y="0"
+          textAnchor="middle"
+          fontFamily="'JetBrains Mono', monospace"
+          fontSize="11"
+          fill={C.neutralText}
+          opacity="0.7"
+          letterSpacing="1"
+        >
+          9neDHouX…
+        </text>
+        <text
+          x="0"
+          y="24"
+          textAnchor="middle"
+          fontFamily="'JetBrains Mono', monospace"
+          fontSize="9"
+          fill={C.neutralText}
+          opacity="0.55"
+          letterSpacing="1.5"
+        >
+          HELD
+        </text>
+        <text
+          x="0"
+          y="40"
+          textAnchor="middle"
+          fontFamily="'Source Serif 4', Georgia, serif"
+          fontSize="16"
+          fontWeight="500"
+          fill={beat === 1 || beat === 2 || beat === 3 ? C.accentGold : C.neutralText}
+        >
+          {escrowBalance}
+        </text>
+      </g>
 
       {/* Packets — transient; rendered only during their active beat.
           The loopKey on the wrapping group forces a remount each loop so
@@ -297,7 +330,6 @@ interface CubeProps {
   x: number
   y: number
   label: string
-  sublabel?: string
   fill: string
   dot: string
   dashed?: boolean
@@ -305,7 +337,7 @@ interface CubeProps {
   pulse?: boolean
 }
 
-function Cube({ x, y, label, sublabel, fill, dot, dashed, highlight, pulse }: CubeProps) {
+function Cube({ x, y, label, fill, dot, dashed, highlight, pulse }: CubeProps) {
   const w = 108
   const d = 54
   const h = 62
@@ -351,7 +383,7 @@ function Cube({ x, y, label, sublabel, fill, dot, dashed, highlight, pulse }: Cu
       <circle cx={ax + 14} cy={ay - h + 14} r="3" fill={dot} />
       <text
         x={ax + 14}
-        y={ay - 26}
+        y={ay - 22}
         fontFamily="'JetBrains Mono', monospace"
         fontSize="14"
         fill={C.headingText}
@@ -359,19 +391,6 @@ function Cube({ x, y, label, sublabel, fill, dot, dashed, highlight, pulse }: Cu
       >
         {label}
       </text>
-      {sublabel && (
-        <text
-          x={ax + 14}
-          y={ay - 10}
-          fontFamily="'JetBrains Mono', monospace"
-          fontSize="11"
-          fill={C.neutralText}
-          opacity="0.7"
-          letterSpacing="1"
-        >
-          {sublabel}
-        </text>
-      )}
     </g>
   )
 }

@@ -61,15 +61,16 @@ export function SdkCtaPanel({ preHighlighted }: SdkCtaPanelProps) {
       aria-labelledby="sdk-cta-heading"
       className="border-t border-border/60 bg-[var(--popover)]"
     >
-      <div className="mx-auto max-w-[1280px] px-6 py-16 lg:py-24">
+      <div className="mx-auto max-w-[1320px] px-6 py-16 lg:py-24">
         <div className="flex flex-col gap-10">
           {/* headline row */}
           <div className="flex flex-col gap-3">
+            <div className="rule-tipped mb-5" />
             <span className="eyebrow">your first 402</span>
             <h2
               id="sdk-cta-heading"
-              className="font-display leading-[1.0] tracking-[-0.02em] text-foreground"
-              style={{ fontSize: 'clamp(2rem, 4vw, 3.25rem)', fontWeight: 600 }}
+              className="display-wonk text-[var(--heading-color)]"
+              style={{ fontSize: 'clamp(2rem, 4.6vw, 4rem)' }}
             >
               A wallet is your API key.
               <br />
