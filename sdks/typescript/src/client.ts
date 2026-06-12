@@ -17,6 +17,7 @@ import {
 } from './types.js';
 import {
   ClientError,
+  PaymentRejectedError,
   PaymentRequiredError,
   RecipientMismatchError,
   EscrowProgramMismatchError,
@@ -191,7 +192,23 @@ export class SolvelaClient {
     } catch (e) {
       if (e instanceof PaymentRequiredError && this.signer) {
         const signature = await this.signPaymentForRequest(effectiveRequest, e.paymentRequired);
-        yield* this.transport.sendChatStream(effectiveRequest, signature);
+        try {
+          yield* this.transport.sendChatStream(effectiveRequest, signature);
+        } catch (retryErr) {
+          // A 402 on the retry — with the Payment-Signature attached — is a
+          // *post-signing* rejection, not a fresh challenge. Convert to
+          // PaymentRejectedError exactly as handlePaymentRequired does on the
+          // non-streaming path (and as the canonical Python chat_stream and
+          // Go ChatStream do). The outer pre-signing 402 still surfaces as
+          // PaymentRequiredError via the else-branch below.
+          if (retryErr instanceof PaymentRequiredError) {
+            throw new PaymentRejectedError(
+              'Payment rejected: second 402 after signing (streaming)',
+              retryErr.paymentRequired,
+            );
+          }
+          throw retryErr;
+        }
       } else {
         throw e;
       }
@@ -303,7 +320,12 @@ export class SolvelaClient {
     const signature = await this.signPaymentForRequest(request, pr);
     const result = await this.transport.sendChat(request, signature, extraHeaders);
     if (result instanceof PaymentRequired) {
-      throw new PaymentRequiredError(result);
+      // A 402 after a Payment-Signature was attached is a *post-signing*
+      // rejection, not a fresh challenge — surface it as the typed
+      // PaymentRejectedError carrying the second 402 body (mirrors the
+      // canonical Python client and the Go SDK), so callers can distinguish
+      // "needs signing" from "signed and rejected".
+      throw new PaymentRejectedError('Payment rejected: second 402 after signing', result);
     }
     return result;
   }

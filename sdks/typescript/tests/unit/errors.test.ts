@@ -79,6 +79,22 @@ describe('PaymentRejectedError', () => {
     const err = new PaymentRejectedError('rejected');
     expect(err).toBeInstanceOf(ClientError);
     expect(err.name).toBe('PaymentRejectedError');
+    expect(err.paymentRequired).toBeUndefined();
+  });
+
+  it('optionally carries the second 402 body', () => {
+    const pr = new PaymentRequired(
+      2,
+      new Resource('/v1/chat/completions', 'POST'),
+      [],
+      new CostBreakdown('0', '0', '0', 'USDC', 5),
+      'replay nonce already used',
+    );
+    const err = new PaymentRejectedError('second 402 after signing', pr);
+    expect(err).toBeInstanceOf(ClientError);
+    expect(err.name).toBe('PaymentRejectedError');
+    expect(err.paymentRequired).toBe(pr);
+    expect(err.paymentRequired?.error).toBe('replay nonce already used');
   });
 });
 

@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { SolvelaClient } from '../../src/client.js';
 import { ChatRequest, ChatMessage, PaymentPayload, SolanaPayload } from '../../src/types.js';
-import { InsufficientBalanceError, PaymentRequiredError } from '../../src/errors.js';
+import {
+  GatewayError,
+  InsufficientBalanceError,
+  PaymentRejectedError,
+  PaymentRequiredError,
+} from '../../src/errors.js';
 import { BalanceMonitor } from '../../src/balance.js';
 import type { Signer } from '../../src/signer.js';
 import type { PaymentAccept, Resource } from '../../src/types.js';
@@ -88,7 +93,51 @@ describe('SolvelaClient integration (mocked fetch)', () => {
 
     const client = new SolvelaClient();
     const request = new ChatRequest('gpt-4', [new ChatMessage('user', 'Hello')]);
-    await expect(client.chat(request)).rejects.toThrow(PaymentRequiredError);
+    const err = await client.chat(request).then(
+      () => {
+        throw new Error('expected rejection');
+      },
+      (e: unknown) => e,
+    );
+    // Initial 402 challenge (no signature attached yet) must stay a
+    // PaymentRequiredError — never the post-signing PaymentRejectedError.
+    expect(err).toBeInstanceOf(PaymentRequiredError);
+    expect(err).not.toBeInstanceOf(PaymentRejectedError);
+  });
+
+  it('chat throws PaymentRejectedError on second 402 after signing', async () => {
+    // Gateway returns 402 on every call: the first is the challenge, the
+    // second — after a Payment-Signature was attached — is a post-signing
+    // rejection and must surface as PaymentRejectedError carrying the second
+    // 402 body (mirrors the canonical Python client and Go PR #548).
+    const fetchFn = vi.fn().mockResolvedValue({
+      status: 402,
+      json: async () => prBody,
+      body: null,
+      statusText: 'Payment Required',
+    });
+    globalThis.fetch = fetchFn as unknown as typeof fetch;
+
+    const signer: Signer = {
+      async signPayment(_a, _r, resource, accepted: PaymentAccept) {
+        return new PaymentPayload(2, resource, accepted, new SolanaPayload('tx=='));
+      },
+    };
+    const client = new SolvelaClient({ signer });
+    const err = await client
+      .chat(new ChatRequest('gpt-4', [new ChatMessage('user', 'Hello')]))
+      .then(
+        () => {
+          throw new Error('expected rejection');
+        },
+        (e: unknown) => e,
+      );
+    expect(err).toBeInstanceOf(PaymentRejectedError);
+    expect(err).not.toBeInstanceOf(PaymentRequiredError);
+    const rejected = err as PaymentRejectedError;
+    expect(rejected.paymentRequired).toBeDefined();
+    expect(rejected.paymentRequired?.accepts[0].amount).toBe('1000000');
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
   it('chat with quality retry retries on degraded response', async () => {
@@ -364,10 +413,92 @@ describe('SolvelaClient chatStream payment retry (mocked fetch)', () => {
     const client = new SolvelaClient();
     const request = new ChatRequest('gpt-4', [new ChatMessage('user', 'Hello')]);
 
-    await expect(async () => {
+    const err = await (async () => {
       for await (const _chunk of client.chatStream(request)) {
         // consume
       }
-    }).rejects.toThrow(PaymentRequiredError);
+    })().then(
+      () => {
+        throw new Error('expected rejection');
+      },
+      (e: unknown) => e,
+    );
+    // Initial 402 challenge (no signature attached yet) must stay a
+    // PaymentRequiredError — never the post-signing PaymentRejectedError.
+    expect(err).toBeInstanceOf(PaymentRequiredError);
+    expect(err).not.toBeInstanceOf(PaymentRejectedError);
+  });
+
+  it('chatStream throws PaymentRejectedError on second 402 after signing', async () => {
+    // 402 on every call: first is the challenge, second — with the
+    // Payment-Signature attached on the streaming retry — is a post-signing
+    // rejection and must convert to PaymentRejectedError (mirrors the
+    // canonical Python chat_stream and Go ChatStream, PR #548).
+    const fetchFn = vi.fn().mockResolvedValue({
+      status: 402,
+      json: async () => prBody,
+      body: null,
+      statusText: 'Payment Required',
+    });
+    globalThis.fetch = fetchFn as unknown as typeof fetch;
+
+    const client = new SolvelaClient({ signer: makeMockSigner() });
+    const request = new ChatRequest('gpt-4', [new ChatMessage('user', 'Hello')]);
+
+    const err = await (async () => {
+      for await (const _chunk of client.chatStream(request)) {
+        // consume
+      }
+    })().then(
+      () => {
+        throw new Error('expected rejection');
+      },
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(PaymentRejectedError);
+    expect(err).not.toBeInstanceOf(PaymentRequiredError);
+    const rejected = err as PaymentRejectedError;
+    expect(rejected.paymentRequired).toBeDefined();
+    expect(rejected.paymentRequired?.accepts[0].amount).toBe('1000000');
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('chatStream propagates a non-402 error from the signed retry unconverted', async () => {
+    // 402 challenge, then 500 on the signed retry: the conversion must stay
+    // scoped to PaymentRequiredError — anything else from the signed retry
+    // propagates verbatim (never wrapped into PaymentRejectedError).
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 402,
+        json: async () => prBody,
+        body: null,
+        statusText: 'Payment Required',
+      })
+      .mockResolvedValueOnce({
+        status: 500,
+        json: async () => ({}),
+        body: null,
+        statusText: 'Internal Server Error',
+      });
+    globalThis.fetch = fetchFn as unknown as typeof fetch;
+
+    const client = new SolvelaClient({ signer: makeMockSigner() });
+    const request = new ChatRequest('gpt-4', [new ChatMessage('user', 'Hello')]);
+
+    const err = await (async () => {
+      for await (const _chunk of client.chatStream(request)) {
+        // consume
+      }
+    })().then(
+      () => {
+        throw new Error('expected rejection');
+      },
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(GatewayError);
+    expect(err).not.toBeInstanceOf(PaymentRejectedError);
+    expect(err).not.toBeInstanceOf(PaymentRequiredError);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 });
