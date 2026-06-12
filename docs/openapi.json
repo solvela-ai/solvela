@@ -146,6 +146,16 @@
               }
             }
           },
+          "429": {
+            "description": "Rate limited (`error.type`: `rate_limit_exceeded`). This public route carries a stricter per-client-IP cap than the generic limiter (default 20/min) to bound receipt-id scanning. Honor `retry-after` before retrying.",
+            "headers": {
+              "retry-after": { "description": "Seconds until the rate-limit window resets.", "schema": { "type": "integer" } },
+              "x-ratelimit-limit": { "description": "Requests allowed per window.", "schema": { "type": "integer" } },
+              "x-ratelimit-remaining": { "description": "Requests remaining in the current window (always 0 on a 429).", "schema": { "type": "integer" } },
+              "x-ratelimit-reset": { "description": "Seconds until the window resets.", "schema": { "type": "integer" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
           "503": {
             "description": "Receipt storage is not configured on this gateway (`error.type` = `service_unavailable`) — receipts cannot exist here at all, so no per-id 404 is implied.",
             "content": {

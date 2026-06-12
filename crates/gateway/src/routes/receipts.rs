@@ -9,12 +9,15 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
+use metrics::counter;
 use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::error::GatewayError;
-use crate::receipts::{self, Receipt, ReceiptError};
+use crate::middleware::rate_limit::{connect_info_client_id, rate_limited_response, PeerAddr};
+use crate::receipts::{self, ReceiptError};
 use crate::AppState;
 
 /// Fixed 404 body shared by unknown and malformed ids — the single signal.
@@ -23,8 +26,28 @@ const RECEIPT_NOT_FOUND: &str = "receipt not found";
 /// GET /v1/receipts/{receipt_id}
 pub async fn get_receipt(
     State(state): State<Arc<AppState>>,
+    // Infallible peer-address extractor (same as the free-tier path): `None`
+    // when `ConnectInfo` is absent, degrading to the stricter "unknown" bucket
+    // rather than 500-ing.
+    peer_addr: PeerAddr,
     Path(receipt_id): Path<String>,
-) -> Result<Json<Receipt>, GatewayError> {
+) -> Result<Response, GatewayError> {
+    // Anti-abuse: this route is public and unauthenticated (the unguessable
+    // UUID is the only credential) and the lookup is a DB query, so it gets a
+    // per-IP cap STRICTER than the generic outer limiter — hostile to receipt
+    // scanners, generous for an agent fetching its own receipts. Enforced
+    // FIRST (before the storage check and the UUID parse) so a limited client
+    // is rejected at the cheapest point. Keyed on the TCP peer IP, never a
+    // client-supplied header (GHSA-6ggq-cvwx-4f67); absent ConnectInfo falls
+    // back to the shared stricter "unknown" bucket. Mirrors the free-tier
+    // in-handler limiter in routes/chat.
+    let client_id = connect_info_client_id(peer_addr.0);
+    if state.receipts_rate_limiter.check(&client_id).await.is_err() {
+        counter!("solvela_receipts_rate_limited_total").increment(1);
+        warn!(client_id = %client_id, "receipts GET rate limit exceeded");
+        return Ok(rate_limited_response(state.receipts_rate_limiter.config()));
+    }
+
     // Rule 12 graceful degradation, honestly surfaced: with no DATABASE_URL
     // receipts cannot exist on this gateway AT ALL (the header is never
     // emitted), so the truthful answer is a 503 about the service — not a 404
@@ -44,7 +67,7 @@ pub async fn get_receipt(
     };
 
     match receipts::fetch_receipt(pool, id).await {
-        Ok(Some(receipt)) => Ok(Json(receipt)),
+        Ok(Some(receipt)) => Ok(Json(receipt).into_response()),
         Ok(None) => Err(GatewayError::NotFound(RECEIPT_NOT_FOUND.to_string())),
         Err(e) => {
             // Database/corruption detail stays server-side; the client gets

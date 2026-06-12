@@ -128,6 +128,17 @@ pub struct AppState {
     /// [`FREE_TIER_GLOBAL_RPM_DEFAULT`](crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT);
     /// override via `SOLVELA_FREE_TIER_GLOBAL_RPM`.
     pub free_global_cap: FreeTierGlobalCap,
+    /// Per-client (IP) rate limiter for the public, unauthenticated
+    /// `GET /v1/receipts/{id}` route.
+    ///
+    /// Same in-handler pattern as [`free_rate_limiter`](Self::free_rate_limiter):
+    /// every receipts GET is a DB query gated only by an unguessable-UUID
+    /// capability, so this cap bounds enumeration/scanning per peer IP, STRICTER
+    /// than the generic outer limiter ([`RateLimitConfig::receipts_default`]).
+    /// Keyed on the TCP peer IP, never a client-supplied header
+    /// (GHSA-6ggq-cvwx-4f67); absent `ConnectInfo` falls back to the shared
+    /// stricter "unknown" bucket.
+    pub receipts_rate_limiter: RateLimiter,
 }
 
 impl AppState {

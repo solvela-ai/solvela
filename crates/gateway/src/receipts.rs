@@ -165,7 +165,9 @@ fn receipt_binds(record: &ReceiptRecord) -> Option<ReceiptBinds> {
 ///
 /// Emits a synchronous `info!("receipt logged")` event before spawning the
 /// write, mirroring `UsageTracker::log_spend`, so integration tests observe
-/// the production write through the real route.
+/// the production write through the real route. The event carries the money
+/// fields but never the receipt_id (a bearer capability — see the
+/// de-correlation comment at the event).
 pub fn record_receipt(pool: Option<&sqlx::PgPool>, record: ReceiptRecord) -> Option<String> {
     let pool = pool?;
     let Some(binds) = receipt_binds(&record) else {
@@ -182,8 +184,13 @@ pub fn record_receipt(pool: Option<&sqlx::PgPool>, record: ReceiptRecord) -> Opt
     };
     let created_at = Utc::now();
 
+    // De-correlation (round-2 security review): the happy-path event carries
+    // the payer wallet and the money fields but deliberately NOT the
+    // receipt_id — the id is a bearer capability, and logging it next to the
+    // wallet would turn server logs into a wallet→capability-URL lookup
+    // table. The id appears only in the `error!` failure events below, where
+    // it is needed to reconcile a lost/unadvertised receipt by hand.
     info!(
-        receipt_id = %record.receipt_id,
         model = %record.model,
         payment_scheme = %record.payment_scheme,
         payer_wallet = %record.payer_wallet,
@@ -284,6 +291,16 @@ pub async fn fetch_receipt(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<Recei
         return Ok(None);
     };
 
+    Ok(Some(build_receipt_from_row(&row)?))
+}
+
+/// Assemble the wire [`Receipt`] from one `receipts` DB row.
+///
+/// The single place a schema field addition must touch on the read side
+/// (mirrored by the INSERT in [`record_receipt`] on the write side). Fails
+/// closed on any invariant violation (negative amount, partial vendor
+/// triple) — never serve a half-truth receipt.
+fn build_receipt_from_row(row: &sqlx::postgres::PgRow) -> Result<Receipt, ReceiptError> {
     let atomic = |column: &str| -> Result<u64, ReceiptError> {
         let value: i64 = row.try_get(column)?;
         u64::try_from(value)
@@ -324,7 +341,7 @@ pub async fn fetch_receipt(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<Recei
         }
     };
 
-    Ok(Some(Receipt {
+    Ok(Receipt {
         receipt_id: row.try_get("id")?,
         created_at: row.try_get("created_at")?,
         model: row.try_get("model")?,
@@ -343,7 +360,7 @@ pub async fn fetch_receipt(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<Recei
             currency: "USDC".to_string(),
         },
         vendor,
-    }))
+    })
 }
 
 #[cfg(test)]

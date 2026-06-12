@@ -426,6 +426,20 @@ context_window = 1000000
 supports_streaming = true
 "#;
 
+/// Receipts-GET limiter for test apps: effectively unlimited so the
+/// receipt round-trip tests (which poll `GET /v1/receipts/{id}` up to 50
+/// times waiting on the fire-and-forget write, from the `oneshot` "unknown"
+/// bucket) are never tripped by the production per-IP cap. The strict cap
+/// itself is exercised by the dedicated `test_app_with_receipts_limit`
+/// fixture below.
+fn generous_receipts_limiter() -> RateLimiter {
+    RateLimiter::new(RateLimitConfig {
+        max_requests: 10_000,
+        window: std::time::Duration::from_secs(60),
+        unknown_max_requests: 10_000,
+    })
+}
+
 /// Build a test app with the test model config (no real provider API keys).
 ///
 /// Uses `AlwaysPassVerifier` so that properly-structured PaymentPayload headers
@@ -482,6 +496,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -535,6 +550,7 @@ fn test_app_with_usdc_mint_and_providers(mint: &str, providers: ProviderRegistry
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -776,6 +792,7 @@ fn test_app_with_provider_registry_and_exact_verifier(
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -858,6 +875,7 @@ fn app_with_semantic_cache(sem: Arc<gateway::cache::semantic::SemanticCache>) ->
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: true,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -1169,6 +1187,84 @@ fn app_with_semantic_cache_and_escrow(
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+    });
+    build_router(state, RateLimiter::new(RateLimitConfig::default()))
+}
+
+/// [`app_with_semantic_cache_and_escrow`] composed with a real `db_pool` (the
+/// way [`test_app_with_db_pool`] composes the exact-verifier app): semantic
+/// cache + escrow scheme + Postgres-backed receipts and spend ledger, so the
+/// `UsagelessSemanticHit` spend-log arm's receipt emission is observable
+/// end-to-end through the real route (header → GET round-trip).
+fn app_with_semantic_cache_escrow_and_db_pool(
+    sem: Arc<gateway::cache::semantic::SemanticCache>,
+    pool: sqlx::PgPool,
+) -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![
+        Arc::new(AlwaysPassVerifier),
+        Arc::new(AlwaysPassEscrowVerifier),
+    ]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    config.solana.escrow_program_id =
+        Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
+    config.cache.semantic.enabled = true;
+
+    let test_keypair = {
+        use ed25519_dalek::SigningKey;
+        let sk = SigningKey::from_bytes(&[1u8; 32]);
+        let mut kp = [0u8; 64];
+        kp[..32].copy_from_slice(&[1u8; 32]);
+        kp[32..].copy_from_slice(sk.verifying_key().as_bytes());
+        bs58::encode(&kp).into_string()
+    };
+    let test_fee_payer_pool = Arc::new(
+        solvela_x402::fee_payer::FeePayerPool::from_keys(&[test_keypair])
+            .expect("test pool must load"),
+    );
+    let escrow_claimer = solvela_x402::escrow::EscrowClaimer::new(
+        "https://api.devnet.solana.com".to_string(),
+        test_fee_payer_pool.clone(),
+        "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU",
+        "11111111111111111111111111111111",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        None,
+    )
+    .expect("test claimer must be valid");
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
+        cache: None,
+        semantic_cache: Some(sem),
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: Some(Arc::new(escrow_claimer)),
+        fee_payer_pool: Some(test_fee_payer_pool),
+        nonce_pool: None,
+        db_pool: Some(pool),
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -1829,6 +1925,7 @@ fn test_app_with_provider_registry_and_escrow_verifier(
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -1909,6 +2006,7 @@ fn test_app_with_escrow_and_usdc_mint(mint: &str) -> axum::Router {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -2376,6 +2474,7 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let app = build_router(
@@ -4758,6 +4857,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -6791,6 +6891,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -6956,6 +7057,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
 
@@ -7191,6 +7293,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
 
@@ -7580,6 +7683,7 @@ async fn test_proxy_require_tenant_wallet_rejected_before_settlement() {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let app = build_router(
@@ -9099,6 +9203,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         api_key_hmac_secret: None,
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let app = build_router(
@@ -9713,6 +9818,7 @@ fn test_app_with_free_limit(free_max: u32) -> axum::Router {
         // Generous aggregate cap by default so the PER-IP tests above are not
         // accidentally tripped by the global cap; the aggregate-cap tests build
         // their own app via `test_app_with_global_cap`.
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -10074,6 +10180,7 @@ async fn dev_bypass_still_works() {
         }),
         // Aggregate cap also set to 0 — if the dev-bypass branch were ever
         // (incorrectly) routed through the free gates, this PAID model would 429.
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(0),
     });
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
@@ -10146,6 +10253,7 @@ fn test_app_with_global_cap(global_cap: u32) -> axum::Router {
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(free_cfg),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(global_cap),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -10272,6 +10380,7 @@ async fn free_per_ip_and_global_cap_are_independent() {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(free_cfg),
         // Global cap deliberately LOOSER than the per-IP limit.
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(100),
     });
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
@@ -11140,6 +11249,7 @@ fn test_app_with_db_pool(
         prometheus_handle: Some(test_prometheus_handle()),
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -11348,6 +11458,195 @@ async fn paid_streaming_chat_emits_receipt_header_and_records_estimate() {
     );
 }
 
+/// An ESCROW-paid request that hits the semantic cache on a USAGE-LESS entry
+/// (the `UsagelessSemanticHit` spend-log arm) must also emit a receipt — this
+/// arm previously had zero mutation coverage (deleting its
+/// `emit_chat_receipt` call failed nothing). The receipt must record the
+/// DISCOUNTED billed amount (the escrow claim takes only
+/// `hit_price_percent` of the full price; the remainder refunds to the
+/// agent), strictly less than the 402-quoted estimate, with the breakdown
+/// being the same C1 estimate the 402 quoted.
+///
+/// Self-skips when redis-stack (semantic cache) or Postgres is unavailable.
+/// Domain ("Saturn's rings") is distinct from every other semantic-cache test
+/// domain to avoid cosine collisions in the shared Redis HNSW index.
+#[tokio::test]
+async fn escrow_semantic_hit_usageless_receipt_records_discounted_amount() {
+    let Some(sem) = try_semantic_cache().await else {
+        return;
+    };
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+
+    // Usage-less cached entry (the cached response omits `usage`, so billing
+    // must fall back to the request estimate — the UsagelessSemanticHit arm).
+    let seeded = ChatResponse {
+        id: "seeded-saturn-receipt".to_string(),
+        object: "chat.completion".to_string(),
+        created: 0,
+        model: "openai/gpt-4o".to_string(),
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessage {
+                role: Role::Assistant,
+                content: "Saturn's rings are mostly water ice with traces of rocky debris.".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            finish_reason: Some("stop".to_string()),
+        }],
+        usage: None,
+    };
+    let seed_req = ChatRequest {
+        model: "openai/gpt-4o".to_string(),
+        messages: vec![ChatMessage {
+            role: Role::User,
+            content: "What are the rings of Saturn made of?".into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }],
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        tools: None,
+        tool_choice: None,
+    };
+    sem.store(&seed_req, &seeded).await.expect("seed store");
+
+    // Paraphrase body used for BOTH the 402 quote and the paid request, so the
+    // quoted estimate is exactly the figure the usage-less hit bills against.
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":"What is the composition of Saturn's rings?"}]}"#;
+
+    // Quote the 402 for this body: the exact-scheme `amount` is the atomic
+    // estimate E; `cost_breakdown` is the C1 estimate the receipt must mirror.
+    let quote_resp = test_app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(quote_resp.status(), StatusCode::PAYMENT_REQUIRED);
+    let quote_bytes = quote_resp.into_body().collect().await.unwrap().to_bytes();
+    let quote: serde_json::Value = serde_json::from_slice(&quote_bytes).unwrap();
+    let quoted_atomic: u64 = quote["accepts"]
+        .as_array()
+        .and_then(|a| a.iter().find(|s| s["scheme"] == "exact"))
+        .and_then(|s| s["amount"].as_str())
+        .expect("402 quotes an exact amount")
+        .parse()
+        .expect("quoted amount parses as u64");
+    let quoted_total = quote["cost_breakdown"]["total"]
+        .as_str()
+        .expect("402 carries cost_breakdown.total")
+        .to_string();
+
+    // Expected DISCOUNTED bill: the production hit path derives the full price
+    // via `estimated_atomic_cost` (f64 parse of the breakdown total × 1e6,
+    // truncating cast) and then takes `hit_price_percent` of it
+    // (`apply_hit_price`: floor(full × pct / 100)). Replicate that derivation
+    // from the SAME quoted total string so the pin is exact, not fuzzy.
+    let pct = AppConfig::default().cache.semantic.hit_price_percent;
+    let full_atomic =
+        (quoted_total.parse::<f64>().expect("total parses as f64") * 1_000_000.0) as u64;
+    let expected_billed = ((full_atomic as u128) * (pct as u128) / 100) as u64;
+    assert!(
+        expected_billed > 0 && expected_billed < quoted_atomic,
+        "test premise: the discounted bill ({expected_billed}) must be a positive amount \
+         strictly below the quoted estimate ({quoted_atomic})"
+    );
+
+    let app = app_with_semantic_cache_escrow_and_db_pool(Arc::clone(&sem), pool);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-solvela-debug", "true")
+                .header(
+                    "PAYMENT-SIGNATURE",
+                    valid_escrow_payment_header("/v1/chat/completions"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "escrow-paid usage-less semantic hit must serve 200"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-solvela-cache")
+            .and_then(|v| v.to_str().ok()),
+        Some("semantic-hit"),
+        "request must be served from the semantic cache (the UsagelessSemanticHit arm)"
+    );
+    // The receipt header is the mutation-coverage pin: deleting the
+    // `emit_chat_receipt` call in the UsagelessSemanticHit arm makes this
+    // panic (header absent).
+    let path = receipt_header_path(&resp);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["id"], "seeded-saturn-receipt");
+
+    let receipt = poll_receipt_until_ok(&app, &path).await;
+    assert_eq!(receipt["model"], "openai/gpt-4o");
+    assert_eq!(receipt["payment_scheme"], "escrow");
+    assert!(receipt["tx_signature"].is_string());
+
+    // The DISCOUNTED billed amount — identical to the spend ledger and the
+    // escrow claim; strictly below the 402-quoted estimate.
+    assert_eq!(
+        receipt["amount_paid_atomic"].as_u64(),
+        Some(expected_billed),
+        "receipt must record the discounted escrow bill ({pct}% of the full price)"
+    );
+    assert!(
+        receipt["amount_paid_atomic"].as_u64().unwrap() < quoted_atomic,
+        "discounted bill must be strictly less than the 402-quoted estimate"
+    );
+
+    // Breakdown consistency: the receipt's breakdown is the same C1 estimate
+    // the 402 quoted (string-identical decimals, atomic = checked conversion
+    // of the same strings; total equals the quoted atomic estimate).
+    assert_eq!(
+        receipt["cost_breakdown"]["total_atomic"].as_u64(),
+        Some(quoted_atomic)
+    );
+    assert_eq!(
+        receipt["cost_breakdown"]["total_usdc"],
+        quoted_total.as_str()
+    );
+    assert_eq!(
+        receipt["cost_breakdown"]["provider_cost_usdc"],
+        quote["cost_breakdown"]["provider_cost"]
+    );
+    assert_eq!(
+        receipt["cost_breakdown"]["platform_fee_usdc"],
+        quote["cost_breakdown"]["platform_fee"]
+    );
+    assert_eq!(receipt["cost_breakdown"]["currency"], "USDC");
+    assert!(
+        receipt.get("vendor").is_none(),
+        "chat receipts must not carry vendor fields"
+    );
+}
+
 /// Free-tier ($0) requests produce no payment and therefore no receipt — the
 /// header must be ABSENT even with receipt storage configured.
 #[tokio::test]
@@ -11452,6 +11751,142 @@ async fn get_receipt_without_database_returns_503() {
     assert_eq!(json["error"]["type"], "service_unavailable");
 }
 
+/// DB-less app whose RECEIPTS limiter allows `max` GETs per (named-IP) window.
+/// The outer paid limiter stays at its generous default so the two limiters
+/// can be shown not to cross-contaminate (mirrors `test_app_with_free_limit`).
+fn test_app_with_receipts_limit(max: u32) -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+    // Strict receipts config: `max` for NAMED ip buckets, and the same for the
+    // "unknown" bucket so a no-ConnectInfo request is deterministic.
+    let receipts_cfg = RateLimitConfig {
+        max_requests: max,
+        window: std::time::Duration::from_secs(60),
+        unknown_max_requests: max,
+    };
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        receipts_rate_limiter: RateLimiter::new(receipts_cfg),
+    });
+    build_router(state, RateLimiter::new(RateLimitConfig::default()))
+}
+
+/// Build a receipts GET with a fixed `ConnectInfo` peer IP so the receipts
+/// limiter keys on a NAMED bucket (not the shared "unknown" one).
+fn receipts_get_request(path: &str, ip: &str) -> Request<Body> {
+    let mut req = Request::builder()
+        .method("GET")
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    let addr: std::net::SocketAddr = format!("{ip}:40000").parse().unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(addr));
+    req
+}
+
+/// The public receipts GET is rate-limited per client IP, STRICTER than the
+/// generic outer limiter, and the cap is consumed BEFORE any storage lookup
+/// (this app is DB-less, so under-cap requests 503 — the cap still trips).
+/// The 429 is the canonical envelope: `rate_limit_exceeded` + the standard
+/// `x-ratelimit-*` / `retry-after` headers carrying the RECEIPTS limit.
+#[tokio::test]
+async fn receipts_get_rate_limited_per_ip_with_canonical_429() {
+    let app = test_app_with_receipts_limit(2);
+    let ip = "203.0.113.77";
+    let path = format!("/v1/receipts/{}", uuid::Uuid::new_v4());
+
+    // First 2 GETs from this IP pass the limiter (DB-less → honest 503).
+    for i in 0..2 {
+        let resp = app
+            .clone()
+            .oneshot(receipts_get_request(&path, ip))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GET {i} must pass the receipts limiter (and 503 on this DB-less app)"
+        );
+    }
+
+    // The 3rd exceeds the receipts cap → 429 with the canonical envelope.
+    let resp = app
+        .clone()
+        .oneshot(receipts_get_request(&path, ip))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "exceeding the per-IP receipts cap must 429"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-ratelimit-limit")
+            .expect("429 must carry x-ratelimit-limit"),
+        "2",
+        "429 must carry the RECEIPTS limit (2), not the outer global limit (60)"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-ratelimit-remaining")
+            .expect("429 must carry x-ratelimit-remaining"),
+        "0"
+    );
+    assert!(
+        resp.headers().get("retry-after").is_some(),
+        "429 must carry retry-after"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["error"]["type"], "rate_limit_exceeded");
+
+    // A different IP gets its own bucket — still under cap.
+    let resp = app
+        .clone()
+        .oneshot(receipts_get_request(&path, "203.0.113.78"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "an unrelated IP must not be affected by another IP's exhausted bucket"
+    );
+}
+
 /// A settled paid request to a VENDOR-wallet marketplace service must record a
 /// receipt carrying the vendor settlement + fee receivable — written at
 /// SETTLEMENT time (the vendor was just paid on-chain), so it must exist even
@@ -11471,7 +11906,7 @@ async fn vendor_paid_proxy_request_records_receipt_with_fee_receivable() {
         Arc::new(VendorRecipientRecordingVerifier {
             recorded_recipient: Arc::clone(&recorded_recipient),
         }),
-        pool,
+        pool.clone(),
     );
     register_vendor_service(&app, "vendor-receipt-api").await;
 
@@ -11532,10 +11967,36 @@ async fn vendor_paid_proxy_request_records_receipt_with_fee_receivable() {
     );
     assert_eq!(events[0]["vendor_wallet"], TEST_VENDOR_WALLET_B58);
     assert_eq!(events[0]["amount_paid_atomic"].as_u64(), Some(20_000));
+    // De-correlation guard (round-2 security review): the happy-path event
+    // must NOT carry the receipt_id — wallet + capability-URL together would
+    // make server logs a lookup table (the id is a bearer capability). Logs
+    // keep the money fields; the id reaches the client only via the response
+    // header (not emitted on THIS response — the test endpoint fails the
+    // pre-upstream SSRF/DNS check, whose error arm carries no headers), so
+    // the test recovers the id from the receipts table it owns.
+    assert!(
+        events[0].get("receipt_id").is_none(),
+        "happy-path 'receipt logged' event must not carry receipt_id: {:?}",
+        events[0]
+    );
 
-    let receipt_id = events[0]["receipt_id"]
-        .as_str()
-        .expect("receipt logged event carries receipt_id");
+    // Recover the settlement-time receipt id from storage (the model column
+    // is unique to this test) — polling because the write is fire-and-forget.
+    let mut receipt_id: Option<uuid::Uuid> = None;
+    for _ in 0..50 {
+        if let Some(row) = sqlx::query("SELECT id FROM receipts WHERE model = $1")
+            .bind("vendor-receipt-api")
+            .fetch_optional(&pool)
+            .await
+            .expect("query receipts table")
+        {
+            use sqlx::Row;
+            receipt_id = Some(row.get("id"));
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let receipt_id = receipt_id.expect("settlement-time vendor receipt row never landed");
     let path = format!("/v1/receipts/{receipt_id}");
     let receipt = poll_receipt_until_ok(&app, &path).await;
 
