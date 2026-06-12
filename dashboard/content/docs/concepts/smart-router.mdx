@@ -84,7 +84,7 @@ Each (Profile, Tier) pair maps to a specific model:
 | Complex | `deepseek/deepseek-chat` | `google/gemini-3.1-pro` | `anthropic/claude-opus-4-6` | `google/gemini-3.1-flash-lite` |
 | Reasoning | `deepseek/deepseek-reasoner` | `xai/grok-4-fast-reasoning` | `openai/o3` | `google/gemini-3.1-flash-lite` |
 
-> **`free` profile vs. the free tier:** the `free` profile is a routing choice — it sends every tier to the zero-cost model. Separately, any request whose estimated cost is zero (which is what routing to a zero-cost model produces) skips the 402 payment challenge entirely: no wallet or signature needed. Free-tier traffic is subject to per-IP and aggregate rate limits.
+> **`free` profile vs. the free tier:** the `free` profile is a routing choice — it sends every tier to the zero-cost model. Separately, any request whose estimated cost is zero (which is what routing to a zero-cost model produces) skips the 402 payment challenge entirely: no wallet or signature needed. Free-tier traffic is subject to per-IP and aggregate rate limits. See [Free tier](/docs/concepts/free-tier) for details.
 
 ## Example: same prompt, different profiles
 
@@ -108,7 +108,7 @@ Tier: Reasoning (reasoning markers: "prove", "step by step", "analyze", "compare
 ```
 
 <Note>
-  The router classifies based on user message content only. System messages and assistant turns do not affect the score.
+  The router's keyword dimensions score user message content only, but the conversation-depth dimension counts every message — system and assistant turns included — so a long history can nudge a request across a tier boundary.
 </Note>
 
 ## Bypassing the router

@@ -41,9 +41,9 @@ if (response.status === 402 && body.x402_version) {
 | `403` | Forbidden | Authenticated but lacking permission (e.g. member role calling admin-only org endpoints) |
 | `404` | Not Found | Unknown endpoint, or `model` ID not in the registry (`type: model_not_found`) |
 | `429` | Too Many Requests | Rate limit exceeded |
-| `500` | Internal Server Error | Gateway error (bug or misconfiguration), or all configured providers failed |
+| `500` | Internal Server Error | Gateway error (bug or misconfiguration), or payment settlement failed (`type: settlement_failed`) |
 | `502` | Bad Gateway | Upstream provider returned an error (`type: provider_error`) |
-| `503` | Service Unavailable | Required dependency unavailable (e.g. Prometheus recorder, database, or marketplace target marked unhealthy) |
+| `503` | Service Unavailable | No provider could serve a paid request (`type: upstream_unavailable` — payment not charged), or a required dependency is unavailable |
 
 ## Common errors and fixes
 
@@ -156,19 +156,24 @@ See [x402 Protocol](/docs/concepts/x402) for the full flow.
 
 ---
 
-### 500 — All providers failed
+### 503 — No provider available (paid request)
 
 ```json
-{ "error": { "message": "all providers failed for model 'gpt-4o'. Your payment was submitted but no response could be generated." } }
+{
+  "error": {
+    "type": "upstream_unavailable",
+    "message": "No provider could serve your request right now and your payment was NOT charged. Please retry shortly."
+  }
+}
 ```
 
-**Cause:** The gateway verified payment but could not get a response from the upstream provider.
+**Cause:** The gateway accepted your payment but no upstream provider could produce a response.
 
-**Fix:** Retry the request. If the issue persists, the provider may be experiencing an outage. Contact the gateway operator with the transaction signature.
+**You are not charged for an undelivered completion:**
+- **exact** scheme — the USDC transfer is deferred until after delivery, so nothing settled on-chain.
+- **escrow** scheme — the deposit settled pre-call, but the gateway never claims it for a failed request; the message is `"No provider could serve your request right now; no claim was made against your escrow deposit and it refunds at expiry. Please retry shortly."`
 
-<Warning>
-  If you receive a 500 after a confirmed payment, your USDC was spent but no response was returned. Contact support with your transaction signature.
-</Warning>
+**Fix:** Retry the request. If the issue persists, the provider may be experiencing an outage.
 
 ---
 

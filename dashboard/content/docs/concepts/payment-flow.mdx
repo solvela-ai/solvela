@@ -87,7 +87,7 @@ If you are using the TypeScript, Python, Rust, or Go SDK, you never need to impl
   </Step>
 
   <Step title="Sign the Solana transaction">
-    Construct a USDC-SPL transfer for the exact `amount` to the `pay_to` address and sign it with your wallet's private key. The TypeScript SDK uses `@solana/web3.js`, the Python SDK uses `solders`, and the Rust CLI uses the `solana` crate. The Go SDK ships an `UnimplementedSigner` stub; implementers typically reach for `gagliardetto/solana-go` (or any Solana RPC client) to build and sign the transfer themselves — see [the Go SDK page](/docs/sdks/go#custom-signers).
+    Construct a USDC-SPL transfer for the exact `amount` to the `pay_to` address and sign it with your wallet's private key. The TypeScript SDK uses `@solana/web3.js`, the Python SDK uses `solders`, and the Rust CLI uses the `solana` crate. The Go SDK's built-in `KeypairSigner` (`solvela.NewKeypairSigner(wallet, rpcURL)`) signs `escrow` deposits over raw Solana JSON-RPC; the `exact` scheme is intentionally unimplemented in Go, so for direct transfers implementers reach for `gagliardetto/solana-go` (or any Solana RPC client) via a custom `Signer` — see [the Go SDK page](/docs/sdks/go#custom-signers).
 
     The signing step never broadcasts the transaction — it only produces a signed transaction bytes object. The gateway broadcasts it after verifying the signature is valid.
 
@@ -113,7 +113,7 @@ If you are using the TypeScript, Python, Rust, or Go SDK, you never need to impl
   </Step>
 
   <Step title="Receive the LLM response">
-    If the signature is valid and the nonce is fresh, the gateway broadcasts the transaction to Solana, waits for confirmation, then proxies the request to the upstream LLM and streams the response back to you in standard OpenAI format.
+    If the signature is valid and the nonce is fresh, the gateway verifies the transaction (validate + simulate), proxies the request to the upstream LLM, and streams the response back to you in standard OpenAI format. For the default `exact` scheme, the on-chain broadcast is deferred until after the response is delivered — you are not charged when the provider call fails. Escrow deposits are the exception: they must land on-chain before the request is served.
 
     ```json title="Successful response"
     {
@@ -143,7 +143,7 @@ The `cost_breakdown` object is present on every 402 response. All monetary value
 | `platform_fee` | string | 5% of `provider_cost`, retained by Solvela |
 | `total` | string | `provider_cost` + `platform_fee` |
 | `currency` | string | Always `"USDC"` today |
-| `fee_percent` | number | Platform fee percentage (currently `5.0`) |
+| `fee_percent` | number | Platform fee percentage (currently `5`, serialized as an integer) |
 
 ---
 
@@ -235,14 +235,15 @@ The official SDKs expose a **per-call** payment cap (the maximum amount they wil
   </Tab>
   <Tab value="Rust">
     ```rust
-    use solvela_client::{ClientConfig, SolvelaClient, Wallet};
+    use solvela_client::{ClientBuilder, SolvelaClient, Wallet};
 
     // solvela-client caps spend per call, not per session.
     // Track lifetime spend yourself if you need a session-wide budget.
     let wallet = Wallet::from_env("SOLANA_PRIVATE_KEY")?;
-    let config = ClientConfig::new()
+    let config = ClientBuilder::new()
         .gateway_url("https://api.solvela.ai")
-        .max_payment_amount(100_000); // per-call cap: 0.10 USDC atomic
+        .max_payment_amount(100_000) // per-call cap: 0.10 USDC atomic
+        .build_config();
     let client = SolvelaClient::new(wallet, config)?;
     ```
   </Tab>
@@ -251,7 +252,7 @@ The official SDKs expose a **per-call** payment cap (the maximum amount they wil
     // solvela-go caps spend per call, not per session.
     // Track lifetime spend yourself if you need a session-wide budget.
     wallet, _ := solvela.WalletFromEnv("SOLANA_PRIVATE_KEY")
-    signer := myKeypairSigner{wallet: wallet} // see /docs/sdks/go#custom-signers
+    signer := solvela.NewKeypairSigner(wallet, "https://api.mainnet-beta.solana.com")
 
     client, err := solvela.NewClient(wallet, signer,
         solvela.WithGatewayURL("https://api.solvela.ai"),

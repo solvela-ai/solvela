@@ -63,8 +63,7 @@ All prices are USDC per million tokens (provider cost before the 5% fee).
 | Gemini 3.1 Pro | `google/gemini-3.1-pro` | $2.00 | $12.00 | 1M |
 | Gemini 2.5 Flash | `google/gemini-2.5-flash` | $0.30 | $2.50 | 1M |
 | Gemini 2.5 Flash Lite | `google/gemini-2.5-flash-lite` | $0.10 | $0.40 | 1M |
-| Gemini 2.0 Flash | `google/gemini-2.0-flash` | $0.10 | $0.40 | 1M |
-| Gemini 2.0 Flash Lite | `google/gemini-2.0-flash-lite` | $0.075 | $0.30 | 1M |
+| Gemini 3.1 Flash-Lite (Free) | `google/gemini-3.1-flash-lite` | $0.00 | $0.00 | 1M |
 
 ### xAI
 
@@ -104,7 +103,7 @@ curl https://api.solvela.ai/pricing
 The gateway estimates cost at request time using:
 
 1. **Input tokens**: estimated from the messages in the request (character count / 4, approximately)
-2. **Output tokens**: `max_tokens` if specified, otherwise defaults to 1000
+2. **Output tokens**: the completion-token ceiling — the tightest of `max_tokens` (if specified), the model's declared `max_output_tokens`, and a global 8,192-token cap. When `max_tokens` is omitted, the quote reserves for the full ceiling (up to 8,192 tokens), not a flat default
 3. **Cost**: `(input_tokens * input_rate + output_tokens * output_rate) / 1_000_000 * 1.05`
 
 The actual cost charged via escrow claim is based on the real token usage returned by the provider (when available).

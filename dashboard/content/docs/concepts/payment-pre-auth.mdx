@@ -134,7 +134,7 @@ So the same opt-in client header set works for EVM with no protocol change beyon
 
 Even with pre-auth disabled on Solana and constrained on EVM, the gateway carries a related layer that limits the blast radius of accidentally-replayed requests:
 
-The existing **response cache** (`ResponseCache` in [`crates/gateway/src/cache.rs`](https://github.com/solvela-ai/solvela/blob/main/crates/gateway/src/cache.rs)) keys on `SHA-256(model ‖ serialised_messages ‖ temperature)` and stores the upstream completion for the configured TTL (default 10 minutes). A client that issues the same prompt twice within the TTL window — pre-auth header or not — gets the cached response and the upstream LLM is only charged once.
+The existing **response cache** (`ResponseCache` in [`crates/gateway/src/cache/exact.rs`](https://github.com/solvela-ai/solvela/blob/main/crates/gateway/src/cache/exact.rs)) keys on `SHA-256(model ‖ serialised_messages ‖ tools ‖ tool_choice ‖ temperature)` and stores the upstream completion for the configured TTL (default 10 minutes). A client that issues the same prompt twice within the TTL window — pre-auth header or not — gets the cached response and the upstream LLM is only charged once.
 
 This is **not** a payment-replay guard. Payment-replay protection is handled separately: the gateway tracks transaction signatures and rejects duplicate `payment-signature` headers with `402 Invalid Payment`. The response cache is a cost-control / latency optimization, not a correctness safeguard against double-charging.
 

@@ -73,11 +73,9 @@ Enterprise accounts with API key auth unlock additional capabilities:
 | Feature | Description |
 |---------|-------------|
 | **Org hierarchy** | Manage multiple teams under a single organization |
-| **Team budgets** | Set hourly or daily spend caps per team |
-| **Session budgets** | Limit spending for individual sessions or users |
-| **Audit logs** | Full request and payment history per key |
+| **Team budgets** | Set hourly, daily, or monthly spend caps per team |
+| **Audit logs** | Full audit trail of org actions |
 | **Usage analytics** | Breakdown of spend by model, team, and time period |
-| **Per-model restrictions** | Restrict which models a team or key can access |
 
 ## Choosing a Method
 
@@ -85,7 +83,7 @@ Enterprise accounts with API key auth unlock additional capabilities:
 |--|------|---------|
 | Setup required | None | Enterprise account |
 | Auth mechanism | Payment signature | Bearer token |
-| Rate limiting | Per wallet address | Per API key |
+| Rate limiting | Per wallet address | Per source IP |
 | Billing | Pay per request | Managed via org budgets |
 | Best for | Individual use, developers | Teams, production deployments |
 

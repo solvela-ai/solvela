@@ -1,45 +1,96 @@
 ---
 title: Rate Limits
-description: Rate limiting and quotas
+description: Rate limiting and quotas, including the anonymous free-tier limits
 ---
 
 Solvela applies rate limiting at multiple layers to protect gateway stability and ensure fair usage across all clients.
 
-## Middleware Stack
+## Middleware stack
 
 Requests pass through the following limiting layers in order:
 
-| Layer | Scope | Description |
-|-------|-------|-------------|
-| Per-client rate limiting | Payer wallet, falling back to client IP | Primary limit. The identity is the payer wallet derived from the signed transaction in the `PAYMENT-SIGNATURE` header; a request without a decodable payment falls back to its source IP. The fallback never trusts `X-Forwarded-For` (trivially spoofed) — set real client IPs at your proxy layer. |
-| Global concurrency limiting | Gateway-wide | Caps total in-flight requests across all clients to prevent overload. |
-| Request timeout | Per request | Hard timeout applied globally; long-running requests are terminated. |
+| Layer | Scope | Default | Description |
+|-------|-------|---------|-------------|
+| Per-client rate limiting | Payer wallet, falling back to client IP | 60 requests / 60 s (`SOLVELA_RATE_LIMIT_MAX`) | Primary limit. The identity is the payer wallet derived from the signed transaction in the `payment-signature` header; a request without a decodable payment falls back to its source IP. The fallback never trusts `X-Forwarded-For` (trivially spoofed) — set real client IPs at your proxy layer. |
+| Free-tier limits | Per IP + global aggregate | See [Free tier vs paid](#free-tier-vs-paid-limits) | Stricter limits enforced inside the chat handler on zero-cost requests only. |
+| Global concurrency limiting | Gateway-wide | 256 in-flight (`SOLVELA_MAX_CONCURRENT_REQUESTS`) | Caps total in-flight requests across all clients to prevent overload. |
+| Request timeout | Per request | 120 s (`SOLVELA_REQUEST_TIMEOUT_SECS`) | Hard timeout applied globally; expired requests return `408`. |
 
-## Rate Limit Headers
+Operational endpoints — `/health`, `/v1/models`, and `/metrics` — are exempt from rate limiting so health checks and load balancers keep working even when a client is over its limit.
 
-Every response includes headers indicating the current limit state for your client (wallet or IP):
+## Free tier vs paid limits
+
+A request is **free** if and only if its quoted cost is exactly `0` atomic USDC — i.e. the resolved model is zero-priced in the registry (currently `openai/gpt-oss-120b` and `google/gemini-3.1-flash-lite`, with `gemini-3.1-flash-lite` being the `free` routing profile's target). Free requests are served at $0 with no `payment-signature` header and never touch the payment path. A payment header sent with a free model is ignored — the quoted amount is `0`, so there is nothing to verify or claim.
+
+Because the free path is anonymous (no payer wallet), its rate-limit identity is the actual TCP peer IP — never a client-supplied header such as `X-Forwarded-For`. Two gates run, in order, before any provider call:
+
+| Limit | Bucket | Default | Window | Env override |
+|-------|--------|---------|--------|--------------|
+| Paid per-client | Payer wallet (IP fallback) | 60 requests | 60 s | `SOLVELA_RATE_LIMIT_MAX` |
+| Free per-IP | TCP peer IP | 5 requests | 60 s | `SOLVELA_FREE_TIER_RATE_LIMIT` |
+| Free aggregate (global) | All free clients combined | 12 requests | 60 s | `SOLVELA_FREE_TIER_GLOBAL_RPM` |
+
+### Per-IP free limit
+
+An in-memory fixed-window counter keyed on the peer IP, intentionally much stricter than the paid 60/min limit. When the peer address is unavailable, all unidentified clients share a single stricter "unknown" bucket: 10/min on the paid limiter, 2/min on the free limiter. The unknown-bucket limits are fixed and not env-overridable — `SOLVELA_FREE_TIER_RATE_LIMIT` tunes only the per-IP free limit.
+
+### Aggregate (global) free cap
+
+A single shared counter across **all** free clients per 1-minute window — distinct from the per-IP limiter, which cannot protect a shared ceiling (many distinct IPs each under their per-IP cap can still collectively exceed it). The free models are served on a shared upstream free-tier key, so the aggregate cap keeps total free throughput below the upstream provider's ceiling and the gateway returns its own clean `429` before the upstream's leaks through.
+
+The counter is backed by Redis when configured (one shared key across gateway instances). When Redis is absent or errors at runtime, it degrades to an in-memory per-instance counter — bounded, never unbounded.
+
+### Free-tier env var behavior
+
+- Setting `SOLVELA_FREE_TIER_RATE_LIMIT=0` or `SOLVELA_FREE_TIER_GLOBAL_RPM=0` does **not** disable the limit — it would disable all free-tier access, so the gateway logs a warning and uses the default instead.
+- Legacy `RCR_`-prefixed forms of all three rate-limit env vars are accepted as deprecated fallbacks.
+
+## Rate limit headers
+
+Responses on rate-limited paths include headers indicating the limit state for your bucket (wallet or IP):
 
 | Header | Description |
 |--------|-------------|
-| `X-RateLimit-Limit` | Maximum requests allowed in the current window |
-| `X-RateLimit-Remaining` | Requests remaining in the current window |
-| `X-RateLimit-Reset` | Unix timestamp when the current window resets |
+| `x-ratelimit-limit` | Maximum requests allowed in the current window |
+| `x-ratelimit-remaining` | Requests remaining in the current window (`0` on a `429`) |
+| `x-ratelimit-reset` | Window length in **seconds** — not a Unix timestamp. The limiter is fixed-window; the window starts at your first request in it. |
+| `retry-after` | `429` responses only — seconds to wait before retrying (same value as `x-ratelimit-reset`) |
 
-When a request is rejected due to rate limiting, the gateway returns `429 Too Many Requests` with a `rate_limited` error type. Use the `X-RateLimit-Reset` value to determine when to retry.
+When a request is rejected, the gateway returns `429 Too Many Requests` with an error of type `rate_limit_exceeded`:
+
+```json
+{
+  "error": {
+    "type": "rate_limit_exceeded",
+    "message": "Too many requests. Please slow down."
+  }
+}
+```
 
 ```bash
-# Example response headers
+# Successful paid request
 HTTP/2 200
-X-RateLimit-Limit: 60
-X-RateLimit-Remaining: 42
-X-RateLimit-Reset: 1712345678
+x-ratelimit-limit: 60
+x-ratelimit-remaining: 42
+x-ratelimit-reset: 60
 ```
+
+```bash
+# Rejected free-tier request (per-IP limit)
+HTTP/2 429
+x-ratelimit-limit: 5
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 60
+retry-after: 60
+```
+
+On a `429`, the headers describe the limiter that rejected you: a free-tier rejection carries the free limit (e.g. `5`) and an aggregate-cap rejection carries the global cap (e.g. `12`) — the outer 60/min middleware never overwrites a `429`'s headers with its looser values.
 
 <Note>
 Rate limit windows and exact thresholds are subject to change. Always read the headers from live responses rather than hardcoding expected values.
 </Note>
 
-## Spending Controls (Enterprise)
+## Spending controls (enterprise)
 
 Separate from rate limiting, enterprise organizations can cap **spend** per team or per wallet. These limits are enforced at the gateway before a request is proxied to the provider, and are independent of the request-rate limits above.
 
@@ -63,14 +114,14 @@ When an estimated request cost would push a wallet over its limit, the gateway r
 
 See [Budgets](/docs/enterprise/budgets) for the full reference.
 
-## Handling Rate Limit Errors
+## Handling rate limit errors
 
-When you receive a `429`, read `X-RateLimit-Reset` and wait until that timestamp before retrying:
+When you receive a `429`, read `retry-after` (a duration in seconds) and wait that long before retrying:
 
 ```typescript
 function retryDelayMs(res: Response): number {
-  const resetAt = parseInt(res.headers.get("X-RateLimit-Reset") ?? "0", 10);
-  return Math.max(0, resetAt * 1000 - Date.now());
+  const retryAfterSecs = parseInt(res.headers.get("retry-after") ?? "60", 10);
+  return retryAfterSecs * 1000;
 }
 
 // On a 429 from any HTTP call to the gateway:
@@ -80,5 +131,5 @@ function retryDelayMs(res: Response): number {
 ```
 
 <Warning>
-Do not retry on `429` immediately in a tight loop. This will not succeed and will count against your limit once the window resets. Always wait for `X-RateLimit-Reset` before retrying.
+Do not retry on `429` immediately in a tight loop. The window is fixed, so retries before it elapses will not succeed and will count against your limit once it resets. `retry-after` and `x-ratelimit-reset` are durations in seconds, not timestamps — wait that many seconds before retrying.
 </Warning>

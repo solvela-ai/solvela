@@ -1,0 +1,117 @@
+---
+title: Free Tier
+description: Zero-cost requests that skip the 402 challenge — no wallet, no signature, rate-limited per IP and globally
+---
+
+
+The free tier lets you call the gateway with no wallet, no USDC, and no payment signature. When the upfront cost estimate for a request is exactly zero, the gateway skips the entire 402 payment challenge and serves the request at $0. There is nothing to charge, so there is nothing to sign.
+
+The free model is `google/gemini-3.1-flash-lite`, registered with `0.0` input and output cost per million tokens.
+
+## How to use it
+
+Either route through the `free` profile or name the zero-cost model directly:
+
+```json
+{
+  "model": "free",
+  "messages": [{"role": "user", "content": "What is x402?"}]
+}
+```
+
+```json
+{
+  "model": "google/gemini-3.1-flash-lite",
+  "messages": [{"role": "user", "content": "What is x402?"}]
+}
+```
+
+No `payment-signature` header is needed. A successful response is standard OpenAI format, same as a paid request.
+
+```bash
+curl -s https://api.solvela.ai/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "free",
+    "messages": [{"role": "user", "content": "What is x402?"}]
+  }'
+```
+
+The `free` profile (aliases: `oss`, `open`) maps every complexity tier — Simple, Medium, Complex, Reasoning — to `google/gemini-3.1-flash-lite`.
+
+## How free-ness is decided
+
+A request is free **iff** its computed cost estimate, in atomic USDC units, is exactly `0`. The gateway computes one upfront estimate per request and derives both decisions from it:
+
+1. Free-ness — atomic estimate `0` takes the zero-cost bypass.
+2. The amount advertised in a 402 `accepts[]` for a paid model.
+
+Because both come from the same estimate, a pricing change can never make a paid model silently bypass payment, or a free model wrongly 402. The check fails closed: any non-`"0"` or unparseable value is treated as not free, so a paid request can never take the free path.
+
+This means free-ness is a property of the **model's price**, not the profile name. `model: "free"` is just a routing profile that resolves to a zero-priced model; sending the model ID directly gets the same bypass.
+
+| | `free` routing profile | Zero-cost bypass |
+|-|------------------------|------------------|
+| What it is | Router feature: resolves `"free"` to a model | Payment feature: serves estimate-`0` requests at $0 |
+| Where it lives | Smart router (model resolution) | Chat handler (payment path) |
+| Trigger | `model` set to `free` / `oss` / `open` | Computed atomic cost estimate is exactly `0` |
+| Effect | Picks `google/gemini-3.1-flash-lite` for every tier | Skips 402, skips payment decode/verify/settlement |
+
+<Note>
+  A `payment-signature` header sent with a free request is ignored — the quoted amount is 0, so there is nothing to verify or claim. The request is served at $0 regardless.
+</Note>
+
+## Rate limits
+
+The free path is anonymous (no payer wallet), so abuse is bounded by two gates, both enforced **before** any provider call:
+
+| Gate | Default | Window | Override env var |
+|------|---------|--------|------------------|
+| Per-IP free limit | 5 requests | 60s | `SOLVELA_FREE_TIER_RATE_LIMIT` |
+| Shared "unknown" bucket (no `ConnectInfo`) | 2 requests | 60s | Not overridable |
+| Global aggregate cap (all clients combined) | 12 requests | 60s | `SOLVELA_FREE_TIER_GLOBAL_RPM` |
+
+For comparison, the paid per-client limit defaults to 60 requests per 60s — the free limit is deliberately stricter.
+
+**Per-IP limit.** Keyed on the actual TCP peer IP, never a client-supplied header like `X-Forwarded-For` (which is trivially spoofed). `SOLVELA_FREE_TIER_RATE_LIMIT` overrides only the per-IP value; the "unknown" bucket limit is fixed. Setting the override to `0` is rejected at startup (it would disable all free access) and the default is used instead.
+
+**Global aggregate cap.** The free model is served on Google's free Gemini API tier, whose hard limit is roughly 15 requests/min shared across the gateway's entire API key. Many distinct IPs each under their per-IP cap can still collectively exceed that, so a global counter caps combined free throughput at 12/min by default — leaving headroom so the gateway returns its own clean 429 before Google's leaks through. `SOLVELA_FREE_TIER_GLOBAL_RPM=0` is likewise rejected in favor of the default. (Legacy `RCR_`-prefixed forms of both env vars are accepted as fallbacks.)
+
+The cap counter lives in Redis when configured, so it is shared across gateway instances. Without Redis — or when Redis errors at runtime — it degrades to an in-memory per-instance counter. It never goes unbounded.
+
+Gate order on the free path: per-IP check → global cap → prompt guard → provider. A rate-limited free request never consumes upstream provider quota.
+
+## What a 429 looks like
+
+Both gates return the same response shape:
+
+```json
+{
+  "error": {
+    "type": "rate_limit_exceeded",
+    "message": "Too many requests. Please slow down."
+  }
+}
+```
+
+With headers reflecting whichever limit was hit:
+
+```http
+HTTP/1.1 429 Too Many Requests
+x-ratelimit-limit: 5
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 60
+retry-after: 60
+```
+
+A global-cap 429 carries `x-ratelimit-limit: 12` instead. These headers are authoritative — the outer paid-tier rate-limit middleware preserves a free-tier 429's headers rather than overwriting them with its looser limits.
+
+## Limitations
+
+- **One model.** The free tier serves `google/gemini-3.1-flash-lite` only. The `free` profile does not pick different models by complexity tier the way `eco`/`auto`/`premium` do.
+- **Tight capacity.** 5 requests/min per IP and 12/min total across all users of the gateway, by default. The free tier is for trying the gateway, not running workloads.
+- **Anonymous, IP-keyed.** Clients behind a shared NAT share one per-IP bucket. There is no per-wallet allowance — paying with a wallet is the way to get the paid limits.
+- **Prompt guard still runs.** Free requests reach a real provider, so they pass the same injection/jailbreak/PII checks as paid requests.
+- **Usage is logged at $0.** Free requests appear in spend logs under a `free-tier` sentinel (no wallet address) with `cost_usdc: 0.0`, so they show up in usage and observability but never bill.
+
+See [Smart Router](/docs/concepts/smart-router) for how routing profiles work and [x402 Protocol](/docs/concepts/x402) for the paid payment flow.

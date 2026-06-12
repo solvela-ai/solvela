@@ -46,6 +46,7 @@ Without a `Signer`, paid endpoints raise `PaymentRequiredError` on the first cal
   <Tab value="Dataclass">
     ```python
     from solvela import ClientConfig
+    from solvela.constants import MAINNET_ESCROW_PROGRAM_ID
     from solvela.types import AtomicUsdc
 
     config = ClientConfig(
@@ -55,6 +56,7 @@ Without a `Signer`, paid endpoints raise `PaymentRequiredError` on the first cal
         timeout=180.0,
         max_payment_amount=AtomicUsdc(10_000_000),  # cap per call (10 USDC = 10_000_000 atomic)
         expected_recipient=None,                # if set, gateway must pay-to this address
+        expected_escrow_program_id=MAINNET_ESCROW_PROGRAM_ID,  # default-on escrow program pin
         enable_cache=False,                     # opt-in response caching
         enable_sessions=False,                  # opt-in three-strike session escalation
         session_ttl=1800.0,
@@ -79,12 +81,17 @@ Without a `Signer`, paid endpoints raise `PaymentRequiredError` on the first cal
         .build()
     )
     ```
+
+    The builder also exposes `.expected_escrow_program_id(value)` to repoint the
+    escrow-program pin (e.g. at a devnet deployment) and
+    `.disable_escrow_program_pin()` to clear it entirely.
   </Tab>
 </Tabs>
 
 ### Security defaults
 
 - Non-loopback `gateway_url` or `rpc_url` must use `https://`. Plain `http://` to a remote host raises `ClientError` at construction.
+- `expected_escrow_program_id` is pinned to `MAINNET_ESCROW_PROGRAM_ID` by default, so an escrow deposit is never signed against an unexpected program — a mismatching 402 raises `EscrowProgramMismatchError` before signing.
 - Unknown payment schemes from the gateway raise `ClientError` rather than silently mis-branching.
 - Malformed amount strings in the 402 body raise `ClientError`, not bare `ValueError`.
 
@@ -199,6 +206,7 @@ from solvela import (
     PaymentRejectedError,
     AmountExceedsMaxError,
     RecipientMismatchError,
+    EscrowProgramMismatchError,
     InsufficientBalanceError,
     GatewayError,
     SignerError,
@@ -227,6 +235,7 @@ except SolvelaTimeoutError as exc:
 | `PaymentRejectedError` | Gateway returns 402 *again* after a signed retry. Carries `reason` and (optional) `payment_required`. |
 | `AmountExceedsMaxError` | Gateway's quoted amount exceeds the local `max_payment_amount` cap. Carries `amount` and `max_amount` as `AtomicUsdc`. |
 | `RecipientMismatchError` | Gateway's `pay_to` doesn't match the configured `expected_recipient`. |
+| `EscrowProgramMismatchError` | The 402's escrow program ID doesn't match the configured `expected_escrow_program_id` pin. Raised before any escrow deposit is signed. Carries `expected` and `actual`. |
 | `InsufficientBalanceError` | Wallet balance is too low for the quoted amount. Carries `have` / `need` as `AtomicUsdc`. |
 | `GatewayError` | Non-200/402 HTTP response. Carries `status` and `message`. |
 | `SignerError` | The configured `Signer` failed to build or sign the payment transaction. |
@@ -303,5 +312,5 @@ class MyCustomSigner(Signer):
 `ClientConfig.timeout` (default 180s) caps every HTTP call. Cancel an in-flight `chat()` by cancelling the surrounding asyncio task — `httpx` propagates cancellation through cleanly.
 
 <Note>
-  Source: [`sdks/python/`](https://github.com/solvela-ai/solvela/tree/main/sdks/python) in the monorepo. The canonical chat-flow entry point is [`src/solvela/client.py`](https://github.com/solvela-ai/solvela/blob/main/sdks/python/src/solvela/client.py); a 60-line end-to-end smoke test lives at [`scripts/smoke.py`](https://github.com/solvela-ai/solvela/blob/main/sdks/python/scripts/smoke.py). See also [x402 Protocol](/docs/concepts/x402) for the underlying payment flow.
+  Source: [`sdks/python/`](https://github.com/solvela-ai/solvela/tree/main/sdks/python) in the monorepo. The canonical chat-flow entry point is [`src/solvela/client.py`](https://github.com/solvela-ai/solvela/blob/main/sdks/python/src/solvela/client.py); an end-to-end smoke test lives at [`scripts/smoke.py`](https://github.com/solvela-ai/solvela/blob/main/sdks/python/scripts/smoke.py). See also [x402 Protocol](/docs/concepts/x402) for the underlying payment flow.
 </Note>

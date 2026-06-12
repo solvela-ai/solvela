@@ -39,8 +39,9 @@ The server reads these environment variables on startup:
 | `SOLVELA_SESSION_BUDGET` | No | Per-session USDC cap (e.g. `2.00`) |
 | `SOLVELA_TIMEOUT_MS` | No | HTTP timeout for gateway calls |
 | `SOLVELA_SIGNING_MODE` | No | `auto` / `escrow` / `direct` / `off` (default `auto`) |
-| `SOLVELA_ESCROW_PROGRAM_ID` | If `escrow` mode | Escrow program ID on Solana mainnet |
-| `SOLVELA_RECIPIENT_WALLET` | If `escrow` mode | Gateway recipient pubkey |
+| `SOLVELA_ESCROW_MODE` | No | Set to `enabled` to expose the `deposit_escrow` tool |
+| `SOLVELA_ESCROW_PROGRAM_ID` | If `SOLVELA_ESCROW_MODE=enabled` | Escrow program ID on Solana mainnet |
+| `SOLVELA_RECIPIENT_WALLET` | If `SOLVELA_ESCROW_MODE=enabled` | Gateway recipient pubkey |
 
 ```bash
 export SOLVELA_API_URL=https://api.solvela.ai
@@ -87,7 +88,7 @@ The MCP server exposes the following tools to connected agents:
 | `wallet_status` | Check the configured Solana wallet's status and gateway connectivity |
 | `list_models` | List available models with pricing |
 | `spending` | Show USDC spending statistics for the current session |
-| `deposit_escrow` | Deposit USDC into a trustless escrow PDA for a future call |
+| `deposit_escrow` | Deposit USDC into a trustless escrow PDA for a future call (only listed when `SOLVELA_ESCROW_MODE=enabled`) |
 
 ## Example usage in Claude Desktop
 

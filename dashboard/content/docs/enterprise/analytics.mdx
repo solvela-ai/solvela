@@ -13,7 +13,7 @@ All `total_cost_usdc` values are in USDC (e.g. `4.75` = $4.75 USDC).
 
 ## Team stats
 
-Returns spend and requests for a single team, broken down by model and by wallet.
+Returns spend and requests for a single team, broken down by model, by provider, and by wallet.
 
 Requires `member` role or higher.
 
@@ -44,6 +44,18 @@ Authorization: Bearer <admin-token | solvela_k_...>
     },
     {
       "model": "gpt-4o-mini",
+      "request_count": 2721,
+      "total_cost_usdc": 48.30
+    }
+  ],
+  "by_provider": [
+    {
+      "provider": "anthropic",
+      "request_count": 2100,
+      "total_cost_usdc": 94.50
+    },
+    {
+      "provider": "openai",
       "request_count": 2721,
       "total_cost_usdc": 48.30
     }

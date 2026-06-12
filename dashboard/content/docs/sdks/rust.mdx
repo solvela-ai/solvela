@@ -24,7 +24,6 @@ The CLI reads these environment variables:
 ```bash
 export SOLVELA_API_URL=https://api.solvela.ai              # optional; default https://api.solvela.ai
 export SOLANA_RPC_URL=https://api.mainnet-beta.solana.com  # required for any paid command (signs USDC-SPL tx)
-export RUST_LOG=info                                       # optional logging
 ```
 
 `SOLANA_RPC_URL` is required whenever the CLI has to sign a payment
@@ -111,22 +110,26 @@ solvela doctor
 
 ```bash
 $ solvela health
-{
-  "status": "ok",
-  "solana_rpc": "connected",
-  "providers": ["openai", "anthropic", "google", "xai", "deepseek"]
-}
+Checking gateway at https://api.solvela.ai...
+Status: ok
 
 $ solvela models
-ID                                    Provider    Input $/M   Output $/M
-openai/gpt-4o                         openai      2.50        10.00
-anthropic/claude-opus-4-6             anthropic   5.00        25.00
-google/gemini-2.5-flash               google      0.30        2.50
+MODEL                          PROVIDER     INPUT $/1M      OUTPUT $/1M
+------------------------------------------------------------------------
+openai/gpt-4o                  openai       $2.50           $10.00
+anthropic/claude-opus-4-6      anthropic    $5.00           $25.00
+google/gemini-2.5-flash        google       $0.30           $2.50
 ...
 
+25 models available. 5% platform fee included.
+
 $ solvela chat --model eco "Hello, what can you do?"
+Cost breakdown:
+  Provider cost : 0.000040 USDC
+  Platform fee  : 0.000002 USDC (5%)
+  Total         : 0.000042 USDC
+Proceed? [y/N] y
 Hello! I'm an AI assistant. I can help you with...
-Cost: $0.000042 USDC
 ```
 
 <Note>

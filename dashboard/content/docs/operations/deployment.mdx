@@ -18,7 +18,7 @@ Services:
 | Service | Image | Port | Purpose |
 |---------|-------|------|---------|
 | `postgres` | `postgres:16-alpine` | `127.0.0.1:5432` | Spend logs, wallet budgets |
-| `redis` | `redis:7-alpine` | `127.0.0.1:6379` | Response cache, replay protection |
+| `redis` | `redis/redis-stack-server:7.4.0-v3` | `127.0.0.1:6379` | Response cache, replay protection (redis-stack bundles the RediSearch module the semantic cache needs) |
 
 <Warning>
 Default credentials (`solvela` / `solvela_dev_password`) are for local development only. Never use in production.
@@ -26,7 +26,7 @@ Default credentials (`solvela` / `solvela_dev_password`) are for local developme
 
 Ports are bound to `127.0.0.1` only -- not accessible from the network.
 
-Redis is configured with 256MB LRU eviction and no RDB persistence (the cache is ephemeral).
+Redis is configured with 256MB LRU eviction. Default RDB snapshotting is left on — harmless for an ephemeral local-dev cache.
 
 Migrations in `migrations/` are mounted into the PostgreSQL container and run automatically on first start.
 
@@ -36,8 +36,10 @@ The `Dockerfile` uses a 2-stage build. Dependency caching is achieved by copying
 
 ```dockerfile
 # Stage 1: Build
-FROM rust:1.88-slim-bookworm AS builder
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+FROM rust:1.96-slim-trixie AS builder
+# g++ is required so the linker can resolve -lstdc++ — the fastembed
+# dep pulls in the ONNX Runtime C++ bindings (via `ort` / `ort-sys`).
+RUN apt-get update && apt-get install -y pkg-config libssl-dev g++ && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 # Copy workspace manifests first for dependency caching
@@ -67,8 +69,10 @@ RUN touch crates/protocol/src/lib.rs crates/x402/src/lib.rs crates/router/src/li
 RUN cargo build --release --bin solvela-gateway
 
 # Stage 2: Runtime
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+FROM debian:trixie-slim
+# libstdc++6 is the runtime counterpart to the builder's g++ — fastembed's
+# ONNX Runtime layer dynamically links against libstdc++.so.6.
+RUN apt-get update && apt-get install -y ca-certificates libstdc++6 && rm -rf /var/lib/apt/lists/*
 
 # Create non-root runtime user (no home, no login shell)
 RUN useradd --uid 1001 --no-create-home --shell /usr/sbin/nologin solvela
@@ -85,7 +89,7 @@ Key points:
 
 - Dependency caching is layer-based: workspace `Cargo.toml`s + dummy sources compile first; the real source is copied in a later layer so unchanged dependencies don't rebuild.
 - Migration SQL files in `migrations/` are read at compile time by `sqlx::migrate!`, so they must be present in the build context.
-- Runtime image is `debian:bookworm-slim` with only `ca-certificates` installed.
+- Runtime image is `debian:trixie-slim` with only `ca-certificates` and `libstdc++6` installed.
 - Exposes port 8402.
 - Runs as non-root user `solvela` (UID 1001). Files copied from the build stage use `--chown=solvela:solvela` so the binary and config are owned by the runtime user.
 
@@ -137,7 +141,7 @@ primary_region = "ord"
     protocol = "http"
     timeout = "5s"
 
-[vm]
+[[vm]]
   size = "shared-cpu-1x"
   memory = "512mb"
 ```

@@ -263,9 +263,10 @@ data: [DONE]
         if err != nil {
             log.Fatal(err)
         }
-        // solvela-go ships UnimplementedSigner — implement the Signer
-        // interface yourself for paid requests. See /docs/sdks/go.
-        signer := myKeypairSigner{wallet: wallet}
+        // The built-in KeypairSigner signs escrow-scheme payments; the exact
+        // scheme is not yet implemented in Go (supply a custom Signer for it).
+        // Pass "" to default to mainnet-beta RPC. See /docs/sdks/go.
+        signer := solvela.NewKeypairSigner(wallet, "")
 
         client, err := solvela.NewClient(wallet, signer,
             solvela.WithGatewayURL("https://api.solvela.ai"),
