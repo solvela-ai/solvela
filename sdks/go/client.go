@@ -293,7 +293,15 @@ func (c *SolvelaClient) ChatStream(ctx context.Context, request *ChatRequest) (<
 		// surfacing as PaymentRequiredError.
 		var prErr *PaymentRequiredError
 		if sig != "" && errors.As(err, &prErr) {
-			return nil, &PaymentRejectedError{Reason: "payment rejected after signing (streaming)"}
+			// Carry the second 402's parsed body (already decoded by the
+			// transport into the PaymentRequiredError) across the conversion,
+			// matching the non-streaming path. Copy the value out so the
+			// rejected error does not keep the whole source error alive.
+			pr := prErr.PaymentRequired
+			return nil, &PaymentRejectedError{
+				Reason:          "payment rejected after signing (streaming)",
+				PaymentRequired: &pr,
+			}
 		}
 		return nil, err
 	}
@@ -389,7 +397,12 @@ func (c *SolvelaClient) sendWithPayment(ctx context.Context, request *ChatReques
 		return nil, err
 	}
 	if result.PaymentRequired != nil {
-		return nil, &PaymentRejectedError{Reason: "payment rejected after signing"}
+		// Carry the second 402's parsed body so callers can inspect the
+		// rejection's cost breakdown / accepts / gateway error message.
+		return nil, &PaymentRejectedError{
+			Reason:          "payment rejected after signing",
+			PaymentRequired: result.PaymentRequired,
+		}
 	}
 	return result.Response, nil
 }

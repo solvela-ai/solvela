@@ -198,7 +198,7 @@ With a signer wired up, the SDK automatically:
 4. Calls `signer.SignPayment(ctx, amount, payTo, resource, accepted)` to build and sign the SPL transfer.
 5. Retries with the `Payment-Signature` header.
 
-If the gateway returns 402 *again* after the signed retry, the SDK returns `*PaymentRejectedError` carrying the rejection reason so the caller can inspect why.
+If the gateway returns 402 *again* after the signed retry, the SDK returns `*PaymentRejectedError` carrying the rejection reason. As of v0.4.0 it also carries the second 402's parsed body in the `PaymentRequired` field (cost breakdown, accepted schemes, gateway error message) — on both the non-streaming and streaming paths — so callers can inspect *why* the payment was rejected without re-parsing the response. The field is `nil` when the error is constructed from a reason alone, matching Python's `payment_required` and TypeScript's `paymentRequired`.
 
 ## Streaming
 
@@ -218,7 +218,7 @@ for chunk := range ch {
 fmt.Println()
 ```
 
-`ChatStream` runs the same preflight payment handshake as `Chat` — a `Signer` is required for paid streaming, otherwise the call returns `*PaymentRequiredError` before opening the stream. A post-signing 402 on the streaming POST is converted to `*PaymentRejectedError`, exactly like the non-streaming path — `errors.As(err, &rejErr)` distinguishes "signed and rejected" from a pre-signing `*PaymentRequiredError` challenge on both paths.
+`ChatStream` runs the same preflight payment handshake as `Chat` — a `Signer` is required for paid streaming, otherwise the call returns `*PaymentRequiredError` before opening the stream. A post-signing 402 on the streaming POST is converted to `*PaymentRejectedError`, exactly like the non-streaming path — `errors.As(err, &rejErr)` distinguishes "signed and rejected" from a pre-signing `*PaymentRequiredError` challenge on both paths. The conversion carries the rejection's parsed 402 body across into `rejErr.PaymentRequired` (v0.4.0+).
 
 ## Models and pricing
 
@@ -282,7 +282,7 @@ if err != nil {
 | Error | Returned when |
 |---|---|
 | `*PaymentRequiredError` | Gateway returns 402 and no `Signer` is configured (or no compatible scheme was found). Carries `PaymentRequired`. |
-| `*PaymentRejectedError` | Gateway returns 402 *again* after a signed retry. Carries `Reason`. |
+| `*PaymentRejectedError` | Gateway returns 402 *again* after a signed retry. Carries `Reason`, plus (v0.4.0+) the second 402's parsed body in `PaymentRequired` — populated on both the non-streaming and streaming paths, `nil` if constructed from a reason alone. |
 | `*AmountExceedsMaxError` | Gateway's quoted amount exceeds the configured `MaxPaymentAmount`. Carries `Amount` and `MaxAmount`. |
 | `*RecipientMismatchError` | Gateway's `pay_to` doesn't match the configured `ExpectedRecipient`. |
 | `*EscrowProgramMismatchError` | The 402's escrow program ID doesn't match the configured `ExpectedEscrowProgram` pin. Returned before any escrow deposit is signed. Carries `Expected` and `Actual`. |

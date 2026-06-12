@@ -52,8 +52,20 @@ func (e *PaymentRequiredError) Error() string {
 }
 
 // PaymentRejectedError indicates the payment was not accepted.
+//
+// PaymentRequired, when non-nil, carries the parsed second 402 body the
+// gateway returned AFTER a signed payment was attached — cost breakdown,
+// accepted schemes, and the gateway's error message — so callers can inspect
+// WHY the payment was rejected (replay nonce, expired signature, balance
+// issue) without re-parsing the response. Both the non-streaming
+// ([SolvelaClient.Chat]) and streaming ([SolvelaClient.ChatStream]) paths
+// populate it. It is nil for callers constructing the error from a Reason
+// alone (backward compatible). Mirrors Python's
+// PaymentRejectedError.payment_required and TypeScript's
+// PaymentRejectedError.paymentRequired.
 type PaymentRejectedError struct {
-	Reason string
+	Reason          string
+	PaymentRequired *PaymentRequired
 }
 
 func (e *PaymentRejectedError) Error() string {
