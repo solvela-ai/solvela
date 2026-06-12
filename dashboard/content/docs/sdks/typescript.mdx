@@ -9,9 +9,10 @@ The Solvela TypeScript SDK lives in the monorepo at
 ## Status
 
 <Note>
-`@solvela/sdk@0.2.4` (published 2026-06-06) adds opt-in escrow-program-id
+`@solvela/sdk@0.3.0` converts post-signing 402s to `PaymentRejectedError` on
+both paths; `0.2.4` (published 2026-06-06) added opt-in escrow-program-id
 pinning (atop the native escrow-deposit signing from 0.2.3) and is wire-aligned
-with the production gateway at `api.solvela.ai`. Pin to `^0.2.4` — earlier
+with the production gateway at `api.solvela.ai`. Pin to `^0.3.0` — earlier
 `0.2.x` releases emit a `PaymentPayload` envelope shape the gateway no longer accepts.
 </Note>
 
@@ -29,7 +30,7 @@ package exposes the x402 parser + payment-signer primitives that
 ## Documentation
 
 - **Source:** [`sdks/typescript/`](https://github.com/solvela-ai/solvela/tree/main/sdks/typescript) in the monorepo
-- **npm package:** [@solvela/sdk](https://www.npmjs.com/package/@solvela/sdk) (current: `0.2.4`)
+- **npm package:** [@solvela/sdk](https://www.npmjs.com/package/@solvela/sdk) (current: `0.3.0`)
 
 ## History
 
