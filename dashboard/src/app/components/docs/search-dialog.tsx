@@ -36,7 +36,7 @@ export function SearchTrigger() {
           'flex items-center gap-3 px-4 py-2.5 rounded-lg w-full max-w-md',
           'bg-muted/50 border border-border/50',
           'text-sm text-muted-foreground hover:text-foreground hover:bg-muted hover:border-border',
-          'transition-all'
+          'transition-[color,background-color,border-color]'
         )}
       >
         <SearchIcon className="w-4 h-4 shrink-0" />
