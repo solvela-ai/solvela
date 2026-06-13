@@ -343,6 +343,92 @@ async fn handle_payment_submitted(
         });
     }
 
+    // Concurrent-settlement lock (issue #566).
+    //
+    // Two concurrent `message/send` calls for the SAME taskId carrying two
+    // DIFFERENT valid transactions each pass their own per-tx replay check and
+    // `validate_submitted_against_offer` (which binds to the quoted amount, not
+    // to a specific tx), so without this gate BOTH reach `verify_and_settle` and
+    // BOTH settle on-chain → two spend rows + two receipts for one task. We
+    // acquire an atomic per-task lock (Redis `SET NX EX`, the same idiom as the
+    // replay set) BEFORE any settlement: the CAS winner proceeds, the loser is
+    // rejected cleanly and NEVER calls `verify_and_settle` (so no second
+    // on-chain settlement). The lock is acquired for the dev-bypass path too so
+    // that path is serialised identically.
+    //
+    // Release semantics (see `acquire_settle_lock` / `release_settle_lock`):
+    // - On a settlement FAILURE (verify error, settlement success=false) the
+    //   lock is released so the agent can retry with a corrected payment.
+    // - Once settlement SUCCEEDS the lock is HELD (self-expires via TTL): the
+    //   task becomes `Completed`, and the held lock blocks any in-flight loser
+    //   from re-settling already-moved funds. A downstream failure AFTER a
+    //   successful settle (e.g. provider error) likewise does NOT release —
+    //   the money already moved, so a retry must not settle again.
+    //
+    // No-Redis behaviour: the A2A task store REQUIRES Redis (`load_task`
+    // returns `Ok(None)` without it → this request already 404'd at task load
+    // above), so reaching here implies Redis is present. Acquisition failing
+    // closed (Err → reject) therefore never strands a legitimately-loadable
+    // task, and there is deliberately no in-memory lock fallback (it could not
+    // serialise across gateway instances — the exact race we are closing).
+    let settle_lock_acquired = match &state.cache {
+        Some(cache) => match cache
+            .acquire_settle_lock(task_id, crate::cache::A2A_SETTLE_LOCK_TTL_SECS)
+            .await
+        {
+            Ok(true) => true,
+            Ok(false) => {
+                metrics::counter!("solvela_a2a_concurrent_settlement_rejected_total").increment(1);
+                warn!(
+                    task_id,
+                    "A2A settlement already in progress for this task — rejecting \
+                     concurrent payment (issue #566)"
+                );
+                return Err(JsonRpcErrorData {
+                    code: ERR_PAYMENT_FAILED,
+                    message: "A settlement for this task is already in progress; \
+                              wait and check the task status before retrying."
+                        .to_string(),
+                    data: None,
+                });
+            }
+            Err(e) => {
+                metrics::counter!(
+                    "solvela_a2a_concurrent_settlement_rejected_total",
+                    "reason" => "lock_store_error"
+                )
+                .increment(1);
+                warn!(
+                    task_id,
+                    error = %e,
+                    "A2A settlement lock store unavailable — failing closed (cannot \
+                     guarantee exactly-once settlement)"
+                );
+                return Err(JsonRpcErrorData {
+                    code: ERR_PAYMENT_FAILED,
+                    message: "Payment service is temporarily degraded; please retry shortly."
+                        .to_string(),
+                    data: None,
+                });
+            }
+        },
+        // Unreachable in practice: without Redis the task could not have loaded.
+        // Treated as "no lock held" so the (impossible) path does not panic.
+        None => false,
+    };
+
+    // Release the settlement lock on a FAILURE return after acquisition, so a
+    // legitimate retry isn't stranded waiting out the TTL. Held on success.
+    macro_rules! release_lock_on_failure {
+        () => {
+            if settle_lock_acquired {
+                if let Some(cache) = &state.cache {
+                    cache.release_settle_lock(task_id).await;
+                }
+            }
+        };
+    }
+
     // Verify payment (skip in dev bypass mode)
     let tx_signature = if state.dev_bypass_payment {
         warn!(
@@ -416,6 +502,10 @@ async fn handle_payment_submitted(
         };
 
         if replay_detected {
+            // Release the settlement lock: a replayed tx is a dead end for THIS
+            // submission, but the agent may legitimately retry with a fresh tx,
+            // so do not strand the task locked for the full TTL.
+            release_lock_on_failure!();
             return Err(JsonRpcErrorData {
                 code: ERR_PAYMENT_FAILED,
                 message: "Replay attack detected: transaction already processed".to_string(),
@@ -436,23 +526,32 @@ async fn handle_payment_submitted(
         // Runs after the replay check (so a re-submitted bad payment short-
         // circuits at replay) and before verify_and_settle (so the facilitator
         // never sees a payload that doesn't match an offered accept).
-        validate_submitted_against_offer(task_id, &payload.accepted, &record.payment_required)?;
+        if let Err(e) =
+            validate_submitted_against_offer(task_id, &payload.accepted, &record.payment_required)
+        {
+            // Offer-mismatch / malformed amount is a dead end for this
+            // submission but the agent may retry with a corrected payment.
+            release_lock_on_failure!();
+            return Err(e);
+        }
 
         // Verify via facilitator
-        let settlement = state
-            .facilitator
-            .verify_and_settle(&payload)
-            .await
-            .map_err(|e| {
+        let settlement = match state.facilitator.verify_and_settle(&payload).await {
+            Ok(s) => s,
+            Err(e) => {
                 // GHSA-cgqx-mg48-949v: do not echo the verifier error to clients.
                 tracing::warn!(error = %e, "A2A payment verification failed");
-                JsonRpcErrorData {
+                // Verification failed → no on-chain settlement happened; release
+                // the lock so a corrected retry is not stranded.
+                release_lock_on_failure!();
+                return Err(JsonRpcErrorData {
                     code: ERR_PAYMENT_FAILED,
                     message: "Payment verification failed. Check your transaction and retry."
                         .to_string(),
                     data: None,
-                }
-            })?;
+                });
+            }
+        };
 
         if !settlement.success {
             // Settlement detail (tx_signature, RPC error) is logged by the facilitator;
@@ -481,6 +580,12 @@ async fn handle_payment_submitted(
                 | Some(SettlementFailureKind::Submission)
                 | None => "Payment settlement failed. Transaction was not confirmed.".to_string(),
             };
+            // Settlement did not land (success=false) → no funds moved; release
+            // the lock so the agent can retry with a corrected payment. A
+            // deterministic on-chain rejection is still retryable from the
+            // LOCK's perspective (a different/fixed tx may succeed); the
+            // not-retryable guidance is conveyed in the message, not the lock.
+            release_lock_on_failure!();
             return Err(JsonRpcErrorData {
                 code: ERR_PAYMENT_FAILED,
                 message,

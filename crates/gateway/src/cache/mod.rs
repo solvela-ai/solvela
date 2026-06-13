@@ -44,6 +44,23 @@ const CACHE_KEY_PREFIX: &str = "solvela:cache:";
 /// Redis key prefix for transaction replay-protection entries.
 const REPLAY_KEY_PREFIX: &str = "solvela:txn:";
 
+/// Redis key prefix for the A2A per-task settlement lock (issue #566).
+///
+/// One key per `taskId`; held across `verify_and_settle` so only a single
+/// concurrent `message/send` settles a given task. See
+/// [`ResponseCache::acquire_settle_lock`].
+const A2A_SETTLE_LOCK_PREFIX: &str = "solvela:a2a:settle_lock:";
+
+/// TTL (seconds) for the A2A settlement lock (issue #566).
+///
+/// A single settlement is seconds (on-chain confirm + provider call). 120s
+/// comfortably outlives the worst-case attempt and matches the standard-tx
+/// replay-key window (so a crashed-mid-settlement task's lock and its replay
+/// key expire together). It is well under the 600s A2A task TTL, so a task
+/// whose holder crashed AFTER acquiring but BEFORE settling re-opens for one
+/// legitimate retry inside the task's own lifetime rather than being stranded.
+pub const A2A_SETTLE_LOCK_TTL_SECS: u64 = 120;
+
 /// Redis key prefix for the cross-instance aggregate free-tier RPM counter.
 /// The full key is `free_tier:global_rpm:<epoch_minute>` (see
 /// [`ResponseCache::incr_global_free_window`]).
@@ -249,6 +266,71 @@ impl ResponseCache {
                     Ok(())
                 }
             }
+        }
+    }
+
+    /// Atomically acquire the A2A per-task settlement lock (issue #566).
+    ///
+    /// Uses Redis `SET key 1 NX EX <ttl>` — the same atomic, cross-instance
+    /// compare-and-swap idiom as [`Self::check_and_record_tx`]. Returns:
+    /// - `Ok(true)`  — lock newly acquired (this caller is the sole settler),
+    /// - `Ok(false)` — lock already held by a concurrent settlement (caller
+    ///   MUST reject without settling),
+    /// - `Err(_)`    — Redis was unreachable or the command failed.
+    ///
+    /// On `Err` the caller MUST treat the request as un-settleable (fail
+    /// closed) rather than proceed: the A2A task store already requires Redis,
+    /// so a lock-store error means we cannot guarantee exactly-once settlement.
+    /// Unlike the replay check, there is deliberately **no in-memory fallback**
+    /// — an in-memory lock cannot serialise across gateway instances, which is
+    /// exactly the multi-instance race this lock exists to prevent.
+    ///
+    /// The `ttl` bounds a holder that crashes mid-settlement (see
+    /// [`A2A_SETTLE_LOCK_TTL_SECS`]).
+    pub async fn acquire_settle_lock(
+        &self,
+        task_id: &str,
+        ttl_secs: u64,
+    ) -> Result<bool, CacheError> {
+        let key = format!("{A2A_SETTLE_LOCK_PREFIX}{task_id}");
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))?;
+
+        // SET key 1 NX EX <ttl> — atomic: only sets (and returns Some) if the
+        // key does NOT already exist. `None` means a concurrent settler holds it.
+        let result: Option<String> = redis::cmd("SET")
+            .arg(&key)
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(ttl_secs)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))?;
+
+        Ok(result.is_some())
+    }
+
+    /// Release the A2A per-task settlement lock (issue #566).
+    ///
+    /// Best-effort `DEL`. Called only on a settlement FAILURE so the agent can
+    /// retry with a corrected payment without waiting out the TTL. On SUCCESS
+    /// the lock is intentionally NOT released: the task is now `Completed` and
+    /// the lock must keep blocking any in-flight concurrent attempt from
+    /// re-settling already-moved funds until it self-expires. A failed `DEL`
+    /// degrades to TTL-based release (the task is still payable after the TTL,
+    /// within the task's own lifetime), so the error is logged, not propagated.
+    pub async fn release_settle_lock(&self, task_id: &str) {
+        let key = format!("{A2A_SETTLE_LOCK_PREFIX}{task_id}");
+        if let Err(e) = self.del_raw(&key).await {
+            warn!(
+                task_id,
+                error = %e,
+                "A2A settlement lock release failed — lock will expire via TTL"
+            );
         }
     }
 

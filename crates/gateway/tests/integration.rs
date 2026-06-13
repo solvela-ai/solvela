@@ -221,6 +221,61 @@ impl PaymentVerifier for SettleFailsExactVerifier {
     }
 }
 
+/// An `exact`-scheme verifier that passes verification and, on `settle_payment`,
+/// (1) increments a shared settle counter and (2) sleeps for a configurable
+/// delay before returning success. Used by the issue #566 concurrency tests:
+/// the delay widens the settlement window so two concurrent same-taskId
+/// submissions genuinely overlap inside `verify_and_settle`, and the counter
+/// proves the LOSER never reached settlement (settle count must be exactly 1).
+struct SettleCountingDelayVerifier {
+    settle_count: Arc<std::sync::atomic::AtomicUsize>,
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl PaymentVerifier for SettleCountingDelayVerifier {
+    fn network(&self) -> &str {
+        SOLANA_NETWORK
+    }
+
+    fn scheme(&self) -> &str {
+        "exact"
+    }
+
+    async fn verify_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<VerificationResult, X402Error> {
+        Ok(VerificationResult {
+            valid: true,
+            reason: None,
+            verified_amount: Some(2625),
+        })
+    }
+
+    async fn settle_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<SettlementResult, X402Error> {
+        // Count BEFORE the delay so an overlapping second settle would be
+        // observed even if it started during the first's sleep.
+        self.settle_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        Ok(SettlementResult {
+            success: true,
+            tx_signature: Some(format!(
+                "MockCountedSettledTxSig_{}",
+                uuid::Uuid::new_v4().simple()
+            )),
+            network: SOLANA_NETWORK.to_string(),
+            error: None,
+            verified_amount: None,
+            failure_kind: None,
+        })
+    }
+}
+
 /// A mock verifier for the escrow scheme.
 struct AlwaysPassEscrowVerifier;
 
@@ -12571,5 +12626,336 @@ async fn a2a_unpaid_intake_writes_no_spend_and_no_receipt() {
     assert!(
         result["status"]["message"]["metadata"]["x402.payment.receipts"].is_null(),
         "unpaid intake Task must not carry a receipts metadata object"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A2A concurrent-settlement lock (issue #566)
+//
+// Two concurrent `message/send` calls for the SAME taskId carrying two
+// DIFFERENT valid transactions must NOT both settle: without the per-task
+// settlement lock both pass their own per-tx replay check and
+// `validate_submitted_against_offer`, both reach `verify_and_settle`, and both
+// write a spend row + receipt for one logical task (two real on-chain
+// settlements). These tests drive two paid submissions concurrently through the
+// REAL `/a2a` route (tokio::join!), with a delayed settle verifier so the
+// settlement windows genuinely overlap, and assert exactly-once settlement.
+// Self-skip without Redis/Postgres.
+// ---------------------------------------------------------------------------
+
+/// As [`a2a_app_with_redis_db_and_providers`] but with a caller-supplied exact
+/// verifier, so a test can observe / delay settlement. Returns `None`
+/// (self-skip) when local Redis is unavailable.
+fn a2a_app_with_verifier_and_db(
+    pool: sqlx::PgPool,
+    exact_verifier: Arc<dyn PaymentVerifier>,
+) -> Option<(axum::Router, Arc<AppState>)> {
+    use gateway::cache::{CacheConfig, ResponseCache};
+
+    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
+    let redis_client = redis::Client::open(url).ok()?;
+    if redis_client.get_connection().is_err() {
+        eprintln!("skipping A2A concurrency test: Redis unavailable");
+        return None;
+    }
+    let cache = ResponseCache::from_client(redis_client, CacheConfig::default())
+        .expect("ResponseCache::from_client should not connect");
+
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML)
+        .unwrap()
+        .with_gateway_recipient(TEST_RECIPIENT_WALLET)
+        .unwrap();
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![exact_verifier]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        facilitator,
+        usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
+        cache: Some(cache),
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: Some(pool),
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+    });
+    let router = build_router(
+        Arc::clone(&state),
+        RateLimiter::new(RateLimitConfig::default()),
+    );
+    Some((router, state))
+}
+
+/// POST a JSON-RPC body to `/a2a` and return the FULL JSON-RPC envelope (so a
+/// caller can inspect either `result` or `error`). Unlike [`a2a_call`], this
+/// does NOT assert the absence of a JSON-RPC error — the concurrency tests need
+/// to inspect the loser's rejection.
+async fn a2a_call_envelope(app: &axum::Router, body: &serde_json::Value) -> serde_json::Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/a2a")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "/a2a must return 200");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Read the current value of a Prometheus counter family from the shared test
+/// handle, summing labeled and unlabeled exposition lines.
+fn prom_counter_total(handle: &metrics_exporter_prometheus::PrometheusHandle, name: &str) -> u64 {
+    handle
+        .render()
+        .lines()
+        .filter(|l| l.starts_with(name) && !l.starts_with('#'))
+        .filter_map(|l| l.rsplit(' ').next())
+        .filter_map(|v| v.parse::<f64>().ok())
+        .map(|v| v as u64)
+        .sum()
+}
+
+/// HEADLINE (issue #566): two concurrent paid `message/send` calls for ONE
+/// taskId carrying DIFFERENT transactions → exactly ONE settles (one spend row,
+/// one receipt, one Completed Task) and the other gets a clean ERR_PAYMENT_FAILED
+/// rejection. The settle counter proves the loser never reached settlement
+/// (count == 1), and the reject counter increments. Self-skips without
+/// Redis/Postgres.
+///
+/// Pre-fix, both submissions settle → settle count == 2, two `spend logged`
+/// events, and both Tasks complete. This test fails red without the lock.
+#[tokio::test]
+async fn a2a_concurrent_settlements_same_task_settle_exactly_once() {
+    use tracing::instrument::WithSubscriber;
+
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let settle_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let verifier = Arc::new(SettleCountingDelayVerifier {
+        settle_count: Arc::clone(&settle_count),
+        // Wide enough that the second submission is firmly inside the first's
+        // settle window if the lock were absent.
+        delay: std::time::Duration::from_millis(400),
+    });
+    let Some((app, _state)) = a2a_app_with_verifier_and_db(pool, verifier) else {
+        return;
+    };
+
+    let handle = test_prometheus_handle();
+    let reject_before =
+        prom_counter_total(&handle, "solvela_a2a_concurrent_settlement_rejected_total");
+
+    // Step 1: one task, one offer.
+    let (task_id, offer) = a2a_new_request(&app).await;
+
+    // Two DIFFERENT transactions for the SAME task (each body mints a fresh tx).
+    let pay_a = a2a_payment_submitted_body(&task_id, &offer);
+    let pay_b = a2a_payment_submitted_body(&task_id, &offer);
+    assert_ne!(
+        pay_a["params"]["message"]["metadata"]["x402.payment.payload"]["payload"]["transaction"],
+        pay_b["params"]["message"]["metadata"]["x402.payment.payload"]["payload"]["transaction"],
+        "the two submissions must carry different transactions (the #566 trigger)"
+    );
+
+    // Capture spend-logged events across BOTH concurrent calls.
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    let app_a = app.clone();
+    let app_b = app.clone();
+    let (env_a, env_b) = async {
+        tokio::join!(async { a2a_call_envelope(&app_a, &pay_a).await }, async {
+            a2a_call_envelope(&app_b, &pay_b).await
+        },)
+    }
+    .with_subscriber(subscriber)
+    .await;
+
+    // Exactly one envelope is a success (Completed), the other a clean error.
+    let envs = [&env_a, &env_b];
+    let completed: Vec<&serde_json::Value> = envs
+        .iter()
+        .filter(|e| e["result"]["status"]["state"] == "completed")
+        .copied()
+        .collect();
+    let rejected: Vec<&serde_json::Value> = envs
+        .iter()
+        .filter(|e| !e["error"].is_null())
+        .copied()
+        .collect();
+
+    assert_eq!(
+        completed.len(),
+        1,
+        "exactly ONE concurrent submission must complete; got envelopes: {env_a} | {env_b}"
+    );
+    assert_eq!(
+        rejected.len(),
+        1,
+        "exactly ONE concurrent submission must be rejected; got envelopes: {env_a} | {env_b}"
+    );
+
+    // The loser's rejection is the sanitized payment-failed error.
+    let loser = rejected[0];
+    assert_eq!(
+        loser["error"]["code"].as_i64(),
+        Some(-32001),
+        "loser must be ERR_PAYMENT_FAILED (-32001): {loser}"
+    );
+    assert!(
+        loser["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already in progress"),
+        "loser must get the concurrent-settlement message: {loser}"
+    );
+
+    // Settlement was reached EXACTLY ONCE — the loser never called verify_and_settle.
+    assert_eq!(
+        settle_count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "settle_payment must run exactly once across two concurrent submissions \
+         (the loser must never reach on-chain settlement)"
+    );
+
+    // Exactly one ledger write across both calls.
+    let events = spend_logged_events(&capture);
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly ONE spend row must be written for one task (got {}): the loser \
+         must not write a second ledger entry",
+        events.len()
+    );
+
+    // The reject counter incremented exactly once.
+    let reject_after =
+        prom_counter_total(&handle, "solvela_a2a_concurrent_settlement_rejected_total");
+    assert_eq!(
+        reject_after - reject_before,
+        1,
+        "the concurrent-settlement reject counter must increment once"
+    );
+}
+
+/// The settlement lock must be RELEASED on a settlement FAILURE so a legitimate
+/// retry with a corrected payment still works (the task is not stranded locked).
+/// First submission fails settlement (verifier returns success=false); a second
+/// submission with a fresh tx then succeeds and completes. Self-skips without
+/// Redis/Postgres.
+#[tokio::test]
+async fn a2a_retry_after_failed_settlement_succeeds_lock_released() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+
+    // First app: settlement FAILS (success=false) — exercises the release path.
+    let fail_verifier = Arc::new(SettleFailsExactVerifier {
+        settled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let Some((app, _state)) = a2a_app_with_verifier_and_db(pool.clone(), fail_verifier) else {
+        return;
+    };
+
+    let (task_id, offer) = a2a_new_request(&app).await;
+
+    // Submission 1: acquires the lock, then settlement fails → lock released.
+    let pay1 = a2a_payment_submitted_body(&task_id, &offer);
+    let env1 = a2a_call_envelope(&app, &pay1).await;
+    assert_eq!(
+        env1["error"]["code"].as_i64(),
+        Some(-32001),
+        "first submission must fail with ERR_PAYMENT_FAILED (settlement failed): {env1}"
+    );
+    assert!(
+        !env1["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already in progress"),
+        "first submission must fail at settlement, NOT at the concurrency lock: {env1}"
+    );
+
+    // The lock store IS the same Redis behind the app. Build a SECOND app over
+    // the SAME Redis + DB whose verifier SUCCEEDS, and retry the SAME task with a
+    // fresh tx. If the lock had not been released, this retry would be rejected
+    // as "already in progress"; instead it must settle and complete.
+    let ok_verifier = Arc::new(AlwaysPassVerifier);
+    let Some((app2, _state2)) = a2a_app_with_verifier_and_db(pool, ok_verifier) else {
+        return;
+    };
+    let pay2 = a2a_payment_submitted_body(&task_id, &offer);
+    let env2 = a2a_call_envelope(&app2, &pay2).await;
+    assert!(
+        env2["error"].is_null(),
+        "retry after a released lock must not be rejected: {env2}"
+    );
+    assert_eq!(
+        env2["result"]["status"]["state"], "completed",
+        "a legitimate retry after a failed settlement must complete (lock released): {env2}"
+    );
+}
+
+/// The normal SEQUENTIAL single-payment flow is unaffected by the lock: one
+/// new-request → one payment-submitted → Completed, with one settlement.
+/// (Complements the pre-existing `a2a_paid_request_writes_spend_log`, focusing
+/// on the lock not breaking the happy path and on settle-exactly-once.)
+#[tokio::test]
+async fn a2a_sequential_single_payment_completes_with_one_settlement() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let settle_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let verifier = Arc::new(SettleCountingDelayVerifier {
+        settle_count: Arc::clone(&settle_count),
+        delay: std::time::Duration::from_millis(0),
+    });
+    let Some((app, _state)) = a2a_app_with_verifier_and_db(pool, verifier) else {
+        return;
+    };
+
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let pay = a2a_payment_submitted_body(&task_id, &offer);
+    let env = a2a_call_envelope(&app, &pay).await;
+    assert!(env["error"].is_null(), "happy path must not error: {env}");
+    assert_eq!(
+        env["result"]["status"]["state"], "completed",
+        "single sequential payment must complete: {env}"
+    );
+    assert_eq!(
+        settle_count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "single payment must settle exactly once"
     );
 }
