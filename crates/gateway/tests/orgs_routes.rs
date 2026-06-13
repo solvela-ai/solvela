@@ -902,6 +902,25 @@ async fn org_stats_does_not_double_count_multi_team_wallet(pool: PgPool) {
             "each team sees the membership row once"
         );
     }
+
+    // Counterpart to the dedupe above: by_team INTENTIONALLY attributes the
+    // shared wallet's 0.40 under BOTH teams, so the sum of by_team totals
+    // (0.40 + 0.40 = 0.80) deliberately EXCEEDS the deduped org summary total
+    // (0.40). Pinning the exact sum guards documented semantics against a future
+    // refactor that dedupes by_team (which would silently pass every other
+    // assertion here).
+    let by_team_sum: f64 = by_team
+        .iter()
+        .map(|t| t["total_cost_usdc"].as_f64().expect("total_cost_usdc"))
+        .sum();
+    assert!(
+        (by_team_sum - 0.80).abs() < 1e-9,
+        "by_team totals must sum to 0.80 (shared wallet counted under each team), got {by_team_sum}"
+    );
+    assert!(
+        by_team_sum > json["total_spend_usdc"].as_f64().unwrap(),
+        "by_team sum must exceed the deduped org summary total"
+    );
 }
 
 /// Item 1: org budget-vs-spend is the SUM of the teams' team_budgets limits per
