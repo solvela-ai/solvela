@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::http::HeaderMap;
 use serde_json::{json, Value};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use solvela_protocol::{ChatMessage, ChatRequest, Role, SettlementFailureKind};
 use solvela_router::profiles::{self, Profile};
@@ -19,7 +19,9 @@ use solvela_router::scorer;
 use crate::a2a::task_store::{self, new_task_id, TaskRecord};
 use crate::a2a::types::*;
 use crate::providers::fallback::chat_with_model_fallback;
-use crate::routes::chat::cost::{estimate_input_tokens, usdc_atomic_amount_checked};
+use crate::receipts;
+use crate::routes::chat::cost::{estimate_input_tokens, usdc_atomic_amount_checked, PaymentScheme};
+use crate::usage::SpendLogEntry;
 use crate::AppState;
 
 /// A2A-specific JSON-RPC error codes.
@@ -559,6 +561,12 @@ async fn handle_payment_submitted(
         tool_choice: None,
     };
 
+    // Request-side input-token estimate, computed on the SAME `ChatRequest` sent
+    // to the provider, before `chat_req` is moved into the provider call below.
+    // Used as the attribution-only fallback when the provider omits `usage`,
+    // matching the chat path's EstimateFallback arm (routes/chat/mod.rs).
+    let estimated_input_tokens = crate::routes::chat::cost::estimate_input_tokens(&chat_req);
+
     // Call provider
     let result = chat_with_model_fallback(
         &state.providers,
@@ -608,16 +616,52 @@ async fn handle_payment_submitted(
         "A2A payment verified → completed"
     );
 
-    // Build receipt metadata
+    // Ledger + durable receipt (#561). A paid A2A request settles real USDC;
+    // it must produce the same audit evidence as the chat path — a `spend_logs`
+    // row (visible to stats / budgets / tenant attribution) and a retrievable
+    // receipt. Both writes are fire-and-forget; neither blocks the response.
+    //
+    // The amount RECORDED is what the agent actually paid on this path: the
+    // gateway-quoted total stored on the task at creation
+    // (`record.payment_required.cost_breakdown.total`), which the submitted
+    // payment was validated to cover (`validate_submitted_against_offer`). The
+    // A2A path settles that quoted amount on-chain via the `exact`/`escrow`
+    // scheme — there is no reservation-reconciliation or post-hoc actual-usage
+    // re-bill here (unlike the chat route), so the ledger must record the amount
+    // COLLECTED, not a re-derived usage cost that was never charged. Provider-
+    // reported tokens are recorded for attribution only and never change the
+    // amount. See the solvela-fintech `spend_cost_atomic` rule.
+    let receipt_path = record_a2a_settlement(
+        state,
+        task_id,
+        &payload,
+        &record.payment_required,
+        &resolved_model,
+        &model_info.provider,
+        result.data.usage.as_ref(),
+        estimated_input_tokens,
+        &tx_signature,
+    );
+
+    // Build receipt metadata. In-band fields (status + tx_signature) stay for
+    // header-less A2A clients; the durable receipt path is added alongside
+    // tx_signature when a retrievable receipt was written (#561).
     let mut receipt_meta = serde_json::Map::new();
     receipt_meta.insert(
         x402_meta::STATUS_KEY.to_string(),
         json!(x402_meta::PAYMENT_COMPLETED),
     );
-    if let Some(sig) = &tx_signature {
+    if tx_signature.is_some() || receipt_path.is_some() {
+        let mut receipts_obj = serde_json::Map::new();
+        if let Some(sig) = &tx_signature {
+            receipts_obj.insert("tx_signature".to_string(), json!(sig));
+        }
+        if let Some(path) = &receipt_path {
+            receipts_obj.insert("receipt".to_string(), json!(path));
+        }
         receipt_meta.insert(
             x402_meta::RECEIPTS_KEY.to_string(),
-            json!({ "tx_signature": sig }),
+            Value::Object(receipts_obj),
         );
     }
 
@@ -648,6 +692,176 @@ async fn handle_payment_submitted(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Record the ledger row and durable receipt for a settled A2A payment (#561),
+/// returning the public receipt path (`/v1/receipts/{uuid}`) to surface in the
+/// Task metadata, or `None` when no retrievable receipt was written.
+///
+/// Mirrors the chat path's settlement bookkeeping (`log_spend` +
+/// `record_receipt`), adapted to the A2A path where the agent settles the
+/// gateway-quoted amount on-chain (no reservation reconciliation, no actual-
+/// usage re-bill). Both writes are fire-and-forget (`log_spend` / `record_receipt`
+/// each spawn their own task) — this function never `.await`s a DB write.
+///
+/// Fail-closed (no silent $0 / no over-promise):
+/// - a stored `payment_required` that fails to parse → skip BOTH writes (warn +
+///   counter); the payment already settled, so this is a known settled-but-
+///   unledgered gap surfaced via metrics, never a $0 ledger row.
+/// - a breakdown string that fails the checked atomic conversion → skip both
+///   (warn + counter), header/path not emitted.
+/// - the scheme parses through `PaymentScheme::from_accepted_str` (unknown
+///   schemes are an error upstream at the verifier; here we record the canonical
+///   wire string and never default-route).
+#[allow(clippy::too_many_arguments)]
+fn record_a2a_settlement(
+    state: &Arc<AppState>,
+    task_id: &str,
+    payload: &solvela_x402::types::PaymentPayload,
+    payment_required_value: &serde_json::Value,
+    model: &str,
+    provider: &str,
+    usage: Option<&solvela_protocol::Usage>,
+    estimated_input_tokens: u32,
+    tx_signature: &Option<String>,
+) -> Option<String> {
+    // Parse the stored quote: it holds the cost_breakdown the agent paid against.
+    let payment_required: solvela_x402::types::PaymentRequired =
+        match serde_json::from_value(payment_required_value.clone()) {
+            Ok(pr) => pr,
+            Err(e) => {
+                metrics::counter!(
+                    "solvela_a2a_settlement_record_skipped_total",
+                    "reason" => "corrupt_payment_required"
+                )
+                .increment(1);
+                warn!(
+                    task_id,
+                    error = %e,
+                    "A2A settled but stored payment_required failed to parse — \
+                     spend row and receipt skipped (settled-but-unledgered)"
+                );
+                return None;
+            }
+        };
+    let breakdown = &payment_required.cost_breakdown;
+
+    // All amounts go through the same checked atomic conversion the 402 quote
+    // uses (rejects empty/non-numeric/negative/overflow — fail-closed). The
+    // billed amount is the quoted TOTAL (what the agent settled on-chain).
+    let atomic = |decimal: &str| -> Option<u64> {
+        usdc_atomic_amount_checked(decimal)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+    };
+    let (Some(provider_cost_atomic), Some(platform_fee_atomic), Some(total_atomic)) = (
+        atomic(&breakdown.provider_cost),
+        atomic(&breakdown.platform_fee),
+        atomic(&breakdown.total),
+    ) else {
+        metrics::counter!(
+            "solvela_a2a_settlement_record_skipped_total",
+            "reason" => "corrupt_breakdown"
+        )
+        .increment(1);
+        warn!(
+            task_id,
+            provider_cost = %breakdown.provider_cost,
+            platform_fee = %breakdown.platform_fee,
+            total = %breakdown.total,
+            "A2A settled but cost breakdown failed the checked atomic conversion — \
+             spend row and receipt skipped"
+        );
+        return None;
+    };
+
+    let payer_wallet = crate::payment_util::extract_payer_wallet(payload);
+    // Parse the scheme through the exhaustive enum (never default-route an
+    // unknown scheme onto a financial record). The verifier already accepted
+    // this scheme; an unparseable string here means a record we cannot label
+    // truthfully — skip rather than mislabel.
+    let scheme = match PaymentScheme::from_accepted_str(&payload.accepted.scheme) {
+        Ok(s) => s,
+        Err(e) => {
+            metrics::counter!(
+                "solvela_a2a_settlement_record_skipped_total",
+                "reason" => "unknown_scheme"
+            )
+            .increment(1);
+            warn!(
+                task_id,
+                error = %e,
+                "A2A settled with an unrecognized payment scheme — \
+                 spend row and receipt skipped"
+            );
+            return None;
+        }
+    };
+
+    // Provider-reported tokens are ATTRIBUTION ONLY here; they never change the
+    // recorded amount (which is the quoted total the agent settled). When usage
+    // is absent (e.g. some providers omit it), fall back to the request-side
+    // input estimate and zero output, consistent with the chat path's usage-
+    // less EstimateFallback arm (routes/chat/mod.rs uses `estimate_input_tokens`
+    // for input and 0 for output). This keeps the spend row's input attribution
+    // from under-counting for providers that omit usage; the BILLED amount is
+    // unaffected (it is always the quoted total above).
+    let (input_tokens, output_tokens) = match usage {
+        Some(u) => (u.prompt_tokens, u.completion_tokens),
+        None => {
+            debug!(
+                task_id,
+                model,
+                provider,
+                estimated_input_tokens,
+                "A2A provider omitted usage — recording request-side input \
+                 estimate and zero output for spend attribution (billed amount \
+                 is the quoted total, unaffected)"
+            );
+            (estimated_input_tokens, 0)
+        }
+    };
+
+    // Spend ledger row (fire-and-forget). The ledger boundary converts atomic→
+    // f64 USDC exactly once here (Architectural Rule #6 / fintech §6).
+    let billed_cost = total_atomic as f64 / 1_000_000.0;
+    state.usage.log_spend(SpendLogEntry {
+        wallet_address: payer_wallet.clone(),
+        model: model.to_string(),
+        provider: provider.to_string(),
+        input_tokens,
+        output_tokens,
+        cost_usdc: billed_cost,
+        tx_signature: tx_signature.clone(),
+        request_id: Some(task_id.to_string()),
+        // A2A has no chat session / per-tenant matrix (require_tenant wallets are
+        // rejected upstream on this path), so no session or tenant attribution.
+        session_id: None,
+        tenant: None,
+        tenant_enforced: false,
+        // No Redis reservation was pre-committed on the A2A path, so log_spend
+        // increments the counters by `cost_usdc` directly (None branch).
+        estimated_cost_usdc: None,
+        vendor: None,
+    });
+
+    // Durable receipt (fire-and-forget). Returns the public path when a DB pool
+    // is configured and the row can be written; `None` otherwise (never advertise
+    // an unfetchable receipt — fail-closed, matching the chat path).
+    let record = receipts::ReceiptRecord {
+        receipt_id: uuid::Uuid::new_v4(),
+        model: model.to_string(),
+        payment_scheme: scheme.as_accepted_str().to_string(),
+        tx_signature: tx_signature.clone(),
+        payer_wallet,
+        amount_paid_atomic: total_atomic,
+        provider_cost_atomic,
+        platform_fee_atomic,
+        total_atomic,
+        // A2A is not the marketplace-vendor path — no vendor settlement leg.
+        vendor: None,
+    };
+    receipts::record_receipt(state.db_pool.as_ref(), record)
+}
 
 /// Verify that the submitted `PaymentAccept` matches one of the offers
 /// in the original `PaymentRequired` and that the submitted atomic
