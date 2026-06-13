@@ -691,6 +691,61 @@ impl LLMProvider for FailingProvider {
     }
 }
 
+/// A mock LLM provider whose response carries NO `usage` block — mimics a
+/// provider that omits token accounting. Used to exercise the attribution
+/// fallback in `record_a2a_settlement` (the provider-omits-usage arm records
+/// the request-side input estimate, not 0).
+struct UsagelessProvider {
+    provider_name: String,
+}
+
+impl UsagelessProvider {
+    fn new(name: &str) -> Self {
+        Self {
+            provider_name: name.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for UsagelessProvider {
+    fn name(&self) -> &str {
+        &self.provider_name
+    }
+
+    fn supported_models(&self) -> Vec<ModelRegistration> {
+        vec![]
+    }
+
+    async fn chat_completion(
+        &self,
+        req: solvela_protocol::ChatRequest,
+    ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let mut resp = MockProvider::mock_response(&req.model);
+        resp.usage = None;
+        Ok(resp)
+    }
+
+    async fn chat_completion_stream(
+        &self,
+        _req: solvela_protocol::ChatRequest,
+    ) -> Result<ChatStream, Box<dyn std::error::Error + Send + Sync>> {
+        Err("UsagelessProvider does not stream".into())
+    }
+}
+
+/// A `ProviderRegistry` whose providers return responses with no `usage` block.
+fn usageless_provider_registry() -> ProviderRegistry {
+    let mut providers: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+    for name in ["openai", "anthropic", "deepseek", "google"] {
+        providers.insert(
+            name.to_string(),
+            Arc::new(UsagelessProvider::new(name)) as Arc<dyn LLMProvider>,
+        );
+    }
+    ProviderRegistry::from_providers(providers)
+}
+
 /// Build a mock `ProviderRegistry` that has providers for all models in TEST_MODELS_TOML.
 fn mock_provider_registry() -> ProviderRegistry {
     let mut providers: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
@@ -12086,4 +12141,435 @@ async fn receipts_vendor_co_nullability_check_rejects_partial_vendor_insert() {
     insert_receipt_row(&pool, Some("vendorwallet"), Some(20_000), Some(1_000))
         .await
         .expect("all-non-NULL vendor columns (vendor receipt) must insert");
+}
+
+// ---------------------------------------------------------------------------
+// A2A paid-request ledger + receipt parity (#561)
+//
+// A paid `POST /a2a` (message/send with x402 payment) settles real USDC and
+// MUST now produce the same audit evidence as the chat path: a `spend_logs`
+// row (observed via the synchronous `"spend logged"` event — the same seam the
+// #541 streaming tests use) AND a durable receipt retrievable via
+// `GET /v1/receipts/{uuid}`, whose path is surfaced in the Task's
+// `x402.payment.receipts` metadata alongside `tx_signature`.
+//
+// These drive the FULL two-step JSON-RPC flow through the real `/a2a` route via
+// oneshot (no seeded fixtures — per feedback_test_through_real_paths). The A2A
+// task store requires Redis, so each test self-skips when Redis is unavailable;
+// the receipt assertions additionally require Postgres and self-skip without it.
+//
+// Mutation resistance (mirrors #560): the spend-log test fails if the
+// `log_spend` call is deleted; the receipt test fails if the `record_receipt`
+// call is deleted; neither shares a fixture that would pass vacuously.
+// ---------------------------------------------------------------------------
+
+/// Build a DB + Redis + mock-provider A2A app with a passing exact verifier and
+/// `dev_bypass_payment: false`, so a submitted payment flows through real
+/// verification/settlement and the post-settlement ledger + receipt writes
+/// fire. Returns `None` (self-skip) when local Redis is unavailable. The
+/// `db_pool` is the caller-supplied dedicated receipts test DB.
+fn a2a_app_with_redis_and_db(pool: sqlx::PgPool) -> Option<(axum::Router, Arc<AppState>)> {
+    a2a_app_with_redis_db_and_providers(pool, mock_provider_registry())
+}
+
+/// As [`a2a_app_with_redis_and_db`], but with a caller-supplied provider
+/// registry — used to exercise the provider-omits-usage attribution fallback in
+/// `record_a2a_settlement` through the real `/a2a` route.
+fn a2a_app_with_redis_db_and_providers(
+    pool: sqlx::PgPool,
+    providers: ProviderRegistry,
+) -> Option<(axum::Router, Arc<AppState>)> {
+    use gateway::cache::{CacheConfig, ResponseCache};
+
+    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
+    let redis_client = redis::Client::open(url).ok()?;
+    // from_client does not connect; probe a real connection so we self-skip
+    // cleanly (rather than failing later inside the route) when Redis is down.
+    if redis_client.get_connection().is_err() {
+        eprintln!("skipping A2A ledger/receipt test: Redis unavailable");
+        return None;
+    }
+    let cache = ResponseCache::from_client(redis_client, CacheConfig::default())
+        .expect("ResponseCache::from_client should not connect");
+
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML)
+        .unwrap()
+        .with_gateway_recipient(TEST_RECIPIENT_WALLET)
+        .unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers,
+        facilitator,
+        usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
+        cache: Some(cache),
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: Some(pool),
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+    });
+    let router = build_router(
+        Arc::clone(&state),
+        RateLimiter::new(RateLimitConfig::default()),
+    );
+    Some((router, state))
+}
+
+/// POST a JSON-RPC body to the real `/a2a` route and return the parsed result
+/// object (`response["result"]`). Panics on a transport/JSON-RPC error.
+async fn a2a_call(app: &axum::Router, body: &serde_json::Value) -> serde_json::Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/a2a")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "/a2a must return 200");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        json.get("error").is_none() || json["error"].is_null(),
+        "/a2a JSON-RPC returned an error: {json}"
+    );
+    json["result"].clone()
+}
+
+/// Step 1: a new message/send (no taskId) → input-required Task. Returns
+/// (task_id, the first offered `accepts[0]` object) for the caller to echo back.
+async fn a2a_new_request(app: &axum::Router) -> (String, serde_json::Value) {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "message/send",
+        "id": "a2a-new",
+        "params": {
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "What is Solana?"}],
+                "metadata": {"model": "openai/gpt-4o"}
+            }
+        }
+    });
+    let result = a2a_call(app, &body).await;
+    assert_eq!(result["status"]["state"], "input-required");
+    let task_id = result["id"].as_str().expect("task id").to_string();
+    let offer =
+        result["status"]["message"]["metadata"]["x402.payment.required"]["accepts"][0].clone();
+    assert_eq!(offer["scheme"], "exact", "first offer is the exact scheme");
+    (task_id, offer)
+}
+
+/// Build the step-2 (payment-submitted) JSON-RPC body echoing the offer. Each
+/// call uses a UNIQUE transaction so the shared real Redis replay set does not
+/// cross-reject one test's payment as a replay of another's.
+fn a2a_payment_submitted_body(task_id: &str, offer: &serde_json::Value) -> serde_json::Value {
+    let tx_raw = base64::engine::general_purpose::STANDARD
+        .encode(format!("mock_signed_tx_{}", uuid::Uuid::new_v4().simple()).as_bytes());
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "message/send",
+        "id": "a2a-pay",
+        "params": {
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "pay"}],
+                "metadata": {
+                    "x402.payment.status": "payment-submitted",
+                    "x402.payment.payload": {
+                        "x402_version": 2,
+                        "resource": {"url": "/v1/chat/completions", "method": "POST"},
+                        "accepted": {
+                            "scheme": offer["scheme"],
+                            "network": offer["network"],
+                            "amount": offer["amount"],
+                            "asset": offer["asset"],
+                            "pay_to": offer["pay_to"],
+                            "max_timeout_seconds": offer["max_timeout_seconds"],
+                        },
+                        "payload": {"transaction": tx_raw}
+                    }
+                }
+            },
+            "taskId": task_id
+        }
+    })
+}
+
+/// A settled paid A2A request MUST write exactly one spend ledger row (#561).
+/// Observed through the synchronous `"spend logged"` event on the real `/a2a`
+/// route. Deleting the `log_spend` call in `record_a2a_settlement` makes this
+/// fail (zero events). Self-skips without Redis.
+#[tokio::test]
+async fn a2a_paid_request_writes_spend_log() {
+    use tracing::instrument::WithSubscriber;
+
+    // A DB pool is required for the DB-backed UsageTracker, but the spend
+    // ASSERTION is on the synchronous event, not the DB row.
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let Some((app, _state)) = a2a_app_with_redis_and_db(pool) else {
+        return;
+    };
+
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let pay_body = a2a_payment_submitted_body(&task_id, &offer);
+
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    let result = async { a2a_call(&app, &pay_body).await }
+        .with_subscriber(subscriber)
+        .await;
+    assert_eq!(
+        result["status"]["state"], "completed",
+        "paid A2A request must complete"
+    );
+
+    let events = spend_logged_events(&capture);
+    assert_eq!(
+        events.len(),
+        1,
+        "a settled paid A2A request MUST write exactly one spend entry (got {}): \
+         the agent settled USDC on-chain, so the ledger must record it",
+        events.len()
+    );
+    // The spend is billed at the quoted total (what the agent settled on-chain).
+    let logged_usdc = events[0]["cost_usdc"]
+        .as_f64()
+        .expect("spend logged event carries cost_usdc");
+    assert!(
+        logged_usdc > 0.0,
+        "A2A spend must be a real positive amount, got {logged_usdc}"
+    );
+    assert_eq!(
+        events[0]["model"], "openai/gpt-4o",
+        "spend row records the resolved model"
+    );
+}
+
+/// When the LLM provider omits `usage`, the A2A spend row must record the
+/// request-side INPUT ESTIMATE (not 0) for attribution — matching the chat
+/// path's usage-less EstimateFallback arm. The billed amount is unaffected (it
+/// is always the quoted total). Prompt "What is Solana?" (15 chars) →
+/// `estimate_input_tokens` = 15/4 = 3. Self-skips without Redis/Postgres.
+///
+/// Regression guard for the round-1 MEDIUM: the prior `None => (0, 0)` arm
+/// under-counted input tokens and contradicted its own comment.
+#[tokio::test]
+async fn a2a_paid_request_without_provider_usage_records_input_estimate() {
+    use tracing::instrument::WithSubscriber;
+
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let Some((app, _state)) =
+        a2a_app_with_redis_db_and_providers(pool, usageless_provider_registry())
+    else {
+        return;
+    };
+
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let pay_body = a2a_payment_submitted_body(&task_id, &offer);
+
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    let result = async { a2a_call(&app, &pay_body).await }
+        .with_subscriber(subscriber)
+        .await;
+    assert_eq!(
+        result["status"]["state"], "completed",
+        "paid A2A request must complete even when the provider omits usage"
+    );
+
+    let events = spend_logged_events(&capture);
+    assert_eq!(
+        events.len(),
+        1,
+        "a settled paid A2A request MUST write exactly one spend entry (got {})",
+        events.len()
+    );
+    // The fix: input attribution falls back to the request-side estimate, not 0.
+    assert_eq!(
+        events[0]["input_tokens"].as_u64(),
+        Some(3),
+        "usage-less A2A spend must record the request-side input estimate \
+         (estimate_input_tokens(\"What is Solana?\") = 3), not 0"
+    );
+    assert_eq!(
+        events[0]["output_tokens"].as_u64(),
+        Some(0),
+        "no provider usage → output_tokens recorded as 0"
+    );
+    // The billed amount is the quoted total — unaffected by the attribution.
+    let logged_usdc = events[0]["cost_usdc"]
+        .as_f64()
+        .expect("spend logged event carries cost_usdc");
+    assert!(
+        logged_usdc > 0.0,
+        "billed amount must remain the positive quoted total, got {logged_usdc}"
+    );
+}
+
+/// A settled paid A2A request MUST write a durable receipt AND surface its path
+/// in the Task `x402.payment.receipts` metadata; the path must be retrievable
+/// via `GET /v1/receipts/{uuid}` (#561). Deleting the `record_receipt` call in
+/// `record_a2a_settlement` makes this fail (no `receipt` key in metadata).
+/// Self-skips without Redis or Postgres.
+#[tokio::test]
+async fn a2a_paid_request_writes_receipt_and_metadata_path() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let Some((app, _state)) = a2a_app_with_redis_and_db(pool) else {
+        return;
+    };
+
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let pay_body = a2a_payment_submitted_body(&task_id, &offer);
+    let result = a2a_call(&app, &pay_body).await;
+    assert_eq!(result["status"]["state"], "completed");
+
+    // The receipts metadata must carry BOTH the in-band tx_signature and the
+    // new durable receipt path (additive — in-band stays for header-less clients).
+    let receipts_meta = &result["status"]["message"]["metadata"]["x402.payment.receipts"];
+    assert!(
+        receipts_meta["tx_signature"].is_string(),
+        "in-band tx_signature must remain: {receipts_meta}"
+    );
+    let receipt_path = receipts_meta["receipt"]
+        .as_str()
+        .expect("settled A2A Task must carry the durable receipt path");
+    assert!(
+        receipt_path.starts_with("/v1/receipts/"),
+        "receipt metadata path must be the public receipt route, got: {receipt_path}"
+    );
+
+    // The advertised receipt must be fetchable through the real GET route.
+    let receipt = poll_receipt_until_ok(&app, receipt_path).await;
+    assert_eq!(receipt["model"], "openai/gpt-4o");
+    assert_eq!(receipt["payment_scheme"], "exact");
+    assert!(receipt["tx_signature"].is_string());
+    assert!(receipt["receipt_id"].is_string());
+    // Amounts are the quoted total the agent settled (positive, atomic-pinned to
+    // the breakdown triple). A2A is not the vendor path.
+    let total = receipt["cost_breakdown"]["total_atomic"]
+        .as_u64()
+        .expect("total_atomic");
+    assert!(total > 0, "receipt total must be a real positive amount");
+    assert_eq!(
+        receipt["amount_paid_atomic"].as_u64(),
+        Some(total),
+        "A2A receipt records the settled total as the amount paid"
+    );
+    assert_eq!(
+        receipt["cost_breakdown"]["provider_cost_atomic"]
+            .as_u64()
+            .unwrap()
+            + receipt["cost_breakdown"]["platform_fee_atomic"]
+                .as_u64()
+                .unwrap(),
+        total,
+        "provider_cost + platform_fee must equal total (5% fee, applied once)"
+    );
+    assert!(
+        receipt.get("vendor").is_none(),
+        "A2A receipts must not carry vendor fields: {receipt}"
+    );
+}
+
+/// An UNPAID A2A flow (step 1 only — the input-required intake that takes no
+/// payment) must write NO spend row and NO receipt: there is nothing to bill.
+/// Guards against the ledger/receipt writes leaking onto the free intake path.
+/// Self-skips without Redis/Postgres.
+#[tokio::test]
+async fn a2a_unpaid_intake_writes_no_spend_and_no_receipt() {
+    use tracing::instrument::WithSubscriber;
+
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let Some((app, _state)) = a2a_app_with_redis_and_db(pool) else {
+        return;
+    };
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "message/send",
+        "id": "a2a-intake",
+        "params": {
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "What is Solana?"}],
+                "metadata": {"model": "openai/gpt-4o"}
+            }
+        }
+    });
+
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    let result = async { a2a_call(&app, &body).await }
+        .with_subscriber(subscriber)
+        .await;
+    assert_eq!(
+        result["status"]["state"], "input-required",
+        "unpaid intake returns input-required"
+    );
+
+    assert!(
+        spend_logged_events(&capture).is_empty(),
+        "unpaid A2A intake must write no spend row"
+    );
+    assert!(
+        receipt_logged_events(&capture).is_empty(),
+        "unpaid A2A intake must write no receipt"
+    );
+    // No receipt path is surfaced on the unpaid Task.
+    assert!(
+        result["status"]["message"]["metadata"]["x402.payment.receipts"].is_null(),
+        "unpaid intake Task must not carry a receipts metadata object"
+    );
 }
