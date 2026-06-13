@@ -65,6 +65,40 @@ Authorization: Bearer <admin-token | solvela_k_...>
 
 Response shape is the same as the set response above.
 
+## Org budget rollup
+
+There is **no org-level budget**, and setting one is intentionally not
+supported: Solvela enforces spend caps at the leaf (team and wallet) level only.
+For reporting, the [org stats endpoint](/docs/enterprise/analytics#org-stats)
+surfaces a derived `budget` object that is the **per-period sum of the org's
+team budgets** — useful for answering "how much of its aggregate budget has the
+org spent?" without introducing a second enforcement layer.
+
+```json
+"budget": {
+  "hourly_limit_usdc": null,
+  "daily_limit_usdc": 150.0,
+  "monthly_limit_usdc": 4000.0,
+  "teams_total": 3,
+  "teams_with_hourly_budget": 0,
+  "teams_with_daily_budget": 2,
+  "teams_with_monthly_budget": 3
+}
+```
+
+Semantics to keep in mind:
+
+- A team with **no limit for a period** is treated as **unlimited** and adds
+  nothing to that period's sum (matching how the limit behaves in enforcement).
+- Therefore the sum is a true ceiling for a period only when **every** team has
+  a budget for it. The `teams_with_*_budget` counts (against `teams_total`)
+  expose partial coverage so the figure is never silently misleading.
+- A `null` limit means **no team set one** for that period — it is *not* a `0`
+  cap. Do not render `null` as "$0".
+
+This figure is reporting-only and is computed live from team budgets; there is
+nothing extra to configure.
+
 ## Wallet budgets
 
 Wallet budgets are set and read using the admin token only.

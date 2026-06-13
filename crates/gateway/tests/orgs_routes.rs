@@ -744,3 +744,407 @@ async fn org_stats_endpoint_returns_200(pool: PgPool) {
     assert_eq!(resp.status(), StatusCode::OK);
     let _json = body_to_json(resp).await;
 }
+
+// ---------------------------------------------------------------------------
+// E1: org budget rollups + analytics polish
+//
+// Shared helpers for the org-stats E1 tests below: create a team, assign a
+// wallet, set a team budget, and seed a raw spend row. All go through the real
+// HTTP handlers where one exists (so the test exercises the production wiring),
+// and direct SQL only for spend_logs (there is no public spend-write route).
+// ---------------------------------------------------------------------------
+
+async fn mk_team(app: &Router, org_id: Uuid, name: &str) -> Uuid {
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/v1/orgs/{org_id}/teams"),
+            &format!(r#"{{"name":"{name}"}}"#),
+        ))
+        .await
+        .expect("create team");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "team create must succeed"
+    );
+    Uuid::parse_str(body_to_json(resp).await["id"].as_str().unwrap()).expect("uuid")
+}
+
+async fn assign_team_wallet(app: &Router, org_id: Uuid, team_id: Uuid, wallet: &str) {
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            &format!("/v1/orgs/{org_id}/teams/{team_id}/wallets"),
+            &format!(r#"{{"wallet_address":"{wallet}"}}"#),
+        ))
+        .await
+        .expect("assign wallet");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "wallet assign must succeed"
+    );
+}
+
+async fn set_team_budget_http(app: &Router, org_id: Uuid, team_id: Uuid, body: &str) {
+    let resp = app
+        .clone()
+        .oneshot(json_request(
+            "PUT",
+            &format!("/v1/orgs/{org_id}/teams/{team_id}/budget"),
+            body,
+        ))
+        .await
+        .expect("set budget");
+    assert_eq!(resp.status(), StatusCode::OK, "budget set must succeed");
+}
+
+/// Seed a plain (non-vendor) chat spend row.
+async fn seed_spend(pool: &PgPool, wallet: &str, model: &str, provider: &str, cost: f64) {
+    sqlx::query(
+        r#"INSERT INTO spend_logs
+               (wallet_address, model, provider, input_tokens, output_tokens, cost_usdc)
+           VALUES ($1, $2, $3, 10, 20, $4)"#,
+    )
+    .bind(wallet)
+    .bind(model)
+    .bind(provider)
+    .bind(cost)
+    .execute(pool)
+    .await
+    .expect("seed spend_log");
+}
+
+/// Seed a spend row with a tenant tag and vendor-settlement legs.
+#[allow(clippy::too_many_arguments)]
+async fn seed_spend_full(
+    pool: &PgPool,
+    wallet: &str,
+    model: &str,
+    provider: &str,
+    cost: f64,
+    tenant: Option<&str>,
+    vendor_wallet: Option<&str>,
+    vendor_settled_atomic: Option<i64>,
+    vendor_fee_receivable_atomic: Option<i64>,
+) {
+    sqlx::query(
+        r#"INSERT INTO spend_logs
+               (wallet_address, model, provider, input_tokens, output_tokens, cost_usdc,
+                tenant, vendor_wallet, vendor_settled_atomic, vendor_fee_receivable_atomic)
+           VALUES ($1, $2, $3, 10, 20, $4, $5, $6, $7, $8)"#,
+    )
+    .bind(wallet)
+    .bind(model)
+    .bind(provider)
+    .bind(cost)
+    .bind(tenant)
+    .bind(vendor_wallet)
+    .bind(vendor_settled_atomic)
+    .bind(vendor_fee_receivable_atomic)
+    .execute(pool)
+    .await
+    .expect("seed spend_log full");
+}
+
+/// Item 2 (the headline bug): a wallet assigned to TWO teams of the same org,
+/// with ONE paid request, must be counted ONCE in the org summary total — not
+/// doubled by the spend_logs -> team_wallets fan-out. by_team legitimately
+/// shows the row under both teams (each team's slice is real membership), but
+/// the org-level total_requests / total_spend must not double.
+#[sqlx::test(migrations = "../../migrations")]
+async fn org_stats_does_not_double_count_multi_team_wallet(pool: PgPool) {
+    let app = router_with_pool(pool.clone());
+    let org_id = create_test_org(&app, "acme").await;
+
+    let team_a = mk_team(&app, org_id, "Eng").await;
+    let team_b = mk_team(&app, org_id, "Ops").await;
+    // Same wallet in BOTH teams.
+    assign_team_wallet(&app, org_id, team_a, TEST_MEMBER_WALLET).await;
+    assign_team_wallet(&app, org_id, team_b, TEST_MEMBER_WALLET).await;
+
+    // Exactly one paid request.
+    seed_spend(&pool, TEST_MEMBER_WALLET, "openai/gpt-4o", "openai", 0.40).await;
+
+    let resp = app
+        .oneshot(bare_request("GET", &format!("/v1/orgs/{org_id}/stats")))
+        .await
+        .expect("org stats");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_to_json(resp).await;
+
+    // The summary must count the single row once, despite two-team membership.
+    assert_eq!(json["total_requests"], 1, "row counted once at org level");
+    assert!(
+        (json["total_spend_usdc"].as_f64().unwrap() - 0.40).abs() < 1e-9,
+        "org total must be 0.40 (not doubled), got {}",
+        json["total_spend_usdc"]
+    );
+
+    // top_wallets must also dedupe: one wallet, one row, count 1, spend 0.40.
+    let top = json["top_wallets"].as_array().expect("top_wallets array");
+    assert_eq!(top.len(), 1, "one distinct wallet");
+    assert_eq!(top[0]["request_count"], 1, "wallet row counted once");
+    assert!(
+        (top[0]["total_cost_usdc"].as_f64().unwrap() - 0.40).abs() < 1e-9,
+        "top wallet spend not doubled"
+    );
+
+    // by_team legitimately attributes the row under both teams.
+    let by_team = json["by_team"].as_array().expect("by_team array");
+    assert_eq!(by_team.len(), 2, "both teams present");
+    for t in by_team {
+        assert_eq!(
+            t["request_count"], 1,
+            "each team sees the membership row once"
+        );
+    }
+
+    // Counterpart to the dedupe above: by_team INTENTIONALLY attributes the
+    // shared wallet's 0.40 under BOTH teams, so the sum of by_team totals
+    // (0.40 + 0.40 = 0.80) deliberately EXCEEDS the deduped org summary total
+    // (0.40). Pinning the exact sum guards documented semantics against a future
+    // refactor that dedupes by_team (which would silently pass every other
+    // assertion here).
+    let by_team_sum: f64 = by_team
+        .iter()
+        .map(|t| t["total_cost_usdc"].as_f64().expect("total_cost_usdc"))
+        .sum();
+    assert!(
+        (by_team_sum - 0.80).abs() < 1e-9,
+        "by_team totals must sum to 0.80 (shared wallet counted under each team), got {by_team_sum}"
+    );
+    assert!(
+        by_team_sum > json["total_spend_usdc"].as_f64().unwrap(),
+        "by_team sum must exceed the deduped org summary total"
+    );
+}
+
+/// Item 1: org budget-vs-spend is the SUM of the teams' team_budgets limits per
+/// period, with absent budgets treated as unlimited (contributing nothing) and
+/// surfaced via a teams-with-budget count so the figure is not silently
+/// misleading.
+#[sqlx::test(migrations = "../../migrations")]
+async fn org_stats_budget_is_sum_of_team_budgets(pool: PgPool) {
+    let app = router_with_pool(pool.clone());
+    let org_id = create_test_org(&app, "acme").await;
+
+    let team_a = mk_team(&app, org_id, "Eng").await;
+    let team_b = mk_team(&app, org_id, "Ops").await;
+    let _team_c = mk_team(&app, org_id, "NoBudget").await;
+
+    // team_a: daily 10, monthly 100 (no hourly). team_b: hourly 1, daily 5.
+    set_team_budget_http(&app, org_id, team_a, r#"{"daily":10.0,"monthly":100.0}"#).await;
+    set_team_budget_http(&app, org_id, team_b, r#"{"hourly":1.0,"daily":5.0}"#).await;
+    // team_c: no budget row at all -> contributes nothing.
+
+    let resp = app
+        .oneshot(bare_request("GET", &format!("/v1/orgs/{org_id}/stats")))
+        .await
+        .expect("org stats");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_to_json(resp).await;
+
+    let budget = &json["budget"];
+    // hourly: only team_b set (1.0); 1 of 3 teams.
+    assert!((budget["hourly_limit_usdc"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+    assert_eq!(budget["teams_with_hourly_budget"], 1);
+    // daily: 10 + 5 = 15; 2 of 3 teams.
+    assert!((budget["daily_limit_usdc"].as_f64().unwrap() - 15.0).abs() < 1e-9);
+    assert_eq!(budget["teams_with_daily_budget"], 2);
+    // monthly: only team_a set (100.0); 1 of 3 teams.
+    assert!((budget["monthly_limit_usdc"].as_f64().unwrap() - 100.0).abs() < 1e-9);
+    assert_eq!(budget["teams_with_monthly_budget"], 1);
+    // total teams in the org for context.
+    assert_eq!(budget["teams_total"], 3);
+}
+
+/// Item 1 (empty case): an org with no team budgets at all reports NULL limits
+/// and zero teams-with-budget, never a misleading 0.0 that looks like a cap.
+#[sqlx::test(migrations = "../../migrations")]
+async fn org_stats_budget_absent_reports_null_not_zero(pool: PgPool) {
+    let app = router_with_pool(pool.clone());
+    let org_id = create_test_org(&app, "acme").await;
+    let _team = mk_team(&app, org_id, "Eng").await;
+
+    let resp = app
+        .oneshot(bare_request("GET", &format!("/v1/orgs/{org_id}/stats")))
+        .await
+        .expect("org stats");
+    let json = body_to_json(resp).await;
+    let budget = &json["budget"];
+    assert!(
+        budget["hourly_limit_usdc"].is_null(),
+        "no cap -> null, not 0"
+    );
+    assert!(budget["daily_limit_usdc"].is_null());
+    assert!(budget["monthly_limit_usdc"].is_null());
+    assert_eq!(budget["teams_with_daily_budget"], 0);
+    assert_eq!(budget["teams_total"], 1);
+}
+
+/// Item 3: org stats include a daily time series mirroring get_stats_by_day.
+#[sqlx::test(migrations = "../../migrations")]
+async fn org_stats_includes_by_day_time_series(pool: PgPool) {
+    let app = router_with_pool(pool.clone());
+    let org_id = create_test_org(&app, "acme").await;
+    let team = mk_team(&app, org_id, "Eng").await;
+    assign_team_wallet(&app, org_id, team, TEST_MEMBER_WALLET).await;
+
+    // Two rows today, one row dated 3 days ago.
+    seed_spend(&pool, TEST_MEMBER_WALLET, "openai/gpt-4o", "openai", 0.10).await;
+    seed_spend(&pool, TEST_MEMBER_WALLET, "openai/gpt-4o", "openai", 0.20).await;
+    sqlx::query(
+        r#"INSERT INTO spend_logs
+               (wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, created_at)
+           VALUES ($1, 'openai/gpt-4o', 'openai', 10, 20, 0.05, NOW() - INTERVAL '3 days')"#,
+    )
+    .bind(TEST_MEMBER_WALLET)
+    .execute(&pool)
+    .await
+    .expect("seed dated spend");
+
+    let resp = app
+        .oneshot(bare_request(
+            "GET",
+            &format!("/v1/orgs/{org_id}/stats?days=7"),
+        ))
+        .await
+        .expect("org stats");
+    let json = body_to_json(resp).await;
+    let by_day = json["by_day"].as_array().expect("by_day array");
+    // Two distinct days.
+    assert_eq!(by_day.len(), 2, "two distinct spend days");
+    // Ascending by date: oldest first.
+    let day0_spend = by_day[0]["spend_usdc"].as_f64().unwrap();
+    let day1_spend = by_day[1]["spend_usdc"].as_f64().unwrap();
+    assert!((day0_spend - 0.05).abs() < 1e-9, "older day = 0.05");
+    assert!((day1_spend - 0.30).abs() < 1e-9, "today = 0.10 + 0.20");
+    assert_eq!(by_day[1]["requests"], 2);
+}
+
+/// Item 4: top_wallets pagination via clamped limit/offset.
+#[sqlx::test(migrations = "../../migrations")]
+async fn org_stats_top_wallets_pagination(pool: PgPool) {
+    let app = router_with_pool(pool.clone());
+    let org_id = create_test_org(&app, "acme").await;
+    let team = mk_team(&app, org_id, "Eng").await;
+
+    // Three distinct wallets with descending spend.
+    let wallets = [
+        ("So11111111111111111111111111111111111111112", 0.30),
+        ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 0.20),
+        ("9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9A", 0.10),
+    ];
+    for (w, cost) in wallets {
+        assign_team_wallet(&app, org_id, team, w).await;
+        seed_spend(&pool, w, "openai/gpt-4o", "openai", cost).await;
+    }
+
+    // limit=1 -> only the top wallet (0.30).
+    let resp = app
+        .clone()
+        .oneshot(bare_request(
+            "GET",
+            &format!("/v1/orgs/{org_id}/stats?limit=1"),
+        ))
+        .await
+        .expect("limit=1");
+    let json = body_to_json(resp).await;
+    let top = json["top_wallets"].as_array().unwrap();
+    assert_eq!(top.len(), 1);
+    assert!((top[0]["total_cost_usdc"].as_f64().unwrap() - 0.30).abs() < 1e-9);
+
+    // limit=1&offset=1 -> the second wallet (0.20).
+    let resp = app
+        .oneshot(bare_request(
+            "GET",
+            &format!("/v1/orgs/{org_id}/stats?limit=1&offset=1"),
+        ))
+        .await
+        .expect("offset=1");
+    let json = body_to_json(resp).await;
+    let top = json["top_wallets"].as_array().unwrap();
+    assert_eq!(top.len(), 1);
+    assert!((top[0]["total_cost_usdc"].as_f64().unwrap() - 0.20).abs() < 1e-9);
+}
+
+/// Item 5: org stats include by_tenant and by_vendor breakdowns. Vendor amounts
+/// are atomic integers formatted to USDC strings via the receipts helper.
+#[sqlx::test(migrations = "../../migrations")]
+async fn org_stats_includes_tenant_and_vendor_breakdowns(pool: PgPool) {
+    let app = router_with_pool(pool.clone());
+    let org_id = create_test_org(&app, "acme").await;
+    let team = mk_team(&app, org_id, "Eng").await;
+    assign_team_wallet(&app, org_id, team, TEST_MEMBER_WALLET).await;
+
+    let vendor = "GDDMwNyyx8uB6zrqwBFHjLLG3TBYk2F8Az4yrQC5RzMp";
+    // tenant "alpha": two rows; tenant "beta": one row; plus one untagged row.
+    seed_spend_full(
+        &pool,
+        TEST_MEMBER_WALLET,
+        "openai/gpt-4o",
+        "openai",
+        0.10,
+        Some("alpha"),
+        Some(vendor),
+        Some(1_000_000),
+        Some(50_000),
+    )
+    .await;
+    seed_spend_full(
+        &pool,
+        TEST_MEMBER_WALLET,
+        "openai/gpt-4o",
+        "openai",
+        0.20,
+        Some("alpha"),
+        Some(vendor),
+        Some(2_000_000),
+        Some(100_000),
+    )
+    .await;
+    seed_spend_full(
+        &pool,
+        TEST_MEMBER_WALLET,
+        "openai/gpt-4o",
+        "openai",
+        0.05,
+        Some("beta"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    seed_spend(&pool, TEST_MEMBER_WALLET, "openai/gpt-4o", "openai", 0.07).await;
+
+    let resp = app
+        .oneshot(bare_request("GET", &format!("/v1/orgs/{org_id}/stats")))
+        .await
+        .expect("org stats");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_to_json(resp).await;
+
+    // by_tenant: only tagged rows; alpha (0.30, 2 reqs) before beta (0.05, 1).
+    let by_tenant = json["by_tenant"].as_array().expect("by_tenant array");
+    assert_eq!(
+        by_tenant.len(),
+        2,
+        "two distinct tenants (untagged excluded)"
+    );
+    assert_eq!(by_tenant[0]["tenant"], "alpha");
+    assert_eq!(by_tenant[0]["request_count"], 2);
+    assert!((by_tenant[0]["total_cost_usdc"].as_f64().unwrap() - 0.30).abs() < 1e-9);
+    assert_eq!(by_tenant[1]["tenant"], "beta");
+
+    // by_vendor: one vendor; settled 3.000000, fee 0.150000 (atomic-summed).
+    let by_vendor = json["by_vendor"].as_array().expect("by_vendor array");
+    assert_eq!(by_vendor.len(), 1, "one vendor wallet");
+    assert_eq!(by_vendor[0]["vendor_wallet"], vendor);
+    assert_eq!(by_vendor[0]["request_count"], 2);
+    assert_eq!(by_vendor[0]["settled_usdc"], "3.000000");
+    assert_eq!(by_vendor[0]["fee_receivable_usdc"], "0.150000");
+}
