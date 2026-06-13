@@ -443,15 +443,19 @@ async fn handle_payment_submitted(
     // closed (Err → reject) therefore never strands a legitimately-loadable
     // task, and there is deliberately no in-memory lock fallback (it could not
     // serialise across gateway instances — the exact race we are closing).
-    let settle_lock_acquired = match &state.cache {
+    match &state.cache {
         Some(cache) => match cache
             .acquire_settle_lock(task_id, crate::cache::A2A_SETTLE_LOCK_TTL_SECS)
             .await
         {
-            Ok(true) => true,
+            Ok(true) => {}
             Ok(false) => {
-                // F4 (#566): label the rejection cause so concurrent rejects and
-                // lock-store errors are separately alertable.
+                // F4 (#566): a genuine concurrent settlement holds the lock. This
+                // is the only case that stays on the "concurrent" counter; the
+                // infra-degradation cases (lock-store error, no-Redis) moved to
+                // `solvela_a2a_settle_lock_unavailable_total` so a Redis blip is
+                // alertable without disentangling reason labels on a metric whose
+                // name implies legitimate concurrency.
                 metrics::counter!(
                     "solvela_a2a_concurrent_settlement_rejected_total",
                     "reason" => "concurrent"
@@ -471,8 +475,11 @@ async fn handle_payment_submitted(
                 });
             }
             Err(e) => {
+                // Infra degradation (Redis unreachable / command error), NOT a
+                // concurrent settler — track on a distinctly-named counter so it
+                // is alertable as a degraded-lock-store condition.
                 metrics::counter!(
-                    "solvela_a2a_concurrent_settlement_rejected_total",
+                    "solvela_a2a_settle_lock_unavailable_total",
                     "reason" => "lock_store_error"
                 )
                 .increment(1);
@@ -496,11 +503,11 @@ async fn handle_payment_submitted(
         // Redis" invariant broke. Settling with NO lock would re-open the exact
         // exactly-once race the lock exists to close (and across instances, an
         // in-memory lock could not serialise it), so we reject rather than
-        // proceed unlocked. Labeled distinctly from the concurrent/store-error
-        // causes above for alerting.
+        // proceed unlocked. Tracked on the infra-degradation counter (not the
+        // "concurrent" one) so a missing-Redis misconfiguration is alertable.
         None => {
             metrics::counter!(
-                "solvela_a2a_concurrent_settlement_rejected_total",
+                "solvela_a2a_settle_lock_unavailable_total",
                 "reason" => "no_redis_fail_closed"
             )
             .increment(1);
@@ -517,16 +524,22 @@ async fn handle_payment_submitted(
                 data: None,
             });
         }
-    };
+    }
 
     // Release the settlement lock on a FAILURE return after acquisition, so a
     // legitimate retry isn't stranded waiting out the TTL. Held on success.
+    //
+    // The macro is unconditional: every non-acquired arm of the lock block above
+    // (`Ok(false)`, `Err`, `None`) returns before reaching here, so control only
+    // arrives at this point when THIS caller holds the lock (`Ok(true)`). There
+    // is deliberately no "was a lock acquired?" guard — it would be dead code and
+    // could mislead a future maintainer into thinking the macro is safe to call
+    // when no lock is held. It is not: it must only ever be invoked on a failure
+    // path AFTER a successful acquisition.
     macro_rules! release_lock_on_failure {
         () => {
-            if settle_lock_acquired {
-                if let Some(cache) = &state.cache {
-                    cache.release_settle_lock(task_id).await;
-                }
+            if let Some(cache) = &state.cache {
+                cache.release_settle_lock(task_id).await;
             }
         };
     }
@@ -553,6 +566,13 @@ async fn handle_payment_submitted(
                 .await
                 .is_err()
         } else {
+            // STRUCTURALLY UNREACHABLE: the lock block above has a `None` cache
+            // arm that already returned (fail-closed) when `state.cache` is
+            // `None`, so reaching this point implies `state.cache` is `Some`.
+            // Retained as defense-in-depth — if a future refactor decouples the
+            // lock from the replay cache, this in-memory degraded path is still
+            // correct on its own (durable-nonce deny + bounded in-memory LRU).
+            //
             // GHSA-fq3f-c8p7-873f: durable-nonce transactions carry a 24-hour replay window.
             // The in-memory LRU cannot cover that window, so deny rather than accept with
             // degraded protection.
@@ -763,7 +783,15 @@ async fn handle_payment_submitted(
             // falls back to the request-side input estimate; the BILLED amount is
             // the quoted total regardless). Fire-and-forget, same as the success
             // path; never blocks the error return.
-            record_a2a_settlement(
+            //
+            // `record_a2a_settlement` returns `None` when the ledger/receipt write
+            // was skipped (corrupt stored quote/breakdown/scheme — each already
+            // counted on `solvela_a2a_settlement_record_skipped_total`). On the
+            // SUCCESS path that is benign, but here it means a settled-but-
+            // unledgered task on the FAILURE path: surface it as an `error!` so
+            // this case is distinguishable in logs from a clean post-settle
+            // failure that DID ledger.
+            if record_a2a_settlement(
                 state,
                 task_id,
                 &payload,
@@ -773,7 +801,15 @@ async fn handle_payment_submitted(
                 None,
                 estimated_input_tokens,
                 &tx_signature,
-            );
+            )
+            .is_none()
+            {
+                tracing::error!(
+                    task_id,
+                    "post-settle-failure: ledger/receipt write was skipped \
+                     (settled-but-unledgered; see solvela_a2a_settlement_record_skipped_total)"
+                );
+            }
 
             // Move the task to a terminal failed state. The lock is intentionally
             // NOT released (the macro is not invoked here): the agent's funds
@@ -782,6 +818,12 @@ async fn handle_payment_submitted(
             if let Err(state_err) =
                 task_store::update_task_state(state, task_id, TaskState::Failed).await
             {
+                // A failed state write leaves the task in `InputRequired` even
+                // though funds settled and the lock is held — the precondition for
+                // a re-settle once the lock TTL expires (the full fix is a separate
+                // follow-up). Count it so the stuck-state case is alertable.
+                metrics::counter!("solvela_a2a_task_state_update_failed_after_settle_total")
+                    .increment(1);
                 tracing::error!(
                     error = %state_err,
                     task_id,
@@ -789,9 +831,18 @@ async fn handle_payment_submitted(
                 );
             }
 
+            // GHSA-cgqx-mg48-949v: do not echo the raw provider error to the
+            // JSON-RPC client (consistent with the verifier-error path above,
+            // which logs `error = %e` internally and returns a generic message).
+            // The real error is already logged on the `warn!` above with `error =
+            // %e`; the client gets a generic, actionable message that does NOT
+            // interpolate `{e}`.
             return Err(JsonRpcErrorData {
                 code: ERR_PROVIDER_ERROR,
-                message: format!("Provider call failed: {e}"),
+                message: "Provider unavailable after settlement. Your payment was \
+                          collected and recorded; retrieve your task status or \
+                          contact support with the task ID."
+                    .to_string(),
                 data: None,
             });
         }

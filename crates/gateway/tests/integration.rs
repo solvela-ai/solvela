@@ -13129,6 +13129,22 @@ async fn a2a_provider_failure_after_settle_writes_ledger_and_holds_lock() {
         Some(-32002),
         "post-settle provider failure must return ERR_PROVIDER_ERROR: {env}"
     );
+    // GHSA-cgqx-mg48-949v (HIGH): the client-facing message must NOT echo the
+    // raw provider error. `FailingProvider` errors with the distinctive
+    // "simulated provider outage" / "HTTP 404" strings; neither may cross the
+    // boundary. The agent gets a generic, actionable message instead. Mirrors
+    // the verifier-error suppression asserted in
+    // `payment_submitted_facilitator_failure_returns_payment_failed`.
+    let client_msg = env["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        !client_msg.contains("simulated provider outage") && !client_msg.contains("HTTP 404"),
+        "post-settle provider error must NOT leak the raw provider error to the \
+         client (GHSA-cgqx-mg48-949v): {client_msg}"
+    );
+    assert!(
+        client_msg.contains("Provider unavailable after settlement"),
+        "client must get the generic post-settle message: {client_msg}"
+    );
 
     // The collected money is ledgered durably (Postgres, parallel-safe): exactly
     // one spend row for this task at the quoted total, even though the provider
@@ -13139,8 +13155,25 @@ async fn a2a_provider_failure_after_settle_writes_ledger_and_holds_lock() {
         "a settled-then-provider-failed A2A request MUST still write ONE spend_logs \
          row for the collected total (got {rows}): the agent's USDC moved on-chain"
     );
-    // Inspect the durable row: positive cost (the quoted total), and output_tokens
-    // 0 (no provider usage was produced — input attribution falls back to the
+
+    // EXACT-AMOUNT pin (CRITICAL): the recorded `cost_usdc` must equal the quoted
+    // TOTAL the agent settled against — the atomic-string `offer["amount"]` (the
+    // same value `validate_submitted_against_offer` checked the submission
+    // against), converted atomic→decimal as the ledger boundary does
+    // (`as f64 / 1_000_000.0`). A liveness-only `> 0.0` check would pass even if
+    // the amount were sourced from the wrong field (e.g. `verified_amount`) or
+    // mangled by an atomic→decimal slip; this pins the exact figure. Reference:
+    // the success-path receipt test `a2a_paid_request_writes_receipt_and_metadata_path`
+    // pins `amount_paid_atomic == total_atomic` the same way.
+    let quoted_total_atomic: u64 = offer["amount"]
+        .as_str()
+        .expect("offer amount is the atomic-unit string")
+        .parse::<u64>()
+        .expect("offer amount parses as atomic u64");
+    let expected_cost_usdc = quoted_total_atomic as f64 / 1_000_000.0;
+
+    // Inspect the durable row: the EXACT quoted total, and output_tokens 0 (no
+    // provider usage was produced — input attribution falls back to the
     // request-side estimate; the BILLED amount is unaffected). Cast the DECIMAL
     // cost to DOUBLE PRECISION to read it as f64 (the project's sqlx config has
     // no decimal feature; this mirrors the stats queries in usage.rs).
@@ -13153,8 +13186,10 @@ async fn a2a_provider_failure_after_settle_writes_ledger_and_holds_lock() {
     .await
     .expect("fetch the single spend_logs row");
     assert!(
-        cost_usdc > 0.0,
-        "the recorded amount is the positive quoted total, got {cost_usdc}"
+        (cost_usdc - expected_cost_usdc).abs() < 1e-9,
+        "the recorded amount MUST equal the quoted total the agent settled \
+         against ({expected_cost_usdc} USDC from atomic {quoted_total_atomic}), \
+         got {cost_usdc}"
     );
     assert_eq!(
         output_tokens, 0,
