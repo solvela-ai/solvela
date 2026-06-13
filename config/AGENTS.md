@@ -10,7 +10,7 @@ Static TOML configuration consumed by the gateway at startup. Non-secret values 
 | File | Description |
 |------|-------------|
 | `default.toml` | Server defaults — host/port, Solana RPC URL, monitor thresholds, CORS, rate-limit defaults |
-| `models.toml` | Model registry — per-model ID, provider, context window, per-token pricing (input / output / cached). Loaded by `crates/router/src/models.rs`. Covers 5 providers, 26+ models |
+| `models.toml` | Model registry — per-model ID, provider, context window, per-token pricing (input / output). Loaded by `crates/router/src/models.rs`. Covers 5 providers, 25 models |
 | `services.toml` | x402 service marketplace registry — service id, description, price, endpoint metadata. Loaded by `crates/gateway/src/services.rs` |
 
 ## Subdirectories
@@ -20,9 +20,9 @@ _(none)_
 
 ### Working In This Directory
 - **Never put secrets in these files** — API keys, fee-payer keypairs, database URLs all live in env vars. Custom `Debug` redaction in `gateway::config` enforces this on the code side; keep the config files clean.
-- Adding a model: edit `models.toml` with id, provider, context window, and pricing per 1M tokens (input/output/cached). Restart the gateway to pick it up.
+- Adding a model: edit `models.toml` with id, provider, context window, and pricing per 1M tokens (input/output). Restart the gateway to pick it up.
 - Pricing is in atomic USDC units when loaded; `models.toml` uses a human-readable per-1M-token figure.
-- Service-marketplace changes in `services.toml` propagate to `GET /services`.
+- Service-marketplace changes in `services.toml` propagate to `GET /v1/services`.
 
 ### Testing Requirements
 ```bash
@@ -32,7 +32,7 @@ cargo test -p gateway services  # loads services.toml
 
 ### Common Patterns
 - TOML keys use snake_case.
-- Every model entry has: `id`, `provider`, `display_name`, `context_window`, `input_price`, `output_price`, optional `cached_input_price`, capability flags.
+- Every model entry has: `provider`, `model_id`, `display_name`, `context_window`, `input_cost_per_million`, `output_cost_per_million`, capability flags.
 
 ## Dependencies
 

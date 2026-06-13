@@ -43,7 +43,7 @@ flowchart LR
 
 ### Smart Routing
 
-15-dimension rule-based scorer classifies requests into complexity tiers (Simple, Medium, Complex, Reasoning) and maps them to optimal models. microsecond-scale, zero external calls per scoring decision. Routing profiles: `eco`, `auto`, `premium`, `free`. Aliases: `fast`, `cheap`, `smart`, `best`, `reason`, `code`, `creative`, `analyze`.
+15-dimension rule-based scorer classifies requests into complexity tiers (Simple, Medium, Complex, Reasoning) and maps them to optimal models. microsecond-scale, zero external calls per scoring decision. Routing profiles: `eco`, `auto`, `premium`, `free` (with shortcuts `cheap`→eco and `best`→premium). Model aliases resolve shorthands to canonical IDs: `gpt5`, `sonnet`, `opus`, `haiku`, `gemini`, `flash`, `grok`, `deepseek`, `o3-mini`, `gpt4.1`, … (full list in `crates/router/src/profiles.rs`).
 
 ### x402 Payments
 
@@ -59,7 +59,7 @@ Proxy any x402-enabled external service through the gateway. Admin-controlled re
 
 ### Prometheus Monitoring
 
-15 production metrics behind an admin-gated `/metrics` endpoint. Request counters, duration histograms, payment status, provider latency, cache hit rates, escrow claim tracking, and fee payer balance gauges. All metrics prefixed with `solvela_`.
+Production metrics behind an admin-gated `/metrics` endpoint. Request counters, duration histograms, payment status, provider latency, cache hit rates, escrow claim tracking, and fee payer balance gauges. All metrics prefixed with `solvela_`.
 
 ### SDKs
 
@@ -185,8 +185,6 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 | Google | `gemini-3.1-pro` | $2.00 | $12.00 | 1M |
 | Google | `gemini-2.5-flash` | $0.30 | $2.50 | 1M |
 | Google | `gemini-2.5-flash-lite` | $0.10 | $0.40 | 1M |
-| Google | `gemini-2.0-flash` | $0.10 | $0.40 | 1M |
-| Google | `gemini-2.0-flash-lite` | $0.075 | $0.30 | 1M |
 | xAI | `grok-3` | $3.00 | $15.00 | 131K |
 | xAI | `grok-3-mini` | $0.30 | $0.50 | 131K |
 | xAI | `grok-4-fast-reasoning` | $0.20 | $0.50 | 2M |
@@ -294,7 +292,7 @@ resp, _ := client.Chat(context.Background(), &solvela.ChatRequest{
 })
 ```
 
-The bundled `UnimplementedSigner` is a placeholder — supply a custom `Signer` (or use the Python / TypeScript SDK) to actually settle payments. See [`sdks/go/README.md`](./sdks/go/README.md).
+The bundled `KeypairSigner` signs `escrow`-scheme payments out of the box (byte-exact deposit transaction). The `exact` scheme is not yet implemented in Go and returns a clear error — for `exact`, use the Rust / Python / TypeScript SDK or supply a custom `Signer`. See [`sdks/go/README.md`](./sdks/go/README.md).
 
 ### MCP (Claude Code)
 
@@ -402,7 +400,7 @@ Environment variables use the `SOLVELA_` prefix. Provider API keys follow the st
 
 See [`.env.example`](.env.example) for the full reference. Configuration files live in `config/`:
 
-- `models.toml` -- Model registry with per-token pricing (5 providers, 26 models)
+- `models.toml` -- Model registry with per-token pricing (5 providers, 25 models)
 - `default.toml` -- Server host/port, Solana RPC URL, monitor thresholds
 - `services.toml` -- x402 service marketplace registry
 

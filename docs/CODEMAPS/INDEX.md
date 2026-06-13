@@ -37,7 +37,7 @@ solvela/
 ├── dashboard/            (Next.js 16 frontend)
 ├── sdks/                 (typescript, python, go, rust, ai-sdk-provider, openclaw-provider, signer-core, mcp, cli-npm)
 ├── config/               (models.toml, services.toml, default.toml)
-├── migrations/           (PostgreSQL schema, 9 files)
+├── migrations/           (PostgreSQL schema, 13 files)
 └── docs/CODEMAPS/        (This documentation)
 ```
 
@@ -179,7 +179,7 @@ The dashboard has no `e2e` npm script — Playwright is pulled in only as a tran
 
 ### TOML Files
 - `config/default.toml` — Server defaults, Solana RPC
-- `config/models.toml` — Model registry (26+ models)
+- `config/models.toml` — Model registry (25 models)
 - `config/services.toml` — Service marketplace
 
 ### Environment Variables

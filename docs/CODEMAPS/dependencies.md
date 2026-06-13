@@ -12,7 +12,7 @@ All providers implement OpenAI-compatible chat/completion format. Gateway transl
 ### OpenAI (providers/openai.rs)
 **Endpoint:** https://api.openai.com/v1/chat/completions  
 **Auth:** `Authorization: Bearer {OPENAI_API_KEY}`  
-**Models:** GPT-5.2, GPT-4o, GPT-4o Mini, o3, GPT-OSS 120B (from config/models.toml)  
+**Models:** GPT-5.2, GPT-4o, GPT-4o Mini, o3, o3-mini, o4-mini, GPT-4.1, GPT-4.1 Mini, GPT-4.1 Nano, GPT-OSS 120B (from config/models.toml)  
 **Features:** Streaming, vision, tools, function calling  
 **Cost:** Tracked per token; 5% platform fee added by gateway
 
@@ -40,7 +40,7 @@ pub async fn chat(
 ### Anthropic (providers/anthropic.rs)
 **Endpoint:** https://api.anthropic.com/v1/messages  
 **Auth:** `x-api-key: {ANTHROPIC_API_KEY}`  
-**Models:** Claude Opus 4.6, Claude Sonnet 4.6, Claude Haiku 4.5  
+**Models:** Claude Opus 4.6, Claude Sonnet 4.6, Claude Sonnet 4.5, Claude Haiku 4.5  
 **Features:** Streaming, vision, tools, extended thinking (native support)  
 **Cost:** Per-token pricing (input/output may differ)
 
@@ -73,7 +73,7 @@ pub async fn chat(
 ### Google Gemini (providers/google.rs)
 **Endpoint:** https://generativelanguage.googleapis.com/v1/models/{model}/generateContent  
 **Auth:** Query param `key={GOOGLE_API_KEY}`  
-**Models:** Gemini 3.1 Pro, Gemini 2.5 Flash, Gemini 2.5 Flash Lite  
+**Models:** Gemini 3.1 Pro, Gemini 3.1 Flash-Lite (Free), Gemini 2.5 Flash, Gemini 2.5 Flash Lite  
 **Features:** Streaming, vision, tools, reasoning (Pro)  
 **Cost:** Per-token pricing; supports million-token batches  
 **Context Window:** Up to 1M tokens (Gemini models)
@@ -88,7 +88,7 @@ pub async fn chat(
 ### DeepSeek (providers/deepseek.rs)
 **Endpoint:** https://api.deepseek.com/v1/chat/completions  
 **Auth:** `Authorization: Bearer {DEEPSEEK_API_KEY}`  
-**Models:** DeepSeek V3.2 Chat, DeepSeek V3.2 Reasoner  
+**Models:** DeepSeek V3.2 Chat, DeepSeek V3.2 Reasoner, DeepSeek Coder V3  
 **Features:** Streaming, reasoning (native `think_tokens`)  
 **Cost:** Lower input/output cost vs. OpenAI; reasoning cheaper than o1
 
@@ -99,7 +99,7 @@ pub async fn chat(
 ### xAI Grok (providers/xai.rs)
 **Endpoint:** https://api.x.ai/v1/chat/completions  
 **Auth:** `Authorization: Bearer {XAI_API_KEY}`  
-**Models:** Grok-4 Fast Reasoning  
+**Models:** Grok 4 Fast (Reasoning), Grok Code Fast, Grok 3, Grok 3 Mini  
 **Features:** Streaming, reasoning, real-time knowledge  
 **Cost:** Experimental pricing
 
@@ -301,7 +301,7 @@ pub async fn acquire_nonce(&self) -> NonceAccountGuard {
 ### PostgreSQL (sqlx)
 **Version:** PostgreSQL 16 (optional; gateway works without it)  
 **Connection:** `DATABASE_URL` env var (e.g., `postgres://user:pass@localhost:5432/solvela`)  
-**Driver:** `sqlx` (compile-time SQL verification, runtime-checked queries)
+**Driver:** `sqlx` (runtime-checked queries via `sqlx::query`/`query_as`; no compile-time `query!` macros)
 
 **Usage:**
 - Spend logs (fire-and-forget writes, analytics reads)
@@ -313,7 +313,7 @@ pub async fn acquire_nonce(&self) -> NonceAccountGuard {
 
 ```toml
 # Cargo.toml
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "uuid", "macros", "migrate"] }
 ```
 
 ---
@@ -359,7 +359,7 @@ pub async fn set(&self, key: &str, value: &str, ttl_secs: usize) -> Result<()> {
 | **tower-http** | 0.6 | HTTP middleware (cors, trace, timeout, limit, set-header, catch-panic) | gateway |
 | **reqwest** | 0.12 | HTTP client | Provider adapters, Solana RPC |
 | **serde** + **serde_json** | 1 | Serialization | All crates |
-| **sqlx** | 0.8 | PostgreSQL driver | gateway (optional) |
+| **sqlx** | 0.9 | PostgreSQL driver | gateway (optional) |
 | **redis** | 1.2 | Redis client | gateway (optional) |
 | **ed25519-dalek** + **curve25519-dalek** | 2/4 | Solana sig verification | x402 |
 | **bs58** | 0.5 | Base58 encoding (Solana addrs) | x402 |
@@ -411,7 +411,7 @@ ttl_secs = 600
 There are no `[logging]` or `[rate_limit]` sections in `config/default.toml`; log level is set via `RUST_LOG` and rate-limit defaults live in `crates/gateway/src/middleware/rate_limit.rs` (60 req / 60 s per wallet, hard-coded).
 
 ### config/models.toml
-Model registry; 26+ models with per-token pricing.
+Model registry; 25 models with per-token pricing.
 
 ```toml
 [models.openai-gpt-4o]

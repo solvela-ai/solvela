@@ -4,7 +4,7 @@
 
 **Last Updated:** 2026-05-27  
 **Provider:** PostgreSQL 16 (optional; gateway degrades gracefully without it)  
-**Migrations:** `migrations/` (9 files, idempotent, auto-run on startup)  
+**Migrations:** `migrations/` (13 files, idempotent, auto-run on startup)  
 **ORM:** sqlx (runtime-checked SQL via `sqlx::query`/`query_as`; no compile-time `query!` macros)
 
 ## Schema Overview
@@ -24,6 +24,10 @@ One row per completed LLM request. Written asynchronously (fire-and-forget via `
 | output_tokens | INTEGER | NOT NULL, CHECK >= 0 | Completion tokens |
 | cost_usdc | DECIMAL(18, 6) | NOT NULL, CHECK >= 0 | Total cost including 5% fee |
 | tx_signature | TEXT | NULLABLE | Solana transaction signature (nullable for free/no-payment) |
+| tenant | TEXT | NULLABLE (migration 010) | Per-tenant attribution tag from the `x-tenant` header (trusted proxy) |
+| vendor_wallet | TEXT | NULLABLE, CHECK len ≤ 44 (migration 012) | Vendor settlement recipient for marketplace services |
+| vendor_settled_atomic | BIGINT | NULLABLE, CHECK >= 0 (migration 012) | Amount settled on-chain to the vendor (atomic USDC) |
+| vendor_fee_receivable_atomic | BIGINT | NULLABLE, CHECK >= 0 (migration 012) | Solvela 5% fee recorded as an off-chain receivable (atomic USDC) |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Request timestamp |
 
 **Indexes:**
@@ -260,7 +264,7 @@ Pending USDC-SPL escrow claims (async processing).
 - `idx_claim_queue_created` — Find claims by submission time
 
 **Usage:**
-- Background processor (`escrow/claim_processor.rs`) polls pending claims
+- Background processor (`crates/x402/src/escrow/claim_processor.rs`) polls pending claims
 - Retries failed claims with exponential backoff
 - Tracks claim lifecycle from submission to confirmation
 - Stale `in_progress` claims older than 5 minutes (by `updated_at`) are reclaimed by `fetch_pending_claims`
@@ -288,6 +292,48 @@ Per-team spend caps. (Migration 007 is named `007_hourly_spend_limits.sql` but a
 
 ---
 
+### Settlement & Per-Tenant
+
+#### tenant_budgets (migration 011)
+Per-tenant spend caps on a `(wallet_address, tenant)` bucket. **Security boundary:** the `x-tenant` header is unauthenticated and forgeable — these are cooperative accounting under ONE trusted single-wallet proxy metering its own downstream customers, NOT isolation between mutually-distrusting tenants.
+
+| Column | Type | Constraints | Notes |
+|--------|------|-----------|-------|
+| wallet_address | TEXT | PK (with tenant) | Proxy's Solana wallet |
+| tenant | TEXT | PK (with wallet_address) | Free-form tenant tag |
+| hourly_limit_usdc | DECIMAL(18, 6) | NULLABLE | Hourly spend cap |
+| daily_limit_usdc | DECIMAL(18, 6) | NULLABLE | Daily spend cap |
+| monthly_limit_usdc | DECIMAL(18, 6) | NULLABLE | Monthly spend cap |
+| created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Record created |
+| updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Last modified (auto-updated by trigger) |
+
+Migration 011 also adds `wallet_budgets.require_tenant BOOLEAN NOT NULL DEFAULT FALSE` — an opt-in fail-closed flag: when TRUE, untagged or unknown-tenant requests on that wallet are rejected.
+
+---
+
+#### receipts (migration 013)
+One row per **paid, delivered + settled** request (chat path + services proxy; free-tier `$0` requests produce none). The UUIDv4 `id` is the capability returned in the `x-solvela-receipt` response header and fetched via `GET /v1/receipts/{receipt_id}` — there is no listing endpoint. All amounts are atomic USDC (integer math); decimal strings are derived at read time.
+
+| Column | Type | Constraints | Notes |
+|--------|------|-----------|-------|
+| id | UUID | PK | Unguessable receipt capability (returned in `x-solvela-receipt`) |
+| created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | Receipt timestamp |
+| model | TEXT | NOT NULL | Model id (chat) or marketplace service id (proxy) |
+| payment_scheme | TEXT | NOT NULL, CHECK len ≤ 16 | x402 scheme that settled (`exact` / `escrow`) |
+| tx_signature | TEXT | NULLABLE | Settlement transaction reference |
+| payer_wallet | TEXT | NOT NULL | Paying agent wallet |
+| amount_paid_atomic | BIGINT | NOT NULL, CHECK >= 0 | What the agent was actually billed |
+| provider_cost_atomic | BIGINT | NOT NULL, CHECK >= 0 | Provider cost leg of the breakdown |
+| platform_fee_atomic | BIGINT | NOT NULL, CHECK >= 0 | 5% platform fee leg |
+| total_atomic | BIGINT | NOT NULL, CHECK >= 0 | provider_cost + platform_fee |
+| vendor_wallet | TEXT | NULLABLE, CHECK len ≤ 44 | Vendor recipient (marketplace settlement only) |
+| vendor_settled_atomic | BIGINT | NULLABLE, CHECK >= 0 | Amount settled to the vendor |
+| vendor_fee_receivable_atomic | BIGINT | NULLABLE, CHECK >= 0 | Off-chain 5% fee receivable |
+
+**Constraint:** `receipts_vendor_co_nullability` — the three `vendor_*` columns travel together (all NULL on the chat/plain-services path, or all non-NULL for vendor-settled services).
+
+---
+
 ## Migration Timeline
 
 | # | File | Tables Created/Modified | Purpose |
@@ -301,6 +347,10 @@ Per-team spend caps. (Migration 007 is named `007_hourly_spend_limits.sql` but a
 | 7 | `007_hourly_spend_limits.sql` | wallet_budgets.hourly_limit_usdc, team_budgets | Team budgets + hourly caps |
 | 8 | `008_escrow_claim_queue_updated_at.sql` | escrow_claim_queue.updated_at | Stale-claim recovery |
 | 9 | `009_audit_actor_admin.sql` | audit_logs admin-actor backfill | Track admin-token actions |
+| 10 | `010_spend_tenant.sql` | spend_logs.tenant | Per-tenant spend attribution (`x-tenant`) |
+| 11 | `011_tenant_budgets.sql` | tenant_budgets, wallet_budgets.require_tenant | Per-tenant budget enforcement + fail-closed flag |
+| 12 | `012_vendor_settlement_receivable.sql` | spend_logs.vendor_wallet, .vendor_settled_atomic, .vendor_fee_receivable_atomic | Vendor settlement + 5% fee receivable |
+| 13 | `013_receipts.sql` | receipts | Client-facing payment receipts |
 
 All migrations are **idempotent** (use `CREATE TABLE IF NOT EXISTS`). Applied automatically on gateway startup via `run_migrations()` (from `main.rs`). If migration fails and `DATABASE_URL` is set, gateway exits with non-zero status (fatal error).
 

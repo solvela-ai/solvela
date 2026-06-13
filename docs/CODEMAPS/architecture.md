@@ -159,7 +159,7 @@ Return Task (completed) with artifacts + receipt
 
 | Table | Purpose | Key Fields |
 |-------|---------|-----------|
-| `spend_logs` | One row per LLM request | wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, request_id, session_id, created_at |
+| `spend_logs` | One row per LLM request | wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, request_id, session_id, tenant, vendor_wallet, vendor_settled_atomic, vendor_fee_receivable_atomic, created_at |
 | `wallet_budgets` | Per-wallet spend limits | wallet_address (PK), hourly/daily/monthly_limit_usdc, total_spent_usdc |
 | `organizations` | Billing entity | id (UUID), name, slug (unique), owner_wallet |
 | `teams` | Org sub-division | id, org_id (FK), name |
@@ -169,8 +169,10 @@ Return Task (completed) with artifacts + receipt
 | `api_keys` | Org-scoped API credentials | id, org_id (FK), key_hash (unique), key_prefix, role, expires_at, revoked_at |
 | `audit_logs` | Action tracking | id, org_id (FK), actor_wallet, actor_api_key (FK), action, resource_type, resource_id, details, ip_address, created_at |
 | `escrow_claim_queue` | Pending USDC claims | id, agent_pubkey, service_id (BYTEA), claim_amount (BIGINT atomic), deposited_amount, status, attempts, tx_signature, next_retry_at, updated_at |
+| `tenant_budgets` | Per-tenant spend caps (forgeable `x-tenant`; cooperative accounting, not isolation) | wallet_address+tenant (PK), hourly/daily/monthly_limit_usdc |
+| `receipts` | Client-facing payment receipts (one per paid request) | id (UUID PK), model, payment_scheme, payer_wallet, amount_paid_atomic, provider_cost_atomic, platform_fee_atomic, total_atomic, vendor_* |
 
-Migrations in `migrations/`: 001 (spend_logs, budgets) → 009 (audit actor admin); see [data.md](data.md) for the per-migration breakdown.
+Migrations in `migrations/`: 001 (spend_logs, budgets) → 013 (receipts); see [data.md](data.md) for the per-migration breakdown.
 
 ## x402 Crate (Protocol)
 
@@ -249,7 +251,7 @@ Key files:
 | File | Purpose | Format |
 |------|---------|--------|
 | `config/default.toml` | Server defaults | TOML: host, port, Solana RPC URL, log level |
-| `config/models.toml` | Model registry + pricing | TOML: 26+ models, per-token costs, context windows |
+| `config/models.toml` | Model registry + pricing | TOML: 25 models, per-token costs, context windows |
 | `config/services.toml` | Service marketplace | TOML: external LLM services |
 | `.env.example` | Required env vars | Bash: API keys, wallet keys, database URL |
 | `Cargo.toml` | Workspace manifest | TOML: workspace members, shared deps |
@@ -261,7 +263,7 @@ Key files:
 | `axum` | 0.8 | Web framework |
 | `tokio` | 1 (full) | Async runtime |
 | `serde` + `serde_json` | 1 | Serialization |
-| `sqlx` | 0.8 | PostgreSQL driver (optional) |
+| `sqlx` | 0.9 | PostgreSQL driver (optional) |
 | `redis` | 1.2 | Cache layer (optional) |
 | `reqwest` | 0.12 | HTTP client |
 | `tracing` | 0.1 | Structured logging |
@@ -279,8 +281,8 @@ Double-underscore (Fly.io convention) is the canonical separator; single-undersc
 |----------|----------|---------|---------|
 | `SOLVELA_HOST` | No (default 0.0.0.0) | Listen address | 127.0.0.1 |
 | `SOLVELA_PORT` | No (default 8402) | Listen port | 8080 |
-| `SOLVELA_SOLANA__RPC_URL` | Yes | Solana RPC endpoint | https://api.mainnet-beta.solana.com |
-| `SOLVELA_SOLANA__RECIPIENT_WALLET` | Yes | USDC recipient | Hpq... (wallet addr) |
+| `SOLVELA_SOLANA__RPC_URL` | Prod (default: devnet) | Solana RPC endpoint | https://api.mainnet-beta.solana.com |
+| `SOLVELA_SOLANA__RECIPIENT_WALLET` | Prod (default: empty) | USDC recipient | Hpq... (wallet addr) |
 | `SOLVELA_SOLANA__USDC_MINT` | No (defaults to mainnet USDC) | USDC mint | EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v |
 | `SOLVELA_SOLANA__FEE_PAYER_KEY` | No | Fee payer hot wallet | base64/JSON private key |
 | `SOLVELA_SOLANA__ESCROW_PROGRAM_ID` | No | Escrow program ID | 9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU |

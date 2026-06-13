@@ -63,6 +63,7 @@ response = await openai.chat.completions.create(
 - **Quality checks** — `enable_quality_check=True` detects degraded responses and retries
 - **Balance guard** — automatic fallback to free models when USDC balance hits zero
 - **Balance monitor** — background polling with low-balance callbacks
+- **Escrow payments** — `prefer_escrow=True` settles via the trustless on-chain escrow scheme when the gateway offers it (falls back to `exact`)
 
 ## Configuration
 
@@ -77,6 +78,7 @@ config = ClientConfig(
     enable_quality_check=True,
     free_fallback_model="deepseek-chat",
     max_payment_amount=100_000,  # atomic USDC (0.10 USDC)
+    prefer_escrow=True,  # use the on-chain escrow scheme when the gateway offers it
 )
 
 # Fluent builder

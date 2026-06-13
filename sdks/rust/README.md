@@ -7,7 +7,7 @@ for unmodified OpenAI-format clients.
 
 ## Crates
 
-All four are published to crates.io at `0.2.5`.
+All four are published to crates.io at `0.3.0`.
 
 | Crate | crates.io | Purpose |
 |---|---|---|
@@ -121,7 +121,7 @@ was consolidated into the monorepo (PR
 
 ## Releases
 
-The four crates are published to crates.io at **`0.2.5`**:
+The four crates are published to crates.io at **`0.3.0`**:
 [`solvela-client`](https://crates.io/crates/solvela-client),
 [`solvela-client-cli`](https://crates.io/crates/solvela-client-cli),
 [`solvela-client-cli-args`](https://crates.io/crates/solvela-client-cli-args),
