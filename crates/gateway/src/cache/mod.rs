@@ -326,6 +326,11 @@ impl ResponseCache {
     pub async fn release_settle_lock(&self, task_id: &str) {
         let key = format!("{A2A_SETTLE_LOCK_PREFIX}{task_id}");
         if let Err(e) = self.del_raw(&key).await {
+            // F3 (#566): make a lost release observable. The lock still self-
+            // expires via TTL (so the task re-opens for retry within its own
+            // lifetime), but a non-zero rate here means legitimate retries are
+            // waiting out the full TTL after a failed payment — alertable.
+            metrics::counter!("solvela_a2a_settle_lock_release_failed_total").increment(1);
             warn!(
                 task_id,
                 error = %e,

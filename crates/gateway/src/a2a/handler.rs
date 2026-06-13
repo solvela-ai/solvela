@@ -343,6 +343,78 @@ async fn handle_payment_submitted(
         });
     }
 
+    // ── Deterministic, money-free pre-checks (issue #566 settle-then-fail) ──
+    //
+    // Model resolution, the registry lookup, and the prompt guard are all
+    // deterministic and involve NO funds movement. The chat route runs the
+    // equivalent checks (resolve model + registry lookup + prompt guard) BEFORE
+    // it ever settles (routes/chat/mod.rs). The A2A path historically ran them
+    // AFTER `verify_and_settle`, so a bad model id or guard-blocked content left
+    // the task settled-but-unledgered — and, once the #566 lock landed, also
+    // lock-held for the full TTL with no clean retry. We hoist them here so a
+    // bad model id or blocked content rejects with NO lock acquired and NO
+    // settlement (the loser of a concurrent race can still proceed afterward).
+    let model = record.model.clone().unwrap_or_else(|| "auto".to_string());
+    let resolved_model = resolve_model(&model, &record.original_message, state)?;
+
+    let model_info = state
+        .model_registry
+        .get(&resolved_model)
+        .ok_or_else(|| JsonRpcErrorData {
+            code: ERR_MODEL_NOT_FOUND,
+            message: format!("Model not found: {resolved_model}"),
+            data: None,
+        })?;
+
+    // Re-apply the max_tokens cap that was used to compute the quoted cost
+    // in step 2 (handle_new_request). Records persisted before the H1 fix
+    // have `max_tokens = None`; for those we fall back to the historical
+    // 1000-token default so the cap is never silently absent.
+    let enforced_max_tokens = record.max_tokens.unwrap_or(1000);
+
+    let messages = vec![ChatMessage {
+        role: Role::User,
+        content: record.original_message.clone().into(),
+        name: None,
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+
+    // Prompt guard — injection / jailbreak / PII detection.
+    //
+    // The HTTP chat route runs this on every provider-reaching path; the A2A
+    // path must hold the same invariant or a paid agent could submit injection
+    // or jailbreak content and reach the provider. Mirroring the chat route's
+    // DoS-hardening decision, the guard runs ONLY on this payment-submitted path
+    // — never on the unpaid `handle_new_request` intake path — so an anonymous
+    // caller cannot force the expensive scans for free. It now runs BEFORE lock
+    // acquisition and settlement (issue #566): the guard is deterministic and
+    // money-free, so blocked content must reject with no lock acquired and no
+    // funds moved, rather than settling first and stranding the task. Config and
+    // result mapping match the chat route: `Blocked` rejects, `PiiDetected`
+    // forwards with a warning, `Clean` passes.
+    match crate::middleware::prompt_guard::check(
+        &messages,
+        &crate::middleware::prompt_guard::PromptGuardConfig::default(),
+    ) {
+        crate::middleware::prompt_guard::GuardResult::Blocked { reason } => {
+            warn!(task_id, reason = %reason, "A2A request blocked by prompt guard");
+            return Err(JsonRpcErrorData {
+                code: ERR_INVALID_PARAMS,
+                message: "Request blocked by content policy".to_string(),
+                data: None,
+            });
+        }
+        crate::middleware::prompt_guard::GuardResult::PiiDetected { fields } => {
+            warn!(
+                task_id,
+                pii_fields = ?fields,
+                "PII detected in A2A request — forwarding with warning logged"
+            );
+        }
+        crate::middleware::prompt_guard::GuardResult::Clean => {}
+    }
+
     // Concurrent-settlement lock (issue #566).
     //
     // Two concurrent `message/send` calls for the SAME taskId carrying two
@@ -378,7 +450,13 @@ async fn handle_payment_submitted(
         {
             Ok(true) => true,
             Ok(false) => {
-                metrics::counter!("solvela_a2a_concurrent_settlement_rejected_total").increment(1);
+                // F4 (#566): label the rejection cause so concurrent rejects and
+                // lock-store errors are separately alertable.
+                metrics::counter!(
+                    "solvela_a2a_concurrent_settlement_rejected_total",
+                    "reason" => "concurrent"
+                )
+                .increment(1);
                 warn!(
                     task_id,
                     "A2A settlement already in progress for this task — rejecting \
@@ -412,9 +490,33 @@ async fn handle_payment_submitted(
                 });
             }
         },
-        // Unreachable in practice: without Redis the task could not have loaded.
-        // Treated as "no lock held" so the (impossible) path does not panic.
-        None => false,
+        // F2 (#566): fail CLOSED, never fall through. The A2A task store REQUIRES
+        // Redis (`load_task` returns `Ok(None)` without it), so this arm is
+        // unreachable in practice — reaching here means the "task store requires
+        // Redis" invariant broke. Settling with NO lock would re-open the exact
+        // exactly-once race the lock exists to close (and across instances, an
+        // in-memory lock could not serialise it), so we reject rather than
+        // proceed unlocked. Labeled distinctly from the concurrent/store-error
+        // causes above for alerting.
+        None => {
+            metrics::counter!(
+                "solvela_a2a_concurrent_settlement_rejected_total",
+                "reason" => "no_redis_fail_closed"
+            )
+            .increment(1);
+            warn!(
+                task_id,
+                "A2A settlement requested with no Redis cache configured — failing \
+                 closed (the task store requires Redis; cannot guarantee \
+                 exactly-once settlement without the lock)"
+            );
+            return Err(JsonRpcErrorData {
+                code: ERR_PAYMENT_FAILED,
+                message: "Payment service is temporarily degraded; please retry shortly."
+                    .to_string(),
+                data: None,
+            });
+        }
     };
 
     // Release the settlement lock on a FAILURE return after acquisition, so a
@@ -596,65 +698,11 @@ async fn handle_payment_submitted(
         settlement.tx_signature
     };
 
-    // Build ChatRequest from stored original message.
-    let model = record.model.unwrap_or_else(|| "auto".to_string());
-    let resolved_model = resolve_model(&model, &record.original_message, state)?;
-
-    let model_info = state
-        .model_registry
-        .get(&resolved_model)
-        .ok_or_else(|| JsonRpcErrorData {
-            code: ERR_MODEL_NOT_FOUND,
-            message: format!("Model not found: {resolved_model}"),
-            data: None,
-        })?;
-
-    // Re-apply the max_tokens cap that was used to compute the quoted cost
-    // in step 2 (handle_new_request). Records persisted before the H1 fix
-    // have `max_tokens = None`; for those we fall back to the historical
-    // 1000-token default so the cap is never silently absent.
-    let enforced_max_tokens = record.max_tokens.unwrap_or(1000);
-
-    let messages = vec![ChatMessage {
-        role: Role::User,
-        content: record.original_message.clone().into(),
-        name: None,
-        tool_calls: None,
-        tool_call_id: None,
-    }];
-
-    // Prompt guard — injection / jailbreak / PII detection.
-    //
-    // The HTTP chat route runs this on every provider-reaching path; the A2A
-    // path must hold the same invariant or a paid agent could submit injection
-    // or jailbreak content and reach the provider. Mirroring the chat route's
-    // DoS-hardening decision, the guard runs ONLY here (after payment is
-    // verified) — never on the unpaid `handle_new_request` intake path — so an
-    // anonymous caller cannot force the expensive scans for free. Config and
-    // result mapping match the chat route: `Blocked` rejects, `PiiDetected`
-    // forwards with a warning, `Clean` passes.
-    match crate::middleware::prompt_guard::check(
-        &messages,
-        &crate::middleware::prompt_guard::PromptGuardConfig::default(),
-    ) {
-        crate::middleware::prompt_guard::GuardResult::Blocked { reason } => {
-            warn!(task_id, reason = %reason, "A2A request blocked by prompt guard");
-            return Err(JsonRpcErrorData {
-                code: ERR_INVALID_PARAMS,
-                message: "Request blocked by content policy".to_string(),
-                data: None,
-            });
-        }
-        crate::middleware::prompt_guard::GuardResult::PiiDetected { fields } => {
-            warn!(
-                task_id,
-                pii_fields = ?fields,
-                "PII detected in A2A request — forwarding with warning logged"
-            );
-        }
-        crate::middleware::prompt_guard::GuardResult::Clean => {}
-    }
-
+    // Build the ChatRequest to dispatch. Model resolution, the registry lookup,
+    // the max_tokens cap, the message vec, and the prompt guard all ran ABOVE,
+    // BEFORE the lock + settlement (issue #566), so this point is reached only
+    // after funds have moved and the only remaining failure surface is the
+    // provider call itself.
     let chat_req = ChatRequest {
         model: resolved_model.clone(),
         messages,
@@ -672,8 +720,24 @@ async fn handle_payment_submitted(
     // matching the chat path's EstimateFallback arm (routes/chat/mod.rs).
     let estimated_input_tokens = crate::routes::chat::cost::estimate_input_tokens(&chat_req);
 
-    // Call provider
-    let result = chat_with_model_fallback(
+    // Call provider.
+    //
+    // POST-SETTLE provider failure window (issue #566). Unlike the chat route —
+    // where the `exact` transfer is DEFERRED until after the provider delivers,
+    // so a provider failure simply never settles (routes/chat/mod.rs
+    // `AllProvidersFailed` arm releases the reservation and takes no charge) —
+    // the A2A path has ALREADY settled the agent's payment on-chain above
+    // (`verify_and_settle`, both exact and escrow) before this call. The money
+    // has moved. So a provider error here must NOT leave the task settled-but-
+    // unledgered: we still write the `spend_logs` row + durable receipt for the
+    // amount COLLECTED (the gateway-quoted total — the same figure the success
+    // path records via `record_a2a_settlement`; never a re-derived usage cost,
+    // so the agent is never double-charged), mark the task `Failed`, HOLD the
+    // settlement lock (the funds moved — a retry must not re-settle), and return
+    // the provider error. This mirrors the chat path's principle that collected
+    // money is always ledgered (its spend-recording arms), adapted to the A2A
+    // settle-before-serve ordering.
+    let result = match chat_with_model_fallback(
         &state.providers,
         &state.provider_health,
         &state.model_registry,
@@ -682,11 +746,56 @@ async fn handle_payment_submitted(
         chat_req,
     )
     .await
-    .map_err(|e| JsonRpcErrorData {
-        code: ERR_PROVIDER_ERROR,
-        message: format!("Provider call failed: {e}"),
-        data: None,
-    })?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(
+                task_id,
+                model = %resolved_model,
+                error = %e,
+                "A2A provider call failed AFTER settlement — funds moved; recording \
+                 spend + receipt for the collected total and failing the task \
+                 (lock held; no re-settle on retry) (issue #566)"
+            );
+            metrics::counter!("solvela_a2a_provider_failed_after_settle_total").increment(1);
+
+            // Ledger + receipt for the COLLECTED amount (no usage → attribution
+            // falls back to the request-side input estimate; the BILLED amount is
+            // the quoted total regardless). Fire-and-forget, same as the success
+            // path; never blocks the error return.
+            record_a2a_settlement(
+                state,
+                task_id,
+                &payload,
+                &record.payment_required,
+                &resolved_model,
+                &model_info.provider,
+                None,
+                estimated_input_tokens,
+                &tx_signature,
+            );
+
+            // Move the task to a terminal failed state. The lock is intentionally
+            // NOT released (the macro is not invoked here): the agent's funds
+            // already settled on-chain, so a retry against this taskId must never
+            // settle again. The held lock self-expires via TTL.
+            if let Err(state_err) =
+                task_store::update_task_state(state, task_id, TaskState::Failed).await
+            {
+                tracing::error!(
+                    error = %state_err,
+                    task_id,
+                    "failed to mark A2A task Failed after post-settle provider error"
+                );
+            }
+
+            return Err(JsonRpcErrorData {
+                code: ERR_PROVIDER_ERROR,
+                message: format!("Provider call failed: {e}"),
+                data: None,
+            });
+        }
+    };
 
     // Extract response text. A paid A2A request that yields no choices, or a
     // choice with empty content, is money-adjacent: the agent paid but gets an
@@ -2751,5 +2860,101 @@ supports_vision = false
         let err = result.expect_err("corrupt stored record must reject");
         // Without the expected amount we cannot verify — must be ERR_PAYMENT_FAILED, not pass.
         assert_eq!(err.code, ERR_PAYMENT_FAILED);
+    }
+
+    /// (a) #566 reorder: a task whose STORED model no longer resolves (unknown
+    /// model id) must reject with ERR_MODEL_NOT_FOUND on the payment-submitted
+    /// path BEFORE the settlement lock and BEFORE `verify_and_settle` — so a bad
+    /// model id costs no lock and no settlement.
+    ///
+    /// `handle_new_request` validates the model, so a bad-model task cannot be
+    /// created through the route; we seed the record directly into Redis. Proof
+    /// that no lock was acquired: a SECOND submission for the same task is NOT
+    /// rejected as "already in progress" (it hits the same model-not-found
+    /// reject again). Self-skips without local Redis.
+    #[tokio::test]
+    async fn payment_submitted_unknown_model_rejects_before_lock() {
+        let state = test_state_with_redis();
+        // Seed a task record whose model is unknown to the registry. The stored
+        // payment_required only needs to exist; resolution fails before it is
+        // consulted.
+        let task_id = new_task_id();
+        let record = TaskRecord {
+            id: task_id.clone(),
+            state: TaskState::InputRequired,
+            original_message: "hello".to_string(),
+            payment_required: json!({"x402_version": 2, "accepts": []}),
+            model: Some("definitely-not-a-real-model-xyz".to_string()),
+            max_tokens: Some(1000),
+            created_at: chrono::Utc::now(),
+        };
+        if task_store::save_task(&state, &record).await.is_err() {
+            eprintln!("skipping unknown-model reorder test: Redis unavailable");
+            return;
+        }
+
+        let build_params = || {
+            let tx_raw = format!("test_tx_{}", uuid::Uuid::new_v4().simple());
+            let payload = json!({
+                "x402_version": solvela_x402::types::X402_VERSION,
+                "resource": {"url": "/v1/chat/completions", "method": "POST"},
+                "accepted": {
+                    "scheme": "exact",
+                    "network": solvela_x402::types::SOLANA_NETWORK,
+                    "amount": "1000",
+                    "asset": solvela_x402::types::USDC_MINT,
+                    "pay_to": "11111111111111111111111111111111",
+                    "max_timeout_seconds": solvela_x402::types::MAX_TIMEOUT_SECONDS,
+                },
+                "payload": { "transaction": tx_raw }
+            });
+            let mut metadata = serde_json::Map::new();
+            metadata.insert(
+                x402_meta::STATUS_KEY.to_string(),
+                json!(x402_meta::PAYMENT_SUBMITTED),
+            );
+            metadata.insert(x402_meta::PAYLOAD_KEY.to_string(), payload);
+            MessageSendParams {
+                message: Message {
+                    role: MessageRole::User,
+                    parts: vec![Part::Text {
+                        text: "pay".to_string(),
+                    }],
+                    metadata: Some(metadata),
+                },
+                task_id: Some(task_id.clone()),
+            }
+        };
+
+        let err = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &build_params())
+            .await
+            .expect_err("unknown stored model must reject");
+        assert_eq!(
+            err.code, ERR_MODEL_NOT_FOUND,
+            "bad model id must reject with model-not-found, got {}",
+            err.code
+        );
+
+        // No lock was acquired (model resolution ran first): a second submission
+        // hits the SAME model-not-found reject, never the "already in progress"
+        // concurrency reject — proving the first attempt left no held lock.
+        let err2 = handle_payment_submitted(&state, &HeaderMap::new(), &task_id, &build_params())
+            .await
+            .expect_err("second submission must also reject at model resolution");
+        assert_eq!(
+            err2.code, ERR_MODEL_NOT_FOUND,
+            "second submission must reject at model resolution (no lock held), got {}",
+            err2.code
+        );
+        assert!(
+            !err2.message.contains("already in progress"),
+            "the first reject must NOT have acquired the settlement lock: {}",
+            err2.message
+        );
+
+        // Cleanup the seeded task key.
+        if let Some(cache) = &state.cache {
+            let _ = cache.del_raw(&format!("a2a_task:{task_id}")).await;
+        }
     }
 }
