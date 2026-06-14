@@ -11,7 +11,7 @@ A2A (Agent-to-Agent) protocol adapter. Translates A2A JSON-RPC `message/send` ca
 |------|-------------|
 | `mod.rs` | Module root; re-exports public types and the top-level handler |
 | `types.rs` | A2A wire types: `Task`, `Message`, `Artifact`, `TaskState`, x402/AP2 metadata |
-| `agent_card.rs` | Builds the `AgentCard` returned at `GET /.well-known/agent.json` (includes AP2 + x402 extensions) |
+| `agent_card.rs` | Builds the `AgentCard` returned at `GET /.well-known/agent-card.json` (A2A v0.3 canonical path; `/.well-known/agent.json` is a backward-compat alias). Includes AP2 + x402 extensions; `url` from `SOLVELA_PUBLIC_URL` |
 | `jsonrpc.rs` | JSON-RPC 2.0 request/response envelope + error mapping |
 | `handler.rs` | Main `message/send` handler — cost calc → 402 / payment verify → LLM proxy → Task response |
 | `task_store.rs` | In-memory task store keyed by task id — tracks state transitions across request chains |
@@ -23,7 +23,7 @@ _(none)_
 
 ### Working In This Directory
 - A2A flow:
-  1. Agent calls `GET /.well-known/agent.json` → gets `AgentCard`.
+  1. Agent calls `GET /.well-known/agent-card.json` (or the `agent.json` alias) → gets `AgentCard`.
   2. Agent sends `message/send` (no payment) → gateway returns a Task in `input-required` state with `x402.payment.required` metadata.
   3. Agent signs SPL USDC transfer → sends `message/send` with `taskId` + `x402.payment.payload` metadata.
   4. Gateway verifies payment (reuses the facilitator), proxies to LLM, returns Task in `completed` state with artifacts + receipt.

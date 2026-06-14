@@ -129,6 +129,36 @@ async fn main() -> anyhow::Result<()> {
             app_config.server.port = port;
         }
     }
+    // Public base URL advertised in the A2A AgentCard `url` field. Ignore an
+    // empty/whitespace override (same guard as USDC_MINT above) so a blank env
+    // var doesn't replace a valid TOML value with an unroutable empty string,
+    // and reject a value without an http(s) scheme rather than publish a
+    // malformed url an agent/registry can't follow.
+    if let Ok(val) = env_with_fallback("SOLVELA_PUBLIC_URL", "RCR_PUBLIC_URL") {
+        let trimmed = val.trim();
+        if trimmed.is_empty() {
+            warn!("SOLVELA_PUBLIC_URL is set but empty — ignoring; AgentCard url falls back to host:port");
+        } else if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+            warn!(
+                value = %trimmed,
+                "SOLVELA_PUBLIC_URL must start with http:// or https:// — ignoring; AgentCard url falls back to host:port"
+            );
+        } else {
+            app_config.server.public_url = Some(trimmed.to_string());
+        }
+    }
+    // If no public URL is set and we're bound to the wildcard host, the
+    // AgentCard will advertise an unroutable url (http://0.0.0.0:PORT) that
+    // external agents/registries cannot reach. Warn loudly — a published card
+    // pointing at 0.0.0.0 is the silent failure mode for any deployment.
+    if app_config.server.public_url.is_none() && app_config.server.host == "0.0.0.0" {
+        warn!(
+            "SOLVELA_PUBLIC_URL is unset and host is 0.0.0.0 — the A2A AgentCard \
+             will advertise an unroutable url (http://0.0.0.0:{}); set \
+             SOLVELA_PUBLIC_URL in any deployment that publishes its card",
+            app_config.server.port
+        );
+    }
 
     // The configured USDC mint is quoted in every 402 challenge and enforced
     // by every payment verifier, but `EscrowVerifier` only Pubkey-parses its

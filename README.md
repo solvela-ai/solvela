@@ -219,7 +219,7 @@ All prices are provider cost in USDC. A 5% platform fee is applied on top. See `
 | `GET` | `/v1/escrow/config` | Escrow program configuration |
 | `GET` | `/v1/escrow/health` | Escrow claim metrics (admin) |
 | `GET` | `/v1/admin/stats` | Aggregate gateway statistics (admin) |
-| `GET` | `/.well-known/agent.json` | A2A AgentCard for agent discovery |
+| `GET` | `/.well-known/agent-card.json` | A2A AgentCard for agent discovery (v0.3 canonical path; `/.well-known/agent.json` kept as a backward-compat alias) |
 | `GET` | `/pricing` | Per-model USDC cost breakdown |
 | `GET` | `/health` | Gateway health check |
 | `GET` | `/metrics` | Prometheus metrics (admin) |

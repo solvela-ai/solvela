@@ -74,7 +74,7 @@ solvela/
 9. Return JSON or SSE stream
 
 ### A2A Protocol (POST /a2a)
-1. Agent discovers gateway via GET /.well-known/agent.json
+1. Agent discovers gateway via GET /.well-known/agent-card.json (alias: /.well-known/agent.json)
 2. Send message/send JSON-RPC → Gateway returns Task (input-required) + cost
 3. Agent signs USDC-SPL transaction → sends with payment payload
 4. Gateway verifies payment → proxies to LLM → returns Task (completed)

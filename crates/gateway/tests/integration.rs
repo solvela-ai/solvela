@@ -9410,6 +9410,44 @@ async fn test_a2a_agent_card_returns_capabilities() {
     assert!(extensions.len() >= 2, "should have AP2 + x402 extensions");
 }
 
+/// The A2A v0.3 canonical path is served by the real router and returns the
+/// same card as the backward-compat `/.well-known/agent.json` alias.
+#[tokio::test]
+async fn test_a2a_agent_card_canonical_path() {
+    let canonical = test_app()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/.well-known/agent-card.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(canonical.status(), StatusCode::OK);
+    let canonical_body = canonical.into_body().collect().await.unwrap().to_bytes();
+    let canonical_json: serde_json::Value = serde_json::from_slice(&canonical_body).unwrap();
+
+    let alias = test_app()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/.well-known/agent.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let alias_body = alias.into_body().collect().await.unwrap().to_bytes();
+    let alias_json: serde_json::Value = serde_json::from_slice(&alias_body).unwrap();
+
+    assert_eq!(canonical_json["name"], "Solvela");
+    assert_eq!(
+        canonical_json, alias_json,
+        "canonical path and alias must return identical AgentCards"
+    );
+}
+
 #[tokio::test]
 async fn test_a2a_unknown_method_returns_method_not_found() {
     let app = test_app();

@@ -212,7 +212,7 @@ These boundaries are architectural decisions made to avoid regulatory exposure:
 
 Solvela implements compatibility with Google's **Agent-to-Agent (A2A)** protocol and the **Agentic Payments (AP2)** specification, but only the parts that do not involve fiat:
 
-- **Implemented**: Agent discovery via `AgentCard` (`.well-known/agent.json`), x402 payment settlement flow within the A2A `message/send` lifecycle.
+- **Implemented**: Agent discovery via `AgentCard` (`.well-known/agent-card.json`, with the legacy `.well-known/agent.json` path served as an alias), x402 payment settlement flow within the A2A `message/send` lifecycle.
 - **Explicitly excluded**: The AP2 specification includes a Managed Payment Provider (MPP) flow for card-based payments. Implementing MPP would require acting as a payment facilitator, which triggers MSB registration and state licensing. We do not implement MPP.
 
 ## Summary of Money Flow
