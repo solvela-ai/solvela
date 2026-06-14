@@ -818,6 +818,13 @@ async fn main() -> anyhow::Result<()> {
         // so the cap only needs to bound scan/enumeration throughput; tune
         // `RateLimitConfig::receipts_default` in code if that ever changes.
         receipts_rate_limiter: RateLimiter::new(RateLimitConfig::receipts_default()),
+        // Public faucet POST: fixed stricter per-IP cap (3/24h). Like the
+        // receipts limiter above, deliberately NOT env-tunable — the per-wallet
+        // DB key already stops per-wallet repeats, so this cap only needs to
+        // bound single-IP enumeration bursts (mint fresh wallets to drain the
+        // daily cap). Tune `RateLimitConfig::faucet_default` in code if that
+        // ever changes.
+        faucet_rate_limiter: RateLimiter::new(RateLimitConfig::faucet_default()),
     });
 
     // ── Shutdown signal for background tasks ────────────────────────────────

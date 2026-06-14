@@ -495,6 +495,19 @@ fn generous_receipts_limiter() -> RateLimiter {
     })
 }
 
+/// Faucet-POST limiter for test apps: effectively unlimited so unrelated tests
+/// that exercise `POST /v1/faucet/gas` (or just construct an `AppState`) are
+/// never tripped by the production per-IP cap. The strict cap itself is
+/// exercised by the `app_with_faucet_and_limit` fixture in the
+/// `faucet_route_tests` module below.
+fn generous_faucet_limiter() -> RateLimiter {
+    RateLimiter::new(RateLimitConfig {
+        max_requests: 10_000,
+        window: std::time::Duration::from_secs(60),
+        unknown_max_requests: 10_000,
+    })
+}
+
 /// Build a test app with the test model config (no real provider API keys).
 ///
 /// Uses `AlwaysPassVerifier` so that properly-structured PaymentPayload headers
@@ -553,6 +566,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -608,6 +622,7 @@ fn test_app_with_usdc_mint_and_providers(mint: &str, providers: ProviderRegistry
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -906,6 +921,7 @@ fn test_app_with_provider_registry_and_exact_verifier(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -990,6 +1006,7 @@ fn app_with_semantic_cache(sem: Arc<gateway::cache::semantic::SemanticCache>) ->
         dev_bypass_payment: true,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -1303,6 +1320,7 @@ fn app_with_semantic_cache_and_escrow(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -1381,6 +1399,7 @@ fn app_with_semantic_cache_escrow_and_db_pool(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -2043,6 +2062,7 @@ fn test_app_with_provider_registry_and_escrow_verifier(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -2125,6 +2145,7 @@ fn test_app_with_escrow_and_usdc_mint(mint: &str) -> axum::Router {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -2594,6 +2615,7 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let app = build_router(
@@ -4978,6 +5000,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -7013,6 +7036,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -7180,6 +7204,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
 
@@ -7417,6 +7442,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
 
@@ -7808,6 +7834,7 @@ async fn test_proxy_require_tenant_wallet_rejected_before_settlement() {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let app = build_router(
@@ -9329,6 +9356,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let app = build_router(
@@ -9983,6 +10011,7 @@ fn test_app_with_free_limit(free_max: u32) -> axum::Router {
         // accidentally tripped by the global cap; the aggregate-cap tests build
         // their own app via `test_app_with_global_cap`.
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -10346,6 +10375,7 @@ async fn dev_bypass_still_works() {
         // Aggregate cap also set to 0 — if the dev-bypass branch were ever
         // (incorrectly) routed through the free gates, this PAID model would 429.
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(0),
     });
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
@@ -10420,6 +10450,7 @@ fn test_app_with_global_cap(global_cap: u32) -> axum::Router {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(free_cfg),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(global_cap),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -10548,6 +10579,7 @@ async fn free_per_ip_and_global_cap_are_independent() {
         free_rate_limiter: RateLimiter::new(free_cfg),
         // Global cap deliberately LOOSER than the per-IP limit.
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(100),
     });
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
@@ -11418,6 +11450,7 @@ fn test_app_with_db_pool(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -11968,6 +12001,7 @@ fn test_app_with_receipts_limit(max: u32) -> axum::Router {
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         receipts_rate_limiter: RateLimiter::new(receipts_cfg),
+        faucet_rate_limiter: generous_faucet_limiter(),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -12055,7 +12089,6 @@ async fn receipts_get_rate_limited_per_ip_with_canonical_429() {
         "an unrelated IP must not be affected by another IP's exhausted bucket"
     );
 }
-
 /// A settled paid request to a VENDOR-wallet marketplace service must record a
 /// receipt carrying the vendor settlement + fee receivable — written at
 /// SETTLEMENT time (the vendor was just paid on-chain), so it must exist even
@@ -12345,6 +12378,7 @@ fn a2a_app_with_redis_db_and_providers(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -12745,6 +12779,7 @@ fn a2a_app_with_verifier_and_db(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -13432,6 +13467,7 @@ mod faucet_route_tests {
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         build_router(
@@ -13564,5 +13600,219 @@ mod faucet_route_tests {
         assert_eq!(json["reason"], serde_json::json!("send_failed"));
         // Reservation rolled back so a retry is possible.
         assert!(!ledger.reserved.lock().unwrap().contains_key(FAUCET_WALLET));
+    }
+
+    // ── F6: per-IP faucet rate limit (security review) ───────────────────────
+
+    /// `app_with_faucet` variant with a custom faucet limiter so the per-IP cap
+    /// can be exercised through the real `POST /v1/faucet/gas` route. Identical
+    /// to `app_with_faucet` except `faucet_rate_limiter` is the supplied one.
+    fn app_with_faucet_and_limit(
+        faucet: Option<Arc<Faucet>>,
+        faucet_rate_limiter: RateLimiter,
+    ) -> axum::Router {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML)
+            .unwrap()
+            .with_gateway_recipient(TEST_RECIPIENT_WALLET)
+            .unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+        let new_state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator,
+            usage: gateway::usage::UsageTracker::noop(),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            faucet,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: Some(gateway::secret::AdminToken::new(
+                TEST_ADMIN_TOKEN.to_string(),
+            )),
+            api_key_hmac_secret: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter,
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        build_router(
+            Arc::clone(&new_state),
+            RateLimiter::new(RateLimitConfig::default()),
+        )
+    }
+
+    /// A strict faucet limiter of `max` per 24h window, with the SAME cap on the
+    /// "unknown" bucket so the per-IP behavior is deterministic in `oneshot`.
+    fn strict_faucet_limiter(max: u32) -> RateLimiter {
+        RateLimiter::new(RateLimitConfig {
+            max_requests: max,
+            window: std::time::Duration::from_secs(24 * 60 * 60),
+            unknown_max_requests: max,
+        })
+    }
+
+    /// `POST /v1/faucet/gas` with a fixed `ConnectInfo` peer IP so the faucet
+    /// limiter keys on a NAMED bucket (not the shared "unknown" one). Mirrors
+    /// `receipts_get_request`'s ConnectInfo injection.
+    async fn post_faucet_from_ip(
+        app: axum::Router,
+        wallet: &str,
+        ip: &str,
+    ) -> (StatusCode, axum::http::HeaderMap, serde_json::Value) {
+        let body = format!(r#"{{"wallet":"{wallet}"}}"#);
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/v1/faucet/gas")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let addr: std::net::SocketAddr = format!("{ip}:40000").parse().unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, headers, json)
+    }
+
+    /// F6: the (N+1)th drip attempt from ONE IP gets the canonical 429 — and a
+    /// FRESH wallet on every attempt must NOT escape the per-IP cap (this is the
+    /// enumeration burst the finding defends against: the per-wallet DB key only
+    /// stops per-wallet repeats, not mass fresh-wallet enumeration from one IP).
+    /// The cap is consumed BEFORE any drip work and the 429 carries the FAUCET
+    /// limit in the standard `rate_limit_exceeded` envelope.
+    #[tokio::test]
+    async fn route_rate_limited_per_ip_with_canonical_429() {
+        let source = Arc::new(MockSource::new(1_000_000, 0, true)); // always funds
+        let ledger = Arc::new(MockLedger::default());
+        let app = app_with_faucet_and_limit(
+            Some(wired_faucet(source.clone(), ledger)),
+            strict_faucet_limiter(3),
+        );
+        let ip = "198.51.100.7";
+
+        // Three drips from one IP, each a DISTINCT fresh wallet, all funded.
+        let wallets = [
+            "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+            "So11111111111111111111111111111111111111112",
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        ];
+        for (i, w) in wallets.iter().enumerate() {
+            let (status, _h, json) = post_faucet_from_ip(app.clone(), w, ip).await;
+            assert_eq!(status, StatusCode::OK, "drip {i} must fund under the cap");
+            assert_eq!(json["funded"], serde_json::json!(true), "drip {i} funded");
+        }
+        // Three sends happened — the per-wallet key did NOT stop the burst.
+        assert_eq!(source.sends.load(Ordering::SeqCst), 3);
+
+        // 4th attempt (another fresh wallet) exceeds the per-IP cap → 429 BEFORE
+        // any drip work (send count stays at 3).
+        let (status, headers, json) = post_faucet_from_ip(
+            app.clone(),
+            "GDDMwNyyx8uB6zrqwBFHjLLG3TBYk2F8Az4yrQC5RzMp",
+            ip,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "a fresh wallet must NOT escape the per-IP faucet cap"
+        );
+        assert_eq!(
+            source.sends.load(Ordering::SeqCst),
+            3,
+            "the rate-limited request must be rejected BEFORE any drip/send work"
+        );
+        assert_eq!(
+            headers.get("x-ratelimit-limit").unwrap(),
+            "3",
+            "429 must carry the FAUCET limit (3), not the outer global limit (60)"
+        );
+        assert_eq!(headers.get("x-ratelimit-remaining").unwrap(), "0");
+        assert!(
+            headers.get("retry-after").is_some(),
+            "429 must carry retry-after"
+        );
+        assert_eq!(
+            json["error"]["type"],
+            serde_json::json!("rate_limit_exceeded")
+        );
+    }
+
+    /// F6: different IPs get independent faucet buckets — one IP exhausting its
+    /// cap must not affect another IP.
+    #[tokio::test]
+    async fn route_rate_limit_is_per_ip_independent() {
+        let source = Arc::new(MockSource::new(1_000_000, 0, true));
+        let ledger = Arc::new(MockLedger::default());
+        let app = app_with_faucet_and_limit(
+            Some(wired_faucet(source.clone(), ledger)),
+            strict_faucet_limiter(1),
+        );
+
+        // IP A: first drip funds, second is rate-limited.
+        let (s1, _h1, _j1) = post_faucet_from_ip(app.clone(), FAUCET_WALLET, "198.51.100.10").await;
+        assert_eq!(s1, StatusCode::OK, "IP-A first drip funds");
+        let (s2, _h2, _j2) = post_faucet_from_ip(app.clone(), FAUCET_WALLET, "198.51.100.10").await;
+        assert_eq!(
+            s2,
+            StatusCode::TOO_MANY_REQUESTS,
+            "IP-A second drip is rate-limited (cap of 1)"
+        );
+
+        // IP B (a different peer) still has its full allowance.
+        let (s3, _h3, _j3) = post_faucet_from_ip(app.clone(), FAUCET_WALLET, "198.51.100.11").await;
+        assert_eq!(
+            s3,
+            StatusCode::OK,
+            "an unrelated IP must not be affected by another IP's exhausted faucet bucket"
+        );
+    }
+
+    /// F6 ordering: a DISABLED faucet returns the `disabled` decline early —
+    /// cheapest-first, ahead of the rate limiter — so it does NOT consume a
+    /// rate-limit slot. Proven by exhausting the per-IP cap with disabled
+    /// responses and confirming the (cap+1)th from the same IP STILL returns
+    /// `disabled` (a 200), never a 429.
+    #[tokio::test]
+    async fn route_disabled_returns_early_without_consuming_rate_limit() {
+        // Disabled faucet (None) + a strict cap of 1 on the per-IP bucket.
+        let app = app_with_faucet_and_limit(None, strict_faucet_limiter(1));
+        let ip = "198.51.100.30";
+
+        // First disabled response.
+        let (s1, _h1, j1) = post_faucet_from_ip(app.clone(), FAUCET_WALLET, ip).await;
+        assert_eq!(s1, StatusCode::OK);
+        assert_eq!(j1["reason"], serde_json::json!("disabled"));
+
+        // Second from the SAME IP: if the disabled path had consumed a rate-limit
+        // slot, this would 429. It must still be `disabled` (the disabled check
+        // is ahead of the limiter), proving the cheapest-first ordering.
+        let (s2, _h2, j2) = post_faucet_from_ip(app.clone(), FAUCET_WALLET, ip).await;
+        assert_eq!(
+            s2,
+            StatusCode::OK,
+            "disabled must short-circuit BEFORE the rate limiter (no slot consumed)"
+        );
+        assert_eq!(j2["reason"], serde_json::json!("disabled"));
     }
 }
