@@ -13,19 +13,28 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
+import type { TransactionConfirmationStatus } from '@solana/web3.js';
+
 import { ensureGas } from '../src/ensure-gas.ts';
 
 // A real, valid base58 Solana pubkey (PublicKey() must accept it).
 const ADDRESS = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM';
 
 /** Minimal Connection mock satisfying the Pick used by ensureGas. */
-function mockConnection(balance: number, status?: string) {
+function mockConnection(balance: number, status?: TransactionConfirmationStatus) {
   return {
     async getBalance() {
       return balance;
     },
     async getSignatureStatus() {
-      return { value: status ? { confirmationStatus: status } : null };
+      // Mirror web3.js `RpcResponseAndContext<SignatureStatus | null>`: the
+      // `context` wrapper plus a full SignatureStatus when a status is given.
+      return {
+        context: { slot: 0 },
+        value: status
+          ? { slot: 0, confirmations: null, err: null, confirmationStatus: status }
+          : null,
+      };
     },
   } as const;
 }
@@ -108,7 +117,7 @@ describe('ensureGas', () => {
           throw new Error('rpc down');
         },
         async getSignatureStatus() {
-          return { value: null };
+          return { context: { slot: 0 }, value: null };
         },
       },
       fetchImpl: mockFetch({ funded: true }),
