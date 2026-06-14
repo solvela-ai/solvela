@@ -128,6 +128,12 @@ pub struct AppState {
     /// [`FREE_TIER_GLOBAL_RPM_DEFAULT`](crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT);
     /// override via `SOLVELA_FREE_TIER_GLOBAL_RPM`.
     pub free_global_cap: FreeTierGlobalCap,
+    /// Gas-drip faucet. `Some` only when the faucet is enabled, a dedicated
+    /// gas `source_key` is configured, AND a DB pool is present (the once-per-
+    /// wallet idempotency ledger lives in Postgres). `None` ⇒ the
+    /// `POST /v1/faucet/gas` route returns `{funded:false, reason:"disabled"}`.
+    /// See [`routes::faucet`].
+    pub faucet: Option<Arc<routes::faucet::Faucet>>,
     /// Per-client (IP) rate limiter for the public, unauthenticated
     /// `GET /v1/receipts/{id}` route.
     ///
@@ -286,6 +292,7 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             "/v1/escrow/settle",
             post(routes::escrow_settle::handle_settle),
         )
+        .route("/v1/faucet/gas", post(routes::faucet::gas_faucet))
         .route("/pricing", get(routes::pricing::pricing))
         .route("/health", get(routes::health::health))
         .route("/v1/admin/stats", get(routes::admin_stats::admin_stats))

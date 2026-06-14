@@ -267,6 +267,7 @@ fn contract_app_with_db(
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),

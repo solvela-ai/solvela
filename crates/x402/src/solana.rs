@@ -519,6 +519,152 @@ impl PaymentVerifier for SolanaVerifier {
     }
 }
 
+// ---------------------------------------------------------------------------
+// System-Program SOL transfer builder (gas-drip faucet) — byte-exact
+// ---------------------------------------------------------------------------
+
+/// Errors from building or sending a System-Program SOL transfer.
+#[derive(Debug, thiserror::Error)]
+pub enum SystemTransferError {
+    /// The transfer amount was zero lamports.
+    #[error("transfer amount must be greater than zero lamports")]
+    ZeroAmount,
+    /// The signing keypair was invalid (bad length or ed25519 error).
+    #[error("invalid source keypair: {0}")]
+    InvalidKeypair(String),
+    /// The derived signer pubkey did not match the supplied `from` account.
+    #[error("source keypair pubkey does not match the `from` account")]
+    KeypairMismatch,
+}
+
+/// Build a Solana **legacy** message that transfers `lamports` of native SOL
+/// from `from` to `to` via the System Program.
+///
+/// Byte-exact, golden-vector-pinned. Mirrors the framing of the escrow
+/// deposit builder (`crates/escrow-tx/src/deposit.rs::build_legacy_message`):
+/// single-byte compact-u16 length prefixes (valid for the small, fixed account
+/// and data lengths used here), accounts sorted by writability, program key
+/// appended last.
+///
+/// Layout:
+/// - header `[1, 0, 1]` — 1 signer, 0 readonly-signed, 1 readonly-unsigned
+///   (only the System Program is readonly-unsigned).
+/// - account keys (compact-u16 count `3` + 3×32 bytes):
+///   - `0: from`           (signer, writable)
+///   - `1: to`             (writable, non-signer)
+///   - `2: system_program` (readonly, non-signer; program key, appended last)
+/// - 32-byte recent blockhash
+/// - instruction count `1`
+/// - instruction:
+///   - `program_id_index = 2` (System Program)
+///   - account indices `[0, 1]` (from, to)
+///   - data `= u32_le(2)  ++  u64_le(lamports)` (12 bytes): the System Program
+///     `Transfer` instruction (variant index 2).
+///
+/// `from`/`to`/`recent_blockhash` are raw 32-byte values; the System Program ID
+/// is the all-zero pubkey (base58 `11111111111111111111111111111111`).
+pub fn build_system_transfer_message(
+    from: &[u8; 32],
+    to: &[u8; 32],
+    lamports: u64,
+    recent_blockhash: &[u8; 32],
+) -> Vec<u8> {
+    let system_program = [0u8; 32]; // 11111111111111111111111111111111
+
+    // Instruction data: 4-byte LE Transfer discriminator (2) ++ 8-byte LE lamports.
+    let mut ix_data = Vec::with_capacity(12);
+    ix_data.extend_from_slice(&2u32.to_le_bytes());
+    ix_data.extend_from_slice(&lamports.to_le_bytes());
+
+    let mut msg = Vec::new();
+
+    // Header: 1 required signature, 0 readonly-signed, 1 readonly-unsigned.
+    msg.extend_from_slice(&[1u8, 0u8, 1u8]);
+
+    // Account keys: 3 total (from, to, system_program). Single-byte compact-u16.
+    msg.push(3u8);
+    msg.extend_from_slice(from);
+    msg.extend_from_slice(to);
+    msg.extend_from_slice(&system_program);
+
+    // Recent blockhash.
+    msg.extend_from_slice(recent_blockhash);
+
+    // Instruction count: 1.
+    msg.push(1u8);
+
+    // The single Transfer instruction.
+    msg.push(2u8); // program_id_index = system_program (index 2)
+    msg.push(2u8); // account index count = 2
+    msg.extend_from_slice(&[0u8, 1u8]); // [from, to]
+    msg.push(ix_data.len() as u8); // data length (12) — single-byte compact-u16
+    msg.extend_from_slice(&ix_data);
+
+    msg
+}
+
+/// Validate a raw 64-byte ed25519 keypair (`secret[0..32] || pubkey[32..64]`)
+/// and return its 32-byte public key.
+///
+/// Validates that the bytes form a self-consistent ed25519 keypair — the
+/// public half MUST match the key derived from the secret half — so a tampered
+/// or malformed key is rejected up front rather than producing a signature
+/// over the wrong fee payer. Used by the gas faucet to derive (and check) its
+/// dedicated gas wallet's pubkey at construction.
+pub fn keypair_pubkey(keypair: &[u8; 64]) -> Result<[u8; 32], SystemTransferError> {
+    use ed25519_dalek::SigningKey;
+
+    let signing_key = SigningKey::from_keypair_bytes(keypair)
+        .map_err(|e| SystemTransferError::InvalidKeypair(e.to_string()))?;
+    Ok(signing_key.verifying_key().to_bytes())
+}
+
+/// Sign a System-Program SOL transfer message with the source's ed25519
+/// keypair and assemble it into a base64-encoded wire transaction.
+///
+/// `source_keypair` is the raw 64-byte ed25519 keypair (`secret[0..32] ||
+/// pubkey[32..64]`). The source MUST be `account_keys[0]` (the fee payer /
+/// sole signer) — this is the gateway's dedicated gas wallet, which pays the
+/// network fee for the drip. The keypair material is wiped after signing.
+///
+/// Returns the base64 (standard alphabet) wire transaction, ready for
+/// [`crate::solana_rpc::send_transaction`].
+pub fn sign_system_transfer(
+    from: &[u8; 32],
+    to: &[u8; 32],
+    lamports: u64,
+    recent_blockhash: &[u8; 32],
+    source_keypair: &[u8; 64],
+) -> Result<String, SystemTransferError> {
+    use base64::Engine;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    if lamports == 0 {
+        return Err(SystemTransferError::ZeroAmount);
+    }
+
+    let signing_key = SigningKey::from_keypair_bytes(source_keypair)
+        .map_err(|e| SystemTransferError::InvalidKeypair(e.to_string()))?;
+    let signer_pubkey = signing_key.verifying_key().to_bytes();
+
+    // The signer MUST be account_keys[0] (`from`) — never sign a message whose
+    // fee payer is a different key than the one we hold.
+    if &signer_pubkey != from {
+        return Err(SystemTransferError::KeypairMismatch);
+    }
+
+    let msg = build_system_transfer_message(from, to, lamports, recent_blockhash);
+    let signature = signing_key.sign(&msg);
+
+    // Wire tx: compact-u16(1) || signature(64) || message.
+    let mut tx_bytes = Vec::with_capacity(1 + 64 + msg.len());
+    tx_bytes.push(0x01);
+    tx_bytes.extend_from_slice(&signature.to_bytes());
+    tx_bytes.extend_from_slice(&msg);
+
+    Ok(base64::engine::general_purpose::STANDARD.encode(&tx_bytes))
+}
+
 /// Validate that a client-submitted durable-nonce transaction's nonce account
 /// is in the operator's allowlist. Fail closed when no pool is configured —
 /// accepting any client-supplied nonce account would let a stale signed
@@ -1342,5 +1488,133 @@ mod tests {
             transfer.destination, expected_ata,
             "destination must be ATA(pay_to, USDC_MINT)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // System-Program SOL transfer builder (gas-drip faucet) — golden vector
+    // -----------------------------------------------------------------------
+
+    /// Fixed `from` for the system-transfer golden vector: the pubkey derived
+    /// from signing-key seed `[7u8; 32]`.
+    fn system_golden_from_keypair() -> [u8; 64] {
+        use ed25519_dalek::SigningKey;
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let mut kp = [0u8; 64];
+        kp[..32].copy_from_slice(&sk.to_bytes());
+        kp[32..].copy_from_slice(sk.verifying_key().as_bytes());
+        kp
+    }
+
+    /// Fixed `to` recipient for the golden vector (the canonical provider
+    /// pubkey reused across the escrow/exact vectors).
+    const SYSTEM_GOLDEN_TO: &str = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+    /// Fixed drip amount for the golden vector: 0.01 SOL.
+    const SYSTEM_GOLDEN_LAMPORTS: u64 = 10_000_000;
+
+    /// Byte-exact base64 wire transaction for the fixed system-transfer input.
+    ///
+    /// Pins the SOL-transfer wire layout (header, account order, Transfer
+    /// discriminator, lamports encoding, signing) so any drift breaks the
+    /// build. Fixed input: `from` = seed-`[7u8;32]` keypair pubkey, `to` =
+    /// `9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM`, `lamports = 10_000_000`,
+    /// `recent_blockhash = [0xABu8; 32]`.
+    ///
+    /// DO NOT hand-edit. If this changes, the SOL-transfer layout changed.
+    const SYSTEM_TRANSFER_GOLDEN_VECTOR_B64: &str = "AWFNbJv6GcW5PimEeAoaVJ0r3LacP4hSydPe2OWwCoLfzjgxiASbaZw/ev4JVqKtdyQ0+kzA2LbReQIxdRvZHwgBAAED6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0ix+jAiHYL/eHd3PMsF/IJuCQu5SqvEx+s2I0OosbQsG8gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAq6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6sBAgIAAQwCAAAAgJaYAAAAAAA=";
+
+    #[test]
+    fn system_transfer_golden_vector_is_byte_exact() {
+        use base64::Engine;
+
+        let kp = system_golden_from_keypair();
+        let from: [u8; 32] = kp[32..].try_into().unwrap();
+        let to = Pubkey::from_str(SYSTEM_GOLDEN_TO).unwrap().0;
+        let blockhash = [0xABu8; 32];
+
+        let b64 = sign_system_transfer(&from, &to, SYSTEM_GOLDEN_LAMPORTS, &blockhash, &kp)
+            .expect("sign must succeed");
+
+        // Print on mismatch so the pinned literal can be filled in from the
+        // observed value the FIRST time, then frozen.
+        assert_eq!(
+            b64, SYSTEM_TRANSFER_GOLDEN_VECTOR_B64,
+            "system-transfer wire bytes drifted (or golden not yet pinned)"
+        );
+
+        // The pinned bytes must decode + signature-verify as `from` is the
+        // sole signer / account_keys[0].
+        let verifier = test_verifier();
+        let tx = verifier
+            .decode_and_validate_transaction(&b64)
+            .expect("golden system-transfer tx must decode and signature-verify");
+        let message = tx.parse_message().unwrap();
+        assert_eq!(
+            message.account_keys[0].0, from,
+            "from must be account_keys[0]"
+        );
+
+        // And the decoded wire length is compact-u16(1) + sig(64) + message.
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .unwrap();
+        assert_eq!(raw.len(), 1 + 64 + tx.message_bytes.len());
+    }
+
+    #[test]
+    fn build_system_transfer_message_structure_round_trips() {
+        let kp = system_golden_from_keypair();
+        let from: [u8; 32] = kp[32..].try_into().unwrap();
+        let to = Pubkey::from_str(SYSTEM_GOLDEN_TO).unwrap().0;
+        let blockhash = [0xABu8; 32];
+
+        let msg = build_system_transfer_message(&from, &to, SYSTEM_GOLDEN_LAMPORTS, &blockhash);
+        let parsed = ParsedMessage::from_bytes(&msg).expect("must parse");
+
+        // Header
+        assert_eq!(parsed.header.num_required_signatures, 1);
+        assert_eq!(parsed.header.num_readonly_signed_accounts, 0);
+        assert_eq!(parsed.header.num_readonly_unsigned_accounts, 1);
+
+        // Accounts: [from, to, system_program]
+        assert_eq!(parsed.account_keys.len(), 3);
+        assert_eq!(parsed.account_keys[0].0, from);
+        assert_eq!(parsed.account_keys[1].0, to);
+        assert_eq!(parsed.account_keys[2], Pubkey::SYSTEM_PROGRAM);
+        assert_eq!(parsed.recent_blockhash, blockhash);
+
+        // Single instruction: program=system(2), accounts=[0,1], data=2u32||lamports
+        assert_eq!(parsed.instructions.len(), 1);
+        let ix = &parsed.instructions[0];
+        assert_eq!(ix.program_id_index, 2);
+        assert_eq!(ix.accounts, vec![0, 1]);
+        assert_eq!(
+            &ix.data[0..4],
+            &2u32.to_le_bytes(),
+            "Transfer discriminator"
+        );
+        let lamports = u64::from_le_bytes(ix.data[4..12].try_into().unwrap());
+        assert_eq!(lamports, SYSTEM_GOLDEN_LAMPORTS);
+        assert_eq!(ix.data.len(), 12);
+    }
+
+    #[test]
+    fn sign_system_transfer_rejects_zero_amount() {
+        let kp = system_golden_from_keypair();
+        let from: [u8; 32] = kp[32..].try_into().unwrap();
+        let to = Pubkey::from_str(SYSTEM_GOLDEN_TO).unwrap().0;
+        let err = sign_system_transfer(&from, &to, 0, &[0xABu8; 32], &kp)
+            .expect_err("zero lamports must be rejected");
+        assert!(matches!(err, SystemTransferError::ZeroAmount));
+    }
+
+    #[test]
+    fn sign_system_transfer_rejects_keypair_mismatch() {
+        let kp = system_golden_from_keypair();
+        // `from` is a DIFFERENT key than the one we hold.
+        let wrong_from = Pubkey::from_str(SYSTEM_GOLDEN_TO).unwrap().0;
+        let to = [9u8; 32];
+        let err = sign_system_transfer(&wrong_from, &to, 1_000, &[0xABu8; 32], &kp)
+            .expect_err("mismatched from must be rejected");
+        assert!(matches!(err, SystemTransferError::KeypairMismatch));
     }
 }

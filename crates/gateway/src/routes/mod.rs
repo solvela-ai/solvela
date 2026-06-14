@@ -3,6 +3,7 @@ pub mod chat;
 pub mod debug_headers;
 pub mod escrow;
 pub mod escrow_settle;
+pub mod faucet;
 pub mod health;
 pub mod images;
 pub mod metrics;

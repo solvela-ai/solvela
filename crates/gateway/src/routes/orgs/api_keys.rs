@@ -242,6 +242,7 @@ mod tests {
             fee_payer_pool: None,
             nonce_pool: None,
             db_pool: None,
+            faucet: None,
             session_secret: vec![0u8; 32],
             replay_set: crate::AppState::new_replay_set(),
             http_client: reqwest::Client::new(),

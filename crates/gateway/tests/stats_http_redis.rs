@@ -86,6 +86,7 @@ fn stats_router(usage: UsageTracker, db_pool: Option<PgPool>) -> axum::Router {
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool,
+        faucet: None,
         session_secret: SESSION_SECRET.to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),

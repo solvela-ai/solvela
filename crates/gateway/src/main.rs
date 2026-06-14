@@ -120,6 +120,47 @@ async fn main() -> anyhow::Result<()> {
     {
         app_config.solana.fee_payer_key = Some(val);
     }
+    // Gas-drip faucet config (SOLVELA_FAUCET__*). All optional; the faucet stays
+    // disabled unless `SOLVELA_FAUCET__ENABLED=true` AND a `SOURCE_KEY` is set
+    // AND a DB is configured (wired below).
+    if let Ok(val) = env_with_fallback("SOLVELA_FAUCET__ENABLED", "RCR_FAUCET__ENABLED") {
+        app_config.faucet.enabled = matches!(val.as_str(), "true" | "1" | "yes");
+    }
+    if let Ok(val) = env_with_fallback("SOLVELA_FAUCET__DRIP_LAMPORTS", "RCR_FAUCET__DRIP_LAMPORTS")
+    {
+        if let Ok(n) = val.parse::<u64>() {
+            app_config.faucet.drip_lamports = n;
+        }
+    }
+    if let Ok(val) = env_with_fallback(
+        "SOLVELA_FAUCET__USDC_FLOOR_ATOMIC",
+        "RCR_FAUCET__USDC_FLOOR_ATOMIC",
+    ) {
+        if let Ok(n) = val.parse::<u64>() {
+            app_config.faucet.usdc_floor_atomic = n;
+        }
+    }
+    if let Ok(val) = env_with_fallback(
+        "SOLVELA_FAUCET__SOL_LOW_WATER_LAMPORTS",
+        "RCR_FAUCET__SOL_LOW_WATER_LAMPORTS",
+    ) {
+        if let Ok(n) = val.parse::<u64>() {
+            app_config.faucet.sol_low_water_lamports = n;
+        }
+    }
+    if let Ok(val) = env_with_fallback(
+        "SOLVELA_FAUCET__DAILY_CAP_LAMPORTS",
+        "RCR_FAUCET__DAILY_CAP_LAMPORTS",
+    ) {
+        if let Ok(n) = val.parse::<u64>() {
+            app_config.faucet.daily_cap_lamports = n;
+        }
+    }
+    if let Ok(val) = env_with_fallback("SOLVELA_FAUCET__SOURCE_KEY", "RCR_FAUCET__SOURCE_KEY") {
+        if !val.is_empty() {
+            app_config.faucet.source_key = Some(val);
+        }
+    }
     // Server config overrides
     if let Ok(val) = env_with_fallback("SOLVELA_HOST", "RCR_HOST") {
         app_config.server.host = val;
@@ -629,6 +670,67 @@ async fn main() -> anyhow::Result<()> {
         };
     let free_global_cap = FreeTierGlobalCap::new(free_global_rpm);
 
+    // ── Gas-drip faucet (optional) ─────────────────────────────────────────────
+    //
+    // Active only when ALL of: faucet enabled + a dedicated `source_key` set +
+    // a DB pool present (the once-per-wallet idempotency ledger is in Postgres).
+    // The `source_key` is a DEDICATED gas wallet — never the fee-payer reserve
+    // (which pays providers and is regulatory-sensitive). When unset/empty the
+    // faucet stays disabled. Degradation: no DATABASE_URL ⇒ disabled with a warn.
+    let faucet = if app_config.faucet.is_active() {
+        match (&db_pool, app_config.faucet.source_key.as_deref()) {
+            (Some(pool), Some(source_key)) => {
+                match gateway::routes::faucet::RpcGasSource::from_keypair_b58(
+                    http_client.clone(),
+                    app_config.solana.rpc_url.clone(),
+                    app_config.solana.usdc_mint.clone(),
+                    source_key,
+                ) {
+                    Ok(source) => {
+                        let params = gateway::routes::faucet::FaucetParams {
+                            drip_lamports: app_config.faucet.drip_lamports,
+                            usdc_floor_atomic: app_config.faucet.usdc_floor_atomic,
+                            sol_low_water_lamports: app_config.faucet.sol_low_water_lamports,
+                            daily_cap_lamports: app_config.faucet.daily_cap_lamports,
+                        };
+                        let ledger = gateway::routes::faucet::PgGasLedger::new(pool.clone());
+                        info!(
+                            gas_wallet = %source.source_pubkey_b58(),
+                            drip_lamports = params.drip_lamports,
+                            usdc_floor_atomic = params.usdc_floor_atomic,
+                            "gas-drip faucet enabled"
+                        );
+                        Some(Arc::new(gateway::routes::faucet::Faucet::new(
+                            params,
+                            Arc::new(source),
+                            Arc::new(ledger),
+                        )))
+                    }
+                    Err(e) => {
+                        // A bad SOURCE_KEY is an operator error — fail closed
+                        // (faucet disabled) and surface it loudly, never sign
+                        // with a half-resolved key.
+                        warn!(error = %e, "SOLVELA_FAUCET__SOURCE_KEY invalid — faucet disabled");
+                        None
+                    }
+                }
+            }
+            // Enabled + source key but NO DB: the idempotency ledger is missing,
+            // so we cannot guarantee once-per-wallet. Disable, don't risk
+            // double-dripping.
+            (None, _) => {
+                warn!(
+                    "faucet enabled but DATABASE_URL is not configured — faucet disabled \
+                     (it needs the gas_drips table for once-per-wallet idempotency)"
+                );
+                None
+            }
+            (Some(_), None) => None, // unreachable: is_active() guarantees a key
+        }
+    } else {
+        None
+    };
+
     // Build shared state
     let state = Arc::new(AppState {
         config: app_config.clone(),
@@ -644,6 +746,7 @@ async fn main() -> anyhow::Result<()> {
         fee_payer_pool,
         nonce_pool,
         db_pool,
+        faucet,
         escrow_metrics: escrow_metrics.clone(),
         admin_token,
         api_key_hmac_secret,

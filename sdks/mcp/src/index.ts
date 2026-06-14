@@ -47,6 +47,7 @@ import type { PaymentRequired, PaymentAccept } from '@solvela/signer-core';
 import { Connection, PublicKey } from '@solana/web3.js';
 
 import { resolveWallet } from './wallet.js';
+import { ensureGas } from './ensure-gas.js';
 
 // ---------------------------------------------------------------------------
 // Bootstrap client from environment
@@ -711,6 +712,25 @@ async function main() {
         'Fatal: SOLANA_RPC_URL is required when signing is enabled. Set SOLVELA_SIGNING_MODE=off to run without signing.\n',
       );
       process.exit(1);
+    }
+
+    // Gas top-up (best-effort, once at startup). The gateway's faucet drips a
+    // dust of SOL to USDC-funded wallets so the agent can pay its own network
+    // gas as the on-chain fee payer — the user funds USDC only. ANY failure
+    // (faucet disabled/unreachable/declined) is logged and swallowed: the agent
+    // would just get the existing insufficient-SOL behaviour on its first call.
+    // Never blocks startup. Only signed txs / public reads leave the host.
+    try {
+      await ensureGas({
+        address: resolvedWalletAddress,
+        gatewayUrl: client.apiUrl,
+        rpcUrl: process.env['SOLANA_RPC_URL'] as string,
+      });
+    } catch (err) {
+      // Defensive: ensureGas is best-effort and should not throw, but a bug
+      // there must NEVER take down startup.
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[solvela-mcp] gas: ensureGas unexpected error (${msg}); continuing.\n`);
     }
   }
 

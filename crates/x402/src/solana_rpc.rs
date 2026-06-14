@@ -268,6 +268,176 @@ pub async fn poll_for_confirmation(
     }
 }
 
+/// Fetch a recent blockhash via Solana JSON-RPC `getLatestBlockhash`.
+///
+/// Returns the 32 raw blockhash bytes (base58-decoded from the RPC's string
+/// form), suitable for the `recent_blockhash` field of a legacy message built
+/// by [`crate::solana::build_system_transfer_message`]. Uses the `finalized`
+/// commitment so the blockhash is durable enough to survive the round-trip to
+/// `sendTransaction`.
+///
+/// Fails closed: an unparseable / wrong-length blockhash is an [`Error::Rpc`],
+/// never a silent zero blockhash (which would build an unsubmittable tx).
+pub async fn get_latest_blockhash(client: &Client, rpc_url: &str) -> Result<[u8; 32], Error> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getLatestBlockhash",
+        "params": [{"commitment": "finalized"}],
+    });
+
+    let response = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    let result: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    if let Some(error) = result.get("error") {
+        return Err(Error::Rpc(error.to_string()));
+    }
+
+    let blockhash_b58 = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.get("blockhash"))
+        .and_then(|b| b.as_str())
+        .ok_or_else(|| {
+            Error::Rpc("getLatestBlockhash did not return a blockhash string".to_string())
+        })?;
+
+    let bytes = bs58::decode(blockhash_b58)
+        .into_vec()
+        .map_err(|e| Error::Rpc(format!("blockhash is not valid base58: {e}")))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| Error::Rpc(format!("blockhash must be 32 bytes, got {}", v.len())))?;
+    Ok(arr)
+}
+
+/// Fetch a wallet's native SOL balance (in lamports) via `getBalance`.
+///
+/// `pubkey_b58` is the base58 wallet address. Returns the lamport balance as a
+/// `u64`. Fails closed on a missing/malformed result — never silently returns 0
+/// (a faucet that reads 0 on RPC failure would re-drip an already-funded
+/// wallet).
+pub async fn get_sol_balance(
+    client: &Client,
+    rpc_url: &str,
+    pubkey_b58: &str,
+) -> Result<u64, Error> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getBalance",
+        "params": [pubkey_b58, {"commitment": "confirmed"}],
+    });
+
+    let response = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    let result: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    if let Some(error) = result.get("error") {
+        return Err(Error::Rpc(error.to_string()));
+    }
+
+    result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| Error::Rpc("getBalance did not return a u64 lamport value".to_string()))
+}
+
+/// Fetch a wallet's USDC-SPL balance in atomic (6-decimal) units via the
+/// owner's associated token account (ATA).
+///
+/// Derives `ATA(owner, mint)` and queries `getTokenAccountBalance`. A **missing
+/// ATA** (the owner has never held this token) is treated as a balance of `0`,
+/// matching how the on-chain world sees an unfunded token account — this is the
+/// one sanctioned "absent → 0" case, distinct from an RPC/parse failure which
+/// fails closed with an [`Error::Rpc`].
+///
+/// Returns the atomic `u64` amount (micro-USDC). Per the fintech rules, all
+/// downstream USDC comparisons stay in integer atomic units — this function
+/// never converts to a decimal float.
+pub async fn get_usdc_balance(
+    client: &Client,
+    rpc_url: &str,
+    owner_b58: &str,
+    mint_b58: &str,
+) -> Result<u64, Error> {
+    use crate::solana_types::{derive_ata, Pubkey};
+    use std::str::FromStr;
+
+    let owner = Pubkey::from_str(owner_b58)
+        .map_err(|e| Error::InvalidTransaction(format!("invalid owner pubkey: {e}")))?;
+    let mint = Pubkey::from_str(mint_b58)
+        .map_err(|e| Error::InvalidTransaction(format!("invalid mint pubkey: {e}")))?;
+
+    let ata = derive_ata(&owner, &mint, &Pubkey::TOKEN_PROGRAM_ID)
+        .ok_or_else(|| Error::InvalidTransaction("failed to derive owner USDC ATA".to_string()))?;
+    let ata_b58 = ata.to_string();
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTokenAccountBalance",
+        "params": [ata_b58, {"commitment": "confirmed"}],
+    });
+
+    let response = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    let result: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    // A non-existent ATA returns an RPC error ("could not find account" /
+    // "Invalid param: could not find account"). Treat that — and ONLY that —
+    // as a zero balance. Any other RPC error fails closed.
+    if let Some(error) = result.get("error") {
+        let msg = error.to_string().to_lowercase();
+        if msg.contains("could not find account") || msg.contains("invalid param") {
+            return Ok(0);
+        }
+        return Err(Error::Rpc(error.to_string()));
+    }
+
+    // `amount` is a *string* of atomic units in the RPC response — parse it as
+    // an integer; never go through an f64 (`uiAmount`) which would violate the
+    // atomic-only money-math rule.
+    let amount_str = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.get("amount"))
+        .and_then(|a| a.as_str())
+        .ok_or_else(|| {
+            Error::Rpc("getTokenAccountBalance did not return an amount string".to_string())
+        })?;
+
+    amount_str
+        .parse::<u64>()
+        .map_err(|e| Error::Rpc(format!("token amount is not a u64: {e}")))
+}
+
 /// Fetch the current confirmed slot via Solana JSON-RPC `getSlot`.
 ///
 /// Used by escrow verification to enforce a minimum buffer between the

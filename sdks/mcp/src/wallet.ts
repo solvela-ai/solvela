@@ -194,8 +194,9 @@ export async function resolveWallet(opts: ResolveWalletOptions): Promise<Resolve
       created: true,
       notice:
         `[solvela-mcp] Created a new Solvela wallet → ${persisted.address}. ` +
-        `Fund it with USDC-SPL on Solana — plus a little SOL (~0.01) for network fees — ` +
-        `to start paying for calls. Back it up: ${filePath} controls your funds.`,
+        `Fund it with USDC-SPL on Solana to start paying for calls — network gas is ` +
+        `covered by the gateway's faucet, so no SOL needed. ` +
+        `Back it up: ${filePath} controls your funds.`,
     };
   }
   // Lost the create race — adopt the winner's file.

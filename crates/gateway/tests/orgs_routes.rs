@@ -76,6 +76,7 @@ fn router_with_pool(pool: PgPool) -> Router {
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: Some(pool),
+        faucet: None,
         session_secret: vec![0u8; 32],
         replay_set: AppState::new_replay_set(),
         http_client: reqwest::Client::new(),
