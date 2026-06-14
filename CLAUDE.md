@@ -149,7 +149,7 @@ Next.js 16 + Tailwind + Recharts. Pages: Overview, Usage, Models, Wallet, Settin
 
 ## A2A Request Flow (POST /a2a, method: message/send)
 
-1. Agent discovers Solvela via `GET /.well-known/agent.json` (AgentCard with AP2 + x402 extensions)
+1. Agent discovers Solvela via `GET /.well-known/agent-card.json` (A2A v0.3 canonical path; `/.well-known/agent.json` is a backward-compat alias). The AgentCard carries AP2 + x402 extensions and a `url` field set from `SOLVELA_PUBLIC_URL` (falls back to `http://host:port`)
 2. Agent sends `message/send` JSON-RPC with text prompt → gateway computes cost → returns Task (`input-required`) with `x402.payment.required` metadata
 3. Agent signs Solana USDC-SPL transaction → sends `message/send` with `taskId` + `x402.payment.payload` metadata
 4. Gateway verifies payment (reuses facilitator), proxies to LLM provider → returns Task (`completed`) with artifacts + receipt

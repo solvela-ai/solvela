@@ -27,6 +27,15 @@ pub struct ServerConfig {
     /// Port to listen on (default: 8402).
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Public base URL the gateway is reachable at (e.g. `https://api.solvela.ai`).
+    ///
+    /// Used as the `url` field of the A2A AgentCard, which external agents and
+    /// registries follow to reach `/a2a`. When unset, the card falls back to
+    /// `http://{host}:{port}` — correct for local dev but NOT a public address
+    /// (the default bind host is `0.0.0.0`). Set via `SOLVELA_PUBLIC_URL` in any
+    /// deployment that publishes its card.
+    #[serde(default)]
+    pub public_url: Option<String>,
 }
 
 /// Solana network settings.
@@ -234,6 +243,7 @@ impl Default for AppConfig {
             server: ServerConfig {
                 host: default_host(),
                 port: default_port(),
+                public_url: None,
             },
             solana: SolanaConfig {
                 rpc_url: "https://api.devnet.solana.com".to_string(),

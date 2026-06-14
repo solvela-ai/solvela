@@ -1,6 +1,8 @@
 //! AgentCard endpoint — AP2 discovery for AI agents.
 //!
-//! Serves at `GET /.well-known/agent.json` per the A2A discovery convention.
+//! Served at the A2A v0.3 canonical path `GET /.well-known/agent-card.json`
+//! (RFC 8615), with `GET /.well-known/agent.json` kept as a backward-compatible
+//! alias for pre-v0.3 clients. Both routes resolve to the same handler.
 //! Advertises AP2 merchant role and x402 Solana settlement support.
 
 use std::sync::Arc;
@@ -13,17 +15,29 @@ use serde_json::json;
 use crate::a2a::types::{AP2_EXTENSION_URI, X402_EXTENSION_URI};
 use crate::AppState;
 
-/// `GET /.well-known/agent.json` — Return the A2A AgentCard.
+/// `GET /.well-known/agent-card.json` (and the `/.well-known/agent.json` alias)
+/// — Return the A2A AgentCard.
 pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut schemes = vec!["exact"];
     if state.escrow_claimer.is_some() {
         schemes.push("escrow");
     }
 
+    // The AgentCard `url` is the A2A service endpoint external agents/registries
+    // POST to. Prefer the configured public URL; the host:port fallback is for
+    // local dev only (the default bind host is 0.0.0.0, not publicly routable).
+    let url = match &state.config.server.public_url {
+        Some(u) => u.trim_end_matches('/').to_string(),
+        None => format!(
+            "http://{}:{}",
+            state.config.server.host, state.config.server.port
+        ),
+    };
+
     Json(json!({
         "name": "Solvela",
         "description": "Solana-native AI agent payment gateway — pay for LLM API calls with USDC-SPL via x402",
-        "url": format!("http://{}:{}", state.config.server.host, state.config.server.port),
+        "url": url,
         "version": "0.1.0",
         "capabilities": {
             "streaming": true,
@@ -136,13 +150,76 @@ supports_vision = false
     }
 
     fn test_app() -> axum::Router {
-        let state = make_state();
+        app_with_state(make_state())
+    }
+
+    /// Mirror production routing: the canonical A2A v0.3 path plus the
+    /// backward-compat alias, both bound to the same handler.
+    fn app_with_state(state: Arc<AppState>) -> axum::Router {
         axum::Router::new()
+            .route(
+                "/.well-known/agent-card.json",
+                axum::routing::get(super::agent_card),
+            )
             .route(
                 "/.well-known/agent.json",
                 axum::routing::get(super::agent_card),
             )
             .with_state(state)
+    }
+
+    async fn get_card(app: axum::Router, uri: &str) -> serde_json::Value {
+        let resp = app
+            .oneshot(
+                http::Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        // Generous cap: the card grows as skills/extensions are added; a tight
+        // cap would silently truncate and fail with a misleading JSON error.
+        let body = axum::body::to_bytes(resp.into_body(), 65_536)
+            .await
+            .expect("read body");
+        serde_json::from_slice(&body).expect("valid JSON")
+    }
+
+    /// The canonical v0.3 path serves the card, byte-identical to the alias.
+    #[tokio::test]
+    async fn test_agent_card_canonical_path_matches_alias() {
+        let canonical = get_card(test_app(), "/.well-known/agent-card.json").await;
+        let alias = get_card(test_app(), "/.well-known/agent.json").await;
+        assert_eq!(canonical["name"], "Solvela");
+        assert_eq!(
+            canonical, alias,
+            "canonical agent-card.json and agent.json alias must return identical cards"
+        );
+    }
+
+    /// When `public_url` is configured, the card's `url` is that value
+    /// (an external agent/registry follows it to reach `/a2a`).
+    #[tokio::test]
+    async fn test_agent_card_url_uses_public_url_when_set() {
+        let mut config = AppConfig::default();
+        config.server.public_url = Some("https://api.solvela.ai/".to_string());
+        let json = get_card(
+            app_with_state(make_state_with_config(config)),
+            "/.well-known/agent-card.json",
+        )
+        .await;
+        // Trailing slash trimmed.
+        assert_eq!(json["url"], "https://api.solvela.ai");
+    }
+
+    /// With no `public_url`, the card falls back to the host:port form (dev only).
+    #[tokio::test]
+    async fn test_agent_card_url_falls_back_to_host_port() {
+        let json = get_card(test_app(), "/.well-known/agent-card.json").await;
+        assert_eq!(json["url"], "http://0.0.0.0:8402");
     }
 
     #[tokio::test]

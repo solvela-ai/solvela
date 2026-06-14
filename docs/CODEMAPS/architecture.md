@@ -76,7 +76,7 @@ Has PAYMENT-SIGNATURE?
 ## Request Flow: POST /a2a (Agent-to-Agent Protocol)
 
 ```
-GET /.well-known/agent.json
+GET /.well-known/agent-card.json   (alias: /.well-known/agent.json)
     ↓ (returns AgentCard with AP2 + x402 extensions)
 Agent sends message/send JSON-RPC
     ↓

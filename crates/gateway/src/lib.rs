@@ -332,6 +332,11 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             get(routes::orgs::get_team_stats),
         )
         .route("/v1/orgs/{id}/stats", get(routes::orgs::get_org_stats))
+        // A2A v0.3 canonical AgentCard path (RFC 8615) + pre-v0.3 alias.
+        .route(
+            "/.well-known/agent-card.json",
+            get(a2a::agent_card::agent_card),
+        )
         .route("/.well-known/agent.json", get(a2a::agent_card::agent_card))
         .route("/a2a", post(a2a::jsonrpc::a2a_endpoint))
         .route("/metrics", get(routes::metrics::get_metrics))

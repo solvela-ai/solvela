@@ -11,7 +11,7 @@
 Routes as registered in `crates/gateway/src/lib.rs::build_router`.
 
 ```
-GET  /.well-known/agent.json
+GET  /.well-known/agent-card.json   (alias: /.well-known/agent.json)
 GET  /health
 POST /a2a
 
@@ -63,9 +63,9 @@ GET  /v1/orgs/{id}/audit-logs
 
 ## Public Routes
 
-### GET /.well-known/agent.json
+### GET /.well-known/agent-card.json (alias: /.well-known/agent.json)
 **Handler:** `a2a/agent_card.rs`  
-**Response:** AgentCard with AP2 + x402 extensions.
+**Response:** AgentCard with AP2 + x402 extensions. A2A v0.3 canonical path; the `agent.json` path is served as a backward-compat alias.
 ```json
 {
   "name": "Solvela Gateway",
