@@ -19,9 +19,27 @@ solvela mcp install --host=claude-desktop
 solvela mcp install --host=openclaw
 ```
 
-The installer writes the correct config for your host and prints a reminder to
-set `SOLANA_WALLET_KEY` in your shell environment (it is intentionally never
-written to disk by default):
+The installer writes the correct config for your host. **You do not need to
+generate a keypair or set any wallet env var to get started** — on first run the
+server resolves a non-custodial wallet automatically:
+
+1. If `SOLANA_WALLET_KEY` is set in the environment, that key is used (and no
+   file is read or created).
+2. Otherwise it reads `~/.solvela/wallet.json` if present (the same file the
+   `solvela` CLI uses — they share one wallet).
+3. If neither exists, it **generates a new ed25519 wallet and writes
+   `~/.solvela/wallet.json`** (mode `0600`, dir `0700`), then prints the new
+   address to stderr.
+
+After the first run, fund the printed address with **USDC-SPL on Solana plus a
+little SOL (~0.01) for network fees** to start paying for calls.
+
+> **Back up `~/.solvela/wallet.json` — it controls your funds.** Anyone who can
+> read that file can drain the wallet. The private key never leaves your
+> machine; only signed transactions reach the gateway.
+
+To use an existing keypair instead of the auto-created one, set it explicitly
+(it is intentionally never written to disk by the installer):
 
 ```bash
 export SOLANA_WALLET_KEY=<your-base58-keypair>
@@ -164,9 +182,9 @@ All configuration is via environment variables:
 | `SOLVELA_MAX_ESCROW_SESSION` | `20.0` | Cumulative session deposit cap in USDC (applies only when escrow mode is enabled) |
 | `SOLVELA_ESCROW_PROGRAM_ID` | required (when escrow enabled) | Base58 address of the Solvela escrow program on Solana |
 | `SOLVELA_RECIPIENT_WALLET` | required (when escrow enabled) | Base58 wallet address that receives escrow payments |
-| `SOLANA_WALLET_KEY` | required (when signing enabled) | Base58-encoded Solana keypair secret key |
+| `SOLANA_WALLET_KEY` | auto-resolved | Base58-encoded Solana keypair secret key. **Optional** — when unset (and signing is enabled) the server reads or auto-creates `~/.solvela/wallet.json`. Set it to override the on-disk wallet. |
 | `SOLANA_RPC_URL` | required (when signing enabled) | Solana RPC endpoint (e.g. `https://api.mainnet-beta.solana.com`) |
-| `SOLANA_WALLET_ADDRESS` | not configured | Wallet pubkey shown in `wallet_status` and `spending` |
+| `SOLANA_WALLET_ADDRESS` | derived from key | Display-only override. The address shown in `wallet_status` / `spending` is **derived from the resolved key**; if this env var is set and differs, the server logs a warning and uses the derived address. |
 
 ### Escrow Mode
 
@@ -224,7 +242,11 @@ rm ~/.solvela/mcp-session.json
 - **`auto`** (default) — The SDK prefers escrow deposits when the gateway advertises them, falling back to direct TransferChecked. Recommended for production.
 - **`escrow`** — Only use escrow payment schemes. Fails if the gateway does not advertise escrow.
 - **`direct`** — Only use direct USDC TransferChecked payment schemes. Ignores escrow offers.
-- **`off`** — Do not sign payments. Useful when the gateway runs with `dev_bypass_payment` enabled (development only). `SOLANA_WALLET_KEY` and `SOLANA_RPC_URL` are not required in this mode.
+- **`off`** — Do not sign payments. Useful when the gateway runs with `dev_bypass_payment` enabled (development only). `SOLANA_WALLET_KEY` and `SOLANA_RPC_URL` are not required in this mode, and **no wallet file is read or created**.
+
+In every mode except `off`, the wallet is resolved on startup using the
+precedence `SOLANA_WALLET_KEY` env → `~/.solvela/wallet.json` → auto-create. The
+displayed wallet address is always derived from the resolved key.
 
 ## Available Tools
 
@@ -281,7 +303,7 @@ Deposit USDC into a trustless escrow PDA on Solana for a future Solvela call. Th
 
 **Only visible when `SOLVELA_ESCROW_MODE=enabled`.**
 
-Requires `SOLANA_WALLET_KEY` and `SOLANA_RPC_URL` regardless of `SOLVELA_SIGNING_MODE`.
+Requires a signing wallet and `SOLANA_RPC_URL` regardless of `SOLVELA_SIGNING_MODE` (escrow always signs on-chain). The wallet is resolved the same way as for chat — `SOLANA_WALLET_KEY` env, then `~/.solvela/wallet.json`, auto-created if absent — even when `SOLVELA_SIGNING_MODE=off`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -383,9 +405,19 @@ Use a single MCP server instance per session file.
 
 ### Key storage model
 
-`SOLANA_WALLET_KEY` is a **hot-wallet secret**. Anyone who can read it can drain your USDC. Treat it with the same care as an SSH private key.
+Your wallet's private key is a **hot-wallet secret**. Anyone who can read it can
+drain your USDC. Treat it with the same care as an SSH private key.
 
-**The installer does NOT write `SOLANA_WALLET_KEY` to any config file by default.** The generated config intentionally omits the key. You must supply it through one of the secure paths below.
+**Default (auto-wallet):** when `SOLANA_WALLET_KEY` is not set, the server stores
+the key in `~/.solvela/wallet.json` (file mode `0600`, dir mode `0700`),
+auto-creating it on first run. This is the same file the `solvela` CLI uses, so
+the CLI and the MCP server share one wallet. The file is written atomically and
+is **never overwritten** once it exists. On load it is validated (the key must
+be exactly 64 bytes and its derived address must match the stored `address`); a
+corrupt or tampered file is rejected rather than used. **Back up
+`~/.solvela/wallet.json` and keep it `0600`.**
+
+**The installer does NOT write `SOLANA_WALLET_KEY` to any config file by default.** The generated config intentionally omits the key. To use an explicit key instead of the auto-created file, supply it through one of the secure paths below.
 
 **`--include-key` flag (dev/CI only):** Passing this flag writes a plaintext placeholder into the config file. The installer emits a prominent stderr warning. Only use this in isolated dev environments or ephemeral CI runners where the config file is never committed or shared. The placeholder must be replaced with your actual key before the MCP server will work.
 
@@ -409,10 +441,10 @@ Or store it in a `0600` file and source it from your profile.
 
 ### General rules
 
-- Never commit `SOLANA_WALLET_KEY` to version control. Add `*.env`, `.solvela/env`, and any file containing the key to `.gitignore`.
-- The MCP server never logs, echoes, or returns the key in tool responses. Stack traces and error messages are also sanitized.
+- Never commit `SOLANA_WALLET_KEY` or `~/.solvela/wallet.json` to version control. Add `*.env`, `.solvela/`, and any file containing the key to `.gitignore`.
+- The MCP server never logs, echoes, or returns the key in tool responses or startup notices (which print the **address only**). Stack traces and error messages are also sanitized.
 - The SDK zeroes secret key bytes in memory after signing.
-- Private key material flows only from environment variable into the signer — it is never passed through tool arguments (which are model-controlled).
+- Private key material flows only from the resolved wallet (env var or `~/.solvela/wallet.json`) into the signer — it is never passed through tool arguments (which are model-controlled).
 
 ## Testing
 

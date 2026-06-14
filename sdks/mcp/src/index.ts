@@ -18,9 +18,14 @@
  *   SOLVELA_ESCROW_MODE         Set to "enabled" to expose the deposit_escrow tool
  *   SOLVELA_MAX_ESCROW_DEPOSIT  Per-call deposit cap in USDC (default: 5.0)
  *   SOLVELA_MAX_ESCROW_SESSION  Cumulative session deposit cap in USDC (default: 20.0)
- *   SOLANA_WALLET_KEY           Base58 secret key (required unless SOLVELA_SIGNING_MODE=off)
+ *   SOLANA_WALLET_KEY           Base58 secret key. OPTIONAL: when unset (and
+ *                               SOLVELA_SIGNING_MODE != off) the server resolves
+ *                               ~/.solvela/wallet.json, auto-creating a
+ *                               non-custodial wallet on first run.
  *   SOLANA_RPC_URL              Solana RPC endpoint (required unless SOLVELA_SIGNING_MODE=off)
- *   SOLANA_WALLET_ADDRESS       Wallet pubkey shown in wallet_status / spending
+ *   SOLANA_WALLET_ADDRESS       Optional override for display only. The address
+ *                               shown is DERIVED from the resolved key; a
+ *                               mismatch logs a warning and the derived value wins.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -40,6 +45,8 @@ import { parseStrictUsdc } from './parse-amount.js';
 import { createPaymentHeader, decodePaymentHeader, isStubTransaction } from '@solvela/signer-core';
 import type { PaymentRequired, PaymentAccept } from '@solvela/signer-core';
 import { Connection, PublicKey } from '@solana/web3.js';
+
+import { resolveWallet } from './wallet.js';
 
 // ---------------------------------------------------------------------------
 // Bootstrap client from environment
@@ -133,6 +140,12 @@ if (maxEscrowSessionStr !== undefined) {
 
 // T-1K-B: Wire session store for persistence.
 const sessionStore = createSessionStore();
+
+// Resolved wallet address (source of truth, derived from the resolved key).
+// Populated in main() by resolveWallet() before the transport connects, so
+// every tool handler (which runs post-connect) sees a stable value. Stays
+// undefined in `off` mode when no key is configured.
+let resolvedWalletAddress: string | undefined;
 
 const client = new GatewayClient({
   apiUrl: process.env['SOLVELA_API_URL'] ?? process.env['RCR_API_URL'], // compat
@@ -245,7 +258,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'wallet_status': {
         const health = await client.health();
-        const walletAddress = process.env['SOLANA_WALLET_ADDRESS'] ?? 'not configured';
+        // Show the address DERIVED from the resolved key (source of truth), not
+        // the SOLANA_WALLET_ADDRESS env var (display-only, may be stale/mismatched).
+        const walletAddress = resolvedWalletAddress ?? 'not configured';
         const spend = client.spendSummary();
 
         const lines = [
@@ -638,14 +653,59 @@ function formatUsage(response: { model: string; usage?: { prompt_tokens: number;
 // ---------------------------------------------------------------------------
 
 async function main() {
-  // T1-D / T1-E: Startup validation — fail fast when signing is enabled without required keys.
+  // Auto-wallet: resolve (and, on first run, auto-create) a non-custodial
+  // wallet so a new user never has to generate a keypair or set an env var.
+  // Precedence: SOLANA_WALLET_KEY env > ~/.solvela/wallet.json > auto-generate.
+  // In `off` mode no wallet is required and none is created. The resolved key
+  // is published to process.env['SOLANA_WALLET_KEY'] so the existing signer
+  // read-path (signer-core via client.chat / deposit_escrow) plugs in
+  // identically — only signed txs ever leave the host.
   if (signingMode !== 'off') {
-    if (!process.env['SOLANA_WALLET_KEY']) {
+    let resolved;
+    try {
+      resolved = await resolveWallet({ signingMode });
+    } catch (err) {
+      // Fail closed — never sign with a half-resolved or tampered wallet.
       process.stderr.write(
-        'Fatal: SOLANA_WALLET_KEY is required when signing is enabled. Set SOLVELA_SIGNING_MODE=off to run without signing.\n',
+        `Fatal: could not resolve a Solana wallet: ${err instanceof Error ? err.message : String(err)}\n`,
       );
       process.exit(1);
+      return; // unreachable; satisfies the type narrower below
     }
+
+    if (resolved.privateKey === undefined || resolved.address === undefined) {
+      // Defensive: signing mode != off must always yield a usable wallet.
+      process.stderr.write(
+        'Fatal: wallet resolution returned no key while signing is enabled.\n',
+      );
+      process.exit(1);
+      return;
+    }
+
+    // If the user pinned SOLANA_WALLET_ADDRESS and it disagrees with the
+    // key-derived address, warn (possible misconfig) but proceed with derived.
+    const envAddress = process.env['SOLANA_WALLET_ADDRESS'];
+    if (envAddress !== undefined && envAddress !== '' && envAddress !== resolved.address) {
+      process.stderr.write(
+        `[solvela-mcp] WARN: SOLANA_WALLET_ADDRESS=${envAddress} does not match the ` +
+        `address derived from the resolved key (${resolved.address}). Using the derived address.\n`,
+      );
+    }
+
+    // Publish the resolved key + address to the env the existing read-path uses
+    // (signer-core reads SOLANA_WALLET_KEY; spendSummary reads SOLANA_WALLET_ADDRESS).
+    // The derived address overwrites any stale/mismatched env value so every
+    // display path is consistent with the key that actually signs.
+    process.env['SOLANA_WALLET_KEY'] = resolved.privateKey;
+    process.env['SOLANA_WALLET_ADDRESS'] = resolved.address;
+    resolvedWalletAddress = resolved.address;
+
+    // Startup notice → stderr only (stdout must stay clean for stdio transport).
+    // Address only; the private key is NEVER logged.
+    if (resolved.notice) {
+      process.stderr.write(`${resolved.notice}\n`);
+    }
+
     if (!process.env['SOLANA_RPC_URL']) {
       process.stderr.write(
         'Fatal: SOLANA_RPC_URL is required when signing is enabled. Set SOLVELA_SIGNING_MODE=off to run without signing.\n',
@@ -686,13 +746,36 @@ async function main() {
       );
       process.exit(1);
     }
-    // SOLANA_WALLET_KEY and SOLANA_RPC_URL are also required when escrow is enabled,
-    // even if SOLVELA_SIGNING_MODE=off (escrow always needs real signing).
+    // Escrow always needs a real signing wallet, even when SOLVELA_SIGNING_MODE=off
+    // (the deposit_escrow path signs + broadcasts on-chain). If the signing-mode
+    // block above already resolved a wallet, SOLANA_WALLET_KEY and
+    // resolvedWalletAddress are set; otherwise (off mode + escrow) resolve one
+    // now, forcing file resolution/auto-create with mode 'auto'.
     if (!process.env['SOLANA_WALLET_KEY']) {
-      process.stderr.write(
-        'Fatal: SOLANA_WALLET_KEY required when SOLVELA_ESCROW_MODE=enabled.\n',
-      );
-      process.exit(1);
+      let resolved;
+      try {
+        resolved = await resolveWallet({ signingMode: 'auto' });
+      } catch (err) {
+        process.stderr.write(
+          `Fatal: SOLVELA_ESCROW_MODE=enabled but could not resolve a wallet: ` +
+          `${err instanceof Error ? err.message : String(err)}\n`,
+        );
+        process.exit(1);
+        return;
+      }
+      if (resolved.privateKey === undefined || resolved.address === undefined) {
+        process.stderr.write(
+          'Fatal: wallet resolution returned no key while SOLVELA_ESCROW_MODE=enabled.\n',
+        );
+        process.exit(1);
+        return;
+      }
+      process.env['SOLANA_WALLET_KEY'] = resolved.privateKey;
+      process.env['SOLANA_WALLET_ADDRESS'] = resolved.address;
+      resolvedWalletAddress = resolved.address;
+      if (resolved.notice) {
+        process.stderr.write(`${resolved.notice}\n`);
+      }
     }
     if (!process.env['SOLANA_RPC_URL']) {
       process.stderr.write(
