@@ -73,9 +73,10 @@ jobs:
             const ALLOW = ['sky64', 'dependabot[bot]'];
 
             // Money-path surfaces: code that signs / verifies / settles payments,
-            // computes cost, or touches escrow / USDC. A PR touching ANY of these
-            // is NOT auto-approved — it requires a human review even on green CI,
-            // because here CI is not a sufficient gate (funds move).
+            // computes cost, touches escrow / USDC, or handles secret key material
+            // (wallets / keypairs / signers). A PR touching ANY of these is NOT
+            // auto-approved — it requires a human review even on green CI, because
+            // here CI is not a sufficient gate (funds move, or keys are at risk).
             const MONEY_PATH = [
               /^crates\/x402\//,
               /^crates\/escrow-tx\//,
@@ -86,7 +87,10 @@ jobs:
               /^crates\/gateway\/src\/escrow\//,
               /^crates\/gateway\/src\/a2a\//,
               /^crates\/gateway\/src\/usage\.rs$/,
-              /(^|\/)signer\.(rs|ts|py|go)$/, // SDK signing modules (any language)
+              /(^|\/)signer\.(rs|ts|py|go)$/, // per-language SDK signing modules
+              /^sdks\/signer-core\//,         // shared cross-language signer pkg (sign/scheme-filter/stub-guard fall through signer.* above)
+              /(^|\/)(wallet|keypair)[\w-]*\.(rs|ts|py|go)$/, // wallet/keypair modules that load/create/hold secret keys (e.g. sdks/mcp/src/wallet.ts, missed on #577)
+              /(^|\/)adapters\/local\.ts$/,   // dev/test local wallet adapter — decodes raw secret-key bytes
               /^sdks\/.*\/escrow/,            // SDK escrow paths
             ];
 
