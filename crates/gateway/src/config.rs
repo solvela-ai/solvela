@@ -16,6 +16,94 @@ pub struct AppConfig {
     /// Caching configuration (response/semantic cache).
     #[serde(default)]
     pub cache: CacheSettings,
+    /// Gas-drip faucet configuration (`[faucet]` / `SOLVELA_FAUCET__*`).
+    #[serde(default)]
+    pub faucet: FaucetConfig,
+}
+
+/// Gas-drip faucet configuration (`[faucet]`).
+///
+/// The faucet drips a dust of native SOL to USDC-funded agent wallets so the
+/// agent (the on-chain fee payer) can pay its own gas — the user funds USDC
+/// only. Disabled by default; requires BOTH `enabled = true` AND a configured
+/// `source_key` (`SOLVELA_FAUCET__SOURCE_KEY`) to be active. A DB is also
+/// required for once-per-wallet idempotency (the route disables itself with a
+/// `warn!` when no `DATABASE_URL` is configured).
+///
+/// `source_key` is a dedicated gas keypair — it is deliberately NOT the
+/// fee-payer reserve (which pays providers and is regulatory-sensitive). When
+/// `source_key` is unset the faucet is disabled even if `enabled = true`.
+///
+/// `Debug` is manually implemented to redact `source_key` (an ed25519 private
+/// key that must never appear in logs or panic output).
+#[derive(Clone, Deserialize)]
+pub struct FaucetConfig {
+    /// Master switch. Default `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Lamports dripped per funded wallet. Default `10_000_000` (0.01 SOL).
+    #[serde(default = "default_drip_lamports")]
+    pub drip_lamports: u64,
+    /// Minimum wallet USDC balance (atomic, 6-decimal) to qualify — the abuse
+    /// moat. Default `100_000` (0.10 USDC).
+    #[serde(default = "default_usdc_floor_atomic")]
+    pub usdc_floor_atomic: u64,
+    /// SOL low-water mark (lamports): only drip when the wallet's SOL balance is
+    /// strictly below this. Default `3_000_000`.
+    #[serde(default = "default_sol_low_water_lamports")]
+    pub sol_low_water_lamports: u64,
+    /// Global per-UTC-day cap on total lamports dripped. Default
+    /// `1_000_000_000` (1 SOL).
+    #[serde(default = "default_daily_cap_lamports")]
+    pub daily_cap_lamports: u64,
+    /// Base58-encoded 64-byte dedicated gas keypair. `None` (or empty) disables
+    /// the faucet. Loaded from `SOLVELA_FAUCET__SOURCE_KEY`. SECRET — redacted
+    /// in `Debug`, never logged.
+    #[serde(default)]
+    pub source_key: Option<String>,
+}
+
+impl Default for FaucetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            drip_lamports: default_drip_lamports(),
+            usdc_floor_atomic: default_usdc_floor_atomic(),
+            sol_low_water_lamports: default_sol_low_water_lamports(),
+            daily_cap_lamports: default_daily_cap_lamports(),
+            source_key: None,
+        }
+    }
+}
+
+impl FaucetConfig {
+    /// Whether the faucet has the minimum config to operate: enabled AND a
+    /// non-empty source key. (A DB is additionally required and checked at the
+    /// route, since the pool lives on `AppState`, not the config.)
+    pub fn is_active(&self) -> bool {
+        self.enabled
+            && self
+                .source_key
+                .as_ref()
+                .map(|k| !k.is_empty())
+                .unwrap_or(false)
+    }
+}
+
+impl fmt::Debug for FaucetConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FaucetConfig")
+            .field("enabled", &self.enabled)
+            .field("drip_lamports", &self.drip_lamports)
+            .field("usdc_floor_atomic", &self.usdc_floor_atomic)
+            .field("sol_low_water_lamports", &self.sol_low_water_lamports)
+            .field("daily_cap_lamports", &self.daily_cap_lamports)
+            .field(
+                "source_key",
+                &self.source_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 /// HTTP server settings.
@@ -262,6 +350,7 @@ impl Default for AppConfig {
             },
             monitor: MonitorConfig::default(),
             cache: CacheSettings::default(),
+            faucet: FaucetConfig::default(),
         }
     }
 }
@@ -284,6 +373,22 @@ fn default_semantic_ttl_secs() -> u64 {
 
 fn default_port() -> u16 {
     8402
+}
+
+fn default_drip_lamports() -> u64 {
+    10_000_000 // 0.01 SOL
+}
+
+fn default_usdc_floor_atomic() -> u64 {
+    100_000 // 0.10 USDC (6-decimal atomic)
+}
+
+fn default_sol_low_water_lamports() -> u64 {
+    3_000_000
+}
+
+fn default_daily_cap_lamports() -> u64 {
+    1_000_000_000 // 1 SOL
 }
 
 fn default_usdc_mint() -> String {
@@ -662,6 +767,118 @@ recipient_wallet = ""
         assert!(
             debug_output.contains("2 keys REDACTED"),
             "debug should show redacted key count"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Gas-drip faucet config ([faucet] / SOLVELA_FAUCET__*)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn faucet_defaults_off_and_conservative() {
+        let config = AppConfig::default();
+        assert!(
+            !config.faucet.enabled,
+            "faucet MUST default off — zero behaviour change"
+        );
+        assert_eq!(config.faucet.drip_lamports, 10_000_000);
+        assert_eq!(config.faucet.usdc_floor_atomic, 100_000);
+        assert_eq!(config.faucet.sol_low_water_lamports, 3_000_000);
+        assert_eq!(config.faucet.daily_cap_lamports, 1_000_000_000);
+        assert!(config.faucet.source_key.is_none());
+    }
+
+    #[test]
+    fn faucet_is_active_requires_enabled_and_source_key() {
+        // Disabled (default) → not active even with a key.
+        let mut f = FaucetConfig {
+            source_key: Some("some-key".to_string()),
+            ..FaucetConfig::default()
+        };
+        assert!(!f.is_active(), "disabled faucet must not be active");
+
+        // Enabled but no source key → not active (do NOT reuse the fee-payer reserve).
+        f.enabled = true;
+        f.source_key = None;
+        assert!(
+            !f.is_active(),
+            "enabled faucet without a source key must not be active"
+        );
+
+        // Enabled but EMPTY source key → not active.
+        f.source_key = Some(String::new());
+        assert!(
+            !f.is_active(),
+            "empty source key must not activate the faucet"
+        );
+
+        // Enabled AND non-empty source key → active.
+        f.source_key = Some("dedicated-gas-key".to_string());
+        assert!(f.is_active(), "enabled + source key must be active");
+    }
+
+    #[test]
+    fn faucet_parses_from_toml() {
+        let toml = r#"
+[server]
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+recipient_wallet = ""
+[providers]
+[faucet]
+enabled = true
+drip_lamports = 5000000
+usdc_floor_atomic = 250000
+sol_low_water_lamports = 2000000
+daily_cap_lamports = 500000000
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("valid config TOML");
+        assert!(config.faucet.enabled);
+        assert_eq!(config.faucet.drip_lamports, 5_000_000);
+        assert_eq!(config.faucet.usdc_floor_atomic, 250_000);
+        assert_eq!(config.faucet.sol_low_water_lamports, 2_000_000);
+        assert_eq!(config.faucet.daily_cap_lamports, 500_000_000);
+    }
+
+    #[test]
+    fn faucet_debug_redacts_source_key() {
+        let f = FaucetConfig {
+            enabled: true,
+            source_key: Some("5KhPpRwmBMaRrjmVyPmvPqEBPcSxR3Z7ZuNbxbT5PFgT".to_string()),
+            ..FaucetConfig::default()
+        };
+        let debug_output = format!("{f:?}");
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug must redact source_key: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("5KhPpRwmBMaRrjmVyPmvPqEBPcSxR3Z7ZuNbxbT5PFgT"),
+            "Debug must not leak source_key: {debug_output}"
+        );
+        // Non-secret fields still visible.
+        assert!(debug_output.contains("drip_lamports"));
+    }
+
+    #[test]
+    fn faucet_debug_none_source_key_shows_none() {
+        let f = FaucetConfig::default();
+        let debug_output = format!("{f:?}");
+        assert!(
+            !debug_output.contains("[REDACTED]"),
+            "no source key → no REDACTED marker: {debug_output}"
+        );
+        assert!(debug_output.contains("None"));
+    }
+
+    #[test]
+    fn app_config_debug_does_not_leak_faucet_source_key() {
+        let mut config = AppConfig::default();
+        config.faucet.source_key = Some("super-secret-gas-key".to_string());
+        let debug_output = format!("{config:?}");
+        assert!(
+            !debug_output.contains("super-secret-gas-key"),
+            "AppConfig debug must not leak the faucet source key"
         );
     }
 

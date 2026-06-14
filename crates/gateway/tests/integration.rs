@@ -539,6 +539,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -593,6 +594,7 @@ fn test_app_with_usdc_mint_and_providers(mint: &str, providers: ProviderRegistry
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -890,6 +892,7 @@ fn test_app_with_provider_registry_and_exact_verifier(
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -973,6 +976,7 @@ fn app_with_semantic_cache(sem: Arc<gateway::cache::semantic::SemanticCache>) ->
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -1285,6 +1289,7 @@ fn app_with_semantic_cache_and_escrow(
         fee_payer_pool: Some(test_fee_payer_pool),
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -1362,6 +1367,7 @@ fn app_with_semantic_cache_escrow_and_db_pool(
         fee_payer_pool: Some(test_fee_payer_pool),
         nonce_pool: None,
         db_pool: Some(pool),
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -2023,6 +2029,7 @@ fn test_app_with_provider_registry_and_escrow_verifier(
         fee_payer_pool: Some(test_fee_payer_pool),
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -2104,6 +2111,7 @@ fn test_app_with_escrow_and_usdc_mint(mint: &str) -> axum::Router {
         fee_payer_pool: Some(test_fee_payer_pool),
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -2572,6 +2580,7 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: Some(pool.clone()),
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -4955,6 +4964,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         fee_payer_pool: None,
         nonce_pool: Some(Arc::new(pool)),
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -6989,6 +6999,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         fee_payer_pool: Some(test_fee_payer_pool),
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -7155,6 +7166,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         fee_payer_pool: Some(test_fee_payer_pool),
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -7391,6 +7403,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -7781,6 +7794,7 @@ async fn test_proxy_require_tenant_wallet_rejected_before_settlement() {
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -9303,6 +9317,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -9951,6 +9966,7 @@ fn test_app_with_free_limit(free_max: u32) -> axum::Router {
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -10307,6 +10323,7 @@ async fn dev_bypass_still_works() {
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -10389,6 +10406,7 @@ fn test_app_with_global_cap(global_cap: u32) -> axum::Router {
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -10515,6 +10533,7 @@ async fn free_per_ip_and_global_cap_are_independent() {
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -11385,6 +11404,7 @@ fn test_app_with_db_pool(
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: Some(pool),
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -11933,6 +11953,7 @@ fn test_app_with_receipts_limit(max: u32) -> axum::Router {
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: None,
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -12310,6 +12331,7 @@ fn a2a_app_with_redis_db_and_providers(
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: Some(pool),
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -12709,6 +12731,7 @@ fn a2a_app_with_verifier_and_db(
         fee_payer_pool: None,
         nonce_pool: None,
         db_pool: Some(pool),
+        faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
         replay_set: AppState::new_replay_set(),
@@ -13262,3 +13285,284 @@ async fn a2a_provider_failure_after_settle_writes_ledger_and_holds_lock() {
 // There is therefore no honest end-to-end trigger; the arm's fail-closed
 // behaviour is verified by inspection (it returns ERR_PAYMENT_FAILED, never
 // `false`). See the F2 comment on the `None` arm in `a2a/handler.rs`.
+
+// ===========================================================================
+// Gas-drip faucet — POST /v1/faucet/gas (through the real route)
+// ===========================================================================
+//
+// These drive the faucet end-to-end through `build_router` + `oneshot`, with
+// the on-chain RPC reads + send and the DB ledger mocked via the public
+// `GasSource` / `GasLedger` traits. No live server, no live RPC, no live DB.
+mod faucet_route_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use gateway::routes::faucet::{Faucet, FaucetError, FaucetParams, GasLedger, GasSource};
+
+    /// A real, valid base58 Solana pubkey to fund.
+    const FAUCET_WALLET: &str = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+
+    fn faucet_params() -> FaucetParams {
+        FaucetParams {
+            drip_lamports: 10_000_000,
+            usdc_floor_atomic: 100_000,
+            sol_low_water_lamports: 3_000_000,
+            daily_cap_lamports: 1_000_000_000,
+        }
+    }
+
+    #[derive(Default)]
+    struct MockLedger {
+        reserved: Mutex<HashMap<String, Option<String>>>,
+        day_total: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl GasLedger for MockLedger {
+        async fn reserve(&self, w: &str, lamports: u64) -> Result<bool, FaucetError> {
+            let mut g = self.reserved.lock().unwrap();
+            if g.contains_key(w) {
+                return Ok(false);
+            }
+            g.insert(w.to_string(), None);
+            self.day_total
+                .fetch_add(lamports as usize, Ordering::SeqCst);
+            Ok(true)
+        }
+        async fn delete_reservation(&self, w: &str) -> Result<(), FaucetError> {
+            let mut g = self.reserved.lock().unwrap();
+            if matches!(g.get(w), Some(None)) {
+                g.remove(w);
+            }
+            Ok(())
+        }
+        async fn day_total_lamports(&self) -> Result<u64, FaucetError> {
+            Ok(self.day_total.load(Ordering::SeqCst) as u64)
+        }
+        async fn record_signature(&self, w: &str, sig: &str) -> Result<(), FaucetError> {
+            self.reserved
+                .lock()
+                .unwrap()
+                .insert(w.to_string(), Some(sig.to_string()));
+            Ok(())
+        }
+        async fn prior_signature(&self, w: &str) -> Result<Option<String>, FaucetError> {
+            Ok(self.reserved.lock().unwrap().get(w).cloned().flatten())
+        }
+    }
+
+    struct MockSource {
+        usdc: u64,
+        sol: u64,
+        send_ok: bool,
+        sends: AtomicUsize,
+    }
+    impl MockSource {
+        fn new(usdc: u64, sol: u64, send_ok: bool) -> Self {
+            Self {
+                usdc,
+                sol,
+                send_ok,
+                sends: AtomicUsize::new(0),
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl GasSource for MockSource {
+        async fn sol_balance(&self, _w: &str) -> Result<u64, FaucetError> {
+            Ok(self.sol)
+        }
+        async fn usdc_balance(&self, _w: &str) -> Result<u64, FaucetError> {
+            Ok(self.usdc)
+        }
+        async fn send_drip(&self, _w: &str, _l: u64) -> Result<String, FaucetError> {
+            self.sends.fetch_add(1, Ordering::SeqCst);
+            if self.send_ok {
+                Ok("FaucetRouteSig".to_string())
+            } else {
+                Err(FaucetError::Rpc("forced send failure".to_string()))
+            }
+        }
+    }
+
+    /// Build an app whose `AppState.faucet` is the provided `Faucet`.
+    fn app_with_faucet(faucet: Option<Arc<Faucet>>) -> axum::Router {
+        let (_, state) = test_app_with_state();
+        // Rebuild AppState with the faucet swapped in. We can't mutate the Arc,
+        // so construct a fresh state mirroring test_app_with_state but with the
+        // faucet field set.
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML)
+            .unwrap()
+            .with_gateway_recipient(TEST_RECIPIENT_WALLET)
+            .unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        let _ = state; // discard the default state; we only reused helpers above
+
+        let new_state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator,
+            usage: gateway::usage::UsageTracker::noop(),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            faucet,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: Some(gateway::secret::AdminToken::new(
+                TEST_ADMIN_TOKEN.to_string(),
+            )),
+            api_key_hmac_secret: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        build_router(
+            Arc::clone(&new_state),
+            RateLimiter::new(RateLimitConfig::default()),
+        )
+    }
+
+    async fn post_faucet(app: axum::Router, wallet: &str) -> (StatusCode, serde_json::Value) {
+        let body = format!(r#"{{"wallet":"{wallet}"}}"#);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/faucet/gas")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, json)
+    }
+
+    fn wired_faucet(source: Arc<MockSource>, ledger: Arc<MockLedger>) -> Arc<Faucet> {
+        Arc::new(Faucet::new(faucet_params(), source, ledger))
+    }
+
+    #[tokio::test]
+    async fn route_disabled_when_no_faucet_configured() {
+        // No faucet on AppState → disabled, regardless of wallet.
+        let app = app_with_faucet(None);
+        let (status, json) = post_faucet(app, FAUCET_WALLET).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["funded"], serde_json::json!(false));
+        assert_eq!(json["reason"], serde_json::json!("disabled"));
+    }
+
+    #[tokio::test]
+    async fn route_happy_path_funds_once() {
+        let source = Arc::new(MockSource::new(100_000, 0, true));
+        let ledger = Arc::new(MockLedger::default());
+        let app = app_with_faucet(Some(wired_faucet(source.clone(), ledger)));
+        let (status, json) = post_faucet(app, FAUCET_WALLET).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["funded"], serde_json::json!(true));
+        assert_eq!(json["tx_signature"], serde_json::json!("FaucetRouteSig"));
+        assert_eq!(json["lamports"], serde_json::json!(10_000_000u64));
+        assert_eq!(source.sends.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn route_bad_wallet_400() {
+        let source = Arc::new(MockSource::new(100_000, 0, true));
+        let ledger = Arc::new(MockLedger::default());
+        let app = app_with_faucet(Some(wired_faucet(source.clone(), ledger)));
+        let (status, json) = post_faucet(app, "not-a-pubkey!!!").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["funded"], serde_json::json!(false));
+        assert_eq!(json["reason"], serde_json::json!("invalid_wallet"));
+        assert_eq!(source.sends.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn route_insufficient_usdc_declines() {
+        let source = Arc::new(MockSource::new(99_999, 0, true)); // below floor
+        let ledger = Arc::new(MockLedger::default());
+        let app = app_with_faucet(Some(wired_faucet(source.clone(), ledger)));
+        let (status, json) = post_faucet(app, FAUCET_WALLET).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["funded"], serde_json::json!(false));
+        assert_eq!(json["reason"], serde_json::json!("insufficient_usdc"));
+        assert_eq!(source.sends.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn route_already_has_sol_declines() {
+        let source = Arc::new(MockSource::new(100_000, 5_000_000, true)); // above low-water
+        let ledger = Arc::new(MockLedger::default());
+        let app = app_with_faucet(Some(wired_faucet(source.clone(), ledger)));
+        let (status, json) = post_faucet(app, FAUCET_WALLET).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["reason"], serde_json::json!("already_has_sol"));
+        assert_eq!(source.sends.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn route_daily_cap_declines() {
+        let source = Arc::new(MockSource::new(100_000, 0, true));
+        let ledger = Arc::new(MockLedger::default());
+        ledger.day_total.store(2_000_000_000, Ordering::SeqCst); // over cap
+        let app = app_with_faucet(Some(wired_faucet(source.clone(), ledger)));
+        let (status, json) = post_faucet(app, FAUCET_WALLET).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["reason"], serde_json::json!("daily_cap"));
+        assert_eq!(source.sends.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn route_already_funded_on_second_call() {
+        let source = Arc::new(MockSource::new(100_000, 0, true));
+        let ledger = Arc::new(MockLedger::default());
+        let faucet = wired_faucet(source.clone(), ledger.clone());
+
+        // First call funds.
+        let app1 = app_with_faucet(Some(faucet.clone()));
+        let (_, json1) = post_faucet(app1, FAUCET_WALLET).await;
+        assert_eq!(json1["funded"], serde_json::json!(true));
+
+        // Second call (same wallet, shared ledger) hits the reservation conflict.
+        let app2 = app_with_faucet(Some(faucet));
+        let (status, json2) = post_faucet(app2, FAUCET_WALLET).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json2["funded"], serde_json::json!(false));
+        assert_eq!(json2["reason"], serde_json::json!("already_funded"));
+        assert_eq!(json2["tx_signature"], serde_json::json!("FaucetRouteSig"));
+        assert_eq!(source.sends.load(Ordering::SeqCst), 1, "never double-drip");
+    }
+
+    #[tokio::test]
+    async fn route_send_failure_502() {
+        let source = Arc::new(MockSource::new(100_000, 0, false)); // send fails
+        let ledger = Arc::new(MockLedger::default());
+        let app = app_with_faucet(Some(wired_faucet(source.clone(), ledger.clone())));
+        let (status, json) = post_faucet(app, FAUCET_WALLET).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(json["reason"], serde_json::json!("send_failed"));
+        // Reservation rolled back so a retry is possible.
+        assert!(!ledger.reserved.lock().unwrap().contains_key(FAUCET_WALLET));
+    }
+}

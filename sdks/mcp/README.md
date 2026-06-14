@@ -31,8 +31,10 @@ server resolves a non-custodial wallet automatically:
    `~/.solvela/wallet.json`** (mode `0600`, dir `0700`), then prints the new
    address to stderr.
 
-After the first run, fund the printed address with **USDC-SPL on Solana plus a
-little SOL (~0.01) for network fees** to start paying for calls.
+After the first run, fund the printed address with **USDC-SPL on Solana** to
+start paying for calls. You do **not** need any SOL — network gas is covered by
+the gateway's gas-drip faucet, which sends a dust of SOL to USDC-funded wallets
+automatically on startup.
 
 > **Back up `~/.solvela/wallet.json` — it controls your funds.** Anyone who can
 > read that file can drain the wallet. The private key never leaves your

@@ -47,6 +47,7 @@ import type { PaymentRequired, PaymentAccept } from '@solvela/signer-core';
 import { Connection, PublicKey } from '@solana/web3.js';
 
 import { resolveWallet } from './wallet.js';
+import { ensureGas } from './ensure-gas.js';
 
 // ---------------------------------------------------------------------------
 // Bootstrap client from environment
@@ -146,6 +147,16 @@ const sessionStore = createSessionStore();
 // every tool handler (which runs post-connect) sees a stable value. Stays
 // undefined in `off` mode when no key is configured.
 let resolvedWalletAddress: string | undefined;
+
+// Resolved wallet private key (base58 secret). Captured in main() alongside
+// resolvedWalletAddress, BEFORE the transport connects. The deposit_escrow
+// handler reads THIS, never `process.env['SOLANA_WALLET_KEY']` at call time:
+// re-reading env worked only by relying on main() writing the key back to env
+// before connect — a fragile implicit ordering. The private key is NEVER logged
+// or returned; only signed txs leave the host. Stays undefined when no signing
+// wallet is configured (handler then surfaces the "requires SOLANA_WALLET_KEY"
+// error, preserving existing behaviour).
+let resolvedPrivateKey: string | undefined;
 
 const client = new GatewayClient({
   apiUrl: process.env['SOLVELA_API_URL'] ?? process.env['RCR_API_URL'], // compat
@@ -360,9 +371,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           );
         }
 
-        // deposit_escrow always requires real signing — SOLANA_WALLET_KEY and SOLANA_RPC_URL
-        // must be present regardless of SOLVELA_SIGNING_MODE.
-        const privateKey = process.env['SOLANA_WALLET_KEY'];
+        // deposit_escrow always requires real signing — a wallet key and
+        // SOLANA_RPC_URL must be present regardless of SOLVELA_SIGNING_MODE.
+        // Read the key captured by main() (resolvedPrivateKey), NOT
+        // process.env['SOLANA_WALLET_KEY'] at call time: the latter only worked
+        // because main() writes the resolved key back to env before the
+        // transport connects — a fragile implicit ordering. Using the resolved
+        // value removes that coupling.
+        const privateKey = resolvedPrivateKey;
         if (!privateKey) {
           throw new McpError(
             ErrorCode.InvalidRequest,
@@ -670,7 +686,7 @@ async function main() {
         `Fatal: could not resolve a Solana wallet: ${err instanceof Error ? err.message : String(err)}\n`,
       );
       process.exit(1);
-      return; // unreachable; satisfies the type narrower below
+      return; // unreachable (process.exit is typed `never`); kept as an explicit no-fall-through guard
     }
 
     if (resolved.privateKey === undefined || resolved.address === undefined) {
@@ -699,6 +715,9 @@ async function main() {
     process.env['SOLANA_WALLET_KEY'] = resolved.privateKey;
     process.env['SOLANA_WALLET_ADDRESS'] = resolved.address;
     resolvedWalletAddress = resolved.address;
+    // Capture the resolved key for the deposit_escrow handler (read directly,
+    // not via env, at call time).
+    resolvedPrivateKey = resolved.privateKey;
 
     // Startup notice → stderr only (stdout must stay clean for stdio transport).
     // Address only; the private key is NEVER logged.
@@ -711,6 +730,25 @@ async function main() {
         'Fatal: SOLANA_RPC_URL is required when signing is enabled. Set SOLVELA_SIGNING_MODE=off to run without signing.\n',
       );
       process.exit(1);
+    }
+
+    // Gas top-up (best-effort, once at startup). The gateway's faucet drips a
+    // dust of SOL to USDC-funded wallets so the agent can pay its own network
+    // gas as the on-chain fee payer — the user funds USDC only. ANY failure
+    // (faucet disabled/unreachable/declined) is logged and swallowed: the agent
+    // would just get the existing insufficient-SOL behaviour on its first call.
+    // Never blocks startup. Only signed txs / public reads leave the host.
+    try {
+      await ensureGas({
+        address: resolvedWalletAddress,
+        gatewayUrl: client.apiUrl,
+        rpcUrl: process.env['SOLANA_RPC_URL'] as string,
+      });
+    } catch (err) {
+      // Defensive: ensureGas is best-effort and should not throw, but a bug
+      // there must NEVER take down startup.
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[solvela-mcp] gas: ensureGas unexpected error (${msg}); continuing.\n`);
     }
   }
 
@@ -773,9 +811,18 @@ async function main() {
       process.env['SOLANA_WALLET_KEY'] = resolved.privateKey;
       process.env['SOLANA_WALLET_ADDRESS'] = resolved.address;
       resolvedWalletAddress = resolved.address;
+      resolvedPrivateKey = resolved.privateKey;
       if (resolved.notice) {
         process.stderr.write(`${resolved.notice}\n`);
       }
+    }
+    // Capture the key for the handler. In the common path the block above (or
+    // the signing-mode block earlier) already set resolvedPrivateKey; this also
+    // covers the case where the user pre-set SOLANA_WALLET_KEY in env (the block
+    // above was skipped) — we capture it ONCE here at startup so the handler
+    // never re-reads env at call time.
+    if (resolvedPrivateKey === undefined) {
+      resolvedPrivateKey = process.env['SOLANA_WALLET_KEY'];
     }
     if (!process.env['SOLANA_RPC_URL']) {
       process.stderr.write(

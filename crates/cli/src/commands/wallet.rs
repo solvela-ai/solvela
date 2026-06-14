@@ -88,7 +88,7 @@ pub async fn init() -> Result<()> {
     println!("Saved to:  {}", wallet_file().display());
     println!();
     println!("Fund this address with USDC-SPL on Solana to start using AI models.");
-    println!("Solana devnet faucet: https://faucet.solana.com");
+    println!("No SOL needed — network gas is covered by the gateway's gas-drip faucet.");
     Ok(())
 }
 
