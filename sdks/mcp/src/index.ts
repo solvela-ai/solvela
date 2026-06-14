@@ -148,6 +148,16 @@ const sessionStore = createSessionStore();
 // undefined in `off` mode when no key is configured.
 let resolvedWalletAddress: string | undefined;
 
+// Resolved wallet private key (base58 secret). Captured in main() alongside
+// resolvedWalletAddress, BEFORE the transport connects. The deposit_escrow
+// handler reads THIS, never `process.env['SOLANA_WALLET_KEY']` at call time:
+// re-reading env worked only by relying on main() writing the key back to env
+// before connect — a fragile implicit ordering. The private key is NEVER logged
+// or returned; only signed txs leave the host. Stays undefined when no signing
+// wallet is configured (handler then surfaces the "requires SOLANA_WALLET_KEY"
+// error, preserving existing behaviour).
+let resolvedPrivateKey: string | undefined;
+
 const client = new GatewayClient({
   apiUrl: process.env['SOLVELA_API_URL'] ?? process.env['RCR_API_URL'], // compat
   sessionBudget,
@@ -361,9 +371,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           );
         }
 
-        // deposit_escrow always requires real signing — SOLANA_WALLET_KEY and SOLANA_RPC_URL
-        // must be present regardless of SOLVELA_SIGNING_MODE.
-        const privateKey = process.env['SOLANA_WALLET_KEY'];
+        // deposit_escrow always requires real signing — a wallet key and
+        // SOLANA_RPC_URL must be present regardless of SOLVELA_SIGNING_MODE.
+        // Read the key captured by main() (resolvedPrivateKey), NOT
+        // process.env['SOLANA_WALLET_KEY'] at call time: the latter only worked
+        // because main() writes the resolved key back to env before the
+        // transport connects — a fragile implicit ordering. Using the resolved
+        // value removes that coupling.
+        const privateKey = resolvedPrivateKey;
         if (!privateKey) {
           throw new McpError(
             ErrorCode.InvalidRequest,
@@ -700,6 +715,9 @@ async function main() {
     process.env['SOLANA_WALLET_KEY'] = resolved.privateKey;
     process.env['SOLANA_WALLET_ADDRESS'] = resolved.address;
     resolvedWalletAddress = resolved.address;
+    // Capture the resolved key for the deposit_escrow handler (read directly,
+    // not via env, at call time).
+    resolvedPrivateKey = resolved.privateKey;
 
     // Startup notice → stderr only (stdout must stay clean for stdio transport).
     // Address only; the private key is NEVER logged.
@@ -793,9 +811,18 @@ async function main() {
       process.env['SOLANA_WALLET_KEY'] = resolved.privateKey;
       process.env['SOLANA_WALLET_ADDRESS'] = resolved.address;
       resolvedWalletAddress = resolved.address;
+      resolvedPrivateKey = resolved.privateKey;
       if (resolved.notice) {
         process.stderr.write(`${resolved.notice}\n`);
       }
+    }
+    // Capture the key for the handler. In the common path the block above (or
+    // the signing-mode block earlier) already set resolvedPrivateKey; this also
+    // covers the case where the user pre-set SOLANA_WALLET_KEY in env (the block
+    // above was skipped) — we capture it ONCE here at startup so the handler
+    // never re-reads env at call time.
+    if (resolvedPrivateKey === undefined) {
+      resolvedPrivateKey = process.env['SOLANA_WALLET_KEY'];
     }
     if (!process.env['SOLANA_RPC_URL']) {
       process.stderr.write(

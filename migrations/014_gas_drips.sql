@@ -20,7 +20,11 @@ CREATE TABLE IF NOT EXISTS gas_drips (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- The global daily cap query filters on `created_at::date = CURRENT_DATE`.
--- Index the date expression so the cap check stays cheap as the table grows.
-CREATE INDEX IF NOT EXISTS idx_gas_drips_created_at_date
-    ON gas_drips ((created_at::date));
+-- The global daily-cap query filters on a sargable half-open UTC range
+-- (`created_at >= start_of_utc_day AND created_at < start_of_utc_day + 1 day`),
+-- which lets the planner use a plain btree on `created_at`. A functional index
+-- on `(created_at::date)` is NOT usable here (and is itself invalid: casting a
+-- `timestamptz` to `date` is STABLE, not IMMUTABLE — Postgres rejects it with
+-- 42P17, aborting the migration). Index the raw column instead.
+CREATE INDEX IF NOT EXISTS idx_gas_drips_created_at
+    ON gas_drips (created_at);

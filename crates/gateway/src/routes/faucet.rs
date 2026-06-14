@@ -21,16 +21,26 @@
 //! 5. **USDC floor** — wallet USDC `>= usdc_floor_atomic` (the abuse moat).
 //! 6. **SOL low-water** — wallet SOL `< sol_low_water_lamports`.
 //!
-//! On gate failure AFTER the reservation (4/5/6, or a send failure) the
-//! reservation row is DELETEd so a legitimate retry is possible. On send
+//! On a DEFINITIVE post-reservation decline (daily cap reached, USDC below the
+//! floor, SOL already above the low-water mark, or a pre-broadcast send error)
+//! the reservation row is DELETEd so a legitimate retry is possible. On send
 //! SUCCESS the row's `tx_signature` is filled in.
 //!
 //! ## Money-path safety: prefer under-dripping to double-dripping
 //!
-//! A crash AFTER send but BEFORE the signature update leaves the reservation
-//! in place (with a NULL `tx_signature`), which correctly blocks a re-drip —
-//! the safe failure direction. We never delete a reservation once the transfer
-//! has been broadcast.
+//! When a check's result is INDETERMINATE rather than a clean decline, we keep
+//! the reservation instead of freeing the idempotency slot — under-dripping is
+//! the safe direction. Concretely:
+//! - An RPC failure of the SOL low-water check (gate 6) retains the reservation
+//!   (it is only a "skip if already funded" optimization, and freeing the slot
+//!   would let a caller time retries to RPC jitter and double-drip).
+//! - An "already processed" error on broadcast retains the reservation (the
+//!   lamports already moved) and reports a signature-less success.
+//! - A crash AFTER send but BEFORE the signature update leaves the reservation
+//!   in place (with a NULL `tx_signature`), which correctly blocks a re-drip.
+//!
+//! We never delete a reservation once the transfer has been (or may have been)
+//! broadcast.
 
 use std::sync::Arc;
 
@@ -88,6 +98,13 @@ pub enum FaucetError {
     /// Building/signing the SOL transfer failed.
     #[error("transfer build error: {0}")]
     Transfer(#[from] SystemTransferError),
+    /// The drip transaction was already on-chain (the RPC reported an
+    /// "already processed" error on broadcast). This is NOT a pre-broadcast
+    /// failure: the lamports already moved, so the caller must treat it as a
+    /// (signature-less) success and MUST NOT roll the reservation back — doing
+    /// so would free the idempotency slot and allow a double-drip on retry.
+    #[error("drip transaction already processed on-chain")]
+    AlreadyProcessed,
 }
 
 /// On-chain operations the faucet needs. Mocked in tests.
@@ -114,8 +131,8 @@ pub trait GasLedger: Send + Sync {
     /// Delete the reservation row for `wallet_b58` (rollback when a gate after
     /// the reservation rejects, or a send fails). Idempotent.
     async fn delete_reservation(&self, wallet_b58: &str) -> Result<(), FaucetError>;
-    /// Total lamports dripped/reserved for the current UTC day (`SUM(lamports)
-    /// WHERE created_at::date = CURRENT_DATE`).
+    /// Total lamports dripped/reserved for the current UTC day (`SUM(lamports)`
+    /// over the half-open `[start_of_utc_day, start_of_utc_day + 1 day)` range).
     async fn day_total_lamports(&self) -> Result<u64, FaucetError>;
     /// Persist the broadcast `tx_signature` onto the wallet's reservation row.
     async fn record_signature(
@@ -239,7 +256,11 @@ impl Faucet {
         // our own reservation is included — this is intentional: it makes the
         // cap a true ceiling on reserved+sent lamports for the day.
         match self.ledger.day_total_lamports().await {
-            Ok(total) if total > self.params.daily_cap_lamports => {
+            // `>=` (not `>`): the day total here already INCLUDES our own
+            // just-taken reservation, so reaching exactly the cap means the cap
+            // is met — one more drip would exceed it. `>` would let a single
+            // drip through at the boundary (off-by-one over-spend).
+            Ok(total) if total >= self.params.daily_cap_lamports => {
                 self.rollback(wallet_b58).await;
                 return DripOutcome::DailyCap;
             }
@@ -269,24 +290,49 @@ impl Faucet {
         match self.source.sol_balance(wallet_b58).await {
             Ok(sol_lamports) if sol_lamports < self.params.sol_low_water_lamports => {}
             Ok(_) => {
+                // A definitive "already funded enough" read: safe to roll back so
+                // a later request (after the wallet has spent its SOL) can drip.
                 self.rollback(wallet_b58).await;
                 return DripOutcome::AlreadyHasSol;
             }
             Err(e) => {
-                warn!(error = %e, "faucet sol balance read failed");
-                self.rollback(wallet_b58).await;
+                // RPC FAILURE asymmetry vs the USDC gate above: this low-water
+                // check is only a "skip if already funded" optimization, not a
+                // correctness gate. On an indeterminate RPC failure we prefer
+                // UNDER-dripping to double-dripping (the faucet's stated model),
+                // so we RETAIN the reservation rather than freeing the
+                // idempotency slot — otherwise a caller could time retries to RPC
+                // jitter and slip a second drip through. (The USDC gate may roll
+                // back because its floor is the abuse moat: failing closed there
+                // — declining the drip and freeing the slot — does not risk a
+                // double-spend, it only delays a legitimate drip.)
+                warn!(error = %e, wallet = %wallet_b58, "faucet sol balance read failed; retaining reservation (no re-drip)");
                 return DripOutcome::SendFailed;
             }
         }
 
-        // Send the drip. On failure roll back the reservation so a retry can
-        // succeed (the tx was never broadcast).
+        // Send the drip. Roll back ONLY on errors that are definitively
+        // pre-broadcast (the tx never hit the wire), so a retry can succeed.
+        // An "already processed" error is NOT pre-broadcast: the same signed
+        // transfer is already on-chain and the lamports have moved. Rolling
+        // back there would free the idempotency slot and let a retry double-drip
+        // — so we keep the reservation and report a (signature-less) success.
         let signature = match self
             .source
             .send_drip(wallet_b58, self.params.drip_lamports)
             .await
         {
             Ok(sig) => sig,
+            Err(FaucetError::AlreadyProcessed) => {
+                info!(
+                    wallet = %wallet_b58,
+                    "faucet drip already processed on-chain; retaining reservation (no re-drip)"
+                );
+                // Reservation retained (no rollback). We have no signature from
+                // an already-processed error; the prior reservation row's
+                // tx_signature stays as-is.
+                return DripOutcome::AlreadyFunded { tx_signature: None };
+            }
             Err(e) => {
                 warn!(error = %e, wallet = %wallet_b58, "faucet drip send failed");
                 self.rollback(wallet_b58).await;
@@ -373,9 +419,14 @@ impl GasLedger for PgGasLedger {
     }
 
     async fn day_total_lamports(&self) -> Result<u64, FaucetError> {
+        // Sargable, timezone-correct half-open UTC-day range so the planner can
+        // use `idx_gas_drips_created_at`. A `created_at::date = CURRENT_DATE`
+        // predicate would (a) not be sargable and (b) bucket by the server's
+        // local date rather than UTC.
         let row: (i64,) = sqlx::query_as(
             "SELECT COALESCE(SUM(lamports), 0)::BIGINT FROM gas_drips \
-             WHERE created_at::date = CURRENT_DATE",
+             WHERE created_at >= date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' \
+             AND created_at < date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 day'",
         )
         .fetch_one(&self.pool)
         .await
@@ -526,7 +577,20 @@ impl GasSource for RpcGasSource {
 
         solvela_x402::solana_rpc::send_transaction(&self.http_client, &self.rpc_url, &signed_b64)
             .await
-            .map_err(|e| FaucetError::Rpc(e.to_string()))
+            .map_err(|e| {
+                // An "already processed" error means the SAME signed transfer is
+                // already on-chain (idempotent resubmission) — the lamports have
+                // moved. Surface it as a distinct, non-rollback outcome rather
+                // than a generic send failure, so the pipeline does not free the
+                // idempotency slot and double-drip. Classification is delegated
+                // to the canonical x402 helper (the single source of truth for
+                // this error class — it deliberately does NOT match bare -32002).
+                if solvela_x402::solana_rpc::is_already_processed_error(&e) {
+                    FaucetError::AlreadyProcessed
+                } else {
+                    FaucetError::Rpc(e.to_string())
+                }
+            })
     }
 }
 
@@ -675,10 +739,24 @@ mod tests {
         }
     }
 
+    /// How the mock `send_drip` should behave.
+    #[derive(Clone, Copy, PartialEq)]
+    enum SendMode {
+        /// Succeed, returning `MockDripSig`.
+        Ok,
+        /// Fail with a generic, pre-broadcast RPC error (rollback expected).
+        Fail,
+        /// Fail with an "already processed" RPC error (NO rollback expected —
+        /// the lamports already moved).
+        AlreadyProcessed,
+    }
+
     struct MockSource {
         usdc: u64,
         sol: u64,
-        send_ok: bool,
+        send_mode: SendMode,
+        /// When true, `sol_balance` returns an RPC error (gate-6 RPC failure).
+        sol_read_fails: bool,
         sends: AtomicUsize,
     }
 
@@ -687,7 +765,32 @@ mod tests {
             Self {
                 usdc,
                 sol,
-                send_ok,
+                send_mode: if send_ok {
+                    SendMode::Ok
+                } else {
+                    SendMode::Fail
+                },
+                sol_read_fails: false,
+                sends: AtomicUsize::new(0),
+            }
+        }
+
+        fn with_send_mode(usdc: u64, sol: u64, send_mode: SendMode) -> Self {
+            Self {
+                usdc,
+                sol,
+                send_mode,
+                sol_read_fails: false,
+                sends: AtomicUsize::new(0),
+            }
+        }
+
+        fn with_failing_sol_read(usdc: u64) -> Self {
+            Self {
+                usdc,
+                sol: 0,
+                send_mode: SendMode::Ok,
+                sol_read_fails: true,
                 sends: AtomicUsize::new(0),
             }
         }
@@ -696,6 +799,11 @@ mod tests {
     #[async_trait]
     impl GasSource for MockSource {
         async fn sol_balance(&self, _w: &str) -> Result<u64, FaucetError> {
+            if self.sol_read_fails {
+                return Err(FaucetError::Rpc(
+                    "forced sol balance read failure".to_string(),
+                ));
+            }
             Ok(self.sol)
         }
         async fn usdc_balance(&self, _w: &str) -> Result<u64, FaucetError> {
@@ -703,10 +811,10 @@ mod tests {
         }
         async fn send_drip(&self, _w: &str, _l: u64) -> Result<String, FaucetError> {
             self.sends.fetch_add(1, Ordering::SeqCst);
-            if self.send_ok {
-                Ok("MockDripSig".to_string())
-            } else {
-                Err(FaucetError::Rpc("forced send failure".to_string()))
+            match self.send_mode {
+                SendMode::Ok => Ok("MockDripSig".to_string()),
+                SendMode::Fail => Err(FaucetError::Rpc("forced send failure".to_string())),
+                SendMode::AlreadyProcessed => Err(FaucetError::AlreadyProcessed),
             }
         }
     }
@@ -832,6 +940,92 @@ mod tests {
         // Rolled back → no lingering reservation.
         assert_eq!(ledger.prior_signature(VALID_WALLET).await.unwrap(), None);
         assert!(!ledger.reserved.lock().unwrap().contains_key(VALID_WALLET));
+    }
+
+    #[tokio::test]
+    async fn daily_cap_declines_at_exactly_the_cap() {
+        // F3 boundary: the day total here INCLUDES our own just-taken
+        // reservation, so total == cap means the cap is met and the drip must be
+        // rejected (`>=`, not `>`). A `>` guard would let one drip through at the
+        // boundary (off-by-one over-spend).
+        let source = Arc::new(MockSource::new(100_000, 0, true));
+        let ledger = Arc::new(MockLedger::default());
+        // Pre-load so that, AFTER our reservation adds drip_lamports, the total
+        // lands exactly on the cap: cap - drip_lamports = 1_000_000_000 -
+        // 10_000_000 = 990_000_000.
+        ledger.day_total.store(990_000_000, Ordering::SeqCst);
+        let faucet = faucet_with(source.clone(), ledger.clone());
+
+        let out = faucet.drip(VALID_WALLET).await;
+        assert_eq!(
+            out,
+            DripOutcome::DailyCap,
+            "total exactly at the cap must be rejected"
+        );
+        assert_eq!(source.sends.load(Ordering::SeqCst), 0);
+        // Rolled back → no lingering reservation.
+        assert!(!ledger.reserved.lock().unwrap().contains_key(VALID_WALLET));
+    }
+
+    #[tokio::test]
+    async fn already_processed_send_retains_reservation_no_double_drip() {
+        // F4: an "already processed" error on broadcast means the SAME signed
+        // transfer is already on-chain (the lamports moved). The pipeline must
+        // NOT roll the reservation back (that would free the idempotency slot and
+        // let a retry double-drip); it must report a signature-less success.
+        let source = Arc::new(MockSource::with_send_mode(
+            100_000,
+            0,
+            SendMode::AlreadyProcessed,
+        ));
+        let ledger = Arc::new(MockLedger::default());
+        let faucet = faucet_with(source.clone(), ledger.clone());
+
+        let out = faucet.drip(VALID_WALLET).await;
+        assert_eq!(
+            out,
+            DripOutcome::AlreadyFunded { tx_signature: None },
+            "already-processed must map to a signature-less success"
+        );
+        assert_eq!(source.sends.load(Ordering::SeqCst), 1);
+        // Reservation RETAINED (not rolled back).
+        assert!(
+            ledger.reserved.lock().unwrap().contains_key(VALID_WALLET),
+            "reservation must be retained after an already-processed send"
+        );
+
+        // A retry must NOT double-drip: it hits the reservation conflict and
+        // sees already_funded without a second send.
+        let out2 = faucet.drip(VALID_WALLET).await;
+        assert!(matches!(out2, DripOutcome::AlreadyFunded { .. }));
+        assert_eq!(
+            source.sends.load(Ordering::SeqCst),
+            1,
+            "must not double-drip after an already-processed send"
+        );
+    }
+
+    #[tokio::test]
+    async fn sol_read_failure_retains_reservation() {
+        // F5: an RPC failure of the SOL low-water check (gate 6) must RETAIN the
+        // reservation (prefer under-drip to double-drip), unlike a clean decline
+        // which rolls back. Returns SendFailed.
+        let source = Arc::new(MockSource::with_failing_sol_read(100_000));
+        let ledger = Arc::new(MockLedger::default());
+        let faucet = faucet_with(source.clone(), ledger.clone());
+
+        let out = faucet.drip(VALID_WALLET).await;
+        assert_eq!(out, DripOutcome::SendFailed);
+        assert_eq!(
+            source.sends.load(Ordering::SeqCst),
+            0,
+            "no send on gate-6 RPC failure"
+        );
+        // Reservation RETAINED so a jitter-timed retry cannot double-drip.
+        assert!(
+            ledger.reserved.lock().unwrap().contains_key(VALID_WALLET),
+            "reservation must be retained on a gate-6 RPC failure"
+        );
     }
 
     #[tokio::test]
