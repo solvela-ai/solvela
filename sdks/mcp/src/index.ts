@@ -671,7 +671,7 @@ async function main() {
         `Fatal: could not resolve a Solana wallet: ${err instanceof Error ? err.message : String(err)}\n`,
       );
       process.exit(1);
-      return; // unreachable; satisfies the type narrower below
+      return; // unreachable (process.exit is typed `never`); kept as an explicit no-fall-through guard
     }
 
     if (resolved.privateKey === undefined || resolved.address === undefined) {
