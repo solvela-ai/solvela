@@ -4886,11 +4886,20 @@ async fn test_chat_wrong_resource_url_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/chat/completions — missing body returns 4xx
+// POST /v1/chat/completions — empty body (no payment) returns the x402
+// discovery 402
+//
+// Behavior change (feat/x402-discovery-402): an UNPAID empty/malformed-body POST
+// used to be rejected with a bare 400/422 (Axum's `Json<ChatRequest>` extractor
+// failed before the handler ran), which made x402 registry health-checkers mark
+// the service "unknown protocol". It now returns the discovery 402 challenge so
+// those probes can confirm the resource speaks x402. The precise challenge shape
+// is pinned in `discovery_challenge_tests`; this test guards the status code at
+// the original probe site.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_chat_empty_body_returns_error() {
+async fn test_chat_empty_body_returns_discovery_402() {
     let app = test_app();
 
     let response = app
@@ -4905,10 +4914,11 @@ async fn test_chat_empty_body_returns_error() {
         .await
         .unwrap();
 
-    // Missing JSON body should be rejected
-    assert!(
-        response.status().is_client_error(),
-        "empty body should return a 4xx error, got {}",
+    // Empty body, no payment header → x402 discovery challenge (NOT a 400/422).
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "an unpaid empty-body POST must return the discovery 402, got {}",
         response.status()
     );
 }
@@ -13814,5 +13824,286 @@ mod faucet_route_tests {
             "disabled must short-circuit BEFORE the rate limiter (no slot consumed)"
         );
         assert_eq!(j2["reason"], serde_json::json!("disabled"));
+    }
+}
+
+// ===========================================================================
+// x402 discovery-challenge tests (feat/x402-discovery-402)
+//
+// An x402 registry health-checker probes a resource with a GET or an
+// empty/minimal POST and expects a 402 challenge so it can mark the service
+// "x402-enabled". Previously the gateway only emitted the 402 AFTER a valid
+// `ChatRequest` deserialized, so those probes saw 405 / 400 / 422 and the
+// service was marked "degraded / unknown protocol".
+//
+// The discovery 402 is a NON-BINDING advertisement: it reuses the exact
+// `GatewayError::PaymentChallenge` builder (so the legacy snake_case body AND
+// the canonical `payment-required` header are byte-shape-identical to the real
+// 402), advertises the same `accepts` (asset = configured mint, payTo =
+// configured recipient), and quotes a discovery FLOOR (not a per-request
+// quote). The discovery path is for UNPAID requests only and must never reach
+// payment verification, settlement, the provider, budget mutation, or spend
+// logging.
+// ===========================================================================
+mod discovery_challenge_tests {
+    use super::*;
+
+    /// Assert a 402 response carries a parseable x402 challenge advertising the
+    /// configured asset/payTo and the canonical `payment-required` header.
+    /// Returns the parsed legacy body so callers can inspect the amount.
+    async fn assert_discovery_402(response: axum::http::Response<Body>) -> serde_json::Value {
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYMENT_REQUIRED,
+            "discovery probe must return a 402 challenge"
+        );
+
+        // Canonical x402 v2 header must be present (byte-shape parity with the
+        // real 402 — registry checkers read this header BEFORE body parse).
+        assert!(
+            response
+                .headers()
+                .contains_key(CANONICAL_PAYMENT_REQUIRED_HEADER),
+            "discovery 402 must carry the canonical payment-required header"
+        );
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let challenge: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // x402-spec body shape (issue #217: top-level PaymentRequired).
+        assert_eq!(challenge["x402_version"], 2);
+        let accepts = challenge["accepts"].as_array().expect("accepts array");
+        assert!(!accepts.is_empty(), "accepts must be non-empty");
+
+        let exact = &accepts[0];
+        assert_eq!(exact["scheme"], "exact");
+        // Asset MUST be the CONFIGURED mint (here the mainnet default), never
+        // empty / a placeholder.
+        assert_eq!(exact["asset"], USDC_MINT);
+        assert_eq!(exact["pay_to"], TEST_RECIPIENT_WALLET);
+        assert_eq!(challenge["cost_breakdown"]["currency"], "USDC");
+        assert_eq!(challenge["cost_breakdown"]["fee_percent"], 5);
+
+        challenge
+    }
+
+    /// GET /v1/chat/completions (no payment) -> 402 discovery challenge.
+    /// Previously 405 (route was POST-only).
+    #[tokio::test]
+    async fn test_get_returns_discovery_402() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/chat/completions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_discovery_402(response).await;
+    }
+
+    /// POST empty body, no payment -> 402 discovery challenge.
+    /// Previously 400 (JSON parse error).
+    #[tokio::test]
+    async fn test_post_empty_body_returns_discovery_402() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_discovery_402(response).await;
+    }
+
+    /// POST `{}` (missing `model` + `messages`), no payment -> 402 discovery.
+    /// Previously 422 (missing field `model`).
+    #[tokio::test]
+    async fn test_post_empty_object_returns_discovery_402() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_discovery_402(response).await;
+    }
+
+    /// POST `{"messages":[]}` (missing `model`), no payment -> 402 discovery.
+    /// Previously 422.
+    #[tokio::test]
+    async fn test_post_messages_only_returns_discovery_402() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"messages":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_discovery_402(response).await;
+    }
+
+    /// POST unparseable garbage, no payment -> 402 discovery (not 400).
+    #[tokio::test]
+    async fn test_post_garbage_body_returns_discovery_402() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from("not json at all <<<"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_discovery_402(response).await;
+    }
+
+    /// POST a VALID body with no payment -> 402 with the EXACT per-request
+    /// quote (existing behavior preserved). The quoted amount must be the real
+    /// computed cost for gpt-4o (> 1 atomic, distinguishable from the discovery
+    /// floor of 1 atomic from the cheapest model).
+    #[tokio::test]
+    async fn test_valid_body_returns_exact_quote_not_discovery_floor() {
+        let app = test_app();
+        let body = serde_json::json!({
+            "model": "openai/gpt-4o",
+            "messages": [{"role": "user", "content": "Summarize the French Revolution in detail."}],
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let challenge = assert_discovery_402(response).await;
+        let amount: u64 = challenge["accepts"][0]["amount"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        // gpt-4o quote for a real prompt is far above the 1-atomic discovery
+        // floor (cheapest deepseek model at 1+1 tokens), proving the valid-body
+        // path returns the per-request quote, not the discovery advertisement.
+        assert!(
+            amount > 1,
+            "valid-body 402 must quote the real per-request cost, got {amount}"
+        );
+    }
+
+    /// POST a BAD body WITH a payment-signature header present -> still 400/422.
+    /// A paying client must keep getting real validation errors; only the
+    /// UNPAID probe path is rerouted to discovery.
+    #[tokio::test]
+    async fn test_bad_body_with_payment_header_still_4xx() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header(
+                        "payment-signature",
+                        valid_payment_header("/v1/chat/completions"),
+                    )
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
+            "a paying client sending a bad body must get a 4xx validation error, got {status}"
+        );
+        assert_ne!(
+            status,
+            StatusCode::PAYMENT_REQUIRED,
+            "a present payment header must never be rerouted to the discovery 402"
+        );
+    }
+
+    /// The discovery path must NEVER reach settlement or the provider. We build
+    /// an app with a mock provider AND a settle-recording verifier, then send a
+    /// GET and an empty POST (no payment). Both must 402, the settle flag must
+    /// stay false, and the mock provider's response body must never appear.
+    #[tokio::test]
+    async fn test_discovery_never_settles_or_calls_provider() {
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (app, _state) =
+            test_app_with_mock_provider_and_exact_verifier(Arc::new(SettleRecordingVerifier {
+                settled: Arc::clone(&settled),
+            }));
+
+        // GET probe.
+        let get_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/chat/completions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::PAYMENT_REQUIRED);
+        let get_body = get_resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            !String::from_utf8_lossy(&get_body).contains("[mock response]"),
+            "discovery GET must not reach the provider"
+        );
+
+        // Empty-POST probe.
+        let post_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(post_resp.status(), StatusCode::PAYMENT_REQUIRED);
+        let post_body = post_resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            !String::from_utf8_lossy(&post_body).contains("[mock response]"),
+            "discovery POST must not reach the provider"
+        );
+
+        assert!(
+            !settled.load(std::sync::atomic::Ordering::SeqCst),
+            "discovery path must NEVER reach on-chain settlement"
+        );
     }
 }

@@ -17,7 +17,6 @@ use std::time::Instant;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::Response;
-use axum::Json;
 use metrics::{counter, histogram};
 use tracing::{debug, info, warn};
 
@@ -34,9 +33,9 @@ use crate::AppState;
 
 use cost::{
     cap_usage_to_request_limits, completion_token_ceiling, compute_actual_atomic_cost,
-    estimate_input_tokens, estimated_atomic_cost, is_free_estimate, scheme_realized_discount,
-    select_spend_log_arm, spend_cost_atomic, usdc_atomic_amount_checked, usdc_f64_to_atomic_safe,
-    PaymentScheme, SpendLogArm,
+    discovery_floor_atomic, estimate_input_tokens, estimated_atomic_cost, is_free_estimate,
+    scheme_realized_discount, select_spend_log_arm, spend_cost_atomic, usdc_atomic_amount_checked,
+    usdc_f64_to_atomic_safe, PaymentScheme, SpendLogArm,
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
@@ -85,10 +84,54 @@ pub async fn chat_completions(
     // path degrades to the stricter "unknown" bucket rather than 500-ing.
     peer_addr: crate::middleware::rate_limit::PeerAddr,
     headers: HeaderMap,
-    Json(mut req): Json<ChatRequest>,
+    // Take the RAW body (not `Json<ChatRequest>`) so we can intercept a
+    // malformed/empty body BEFORE Axum's extractor rejects it with a bare
+    // 400/422. An x402 registry health-checker probes an UNPAID request with an
+    // empty/minimal body to confirm the resource speaks x402; it must see the
+    // discovery 402, not a parse error. `Bytes` is the LAST argument because it
+    // consumes the request body. The 10MB `RequestBodyLimitLayer` (lib.rs)
+    // still bounds it.
+    body: axum::body::Bytes,
 ) -> Result<Response, GatewayError> {
     let request_start = Instant::now();
     let debug_enabled = is_debug_enabled(&headers);
+
+    // Is a payment credential present? This single check decides how a
+    // bad/empty body is handled (CLAUDE.md rule #8: the route, not middleware,
+    // emits the 402). A `PAYMENT-SIGNATURE` header means a PAYING client, which
+    // must get real validation errors on a bad body. NO header means an UNPAID
+    // request, which is eligible for the discovery 402 on a bad body.
+    let has_payment_header = headers
+        .get("payment-signature")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| !v.is_empty());
+
+    // Deserialize the body into a `ChatRequest`.
+    //
+    //   - Payment header PRESENT → strict parse; on failure return today's 4xx
+    //     (a paying client still gets a real validation error — UNCHANGED).
+    //   - Payment header ABSENT → on parse failure (empty/garbage/missing
+    //     fields) return the DISCOVERY 402, never a 400/422. This is the only
+    //     behavior change, and it is confined to the UNPAID path. On parse
+    //     SUCCESS the request flows through the existing logic, which returns
+    //     the EXACT per-request quote 402 for a paid model (UNCHANGED).
+    //
+    // The discovery path returns here BEFORE any guard, model resolution,
+    // payment verification, settlement, provider call, budget mutation, or
+    // spend logging — it is read-only.
+    let mut req: ChatRequest = match serde_json::from_slice::<ChatRequest>(&body) {
+        Ok(req) => req,
+        Err(e) => {
+            if has_payment_header {
+                // Paying client, bad body → real validation error (as today).
+                return Err(GatewayError::BadRequest(format!(
+                    "invalid request body: {e}"
+                )));
+            }
+            // Unpaid probe with a bad/empty body → advertise the resource.
+            return Err(chat_completions_discovery(&state));
+        }
+    };
 
     // Validate message count before any processing
     if req.messages.len() > MAX_MESSAGES {
@@ -539,43 +582,11 @@ pub async fn chat_completions(
         counter!("solvela_payments_total", "status" => "none").increment(1);
         info!(model = %req.model, "no payment signature, returning 402");
 
-        // Quote the CONFIGURED mint — the same one `SolanaVerifier`/
-        // `EscrowVerifier` enforce — never the compile-time constant, so a
-        // deployment with a non-default mint (e.g. devnet) quotes an asset it
-        // will actually accept.
-        let mut accepts = vec![solvela_x402::types::PaymentAccept {
-            scheme: "exact".to_string(),
-            network: solvela_x402::types::SOLANA_NETWORK.to_string(),
-            amount: atomic_amount.clone(),
-            asset: state.config.solana.usdc_mint.clone(),
-            pay_to: state.config.solana.recipient_wallet.clone(),
-            max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
-            escrow_program_id: None,
-        }];
-
-        // Offer escrow scheme if configured
-        if state.escrow_claimer.is_some() {
-            accepts.push(solvela_x402::types::PaymentAccept {
-                scheme: "escrow".to_string(),
-                network: solvela_x402::types::SOLANA_NETWORK.to_string(),
-                amount: atomic_amount,
-                asset: state.config.solana.usdc_mint.clone(),
-                pay_to: state.config.solana.recipient_wallet.clone(),
-                max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
-                escrow_program_id: state.config.solana.escrow_program_id.clone(),
-            });
-        }
-
-        let payment_required = solvela_x402::types::PaymentRequired {
-            x402_version: solvela_x402::types::X402_VERSION,
-            resource: solvela_x402::types::Resource {
-                url: "/v1/chat/completions".to_string(),
-                method: "POST".to_string(),
-            },
-            accepts,
-            cost_breakdown: cost,
-            error: "Payment required".to_string(),
-        };
+        // Reuse the single 402 challenge builder so the per-request quote and
+        // the discovery challenge are byte-shape-identical (same accepts /
+        // legacy body / canonical PAYMENT-REQUIRED header). The CONFIGURED mint
+        // and recipient are baked in there — never the compile-time constant.
+        let payment_required = build_payment_challenge(&state, atomic_amount, cost);
 
         // Emit the PaymentRequired body at the top level of the 402 response
         // per x402 spec — NOT wrapped in the OpenAI-style error envelope.
@@ -1643,6 +1654,137 @@ pub async fn chat_completions(
             Err(GatewayError::Internal(msg))
         }
     }
+}
+
+/// Build the x402 [`PaymentRequired`] challenge for `/v1/chat/completions`.
+///
+/// The SINGLE source of truth for the 402 `accepts[]` shape, shared by both the
+/// per-request quote path ([`chat_completions`]) and the discovery path
+/// ([`chat_completions_discovery`]). Sharing one builder guarantees the
+/// discovery challenge is byte-shape-identical to the real quote — same
+/// scheme(s), same legacy snake_case body, and (via
+/// `GatewayError::PaymentChallenge`) the same canonical `PAYMENT-REQUIRED`
+/// header.
+///
+/// - `amount` is the atomic-USDC string to advertise (the per-request quote on
+///   the quote path; the non-binding discovery floor on the discovery path).
+/// - `cost_breakdown` is the matching breakdown to embed.
+///
+/// The CONFIGURED mint / recipient are baked in here — never the compile-time
+/// constant — so a deployment with a non-default mint (e.g. devnet) advertises
+/// an asset its verifier will actually accept. The `escrow` scheme is offered
+/// iff an escrow claimer is configured, exactly mirroring the quote path.
+fn build_payment_challenge(
+    state: &AppState,
+    amount: String,
+    cost_breakdown: solvela_protocol::CostBreakdown,
+) -> solvela_x402::types::PaymentRequired {
+    let mut accepts = vec![solvela_x402::types::PaymentAccept {
+        scheme: "exact".to_string(),
+        network: solvela_x402::types::SOLANA_NETWORK.to_string(),
+        amount: amount.clone(),
+        asset: state.config.solana.usdc_mint.clone(),
+        pay_to: state.config.solana.recipient_wallet.clone(),
+        max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
+        escrow_program_id: None,
+    }];
+
+    // Offer escrow scheme if configured
+    if state.escrow_claimer.is_some() {
+        accepts.push(solvela_x402::types::PaymentAccept {
+            scheme: "escrow".to_string(),
+            network: solvela_x402::types::SOLANA_NETWORK.to_string(),
+            amount,
+            asset: state.config.solana.usdc_mint.clone(),
+            pay_to: state.config.solana.recipient_wallet.clone(),
+            max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
+            escrow_program_id: state.config.solana.escrow_program_id.clone(),
+        });
+    }
+
+    solvela_x402::types::PaymentRequired {
+        x402_version: solvela_x402::types::X402_VERSION,
+        resource: solvela_x402::types::Resource {
+            url: "/v1/chat/completions".to_string(),
+            method: "POST".to_string(),
+        },
+        accepts,
+        cost_breakdown,
+        error: "Payment required".to_string(),
+    }
+}
+
+/// Build the DISCOVERY 402 challenge — a non-binding advertisement that
+/// `/v1/chat/completions` is a payable x402 resource.
+///
+/// Returned for UNPAID requests that an x402 registry health-checker sends to
+/// probe the protocol: a `GET`, or a `POST` with an empty/unparseable/invalid
+/// body and NO `PAYMENT-SIGNATURE` header. Without this, those probes saw
+/// 405/400/422 (Axum rejects a bad body before the handler runs) and the
+/// service was marked "degraded / unknown protocol".
+///
+/// The advertised amount is the [`discovery_floor_atomic`] — the minimum
+/// non-zero per-request cost across the model registry, an honest LOWER BOUND.
+/// It is explicitly NOT a binding quote: the price is model- and
+/// token-dependent and is only known once a valid request is parsed (that path
+/// returns the exact per-request quote, unchanged). The embedded
+/// `cost_breakdown` surfaces that floor as the `total` (the 5% platform fee is
+/// already folded in), with a `provider_cost`/`platform_fee` split derived by
+/// the canonical integer fee math so the parts sum back to the total and the
+/// fee is never re-applied.
+///
+/// This is a pure builder (no payment verification, no settlement, no provider
+/// call, no budget or spend mutation) — the discovery path is read-only.
+fn chat_completions_discovery(state: &AppState) -> GatewayError {
+    let floor_atomic = discovery_floor_atomic(&state.model_registry);
+    // Atomic → decimal string (6 dp) for the wire `amount`/breakdown. Integer
+    // math only (solvela-fintech): split the atomic value into whole + 6-digit
+    // fractional USDC. This is a display projection of an exact integer, not a
+    // float computation.
+    let amount = floor_atomic.to_string();
+
+    // The discovery floor is a single all-in figure (the registry estimate
+    // already folds in the 5% platform fee exactly once). Present it honestly:
+    // the total is the floor; the provider_cost / platform_fee split is derived
+    // by the canonical integer fee math so the breakdown sums to the total and
+    // never re-applies the fee.
+    //   total = provider * 105/100  ⇒  provider = floor(total * 100 / 105)
+    let total_atomic = floor_atomic;
+    let provider_atomic = (total_atomic as u128 * 100 / 105) as u64;
+    let fee_atomic = total_atomic.saturating_sub(provider_atomic);
+    let to_usdc =
+        |atomic: u64| -> String { format!("{}.{:06}", atomic / 1_000_000, atomic % 1_000_000) };
+    let cost_breakdown = solvela_protocol::CostBreakdown {
+        provider_cost: to_usdc(provider_atomic),
+        platform_fee: to_usdc(fee_atomic),
+        total: to_usdc(total_atomic),
+        currency: "USDC".to_string(),
+        fee_percent: solvela_protocol::PLATFORM_FEE_PERCENT,
+    };
+
+    info!(
+        floor_atomic,
+        "returning x402 discovery challenge (non-binding floor; exact quote requires a valid request)"
+    );
+    counter!("solvela_payments_total", "status" => "discovery").increment(1);
+
+    GatewayError::PaymentChallenge(Box::new(build_payment_challenge(
+        state,
+        amount,
+        cost_breakdown,
+    )))
+}
+
+/// GET /v1/chat/completions — x402 discovery probe.
+///
+/// A GET carries no body and cannot be paid, so it always returns the discovery
+/// 402 challenge (constraint: discovery is for UNPAID requests only). Registry
+/// health-checkers use this to confirm the resource speaks x402 before ever
+/// building a payment.
+pub async fn chat_completions_discovery_get(
+    State(state): State<Arc<AppState>>,
+) -> Result<Response, GatewayError> {
+    Err(chat_completions_discovery(&state))
 }
 
 /// Inputs for one chat-path receipt (settlement-platform P2). Groups the

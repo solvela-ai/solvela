@@ -274,7 +274,14 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .unwrap_or(256);
 
     Router::new()
-        .route("/v1/chat/completions", post(routes::chat::chat_completions))
+        // GET serves the x402 discovery 402 (so registry health-checkers probing
+        // with a GET see the challenge instead of a 405); POST is the real
+        // OpenAI-compatible endpoint (which itself returns the discovery 402 for
+        // an UNPAID empty/malformed body — see `chat_completions`).
+        .route(
+            "/v1/chat/completions",
+            get(routes::chat::chat_completions_discovery_get).post(routes::chat::chat_completions),
+        )
         .route(
             "/v1/images/generations",
             post(routes::images::image_generations),
