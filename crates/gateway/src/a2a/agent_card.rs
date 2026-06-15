@@ -39,6 +39,13 @@ pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "description": "Solana-native AI agent payment gateway — pay for LLM API calls with USDC-SPL via x402",
         "url": url,
         "version": "0.1.0",
+        // A2A v0.3 required descriptors: protocol version, the transport the
+        // `url` speaks (our /a2a endpoint is JSON-RPC 2.0), and the default I/O
+        // media types. Required for a card to pass a strict v0.3 schema validator.
+        "protocolVersion": "0.3.0",
+        "preferredTransport": "JSONRPC",
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain"],
         "capabilities": {
             "streaming": true,
             "pushNotifications": false,
@@ -68,8 +75,10 @@ pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "id": "chat-completion",
                 "name": "Chat Completion",
                 "description": "Proxy AI chat completions to multiple LLM providers (OpenAI, Anthropic, Google, xAI, DeepSeek)",
-                "inputModes": ["text"],
-                "outputModes": ["text"]
+                // `tags` is required on every AgentSkill in A2A v0.3.
+                "tags": ["llm", "chat", "completions", "ai", "x402"],
+                "inputModes": ["text/plain"],
+                "outputModes": ["text/plain"]
             }
         ]
     }))
@@ -224,6 +233,26 @@ supports_vision = false
     async fn test_agent_card_url_falls_back_to_host_port() {
         let json = get_card(test_app(), "/.well-known/agent-card.json").await;
         assert_eq!(json["url"], "http://0.0.0.0:8402");
+    }
+
+    /// The card carries every field a strict A2A v0.3 schema validator requires.
+    #[tokio::test]
+    async fn test_agent_card_has_v03_required_fields() {
+        let json = get_card(test_app(), "/.well-known/agent-card.json").await;
+        assert_eq!(json["protocolVersion"], "0.3.0");
+        assert_eq!(json["preferredTransport"], "JSONRPC");
+        assert_eq!(json["defaultInputModes"], serde_json::json!(["text/plain"]));
+        assert_eq!(
+            json["defaultOutputModes"],
+            serde_json::json!(["text/plain"])
+        );
+        // Every AgentSkill must have a non-empty `tags` array in v0.3.
+        let skills = json["skills"].as_array().expect("skills is array");
+        assert!(!skills.is_empty(), "must advertise at least one skill");
+        for skill in skills {
+            let tags = skill["tags"].as_array().expect("skill.tags is array");
+            assert!(!tags.is_empty(), "skill {} must have tags", skill["id"]);
+        }
     }
 
     #[tokio::test]
