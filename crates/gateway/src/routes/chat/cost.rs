@@ -678,6 +678,70 @@ pub(crate) fn semantic_hit_full_atomic(
         .filter(|&c| c > 0)
 }
 
+/// Fallback discovery floor when the registry yields no priceable paid model
+/// (e.g. an all-free deployment). 1 atomic unit (1e-6 USDC) advertises a
+/// non-zero, payable amount without quoting a misleading $0 — the discovery
+/// challenge exists to signal "this resource is payable", and a $0 advert would
+/// misrepresent that. Documented nominal, never a binding quote.
+pub(crate) const DISCOVERY_FLOOR_FALLBACK_ATOMIC: u64 = 1;
+
+/// Compute the **discovery floor** — a non-binding, representative atomic-USDC
+/// amount to advertise in the GET / malformed-body discovery 402.
+///
+/// This is NOT a per-request quote. The exact price is request-dependent (it
+/// varies with the model and token usage) and is only known once a valid
+/// `ChatRequest` is parsed (that path returns the real quote, unchanged). The
+/// discovery challenge cannot see a model or tokens, so it advertises an honest
+/// floor — the smallest non-zero total cost any real request could incur across
+/// the model registry.
+///
+/// Derivation (all integer / fail-closed per solvela-fintech):
+///
+/// 1. For each registered model, price a representative minimal request of
+///    `(1 input, 1 output)` token via the registry's `estimate_cost` — which
+///    already applies the 5% platform fee exactly once.
+/// 2. Convert each total to atomic units via the checked decimal→atomic
+///    conversion (rejects NaN/∞/negative/overflow — never saturates to 0).
+/// 3. Take the minimum non-zero result. Zero-priced (free-tier) models are
+///    excluded: a $0 advertisement would misrepresent a payable resource, and
+///    those models are served free on their own path anyway.
+/// 4. If no model yields a positive cost (degenerate all-free registry), fall
+///    back to [`DISCOVERY_FLOOR_FALLBACK_ATOMIC`].
+///
+/// Cost is monotonic in tokens, so no real paid request can settle below this
+/// floor — it is a true lower bound, advertised as such, never a binding quote.
+pub(crate) fn discovery_floor_atomic(registry: &solvela_router::models::ModelRegistry) -> u64 {
+    registry
+        .all()
+        .iter()
+        .filter_map(|m| {
+            // Minimal representative request: 1 input + 1 output token. The 5%
+            // fee is applied inside `estimate_cost`; we never re-apply it.
+            let breakdown = registry.estimate_cost(&m.id, 1, 1).ok()?;
+            // Checked decimal→atomic (fail-closed): a corrupt registry entry
+            // that produced a non-numeric total is skipped, not coerced to 0.
+            let atomic: u64 = usdc_atomic_amount_checked(&breakdown.total)
+                .ok()?
+                .parse()
+                .ok()?;
+            // Exclude free models — a $0 floor would advertise a non-payable
+            // amount on a discovery challenge whose whole purpose is to say
+            // "this resource is payable".
+            (atomic > 0).then_some(atomic)
+        })
+        .min()
+        .unwrap_or_else(|| {
+            // Degenerate: every model failed pricing or is free. Surface it —
+            // a silent fallback would hide a misconfigured/unpriced registry.
+            tracing::warn!(
+                fallback_atomic = DISCOVERY_FLOOR_FALLBACK_ATOMIC,
+                "discovery floor fell back to nominal: no model produced a positive \
+                 priced quote (check model registry pricing)"
+            );
+            DISCOVERY_FLOOR_FALLBACK_ATOMIC
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1470,6 +1534,68 @@ supports_vision = false
 
     fn simple_req() -> ChatRequest {
         make_request("test-model", vec![user_msg("hello")])
+    }
+
+    #[test]
+    fn test_discovery_floor_picks_cheapest_nonzero_model_and_excludes_free() {
+        // Three models: a $0 free model, a cheap model, and an expensive one.
+        // The discovery floor must be the cheapest NON-ZERO 1-input/1-output
+        // estimate (5% fee included by `estimate_cost`), never the free $0
+        // model (a $0 advertisement would misrepresent a payable resource).
+        let toml = r#"
+[models.free]
+provider = "test"
+model_id = "free"
+display_name = "Free"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 4096
+supports_streaming = false
+
+[models.cheap]
+provider = "test"
+model_id = "cheap"
+display_name = "Cheap"
+input_cost_per_million = 0.28
+output_cost_per_million = 0.42
+context_window = 4096
+supports_streaming = false
+
+[models.pricey]
+provider = "test"
+model_id = "pricey"
+display_name = "Pricey"
+input_cost_per_million = 2.50
+output_cost_per_million = 10.00
+context_window = 4096
+supports_streaming = false
+"#;
+        let reg = solvela_router::models::ModelRegistry::from_toml(toml).unwrap();
+        let floor = discovery_floor_atomic(&reg);
+
+        // Cheap model at (1,1): (0.28 + 0.42)/1e6 = 0.0000007, ×1.05 =
+        // 0.000000735, formatted to 6 dp = "0.000001" → 1 atomic.
+        // Pricey model at (1,1): (2.50 + 10.0)/1e6 = 0.0000125, ×1.05 =
+        // 0.000013125, formatted to 6 dp = "0.000013" → 13 atomic.
+        // Floor = min over non-zero = 1 (the cheap model), free model excluded.
+        assert_eq!(
+            floor, 1,
+            "discovery floor must be the cheapest non-zero per-request cost"
+        );
+        assert!(floor > 0, "discovery floor must never advertise $0");
+    }
+
+    #[test]
+    fn test_discovery_floor_falls_back_when_all_models_free() {
+        // Degenerate all-free registry: there is no positive cost to advertise,
+        // so the floor falls back to the documented 1-atomic nominal rather
+        // than advertising $0 (non-payable) on a payable-resource challenge.
+        let reg = registry_with_cost(0.0);
+        assert_eq!(
+            discovery_floor_atomic(&reg),
+            DISCOVERY_FLOOR_FALLBACK_ATOMIC,
+            "an all-free registry must fall back to the 1-atomic nominal floor"
+        );
     }
 
     #[test]
