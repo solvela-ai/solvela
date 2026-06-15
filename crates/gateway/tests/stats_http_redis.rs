@@ -100,6 +100,7 @@ fn stats_router(usage: UsageTracker, db_pool: Option<PgPool>) -> axum::Router {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: RateLimiter::new(RateLimitConfig::receipts_default()),
+        faucet_rate_limiter: RateLimiter::new(RateLimitConfig::faucet_default()),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(

@@ -109,6 +109,31 @@ impl RateLimitConfig {
             unknown_max_requests: 5,
         }
     }
+
+    /// Default per-IP rate-limit budget for the public, unauthenticated
+    /// `POST /v1/faucet/gas` gas-drip route (security review finding F6).
+    ///
+    /// The faucet is unauthenticated and the per-wallet DB primary key only
+    /// stops repeat drips to ONE wallet — it does NOT stop mass enumeration: an
+    /// attacker can mint unlimited fresh wallets, pre-fund each past the cheap
+    /// USDC floor, and drain the entire daily cap in a single-IP burst. The
+    /// daily cap is the only throttle without this per-IP cap. The legitimate
+    /// caller (the MCP wallet auto-create flow) hits the faucet at most once per
+    /// wallet per device lifetime, so a TIGHT cap is safe: 3 drips per IP per
+    /// 24h is generous for a real device (initial wallet + a couple of retries)
+    /// and hostile to a single-IP enumeration burst. The `unknown` bucket (no
+    /// `ConnectInfo`) is stricter still (1), matching the receipts/free policy.
+    ///
+    /// Like [`receipts_default`](Self::receipts_default) this is deliberately
+    /// NOT env-tunable — the cap only needs to bound enumeration throughput;
+    /// tune it here in code if the legitimate-caller pattern ever changes.
+    pub fn faucet_default() -> Self {
+        Self {
+            max_requests: 3,
+            window: Duration::from_secs(24 * 60 * 60),
+            unknown_max_requests: 1,
+        }
+    }
 }
 
 /// Per-client rate limit state.
@@ -682,6 +707,23 @@ mod tests {
         assert_eq!(receipts.max_requests, 20);
         assert_eq!(receipts.unknown_max_requests, 5);
         assert_eq!(receipts.window, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_faucet_default_is_stricter_than_paid() {
+        let faucet = RateLimitConfig::faucet_default();
+        let paid = RateLimitConfig::default();
+        assert!(
+            faucet.max_requests < paid.max_requests,
+            "faucet per-IP limit ({}) must be stricter than the generic outer limit ({})",
+            faucet.max_requests,
+            paid.max_requests
+        );
+        assert_eq!(faucet.max_requests, 3);
+        assert_eq!(faucet.unknown_max_requests, 1);
+        // 24h window: the legitimate caller hits the faucet once per wallet per
+        // device lifetime, so the throttle is over a day, not a minute.
+        assert_eq!(faucet.window, Duration::from_secs(24 * 60 * 60));
     }
 
     #[test]

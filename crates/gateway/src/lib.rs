@@ -145,6 +145,19 @@ pub struct AppState {
     /// (GHSA-6ggq-cvwx-4f67); absent `ConnectInfo` falls back to the shared
     /// stricter "unknown" bucket.
     pub receipts_rate_limiter: RateLimiter,
+    /// Per-client (IP) rate limiter for the public, unauthenticated
+    /// `POST /v1/faucet/gas` gas-drip route (security review finding F6).
+    ///
+    /// Same in-handler pattern as
+    /// [`receipts_rate_limiter`](Self::receipts_rate_limiter): the faucet is
+    /// unauthenticated and the per-wallet DB primary key only stops repeat drips
+    /// to one wallet, NOT mass enumeration (mint fresh wallets, pre-fund each
+    /// past the USDC floor, drain the daily cap in a one-IP burst). This cap
+    /// bounds drip attempts per peer IP, STRICTER than the generic outer limiter
+    /// ([`RateLimitConfig::faucet_default`]). Keyed on the TCP peer IP, never a
+    /// client-supplied header (GHSA-6ggq-cvwx-4f67); absent `ConnectInfo` falls
+    /// back to the shared stricter "unknown" bucket.
+    pub faucet_rate_limiter: RateLimiter,
 }
 
 impl AppState {

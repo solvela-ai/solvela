@@ -56,6 +56,7 @@ use zeroize::Zeroizing;
 use solvela_x402::solana::{sign_system_transfer, SystemTransferError};
 use solvela_x402::solana_types::Pubkey;
 
+use crate::middleware::rate_limit::{connect_info_client_id, rate_limited_response, PeerAddr};
 use crate::AppState;
 
 /// Request body for `POST /v1/faucet/gas`.
@@ -605,14 +606,46 @@ impl GasSource for RpcGasSource {
 /// callers can distinguish "declined" from "tried and failed").
 pub async fn gas_faucet(
     State(state): State<Arc<AppState>>,
+    // Infallible peer-address extractor (same as the receipts/free-tier path):
+    // `None` when `ConnectInfo` is absent, degrading to the stricter "unknown"
+    // bucket rather than 500-ing. Extracted before the body so the rate limit can
+    // gate on the real TCP peer IP.
+    peer_addr: PeerAddr,
     Json(req): Json<FaucetRequest>,
 ) -> impl IntoResponse {
-    let outcome = match &state.faucet {
+    let faucet = match &state.faucet {
         // Gate 1: enabled. An absent faucet (disabled, no source key, or no DB)
-        // short-circuits — no chain or DB work.
-        None => DripOutcome::Disabled,
-        Some(faucet) => faucet.drip(req.wallet.trim()).await,
+        // short-circuits FIRST — it is the cheapest possible reject (a single
+        // `Option` check on already-loaded state, no lock/DB/RPC), and a disabled
+        // faucet has no abuse surface to protect (no drip work ever runs). So we
+        // answer "disabled" before even touching the rate limiter.
+        None => {
+            let outcome = DripOutcome::Disabled;
+            metrics::counter!("solvela_gas_drips_total", "result" => outcome.metric_label())
+                .increment(1);
+            return (StatusCode::OK, Json(decline("disabled"))).into_response();
+        }
+        Some(faucet) => faucet,
     };
+
+    // F6 anti-enumeration: the faucet is unauthenticated and the per-wallet DB
+    // key only stops repeat drips to ONE wallet, not mass enumeration (mint
+    // fresh wallets, pre-fund each past the cheap USDC floor, drain the daily
+    // cap in a single-IP burst). Enforce a per-IP cap BEFORE any drip work
+    // (DB reservation / RPC balance reads / chain send) so an abusive caller is
+    // rejected at the cheapest point. Keyed on the TCP peer IP, never a
+    // client-supplied header (X-Forwarded-For et al. are forgeable —
+    // GHSA-6ggq-cvwx-4f67); absent `ConnectInfo` falls back to the shared
+    // stricter "unknown" bucket. Mirrors the receipts/free-tier in-handler
+    // limiter.
+    let client_id = connect_info_client_id(peer_addr.0);
+    if state.faucet_rate_limiter.check(&client_id).await.is_err() {
+        metrics::counter!("solvela_gas_faucet_rate_limited_total").increment(1);
+        warn!(client_id = %client_id, "gas faucet rate limit exceeded");
+        return rate_limited_response(state.faucet_rate_limiter.config());
+    }
+
+    let outcome = faucet.drip(req.wallet.trim()).await;
 
     // Metrics: one labelled counter per outcome + a lamports counter on funded.
     metrics::counter!("solvela_gas_drips_total", "result" => outcome.metric_label()).increment(1);
@@ -646,12 +679,15 @@ pub async fn gas_faucet(
         DripOutcome::AlreadyHasSol => (StatusCode::OK, decline("already_has_sol")),
         DripOutcome::DailyCap => (StatusCode::OK, decline("daily_cap")),
         DripOutcome::BadWallet => (StatusCode::BAD_REQUEST, decline("invalid_wallet")),
+        // `drip()` never yields `Disabled` (the disabled case returns early at
+        // the top of the handler, before the rate limiter and before any drip
+        // work); the arm is kept only to keep the match exhaustive.
         DripOutcome::Disabled => (StatusCode::OK, decline("disabled")),
         // A send failure is the one "we tried and it broke" case → 502.
         DripOutcome::SendFailed => (StatusCode::BAD_GATEWAY, decline("send_failed")),
     };
 
-    (status, Json(body))
+    (status, Json(body)).into_response()
 }
 
 /// Build a `funded: false` response with a reason.
