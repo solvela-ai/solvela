@@ -6,7 +6,7 @@
 // gateway (right). Five beats trace the canonical A2A x402 handshake, every
 // label sourced verbatim from crates/gateway/src/a2a/{agent_card,types,handler}.rs:
 //
-//   0  GET /.well-known/agent.json  → AgentCard (capabilities + x402·ap2 ext)
+//   0  GET /.well-known/agent-card.json  → AgentCard (capabilities + x402·ap2 ext)
 //   1  message/send (text prompt)   → Task: input-required + x402.payment.required
 //   2  agent signs USDC payment     (brief Solana chain-tick moment)
 //   3  message/send (taskId + x402.payment.payload)
@@ -293,7 +293,7 @@ function A2ADiagramSvg({ beat, loopKey }: SvgProps) {
         <g key={`b0-${loopKey}`} aria-hidden="true">
           <WirePacket
             pathId="#a2a-req"
-            label="GET /.well-known/agent.json"
+            label="GET /.well-known/agent-card.json"
             color={C.neutralText}
             dur="1.0s"
           />
@@ -415,7 +415,7 @@ function A2ADiagramSvg({ beat, loopKey }: SvgProps) {
 
 const A11Y_LABEL =
   'Agent-to-agent discovery and payment flow. A requesting agent fetches the ' +
-  'Solvela AgentCard at GET /.well-known/agent.json, with x402 and ap2 ' +
+  'Solvela AgentCard at GET /.well-known/agent-card.json, with x402 and ap2 ' +
   'extensions. It calls message/send, receiving a Task in the input-required ' +
   'state with x402.payment.required metadata. The agent signs a USDC payment ' +
   'on Solana, then calls message/send again with the taskId and ' +

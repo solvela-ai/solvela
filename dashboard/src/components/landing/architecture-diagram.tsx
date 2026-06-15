@@ -147,7 +147,7 @@ function WideSvg({ drift }: { drift: boolean }) {
         w={192}
         h={56}
         title="A2A agents"
-        sub=".well-known/agent.json"
+        sub=".well-known/agent-card.json"
         dot={C.accentGold}
       />
 
@@ -249,7 +249,7 @@ function CompactSvg({ drift }: { drift: boolean }) {
         w={320}
         h={56}
         title="A2A agents"
-        sub=".well-known/agent.json"
+        sub=".well-known/agent-card.json"
         dot={C.accentGold}
         center
       />

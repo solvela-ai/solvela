@@ -95,7 +95,7 @@ export function WhySolvela() {
             kicker="a2a, end to end"
             title="Agents discover, negotiate, and pay — no human."
             body="Solvela publishes a live A2A AgentCard. Another agent can fetch it, read the x402 terms, and complete a paid call from discovery to settlement without a person ever touching the loop."
-            mono="GET /.well-known/agent.json"
+            mono="GET /.well-known/agent-card.json"
             href={`${DOCS_URL}/docs/api`}
             accent="salmon"
             tall
