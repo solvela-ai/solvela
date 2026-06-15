@@ -48,7 +48,7 @@ The Agent-to-Agent interface follows the [A2A protocol](https://a2aprotocol.ai) 
 
 <Steps>
   <Step title="Agent discovery">
-    The calling agent fetches `GET /.well-known/agent.json` to retrieve the **AgentCard** — a machine-readable description of supported methods, accepted payment schemes, and cost tiers.
+    The calling agent fetches `GET /.well-known/agent-card.json` to retrieve the **AgentCard** — a machine-readable description of supported methods, accepted payment schemes, and cost tiers.
   </Step>
   <Step title="Send message/send request">
     The agent sends a `message/send` JSON-RPC request to `POST /a2a`. The gateway scores the request using the smart router, computes the cost, and returns a **Task** in `input-required` state containing x402 metadata (amount, payment address, accepted schemes).

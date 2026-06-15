@@ -12,7 +12,7 @@ Two routes:
 
 | Route | Purpose |
 |-------|---------|
-| `GET /.well-known/agent.json` | AgentCard discovery — advertises AP2 + x402 extensions |
+| `GET /.well-known/agent-card.json` | AgentCard discovery — advertises AP2 + x402 extensions |
 | `POST /a2a` | JSON-RPC 2.0 endpoint — `message/send` is the only method |
 
 A2A is **text-only today**. Messages carrying image `data` parts (`contentType` starting with `image/`) are rejected with an invalid-params error before any paid work happens.
@@ -23,7 +23,7 @@ A2A is **text-only today**. Messages carrying image `data` parts (`contentType` 
 
 ## AgentCard discovery
 
-Agents discover Solvela by fetching `GET /.well-known/agent.json`. The card advertises the AP2 extension (merchant role) and the x402 extension (Solana USDC-SPL settlement). A representative trimmed response:
+Agents discover Solvela by fetching `GET /.well-known/agent-card.json`. The card advertises the AP2 extension (merchant role) and the x402 extension (Solana USDC-SPL settlement). The legacy `/.well-known/agent.json` path remains available as an alias for backward compatibility. A representative trimmed response:
 
 ```json
 {

@@ -28,7 +28,7 @@ export function A2ASection() {
               <p className="mt-6 max-w-[52ch] text-[15px] leading-[1.65] text-muted-foreground">
                 Solvela speaks the A2A protocol. An agent fetches{' '}
                 <code className="font-mono text-[13px] text-[var(--accent-gold)]">
-                  /.well-known/agent.json
+                  /.well-known/agent-card.json
                 </code>
                 , sends a <code className="font-mono text-[13px]">message/send</code>,
                 gets back a task that says exactly what it costs, signs a USDC

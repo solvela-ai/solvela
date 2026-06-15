@@ -33,7 +33,7 @@ const BEATS: Beat[] = [
     n: '01',
     key: 0,
     verb: 'discover',
-    http: 'GET /.well-known/agent.json',
+    http: 'GET /.well-known/agent-card.json',
     body: 'The agent reads Solvela’s A2A AgentCard — capabilities, models, and the x402 payment terms it will be quoted against. No human, no dashboard.',
     tone: 'neutral',
   },

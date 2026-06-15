@@ -14,7 +14,7 @@ const EVENTS = [
   'deposit 0.0042 usdc → escrow 9neDHouX',
   'claim 0.0038 → provider · refund 0.0004 → agent · same tx',
   '402 quote · model auto · fee 0.0002 (5%)',
-  'agent-card fetched · /.well-known/agent.json',
+  'agent-card fetched · /.well-known/agent-card.json',
   'cache hit · exact match · upstream skipped',
   'router → tier complex · 15-dim · 0 external calls',
   'deposit 0.0117 usdc → escrow · nonce 4c1d',
