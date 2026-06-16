@@ -429,6 +429,7 @@ mod tests {
             admin_token: None, // no admin token — forces API key auth path
             prometheus_handle: None,
             api_key_hmac_secret: None,
+            auth_provider: None,
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::free_default(),
@@ -449,7 +450,7 @@ mod tests {
 
         let ctx = OrgContext {
             org_id,
-            api_key_id: Uuid::new_v4(),
+            api_key_id: Some(Uuid::new_v4()),
             role: OrgRole::Admin, // Admin, not Owner
         };
 

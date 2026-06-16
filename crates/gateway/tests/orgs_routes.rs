@@ -84,6 +84,7 @@ fn router_with_pool(pool: PgPool) -> Router {
         escrow_metrics: None,
         admin_token: Some(gateway::secret::AdminToken::new(ADMIN_TOKEN.to_string())),
         api_key_hmac_secret: None,
+        auth_provider: None,
         prometheus_handle: None,
         dev_bypass_payment: false,
         free_rate_limiter: gateway::middleware::rate_limit::RateLimiter::new(

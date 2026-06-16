@@ -1216,6 +1216,7 @@ mod tests {
             escrow_metrics: None,
             admin_token: None,
             api_key_hmac_secret: None,
+            auth_provider: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(crate::middleware::rate_limit::RateLimitConfig::free_default()),
@@ -1367,6 +1368,7 @@ mod tests {
             escrow_metrics: None,
             admin_token: None,
             api_key_hmac_secret: None,
+            auth_provider: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(

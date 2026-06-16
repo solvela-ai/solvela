@@ -813,6 +813,10 @@ async fn main() -> anyhow::Result<()> {
         escrow_metrics: escrow_metrics.clone(),
         admin_token,
         api_key_hmac_secret,
+        // No pluggable auth provider in the OSS binary — the built-in API-key
+        // path is the only authentication backend. The enterprise build sets
+        // this to its SSO/OIDC provider before calling `build_router`.
+        auth_provider: None,
         session_secret: {
             let secret = match env_with_fallback("SOLVELA_SESSION_SECRET", "RCR_SESSION_SECRET") {
                 Ok(b64) => {

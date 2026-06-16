@@ -96,6 +96,7 @@ fn stats_router(usage: UsageTracker, db_pool: Option<PgPool>) -> axum::Router {
             TEST_ADMIN_TOKEN.to_string(),
         )),
         api_key_hmac_secret: None,
+        auth_provider: None,
         prometheus_handle: None,
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
