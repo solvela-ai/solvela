@@ -23,16 +23,21 @@ pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse
         schemes.push("escrow");
     }
 
-    // The AgentCard `url` is the A2A service endpoint external agents/registries
-    // POST to. Prefer the configured public URL; the host:port fallback is for
-    // local dev only (the default bind host is 0.0.0.0, not publicly routable).
-    let url = match &state.config.server.public_url {
+    // The AgentCard `url` IS the A2A JSON-RPC endpoint a conformant client POSTs
+    // `message/send` directly to (A2A v0.3: `url` MUST support the
+    // `preferredTransport`, which is `JSONRPC`). That handler is mounted at
+    // `/a2a` (see `lib.rs`), so the advertised url is `{base}/a2a` — NOT the
+    // bare host, which serves no JSON-RPC and would 404 a conformant probe.
+    // Prefer the configured public URL; the host:port fallback is for local dev
+    // only (the default bind host is 0.0.0.0, not publicly routable).
+    let base = match &state.config.server.public_url {
         Some(u) => u.trim_end_matches('/').to_string(),
         None => format!(
             "http://{}:{}",
             state.config.server.host, state.config.server.port
         ),
     };
+    let url = format!("{base}/a2a");
 
     Json(json!({
         "name": "Solvela",
@@ -216,8 +221,10 @@ supports_vision = false
         );
     }
 
-    /// When `public_url` is configured, the card's `url` is that value
-    /// (an external agent/registry follows it to reach `/a2a`).
+    /// When `public_url` is configured, the card's `url` is the full A2A
+    /// JSON-RPC endpoint (`{public_url}/a2a`) — the URL a conformant A2A client
+    /// POSTs `message/send` directly to (A2A v0.3: `url` MUST support the
+    /// `preferredTransport`, and ours is `JSONRPC`, served only at `/a2a`).
     #[tokio::test]
     async fn test_agent_card_url_uses_public_url_when_set() {
         let mut config = AppConfig::default();
@@ -227,15 +234,89 @@ supports_vision = false
             "/.well-known/agent-card.json",
         )
         .await;
-        // Trailing slash trimmed.
-        assert_eq!(json["url"], "https://api.solvela.ai");
+        // Trailing slash on the public URL is trimmed, then `/a2a` appended.
+        assert_eq!(json["url"], "https://api.solvela.ai/a2a");
     }
 
-    /// With no `public_url`, the card falls back to the host:port form (dev only).
+    /// With no `public_url`, the card falls back to the host:port form (dev
+    /// only), still pointing at the `/a2a` JSON-RPC endpoint.
     #[tokio::test]
     async fn test_agent_card_url_falls_back_to_host_port() {
         let json = get_card(test_app(), "/.well-known/agent-card.json").await;
-        assert_eq!(json["url"], "http://0.0.0.0:8402");
+        assert_eq!(json["url"], "http://0.0.0.0:8402/a2a");
+    }
+
+    /// Regression for the A2A conformance bug a2aregistry.org's probe caught:
+    /// the AgentCard `url` MUST address a route that actually serves the
+    /// `preferredTransport` (JSONRPC). Previously `url` was the bare public
+    /// host, so a conformant client POSTing `message/send` directly to it hit
+    /// the root and got 404 ("the message/send endpoint does not exist at the
+    /// URL declared in the agent card"). Our prior a2a tests hardcoded
+    /// `.uri("/a2a")`, so they never exercised the advertised URL — this test
+    /// closes that gap by wiring BOTH the agent-card route AND the real
+    /// production `/a2a` handler, then driving traffic to the path the card
+    /// advertises.
+    #[tokio::test]
+    async fn test_advertised_url_path_reaches_real_a2a_endpoint() {
+        // Router carrying the agent card AND the production JSON-RPC route.
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/agent-card.json",
+                axum::routing::get(super::agent_card),
+            )
+            .route(
+                "/a2a",
+                axum::routing::post(crate::a2a::jsonrpc::a2a_endpoint),
+            )
+            .with_state(make_state());
+
+        // 1. Fetch the card and extract the path component of the advertised URL.
+        let json = get_card(app.clone(), "/.well-known/agent-card.json").await;
+        let advertised = json["url"].as_str().expect("url is a string");
+        let path = advertised
+            .strip_prefix("http://0.0.0.0:8402")
+            .expect("dev fallback url should be host:port-prefixed");
+        // The advertised path must be the real JSON-RPC route, not the root.
+        assert_eq!(
+            path, "/a2a",
+            "AgentCard url must advertise the /a2a JSON-RPC endpoint, not the bare host"
+        );
+
+        // 2. POST a minimal `message/send` to the advertised path and assert the
+        //    response is NOT 404 — i.e. the path the card advertises is a real
+        //    route that reaches the handler. (With cache: None the handler
+        //    returns 200 + a JSON-RPC error body; any non-404 proves routing.)
+        let resp = app
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "message/send",
+                            "id": "conformance-1",
+                            "params": {
+                                "message": {
+                                    "role": "user",
+                                    "parts": [{"kind": "text", "text": "ping"}],
+                                    "metadata": {"model": "test-model"}
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("request should succeed");
+        assert_ne!(
+            resp.status(),
+            http::StatusCode::NOT_FOUND,
+            "POSTing message/send to the advertised AgentCard url path must not 404 — \
+             that 404 is the exact conformance failure this test guards against"
+        );
     }
 
     /// The card carries every field a strict A2A v0.3 schema validator requires.
