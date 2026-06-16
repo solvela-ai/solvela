@@ -5,8 +5,13 @@ import { TerminalCard } from "@/components/ui/terminal-card";
 import { WALLET_TXS, DASHBOARD_STATS } from "@/lib/mock-data";
 import { fetchAdminStats, fetchEscrowConfig } from "@/lib/api";
 import { formatUSDC, formatNumber } from "@/lib/utils";
+import { EscrowFunding } from "@/components/wallet/escrow-funding";
 
 const WALLET_SETUP_DOCS_URL = "/docs/quickstart#configure-recipient-wallet";
+
+// Browser-reachable gateway URL for the client-side escrow-funding flow.
+const GATEWAY_URL =
+  process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:8402";
 
 export default async function WalletPage() {
   const recipientWallet =
@@ -84,6 +89,12 @@ export default async function WalletPage() {
               </a>
             </div>
         </TerminalCard>
+
+        {/* BYO-wallet escrow funding (connect → verify → sign → submit) */}
+        <EscrowFunding
+          gatewayUrl={GATEWAY_URL}
+          escrowConfigured={Boolean(escrowConfig?.escrow_program_id)}
+        />
 
         {/* Escrow config */}
         {escrowConfig && (

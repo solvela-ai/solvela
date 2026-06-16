@@ -53,7 +53,10 @@ deployments set these in Vercel.
 
 | Variable | Where read | Description |
 |---|---|---|
-| `NEXT_PUBLIC_GATEWAY_URL` | `src/lib/api.ts` | Solvela gateway base URL. Defaults to `http://localhost:8402` for local dev. |
+| `NEXT_PUBLIC_GATEWAY_URL` | `src/lib/api.ts`, `src/app/dashboard/wallet/page.tsx` | Solvela gateway base URL. Defaults to `http://localhost:8402` for local dev. Also used browser-side by the escrow-funding flow, so in production the dashboard origin must be in the gateway's `SOLVELA_CORS_ORIGINS`. |
+| `NEXT_PUBLIC_SOLANA_CHAIN` | `src/lib/wallet/wallet-standard.tsx` | Wallet-Standard cluster the escrow-funding flow signs/broadcasts against (`solana:mainnet` \| `solana:devnet` \| `solana:testnet`). Defaults to `solana:mainnet`; set `solana:devnet` to test against a devnet gateway. |
+| `NEXT_PUBLIC_ESCROW_PROGRAM_ID` | `src/lib/escrow/verify.ts` | Pinned escrow program the verify-what-you-sign gate checks the deposit against — a hostile/compromised gateway can't substitute its own program. Defaults to the mainnet program `9neD…`; set the devnet program id when targeting devnet. |
+| `NEXT_PUBLIC_USDC_MINT` | `src/lib/escrow/verify.ts` | Pinned USDC mint the verify gate checks the deposit against (blocks a fake-token substitution). Defaults to mainnet USDC `EPjF…`; set devnet USDC `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` for devnet. |
 | `NEXT_PUBLIC_SITE_URL` | `src/lib/theme-config.ts` | Canonical site URL for OG / Twitter card metadata. Falls back through `VERCEL_PROJECT_PRODUCTION_URL` → `VERCEL_URL` → `http://localhost:3000`. |
 | `GATEWAY_ADMIN_KEY` | `src/lib/api.ts` | Server-only admin bearer token used for privileged gateway calls (Overview, Models, and Metrics pages). Never exposed to the browser. |
 | `SOLVELA_SOLANA_RECIPIENT_WALLET` | `src/app/dashboard/wallet/page.tsx` | Public recipient wallet shown on the Wallet page. Legacy `RCR_SOLANA_RECIPIENT_WALLET` is also accepted as a fallback. |

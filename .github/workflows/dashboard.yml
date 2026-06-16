@@ -80,8 +80,9 @@ jobs:
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
       - run: npm ci
-      # Dashboard has no Solana dependencies, so the bigint-buffer CVE
-      # exception that the SDK workflows carry doesn't apply here.
-      # `--audit-level=high` is the right floor for a frontend with no
-      # crypto-adjacent transitives.
+      # The dashboard now carries Solana deps (@solana/kit + Wallet Standard,
+      # for the escrow-funding flow), but @solana/kit is the modern web3.js 2.0
+      # line and pulls NO bigint-buffer, so the bigint-buffer CVE exception the
+      # SDK workflows carry still doesn't apply here. `--audit-level=high`
+      # remains a clean, appropriate floor for this frontend.
       - run: npm audit --production --audit-level=high
