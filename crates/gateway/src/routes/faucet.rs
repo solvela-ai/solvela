@@ -562,11 +562,17 @@ impl GasSource for RpcGasSource {
         let to = Pubkey::from_str(wallet_b58)
             .map_err(|e| FaucetError::Rpc(format!("invalid recipient pubkey: {e}")))?;
 
-        // Fetch a fresh blockhash, then sign + broadcast.
-        let blockhash =
-            solvela_x402::solana_rpc::get_latest_blockhash(&self.http_client, &self.rpc_url)
-                .await
-                .map_err(|e| FaucetError::Rpc(e.to_string()))?;
+        // Fetch a fresh blockhash, then sign + broadcast. Uses `finalized`
+        // commitment (unchanged): the faucet only cares that the blockhash
+        // survives the round-trip to `sendTransaction`, so it prefers the
+        // most-settled reference.
+        let blockhash = solvela_x402::solana_rpc::get_latest_blockhash(
+            &self.http_client,
+            &self.rpc_url,
+            "finalized",
+        )
+        .await
+        .map_err(|e| FaucetError::Rpc(e.to_string()))?;
 
         let signed_b64 = sign_system_transfer(
             &self.source_pubkey,

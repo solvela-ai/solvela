@@ -15,6 +15,7 @@ use serde::Serialize;
 use serde_json::json;
 use tokio::sync::Mutex;
 
+use crate::middleware::rate_limit::{connect_info_client_id, rate_limited_response, PeerAddr};
 use crate::AppState;
 
 /// Cached Solana slot value with a 5-second TTL.
@@ -246,6 +247,385 @@ pub async fn escrow_health(
     (StatusCode::OK, Json(json!(response))).into_response()
 }
 
+// ---------------------------------------------------------------------------
+// POST /v1/escrow/deposit-tx — unsigned escrow-deposit transaction builder
+// ---------------------------------------------------------------------------
+
+/// Default expiry buffer (slots ahead of the current slot) when the caller does
+/// not supply `expiry_slot`. Equals the 300-second-timeout equivalent the SDK
+/// produces (`300 s × 1000 / 400 ms = 750 slots`), and sits inside the
+/// `[MIN_EXPIRY_SLOTS_AHEAD, MAX_EXPIRY_SLOTS_AHEAD]` window. Mirrors the Rust
+/// SDK's `escrow_expiry_slot(_, 300)` (`sdks/rust/.../signer.rs`).
+const DEFAULT_EXPIRY_SLOTS_AHEAD: u64 = 750;
+
+/// Minimum slots ahead of the current slot an escrow expiry may be. Mirrors the
+/// Rust SDK's `MIN_ESCROW_EXPIRY_SLOTS_AHEAD = 150`, which itself
+/// mirrors-and-exceeds the gateway/on-chain `MIN_EXPIRY_BUFFER_SLOTS = 50`. A
+/// too-near expiry would be bounced by the verifier, so we reject it here.
+const MIN_EXPIRY_SLOTS_AHEAD: u64 = 150;
+
+/// Maximum slots ahead of the current slot an escrow expiry may be. Mirrors the
+/// Rust SDK's `MAX_ESCROW_EXPIRY_SLOTS_AHEAD = 10_000` (~66 min). An explicit
+/// value beyond this is clamped down, never silently extended to "never".
+const MAX_EXPIRY_SLOTS_AHEAD: u64 = 10_000;
+
+/// Request body for `POST /v1/escrow/deposit-tx`.
+///
+/// `amount` is the deposit in **atomic USDC units** (6-decimal micro-USDC) as an
+/// integer string (e.g. `"2625"`), NOT a decimal USDC string. It must parse as a
+/// `u64 > 0`.
+///
+/// `#[serde(deny_unknown_fields)]`: a money-path request must reject an unknown
+/// field rather than silently ignore it — a typo like `"ammount"` would
+/// otherwise drop the caller's intended amount and fall through to the default
+/// expiry / a missing required field, building a deposit the caller never asked
+/// for. This is a gateway-local request type (not the x402 wire `EscrowPayload`),
+/// so strict rejection is safe and does not break protocol forward-compat.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DepositTxRequest {
+    /// Base58 agent wallet pubkey (the external signer / fee payer).
+    pub agent_wallet: String,
+    /// Base64 of the 32-byte `service_id` seeding the escrow PDA.
+    pub service_id: String,
+    /// Atomic USDC units, integer string, must be > 0.
+    pub amount: String,
+    /// Optional absolute expiry slot. Absent → `current_slot +
+    /// DEFAULT_EXPIRY_SLOTS_AHEAD`. Present → clamped into the valid window;
+    /// rejected if already below `current_slot + MIN_EXPIRY_SLOTS_AHEAD`.
+    #[serde(default)]
+    pub expiry_slot: Option<u64>,
+}
+
+/// The deterministic inputs a client re-derives the message from to verify what
+/// it is about to sign ("verify what you sign").
+#[derive(Debug, Clone, Serialize)]
+pub struct DecodedIntent {
+    pub program_id: String,
+    pub usdc_mint: String,
+    pub provider: String,
+    pub escrow_pda: String,
+    pub vault_ata: String,
+    /// Atomic USDC units, integer string (echoes the validated request amount).
+    pub amount: String,
+    /// Base64 of the 32-byte service_id (echoes the validated request).
+    pub service_id: String,
+    pub expiry_slot: u64,
+    /// Base58 recent blockhash embedded in the message.
+    pub recent_blockhash: String,
+}
+
+/// Response body for `POST /v1/escrow/deposit-tx`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DepositTxResponse {
+    /// Base64 of the UNSIGNED legacy message bytes. The signer signs THESE bytes
+    /// and assembles `compact-u16(1) || signature(64) || message`.
+    pub message: String,
+    pub decoded_intent: DecodedIntent,
+    pub network: String,
+}
+
+/// POST /v1/escrow/deposit-tx
+///
+/// Returns an UNSIGNED escrow-deposit legacy message for an external signer
+/// (browser wallet / KMS / hardware). The gateway NEVER holds a private key on
+/// this path — it derives the agent's PDA/ATA from the supplied public key,
+/// fetches a recent blockhash, builds the canonical message via the
+/// golden-vector-pinned `build_deposit_message`, and returns the message plus a
+/// `decoded_intent` so the client can re-derive and byte-compare before signing.
+///
+/// Status codes:
+/// - 200 with `{ message, decoded_intent, network }` on success
+/// - 400 on a malformed pubkey / service_id / amount or an out-of-window
+///   explicit `expiry_slot`
+/// - 404 `{"error":"escrow not configured"}` when `escrow_program_id` is unset
+/// - 503 (fail-closed) when the recent-blockhash RPC is unavailable — never a
+///   silently-built unsubmittable transaction
+///
+/// All amount handling is integer atomic-unit (no float). Validation happens
+/// before the single RPC call so malformed input never triggers network I/O.
+pub async fn deposit_tx(
+    State(state): State<Arc<AppState>>,
+    // Infallible peer-address extractor (same as the faucet/receipts routes):
+    // `None` when `ConnectInfo` is absent, degrading to the stricter "unknown"
+    // bucket rather than 500-ing. Extracted before the body so the rate limit can
+    // gate on the real TCP peer IP.
+    peer_addr: PeerAddr,
+    Json(req): Json<DepositTxRequest>,
+) -> axum::response::Response {
+    use base64::Engine;
+    use solvela_x402::escrow::deposit::{
+        build_deposit_message, derive_deposit_addresses, UnsignedDepositParams,
+    };
+
+    // Anti-amplification: this route is public and unauthenticated and each call
+    // can fan out to Solana RPC (slot + blockhash). Enforce a per-IP cap BEFORE
+    // any RPC work (and before the escrow-configured / validation checks) so an
+    // abusive caller is rejected at the cheapest point and cannot drive RPC
+    // traffic. Keyed on the TCP peer IP, never a client-supplied header
+    // (X-Forwarded-For et al. are forgeable — GHSA-6ggq-cvwx-4f67); absent
+    // `ConnectInfo` falls back to the shared stricter "unknown" bucket. Mirrors
+    // the faucet/receipts in-handler limiters and reuses the same 429 envelope.
+    let client_id = connect_info_client_id(peer_addr.0);
+    if state
+        .deposit_tx_rate_limiter
+        .check(&client_id)
+        .await
+        .is_err()
+    {
+        metrics::counter!("solvela_deposit_tx_rate_limited_total").increment(1);
+        tracing::warn!(client_id = %client_id, "escrow deposit-tx rate limit exceeded");
+        return rate_limited_response(state.deposit_tx_rate_limiter.config());
+    }
+
+    // Fail closed if escrow is not configured (mirror escrow_config's 404 body).
+    let escrow_program_id = match &state.config.solana.escrow_program_id {
+        Some(id) if !id.is_empty() => id.clone(),
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "escrow not configured" })),
+            )
+                .into_response();
+        }
+    };
+
+    // --- Validate inputs BEFORE any RPC call (no network I/O on bad input) ---
+
+    // agent_wallet: base58 → 32-byte pubkey.
+    let agent_pubkey = match solvela_x402::escrow::pda::decode_bs58_pubkey(&req.agent_wallet) {
+        Ok(pk) => pk,
+        Err(_) => {
+            return bad_request("agent_wallet must be a base58-encoded 32-byte pubkey");
+        }
+    };
+
+    // service_id: base64 → exactly 32 bytes.
+    let service_id_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.service_id) {
+        Ok(b) => b,
+        Err(_) => return bad_request("service_id must be valid base64"),
+    };
+    let service_id: [u8; 32] = match service_id_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(v) => {
+            let len = v.len();
+            return bad_request(&format!(
+                "service_id must decode to exactly 32 bytes, got {len}"
+            ));
+        }
+    };
+
+    // amount: atomic-unit integer string, must be > 0. Integer parse only — the
+    // field is atomic micro-USDC, never a decimal string, so a `u64` parse is the
+    // correct (and only float-free) reading. Rejects "", "-5", "0.5", overflow.
+    let amount: u64 = match req.amount.parse::<u64>() {
+        Ok(a) => a,
+        Err(_) => {
+            return bad_request(
+                "amount must be a positive integer of atomic USDC units (no decimals, no overflow)",
+            );
+        }
+    };
+    if amount == 0 {
+        return bad_request("amount must be greater than zero");
+    }
+    // Reject a NON-CANONICAL amount string (leading zeros, `+` sign, surrounding
+    // whitespace): `"01".parse::<u64>()` is `1`, but `decoded_intent.amount`
+    // echoes the canonical `"1"`. A strict "verify what you sign" client does a
+    // string compare of the amount it sent against the echoed intent — so the
+    // request string and the echoed intent must be byte-equal. Re-serializing the
+    // parsed `u64` is the canonical form; anything that differs is rejected here
+    // rather than silently canonicalized.
+    if req.amount != amount.to_string() {
+        return bad_request(
+            "amount must be a canonical integer string (no leading zeros, sign, or whitespace)",
+        );
+    }
+
+    // --- Current slot for expiry-window logic (CACHED) ---
+    // Reuse the same 5s `SlotCache` the `escrow_config` handler uses rather than
+    // an uncached `getSlot` per request: this removes one RPC round-trip per
+    // request (RPC-amplification surface) and closes the slot/blockhash skew
+    // window. `fetch_cached_slot` returns the cached value when fresh, otherwise
+    // fetches once (and on failure returns a stale cached value if any). It
+    // yields `None` only when there is NO usable slot at all (no fresh fetch AND
+    // no cached value) — fail closed with the same static 503 as before, never a
+    // silently-built unsubmittable transaction.
+    let current_slot = match fetch_cached_slot(&state).await {
+        Some(s) => s,
+        None => {
+            // Detail already logged at warn! inside `fetch_cached_slot`. Surface
+            // only a clean, static message — never raw RPC internals
+            // (GHSA-cgqx-mg48-949v).
+            return service_unavailable("could not reach the Solana cluster to build the deposit");
+        }
+    };
+
+    // Resolve the expiry slot from the current slot + the configured window.
+    let expiry_slot = match resolve_expiry_slot(req.expiry_slot, current_slot) {
+        Ok(slot) => slot,
+        Err(msg) => return bad_request(msg),
+    };
+
+    // --- Single RPC call: fetch a recent blockhash for the message ---
+    // `confirmed` commitment (not `finalized`): this endpoint's job is to hand
+    // back a promptly-submittable transaction, so it wants the freshest,
+    // longest-lived blockhash, and keeping it on `confirmed` matches the
+    // `confirmed` slot reference above (a finalized blockhash would be ~32 slots
+    // staler, shortening the effective expiry window).
+    let recent_blockhash = match solvela_x402::solana_rpc::get_latest_blockhash(
+        &state.http_client,
+        &state.config.solana.rpc_url,
+        "confirmed",
+    )
+    .await
+    {
+        Ok(bh) => bh,
+        Err(e) => {
+            tracing::warn!(error = %e, "deposit-tx: failed to fetch recent blockhash");
+            return service_unavailable("could not reach the Solana cluster to build the deposit");
+        }
+    };
+
+    let usdc_mint = state.config.solana.usdc_mint.clone();
+    let provider = state.config.solana.recipient_wallet.clone();
+
+    // Build the canonical UNSIGNED message (golden-vector-pinned). The agent
+    // pubkey is client-supplied (already validated); the provider/mint/program
+    // all come from gateway config, so any builder error here is a gateway-config
+    // fault, handled as a 500 below (never a 400 that blames the caller).
+    let unsigned = UnsignedDepositParams {
+        agent_pubkey,
+        provider_wallet_b58: provider.clone(),
+        usdc_mint_b58: usdc_mint.clone(),
+        escrow_program_id_b58: escrow_program_id.clone(),
+        amount,
+        service_id,
+        expiry_slot,
+        recent_blockhash,
+    };
+    // By this point the client-controlled inputs (agent_pubkey, service_id,
+    // amount) are all validated, so any `build_deposit_message` failure is a
+    // GATEWAY-CONFIG fault (a malformed provider/mint/program in server config),
+    // NOT a client error — return 500, never a 400 that blames the caller. Fail
+    // closed and log the detail (the message stays free of internal specifics).
+    let message_bytes = match build_deposit_message(&unsigned) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(error = %e, "deposit-tx: failed to build unsigned message (gateway config?)");
+            return internal_error("could not build the deposit transaction");
+        }
+    };
+
+    // Derive escrow PDA + vault ATA for the decoded_intent (reuse canonical
+    // derivation; do not reimplement). Same config-fault classification as above.
+    let derived = match derive_deposit_addresses(
+        &agent_pubkey,
+        &service_id,
+        &usdc_mint,
+        &escrow_program_id,
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!(error = %e, "deposit-tx: failed to derive escrow addresses (gateway config?)");
+            return internal_error("could not derive the escrow accounts");
+        }
+    };
+
+    let response = DepositTxResponse {
+        message: base64::engine::general_purpose::STANDARD.encode(&message_bytes),
+        decoded_intent: DecodedIntent {
+            program_id: escrow_program_id,
+            usdc_mint,
+            provider,
+            escrow_pda: bs58::encode(derived.escrow_pda).into_string(),
+            vault_ata: bs58::encode(derived.vault_ata).into_string(),
+            // Echo the *validated* amount as an atomic-unit integer string.
+            amount: amount.to_string(),
+            // Echo the *validated* service_id (re-encode the bytes we used, so
+            // the response is canonical even if the request used a non-canonical
+            // base64 variant).
+            service_id: base64::engine::general_purpose::STANDARD.encode(service_id),
+            expiry_slot,
+            recent_blockhash: bs58::encode(recent_blockhash).into_string(),
+        },
+        network: solvela_x402::types::SOLANA_NETWORK.to_string(),
+    };
+
+    (StatusCode::OK, Json(json!(response))).into_response()
+}
+
+/// Static, RELATIVE client-facing message for a too-near explicit `expiry_slot`.
+///
+/// Deliberately does NOT embed the live absolute slot or the caller's echoed
+/// value: the absolute `min_slot` reveals the gateway's current chain view, and
+/// echoing caller input back is needless reflection. The relative constant
+/// (`MIN_EXPIRY_SLOTS_AHEAD`) is fixed and safe to publish; the dynamic detail is
+/// logged at `debug!` in [`resolve_expiry_slot`] for operators only.
+///
+/// The literal `150` below is pinned to [`MIN_EXPIRY_SLOTS_AHEAD`] by the
+/// compile-time guard immediately following, so a change to the constant fails
+/// the build (forcing this string to be updated) rather than silently drifting.
+const EXPIRY_BELOW_MIN_MESSAGE: &str =
+    "expiry_slot must be at least 150 slots ahead of the current slot";
+const _: () = assert!(MIN_EXPIRY_SLOTS_AHEAD == 150);
+
+/// Resolve the absolute expiry slot from an optional explicit value and the
+/// current slot, using the SDK-aligned `[MIN, MAX]` window.
+///
+/// - `None` → `current_slot + DEFAULT_EXPIRY_SLOTS_AHEAD`.
+/// - `Some(slot)`:
+///   - reject (`Err`) if `slot < current_slot + MIN_EXPIRY_SLOTS_AHEAD` (a
+///     too-near expiry the verifier would bounce — fail closed, do not silently
+///     bump it up),
+///   - clamp DOWN to `current_slot + MAX_EXPIRY_SLOTS_AHEAD` if it exceeds the
+///     cap (never silently extend to "never").
+///
+/// The `Err` carries the STATIC, RELATIVE [`EXPIRY_BELOW_MIN_MESSAGE`] — the live
+/// absolute slot and the caller's echoed value are logged at `debug!` only, never
+/// returned on the wire. Saturating arithmetic guards the `current_slot + buffer`
+/// overflow case.
+fn resolve_expiry_slot(explicit: Option<u64>, current_slot: u64) -> Result<u64, &'static str> {
+    let min_slot = current_slot.saturating_add(MIN_EXPIRY_SLOTS_AHEAD);
+    let max_slot = current_slot.saturating_add(MAX_EXPIRY_SLOTS_AHEAD);
+    match explicit {
+        None => Ok(current_slot.saturating_add(DEFAULT_EXPIRY_SLOTS_AHEAD)),
+        Some(slot) => {
+            if slot < min_slot {
+                // Dynamic detail (live slot + caller value) is operator-only.
+                tracing::debug!(
+                    expiry_slot = slot,
+                    current_slot,
+                    min_slot,
+                    "deposit-tx: explicit expiry_slot below the minimum buffer"
+                );
+                return Err(EXPIRY_BELOW_MIN_MESSAGE);
+            }
+            // Above the cap → clamp down (never extend to never).
+            Ok(slot.min(max_slot))
+        }
+    }
+}
+
+/// Build a 400 Bad Request JSON response with a safe, static-ish message.
+fn bad_request(message: &str) -> axum::response::Response {
+    crate::error::GatewayError::BadRequest(message.to_string()).into_response()
+}
+
+/// Build a 503 Service Unavailable JSON response (RPC unreachable). The message
+/// is static and free of RPC internals.
+fn service_unavailable(message: &str) -> axum::response::Response {
+    crate::error::GatewayError::ServiceUnavailable(message.to_string()).into_response()
+}
+
+/// Build a 500 Internal Server Error JSON response for a gateway-config fault
+/// (the client-controlled inputs are already validated by the time this is
+/// reachable). `GatewayError::Internal` discards the inner message client-side
+/// and emits a static "Internal server error" body, so no internal detail leaks.
+fn internal_error(message: &str) -> axum::response::Response {
+    crate::error::GatewayError::Internal(message.to_string()).into_response()
+}
+
 /// Make a `getSlot` JSON-RPC call to the Solana cluster.
 async fn fetch_slot_from_rpc(client: &reqwest::Client, rpc_url: &str) -> Result<u64, String> {
     let body = serde_json::json!({
@@ -337,5 +717,94 @@ mod tests {
     #[test]
     fn test_slot_cache_ttl_is_five_seconds() {
         assert_eq!(SLOT_CACHE_TTL, Duration::from_secs(5));
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_expiry_slot — pure window logic (no RPC)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_expiry_default_uses_default_buffer() {
+        // No explicit expiry → current_slot + DEFAULT_EXPIRY_SLOTS_AHEAD (750).
+        assert_eq!(
+            resolve_expiry_slot(None, 1_000_000).unwrap(),
+            1_000_000 + DEFAULT_EXPIRY_SLOTS_AHEAD
+        );
+    }
+
+    #[test]
+    fn resolve_expiry_explicit_within_window_passes_through() {
+        // A value comfortably inside [min, max] is returned unchanged.
+        let current = 1_000_000;
+        let slot = current + 800; // between 150 and 10_000 ahead
+        assert_eq!(resolve_expiry_slot(Some(slot), current).unwrap(), slot);
+    }
+
+    #[test]
+    fn resolve_expiry_below_min_buffer_is_rejected() {
+        // Too-near expiry (verifier would bounce it) → Err, NOT a silent bump-up.
+        let current = 1_000_000;
+        // current + 149 is below the 150 floor.
+        let err = resolve_expiry_slot(Some(current + 149), current).unwrap_err();
+        // The error message is STATIC and RELATIVE — it must NOT echo the live
+        // absolute slot or the caller's value (fix #6). It must mention the
+        // relative buffer requirement.
+        assert_eq!(err, EXPIRY_BELOW_MIN_MESSAGE);
+        assert!(
+            err.contains("at least 150 slots ahead"),
+            "must state the relative buffer, got: {err}"
+        );
+        assert!(
+            !err.contains("1000000") && !err.contains(&(current + 149).to_string()),
+            "message must not leak the live slot or the caller's value: {err}"
+        );
+        // An absolute slot far in the past is likewise rejected.
+        assert!(resolve_expiry_slot(Some(1), current).is_err());
+        assert!(resolve_expiry_slot(Some(0), current).is_err());
+    }
+
+    #[test]
+    fn resolve_expiry_at_exact_min_is_accepted() {
+        let current = 1_000_000;
+        let at_min = current + MIN_EXPIRY_SLOTS_AHEAD;
+        assert_eq!(resolve_expiry_slot(Some(at_min), current).unwrap(), at_min);
+    }
+
+    #[test]
+    fn resolve_expiry_above_max_is_clamped_down() {
+        // Beyond the cap → clamped DOWN to current + MAX (never extended).
+        let current = 1_000_000;
+        let way_future = current + MAX_EXPIRY_SLOTS_AHEAD + 5_000;
+        assert_eq!(
+            resolve_expiry_slot(Some(way_future), current).unwrap(),
+            current + MAX_EXPIRY_SLOTS_AHEAD
+        );
+    }
+
+    #[test]
+    fn resolve_expiry_saturates_on_current_slot_overflow() {
+        // current_slot near u64::MAX must not panic; min/max saturate.
+        let current = u64::MAX - 10;
+        // Default buffer saturates to u64::MAX.
+        assert_eq!(resolve_expiry_slot(None, current).unwrap(), u64::MAX);
+        // An explicit u64::MAX is >= the saturated min and <= the saturated max,
+        // so it passes through.
+        assert_eq!(
+            resolve_expiry_slot(Some(u64::MAX), current).unwrap(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn expiry_window_constants_are_sdk_aligned() {
+        // Guard against drift from the Rust SDK signer constants.
+        assert_eq!(MIN_EXPIRY_SLOTS_AHEAD, 150);
+        assert_eq!(MAX_EXPIRY_SLOTS_AHEAD, 10_000);
+        assert_eq!(DEFAULT_EXPIRY_SLOTS_AHEAD, 750);
+        // The floor must be >= the gateway/on-chain MIN_EXPIRY_BUFFER_SLOTS (50)
+        // and the default must sit inside [MIN, MAX]. Compile-time guards.
+        const _: () = assert!(MIN_EXPIRY_SLOTS_AHEAD >= 50);
+        const _: () = assert!(DEFAULT_EXPIRY_SLOTS_AHEAD >= MIN_EXPIRY_SLOTS_AHEAD);
+        const _: () = assert!(DEFAULT_EXPIRY_SLOTS_AHEAD <= MAX_EXPIRY_SLOTS_AHEAD);
     }
 }

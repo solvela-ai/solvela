@@ -95,6 +95,9 @@ fn router_with_pool(pool: PgPool) -> Router {
         faucet_rate_limiter: gateway::middleware::rate_limit::RateLimiter::new(
             gateway::middleware::rate_limit::RateLimitConfig::faucet_default(),
         ),
+        deposit_tx_rate_limiter: gateway::middleware::rate_limit::RateLimiter::new(
+            gateway::middleware::rate_limit::RateLimitConfig::deposit_tx_default(),
+        ),
         free_global_cap: gateway::middleware::rate_limit::FreeTierGlobalCap::new(
             gateway::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT,
         ),

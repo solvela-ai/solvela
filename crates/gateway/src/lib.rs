@@ -158,6 +158,19 @@ pub struct AppState {
     /// client-supplied header (GHSA-6ggq-cvwx-4f67); absent `ConnectInfo` falls
     /// back to the shared stricter "unknown" bucket.
     pub faucet_rate_limiter: RateLimiter,
+    /// Per-client (IP) rate limiter for the public, unauthenticated
+    /// `POST /v1/escrow/deposit-tx` unsigned-deposit-tx builder route.
+    ///
+    /// Same in-handler pattern as
+    /// [`faucet_rate_limiter`](Self::faucet_rate_limiter): the route is
+    /// unauthenticated and each call can fan out to Solana RPC (slot +
+    /// blockhash), so this cap bounds RPC-amplification per peer IP, STRICTER
+    /// than the generic outer limiter but more generous than the faucet
+    /// ([`RateLimitConfig::deposit_tx_default`]) because building deposit
+    /// transactions is a legitimate, occasionally-bursty funding flow. Keyed on
+    /// the TCP peer IP, never a client-supplied header (GHSA-6ggq-cvwx-4f67);
+    /// absent `ConnectInfo` falls back to the shared stricter "unknown" bucket.
+    pub deposit_tx_rate_limiter: RateLimiter,
 }
 
 impl AppState {
@@ -308,6 +321,7 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         )
         .route("/v1/escrow/config", get(routes::escrow::escrow_config))
         .route("/v1/escrow/health", get(routes::escrow::escrow_health))
+        .route("/v1/escrow/deposit-tx", post(routes::escrow::deposit_tx))
         .route(
             "/v1/escrow/settle",
             post(routes::escrow_settle::handle_settle),

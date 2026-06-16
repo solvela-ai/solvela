@@ -41,7 +41,18 @@ use solvela_x402::types::{
 // ---------------------------------------------------------------------------
 
 /// Recipient wallet used across all integration test AppState and payment headers.
+///
+/// NOTE: this placeholder is NOT valid base58 (it contains a lowercase `l`), so
+/// it cannot be base58-decoded. That is fine for the exact-scheme paths that only
+/// string-compare it, but the escrow unsigned-deposit-tx builder DECODES the
+/// recipient (provider) — so escrow fixtures that must reach `build_deposit_message`
+/// use [`TEST_RECIPIENT_WALLET_VALID`] instead.
 const TEST_RECIPIENT_WALLET: &str = "GatewayRecipientWallet111111111111111111111111";
+
+/// A VALID base58 recipient pubkey for escrow fixtures whose handler decodes the
+/// recipient (the unsigned-deposit-tx builder). Reuses the golden-vector provider
+/// so it matches the escrow-tx canonical inputs.
+const TEST_RECIPIENT_WALLET_VALID: &str = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
 
 /// Large payment amount (in atomic USDC) that exceeds any test model cost estimate.
 const TEST_PAYMENT_AMOUNT: &str = "1000000";
@@ -508,6 +519,18 @@ fn generous_faucet_limiter() -> RateLimiter {
     })
 }
 
+/// Deposit-tx POST limiter for test apps: effectively unlimited so unrelated
+/// tests that exercise `POST /v1/escrow/deposit-tx` (or just construct an
+/// `AppState`) are never tripped by the production per-IP cap. The strict cap
+/// itself is exercised by the dedicated deposit-tx rate-limit test fixture.
+fn generous_deposit_tx_limiter() -> RateLimiter {
+    RateLimiter::new(RateLimitConfig {
+        max_requests: 10_000,
+        window: std::time::Duration::from_secs(60),
+        unknown_max_requests: 10_000,
+    })
+}
+
 /// Build a test app with the test model config (no real provider API keys).
 ///
 /// Uses `AlwaysPassVerifier` so that properly-structured PaymentPayload headers
@@ -567,6 +590,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -623,6 +647,7 @@ fn test_app_with_usdc_mint_and_providers(mint: &str, providers: ProviderRegistry
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -922,6 +947,7 @@ fn test_app_with_provider_registry_and_exact_verifier(
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -1007,6 +1033,7 @@ fn app_with_semantic_cache(sem: Arc<gateway::cache::semantic::SemanticCache>) ->
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -1321,6 +1348,7 @@ fn app_with_semantic_cache_and_escrow(
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -1400,6 +1428,7 @@ fn app_with_semantic_cache_escrow_and_db_pool(
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -2063,6 +2092,7 @@ fn test_app_with_provider_registry_and_escrow_verifier(
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -2087,7 +2117,10 @@ fn test_app_with_escrow_and_usdc_mint(mint: &str) -> axum::Router {
     ]);
 
     let mut config = AppConfig::default();
-    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    // Escrow is enabled here, and the unsigned-deposit-tx builder decodes the
+    // recipient (provider) — so this fixture needs a VALID base58 recipient,
+    // unlike the non-decoding exact-scheme fixtures that use the placeholder.
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET_VALID.to_string();
     config.solana.escrow_program_id =
         Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
     config.solana.usdc_mint = mint.to_string();
@@ -2146,6 +2179,7 @@ fn test_app_with_escrow_and_usdc_mint(mint: &str) -> axum::Router {
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -2616,6 +2650,7 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let app = build_router(
@@ -5011,6 +5046,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -6841,7 +6877,7 @@ async fn test_escrow_config_returns_200_when_configured() {
     );
     assert_eq!(json["network"], SOLANA_NETWORK);
     assert_eq!(json["usdc_mint"], USDC_MINT);
-    assert_eq!(json["provider_wallet"], TEST_RECIPIENT_WALLET);
+    assert_eq!(json["provider_wallet"], TEST_RECIPIENT_WALLET_VALID);
     // current_slot may be null if devnet RPC is unreachable in CI
     assert!(
         json["current_slot"].is_u64() || json["current_slot"].is_null(),
@@ -7047,6 +7083,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -7215,6 +7252,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
 
@@ -7272,7 +7310,7 @@ fn mismatched_exact_scheme_escrow_payload_header(resource_url: &str) -> String {
             network: SOLANA_NETWORK.to_string(),
             amount: TEST_PAYMENT_AMOUNT.to_string(),
             asset: USDC_MINT.to_string(),
-            pay_to: TEST_RECIPIENT_WALLET.to_string(),
+            pay_to: TEST_RECIPIENT_WALLET_VALID.to_string(),
             max_timeout_seconds: 300,
             escrow_program_id: None,
         },
@@ -7300,7 +7338,7 @@ fn mismatched_escrow_scheme_direct_payload_header(resource_url: &str) -> String 
             network: SOLANA_NETWORK.to_string(),
             amount: TEST_PAYMENT_AMOUNT.to_string(),
             asset: USDC_MINT.to_string(),
-            pay_to: TEST_RECIPIENT_WALLET.to_string(),
+            pay_to: TEST_RECIPIENT_WALLET_VALID.to_string(),
             max_timeout_seconds: 300,
             escrow_program_id: Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string()),
         },
@@ -7453,6 +7491,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
 
@@ -7845,6 +7884,7 @@ async fn test_proxy_require_tenant_wallet_rejected_before_settlement() {
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let app = build_router(
@@ -9367,6 +9407,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let app = build_router(
@@ -10022,6 +10063,7 @@ fn test_app_with_free_limit(free_max: u32) -> axum::Router {
         // their own app via `test_app_with_global_cap`.
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -10386,6 +10428,7 @@ async fn dev_bypass_still_works() {
         // (incorrectly) routed through the free gates, this PAID model would 429.
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(0),
     });
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
@@ -10461,6 +10504,7 @@ fn test_app_with_global_cap(global_cap: u32) -> axum::Router {
         free_rate_limiter: RateLimiter::new(free_cfg),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(global_cap),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
@@ -10590,6 +10634,7 @@ async fn free_per_ip_and_global_cap_are_independent() {
         // Global cap deliberately LOOSER than the per-IP limit.
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(100),
     });
     let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
@@ -11461,6 +11506,7 @@ fn test_app_with_db_pool(
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -12012,6 +12058,7 @@ fn test_app_with_receipts_limit(max: u32) -> axum::Router {
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         receipts_rate_limiter: RateLimiter::new(receipts_cfg),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
@@ -12389,6 +12436,7 @@ fn a2a_app_with_redis_db_and_providers(
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -12790,6 +12838,7 @@ fn a2a_app_with_verifier_and_db(
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     let router = build_router(
@@ -13478,6 +13527,7 @@ mod faucet_route_tests {
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         build_router(
@@ -13660,6 +13710,7 @@ mod faucet_route_tests {
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
             faucet_rate_limiter,
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         build_router(
@@ -14105,5 +14156,520 @@ mod discovery_challenge_tests {
             !settled.load(std::sync::atomic::Ordering::SeqCst),
             "discovery path must NEVER reach on-chain settlement"
         );
+    }
+}
+
+// ===========================================================================
+// POST /v1/escrow/deposit-tx — unsigned escrow-deposit-transaction API
+// ===========================================================================
+//
+// The gateway builds an UNSIGNED escrow-deposit legacy message for an external
+// signer (browser wallet / KMS / hardware) to sign — the gateway never holds a
+// key. The deterministic 4xx/404 cases below reject BEFORE any RPC call, so
+// they are reproducible with no live network. The happy path needs a recent
+// blockhash (one `getLatestBlockhash` RPC); since the test harness has no RPC
+// stub, that test asserts the full response shape when the RPC is reachable and
+// tolerates a fail-closed 503 when it is not (mirroring how the escrow-config
+// test tolerates a null slot). The validation guarantees are the deterministic
+// tests; the happy-path shape is best-effort on live devnet RPC.
+mod escrow_deposit_tx_tests {
+    use super::*;
+
+    /// Agent pubkey derived from the canonical golden seed `[42u8; 32]`
+    /// (see `sdks/rust/.../signer.rs` and `escrow-tx` golden vector).
+    const GOLDEN_AGENT_PUBKEY_B58: &str = "2iXtA8oeZqUU5pofxK971TCEvFGfems2AcDRaZHKD2pQ";
+
+    /// Base64 of a valid 32-byte service_id (`[7u8; 32]`, the golden value).
+    fn service_id_b64() -> String {
+        base64::engine::general_purpose::STANDARD.encode([7u8; 32])
+    }
+
+    fn deposit_tx_uri() -> &'static str {
+        "/v1/escrow/deposit-tx"
+    }
+
+    /// A REAL base58 recipient wallet (32 bytes), unlike the placeholder
+    /// `TEST_RECIPIENT_WALLET` which is not valid base58. The unsigned-deposit
+    /// builder decodes the configured `recipient_wallet` (provider), so the
+    /// happy-path app must carry a valid one.
+    const REAL_RECIPIENT: &str = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+
+    /// Escrow-enabled app whose `recipient_wallet` is a real base58 pubkey, so
+    /// `build_deposit_message` can decode the provider. Minimal `AppState`
+    /// (no claimer/fee-payer needed — this endpoint never settles).
+    fn happy_path_app() -> axum::Router {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = REAL_RECIPIENT.to_string();
+        config.solana.escrow_program_id =
+            Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
+
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator,
+            usage: gateway::usage::UsageTracker::noop(),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: Some(gateway::secret::AdminToken::new(
+                TEST_ADMIN_TOKEN.to_string(),
+            )),
+            api_key_hmac_secret: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        build_router(state, RateLimiter::new(RateLimitConfig::default()))
+    }
+
+    async fn post_deposit_tx(
+        app: axum::Router,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(deposit_tx_uri())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    /// 404 when escrow is not configured (default config has escrow_program_id:
+    /// None). Mirrors the escrow-config 404 body exactly.
+    #[tokio::test]
+    async fn deposit_tx_returns_404_when_escrow_not_configured() {
+        let app = test_app(); // default: escrow_program_id None
+        let (status, json) = post_deposit_tx(
+            app,
+            serde_json::json!({
+                "agent_wallet": GOLDEN_AGENT_PUBKEY_B58,
+                "service_id": service_id_b64(),
+                "amount": "2625",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["error"], "escrow not configured");
+    }
+
+    /// 400 when the amount is "0" — reject zero amount before building anything.
+    #[tokio::test]
+    async fn deposit_tx_rejects_zero_amount() {
+        let app = test_app_with_escrow();
+        let (status, _json) = post_deposit_tx(
+            app,
+            serde_json::json!({
+                "agent_wallet": GOLDEN_AGENT_PUBKEY_B58,
+                "service_id": service_id_b64(),
+                "amount": "0",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "zero amount must be 400");
+    }
+
+    /// 400 when the amount string is not a positive integer (no float, no
+    /// negative). A decimal like "0.5" must be rejected — the field is atomic
+    /// integer units, not a decimal USDC string.
+    #[tokio::test]
+    async fn deposit_tx_rejects_non_integer_amount() {
+        let app = test_app_with_escrow();
+        for bad in ["0.5", "-5", "abc", "", "1.0"] {
+            let (status, _json) = post_deposit_tx(
+                test_app_with_escrow(),
+                serde_json::json!({
+                    "agent_wallet": GOLDEN_AGENT_PUBKEY_B58,
+                    "service_id": service_id_b64(),
+                    "amount": bad,
+                }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "amount {bad:?} must be rejected as non-positive-integer"
+            );
+        }
+        let _ = app;
+    }
+
+    /// 400 when the agent_wallet is not a valid base58 32-byte pubkey.
+    #[tokio::test]
+    async fn deposit_tx_rejects_bad_pubkey() {
+        let app = test_app_with_escrow();
+        let (status, _json) = post_deposit_tx(
+            app,
+            serde_json::json!({
+                "agent_wallet": "not-a-valid-pubkey-!!!",
+                "service_id": service_id_b64(),
+                "amount": "2625",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "bad pubkey must be 400");
+    }
+
+    /// 400 when service_id base64-decodes to something other than 32 bytes.
+    #[tokio::test]
+    async fn deposit_tx_rejects_wrong_length_service_id() {
+        let app = test_app_with_escrow();
+        let short = base64::engine::general_purpose::STANDARD.encode([7u8; 16]); // 16 bytes
+        let (status, _json) = post_deposit_tx(
+            app,
+            serde_json::json!({
+                "agent_wallet": GOLDEN_AGENT_PUBKEY_B58,
+                "service_id": short,
+                "amount": "2625",
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "non-32-byte service_id must be 400"
+        );
+    }
+
+    /// 400 when service_id is not valid base64 at all.
+    #[tokio::test]
+    async fn deposit_tx_rejects_non_base64_service_id() {
+        let app = test_app_with_escrow();
+        let (status, _json) = post_deposit_tx(
+            app,
+            serde_json::json!({
+                "agent_wallet": GOLDEN_AGENT_PUBKEY_B58,
+                "service_id": "@@@not-base64@@@",
+                "amount": "2625",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    /// 400 when an explicit expiry_slot is already below the minimum buffer
+    /// (e.g. 0 or 1) relative to the current slot. This is rejected only after
+    /// the current slot is read; tolerate a fail-closed 503 if RPC is down.
+    #[tokio::test]
+    async fn deposit_tx_rejects_expiry_below_min_buffer_or_503_if_no_rpc() {
+        let app = test_app_with_escrow();
+        let (status, _json) = post_deposit_tx(
+            app,
+            serde_json::json!({
+                "agent_wallet": GOLDEN_AGENT_PUBKEY_B58,
+                "service_id": service_id_b64(),
+                "amount": "2625",
+                "expiry_slot": 1u64,
+            }),
+        )
+        .await;
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::SERVICE_UNAVAILABLE,
+            "expiry below the min buffer must be 400 (or 503 if the slot RPC is unreachable), got {status}"
+        );
+    }
+
+    /// Happy path: a valid body yields a 200 with the unsigned message,
+    /// decoded_intent, and network — OR a fail-closed 503 if the blockhash RPC
+    /// is unreachable in the test environment. When 200, assert the full shape
+    /// and that the message decodes from base64 and is non-trivial.
+    #[tokio::test]
+    async fn deposit_tx_happy_path_shape_or_503() {
+        let app = happy_path_app();
+        let (status, json) = post_deposit_tx(
+            app,
+            serde_json::json!({
+                "agent_wallet": GOLDEN_AGENT_PUBKEY_B58,
+                "service_id": service_id_b64(),
+                "amount": "2625",
+            }),
+        )
+        .await;
+
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            // RPC unreachable in this environment — fail-closed is correct.
+            // The message body must NOT leak raw RPC internals.
+            let msg = json["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                !msg.contains("http://") && !msg.contains("https://"),
+                "503 error must not leak an RPC URL: {msg}"
+            );
+            return;
+        }
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status: {status} body={json}"
+        );
+
+        // network
+        assert_eq!(json["network"], SOLANA_NETWORK);
+
+        // message is base64 of a non-trivial legacy message
+        let message_b64 = json["message"].as_str().expect("message must be a string");
+        let message_bytes = base64::engine::general_purpose::STANDARD
+            .decode(message_b64)
+            .expect("message must be valid base64");
+        assert!(
+            message_bytes.len() > 200,
+            "unsigned message too short: {} bytes",
+            message_bytes.len()
+        );
+        // No signature bytes — the message starts with the legacy header [1,0,6].
+        assert_eq!(
+            &message_bytes[..3],
+            &[1u8, 0, 6],
+            "message must start with the legacy header"
+        );
+
+        // decoded_intent carries every field the deterministic builder consumes
+        let intent = &json["decoded_intent"];
+        assert_eq!(
+            intent["program_id"],
+            "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+        );
+        assert_eq!(intent["usdc_mint"], USDC_MINT);
+        assert_eq!(intent["provider"], REAL_RECIPIENT);
+        assert_eq!(intent["amount"], "2625");
+        assert_eq!(intent["service_id"], service_id_b64());
+        assert!(
+            intent["escrow_pda"].is_string(),
+            "escrow_pda must be present"
+        );
+        assert!(intent["vault_ata"].is_string(), "vault_ata must be present");
+        assert!(
+            intent["recent_blockhash"].is_string(),
+            "recent_blockhash must be present"
+        );
+        assert!(intent["expiry_slot"].is_u64(), "expiry_slot must be a u64");
+
+        // Cross-check: the escrow_pda in the intent must equal the canonical
+        // derivation from the declared agent + service_id + program (verify what
+        // you sign).
+        use solvela_x402::escrow::pda::{decode_bs58_pubkey, find_program_address};
+        let agent = decode_bs58_pubkey(GOLDEN_AGENT_PUBKEY_B58).unwrap();
+        let program = decode_bs58_pubkey("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU").unwrap();
+        let (expected_pda, _) =
+            find_program_address(&[b"escrow", &agent, &[7u8; 32]], &program).unwrap();
+        assert_eq!(
+            intent["escrow_pda"].as_str().unwrap(),
+            bs58::encode(expected_pda).into_string(),
+            "decoded_intent escrow_pda must match the canonical derivation"
+        );
+    }
+
+    /// 400 (fix #5) when the amount string is non-canonical (leading zeros).
+    /// `"01".parse::<u64>()` is `1`, but `decoded_intent.amount` echoes the
+    /// canonical `"1"` — a strict "verify what you sign" string compare would
+    /// then fail. The handler rejects this BEFORE any RPC, so the result is a
+    /// deterministic 400 (never a 503), independent of RPC reachability.
+    #[tokio::test]
+    async fn deposit_tx_rejects_leading_zero_amount() {
+        for bad in ["01", "007", "0001"] {
+            let (status, _json) = post_deposit_tx(
+                test_app_with_escrow(),
+                serde_json::json!({
+                    "agent_wallet": GOLDEN_AGENT_PUBKEY_B58,
+                    "service_id": service_id_b64(),
+                    "amount": bad,
+                }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "non-canonical amount {bad:?} must be rejected with 400, before any RPC"
+            );
+        }
+    }
+
+    /// 400/422 (fix #4) when the request carries an UNKNOWN field — a money-path
+    /// typo like `"ammount"` must be rejected by `#[serde(deny_unknown_fields)]`,
+    /// not silently ignored (which would drop the caller's amount). Axum's `Json`
+    /// extractor surfaces a serde error as 422 Unprocessable Entity (or 400);
+    /// accept either, but it must NOT be a 200/404/503.
+    #[tokio::test]
+    async fn deposit_tx_rejects_unknown_field() {
+        let (status, _json) = post_deposit_tx(
+            test_app_with_escrow(),
+            serde_json::json!({
+                "agent_wallet": GOLDEN_AGENT_PUBKEY_B58,
+                "service_id": service_id_b64(),
+                "ammount": "2625", // typo: unknown field, real `amount` missing
+            }),
+        )
+        .await;
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
+            "an unknown field must be rejected (deny_unknown_fields), got {status}"
+        );
+    }
+
+    /// Escrow-enabled app with a CUSTOM deposit-tx limiter, so the per-IP cap can
+    /// be exercised through the real `POST /v1/escrow/deposit-tx` route. The
+    /// `unknown` bucket uses the same cap so a no-ConnectInfo path is also
+    /// deterministic.
+    fn app_with_deposit_tx_limit(max: u32) -> axum::Router {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = REAL_RECIPIENT.to_string();
+        config.solana.escrow_program_id =
+            Some("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU".to_string());
+
+        let limiter = RateLimiter::new(RateLimitConfig {
+            max_requests: max,
+            window: std::time::Duration::from_secs(60),
+            unknown_max_requests: max,
+        });
+
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator,
+            usage: gateway::usage::UsageTracker::noop(),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: Some(gateway::secret::AdminToken::new(
+                TEST_ADMIN_TOKEN.to_string(),
+            )),
+            api_key_hmac_secret: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: limiter,
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        build_router(state, RateLimiter::new(RateLimitConfig::default()))
+    }
+
+    /// `POST /v1/escrow/deposit-tx` with a fixed `ConnectInfo` peer IP so the
+    /// limiter keys on a NAMED bucket (not the shared "unknown" one). Mirrors
+    /// `receipts_get_request` / `post_faucet_from_ip`.
+    fn deposit_tx_request_from_ip(body: serde_json::Value, ip: &str) -> Request<Body> {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(deposit_tx_uri())
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let addr: std::net::SocketAddr = format!("{ip}:40000").parse().unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+        req
+    }
+
+    /// The deposit-tx route is rate-limited per client IP, and the cap is
+    /// consumed BEFORE any RPC work (fix #1b). With a cap of 1, the first request
+    /// passes the limiter (then either 200 or a fail-closed 503 depending on RPC
+    /// reachability — NOT a 429), and the second exceeds the cap → a canonical
+    /// 429 carrying the deposit-tx limit, never the outer global limit.
+    #[tokio::test]
+    async fn deposit_tx_rate_limited_per_ip_with_canonical_429() {
+        let app = app_with_deposit_tx_limit(1);
+        let ip = "203.0.113.91";
+        let body = serde_json::json!({
+            "agent_wallet": GOLDEN_AGENT_PUBKEY_B58,
+            "service_id": service_id_b64(),
+            "amount": "2625",
+        });
+
+        // First request passes the per-IP limiter. Whether it 200s or fail-closes
+        // to 503 depends on RPC reachability in the test environment — either way
+        // it is NOT a 429 (the limiter let it through).
+        let first = app
+            .clone()
+            .oneshot(deposit_tx_request_from_ip(body.clone(), ip))
+            .await
+            .unwrap();
+        assert_ne!(
+            first.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the first request from this IP must pass the limiter"
+        );
+
+        // The second request from the same IP exceeds the cap of 1 → 429.
+        let second = app
+            .clone()
+            .oneshot(deposit_tx_request_from_ip(body, ip))
+            .await
+            .unwrap();
+        assert_eq!(
+            second.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "exceeding the per-IP deposit-tx cap must 429"
+        );
+        assert_eq!(
+            second
+                .headers()
+                .get("x-ratelimit-limit")
+                .expect("429 must carry x-ratelimit-limit"),
+            "1",
+            "429 must carry the DEPOSIT-TX limit (1), not the outer global limit (60)"
+        );
+        assert_eq!(
+            second
+                .headers()
+                .get("x-ratelimit-remaining")
+                .expect("429 must carry x-ratelimit-remaining"),
+            "0"
+        );
+        assert!(
+            second.headers().get("retry-after").is_some(),
+            "429 must carry retry-after"
+        );
+
+        let bytes = second.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["type"], "rate_limit_exceeded");
     }
 }

@@ -268,22 +268,35 @@ pub async fn poll_for_confirmation(
     }
 }
 
-/// Fetch a recent blockhash via Solana JSON-RPC `getLatestBlockhash`.
+/// Fetch a recent blockhash via Solana JSON-RPC `getLatestBlockhash` at the
+/// given `commitment`.
 ///
 /// Returns the 32 raw blockhash bytes (base58-decoded from the RPC's string
 /// form), suitable for the `recent_blockhash` field of a legacy message built
-/// by [`crate::solana::build_system_transfer_message`]. Uses the `finalized`
-/// commitment so the blockhash is durable enough to survive the round-trip to
-/// `sendTransaction`.
+/// by [`crate::solana::build_system_transfer_message`].
+///
+/// `commitment` is the Solana commitment level for the query:
+/// - `"finalized"` — maximally durable; the blockhash is well-settled before it
+///   is used (the faucet's choice, where the round-trip to `sendTransaction` is
+///   the only concern).
+/// - `"confirmed"` — fresher and longer-lived (its ~150-slot validity window
+///   starts ~32 slots later than a finalized blockhash's), at the cost of a
+///   slightly-less-settled reference. Appropriate for an endpoint whose job is to
+///   hand back a promptly-submittable transaction (the unsigned-deposit-tx route)
+///   and for keeping the blockhash consistent with a `confirmed` slot reference.
 ///
 /// Fails closed: an unparseable / wrong-length blockhash is an [`Error::Rpc`],
 /// never a silent zero blockhash (which would build an unsubmittable tx).
-pub async fn get_latest_blockhash(client: &Client, rpc_url: &str) -> Result<[u8; 32], Error> {
+pub async fn get_latest_blockhash(
+    client: &Client,
+    rpc_url: &str,
+    commitment: &str,
+) -> Result<[u8; 32], Error> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "getLatestBlockhash",
-        "params": [{"commitment": "finalized"}],
+        "params": [{"commitment": commitment}],
     });
 
     let response = client
