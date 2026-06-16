@@ -200,6 +200,17 @@ async fn main() -> anyhow::Result<()> {
             app_config.server.port
         );
     }
+    // Static `/.well-known/` files (e.g. x402-registry domain-verification
+    // tokens) as a JSON object {filename: contents}. Parsed once at startup; a
+    // malformed value is ignored with a warning rather than failing boot.
+    if let Ok(val) = env_with_fallback("SOLVELA_WELLKNOWN_FILES", "RCR_WELLKNOWN_FILES") {
+        match serde_json::from_str::<std::collections::HashMap<String, String>>(&val) {
+            Ok(map) => app_config.server.wellknown_files = map,
+            Err(e) => {
+                warn!(error = %e, "SOLVELA_WELLKNOWN_FILES is not a valid JSON object — ignoring")
+            }
+        }
+    }
 
     // The configured USDC mint is quoted in every 402 challenge and enforced
     // by every payment verifier, but `EscrowVerifier` only Pubkey-parses its

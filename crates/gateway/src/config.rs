@@ -124,6 +124,11 @@ pub struct ServerConfig {
     /// deployment that publishes its card.
     #[serde(default)]
     pub public_url: Option<String>,
+    /// Static files served verbatim under `/.well-known/` (filename → contents),
+    /// e.g. domain-ownership verification tokens for x402 registries. Populated
+    /// from `SOLVELA_WELLKNOWN_FILES` (a JSON object). Empty by default.
+    #[serde(default)]
+    pub wellknown_files: std::collections::HashMap<String, String>,
 }
 
 /// Solana network settings.
@@ -332,6 +337,7 @@ impl Default for AppConfig {
                 host: default_host(),
                 port: default_port(),
                 public_url: None,
+                wellknown_files: std::collections::HashMap::new(),
             },
             solana: SolanaConfig {
                 rpc_url: "https://api.devnet.solana.com".to_string(),
