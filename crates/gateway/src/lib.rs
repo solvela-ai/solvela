@@ -365,6 +365,19 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             get(a2a::agent_card::agent_card),
         )
         .route("/.well-known/agent.json", get(a2a::agent_card::agent_card))
+        // Static well-known files (x402-registry domain verification, etc.),
+        // served verbatim from `server.wellknown_files`; 404 when unconfigured.
+        .route(
+            "/.well-known/402index-verify.txt",
+            get(
+                |axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>| async move {
+                    match state.config.server.wellknown_files.get("402index-verify.txt") {
+                        Some(contents) => contents.clone().into_response(),
+                        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+                    }
+                },
+            ),
+        )
         .route("/a2a", post(a2a::jsonrpc::a2a_endpoint))
         .route("/metrics", get(routes::metrics::get_metrics))
         .layer(axum::middleware::from_fn(
