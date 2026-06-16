@@ -228,6 +228,28 @@ async fn main() -> anyhow::Result<()> {
         )
     })?;
 
+    // When escrow is configured, the `POST /v1/escrow/deposit-tx` builder
+    // base58-decodes `recipient_wallet` (the deposit's provider account) on EVERY
+    // request — an empty/malformed value would let the gateway boot "healthy" and
+    // then 500 every deposit-tx build. Validate ONCE here, same fail-fatal spirit
+    // as the USDC mint and the migration rule (arch rule #15): never serve traffic
+    // against a broken money-path config. Gated on escrow being configured so a
+    // no-escrow / stub deploy (which never decodes recipient_wallet) is unaffected.
+    if app_config
+        .solana
+        .escrow_program_id
+        .as_deref()
+        .is_some_and(|id| !id.is_empty())
+    {
+        validate_recipient_wallet(&app_config.solana.recipient_wallet).map_err(|e| {
+            error!(error = %e, "FATAL: escrow is configured but recipient_wallet is not a valid Solana pubkey");
+            anyhow::anyhow!(
+                "invalid recipient wallet configuration (SOLVELA_SOLANA__RECIPIENT_WALLET / \
+                 [solana].recipient_wallet): {e}"
+            )
+        })?;
+    }
+
     // Load model registry from config file
     let models_toml = std::fs::read_to_string("config/models.toml")
         .unwrap_or_else(|_| include_str!("../../../config/models.toml").to_string());
@@ -836,6 +858,7 @@ async fn main() -> anyhow::Result<()> {
         // daily cap). Tune `RateLimitConfig::faucet_default` in code if that
         // ever changes.
         faucet_rate_limiter: RateLimiter::new(RateLimitConfig::faucet_default()),
+        deposit_tx_rate_limiter: RateLimiter::new(RateLimitConfig::deposit_tx_default()),
     });
 
     // ── Shutdown signal for background tasks ────────────────────────────────
@@ -1177,6 +1200,24 @@ fn validate_usdc_mint(mint: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Validate that `recipient_wallet` is a non-empty, valid base58 Solana pubkey.
+///
+/// Called from `main()` ONLY when escrow is configured (the deposit-tx builder
+/// base58-decodes this value on every request). An empty value is rejected
+/// explicitly so the error message is clear ("recipient_wallet is empty") rather
+/// than an opaque base58-parse failure. Pure startup-time seam, mirroring
+/// [`validate_usdc_mint`].
+fn validate_recipient_wallet(wallet: &str) -> anyhow::Result<()> {
+    use std::str::FromStr;
+
+    if wallet.is_empty() {
+        anyhow::bail!("recipient_wallet is empty");
+    }
+    solvela_x402::solana_types::Pubkey::from_str(wallet)
+        .map_err(|e| anyhow::anyhow!("'{wallet}' is not a valid Solana pubkey: {e}"))?;
+    Ok(())
+}
+
 /// Generate a random 32-byte secret using two UUIDv4 values.
 ///
 /// UUIDv4 provides 122 bits of randomness per call (backed by the OS CSPRNG),
@@ -1389,6 +1430,38 @@ mod tests {
             assert!(
                 validate_usdc_mint(bad).is_err(),
                 "malformed mint {bad:?} must fail startup validation"
+            );
+        }
+    }
+
+    /// A valid base58 pubkey passes recipient-wallet startup validation.
+    #[test]
+    fn validate_recipient_wallet_accepts_valid_pubkey() {
+        validate_recipient_wallet("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM")
+            .expect("a valid base58 pubkey must validate");
+    }
+
+    /// Recipient-wallet validation fails closed on empty and every malformed
+    /// shape — escrow is configured here, so a bad value would 500 every
+    /// `POST /v1/escrow/deposit-tx` at runtime instead of refusing to boot.
+    #[test]
+    fn validate_recipient_wallet_rejects_empty_and_malformed() {
+        // Empty must produce the explicit "empty" message (not an opaque parse
+        // error), since an empty recipient_wallet is the most likely misconfig.
+        let err = validate_recipient_wallet("").expect_err("empty must fail");
+        assert!(
+            err.to_string().contains("empty"),
+            "empty recipient_wallet must report 'empty', got: {err}"
+        );
+        for bad in [
+            "   ",                                            // whitespace
+            "not-a-pubkey",                                   // non-base58 ('-')
+            "GatewayRecipientWallet111111111111111111111111", // lowercase 'l' — invalid base58
+            "abc",                                            // too short
+        ] {
+            assert!(
+                validate_recipient_wallet(bad).is_err(),
+                "malformed recipient_wallet {bad:?} must fail startup validation"
             );
         }
     }

@@ -111,6 +111,32 @@ impl RateLimitConfig {
     }
 
     /// Default per-IP rate-limit budget for the public, unauthenticated
+    /// `POST /v1/escrow/deposit-tx` unsigned-deposit-tx builder route.
+    ///
+    /// The route is unauthenticated and each call can fan out to Solana RPC
+    /// (slot + blockhash), so an unbounded caller is an RPC-amplification
+    /// surface. Unlike the faucet (a once-per-wallet-per-device lifetime event),
+    /// this is a legitimate FUNDING flow: a user may build several deposit
+    /// transactions in quick succession (retries, multiple wallets/services from
+    /// one device/NAT), so the faucet's 3/24h cap is far too tight. 20 per 60s
+    /// window per client IP is generous for real funding traffic and still
+    /// hostile to an RPC-amplification burst; it is STRICTER than the generic
+    /// outer limiter (60/min) which still applies first. The `unknown` bucket
+    /// (no `ConnectInfo`) is stricter still, matching the receipts/faucet policy.
+    ///
+    /// Like [`receipts_default`](Self::receipts_default) / [`faucet_default`](Self::faucet_default)
+    /// this is deliberately NOT env-tunable — the cap only needs to bound
+    /// amplification throughput; tune it here in code if the legitimate-caller
+    /// pattern ever changes.
+    pub fn deposit_tx_default() -> Self {
+        Self {
+            max_requests: 20,
+            window: Duration::from_secs(60),
+            unknown_max_requests: 5,
+        }
+    }
+
+    /// Default per-IP rate-limit budget for the public, unauthenticated
     /// `POST /v1/faucet/gas` gas-drip route (security review finding F6).
     ///
     /// The faucet is unauthenticated and the per-wallet DB primary key only
@@ -707,6 +733,30 @@ mod tests {
         assert_eq!(receipts.max_requests, 20);
         assert_eq!(receipts.unknown_max_requests, 5);
         assert_eq!(receipts.window, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_deposit_tx_default_is_stricter_than_paid_but_looser_than_faucet() {
+        let deposit_tx = RateLimitConfig::deposit_tx_default();
+        let paid = RateLimitConfig::default();
+        let faucet = RateLimitConfig::faucet_default();
+        assert!(
+            deposit_tx.max_requests < paid.max_requests,
+            "deposit-tx per-IP limit ({}) must be stricter than the generic outer limit ({})",
+            deposit_tx.max_requests,
+            paid.max_requests
+        );
+        // A funding flow legitimately bursts more than the once-per-device faucet,
+        // so its per-window cap is more generous than the faucet's 3/24h.
+        assert!(
+            deposit_tx.max_requests > faucet.max_requests,
+            "deposit-tx limit ({}) should be more generous than the faucet ({})",
+            deposit_tx.max_requests,
+            faucet.max_requests
+        );
+        assert_eq!(deposit_tx.max_requests, 20);
+        assert_eq!(deposit_tx.unknown_max_requests, 5);
+        assert_eq!(deposit_tx.window, Duration::from_secs(60));
     }
 
     #[test]

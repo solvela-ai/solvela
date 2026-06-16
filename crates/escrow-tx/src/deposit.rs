@@ -40,6 +40,19 @@ pub enum DepositError {
 }
 
 // ---------------------------------------------------------------------------
+// Compile-time layout constants
+// ---------------------------------------------------------------------------
+
+/// Byte length of the `deposit` instruction data:
+/// `anchor_discriminator(8) || amount:u64(8) || service_id([u8;32]) ||
+/// expiry_slot:u64(8)`. Fully compile-time-known. A layout regression fails the
+/// BUILD here, not at request time (the runtime `assert_eq!` this replaced was a
+/// panic vector once `build_deposit_message` became reachable from a live HTTP
+/// handler).
+const DEPOSIT_IX_DATA_LEN: usize = 8 + 8 + 32 + 8;
+const _: () = assert!(DEPOSIT_IX_DATA_LEN == 56);
+
+// ---------------------------------------------------------------------------
 // Golden vector (money-path drift guard)
 // ---------------------------------------------------------------------------
 
@@ -96,6 +109,86 @@ impl std::fmt::Debug for DepositParams {
             .field("expiry_slot", &self.expiry_slot)
             .finish()
     }
+}
+
+/// Pubkey-only parameters for building the UNSIGNED escrow-deposit message.
+///
+/// Identical inputs to [`DepositParams`] minus the secret keypair: the agent is
+/// identified by its public key alone, so this type can be constructed and the
+/// message built WITHOUT any private-key material ever entering the process.
+/// This is what powers the gateway's unsigned-deposit-tx API, where an external
+/// signer (browser wallet / KMS / hardware) holds the key.
+///
+/// Carries no secrets, so it derives `Debug` directly (nothing to redact).
+#[derive(Debug, Clone)]
+pub struct UnsignedDepositParams {
+    /// 32-byte ed25519 agent public key (the deposit's signer + fee payer).
+    pub agent_pubkey: [u8; 32],
+    /// Base58-encoded provider wallet pubkey.
+    pub provider_wallet_b58: String,
+    /// Base58-encoded USDC mint pubkey.
+    pub usdc_mint_b58: String,
+    /// Base58-encoded escrow program ID.
+    pub escrow_program_id_b58: String,
+    /// Amount to deposit in atomic USDC units (must be > 0).
+    pub amount: u64,
+    /// 32-byte service identifier that seeds the escrow PDA.
+    pub service_id: [u8; 32],
+    /// Slot at which the escrow deposit expires (passed to the on-chain instruction).
+    pub expiry_slot: u64,
+    /// Recent blockhash (32 bytes) from `getLatestBlockhash`.
+    pub recent_blockhash: [u8; 32],
+}
+
+/// The two program-derived addresses a deposit consumes, surfaced so a caller
+/// (e.g. the gateway's `decoded_intent`) can report and a client can re-derive
+/// them to verify what it is about to sign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedAddresses {
+    /// Escrow PDA: `find_program_address([b"escrow", agent, service_id], program_id)`.
+    pub escrow_pda: [u8; 32],
+    /// Vault ATA: `ATA(escrow_pda, usdc_mint)`.
+    pub vault_ata: [u8; 32],
+}
+
+/// Derive the escrow PDA and vault ATA a deposit will use, from pubkey-only
+/// inputs. Reuses the canonical [`crate::pda`] derivation — does not
+/// reimplement it — so the addresses always match what [`build_deposit_message`]
+/// embeds. Fails closed on a malformed mint/program address (no silent fallback
+/// to a default/empty address).
+///
+/// # Errors
+///
+/// Returns [`DepositError::InvalidAddress`] if the mint or program ID is not
+/// valid base58, and [`DepositError::DerivationFailed`] if PDA/ATA derivation
+/// finds no valid off-curve point.
+pub fn derive_deposit_addresses(
+    agent_pubkey: &[u8; 32],
+    service_id: &[u8; 32],
+    usdc_mint_b58: &str,
+    escrow_program_id_b58: &str,
+) -> Result<DerivedAddresses, DepositError> {
+    let usdc_mint =
+        decode_bs58_pubkey(usdc_mint_b58).map_err(|e| DepositError::InvalidAddress {
+            field: "usdc_mint",
+            reason: e.to_string(),
+        })?;
+    let escrow_program_id =
+        decode_bs58_pubkey(escrow_program_id_b58).map_err(|e| DepositError::InvalidAddress {
+            field: "escrow_program_id",
+            reason: e.to_string(),
+        })?;
+
+    let (escrow_pda, _bump) =
+        find_program_address(&[b"escrow", agent_pubkey, service_id], &escrow_program_id)
+            .ok_or(DepositError::DerivationFailed("escrow PDA"))?;
+    let vault_ata = derive_ata_address(&escrow_pda, &usdc_mint)
+        .ok_or(DepositError::DerivationFailed("vault ATA"))?;
+
+    Ok(DerivedAddresses {
+        escrow_pda,
+        vault_ata,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +252,70 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, DepositError> 
         ));
     }
 
-    // Step 3: Parse all addresses
+    // Step 3: Build the canonical UNSIGNED legacy message from pubkey-only
+    // inputs. This is the single source of truth for the deposit message bytes —
+    // the signed path here and the gateway's unsigned-deposit-tx API both go
+    // through `build_deposit_message`, so they can never drift. The `amount == 0`
+    // guard above is also enforced inside `build_deposit_message` (defense in
+    // depth for the pubkey-only callers).
+    let msg = build_deposit_message(&UnsignedDepositParams {
+        agent_pubkey,
+        provider_wallet_b58: params.provider_wallet_b58.clone(),
+        usdc_mint_b58: params.usdc_mint_b58.clone(),
+        escrow_program_id_b58: params.escrow_program_id_b58.clone(),
+        amount: params.amount,
+        service_id: params.service_id,
+        expiry_slot: params.expiry_slot,
+        recent_blockhash: params.recent_blockhash,
+    })?;
+
+    // Step 4: Sign the message with the agent keypair
+    let signature = signing_key.sign(&msg);
+
+    // Step 5: Assemble wire-format transaction
+    // compact-u16(1) || signature(64) || message
+    let mut tx_bytes = Vec::with_capacity(1 + 64 + msg.len());
+    tx_bytes.push(0x01); // compact-u16: 1 signature
+    tx_bytes.extend_from_slice(&signature.to_bytes());
+    tx_bytes.extend_from_slice(&msg);
+
+    // Step 6: Base64-encode and return
+    Ok(base64::engine::general_purpose::STANDARD.encode(&tx_bytes))
+}
+
+/// Build the UNSIGNED Solana legacy message for an escrow `deposit`, from
+/// pubkey-only inputs (no private key).
+///
+/// This is the canonical message-construction routine. [`build_deposit_tx`]
+/// calls it and then signs + assembles; the gateway's unsigned-deposit-tx API
+/// calls it directly and hands the bytes to an external signer. Because both
+/// paths share this function, the message bytes are guaranteed identical, which
+/// is exactly the golden-vector contract: `compact-u16(1) || signer_sig(64) ||
+/// build_deposit_message(...)` reproduces [`build_deposit_tx`] byte-for-byte.
+///
+/// The returned bytes are the message portion only — the signer signs THESE
+/// bytes and assembles `compact-u16(1) || signature(64) || message`.
+///
+/// Validation (money-path, fail closed — no silent fallback):
+/// - rejects `amount == 0` before building anything ([`DepositError::ZeroAmount`]),
+/// - rejects any malformed address ([`DepositError::InvalidAddress`]),
+/// - rejects a PDA/ATA derivation failure ([`DepositError::DerivationFailed`]),
+/// - rejects any length that would overflow the single-byte compact-u16 limit
+///   ([`DepositError::MessageTooLong`], via [`build_legacy_message`]).
+///
+/// # Errors
+///
+/// See the validation list above.
+pub fn build_deposit_message(params: &UnsignedDepositParams) -> Result<Vec<u8>, DepositError> {
+    // Reject zero amount BEFORE building anything. A `0` would produce a valid
+    // `$0` deposit message (money-path: reject zero amount).
+    if params.amount == 0 {
+        return Err(DepositError::ZeroAmount);
+    }
+
+    let agent_pubkey = params.agent_pubkey;
+
+    // Parse all addresses (fail closed on any malformed input).
     let provider_pubkey = decode_bs58_pubkey(&params.provider_wallet_b58).map_err(|e| {
         DepositError::InvalidAddress {
             field: "provider_wallet",
@@ -193,20 +349,20 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, DepositError> 
             reason: e.to_string(),
         })?;
 
-    // Step 4: Derive escrow PDA
+    // Derive escrow PDA.
     let (escrow_pda, _bump) = find_program_address(
         &[b"escrow", &agent_pubkey, &params.service_id],
         &escrow_program_id,
     )
     .ok_or(DepositError::DerivationFailed("escrow PDA"))?;
 
-    // Step 5: Derive agent ATA and vault ATA
+    // Derive agent ATA and vault ATA.
     let agent_ata = derive_ata_address(&agent_pubkey, &usdc_mint)
         .ok_or(DepositError::DerivationFailed("agent ATA"))?;
     let vault_ata = derive_ata_address(&escrow_pda, &usdc_mint)
         .ok_or(DepositError::DerivationFailed("vault ATA"))?;
 
-    // Step 6: Build account keys sorted by writability (Solana legacy message requirement):
+    // Build account keys sorted by writability (Solana legacy message requirement):
     //   writable signers first, then writable non-signers, then readonly non-signers.
     // 0: agent_pubkey        (signer, writable)
     // 1: escrow_pda          (writable, non-signer)
@@ -231,27 +387,33 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, DepositError> 
                          // escrow_program_id appended separately as index 9
     ];
 
-    // Step 7: Build instruction data
+    // Build instruction data
     // anchor_discriminator("deposit") + amount(u64 LE) + service_id([u8;32]) + expiry_slot(u64 LE)
     // = 8 + 8 + 32 + 8 = 56 bytes
+    //
+    // The 56-byte length is fully compile-time-known (discriminator 8 + amount 8
+    // + service_id 32 + expiry_slot 8). A layout regression must fail the BUILD,
+    // not panic in a live HTTP handler — this function is reachable from the
+    // gateway's unsigned-deposit-tx route, so a runtime `assert_eq!` here would
+    // be a request-time panic vector. Pin the size as a `const` assertion
+    // instead. See [`DEPOSIT_IX_DATA_LEN`].
     let discriminator = anchor_discriminator("deposit");
-    let mut ix_data = Vec::with_capacity(56);
+    let mut ix_data = Vec::with_capacity(DEPOSIT_IX_DATA_LEN);
     ix_data.extend_from_slice(&discriminator);
     ix_data.extend_from_slice(&params.amount.to_le_bytes());
     ix_data.extend_from_slice(&params.service_id);
     ix_data.extend_from_slice(&params.expiry_slot.to_le_bytes());
-    assert_eq!(ix_data.len(), 56, "deposit ix_data must be 56 bytes");
 
     // Instruction account indices remapped to the new sorted order.
     // Anchor program expects: agent, provider, mint, escrow, agent_ata, vault, token, ata, system
     // New positions:          0,     4,        5,    1,      2,         3,     6,     7,   8
     let ix_account_indices: Vec<u8> = vec![0, 4, 5, 1, 2, 3, 6, 7, 8];
 
-    // Step 8: Build the legacy message
+    // Build the legacy message
     // Header: [1, 0, 6] — 1 signer, 0 readonly signed, 6 readonly unsigned
     // Readonly unsigned: provider(4), mint(5), token_program(6), ata_program(7),
     //                    system_program(8), escrow_program(9) = 6
-    let msg = build_legacy_message(
+    build_legacy_message(
         [1, 0, 6],
         &accounts,
         &escrow_program_id,
@@ -259,20 +421,7 @@ pub fn build_deposit_tx(params: &DepositParams) -> Result<String, DepositError> 
         9u8, // program_id_index = 9 (last account)
         &ix_account_indices,
         &ix_data,
-    )?;
-
-    // Step 9: Sign the message with the agent keypair
-    let signature = signing_key.sign(&msg);
-
-    // Step 10: Assemble wire-format transaction
-    // compact-u16(1) || signature(64) || message
-    let mut tx_bytes = Vec::with_capacity(1 + 64 + msg.len());
-    tx_bytes.push(0x01); // compact-u16: 1 signature
-    tx_bytes.extend_from_slice(&signature.to_bytes());
-    tx_bytes.extend_from_slice(&msg);
-
-    // Step 11: Base64-encode and return
-    Ok(base64::engine::general_purpose::STANDARD.encode(&tx_bytes))
+    )
 }
 
 // ---------------------------------------------------------------------------

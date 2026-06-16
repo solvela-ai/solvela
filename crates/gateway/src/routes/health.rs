@@ -172,6 +172,9 @@ supports_vision = false
             faucet_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::faucet_default(),
             ),
+            deposit_tx_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::deposit_tx_default(),
+            ),
             free_global_cap: crate::middleware::rate_limit::FreeTierGlobalCap::new(
                 crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT,
             ),
@@ -257,6 +260,9 @@ supports_vision = false
             ),
             faucet_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::faucet_default(),
+            ),
+            deposit_tx_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::deposit_tx_default(),
             ),
             free_global_cap: crate::middleware::rate_limit::FreeTierGlobalCap::new(
                 crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT,

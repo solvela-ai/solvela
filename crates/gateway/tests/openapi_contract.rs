@@ -280,6 +280,7 @@ fn contract_app_with_db(
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: RateLimiter::new(RateLimitConfig::receipts_default()),
         faucet_rate_limiter: RateLimiter::new(RateLimitConfig::faucet_default()),
+        deposit_tx_rate_limiter: RateLimiter::new(RateLimitConfig::deposit_tx_default()),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
