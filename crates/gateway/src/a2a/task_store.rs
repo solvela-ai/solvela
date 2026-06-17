@@ -62,11 +62,27 @@ pub async fn save_task(state: &Arc<AppState>, record: &TaskRecord) -> Result<(),
 ///
 /// Returns:
 /// - `Ok(Some(record))` — found
-/// - `Ok(None)` — not found (task expired or never existed)
-/// - `Err(msg)` — Redis error
+/// - `Ok(None)` — not recoverable with Redis present: the task expired, never
+///   existed, or its stored record was corrupt and has been purged (see below)
+/// - `Err(msg)` — Redis absent, or a Redis read error
+///
+/// When no Redis is configured this returns `Err`, NOT `Ok(None)`: the A2A task
+/// store REQUIRES Redis (`save_task` already errors without it), so an absent
+/// cache is an infrastructure failure, not a missing task. Conflating the two
+/// mapped a Redis outage to `ERR_TASK_NOT_FOUND` ("task not found or expired") —
+/// a misleading terminal-looking error for an agent that already signed a
+/// payment, which it cannot distinguish from genuine expiry and may not retry.
+/// The handler maps this `Err` to `ERR_INTERNAL`, the correct retry signal
+/// (issue #532). This mirrors `save_task`, which already fails closed.
+///
+/// A *corrupt* stored record (Redis present, value un-deserializable) is treated
+/// as `Ok(None)`, not `Err`: unlike a transient Redis outage, the record is
+/// unrecoverable, so we purge it and report it as a genuine miss rather than a
+/// retryable error (a retry would only re-find nothing). This is deliberately
+/// distinct from the no-Redis case above.
 pub async fn load_task(state: &Arc<AppState>, task_id: &str) -> Result<Option<TaskRecord>, String> {
     let Some(ref cache) = state.cache else {
-        return Ok(None);
+        return Err("A2A task store requires Redis — no Redis configured".to_string());
     };
     let key = format!("a2a_task:{task_id}");
 
@@ -75,7 +91,16 @@ pub async fn load_task(state: &Arc<AppState>, task_id: &str) -> Result<Option<Ta
             Ok(record) => Ok(Some(record)),
             Err(e) => {
                 tracing::warn!(task_id, error = %e, "A2A task store: corrupt record, deleting");
-                let _ = cache.del_raw(&key).await;
+                // Don't swallow the purge failure: if the delete fails the corrupt
+                // record persists and every subsequent load re-hits this arm, so the
+                // failed cleanup must be observable rather than silently dropped.
+                if let Err(del_err) = cache.del_raw(&key).await {
+                    tracing::warn!(
+                        task_id,
+                        error = %del_err,
+                        "A2A task store: failed to delete corrupt record (it will be re-encountered)"
+                    );
+                }
                 Ok(None)
             }
         },
