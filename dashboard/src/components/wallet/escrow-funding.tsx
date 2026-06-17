@@ -86,7 +86,7 @@ function errMessage(e: unknown): string {
 // ---------------------------------------------------------------------------
 
 function ConnectPanel() {
-  const { wallets, connected, connecting, connect, disconnect } =
+  const { wallets, connected, connecting, connectError, connect, disconnect } =
     useSolanaWallet();
 
   if (connected) {
@@ -174,6 +174,9 @@ function ConnectPanel() {
           {w.name}
         </button>
       ))}
+      {connectError && (
+        <p className="w-full text-xs text-error">{connectError}</p>
+      )}
     </div>
   );
 }
@@ -360,6 +363,10 @@ function FundingFlow({ gatewayUrl, escrowConfigured }: EscrowFundingProps) {
       // Sign exactly the bytes that were verified: re-decoding the same base64
       // string is deterministic, so these bytes are identical to those
       // `verifyDepositMessage` inspected.
+      // NOTE on @solana/kit naming: a base64 *Encoder*'s `.encode(string)`
+      // returns the raw bytes the base64 represents — i.e. this line DECODES
+      // base64 → bytes. (Conversely getBase64Decoder().decode(bytes) → string.)
+      // Do not "fix" this to getBase64Decoder; the direction here is correct.
       const messageBytes = new Uint8Array(
         getBase64Encoder().encode(review.messageB64),
       );

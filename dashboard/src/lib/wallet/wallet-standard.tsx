@@ -92,6 +92,8 @@ export interface SolanaWalletContextValue {
   /** The connected wallet + account, or null. */
   connected: ConnectedWallet | null;
   connecting: boolean;
+  /** Last connect failure (e.g. the user declined), or null. */
+  connectError: string | null;
   /** The cluster used for signing/broadcast. */
   chain: SolanaChain;
   connect: (wallet: Wallet) => Promise<void>;
@@ -110,6 +112,7 @@ export function SolanaWalletProvider({ children }: { children: ReactNode }) {
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [connected, setConnected] = useState<ConnectedWallet | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
 
   // Discover wallets on the client only (the registry touches `window`). Keep
   // the list in sync with register/unregister events.
@@ -128,6 +131,7 @@ export function SolanaWalletProvider({ children }: { children: ReactNode }) {
 
   const connect = useCallback(async (wallet: Wallet) => {
     setConnecting(true);
+    setConnectError(null);
     try {
       const { accounts } = await connectFeature(wallet).connect();
       const account =
@@ -136,6 +140,11 @@ export function SolanaWalletProvider({ children }: { children: ReactNode }) {
         throw new Error("Wallet returned no accounts");
       }
       setConnected({ wallet, account });
+    } catch (e) {
+      // Surface the failure (e.g. the user declined the connection in their
+      // wallet) instead of letting the rejection vanish into a `void connect()`
+      // — otherwise the UI just silently returns to the wallet list.
+      setConnectError(e instanceof Error ? e.message : "Failed to connect wallet");
     } finally {
       setConnecting(false);
     }
@@ -160,7 +169,12 @@ export function SolanaWalletProvider({ children }: { children: ReactNode }) {
           props.accounts.find((a) => a.chains.includes(SOLANA_CHAIN)) ??
           props.accounts[0] ??
           null;
-        setConnected(next ? { wallet: connected.wallet, account: next } : null);
+        // Functional updater: read the wallet from current state, never the
+        // closed-over `connected`, so a rapid wallet switch can't pin a stale
+        // wallet to a new account.
+        setConnected((prev) =>
+          prev && next ? { wallet: prev.wallet, account: next } : null,
+        );
       }
     });
     return off;
@@ -196,12 +210,13 @@ export function SolanaWalletProvider({ children }: { children: ReactNode }) {
       wallets,
       connected,
       connecting,
+      connectError,
       chain: SOLANA_CHAIN,
       connect,
       disconnect,
       signAndSend,
     }),
-    [wallets, connected, connecting, connect, disconnect, signAndSend],
+    [wallets, connected, connecting, connectError, connect, disconnect, signAndSend],
   );
 
   return (

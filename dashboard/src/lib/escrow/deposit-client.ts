@@ -110,6 +110,10 @@ export async function requestDepositTx(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
+      // Defense-in-depth: never silently follow a cross-origin redirect with the
+      // request body. A misconfigured/hostile gateway redirect can't bypass the
+      // verify gate, but we don't forward the POST off-origin either.
+      redirect: "error",
     });
   } catch (err) {
     // Network-level failure (DNS, CORS, offline) — no HTTP status available.
