@@ -340,7 +340,17 @@
               "fee_percent": { "type": "integer", "example": 5 }
             }
           },
-          "error": { "type": "string" }
+          "error": { "type": "string" },
+          "extensions": {
+            "type": "object",
+            "description": "Optional, additive discovery metadata. Present on the live `/v1/chat/completions` 402 challenge body; absent on the canonical camelCase `PAYMENT-REQUIRED` header. Carries the static Coinbase-Bazaar block (`extensions.bazaar`) so x402 discovery indexers (x402scan, agentcash) read the resource as invocable — a non-canonical challenge-embed because Solvela self-settles rather than running on Coinbase's facilitator. NOT part of the value path: clients sign `accepts`, never `extensions`; money fields, verification, and settlement are byte-unchanged. Identical on every challenge (no wallet/amount/time data).",
+            "properties": {
+              "bazaar": {
+                "type": "object",
+                "description": "Coinbase-Bazaar discovery descriptor: `info` (x402scan invocability gate) plus `schema` whose `properties.input.properties.body` is a JSON Schema of the chat request and `properties.output.properties.example` is a representative `chat.completion` response (agentcash schema extraction)."
+              }
+            }
+          }
         }
       },
       "ModelList": {

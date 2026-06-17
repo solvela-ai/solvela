@@ -162,6 +162,10 @@ async fn handle_new_request(
         accepts,
         cost_breakdown: cost,
         error: "Payment required".to_string(),
+        // A2A is a distinct protocol surface (not probed by x402scan/agentcash
+        // for this resource) and the stored offer is later byte-compared in
+        // `validate_submitted_against_offer`; keep the snapshot byte-stable.
+        extensions: None,
     };
 
     let payment_required_json =
@@ -2729,6 +2733,7 @@ supports_vision = false
                 fee_percent: 5,
             },
             error: "Payment required".to_string(),
+            extensions: None,
         };
         serde_json::to_value(&pr).expect("serialize")
     }

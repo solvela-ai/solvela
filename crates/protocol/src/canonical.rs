@@ -349,6 +349,9 @@ mod tests {
                 fee_percent: 5,
             },
             error: "Payment required".to_string(),
+            // Populate the additive discovery block so the projection test below
+            // proves the canonical (camelCase header) surface does NOT carry it.
+            extensions: Some(crate::payment::bazaar_discovery_extension()),
         }
     }
 
@@ -408,8 +411,20 @@ mod tests {
             // NOTE: no `error` key — the pay client never parses it and the
             // legacy body's prose stays out of the canonical header
             // (`from_payment_required` sets `error: None`).
+            //
+            // NOTE: no `extensions` key either. The legacy fixture now carries
+            // the additive `extensions.bazaar` discovery block, but the
+            // canonical (camelCase `PAYMENT-REQUIRED` header) projection only
+            // copies resource/accepts/error — so the header path stays
+            // byte-stable. This exact-equality assert is the guard.
         });
         assert_eq!(value, expected, "canonical challenge wire shape drifted");
+        // Belt-and-suspenders: the additive extension must never leak into the
+        // canonical header surface.
+        assert!(
+            value.get("extensions").is_none(),
+            "extensions must NOT cross into the canonical PAYMENT-REQUIRED header"
+        );
     }
 
     /// The canonical challenge never advertises escrow, and never a feePayer.

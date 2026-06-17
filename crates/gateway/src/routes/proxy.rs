@@ -398,6 +398,10 @@ pub async fn proxy_service(
                 fee_percent: payment_target.agent_fee_percent(),
             },
             error: "Payment required".to_string(),
+            // No Bazaar discovery block on the marketplace-proxy resource: that
+            // block is chat-completions-shaped and per-service proxy schemas
+            // vary. Scoped to /v1/chat/completions for now.
+            extensions: None,
         };
 
         // Emit the PaymentRequired body at the top level of the 402 response
