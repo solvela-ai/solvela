@@ -34,6 +34,10 @@ COPY config/ config/
 # Migration SQL files are read at compile time by `sqlx::migrate!("../../migrations")`
 # in crates/gateway/src/main.rs; must be present in the build context.
 COPY migrations/ migrations/
+# The OpenAPI spec is embedded into the binary at compile time via
+# `include_str!(".../docs/openapi.json")` in crates/gateway/src/routes/openapi.rs
+# (served at GET /openapi.json); must be present in the build context.
+COPY docs/openapi.json docs/openapi.json
 
 # Touch source files to invalidate the cache for actual compilation
 RUN touch crates/protocol/src/lib.rs crates/x402/src/lib.rs crates/router/src/lib.rs crates/gateway/src/lib.rs crates/gateway/src/main.rs
