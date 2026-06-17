@@ -15,6 +15,23 @@ use serde_json::json;
 use crate::a2a::types::{AP2_EXTENSION_URI, X402_EXTENSION_URI};
 use crate::AppState;
 
+/// Resolve the gateway's public base URL (no trailing slash).
+///
+/// Prefers the configured `server.public_url`; falls back to
+/// `http://{host}:{port}` for local dev only (the default bind host is
+/// `0.0.0.0`, not publicly routable). This is the single resolution used by
+/// every discovery surface (the A2A AgentCard `url` and the `/.well-known/x402`
+/// resource list) so they cannot drift across deployments.
+pub(crate) fn public_base_url(state: &AppState) -> String {
+    match &state.config.server.public_url {
+        Some(u) => u.trim_end_matches('/').to_string(),
+        None => format!(
+            "http://{}:{}",
+            state.config.server.host, state.config.server.port
+        ),
+    }
+}
+
 /// `GET /.well-known/agent-card.json` (and the `/.well-known/agent.json` alias)
 /// — Return the A2A AgentCard.
 pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -28,15 +45,7 @@ pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse
     // `preferredTransport`, which is `JSONRPC`). That handler is mounted at
     // `/a2a` (see `lib.rs`), so the advertised url is `{base}/a2a` — NOT the
     // bare host, which serves no JSON-RPC and would 404 a conformant probe.
-    // Prefer the configured public URL; the host:port fallback is for local dev
-    // only (the default bind host is 0.0.0.0, not publicly routable).
-    let base = match &state.config.server.public_url {
-        Some(u) => u.trim_end_matches('/').to_string(),
-        None => format!(
-            "http://{}:{}",
-            state.config.server.host, state.config.server.port
-        ),
-    };
+    let base = public_base_url(&state);
     let url = format!("{base}/a2a");
 
     Json(json!({

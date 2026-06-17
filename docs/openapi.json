@@ -7,7 +7,8 @@
     "license": { "name": "BUSL-1.1", "identifier": "BUSL-1.1" }
   },
   "servers": [
-    { "url": "https://solvela-gateway.fly.dev", "description": "Production" }
+    { "url": "https://api.solvela.ai", "description": "Production" },
+    { "url": "https://solvela-gateway.fly.dev", "description": "Direct Fly host" }
   ],
   "paths": {
     "/v1/chat/completions": {
@@ -15,6 +16,10 @@
         "operationId": "createChatCompletion",
         "summary": "Create an OpenAI-compatible chat completion",
         "description": "OpenAI-compatible chat completion. Without a `PAYMENT-SIGNATURE` header the gateway returns HTTP 402 with an x402 challenge: a legacy snake_case JSON body plus a canonical x402 v2 challenge (camelCase) in the `PAYMENT-REQUIRED` response header, both quoting the USDC cost on Solana mainnet. Sign the quoted `exact` (or `escrow`) payment with your wallet and resubmit the same request with the signed payment payload in the `PAYMENT-SIGNATURE` header to receive the completion.",
+        "x-payment-info": {
+          "protocols": ["x402"],
+          "price": { "mode": "dynamic", "currency": "USD", "min": 0.000001, "max": 1.00, "description": "Non-binding discovery hint; the authoritative per-request price is the dynamic x402 402 challenge (mode=dynamic). Real cost depends on the resolved model and token counts." }
+        },
         "security": [{}, { "x402Payment": [] }],
         "requestBody": {
           "required": true,
