@@ -69,6 +69,7 @@ fn sample_payment_required() -> PaymentRequired {
             fee_percent: PLATFORM_FEE_PERCENT,
         },
         error: "Payment required".to_string(),
+        extensions: None,
     }
 }
 

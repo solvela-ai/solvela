@@ -516,6 +516,7 @@ mod tests {
                 fee_percent: 5,
             },
             error: "Payment required".to_string(),
+            extensions: None,
         }
     }
 

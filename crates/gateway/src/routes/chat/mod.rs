@@ -1711,6 +1711,14 @@ fn build_payment_challenge(
         accepts,
         cost_breakdown,
         error: "Payment required".to_string(),
+        // Static Coinbase-Bazaar discovery block so x402scan / agentcash index
+        // this resource as INVOCABLE (they read invocability from the live 402
+        // body, not OpenAPI). Identical on every challenge — no wallet/amount/
+        // time data — and purely additive: it never touches `accepts`,
+        // `cost_breakdown`, verification, or settlement. Clients sign `accepts`,
+        // not `extensions`. Embedded directly (a tolerated non-canonical embed)
+        // because Solvela self-settles and is not on Coinbase's facilitator.
+        extensions: Some(solvela_x402::types::bazaar_discovery_extension()),
     }
 }
 

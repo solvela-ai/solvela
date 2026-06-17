@@ -3645,6 +3645,138 @@ async fn test_402_response_contains_x402_fields() {
 }
 
 // ---------------------------------------------------------------------------
+// Coinbase-Bazaar discovery extension on the 402 challenge body
+// (feat/bazaar-challenge-schema)
+//
+// x402scan reads invocability from `payload.extensions.bazaar.info`; agentcash
+// (@agentcash/discovery `extractSchemas2`) reads the input schema from
+// `payload.extensions.bazaar.schema.properties.input.properties.body` and the
+// output example from
+// `payload.extensions.bazaar.schema.properties.output.properties.example`.
+// Without these, both indexers mark POST /v1/chat/completions strict
+// non-invocable / "skipped". The block is STATIC discovery metadata — identical
+// on every challenge, no wallet/amount/time data — and additive to the
+// challenge body only (the signed PaymentPayload is built from `accepts`, never
+// `extensions`).
+// ---------------------------------------------------------------------------
+
+/// Assert a parsed 402 challenge body carries the exact `extensions.bazaar`
+/// paths that x402scan and agentcash read. Shared by the quote-path and
+/// discovery-path tests so both 402 emitters are pinned to the same shape.
+fn assert_bazaar_extension(challenge: &serde_json::Value) {
+    let bazaar = &challenge["extensions"]["bazaar"];
+
+    // x402scan: `.info` must be a present object (its presence flips invocable).
+    assert!(
+        bazaar["info"].is_object(),
+        "extensions.bazaar.info must be an object (x402scan invocability gate); got: {}",
+        bazaar["info"]
+    );
+    // `.info.input` describes how to invoke; `.info.output` advertises the JSON
+    // response shape with a representative example.
+    assert!(
+        bazaar["info"]["input"].is_object(),
+        "extensions.bazaar.info.input must be an object"
+    );
+    assert!(
+        bazaar["info"]["output"]["example"].is_object(),
+        "extensions.bazaar.info.output.example must be an object"
+    );
+
+    // agentcash extractSchemas2: input schema path.
+    let input_body = &bazaar["schema"]["properties"]["input"]["properties"]["body"];
+    assert!(
+        input_body.is_object(),
+        "extensions.bazaar.schema.properties.input.properties.body must be an object \
+         (agentcash inputSchema); got: {input_body}"
+    );
+    // It must be a faithful JSON Schema of the chat request: object with
+    // model+messages required.
+    assert_eq!(
+        input_body["type"], "object",
+        "input.body schema must be type=object"
+    );
+    assert!(
+        input_body["properties"]["model"].is_object(),
+        "input.body schema must declare a `model` property"
+    );
+    assert!(
+        input_body["properties"]["messages"].is_object(),
+        "input.body schema must declare a `messages` property"
+    );
+    let required = input_body["required"]
+        .as_array()
+        .expect("input.body schema must list required fields");
+    assert!(
+        required.iter().any(|v| v == "model") && required.iter().any(|v| v == "messages"),
+        "input.body schema must require model+messages; got {required:?}"
+    );
+
+    // agentcash extractSchemas2: output example path — a real chat.completion.
+    let output_example = &bazaar["schema"]["properties"]["output"]["properties"]["example"];
+    assert!(
+        output_example.is_object(),
+        "extensions.bazaar.schema.properties.output.properties.example must be an object \
+         (agentcash outputSchema); got: {output_example}"
+    );
+    assert_eq!(
+        output_example["object"], "chat.completion",
+        "output example must be a chat.completion object"
+    );
+    assert!(
+        output_example["choices"].is_array(),
+        "output example must carry a choices array"
+    );
+    assert!(
+        output_example["choices"][0]["message"].is_object(),
+        "output example choices[0].message must be an object"
+    );
+    assert!(
+        output_example["usage"].is_object(),
+        "output example must carry a usage object"
+    );
+}
+
+/// The per-request quote 402 (valid body, no PAYMENT-SIGNATURE) carries the
+/// `extensions.bazaar` discovery block AND leaves the money fields unchanged.
+#[tokio::test]
+async fn test_quote_402_carries_bazaar_extension() {
+    let app = test_app();
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Tell me about Solana."}],
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let challenge: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_bazaar_extension(&challenge);
+
+    // Money fields are untouched by the additive extension: accepts still the
+    // configured exact scheme/mint/recipient with a real per-request amount.
+    let exact = &challenge["accepts"][0];
+    assert_eq!(exact["scheme"], "exact");
+    assert_eq!(
+        exact["asset"],
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    );
+    let amount: u64 = exact["amount"].as_str().unwrap().parse().unwrap();
+    assert!(amount > 0, "quote amount must remain a real positive cost");
+    assert_eq!(challenge["cost_breakdown"]["fee_percent"], 5);
+}
+
+// ---------------------------------------------------------------------------
 // POST /v1/chat/completions — streaming request is accepted
 // ---------------------------------------------------------------------------
 
@@ -10874,9 +11006,18 @@ async fn test_chat_402_canonical_header_quotes_configured_mint() {
     );
 }
 
-/// Legacy-regression pin: the snake_case 402 body shape must stay EXACTLY as
-/// the published SDKs parse it — same top-level keys, same nested keys, no
-/// additions. The canonical layer is header-only.
+/// Legacy-regression pin: the snake_case 402 body's MONEY-PATH shape must stay
+/// EXACTLY as the published SDKs parse it — same `resource`/`accepts` keys, same
+/// money fields. The canonical (camelCase header) layer remains header-only.
+///
+/// `extensions` is the ONE deliberate, approved additive top-level key
+/// (feat/bazaar-challenge-schema): a static Coinbase-Bazaar discovery block so
+/// x402scan/agentcash index the resource as invocable. It is purely additive
+/// discovery metadata — `accepts`/`cost_breakdown`/verification/settlement are
+/// byte-unchanged, and clients sign `accepts`, never `extensions`. (Caveat: the
+/// Rust `PaymentRequired` is `deny_unknown_fields`, so external Rust consumers
+/// pinned to published `solvela-protocol@0.3.0` must bump to parse the live
+/// body; non-Rust SDKs tolerate the new key. Flagged at next protocol publish.)
 #[tokio::test]
 async fn test_chat_402_legacy_body_shape_unchanged() {
     let response = chat_402_response(test_app()).await;
@@ -10903,10 +11044,18 @@ async fn test_chat_402_legacy_body_shape_unchanged() {
             "accepts",
             "cost_breakdown",
             "error",
+            "extensions",
             "resource",
             "x402_version"
         ],
-        "legacy 402 top-level keys must not change"
+        "legacy 402 top-level keys: money keys unchanged + the additive `extensions`"
+    );
+    // The additive key carries the static Bazaar discovery block (and nothing
+    // wallet/amount/time-specific) — assert its presence so a regression that
+    // drops it (re-breaking discovery indexing) fails here too.
+    assert!(
+        legacy["extensions"]["bazaar"]["info"].is_object(),
+        "the additive `extensions` key must carry the Bazaar discovery block"
     );
     let mut resource_keys: Vec<&str> = legacy["resource"]
         .as_object()
@@ -13959,6 +14108,11 @@ mod discovery_challenge_tests {
         assert_eq!(exact["pay_to"], TEST_RECIPIENT_WALLET);
         assert_eq!(challenge["cost_breakdown"]["currency"], "USDC");
         assert_eq!(challenge["cost_breakdown"]["fee_percent"], 5);
+
+        // The discovery 402 carries the SAME static Coinbase-Bazaar discovery
+        // block as the quote path (shared `build_payment_challenge` builder), so
+        // registry probes hitting the discovery path are indexed as invocable.
+        assert_bazaar_extension(&challenge);
 
         challenge
     }
