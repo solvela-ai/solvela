@@ -219,9 +219,10 @@ impl PaymentTarget {
 /// 2. Reject internal services (400) and unhealthy services (503)
 /// 3. If no PAYMENT-SIGNATURE header → return 402 with cost breakdown
 /// 4. If payment present → decode, validate, replay-protect, verify via Facilitator
-/// 5. Forward request body to service endpoint with 60s timeout
-/// 6. Return upstream response (2xx passthrough, 5xx → 502, timeout → 504)
-/// 7. Fire-and-forget spend log
+/// 5. Fire-and-forget spend log + receipt at SETTLEMENT time (the money moved
+///    on-chain; the ledger row must not be contingent on the upstream — #556)
+/// 6. Forward request body to service endpoint with 60s timeout
+/// 7. Return upstream response (2xx passthrough, 5xx → 502, timeout → 504)
 pub async fn proxy_service(
     State(state): State<Arc<AppState>>,
     Path(service_id): Path<String>,
@@ -689,17 +690,19 @@ pub async fn proxy_service(
     // Build the spend entry once (fire-and-forget: log_spend spawns its own
     // writes, never awaited on the hot path).
     //
-    // WHEN it is logged differs by path:
-    // - Vendor services log NOW, at settlement time: the 5% receivable is owed
-    //   on SETTLED volume (the vendor was just paid on-chain), so deferring
-    //   the record past the upstream call would silently drop receivables for
-    //   settled requests whose upstream then times out or is unreachable.
-    // - Non-vendor services keep the legacy post-upstream write below,
-    //   byte-for-byte today's behavior.
+    // WHEN it is logged: NOW, at settlement time, for BOTH vendor and non-vendor
+    // (plain) services (#556). The money has just moved on-chain — the agent
+    // settled to the vendor wallet or the gateway recipient — so the ledger row
+    // must NOT be contingent on the upstream call succeeding. The legacy code
+    // deferred the PLAIN-service write past `send().await`, which silently
+    // dropped the spend_logs row for any settled request whose upstream then
+    // timed out, was unreachable, or failed the SSRF re-check / client build /
+    // body read: money moved, no record. Vendor receivables already logged at
+    // settlement time; collapsing the branch makes plain services match.
+    //
     // P2 receipt: built from the same settlement facts as the spend entry and
-    // written at the same point(s) — vendor services NOW (the vendor was just
-    // paid on-chain), plain services post-upstream below — so every paid
-    // request that writes a spend row also writes a receipt row.
+    // written at the SAME point — every paid request that writes a spend row
+    // also writes a receipt row, at settlement, for both paths.
     let receipt_record = payment_target.receipt_record(
         &service_id,
         &payload.accepted.scheme,
@@ -731,17 +734,26 @@ pub async fn proxy_service(
         estimated_cost_usdc: None,
         vendor: payment_target.into_vendor_settlement(),
     };
+    // Record spend + receipt UNCONDITIONALLY at settlement time, for both
+    // vendor and plain services (#556). `log_spend` is fire-and-forget (it
+    // spawns its own writes) and `record_receipt` dispatches its insert the
+    // same way — neither blocks the hot path, and a spend/receipt write failure
+    // never fails the request (settlement already happened on-chain; the failure
+    // stays observable via log_spend's existing warn/counter, Architectural
+    // Rule #9). These rows now make charge-without-delivery cases visible — the
+    // upstream-fails arms below 502/504 but the agent was still charged; that
+    // delivery-after-charge gap is tracked as open issue #486 (out of scope
+    // here: #556 only guarantees the ledger records the settled charge).
+    //
     // `receipt_header_path` is `Some` once a retrievable receipt exists (DB
     // configured AND the row write was dispatched); it is attached to every
-    // response built after that point. With no DATABASE_URL it stays `None`
-    // and no header is ever emitted (never promise an unfetchable receipt).
-    let (deferred_spend_entry, mut receipt_header_path) = if spend_entry.vendor.is_some() {
-        state.usage.log_spend(spend_entry);
-        let path = receipts::record_receipt(state.db_pool.as_ref(), receipt_record);
-        (None, path)
-    } else {
-        (Some((spend_entry, receipt_record)), None)
-    };
+    // response built after this point — including the upstream-fails arms, so a
+    // failed-upstream 502/504 now also carries a fetchable receipt (a correct
+    // improvement that matches the vendor path). With no DATABASE_URL it stays
+    // `None` and no header is ever emitted (never promise an unfetchable
+    // receipt).
+    state.usage.log_spend(spend_entry);
+    let receipt_header_path = receipts::record_receipt(state.db_pool.as_ref(), receipt_record);
 
     // Step 5: SSRF check — resolve DNS once, validate all addresses are public,
     // then pin the validated IP into a per-request reqwest client. This eliminates
@@ -815,7 +827,7 @@ pub async fn proxy_service(
         upstream_req = upstream_req.header("x-solvela-request-id", rid.as_str());
     }
 
-    // Step 6: Send request and handle response
+    // Step 7: Send request and handle response
     let upstream_response = match upstream_req.send().await {
         Ok(resp) => resp,
         Err(e) if e.is_timeout() => {
@@ -824,11 +836,11 @@ pub async fn proxy_service(
                 error = %e,
                 "upstream service timed out"
             );
-            // Vendor services already settled AND recorded their receipt at
-            // settlement time above, so the paid (504) response still carries
-            // it. Plain services have not written spend or receipt yet —
-            // `receipt_header_path` is `None` and no header is emitted
-            // (mirrors the legacy spend-log behavior on this arm).
+            // Both vendor AND plain services already recorded spend + receipt
+            // at settlement time above (#556), so this paid (504) response
+            // carries the receipt header when a DB is configured — the agent
+            // was charged on-chain and the ledger/receipt reflect it even
+            // though the upstream timed out (charge-without-delivery: #486).
             let mut response = (
                 StatusCode::GATEWAY_TIMEOUT,
                 axum::Json(json!({
@@ -845,7 +857,9 @@ pub async fn proxy_service(
                 error = %e,
                 "failed to reach upstream service"
             );
-            // Same receipt-header semantics as the timeout arm above.
+            // Same receipt-header semantics as the timeout arm above (#556):
+            // spend + receipt were recorded at settlement, so this 502 carries
+            // the receipt header when a DB is configured.
             let mut response = (
                 StatusCode::BAD_GATEWAY,
                 axum::Json(json!({
@@ -860,13 +874,9 @@ pub async fn proxy_service(
 
     let upstream_status = upstream_response.status();
 
-    // Step 7: Fire-and-forget spend log + receipt (both internally use
-    // tokio::spawn). Non-vendor services only — vendor services already
-    // logged at settlement time above (one row per request either way).
-    if let Some((entry, record)) = deferred_spend_entry {
-        state.usage.log_spend(entry);
-        receipt_header_path = receipts::record_receipt(state.db_pool.as_ref(), record);
-    }
+    // Spend + receipt are already recorded at settlement time above (#556),
+    // for both vendor and plain services — no post-upstream write here. The
+    // ledger row is never contingent on the upstream outcome.
 
     // Handle upstream response based on status
     if upstream_status.is_server_error() {
