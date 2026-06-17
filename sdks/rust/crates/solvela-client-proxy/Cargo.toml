@@ -21,8 +21,8 @@ name = "solvela-client-proxy"
 path = "src/main.rs"
 
 [dependencies]
-solvela-client = { path = "../solvela-client", version = "0.3" }
-solvela-client-cli-args = { path = "../solvela-client-cli-args", version = "0.3" }
+solvela-client = { path = "../solvela-client", version = "0.4" }
+solvela-client-cli-args = { path = "../solvela-client-cli-args", version = "0.4" }
 solvela-protocol = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }

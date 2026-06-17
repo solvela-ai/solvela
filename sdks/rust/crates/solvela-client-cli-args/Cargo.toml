@@ -14,7 +14,7 @@ readme = "README.md"
 
 [dependencies]
 clap = { workspace = true }
-solvela-client = { path = "../solvela-client", version = "0.3" }
+solvela-client = { path = "../solvela-client", version = "0.4" }
 dirs = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
