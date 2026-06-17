@@ -259,7 +259,11 @@ async fn handle_payment_submitted(
     // part can never enter this path. See `reject_image_data_parts`.
     reject_image_data_parts(&params.message.parts)?;
 
-    // Load task record
+    // Load task record. `load_task` distinguishes infra failure from a genuine
+    // miss (issue #532): an absent/unreachable Redis returns `Err` → ERR_INTERNAL
+    // ("retry, this is on us"), while only a true expiry/never-existed returns
+    // `Ok(None)` → ERR_TASK_NOT_FOUND. An agent that already signed a payment must
+    // not be told its task is gone when Redis is merely down.
     let record = task_store::load_task(state, task_id)
         .await
         .map_err(|e| JsonRpcErrorData {
@@ -442,11 +446,12 @@ async fn handle_payment_submitted(
     //   the money already moved, so a retry must not settle again.
     //
     // No-Redis behaviour: the A2A task store REQUIRES Redis (`load_task`
-    // returns `Ok(None)` without it → this request already 404'd at task load
-    // above), so reaching here implies Redis is present. Acquisition failing
-    // closed (Err → reject) therefore never strands a legitimately-loadable
-    // task, and there is deliberately no in-memory lock fallback (it could not
-    // serialise across gateway instances — the exact race we are closing).
+    // returns `Err` without it → this request already failed with ERR_INTERNAL
+    // at task load above, issue #532), so reaching here implies Redis is present.
+    // Acquisition failing closed (Err → reject) therefore never strands a
+    // legitimately-loadable task, and there is deliberately no in-memory lock
+    // fallback (it could not serialise across gateway instances — the exact race
+    // we are closing).
     match &state.cache {
         Some(cache) => match cache
             .acquire_settle_lock(task_id, crate::cache::A2A_SETTLE_LOCK_TTL_SECS)
@@ -502,12 +507,12 @@ async fn handle_payment_submitted(
             }
         },
         // F2 (#566): fail CLOSED, never fall through. The A2A task store REQUIRES
-        // Redis (`load_task` returns `Ok(None)` without it), so this arm is
-        // unreachable in practice — reaching here means the "task store requires
-        // Redis" invariant broke. Settling with NO lock would re-open the exact
-        // exactly-once race the lock exists to close (and across instances, an
-        // in-memory lock could not serialise it), so we reject rather than
-        // proceed unlocked. Tracked on the infra-degradation counter (not the
+        // Redis (`load_task` returns `Err` without it → ERR_INTERNAL at task load,
+        // issue #532), so this arm is unreachable in practice — reaching here means
+        // the "task store requires Redis" invariant broke. Settling with NO lock
+        // would re-open the exact exactly-once race the lock exists to close (and
+        // across instances, an in-memory lock could not serialise it), so we reject
+        // rather than proceed unlocked. Tracked on the infra-degradation counter (not the
         // "concurrent" one) so a missing-Redis misconfiguration is alertable.
         None => {
             metrics::counter!(
@@ -1724,38 +1729,6 @@ supports_vision = false
     }
 
     #[tokio::test]
-    async fn test_payment_submitted_unknown_task_returns_error() {
-        let state = test_state();
-        let headers = HeaderMap::new();
-        let params = MessageSendParams {
-            message: Message {
-                role: MessageRole::User,
-                parts: vec![Part::Text {
-                    text: "pay".to_string(),
-                }],
-                metadata: Some({
-                    let mut m = serde_json::Map::new();
-                    m.insert(
-                        x402_meta::STATUS_KEY.to_string(),
-                        json!(x402_meta::PAYMENT_SUBMITTED),
-                    );
-                    m
-                }),
-            },
-            task_id: Some("nonexistent_task_id".to_string()),
-        };
-
-        let result =
-            handle_payment_submitted(&state, &headers, "nonexistent_task_id", &params).await;
-        assert!(result.is_err(), "should error for unknown task");
-        assert_eq!(
-            result.unwrap_err().code, // safe: just asserted is_err
-            ERR_TASK_NOT_FOUND,
-            "error code should be task not found"
-        );
-    }
-
-    #[tokio::test]
     async fn test_handle_message_send_routes_new_request() {
         let state = test_state();
         let headers = HeaderMap::new();
@@ -1781,32 +1754,6 @@ supports_vision = false
             ERR_INTERNAL,
             "should return ERR_INTERNAL when task store is unavailable"
         );
-    }
-
-    #[tokio::test]
-    async fn test_handle_message_send_routes_payment_submitted() {
-        let state = test_state();
-        let headers = HeaderMap::new();
-        // With a non-existent taskId, should error with task-not-found
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "message/send".to_string(),
-            id: json!("req-2"),
-            params: json!({
-                "message": {
-                    "role": "user",
-                    "parts": [{"kind": "text", "text": "pay"}],
-                    "metadata": {
-                        "x402.payment.status": "payment-submitted"
-                    }
-                },
-                "taskId": "nonexistent_task"
-            }),
-        };
-
-        let result = handle_message_send(state, &headers, &request).await;
-        assert!(result.is_err(), "should error for unknown task");
-        assert_eq!(result.unwrap_err().code, ERR_TASK_NOT_FOUND); // safe: just asserted is_err
     }
 
     #[test]
@@ -1993,6 +1940,72 @@ supports_vision = false
             },
             task_id: None,
         }
+    }
+
+    /// Submitting a payment against a task id that genuinely does NOT exist in a
+    /// PRESENT Redis returns ERR_TASK_NOT_FOUND. This is the true "not found"
+    /// case — distinct from a no-Redis outage, which returns ERR_INTERNAL (issue
+    /// #532; the no-Redis load path is covered by
+    /// `load_task_without_redis_errors_not_none`). A random `new_task_id()` is
+    /// never saved, so its key is absent and `load_task` returns `Ok(None)`.
+    #[tokio::test]
+    async fn test_payment_submitted_unknown_task_returns_error() {
+        let state = test_state_with_redis();
+        let headers = HeaderMap::new();
+        let task_id = new_task_id(); // random, never saved → genuine miss
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: "pay".to_string(),
+                }],
+                metadata: Some({
+                    let mut m = serde_json::Map::new();
+                    m.insert(
+                        x402_meta::STATUS_KEY.to_string(),
+                        json!(x402_meta::PAYMENT_SUBMITTED),
+                    );
+                    m
+                }),
+            },
+            task_id: Some(task_id.clone()),
+        };
+
+        let result = handle_payment_submitted(&state, &headers, &task_id, &params).await;
+        assert!(result.is_err(), "should error for unknown task");
+        assert_eq!(
+            result.unwrap_err().code, // safe: just asserted is_err
+            ERR_TASK_NOT_FOUND,
+            "a genuine absent task (Redis present) must map to task-not-found"
+        );
+    }
+
+    /// `message/send` carrying a `taskId` routes to the payment-submitted path;
+    /// with a genuinely-absent task (Redis present) it returns task-not-found.
+    #[tokio::test]
+    async fn test_handle_message_send_routes_payment_submitted() {
+        let state = test_state_with_redis();
+        let headers = HeaderMap::new();
+        let task_id = new_task_id(); // random, never saved → genuine miss
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "message/send".to_string(),
+            id: json!("req-2"),
+            params: json!({
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "pay"}],
+                    "metadata": {
+                        "x402.payment.status": "payment-submitted"
+                    }
+                },
+                "taskId": task_id,
+            }),
+        };
+
+        let result = handle_message_send(state, &headers, &request).await;
+        assert!(result.is_err(), "should error for unknown task");
+        assert_eq!(result.unwrap_err().code, ERR_TASK_NOT_FOUND); // safe: just asserted is_err
     }
 
     /// New-request happy path: with Redis configured, save_task succeeds and
@@ -3044,5 +3057,33 @@ supports_vision = false
         if let Some(cache) = &state.cache {
             let _ = cache.del_raw(&format!("a2a_task:{task_id}")).await;
         }
+    }
+
+    /// Regression (#532): with no Redis configured, `load_task` must return
+    /// `Err` (an infrastructure failure), NOT `Ok(None)` — which the handler
+    /// maps to ERR_TASK_NOT_FOUND ("task not found or expired"). An agent that
+    /// already signed a payment and submits it while Redis is down must be told
+    /// to retry (ERR_INTERNAL), never that its task vanished. `save_task`
+    /// already fails closed; this proves `load_task` is now consistent, and
+    /// that `update_task_state` (which reads through `load_task`) inherits it.
+    #[tokio::test]
+    async fn load_task_without_redis_errors_not_none() {
+        let state = test_state(); // cache: None
+
+        let err = task_store::load_task(&state, "a2a_irrelevant_id")
+            .await
+            .expect_err("no-Redis load_task must be Err, not Ok(None)");
+        assert!(
+            err.contains("requires Redis"),
+            "error should name the missing Redis dependency, got: {err}"
+        );
+
+        let err2 = task_store::update_task_state(&state, "a2a_irrelevant_id", TaskState::Completed)
+            .await
+            .expect_err("no-Redis update_task_state must propagate the load_task Err");
+        assert!(
+            err2.contains("requires Redis"),
+            "update_task_state should surface the Redis-absent error, got: {err2}"
+        );
     }
 }

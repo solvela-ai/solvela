@@ -13685,14 +13685,14 @@ async fn a2a_provider_failure_after_settle_writes_ledger_and_holds_lock() {
 }
 
 // (c) F2 — no-Redis fail-closed: NOT integration-testable. The A2A task store
-// REQUIRES Redis (`task_store::load_task` returns `Ok(None)` when `cache` is
-// `None`), so a payment-submitted request without Redis already 404s at task
-// load, BEFORE the settlement-lock block — the `None` arm there is unreachable
-// by construction in the current flow and exists purely as defense-in-depth
-// against a future refactor that decouples task loading from the lock cache.
-// There is therefore no honest end-to-end trigger; the arm's fail-closed
-// behaviour is verified by inspection (it returns ERR_PAYMENT_FAILED, never
-// `false`). See the F2 comment on the `None` arm in `a2a/handler.rs`.
+// REQUIRES Redis (`task_store::load_task` returns `Err` when `cache` is `None`,
+// issue #532), so a payment-submitted request without Redis already fails with
+// ERR_INTERNAL at task load, BEFORE the settlement-lock block — the `None` arm
+// there is unreachable by construction in the current flow and exists purely as
+// defense-in-depth against a future refactor that decouples task loading from
+// the lock cache. There is therefore no honest end-to-end trigger; the arm's
+// fail-closed behaviour is verified by inspection (it returns ERR_PAYMENT_FAILED,
+// never `false`). See the F2 comment on the `None` arm in `a2a/handler.rs`.
 
 // ===========================================================================
 // Gas-drip faucet — POST /v1/faucet/gas (through the real route)
