@@ -7,7 +7,11 @@ use solvela_protocol::{
     ModelRegistration, ParseImageError, ParsedImage, Role, Usage,
 };
 
+use super::cache_usage::CacheUsage;
 use super::LLMProvider;
+
+/// Provider label for cache-token metering counters.
+const PROVIDER_LABEL: &str = "google";
 
 /// Google (Gemini) provider adapter.
 ///
@@ -155,6 +159,15 @@ struct GeminiUsageMetadata {
     prompt_token_count: Option<u32>,
     candidates_token_count: Option<u32>,
     total_token_count: Option<u32>,
+    /// Prompt tokens served from Gemini context cache. Maps to the wire field
+    /// `cachedContentTokenCount` (verified against ai.google.dev generateContent
+    /// docs 2026-06-17). `Option` + camelCase rename: absent on responses
+    /// without context caching, yielding 0 for metering. OBSERVABILITY ONLY —
+    /// not part of billing (`from_gemini_response` bills off `promptTokenCount`,
+    /// which Gemini reports as the FULL prompt size including cached tokens, so
+    /// this is purely a discount-visibility read).
+    #[serde(default)]
+    cached_content_token_count: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -357,6 +370,24 @@ fn from_gemini_response(resp: GeminiResponse, original_model: &str) -> ChatRespo
             (String::new(), Some("content_filter".to_string()))
         }
     };
+
+    // OBSERVABILITY ONLY: emit the context-cache read counter (plus the request
+    // denominator) before `resp.usage_metadata` is consumed below. Gemini
+    // reports cache reads via `cachedContentTokenCount`; there is no separate
+    // cache-write count, so write stays 0. Absent metadata / field → 0, which
+    // still emits the denominator (the unambiguous-flatline signal). This reads
+    // a field billing does not use (Gemini's `promptTokenCount` is the full
+    // prompt size), so it cannot affect the agent's charge.
+    let cache_read = resp
+        .usage_metadata
+        .as_ref()
+        .and_then(|u| u.cached_content_token_count)
+        .unwrap_or(0);
+    CacheUsage {
+        cache_read_tokens: cache_read,
+        cache_write_tokens: 0,
+    }
+    .emit(PROVIDER_LABEL, original_model);
 
     let usage = match resp.usage_metadata {
         Some(u) => {
@@ -841,6 +872,7 @@ mod tests {
                 prompt_token_count: Some(5),
                 candidates_token_count: Some(3),
                 total_token_count: Some(8),
+                cached_content_token_count: None,
             }),
         };
 
@@ -848,6 +880,70 @@ mod tests {
         assert_eq!(chat_resp.choices[0].message.content.as_text(), "Hi there!");
         assert_eq!(chat_resp.choices[0].finish_reason, Some("stop".to_string()));
         assert_eq!(chat_resp.usage.as_ref().unwrap().total_tokens, 8);
+    }
+
+    // ---------------------------------------------------------------------
+    // PR-2 cache-token metering (OBSERVABILITY ONLY).
+    // ---------------------------------------------------------------------
+
+    /// `cachedContentTokenCount` deserializes into `cached_content_token_count`
+    /// via the camelCase rename, and is absent (None) when the wire field is
+    /// missing — never a parse error (backward-compat).
+    #[test]
+    fn gemini_usage_metadata_parses_cached_content_token_count() {
+        let raw = r#"{"promptTokenCount":1000,"candidatesTokenCount":20,"totalTokenCount":1020,"cachedContentTokenCount":700}"#;
+        let u: GeminiUsageMetadata = serde_json::from_str(raw).unwrap();
+        assert_eq!(u.cached_content_token_count, Some(700));
+
+        // Absent → None, not an error.
+        let raw_no_cache =
+            r#"{"promptTokenCount":1000,"candidatesTokenCount":20,"totalTokenCount":1020}"#;
+        let u2: GeminiUsageMetadata = serde_json::from_str(raw_no_cache).unwrap();
+        assert_eq!(u2.cached_content_token_count, None);
+    }
+
+    /// `from_gemini_response` emits the read counter (by
+    /// `cachedContentTokenCount`) and the denominator, and leaves the billed
+    /// usage (`prompt_tokens`/`total_tokens`) untouched — Gemini's
+    /// `promptTokenCount` is the FULL prompt size, so metering is purely
+    /// additive observability.
+    #[test]
+    fn from_gemini_response_emits_read_counter_without_touching_billing() {
+        use crate::cache::test_metrics::{counter_value_filtered, install_test_recorder};
+
+        let handle = install_test_recorder();
+        let model = "google/metering-unique-model";
+        let key = format!("model=\"{model}\"");
+        let read_before =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let req_before = counter_value_filtered(&handle, "solvela_provider_requests_total", &key);
+
+        let gemini_resp = GeminiResponse {
+            candidates: Some(vec![GeminiCandidate {
+                content: GeminiContent {
+                    role: Some("model".to_string()),
+                    parts: vec![GeminiPart::text("ok".to_string())],
+                },
+                finish_reason: Some("STOP".to_string()),
+            }]),
+            usage_metadata: Some(GeminiUsageMetadata {
+                prompt_token_count: Some(1000),
+                candidates_token_count: Some(20),
+                total_token_count: Some(1020),
+                cached_content_token_count: Some(700),
+            }),
+        };
+        let chat_resp = from_gemini_response(gemini_resp, model);
+
+        // Billing unchanged: full prompt size from Gemini's promptTokenCount.
+        assert_eq!(chat_resp.usage.as_ref().unwrap().prompt_tokens, 1000);
+        assert_eq!(chat_resp.usage.as_ref().unwrap().total_tokens, 1020);
+
+        let read_after =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let req_after = counter_value_filtered(&handle, "solvela_provider_requests_total", &key);
+        assert_eq!(read_after - read_before, 700, "read counter delta");
+        assert_eq!(req_after - req_before, 1, "denominator delta");
     }
 
     // ---------------------------------------------------------------------

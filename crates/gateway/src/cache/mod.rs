@@ -504,6 +504,29 @@ pub(super) mod test_metrics {
             .filter_map(|l| l.rsplit_once(' ').and_then(|(_, v)| v.parse::<u64>().ok()))
             .sum()
     }
+
+    /// Like [`counter_value`], but sums only the label-series of `name` whose
+    /// exposition line's label block CONTAINS `label_substr`.
+    ///
+    /// The single process-wide recorder means `counter_value` (which sums the
+    /// WHOLE family across labels) is contaminated when sibling tests run
+    /// concurrently and increment the same metric family under different
+    /// labels. Tests that emit labeled counters give themselves a UNIQUE label
+    /// value (e.g. a unique `model="..."`) and read with this filter so their
+    /// before/after delta is attributable only to themselves — independent of
+    /// whatever other tests do to the same family in parallel.
+    pub(crate) fn counter_value_filtered(
+        handle: &metrics_exporter_prometheus::PrometheusHandle,
+        name: &str,
+        label_substr: &str,
+    ) -> u64 {
+        let body = handle.render();
+        body.lines()
+            .filter(|l| l.starts_with(&format!("{name}{{")))
+            .filter(|l| l.contains(label_substr))
+            .filter_map(|l| l.rsplit_once(' ').and_then(|(_, v)| v.parse::<u64>().ok()))
+            .sum()
+    }
 }
 
 #[cfg(test)]

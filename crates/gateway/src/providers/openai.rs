@@ -1,11 +1,59 @@
 use async_trait::async_trait;
+use serde::Deserialize;
 
 use solvela_protocol::{ChatRequest, ChatResponse, ModelRegistration};
 
+use super::cache_usage::CacheUsage;
 use super::{ChatStream, LLMProvider, ProviderError};
 
 const OPENAI_PREFIX: &str = "openai/";
 const OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
+/// Provider label for cache-token metering counters.
+const PROVIDER_LABEL: &str = "openai";
+
+/// Internal, parse-only view of the OpenAI `usage.prompt_tokens_details`
+/// sub-object purely to read `cached_tokens` for metering. This deliberately
+/// does NOT extend the frozen public `solvela_protocol::Usage`: the response is
+/// still deserialized into `ChatResponse` for the agent, and this struct reads
+/// the same JSON body a SECOND time only to pull the nested cache field for a
+/// Prometheus counter. OBSERVABILITY ONLY — never reaches billing or the wire.
+///
+/// OpenAI reports cache READS via `usage.prompt_tokens_details.cached_tokens`
+/// (verified against developers.openai.com prompt-caching docs 2026-06-17).
+/// There is no separate cache-WRITE count, so the metering write counter stays
+/// 0 for OpenAI. Both layers are `Option`/`#[serde(default)]` so a response
+/// without the nested object yields `CacheUsage::default()` (0/0), never an
+/// error.
+#[derive(Debug, Default, Deserialize)]
+struct OpenAiExtendedUsage {
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenAiPromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u32,
+}
+
+/// Extract the cache-read token count from an OpenAI-family response body.
+///
+/// Reads the top-level `usage.prompt_tokens_details.cached_tokens`. Returns
+/// `CacheUsage::default()` (0/0) when `usage` or the nested object is absent —
+/// fail-safe, never an error. Shared by OpenAI and xAI (xAI mirrors OpenAI's
+/// usage shape).
+pub(super) fn cache_usage_from_openai_body(body: &serde_json::Value) -> CacheUsage {
+    let read = body
+        .get("usage")
+        .and_then(|u| serde_json::from_value::<OpenAiExtendedUsage>(u.clone()).ok())
+        .and_then(|u| u.prompt_tokens_details)
+        .map(|d| d.cached_tokens)
+        .unwrap_or(0);
+    CacheUsage {
+        cache_read_tokens: read,
+        cache_write_tokens: 0,
+    }
+}
 
 /// OpenAI provider adapter.
 ///
@@ -56,6 +104,7 @@ impl LLMProvider for OpenAIProvider {
         &self,
         req: ChatRequest,
     ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let original_model = req.model.clone();
         let req_body = build_chat_body(&req)?;
         let response = super::retry_with_backoff(2, || {
             self.client
@@ -67,7 +116,20 @@ impl LLMProvider for OpenAIProvider {
         })
         .await?;
 
-        let body = response.error_for_status()?.json::<ChatResponse>().await?;
+        // Read the body once as a Value so we can BOTH (a) deserialize the
+        // public `ChatResponse` for the agent and (b) read the nested
+        // `usage.prompt_tokens_details.cached_tokens` for OBSERVABILITY-ONLY
+        // metering — without extending the frozen public `Usage` type. The
+        // billing path is untouched: `ChatResponse` is built exactly as before.
+        let value = response
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+        let cache_usage = cache_usage_from_openai_body(&value);
+        let body: ChatResponse = serde_json::from_value(value)?;
+        // Emit metering only after a successful ChatResponse deserialize, so the
+        // request denominator never counts a 200-OK-but-unparseable body.
+        cache_usage.emit(PROVIDER_LABEL, &original_model);
         Ok(body)
     }
 
@@ -228,5 +290,69 @@ mod tests {
     fn supported_models_is_empty_by_design() {
         let provider = OpenAIProvider::new(reqwest::Client::new(), "sk-test".to_string());
         assert!(provider.supported_models().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // PR-2 cache-token metering (OBSERVABILITY ONLY).
+    // -----------------------------------------------------------------------
+
+    use crate::cache::test_metrics::{counter_value_filtered, install_test_recorder};
+
+    /// A response body WITH `usage.prompt_tokens_details.cached_tokens` yields a
+    /// `CacheUsage` carrying the cached count as the READ (OpenAI has no
+    /// separate cache-write count, so write stays 0).
+    #[test]
+    fn cache_usage_from_openai_body_reads_cached_tokens() {
+        let body = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 20,
+                "total_tokens": 1020,
+                "prompt_tokens_details": { "cached_tokens": 768 }
+            }
+        });
+        let cu = cache_usage_from_openai_body(&body);
+        assert_eq!(cu.cache_read_tokens, 768);
+        assert_eq!(cu.cache_write_tokens, 0);
+    }
+
+    /// A response body WITHOUT the nested details (or without `usage`) yields
+    /// `CacheUsage::default()` (0/0) — never a parse error (backward-compat).
+    #[test]
+    fn cache_usage_from_openai_body_defaults_when_absent() {
+        // No prompt_tokens_details.
+        let body = serde_json::json!({
+            "usage": { "prompt_tokens": 1000, "completion_tokens": 20, "total_tokens": 1020 }
+        });
+        assert_eq!(cache_usage_from_openai_body(&body), CacheUsage::default());
+
+        // No usage block at all.
+        let body = serde_json::json!({ "id": "x", "choices": [] });
+        assert_eq!(cache_usage_from_openai_body(&body), CacheUsage::default());
+    }
+
+    /// Emitting the parsed `CacheUsage` increments the read counter by the
+    /// cached-token count and the denominator by 1. (The `chat_completion` path
+    /// wires `cache_usage_from_openai_body(...).emit(...)`; this proves the
+    /// parse+emit composition end to end at the unit level.)
+    #[test]
+    fn openai_emit_increments_read_and_denominator() {
+        let handle = install_test_recorder();
+        let model = "openai/metering-unique-model";
+        let key = format!("model=\"{model}\"");
+        let read_before =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let req_before = counter_value_filtered(&handle, "solvela_provider_requests_total", &key);
+
+        let body = serde_json::json!({
+            "usage": { "prompt_tokens_details": { "cached_tokens": 512 } }
+        });
+        cache_usage_from_openai_body(&body).emit(PROVIDER_LABEL, model);
+
+        let read_after =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let req_after = counter_value_filtered(&handle, "solvela_provider_requests_total", &key);
+        assert_eq!(read_after - read_before, 512);
+        assert_eq!(req_after - req_before, 1);
     }
 }

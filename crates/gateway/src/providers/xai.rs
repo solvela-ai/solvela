@@ -2,10 +2,13 @@ use async_trait::async_trait;
 
 use solvela_protocol::{ChatRequest, ChatResponse, ModelRegistration};
 
+use super::openai::cache_usage_from_openai_body;
 use super::{ChatStream, LLMProvider, ProviderError};
 
 const XAI_PREFIX: &str = "xai/";
 const XAI_URL: &str = "https://api.x.ai/v1/chat/completions";
+/// Provider label for cache-token metering counters.
+const PROVIDER_LABEL: &str = "xai";
 
 /// xAI (Grok) provider adapter.
 ///
@@ -53,6 +56,7 @@ impl LLMProvider for XAIProvider {
         &self,
         req: ChatRequest,
     ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let original_model = req.model.clone();
         let req_body = build_chat_body(&req)?;
         let response = super::retry_with_backoff(2, || {
             self.client
@@ -64,7 +68,19 @@ impl LLMProvider for XAIProvider {
         })
         .await?;
 
-        let body = response.error_for_status()?.json::<ChatResponse>().await?;
+        // xAI mirrors OpenAI's usage shape, including
+        // `usage.prompt_tokens_details.cached_tokens`. Read the body once as a
+        // Value to drive OBSERVABILITY-ONLY cache metering, then deserialize the
+        // public `ChatResponse` for the agent. Billing is untouched.
+        let value = response
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+        let cache_usage = cache_usage_from_openai_body(&value);
+        let body: ChatResponse = serde_json::from_value(value)?;
+        // Emit metering only after a successful ChatResponse deserialize, so the
+        // request denominator never counts a 200-OK-but-unparseable body.
+        cache_usage.emit(PROVIDER_LABEL, &original_model);
         Ok(body)
     }
 
@@ -189,5 +205,51 @@ mod tests {
     fn supported_models_is_empty_by_design() {
         let provider = XAIProvider::new(reqwest::Client::new(), "xai-test".to_string());
         assert!(provider.supported_models().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // PR-2 cache-token metering (OBSERVABILITY ONLY).
+    // -----------------------------------------------------------------------
+
+    use crate::cache::test_metrics::{counter_value_filtered, install_test_recorder};
+    use crate::providers::cache_usage::CacheUsage;
+
+    /// xAI shares OpenAI's usage shape, so it reuses
+    /// `cache_usage_from_openai_body` to read `cached_tokens` as the read count.
+    #[test]
+    fn xai_reads_cached_tokens_via_shared_helper() {
+        let body = serde_json::json!({
+            "usage": { "prompt_tokens_details": { "cached_tokens": 333 } }
+        });
+        let cu = cache_usage_from_openai_body(&body);
+        assert_eq!(cu.cache_read_tokens, 333);
+        assert_eq!(cu.cache_write_tokens, 0);
+
+        // Absent → 0/0, no error.
+        let empty = serde_json::json!({ "usage": { "prompt_tokens": 5 } });
+        assert_eq!(cache_usage_from_openai_body(&empty), CacheUsage::default());
+    }
+
+    /// Emitting under the xAI provider label increments the read counter and the
+    /// denominator.
+    #[test]
+    fn xai_emit_increments_read_and_denominator() {
+        let handle = install_test_recorder();
+        let model = "xai/metering-unique-model";
+        let key = format!("model=\"{model}\"");
+        let read_before =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let req_before = counter_value_filtered(&handle, "solvela_provider_requests_total", &key);
+
+        let body = serde_json::json!({
+            "usage": { "prompt_tokens_details": { "cached_tokens": 256 } }
+        });
+        cache_usage_from_openai_body(&body).emit(PROVIDER_LABEL, model);
+
+        let read_after =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let req_after = counter_value_filtered(&handle, "solvela_provider_requests_total", &key);
+        assert_eq!(read_after - read_before, 256);
+        assert_eq!(req_after - req_before, 1);
     }
 }
