@@ -20,7 +20,9 @@ use crate::a2a::task_store::{self, new_task_id, TaskRecord};
 use crate::a2a::types::*;
 use crate::providers::fallback::chat_with_model_fallback;
 use crate::receipts;
-use crate::routes::chat::cost::{estimate_input_tokens, usdc_atomic_amount_checked, PaymentScheme};
+use crate::routes::chat::cost::{
+    completion_token_ceiling, estimate_input_tokens, usdc_atomic_amount_checked, PaymentScheme,
+};
 use crate::usage::SpendLogEntry;
 use crate::AppState;
 
@@ -78,17 +80,18 @@ async fn handle_new_request(
 
     let resolved_model = resolve_model(model_hint, &user_text, state)?;
 
-    // Look up model in registry for pricing
-    // Verify model exists in registry before computing cost
-    let _model_info =
-        state
-            .model_registry
-            .get(&resolved_model)
-            .ok_or_else(|| JsonRpcErrorData {
-                code: ERR_MODEL_NOT_FOUND,
-                message: format!("Model not found: {resolved_model}"),
-                data: None,
-            })?;
+    // Look up model in registry for pricing. The registration carries the
+    // model's declared `max_output_tokens`, which feeds the completion-token
+    // ceiling below — quoting/billing must reflect what the model can actually
+    // return, not a fixed 1000-token assumption (#504).
+    let model_info = state
+        .model_registry
+        .get(&resolved_model)
+        .ok_or_else(|| JsonRpcErrorData {
+            code: ERR_MODEL_NOT_FOUND,
+            message: format!("Model not found: {resolved_model}"),
+            data: None,
+        })?;
 
     // Build a temporary ChatRequest for token estimation
     let chat_req = ChatRequest {
@@ -109,7 +112,15 @@ async fn handle_new_request(
     };
 
     let input_tokens = estimate_input_tokens(&chat_req);
-    let max_tokens = 1000u32;
+    // Quote against the true completion-token ceiling, NOT a hardcoded 1000
+    // (#504). `chat_req.max_tokens` is `None` on this intake path, so the
+    // ceiling falls back to `min(model.max_output_tokens, 8192)` — the largest
+    // completion the gateway could end up billing for. This value is stored on
+    // the TaskRecord and re-applied as the provider cap at settlement
+    // (`handle_payment_submitted`), so quote == provider cap == settlement by
+    // construction (the same single-source-of-truth invariant the chat path
+    // holds via `completion_token_ceiling`; see #500/#503).
+    let max_tokens = completion_token_ceiling(chat_req.max_tokens, model_info);
 
     let cost = state
         .model_registry
@@ -374,10 +385,18 @@ async fn handle_payment_submitted(
             data: None,
         })?;
 
-    // Re-apply the max_tokens cap that was used to compute the quoted cost
-    // in step 2 (handle_new_request). Records persisted before the H1 fix
-    // have `max_tokens = None`; for those we fall back to the historical
-    // 1000-token default so the cap is never silently absent.
+    // Re-apply the max_tokens cap that was used to compute the quoted cost in
+    // step 2 (handle_new_request). New records store the `completion_token_ceiling`
+    // computed at quote time (#504), so quote == provider cap == settlement.
+    //
+    // LEGACY FALLBACK (do not change): VERY old records — persisted before the
+    // `max_tokens` field existed on `TaskRecord` — deserialize with
+    // `max_tokens = None`. Those tasks were quoted at the historical hardcoded
+    // 1000, and the agent paid against that 1000-token quote, so they MUST
+    // settle at 1000 to match what was actually paid for. Raising the legacy
+    // fallback to the new ceiling would let a provider return more than the
+    // pre-paid 1000 tokens for those old tasks, with the gateway absorbing the
+    // delta — settle at the figure the agent was quoted, never silently absent.
     let enforced_max_tokens = record.max_tokens.unwrap_or(1000);
 
     let messages = vec![ChatMessage {
@@ -1027,11 +1046,21 @@ fn record_a2a_settlement(
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
     };
-    let (Some(provider_cost_atomic), Some(platform_fee_atomic), Some(total_atomic)) = (
-        atomic(&breakdown.provider_cost),
-        atomic(&breakdown.platform_fee),
-        atomic(&breakdown.total),
-    ) else {
+    // `total` is authoritative (it is what settled on-chain). DERIVE the fee
+    // component from it so the three receipt atomics always reconcile:
+    //   total = provider * 105/100  ⇒  fee = total - provider
+    // The registry estimate rounds `provider_cost`, `platform_fee`, and `total`
+    // INDEPENDENTLY as float strings (`format!("{:.6}")` in
+    // `ModelRegistry::estimate_cost`), so parsing `platform_fee` from its own
+    // string can disagree with `total - provider` by 1 atomic unit (1 micro-USDC).
+    // Letting the ±1 integer-USDC rounding skew land in the fee component is the
+    // accepted treatment everywhere else (see `chat_completions_discovery` /
+    // `emit_chat_receipt` in routes/chat/mod.rs). We keep `provider_cost_atomic`
+    // (the real upstream cost) and `total_atomic` (what settled) from the
+    // breakdown, and never parse `platform_fee` independently.
+    let (Some(provider_cost_atomic), Some(total_atomic)) =
+        (atomic(&breakdown.provider_cost), atomic(&breakdown.total))
+    else {
         metrics::counter!(
             "solvela_a2a_settlement_record_skipped_total",
             "reason" => "corrupt_breakdown"
@@ -1040,10 +1069,32 @@ fn record_a2a_settlement(
         warn!(
             task_id,
             provider_cost = %breakdown.provider_cost,
-            platform_fee = %breakdown.platform_fee,
             total = %breakdown.total,
             "A2A settled but cost breakdown failed the checked atomic conversion — \
              spend row and receipt skipped"
+        );
+        return None;
+    };
+    // Checked subtraction: `total ≈ provider * 1.05`, so `total ≥ provider`
+    // always holds for a well-formed breakdown. If a corrupt breakdown ever
+    // reports `provider_cost > total`, fail closed the SAME way as a bad atomic
+    // conversion (skip + counter) rather than underflow into a negative/wrapped
+    // fee. Never produce a fee from saturating-to-zero either — a silent zero
+    // would misreport the split.
+    let Some(platform_fee_atomic) = total_atomic.checked_sub(provider_cost_atomic) else {
+        metrics::counter!(
+            "solvela_a2a_settlement_record_skipped_total",
+            "reason" => "corrupt_breakdown"
+        )
+        .increment(1);
+        warn!(
+            task_id,
+            provider_cost = %breakdown.provider_cost,
+            total = %breakdown.total,
+            provider_cost_atomic,
+            total_atomic,
+            "A2A settled but breakdown provider_cost exceeds total (cannot derive a \
+             non-negative platform fee) — spend row and receipt skipped"
         );
         return None;
     };
@@ -3085,5 +3136,181 @@ supports_vision = false
             err2.contains("requires Redis"),
             "update_task_state should surface the Redis-absent error, got: {err2}"
         );
+    }
+
+    /// Like [`test_state_with_redis`] but with a caller-supplied model registry
+    /// TOML, so a test can pin a model's `max_output_tokens` and observe how it
+    /// drives the A2A completion-token ceiling (#504).
+    fn test_state_with_redis_models(models_toml: &str) -> Arc<AppState> {
+        use crate::cache::{CacheConfig, ResponseCache};
+
+        let redis_client =
+            redis::Client::open("redis://127.0.0.1:6379").expect("local Redis must be reachable");
+        let cache = ResponseCache::from_client(redis_client, CacheConfig::default())
+            .expect("ResponseCache::from_client should not connect");
+
+        Arc::new(AppState {
+            config: AppConfig::default(),
+            model_registry: ModelRegistry::from_toml(models_toml).expect("valid test model TOML"),
+            service_registry: RwLock::new(ServiceRegistry::empty()),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            facilitator: Facilitator::new(vec![]),
+            usage: UsageTracker::noop(),
+            cache: Some(cache),
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: None,
+            dev_bypass_payment: false,
+            free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::free_default(),
+            ),
+            receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::receipts_default(),
+            ),
+            faucet_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::faucet_default(),
+            ),
+            deposit_tx_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::deposit_tx_default(),
+            ),
+            free_global_cap: crate::middleware::rate_limit::FreeTierGlobalCap::new(
+                crate::middleware::rate_limit::FREE_TIER_GLOBAL_RPM_DEFAULT,
+            ),
+        })
+    }
+
+    /// A model registry with one `test-model` whose `max_output_tokens` is the
+    /// given value. Pricing matches the other test registries (1.0 in / 2.0 out
+    /// per million) so cost comparisons across ceilings are apples-to-apples.
+    fn registry_toml_with_max_output(max_output_tokens: u32) -> String {
+        format!(
+            r#"
+[models.test-model]
+provider = "test"
+model_id = "test-model"
+display_name = "Test"
+input_cost_per_million = 1.0
+output_cost_per_million = 2.0
+context_window = 4096
+max_output_tokens = {max_output_tokens}
+supports_streaming = false
+supports_tools = false
+supports_vision = false
+"#
+        )
+    }
+
+    /// Read the quoted total (USDC decimal string) out of the input-required
+    /// task value returned by `handle_new_request`.
+    fn quoted_total(task_value: &Value) -> String {
+        task_value["status"]["message"]["metadata"][x402_meta::REQUIRED_KEY]["cost_breakdown"]
+            ["total"]
+            .as_str()
+            .expect("cost_breakdown.total must be a string")
+            .to_string()
+    }
+
+    /// #504 regression: the A2A new-request quote MUST price against
+    /// `completion_token_ceiling`, NOT a hardcoded 1000 tokens.
+    ///
+    /// Two registries with the SAME pricing but different `max_output_tokens`
+    /// (1000 vs 8000) are quoted for the same prompt. Pricing is linear in the
+    /// completion ceiling, so the 8000-ceiling model must quote strictly more
+    /// than the 1000-ceiling model — impossible if the handler still hardcoded
+    /// 1000. We also assert the lower-ceiling model still caps DOWN to 1000.
+    #[tokio::test]
+    async fn new_request_quote_uses_completion_ceiling_not_hardcoded_1000() {
+        let params = user_msg_with_text("Hello world", Some("test-model"));
+
+        // Ceiling = min(None, Some(1000), 8192) = 1000 — matches the old literal.
+        let state_1000 = test_state_with_redis_models(&registry_toml_with_max_output(1000));
+        let task_1000 = handle_new_request(&state_1000, &params)
+            .await
+            .expect("happy path must succeed with Redis");
+        let total_1000 = quoted_total(&task_1000);
+
+        // Ceiling = min(None, Some(8000), 8192) = 8000 — the #504 case: the model
+        // allows far more output than the old hardcoded default.
+        let state_8000 = test_state_with_redis_models(&registry_toml_with_max_output(8000));
+        let task_8000 = handle_new_request(&state_8000, &params)
+            .await
+            .expect("happy path must succeed with Redis");
+        let total_8000 = quoted_total(&task_8000);
+
+        // Compare as atomic integers (no float gotchas).
+        let atomic = |s: &str| -> u64 {
+            usdc_atomic_amount_checked(s)
+                .expect("quote must be a valid USDC decimal")
+                .parse()
+                .expect("atomic must parse")
+        };
+        assert!(
+            atomic(&total_8000) > atomic(&total_1000),
+            "an 8000-token-ceiling model ({total_8000}) must quote strictly more \
+             than a 1000-token-ceiling model ({total_1000}); the A2A quote must use \
+             completion_token_ceiling, not a hardcoded 1000"
+        );
+
+        // Cleanup both seeded task keys.
+        for (state, task) in [(&state_1000, &task_1000), (&state_8000, &task_8000)] {
+            if let Some(cache) = &state.cache {
+                let id = task["id"].as_str().expect("task id");
+                let _ = cache.del_raw(&format!("a2a_task:{id}")).await;
+            }
+        }
+    }
+
+    /// #504: the ceiling computed at quote time is stored on the TaskRecord, so
+    /// the settlement path (`handle_payment_submitted`) re-applies the SAME cap.
+    /// This pins quote == stored cap == settlement cap for the #504 case (a model
+    /// whose ceiling exceeds the old hardcoded 1000), and that the stored value
+    /// is exactly `completion_token_ceiling(None, model_info)`.
+    #[tokio::test]
+    async fn new_request_stores_completion_ceiling_for_settlement() {
+        let state = test_state_with_redis_models(&registry_toml_with_max_output(8000));
+        let params = user_msg_with_text("Hello world", Some("test-model"));
+
+        let task = handle_new_request(&state, &params)
+            .await
+            .expect("happy path must succeed with Redis");
+        let task_id = task["id"].as_str().expect("task id").to_string();
+
+        // The ceiling the settlement path will re-apply is exactly what was used
+        // to quote: completion_token_ceiling(None, model) = min(8000, 8192) = 8000.
+        let model_info = state
+            .model_registry
+            .get("test-model")
+            .expect("test-model registered");
+        let expected_ceiling = completion_token_ceiling(None, model_info);
+        assert_eq!(expected_ceiling, 8000, "ceiling sanity for the #504 case");
+
+        let record = task_store::load_task(&state, &task_id)
+            .await
+            .expect("load_task must not error")
+            .expect("task must be stored");
+        assert_eq!(
+            record.max_tokens,
+            Some(expected_ceiling),
+            "the stored cap must equal completion_token_ceiling (quote == settlement); \
+             a hardcoded 1000 would store Some(1000) here"
+        );
+
+        // Cleanup the seeded task key.
+        if let Some(cache) = &state.cache {
+            let _ = cache.del_raw(&format!("a2a_task:{task_id}")).await;
+        }
     }
 }
