@@ -393,6 +393,13 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             ),
         )
         .route("/a2a", post(a2a::jsonrpc::a2a_endpoint))
+        // OpenAPI-first x402 discovery surfaces (x402scan et al.): the spec
+        // served verbatim at the root path, the `/.well-known/x402` resource
+        // list, and a favicon to clear the FAVICON_MISSING audit flag. All
+        // public, additive discovery metadata — no payment/wire change.
+        .route("/openapi.json", get(routes::openapi::openapi_spec))
+        .route("/.well-known/x402", get(routes::openapi::well_known_x402))
+        .route("/favicon.ico", get(routes::openapi::favicon))
         .route("/metrics", get(routes::metrics::get_metrics))
         .layer(axum::middleware::from_fn(
             middleware::rate_limit::rate_limit,

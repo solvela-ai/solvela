@@ -1979,4 +1979,41 @@ supports_streaming = false
             "a zero-priceable hit must be None (fall through), never Some(0)"
         );
     }
+
+    /// Ties the static `x-payment-info.price.min` advertised in
+    /// `docs/openapi.json` to reality: it MUST be a genuine lower bound, i.e.
+    /// <= the cheapest non-zero per-request cost derivable from the REAL loaded
+    /// model registry (`discovery_floor_atomic` over the embedded
+    /// `config/models.toml`). Fail-closed: we can never advertise a discovery
+    /// floor *above* the real cheapest payable cost.
+    #[test]
+    fn openapi_payment_info_min_is_a_true_lower_bound_of_registry_floor() {
+        // The exact registry the gateway loads at startup (`main.rs` embeds the
+        // same file via `include_str!`).
+        const REAL_MODELS_TOML: &str = include_str!("../../../../../config/models.toml");
+        let reg = solvela_router::models::ModelRegistry::from_toml(REAL_MODELS_TOML)
+            .expect("config/models.toml must load");
+
+        // Production primitive — the cheapest non-zero per-request cost, atomic
+        // USDC. 1 atomic = $0.000001 (USDC is 6-decimal).
+        let floor_atomic = discovery_floor_atomic(&reg);
+        assert!(floor_atomic > 0, "registry floor must be positive");
+        let floor_usd = floor_atomic as f64 / 1_000_000.0;
+
+        // The advertised static min, parsed straight from docs/openapi.json.
+        const OPENAPI_JSON: &str = include_str!("../../../../../docs/openapi.json");
+        let spec: serde_json::Value =
+            serde_json::from_str(OPENAPI_JSON).expect("docs/openapi.json must parse");
+        let advertised_min = spec
+            .pointer("/paths/~1v1~1chat~1completions/post/x-payment-info/price/min")
+            .and_then(serde_json::Value::as_f64)
+            .expect("x-payment-info.price.min must be a number");
+
+        assert!(
+            advertised_min <= floor_usd,
+            "advertised discovery min ${advertised_min} must be <= the real \
+             registry floor ${floor_usd} ({floor_atomic} atomic) — never \
+             advertise a floor above the cheapest payable cost"
+        );
+    }
 }

@@ -667,3 +667,162 @@ fn receipt_wire_type_conforms_to_receipt_schema() {
         "vendor-settled Receipt wire shape",
     );
 }
+
+// ---------------------------------------------------------------------------
+// OpenAPI + x402 discovery surfaces (x402scan): GET /openapi.json,
+// GET /.well-known/x402, GET /favicon.ico
+// ---------------------------------------------------------------------------
+
+/// Collect a response body as raw bytes (for byte-exact / binary checks).
+async fn response_bytes(response: axum::response::Response) -> Vec<u8> {
+    response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect response body")
+        .to_bytes()
+        .to_vec()
+}
+
+/// Read the response's `content-type` header as an owned String.
+fn content_type(response: &axum::response::Response) -> String {
+    response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// `GET /openapi.json` → 200, `application/json`, body parses as JSON AND
+/// equals the embedded `docs/openapi.json` byte-for-byte (single source of
+/// truth — the served spec is `include_str!` of the same file the drift guard
+/// embeds, so the two cannot diverge).
+#[tokio::test]
+async fn openapi_json_served_verbatim_with_payment_info() {
+    let response = quote_app()
+        .oneshot(
+            Request::builder()
+                .uri("/openapi.json")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        content_type(&response),
+        "application/json",
+        "GET /openapi.json must declare application/json",
+    );
+
+    let bytes = response_bytes(response).await;
+    // Byte-for-byte equality with the canonical file.
+    assert_eq!(
+        bytes,
+        OPENAPI_JSON.as_bytes(),
+        "GET /openapi.json must serve docs/openapi.json verbatim (byte-for-byte)",
+    );
+    // And it must parse as JSON.
+    let body: Value = serde_json::from_slice(&bytes).expect("served openapi.json must be JSON");
+
+    // The paid operation carries the x-payment-info discovery extension with
+    // protocols ⊇ {"x402"} and a dynamic price mode — the trio x402scan needs
+    // (alongside the already-present accepts[] on the live 402 and the
+    // ChatCompletionRequest request-body schema) to index it as payable.
+    let pinfo = body
+        .pointer("/paths/~1v1~1chat~1completions/post/x-payment-info")
+        .expect("x-payment-info must exist on POST /v1/chat/completions");
+    let protocols = pinfo["protocols"]
+        .as_array()
+        .expect("x-payment-info.protocols must be an array");
+    assert!(
+        protocols.iter().any(|p| p == "x402"),
+        "x-payment-info.protocols must contain \"x402\": {pinfo}"
+    );
+    assert_eq!(
+        pinfo["price"]["mode"], "dynamic",
+        "x-payment-info.price.mode must be \"dynamic\" (the authoritative price \
+         is the live 402 challenge; min/max are non-binding hints): {pinfo}"
+    );
+}
+
+/// Spec self-check: the static `x-payment-info` price bounds are internally
+/// consistent (`min <= max`). Parsed from the embedded spec so a bad edit
+/// fails CI rather than silently shipping an inverted/garbage range.
+#[test]
+fn openapi_payment_info_min_not_above_max() {
+    let spec = spec_value();
+    let price = spec
+        .pointer("/paths/~1v1~1chat~1completions/post/x-payment-info/price")
+        .expect("x-payment-info.price must exist");
+    let min = price["min"].as_f64().expect("price.min must be a number");
+    let max = price["max"].as_f64().expect("price.max must be a number");
+    assert!(
+        min <= max,
+        "x-payment-info price.min ({min}) must be <= price.max ({max})"
+    );
+    assert!(min > 0.0, "price.min ({min}) must be positive");
+}
+
+/// `GET /.well-known/x402` → 200, `application/json`, body is
+/// `{ version: 1, resources: [..] }` with a non-empty resources list whose
+/// entry ends with the payable chat path.
+#[tokio::test]
+async fn well_known_x402_lists_payable_resource() {
+    let response = quote_app()
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/x402")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        content_type(&response).starts_with("application/json"),
+        "GET /.well-known/x402 must be JSON",
+    );
+
+    let body = response_json(response).await;
+    assert_eq!(body["version"], 1, "x402 discovery doc version must be 1");
+    let resources = body["resources"]
+        .as_array()
+        .expect("resources must be an array");
+    assert!(!resources.is_empty(), "resources must be non-empty: {body}");
+    let first = resources[0].as_str().expect("resource entry is a string");
+    assert!(
+        first.ends_with("/v1/chat/completions"),
+        "the advertised resource must be the payable chat endpoint, got: {first}"
+    );
+}
+
+/// `GET /favicon.ico` → 200 with an image content type (clears the
+/// `FAVICON_MISSING` discovery audit flag) and a non-empty body.
+#[tokio::test]
+async fn favicon_served_as_image() {
+    let response = quote_app()
+        .oneshot(
+            Request::builder()
+                .uri("/favicon.ico")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        content_type(&response).starts_with("image/"),
+        "favicon must be served with an image content type, got: {}",
+        content_type(&response),
+    );
+    let bytes = response_bytes(response).await;
+    assert!(!bytes.is_empty(), "favicon body must not be empty");
+    // A valid ICO begins with the ICONDIR reserved+type header: 00 00 01 00.
+    assert_eq!(
+        &bytes[..4],
+        &[0x00, 0x00, 0x01, 0x00],
+        "favicon must be a valid .ico (ICONDIR magic)"
+    );
+}
