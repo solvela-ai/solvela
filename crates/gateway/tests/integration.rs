@@ -7931,6 +7931,148 @@ async fn test_proxy_normal_wallet_not_rejected_and_settles() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Issue #556 — non-vendor (plain) proxy services must record spend at
+// SETTLEMENT TIME, not deferred past the upstream call.
+//
+// The money already moved on-chain at settlement, so the spend_logs row must
+// not be contingent on the upstream succeeding. The legacy code stashed the
+// plain-service spend entry into `deferred_spend_entry` and only wrote it AFTER
+// `send().await`, so any early exit between settlement and that write (upstream
+// timeout / unreachable / SSRF re-check / client-build / body-read failure)
+// dropped the ledger row: money moved, no record. These tests prove the row is
+// written at settlement time through the REAL route — the captured synchronous
+// `info!("spend logged")` event fires inside `log_spend` with no DB attached.
+// ---------------------------------------------------------------------------
+
+/// #556 RED→GREEN: a settled paid request to a NON-VENDOR (plain) marketplace
+/// service whose upstream then FAILS (the test endpoint `search.example.com`
+/// is unresolvable — the upstream `send()` errors out) must STILL record its
+/// spend entry. The money settled on-chain; the ledger row must exist.
+///
+/// On the legacy deferred-write code this asserts ZERO spend events (the drop
+/// this issue fixes) — i.e. it FAILS RED. After the settlement-time write it
+/// records exactly one.
+#[tokio::test]
+async fn plain_proxy_request_records_spend_at_settlement_even_when_upstream_fails() {
+    use tracing::instrument::WithSubscriber;
+
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (app, _state) = test_app_with_provider_registry_and_exact_verifier(
+        mock_provider_registry(),
+        Arc::new(SettleRecordingVerifier {
+            settled: Arc::clone(&settled),
+        }),
+    );
+
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    // `web-search` is a NON-vendor service (no vendor_wallet) whose endpoint
+    // `https://search.example.com/...` fails the SSRF/DNS step naturally, so the
+    // upstream fetch never succeeds — the exact drop window #556 closes.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/web-search/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/services/web-search/proxy"),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+
+    // Settlement was reached (request passed all gates and the facilitator
+    // settled on-chain) — so the money moved.
+    assert!(
+        settled.load(std::sync::atomic::Ordering::SeqCst),
+        "the plain-service request must reach settlement (money moved on-chain)"
+    );
+    assert_ne!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "payment must have been accepted (not a 402)"
+    );
+
+    // The ledger row must exist BECAUSE settlement happened — independent of the
+    // upstream outcome. On the legacy deferred-write path this is 0 (the bug).
+    let events = spend_logged_events(&capture);
+    assert_eq!(
+        events.len(),
+        1,
+        "a settled plain-service request MUST record exactly one spend entry at \
+         settlement time even when the upstream fails (got {}): money moved \
+         on-chain, the ledger row must not be contingent on the upstream",
+        events.len()
+    );
+}
+
+/// #556 no-double-write guard: the same settled, upstream-failing plain-service
+/// request must record spend EXACTLY ONCE — not once at settlement and again on
+/// a (now-removed) deferred path. Pins the collapse of the vendor/non-vendor
+/// branch to a single unconditional write.
+#[tokio::test]
+async fn plain_proxy_settled_request_logs_spend_exactly_once() {
+    use tracing::instrument::WithSubscriber;
+
+    let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (app, _state) = test_app_with_provider_registry_and_exact_verifier(
+        mock_provider_registry(),
+        Arc::new(SettleRecordingVerifier {
+            settled: Arc::clone(&settled),
+        }),
+    );
+
+    let capture = CaptureWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/services/web-search/proxy")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    valid_payment_header("/v1/services/web-search/proxy"),
+                )
+                .body(Body::from(r#"{"query":"test"}"#))
+                .unwrap(),
+        )
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+
+    assert!(
+        settled.load(std::sync::atomic::Ordering::SeqCst),
+        "the plain-service request must reach settlement"
+    );
+    assert_ne!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let events = spend_logged_events(&capture);
+    assert_eq!(
+        events.len(),
+        1,
+        "a settled plain-service request must log spend EXACTLY once \
+         (no double-write across the collapsed branch), got {}",
+        events.len()
+    );
+}
+
 /// #499 POSITIVE-reject pin (proxy path): a wallet provisioned
 /// `require_tenant = TRUE` MUST be rejected with 403 `GatewayError::Forbidden`
 /// BEFORE any settlement on the service-marketplace proxy path.
