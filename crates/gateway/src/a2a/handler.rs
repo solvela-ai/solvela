@@ -1367,6 +1367,7 @@ supports_vision = false
             escrow_metrics: None,
             admin_token: None,
             api_key_hmac_secret: None,
+            auth_provider: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
@@ -1881,6 +1882,7 @@ supports_vision = false
             escrow_metrics: None,
             admin_token: None,
             api_key_hmac_secret: None,
+            auth_provider: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
@@ -1951,6 +1953,7 @@ supports_vision = false
             escrow_metrics: None,
             admin_token: None,
             api_key_hmac_secret: None,
+            auth_provider: None,
             prometheus_handle: None,
             dev_bypass_payment: true,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
@@ -2450,6 +2453,7 @@ supports_vision = false
             escrow_metrics: None,
             admin_token: None,
             api_key_hmac_secret: None,
+            auth_provider: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(

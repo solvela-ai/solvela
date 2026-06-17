@@ -129,7 +129,14 @@ impl AuthContext {
     /// populated for any given audit entry.
     pub(crate) fn audit_actor(&self) -> (Option<Uuid>, bool) {
         match self {
-            AuthContext::OrgKey(ctx) => (Some(ctx.api_key_id), false),
+            // `api_key_id` is `None` for an externally authenticated principal
+            // (e.g. SSO via an `AuthProvider`), which has no API key. Today such
+            // an action lands in the audit log with all actor fields null —
+            // i.e. NOT yet distinctly attributable. Known limitation: richer
+            // external-principal attribution (an `actor_subject` column) should
+            // land together with the first `AuthProvider` that produces these
+            // contexts; the public gateway ships none yet.
+            AuthContext::OrgKey(ctx) => (ctx.api_key_id, false),
             AuthContext::Admin => (None, true),
         }
     }
@@ -400,6 +407,7 @@ supports_vision = true
             escrow_metrics: None,
             admin_token: admin_token.map(|t| crate::secret::AdminToken::new(t.to_string())),
             api_key_hmac_secret: None,
+            auth_provider: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
@@ -578,6 +586,7 @@ mod tests {
             escrow_metrics: None,
             admin_token: Some(crate::secret::AdminToken::new("admin-secret".to_string())),
             api_key_hmac_secret: None,
+            auth_provider: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
@@ -639,6 +648,7 @@ mod tests {
             escrow_metrics: None,
             admin_token: Some(crate::secret::AdminToken::new("admin-secret".to_string())),
             api_key_hmac_secret: None,
+            auth_provider: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
@@ -661,7 +671,7 @@ mod tests {
         let org_id = uuid::Uuid::new_v4();
         let ctx = OrgContext {
             org_id,
-            api_key_id: uuid::Uuid::new_v4(),
+            api_key_id: Some(uuid::Uuid::new_v4()),
             role: OrgRole::Member,
         };
         let headers = HeaderMap::new(); // no admin token header
@@ -703,6 +713,7 @@ mod tests {
             escrow_metrics: None,
             admin_token: Some(crate::secret::AdminToken::new("admin-secret".to_string())),
             api_key_hmac_secret: None,
+            auth_provider: None,
             prometheus_handle: None,
             dev_bypass_payment: false,
             free_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
@@ -745,7 +756,7 @@ mod tests {
         let org_id = uuid::Uuid::new_v4();
         let auth = AuthContext::OrgKey(OrgContext {
             org_id,
-            api_key_id: uuid::Uuid::new_v4(),
+            api_key_id: Some(uuid::Uuid::new_v4()),
             role: OrgRole::Member,
         });
         assert!(require_org_access(&auth, org_id).is_ok());
@@ -759,7 +770,7 @@ mod tests {
 
         let auth = AuthContext::OrgKey(OrgContext {
             org_id: uuid::Uuid::new_v4(),
-            api_key_id: uuid::Uuid::new_v4(),
+            api_key_id: Some(uuid::Uuid::new_v4()),
             role: OrgRole::Member,
         });
         let other_org_id = uuid::Uuid::new_v4();
@@ -775,7 +786,7 @@ mod tests {
         let org_id = uuid::Uuid::new_v4();
         let auth = AuthContext::OrgKey(OrgContext {
             org_id,
-            api_key_id: uuid::Uuid::new_v4(),
+            api_key_id: Some(uuid::Uuid::new_v4()),
             role: OrgRole::Member,
         });
         assert!(require_org_admin_access(&auth, org_id).is_err());
@@ -790,7 +801,7 @@ mod tests {
         let org_id = uuid::Uuid::new_v4();
         let auth = AuthContext::OrgKey(OrgContext {
             org_id,
-            api_key_id: uuid::Uuid::new_v4(),
+            api_key_id: Some(uuid::Uuid::new_v4()),
             role: OrgRole::Admin,
         });
         assert!(require_org_admin_access(&auth, org_id).is_ok());
@@ -805,7 +816,7 @@ mod tests {
         let org_id = uuid::Uuid::new_v4();
         let auth = AuthContext::OrgKey(OrgContext {
             org_id,
-            api_key_id: uuid::Uuid::new_v4(),
+            api_key_id: Some(uuid::Uuid::new_v4()),
             role: OrgRole::Owner,
         });
         assert!(require_org_admin_access(&auth, org_id).is_ok());
@@ -819,7 +830,7 @@ mod tests {
 
         let auth = AuthContext::OrgKey(OrgContext {
             org_id: uuid::Uuid::new_v4(),
-            api_key_id: uuid::Uuid::new_v4(),
+            api_key_id: Some(uuid::Uuid::new_v4()),
             role: OrgRole::Owner,
         });
         let other_org_id = uuid::Uuid::new_v4();

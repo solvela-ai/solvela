@@ -99,6 +99,15 @@ pub struct AppState {
     /// `None` falls back to legacy plain-SHA-256 behavior with a startup
     /// warning. See issue #173 (L1 GW).
     pub api_key_hmac_secret: Option<Arc<secret::HmacSecret>>,
+    /// Optional pluggable authentication backend, consulted by
+    /// [`middleware::api_key::extract_api_key`] **only when the built-in
+    /// API-key path abstains**. `None` (the default) preserves the exact
+    /// API-key-only behavior — the built-in path is always authoritative and
+    /// runs first, so a provider can never override an API-key identity. This
+    /// is the public extension seam the enterprise build uses to plug in
+    /// SSO/OIDC/SAML without forking the request pipeline; self-hosters can use
+    /// it for custom auth (LDAP, mTLS, …). See [`middleware::auth`].
+    pub auth_provider: Option<Arc<dyn middleware::auth::AuthProvider>>,
     /// Prometheus metrics handle for rendering the `/metrics` endpoint.
     /// `None` when the recorder failed to install (metrics unavailable).
     pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
