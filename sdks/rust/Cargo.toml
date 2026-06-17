@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.91"
 license = "Apache-2.0"
@@ -20,7 +20,7 @@ keywords = ["solana", "x402", "usdc", "payments", "llm"]
 [workspace.dependencies]
 # Protocol — local path dep so wire-format drift between gateway and this SDK
 # fails CI in the same PR. Version pin matches the monorepo's crates/protocol.
-solvela-protocol = { path = "../../crates/protocol", version = "0.3" }
+solvela-protocol = { path = "../../crates/protocol", version = "0.4" }
 
 # Escrow deposit-tx builder — shared no-deps crate from the monorepo. Local path
 # dep so the on-chain-verified deposit byte layout stays in lockstep with the

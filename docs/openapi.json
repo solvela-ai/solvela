@@ -4,7 +4,9 @@
     "title": "Solvela Gateway",
     "description": "Solana-native AI agent payment gateway. OpenAI-compatible LLM chat completions paid per request in USDC-SPL over the x402 protocol — no API key, no account, just a wallet. A rule-based smart router selects a model per request, an exact-match response cache returns prior answers at zero upstream cost, and a trustless on-chain escrow scheme is available for prepaid sessions.",
     "version": "0.1.0",
-    "license": { "name": "BUSL-1.1", "identifier": "BUSL-1.1" }
+    "license": { "name": "BUSL-1.1", "identifier": "BUSL-1.1" },
+    "contact": { "email": "partnerships@solvela.ai", "url": "https://solvela.ai" },
+    "x-guidance": "Pay per request in USDC-SPL on Solana via x402 — no API key or account, just a wallet. POST /v1/chat/completions with no PAYMENT-SIGNATURE header to receive a 402 challenge quoting the USDC cost; sign the quoted `exact` (or `escrow`) payment and resubmit the same request with the signed payload in the PAYMENT-SIGNATURE header. Model catalog at GET /v1/models; x402 discovery at /openapi.json and /.well-known/x402."
   },
   "servers": [
     { "url": "https://api.solvela.ai", "description": "Production" },
