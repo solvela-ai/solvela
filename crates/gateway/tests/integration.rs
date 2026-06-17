@@ -845,6 +845,75 @@ fn usageless_provider_registry() -> ProviderRegistry {
     ProviderRegistry::from_providers(providers)
 }
 
+/// A mock LLM provider that returns CALLER-CHOSEN token usage, so a chat-path
+/// test can drive the non-streaming receipt to a `(prompt, completion)` pair
+/// whose registry breakdown rounds with a ±1 micro-USDC skew between
+/// `provider_cost + platform_fee` and `total` (the independent-`{:.6}`-rounding
+/// bug fixed in `emit_chat_receipt`). See
+/// `paid_non_streaming_chat_receipt_fee_derived_from_total_under_rounding_skew`.
+struct FixedUsageProvider {
+    provider_name: String,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+}
+
+impl FixedUsageProvider {
+    fn new(name: &str, prompt_tokens: u32, completion_tokens: u32) -> Self {
+        Self {
+            provider_name: name.to_string(),
+            prompt_tokens,
+            completion_tokens,
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for FixedUsageProvider {
+    fn name(&self) -> &str {
+        &self.provider_name
+    }
+
+    fn supported_models(&self) -> Vec<ModelRegistration> {
+        vec![]
+    }
+
+    async fn chat_completion(
+        &self,
+        req: solvela_protocol::ChatRequest,
+    ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let mut resp = MockProvider::mock_response(&req.model);
+        resp.usage = Some(Usage {
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+            total_tokens: self.prompt_tokens + self.completion_tokens,
+        });
+        Ok(resp)
+    }
+
+    async fn chat_completion_stream(
+        &self,
+        _req: solvela_protocol::ChatRequest,
+    ) -> Result<ChatStream, Box<dyn std::error::Error + Send + Sync>> {
+        Err("FixedUsageProvider does not stream".into())
+    }
+}
+
+/// A `ProviderRegistry` whose providers all report the given fixed token usage.
+fn fixed_usage_provider_registry(prompt_tokens: u32, completion_tokens: u32) -> ProviderRegistry {
+    let mut providers: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+    for name in ["openai", "anthropic", "deepseek", "google"] {
+        providers.insert(
+            name.to_string(),
+            Arc::new(FixedUsageProvider::new(
+                name,
+                prompt_tokens,
+                completion_tokens,
+            )) as Arc<dyn LLMProvider>,
+        );
+    }
+    ProviderRegistry::from_providers(providers)
+}
+
 /// Build a mock `ProviderRegistry` that has providers for all models in TEST_MODELS_TOML.
 fn mock_provider_registry() -> ProviderRegistry {
     let mut providers: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
@@ -11973,6 +12042,99 @@ async fn paid_non_streaming_chat_emits_receipt_header_and_get_round_trip() {
     );
 }
 
+/// REGRESSION: the chat receipt's `platform_fee_atomic` MUST be DERIVED from the
+/// authoritative `total` (`fee = total - provider`), not parsed independently
+/// from the breakdown's own `platform_fee` string.
+///
+/// `ModelRegistry::estimate_cost` rounds `provider_cost`, `platform_fee`, and
+/// `total` INDEPENDENTLY as `format!("{:.6}")` float strings, so for some token
+/// combinations `round(provider) + round(fee) != round(total)` by 1 micro-USDC.
+/// gpt-4o (2.50 in / 10.00 out per million) at 3 prompt / 8192 completion tokens
+/// is exactly such a case:
+///   provider_cost = 0.0819275  → "0.081927" → 81927 atomic
+///   platform_fee  = 0.004096375 → "0.004096" →  4096 atomic  (independent parse)
+///   total         = 0.086023875 → "0.086024" → 86024 atomic  (authoritative)
+/// The old code's `81927 + 4096 = 86023 != 86024` skew under-reported the fee
+/// component on the receipt; deriving `fee = total - provider = 86024 - 81927 =
+/// 4097` makes the three atomics reconcile, and the 1-micro rounding skew lands
+/// in the fee (the accepted treatment, matching the chat discovery path and the
+/// A2A settlement path).
+///
+/// Driven through the REAL paid route: a provider that reports usage of
+/// (3 prompt, 8192 completion) for gpt-4o (no `max_output_tokens`, so the 8192
+/// completion is capped to min(req.max_tokens=8192, 8192) = 8192 and survives),
+/// then the receipt is fetched and its atomic decomposition pinned.
+#[tokio::test]
+async fn paid_non_streaming_chat_receipt_fee_derived_from_total_under_rounding_skew() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    // Provider reports (3 prompt, 8192 completion) — the skewing combination.
+    let (app, _state) = test_app_with_db_pool(
+        fixed_usage_provider_registry(3, 8192),
+        Arc::new(AlwaysPassVerifier),
+        pool,
+    );
+
+    // `max_tokens: 8192` so the completion cap is min(8192, max_output_tokens=None,
+    // 8192) = 8192 and the provider's 8192 completion tokens survive capping —
+    // billing the full skewing breakdown.
+    let body = serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "max_tokens": 8192,
+    });
+    let response = paid_chat_response(&app, &body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let path = receipt_header_path(&response);
+
+    let receipt = poll_receipt_until_ok(&app, &path).await;
+
+    // Cross-check the authoritative total against the registry single source of
+    // truth, so the literal pins below can never silently drift if pricing moves.
+    let expected_total = registry_quote_atomic("openai/gpt-4o", 3, 8192);
+    assert_eq!(
+        expected_total, 86_024,
+        "sanity: the gpt-4o 3/8192 registry total is the documented skewing case"
+    );
+
+    let provider_cost = receipt["cost_breakdown"]["provider_cost_atomic"]
+        .as_u64()
+        .expect("provider_cost_atomic");
+    let platform_fee = receipt["cost_breakdown"]["platform_fee_atomic"]
+        .as_u64()
+        .expect("platform_fee_atomic");
+    let total = receipt["cost_breakdown"]["total_atomic"]
+        .as_u64()
+        .expect("total_atomic");
+
+    // Exact atomic pins for the skewing case.
+    assert_eq!(
+        provider_cost, 81_927,
+        "provider_cost from the breakdown string"
+    );
+    assert_eq!(total, 86_024, "total is authoritative (what was billed)");
+    assert_eq!(
+        platform_fee, 4_097,
+        "platform_fee MUST be derived as total - provider (86024 - 81927 = 4097); \
+         the old independent parse produced 4096 and failed to reconcile"
+    );
+    // The invariant the fix guarantees: the components reconcile to the total
+    // (5% fee, applied once). Independent parsing would make this 86023 == 86024.
+    assert_eq!(
+        provider_cost + platform_fee,
+        total,
+        "provider_cost + platform_fee must equal total (fee derived from total)"
+    );
+    // The billed amount is unchanged by this fix — still the authoritative total.
+    assert_eq!(
+        receipt["amount_paid_atomic"].as_u64(),
+        Some(total),
+        "amount_paid must remain the billed total — the fix only redistributes \
+         the 1-micro rounding skew into the fee component, never the bill"
+    );
+}
+
 /// A paid STREAMING chat completion (the #541 bug class) must also produce a
 /// receipt. The header must be decided BEFORE the SSE body starts (it is on
 /// the response head), and the stored amounts are the ESTIMATE — the same
@@ -13006,13 +13168,37 @@ async fn a2a_paid_request_writes_receipt_and_metadata_path() {
         Some(total),
         "A2A receipt records the settled total as the amount paid"
     );
+    // This flow quotes gpt-4o (2.50 in / 10.00 out per million) for "What is
+    // Solana?" — 3 input tokens, completion ceiling 8192 (gpt-4o declares no
+    // max_output_tokens → min(8192) after #504). That is exactly the breakdown
+    // that rounds with a 1-micro skew between independently-parsed components and
+    // the authoritative total:
+    //   provider 0.0819275 → 81927 ; total 0.086023875 → 86024
+    // The fee MUST be derived as total - provider (86024 - 81927 = 4097); the old
+    // independent parse produced 4096 and `81927 + 4096 = 86023 != 86024`. Pin the
+    // exact atomics so a revert to independent parsing fails on the fee value, not
+    // just the generic sum below.
+    let provider_cost = receipt["cost_breakdown"]["provider_cost_atomic"]
+        .as_u64()
+        .expect("provider_cost_atomic");
+    let platform_fee = receipt["cost_breakdown"]["platform_fee_atomic"]
+        .as_u64()
+        .expect("platform_fee_atomic");
     assert_eq!(
-        receipt["cost_breakdown"]["provider_cost_atomic"]
-            .as_u64()
-            .unwrap()
-            + receipt["cost_breakdown"]["platform_fee_atomic"]
-                .as_u64()
-                .unwrap(),
+        provider_cost, 81_927,
+        "provider_cost from the breakdown string"
+    );
+    assert_eq!(
+        total, 86_024,
+        "authoritative settled total (the skewing case)"
+    );
+    assert_eq!(
+        platform_fee, 4_097,
+        "platform_fee MUST be derived as total - provider (86024 - 81927 = 4097); \
+         the old independent parse produced 4096 and failed to reconcile"
+    );
+    assert_eq!(
+        provider_cost + platform_fee,
         total,
         "provider_cost + platform_fee must equal total (5% fee, applied once)"
     );

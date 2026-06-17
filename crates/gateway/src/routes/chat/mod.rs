@@ -1848,18 +1848,46 @@ fn emit_chat_receipt(
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
     };
-    let (Some(provider_cost_atomic), Some(platform_fee_atomic), Some(total_atomic)) = (
+    // `total` is authoritative (it is what was billed). DERIVE the fee component
+    // from it so the three receipt atomics always reconcile:
+    //   total = provider * 105/100  ⇒  fee = total - provider
+    // The registry estimate rounds `provider_cost`, `platform_fee`, and `total`
+    // INDEPENDENTLY as float strings (`format!("{:.6}")` in
+    // `ModelRegistry::estimate_cost`), so parsing `platform_fee` from its own
+    // string can disagree with `total - provider` by 1 atomic unit (1 micro-USDC).
+    // Letting the ±1 integer-USDC rounding skew land in the fee component is the
+    // accepted treatment everywhere else (see `chat_completions_discovery` above).
+    // We keep `provider_cost_atomic` (the real upstream cost) and `total_atomic`
+    // (what was billed) from the breakdown, and never parse `platform_fee`
+    // independently.
+    let (Some(provider_cost_atomic), Some(total_atomic)) = (
         atomic(&inputs.breakdown.provider_cost),
-        atomic(&inputs.breakdown.platform_fee),
         atomic(&inputs.breakdown.total),
     ) else {
         counter!("solvela_receipt_skipped_total", "reason" => "corrupt_breakdown").increment(1);
         warn!(
             model = %inputs.model,
             provider_cost = %inputs.breakdown.provider_cost,
-            platform_fee = %inputs.breakdown.platform_fee,
             total = %inputs.breakdown.total,
             "skipping receipt: cost breakdown failed the checked atomic conversion — header not emitted"
+        );
+        return;
+    };
+    // Checked subtraction: `total ≈ provider * 1.05`, so `total ≥ provider`
+    // always holds for a well-formed breakdown. If a corrupt breakdown ever
+    // reports `provider_cost > total`, fail closed the SAME way as a bad atomic
+    // conversion (skip + counter) rather than underflow into a negative/wrapped
+    // fee — never produce a fee from saturating-to-zero either.
+    let Some(platform_fee_atomic) = total_atomic.checked_sub(provider_cost_atomic) else {
+        counter!("solvela_receipt_skipped_total", "reason" => "corrupt_breakdown").increment(1);
+        warn!(
+            model = %inputs.model,
+            provider_cost = %inputs.breakdown.provider_cost,
+            total = %inputs.breakdown.total,
+            provider_cost_atomic,
+            total_atomic,
+            "skipping receipt: breakdown provider_cost exceeds total (cannot derive a \
+             non-negative platform fee) — header not emitted"
         );
         return;
     };
