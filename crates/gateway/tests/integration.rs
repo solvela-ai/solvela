@@ -566,6 +566,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()), // No keys set in test env
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None, // No Redis in tests — replay check uses in-memory LRU fallback
@@ -624,6 +625,7 @@ fn test_app_with_usdc_mint_and_providers(mint: &str, providers: ProviderRegistry
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers,
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -994,6 +996,7 @@ fn test_app_with_provider_registry_and_exact_verifier(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers,
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -1081,6 +1084,7 @@ fn app_with_semantic_cache(sem: Arc<gateway::cache::semantic::SemanticCache>) ->
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -1397,6 +1401,7 @@ fn app_with_semantic_cache_and_escrow(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -1478,6 +1483,7 @@ fn app_with_semantic_cache_escrow_and_db_pool(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
         cache: None,
@@ -2143,6 +2149,7 @@ fn test_app_with_provider_registry_and_escrow_verifier(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers,
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -2231,6 +2238,7 @@ fn test_app_with_escrow_and_usdc_mint(mint: &str) -> axum::Router {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -2703,6 +2711,7 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client.clone())),
         cache: None,
@@ -5232,6 +5241,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -7270,6 +7280,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -7440,6 +7451,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -7680,6 +7692,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -8216,6 +8229,7 @@ async fn test_proxy_require_tenant_wallet_rejected_before_settlement() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(None, Some(client.clone())),
         cache: None,
@@ -9742,6 +9756,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -10394,6 +10409,7 @@ fn test_app_with_free_limit(free_max: u32) -> axum::Router {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -10754,6 +10770,7 @@ async fn dev_bypass_still_works() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -10840,6 +10857,7 @@ fn test_app_with_global_cap(global_cap: u32) -> axum::Router {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -10970,6 +10988,7 @@ async fn free_per_ip_and_global_cap_are_independent() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -11861,6 +11880,7 @@ fn test_app_with_db_pool(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers,
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
         cache: None,
@@ -12506,6 +12526,7 @@ fn test_app_with_receipts_limit(max: u32) -> axum::Router {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -12886,6 +12907,7 @@ fn a2a_app_with_redis_db_and_providers(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers,
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
         cache: Some(cache),
@@ -13313,6 +13335,7 @@ fn a2a_app_with_verifier_and_db(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
         cache: Some(cache),
@@ -14003,6 +14026,7 @@ mod faucet_route_tests {
             model_registry,
             service_registry: RwLock::new(service_registry),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            search_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
             cache: None,
@@ -14187,6 +14211,7 @@ mod faucet_route_tests {
             model_registry,
             service_registry: RwLock::new(service_registry),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            search_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
             cache: None,
@@ -14720,6 +14745,7 @@ mod escrow_deposit_tx_tests {
             model_registry,
             service_registry: RwLock::new(service_registry),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            search_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
             cache: None,
@@ -15070,6 +15096,7 @@ mod escrow_deposit_tx_tests {
             model_registry,
             service_registry: RwLock::new(service_registry),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            search_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
             cache: None,
@@ -15180,5 +15207,632 @@ mod escrow_deposit_tx_tests {
         let bytes = second.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"]["type"], "rate_limit_exceeded");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Web-search tool (`POST /v1/search`) — Agent Toolbelt PR #1
+//
+// Exercised end-to-end through the REAL route via `build_router` + `oneshot`
+// (no live server, no production-write fixture seeding). Covers:
+//   (a) unpaid → 402 with the correct cost breakdown incl. the 5% fee
+//   (b) the tool is listed by `GET /v1/services`
+//   (c) provider not configured (`TAVILY_API_KEY` absent) → 503
+//   (d) a paid request settles and returns normalized results
+//
+// The flat-price + 5%-fee atomic math itself is unit-tested in
+// `gateway::routes::service_payment` (the pure cost fn); these tests pin the
+// route's USE of it through the live HTTP path.
+// ---------------------------------------------------------------------------
+mod web_search_tests {
+    use super::*;
+
+    use async_trait::async_trait;
+    use gateway::providers::search::{
+        SearchError, SearchProvider, SearchQuery, SearchResult, SearchResults,
+    };
+
+    /// Services TOML with an INTERNAL, priced `web-search` entry served at
+    /// `/v1/search`. Priced at $0.01 (matches `config/services.toml`); the agent
+    /// pays $0.0105 with the 5% fee.
+    const SEARCH_SERVICES_TOML: &str = r#"
+[services.web-search]
+name = "Web Search"
+endpoint = "/v1/search"
+category = "search"
+x402_enabled = true
+internal = true
+description = "x402-paid web search"
+pricing_label = "$0.0105/query"
+price_per_request_usdc = 0.01
+"#;
+
+    /// A stub search provider that returns one canned result without any
+    /// network call — proves the route runs the search AFTER settlement.
+    struct StubSearchProvider;
+
+    #[async_trait]
+    impl SearchProvider for StubSearchProvider {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        async fn search(&self, query: SearchQuery) -> Result<SearchResults, SearchError> {
+            Ok(SearchResults {
+                query: query.query,
+                results: vec![SearchResult {
+                    title: "Result One".to_string(),
+                    url: "https://example.com/1".to_string(),
+                    snippet: "first snippet".to_string(),
+                }],
+                provider: "stub".to_string(),
+            })
+        }
+    }
+
+    /// Build a `/v1/search`-capable app. `provider = None` exercises the
+    /// not-configured 503 path; `Some` exercises the paid happy path.
+    fn search_app(provider: Option<Arc<dyn SearchProvider>>) -> axum::Router {
+        search_app_with_verifier(provider, Arc::new(AlwaysPassVerifier))
+    }
+
+    /// Like [`search_app`] but lets the caller inject a custom payment verifier
+    /// (e.g. a `SettleRecordingVerifier` to assert that settlement is — or is
+    /// NOT — reached on a given request).
+    fn search_app_with_verifier(
+        provider: Option<Arc<dyn SearchProvider>>,
+        verifier: Arc<dyn PaymentVerifier>,
+    ) -> axum::Router {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(SEARCH_SERVICES_TOML).unwrap();
+        let facilitator = solvela_x402::facilitator::Facilitator::new(vec![verifier]);
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            search_provider: provider,
+            facilitator,
+            usage: gateway::usage::UsageTracker::noop(),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        build_router(state, RateLimiter::new(RateLimitConfig::default()))
+    }
+
+    /// (a) Unpaid request → 402 with the correct cost breakdown including the
+    /// 5% platform fee. $0.01 → provider 0.010000, fee 0.000500, total 0.010500.
+    #[tokio::test]
+    async fn search_unpaid_returns_402_with_5pct_fee_breakdown() {
+        let app = search_app(Some(Arc::new(StubSearchProvider)));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"query":"solana x402"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let pr: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(pr["error"], "Payment required");
+        assert_eq!(pr["resource"]["url"], "/v1/search");
+        assert_eq!(pr["resource"]["method"], "POST");
+
+        let cost = &pr["cost_breakdown"];
+        assert_eq!(cost["currency"], "USDC");
+        assert_eq!(cost["fee_percent"], 5);
+        assert_eq!(cost["provider_cost"], "0.010000");
+        assert_eq!(cost["platform_fee"], "0.000500");
+        assert_eq!(cost["total"], "0.010500");
+
+        let accepts = pr["accepts"].as_array().unwrap();
+        assert_eq!(accepts[0]["scheme"], "exact");
+        assert_eq!(accepts[0]["amount"], "10500"); // 10_000 * 105 / 100
+        assert_eq!(accepts[0]["network"], SOLANA_NETWORK);
+        assert_eq!(accepts[0]["asset"], USDC_MINT);
+        assert_eq!(accepts[0]["pay_to"], TEST_RECIPIENT_WALLET);
+    }
+
+    /// (b) The web-search tool is listed by `GET /v1/services`.
+    #[tokio::test]
+    async fn search_tool_listed_in_services() {
+        let app = search_app(Some(Arc::new(StubSearchProvider)));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/services")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let data = json["data"].as_array().unwrap();
+        let entry = data
+            .iter()
+            .find(|s| s["id"] == "web-search")
+            .expect("web-search must be listed in /v1/services");
+        assert_eq!(entry["category"], "search");
+        assert_eq!(entry["endpoint"], "/v1/search");
+        assert_eq!(entry["x402_enabled"], true);
+        assert_eq!(entry["price_per_request_usdc"], 0.01);
+    }
+
+    /// (c) With no search provider configured (`TAVILY_API_KEY` absent), the
+    /// route returns 503 — never a free or stub-paid response. Checked BEFORE
+    /// any 402 challenge so an unconfigured tool cannot even quote a price.
+    #[tokio::test]
+    async fn search_returns_503_when_provider_not_configured() {
+        let app = search_app(None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/search")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"query":"solana"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["type"], "service_unavailable");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not configured"));
+    }
+
+    /// (d) A paid request settles through the facilitator and returns the
+    /// normalized result list. Proves the full money path serves the tool only
+    /// AFTER on-chain settlement.
+    #[tokio::test]
+    async fn search_paid_request_settles_and_returns_normalized_results() {
+        let app = search_app(Some(Arc::new(StubSearchProvider)));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/search")
+                    .header("content-type", "application/json")
+                    .header(
+                        "payment-signature",
+                        valid_payment_header_with("/v1/search", USDC_MINT, TEST_RECIPIENT_WALLET),
+                    )
+                    .body(Body::from(r#"{"query":"solana x402"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["query"], "solana x402");
+        assert_eq!(json["provider"], "stub");
+        let results = json["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["title"], "Result One");
+        assert_eq!(results[0]["url"], "https://example.com/1");
+        assert_eq!(results[0]["snippet"], "first snippet");
+    }
+
+    /// A paid request whose amount is BELOW the quoted cost is rejected — never
+    /// under-charged or served.
+    #[tokio::test]
+    async fn search_paid_request_rejects_insufficient_amount() {
+        let app = search_app(Some(Arc::new(StubSearchProvider)));
+
+        // A structurally-valid header whose amount (10_000) is below the quoted
+        // cost (10_500 = $0.01 × 1.05). Must be rejected, never under-charged.
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/search".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "exact".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "10000".to_string(), // below 10_500
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Direct(SolanaPayload {
+                transaction: base64::engine::general_purpose::STANDARD
+                    .encode(b"mock_tx_insufficient"),
+            }),
+        };
+        let header =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/search")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", header)
+                    .body(Body::from(r#"{"query":"solana"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("insufficient"));
+    }
+
+    /// A request with a VALID payment header but an empty `query` must be
+    /// rejected with 400 and must NOT settle — the body is validated BEFORE any
+    /// payment verification/settlement, so a request that was never going to run
+    /// cannot be charged. The price is flat (body-independent), so validating
+    /// first is a pure reorder with no money-path consequence.
+    ///
+    /// We inject a `SettleRecordingVerifier` that flips a shared `AtomicBool` iff
+    /// `settle_payment` is reached; the flag must stay `false`.
+    #[tokio::test]
+    async fn search_empty_query_returns_400_and_never_settles() {
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let app = search_app_with_verifier(
+            Some(Arc::new(StubSearchProvider)),
+            Arc::new(SettleRecordingVerifier {
+                settled: Arc::clone(&settled),
+            }),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/search")
+                    .header("content-type", "application/json")
+                    .header(
+                        "payment-signature",
+                        valid_payment_header_with("/v1/search", USDC_MINT, TEST_RECIPIENT_WALLET),
+                    )
+                    // Empty query — request was never going to run.
+                    .body(Body::from(r#"{"query":"   "}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "empty query must be rejected with 400"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]["message"].as_str().unwrap().contains("empty"));
+        assert!(
+            !settled.load(std::sync::atomic::Ordering::SeqCst),
+            "settlement must NOT be reached for an empty-query request — \
+             funds must not be taken for a request that was never going to run"
+        );
+    }
+
+    /// A request with a VALID payment header but a malformed body (no `query`
+    /// field at all) must be rejected with 400 and must NOT settle — same
+    /// validate-before-charge invariant as the empty-query case.
+    #[tokio::test]
+    async fn search_malformed_body_returns_400_and_never_settles() {
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let app = search_app_with_verifier(
+            Some(Arc::new(StubSearchProvider)),
+            Arc::new(SettleRecordingVerifier {
+                settled: Arc::clone(&settled),
+            }),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/search")
+                    .header("content-type", "application/json")
+                    .header(
+                        "payment-signature",
+                        valid_payment_header_with("/v1/search", USDC_MINT, TEST_RECIPIENT_WALLET),
+                    )
+                    // No `query` field — body fails to deserialize.
+                    .body(Body::from(r#"{"max_results":5}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "malformed body (missing query) must be rejected with 400"
+        );
+        assert!(
+            !settled.load(std::sync::atomic::Ordering::SeqCst),
+            "settlement must NOT be reached for a malformed-body request"
+        );
+    }
+
+    /// Build a `/v1/search` app whose `UsageTracker` is Redis-backed (and
+    /// `db_pool = None`) so the #499 `require_tenant_for_wallet` gate resolves
+    /// the flag from a seeded `budget_config:{wallet}` cache key. Mirrors the
+    /// proxy positive-reject test's app construction.
+    fn search_app_with_redis_usage(
+        provider: Option<Arc<dyn SearchProvider>>,
+        redis_client: redis::Client,
+        verifier: Arc<dyn PaymentVerifier>,
+    ) -> axum::Router {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(SEARCH_SERVICES_TOML).unwrap();
+        let facilitator = solvela_x402::facilitator::Facilitator::new(vec![verifier]);
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            search_provider: provider,
+            facilitator,
+            usage: gateway::usage::UsageTracker::new(None, Some(redis_client)),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        build_router(state, RateLimiter::new(RateLimitConfig::default()))
+    }
+
+    /// #499 POSITIVE-reject pin (search path): a wallet provisioned
+    /// `require_tenant = TRUE` MUST be rejected with 403 `GatewayError::Forbidden`
+    /// BEFORE any settlement on `/v1/search`. Mirrors the proxy positive-reject
+    /// test.
+    ///
+    /// `/v1/search` only advertises `exact`, but the #499 gate runs (after payer
+    /// extraction) BEFORE the scheme/variant check, so an escrow header — which
+    /// carries the payer pubkey directly via `extract_payer_wallet` (no tx
+    /// decode) — lets us target a unique per-run `budget_config:{payer}` Redis
+    /// key with no global-key collision. We seed that key with
+    /// `require_tenant = TRUE` and assert (a) 403 and (b) settlement was NOT
+    /// reached. Self-skips if local Redis is unavailable.
+    #[tokio::test]
+    async fn search_require_tenant_wallet_rejected_before_settlement() {
+        let client = match redis::Client::open("redis://127.0.0.1:6379") {
+            Ok(c) if c.get_multiplexed_async_connection().await.is_ok() => c,
+            _ => {
+                eprintln!("skipping search require_tenant reject test: Redis unavailable");
+                return;
+            }
+        };
+
+        // Unique payer per run → unique `budget_config:{wallet}` key.
+        let payer = format!("ReqTenantSearch{}", uuid::Uuid::new_v4().simple());
+        let cache_key = format!("budget_config:{payer}");
+
+        let cached = serde_json::to_string(&gateway::usage::BudgetConfig {
+            hourly: None,
+            daily: Some(100.0),
+            monthly: None,
+            require_tenant: true,
+        })
+        .unwrap();
+        {
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("redis conn");
+            let _: () = redis::cmd("SET")
+                .arg(&cache_key)
+                .arg(&cached)
+                .arg("EX")
+                .arg(60)
+                .query_async(&mut conn)
+                .await
+                .expect("seed budget_config cache");
+        }
+
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let app = search_app_with_redis_usage(
+            Some(Arc::new(StubSearchProvider)),
+            client.clone(),
+            Arc::new(SettleRecordingVerifier {
+                settled: Arc::clone(&settled),
+            }),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/search")
+                    .header("content-type", "application/json")
+                    .header(
+                        "payment-signature",
+                        valid_escrow_payment_header_for_payer("/v1/search", &payer),
+                    )
+                    .body(Body::from(r#"{"query":"test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Clean up the seeded key regardless of assertion outcome below.
+        {
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("redis conn");
+            let _: Result<i64, _> = redis::cmd("DEL")
+                .arg(&cache_key)
+                .query_async(&mut conn)
+                .await;
+        }
+
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a require_tenant=TRUE wallet must be rejected with 403 on /v1/search"
+        );
+        assert!(
+            !settled.load(std::sync::atomic::Ordering::SeqCst),
+            "settlement must NOT run when a require_tenant wallet is rejected (#499)"
+        );
+    }
+
+    /// F4 (contract parity): a PAID search response carries the
+    /// `x-solvela-receipt` header (when PostgreSQL is configured), mirroring the
+    /// proxy path. Runs end-to-end through the real route against a dedicated
+    /// test database; self-skips when Postgres is unavailable.
+    #[tokio::test]
+    async fn search_paid_request_emits_receipt_header() {
+        let Some(pool) = try_receipts_db_pool().await else {
+            return; // self-skip without Postgres
+        };
+
+        // DB-backed search app: mirror `search_app_with_verifier` but with
+        // `db_pool: Some(pool)` and a Postgres-backed UsageTracker so receipts
+        // persist and the header is emitted.
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(SEARCH_SERVICES_TOML).unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![
+                Arc::new(AlwaysPassVerifier) as Arc<dyn PaymentVerifier>
+            ]);
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            search_provider: Some(Arc::new(StubSearchProvider)),
+            facilitator,
+            usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: Some(pool.clone()),
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        let app = build_router(
+            Arc::clone(&state),
+            RateLimiter::new(RateLimitConfig::default()),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/search")
+                    .header("content-type", "application/json")
+                    .header(
+                        "payment-signature",
+                        valid_payment_header_with("/v1/search", USDC_MINT, TEST_RECIPIENT_WALLET),
+                    )
+                    .body(Body::from(r#"{"query":"solana x402"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // The paid response must carry a fetchable receipt path header.
+        let path = receipt_header_path(&response);
+        assert!(
+            path.starts_with("/v1/receipts/"),
+            "search receipt header must be the receipt path, got: {path}"
+        );
     }
 }

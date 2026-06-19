@@ -312,6 +312,7 @@ supports_vision = false
             .expect("valid test model TOML"),
             service_registry: RwLock::new(ServiceRegistry::empty()),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            search_provider: None,
             facilitator: Facilitator::new(vec![]),
             usage: UsageTracker::noop(),
             cache: None,

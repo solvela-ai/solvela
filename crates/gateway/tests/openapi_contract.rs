@@ -258,6 +258,7 @@ fn contract_app_with_db(
         model_registry,
         service_registry: RwLock::new(ServiceRegistry::empty()),
         providers,
+        search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,

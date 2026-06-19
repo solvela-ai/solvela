@@ -411,6 +411,7 @@ mod tests {
             model_registry,
             service_registry: RwLock::new(service_registry),
             providers: crate::providers::ProviderRegistry::from_env(reqwest::Client::new()),
+            search_provider: None,
             facilitator,
             usage: crate::usage::UsageTracker::noop(),
             cache: None,
