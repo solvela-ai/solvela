@@ -15836,3 +15836,416 @@ price_per_request_usdc = 0.01
         );
     }
 }
+
+// ===========================================================================
+// POST /v1/messages — inbound Anthropic Messages compatibility (PR1)
+//
+// These tests drive the REAL route through `oneshot(test_app())` (CLAUDE.md
+// rule 10), proving the endpoint rides the SAME x402 money path as
+// /v1/chat/completions via the shared `chat_completions_inner` core. The
+// cost-parity test is the key money-path assertion: an identical prompt to both
+// endpoints must yield the SAME cost_breakdown, proving no payment-logic fork.
+// ===========================================================================
+mod messages_endpoint_tests {
+    use super::*;
+
+    /// An UNPAID request to /v1/messages returns the x402 402 challenge body
+    /// (NOT the Anthropic error envelope) — so x402 clients and registry probes
+    /// see the canonical challenge regardless of which endpoint they call. The
+    /// challenge's resource.url is bound to /v1/messages.
+    #[tokio::test]
+    async fn messages_unpaid_returns_x402_402() {
+        let app = test_app();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        // x402 PaymentRequired body at the top level (NOT the Anthropic
+        // {"type":"error",...} envelope).
+        assert_eq!(v["x402_version"], 2);
+        assert!(v["accepts"].is_array());
+        assert_eq!(v["resource"]["url"], "/v1/messages");
+        assert_eq!(v["cost_breakdown"]["currency"], "USDC");
+        assert_eq!(v["cost_breakdown"]["fee_percent"], 5);
+        assert!(
+            v["type"].is_null(),
+            "402 must be the x402 body, never the Anthropic error envelope"
+        );
+    }
+
+    /// A PAID request (exact scheme, AlwaysPassVerifier) returns a valid
+    /// Anthropic Messages response: type:"message", role:"assistant", a text
+    /// content block, stop_reason mapped from the mock's "stop" → "end_turn",
+    /// and usage.{input_tokens,output_tokens} Claude Code reads.
+    #[tokio::test]
+    async fn messages_paid_returns_anthropic_response_shape() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        // Anthropic Messages response shape.
+        assert_eq!(v["type"], "message");
+        assert_eq!(v["role"], "assistant");
+        assert_eq!(v["content"][0]["type"], "text");
+        // The mock provider returns "[mock response]" content.
+        assert_eq!(v["content"][0]["text"], "[mock response]");
+        // The mock's finish_reason "stop" → Anthropic stop_reason "end_turn".
+        assert_eq!(v["stop_reason"], "end_turn");
+        // usage fields Claude Code reads (mock: prompt 10, completion 5).
+        assert_eq!(v["usage"]["input_tokens"], 10);
+        assert_eq!(v["usage"]["output_tokens"], 5);
+        // The internal `id` is carried through.
+        assert_eq!(v["id"], "mock-chatcmpl-001");
+        assert_eq!(v["model"], "anthropic/claude-sonnet-4-6");
+    }
+
+    /// A PAID request whose `system` is the ARRAY-OF-BLOCKS form Claude Code
+    /// sends (multi-turn) is accepted end-to-end and returns 200 — proving the
+    /// inbound translation reaches the served path with the system prompt
+    /// extracted, not rejected.
+    #[tokio::test]
+    async fn messages_paid_system_as_array_multiturn_succeeds() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 128,
+            "system": [
+                {"type": "text", "text": "You are a coding assistant."},
+                {"type": "text", "text": "Be concise."}
+            ],
+            "messages": [
+                {"role": "user", "content": "Write a haiku."},
+                {"role": "assistant", "content": [{"type": "text", "text": "Sure."}]},
+                {"role": "user", "content": [{"type": "text", "text": "About the sea."}]}
+            ]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "message");
+        assert_eq!(v["content"][0]["text"], "[mock response]");
+    }
+
+    /// COST PARITY (the key money-path assertion): an IDENTICAL prompt to
+    /// /v1/chat/completions and /v1/messages must produce the SAME 402
+    /// cost_breakdown. This proves /v1/messages does not fork the cost/fee math
+    /// — it computes cost through the same `chat_completions_inner` core. The
+    /// Anthropic `system` + user message maps to the same internal System +
+    /// User ChatRequest as the OpenAI body, so the token estimate (and thus the
+    /// 5%-fee-inclusive total) is identical.
+    #[tokio::test]
+    async fn messages_and_chat_have_identical_cost_breakdown() {
+        // OpenAI-shaped body: a system message + a user message.
+        let chat_body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Explain entropy briefly."}
+            ]
+        });
+        // Anthropic-shaped body carrying the SAME logical content: the `system`
+        // string becomes the leading System message, and the user turn matches.
+        let messages_body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 100,
+            "system": "You are helpful.",
+            "messages": [
+                {"role": "user", "content": "Explain entropy briefly."}
+            ]
+        });
+
+        let chat_app = test_app();
+        let chat_resp = chat_app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&chat_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(chat_resp.status(), StatusCode::PAYMENT_REQUIRED);
+        let chat_bytes = chat_resp.into_body().collect().await.unwrap().to_bytes();
+        let chat_v: serde_json::Value = serde_json::from_slice(&chat_bytes).unwrap();
+
+        let messages_app = test_app();
+        let messages_resp = messages_app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&messages_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(messages_resp.status(), StatusCode::PAYMENT_REQUIRED);
+        let messages_bytes = messages_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let messages_v: serde_json::Value = serde_json::from_slice(&messages_bytes).unwrap();
+
+        // The cost_breakdown (provider_cost, platform_fee, total, currency,
+        // fee_percent) must be byte-for-byte identical — proving the same cost
+        // path, the same 5% fee applied once, the same atomic math.
+        assert_eq!(
+            chat_v["cost_breakdown"], messages_v["cost_breakdown"],
+            "identical prompts must yield identical cost_breakdown across endpoints \
+             (no money-path fork)"
+        );
+        // The advertised `accepts[]` amount must also match.
+        assert_eq!(
+            chat_v["accepts"][0]["amount"], messages_v["accepts"][0]["amount"],
+            "the advertised exact-scheme amount must match across endpoints"
+        );
+        // Each challenge binds to its own endpoint.
+        assert_eq!(chat_v["resource"]["url"], "/v1/chat/completions");
+        assert_eq!(messages_v["resource"]["url"], "/v1/messages");
+    }
+
+    /// A non-402 error (unknown model → 404) is returned in the Anthropic error
+    /// envelope `{"type":"error","error":{"type","message"}}`, with the status
+    /// preserved — NOT the OpenAI envelope.
+    #[tokio::test]
+    async fn messages_unknown_model_returns_anthropic_error_envelope() {
+        // A paid request (so we get past the 402) for an unknown model. The
+        // model-resolution failure is a 404 that must come back in the
+        // Anthropic envelope.
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-does-not-exist",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["error"]["type"], "model_not_found");
+        assert!(v["error"]["message"].is_string());
+    }
+
+    /// A `stream: true` request is rejected (PR1 is non-streaming) with a 400 in
+    /// the Anthropic error envelope rather than silently served non-streaming.
+    #[tokio::test]
+    async fn messages_streaming_request_rejected_with_anthropic_envelope() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+    }
+
+    /// An image content block is rejected (PR1 is text-only) with a 415 in the
+    /// Anthropic envelope, never billed-then-silently-dropped.
+    #[tokio::test]
+    async fn messages_image_content_rejected_with_anthropic_envelope() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBOR"}}
+            ]}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "error");
+    }
+
+    /// GET /v1/messages returns the x402 discovery 402 (registry health-check
+    /// mirror of the chat route's discovery GET), bound to /v1/messages.
+    #[tokio::test]
+    async fn messages_discovery_get_returns_x402_402() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/messages")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["x402_version"], 2);
+        assert_eq!(v["resource"]["url"], "/v1/messages");
+    }
+
+    /// An UNPAID probe with an empty/malformed body returns the discovery 402
+    /// (mirrors the chat route) rather than a 400 — so registry health-checkers
+    /// see the challenge.
+    #[tokio::test]
+    async fn messages_unpaid_empty_body_returns_discovery_402() {
+        let app = test_app();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["x402_version"], 2);
+        assert_eq!(v["resource"]["url"], "/v1/messages");
+    }
+
+    /// A payment signed for /v1/chat/completions must NOT be accepted at
+    /// /v1/messages — the resource.url binding prevents cross-endpoint replay.
+    /// The mismatched resource yields an invalid-payment 402 (kept in the x402
+    /// body shape).
+    #[tokio::test]
+    async fn messages_rejects_payment_signed_for_other_endpoint() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    // Header signed for the OTHER endpoint.
+                    .header(
+                        "payment-signature",
+                        valid_payment_header("/v1/chat/completions"),
+                    )
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // resource.url mismatch → invalid-payment 402 (x402 body, not Anthropic
+        // envelope, since it is a 402).
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["type"], "invalid_payment");
+    }
+}

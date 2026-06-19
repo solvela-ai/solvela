@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod anthropic_inbound;
 pub(crate) mod cache_usage;
 pub mod deepseek;
 pub mod fallback;
