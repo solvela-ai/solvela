@@ -93,9 +93,6 @@ pub async fn chat_completions(
     // still bounds it.
     body: axum::body::Bytes,
 ) -> Result<Response, GatewayError> {
-    let request_start = Instant::now();
-    let debug_enabled = is_debug_enabled(&headers);
-
     // Is a payment credential present? This single check decides how a
     // bad/empty body is handled (CLAUDE.md rule #8: the route, not middleware,
     // emits the 402). A `PAYMENT-SIGNATURE` header means a PAYING client, which
@@ -119,7 +116,7 @@ pub async fn chat_completions(
     // The discovery path returns here BEFORE any guard, model resolution,
     // payment verification, settlement, provider call, budget mutation, or
     // spend logging — it is read-only.
-    let mut req: ChatRequest = match serde_json::from_slice::<ChatRequest>(&body) {
+    let req: ChatRequest = match serde_json::from_slice::<ChatRequest>(&body) {
         Ok(req) => req,
         Err(e) => {
             if has_payment_header {
@@ -129,9 +126,41 @@ pub async fn chat_completions(
                 )));
             }
             // Unpaid probe with a bad/empty body → advertise the resource.
-            return Err(chat_completions_discovery(&state));
+            return Err(chat_completions_discovery(&state, "/v1/chat/completions"));
         }
     };
+
+    // Delegate to the shared inner core (the single home of the money path).
+    // `/v1/messages` (the Anthropic Messages adapter) calls the SAME core with
+    // its own `resource_url`, so the 402/cost/verify/settle/record logic is
+    // never forked — CLAUDE.md requires the payment path to live in one place.
+    chat_completions_inner(state, peer_addr, headers, req, "/v1/chat/completions").await
+}
+
+/// Shared inner core for every OpenAI-shaped chat request, regardless of the
+/// inbound wire dialect.
+///
+/// Runs the full money path: content validation → model resolution → prompt
+/// guard → cost estimate → free-tier bypass → 402 → payment decode/verify/
+/// settle → provider call → escrow claim / spend log / receipt → response.
+///
+/// `resource_url` is the endpoint the client posted to (`/v1/chat/completions`
+/// for the OpenAI route, `/v1/messages` for the Anthropic Messages adapter). It
+/// is used for BOTH (a) the `resource.url` the signed payment payload must match
+/// and (b) the `resource.url` advertised in the 402 challenge, so a payment is
+/// always bound to the exact endpoint it was signed for. Extracting this core
+/// (rather than duplicating it) keeps a single home for the payment logic; the
+/// `/v1/chat/completions` behavior is byte-for-byte unchanged because it passes
+/// the same `"/v1/chat/completions"` it always hard-coded.
+pub(crate) async fn chat_completions_inner(
+    state: Arc<AppState>,
+    peer_addr: crate::middleware::rate_limit::PeerAddr,
+    headers: HeaderMap,
+    mut req: ChatRequest,
+    resource_url: &str,
+) -> Result<Response, GatewayError> {
+    let request_start = Instant::now();
+    let debug_enabled = is_debug_enabled(&headers);
 
     // Validate message count before any processing
     if req.messages.len() > MAX_MESSAGES {
@@ -586,7 +615,9 @@ pub async fn chat_completions(
         // the discovery challenge are byte-shape-identical (same accepts /
         // legacy body / canonical PAYMENT-REQUIRED header). The CONFIGURED mint
         // and recipient are baked in there — never the compile-time constant.
-        let payment_required = build_payment_challenge(&state, atomic_amount, cost);
+        // The challenge advertises THIS endpoint's `resource_url` so the client
+        // signs a payment bound to the endpoint it called.
+        let payment_required = build_payment_challenge(&state, atomic_amount, cost, resource_url);
 
         // Emit the PaymentRequired body at the top level of the 402 response
         // per x402 spec — NOT wrapped in the OpenAI-style error envelope.
@@ -653,8 +684,11 @@ pub async fn chat_completions(
             // payment schemes returned with a 402 already tell the client what the
             // correct values are.
 
-            // Verify the resource URL matches this endpoint
-            if payload.resource.url != "/v1/chat/completions" {
+            // Verify the resource URL matches this endpoint. `resource_url` is
+            // the endpoint the client actually posted to (`/v1/chat/completions`
+            // or `/v1/messages`), so a payment signed for one endpoint can never
+            // be replayed against the other.
+            if payload.resource.url != resource_url {
                 // `resource.url` is client-controlled and unbounded (up to the
                 // 50KB header guard), so log a truncated copy server-side —
                 // mirrors the proxy-route truncation (chars-based so a
@@ -1669,6 +1703,9 @@ pub async fn chat_completions(
 /// - `amount` is the atomic-USDC string to advertise (the per-request quote on
 ///   the quote path; the non-binding discovery floor on the discovery path).
 /// - `cost_breakdown` is the matching breakdown to embed.
+/// - `resource_url` is the endpoint the challenge is for (`/v1/chat/completions`
+///   or `/v1/messages`); it becomes the `resource.url` the client must echo in
+///   its signed payment, binding the payment to the exact endpoint.
 ///
 /// The CONFIGURED mint / recipient are baked in here — never the compile-time
 /// constant — so a deployment with a non-default mint (e.g. devnet) advertises
@@ -1678,6 +1715,7 @@ fn build_payment_challenge(
     state: &AppState,
     amount: String,
     cost_breakdown: solvela_protocol::CostBreakdown,
+    resource_url: &str,
 ) -> solvela_x402::types::PaymentRequired {
     let mut accepts = vec![solvela_x402::types::PaymentAccept {
         scheme: "exact".to_string(),
@@ -1705,7 +1743,7 @@ fn build_payment_challenge(
     solvela_x402::types::PaymentRequired {
         x402_version: solvela_x402::types::X402_VERSION,
         resource: solvela_x402::types::Resource {
-            url: "/v1/chat/completions".to_string(),
+            url: resource_url.to_string(),
             method: "POST".to_string(),
         },
         accepts,
@@ -1743,7 +1781,11 @@ fn build_payment_challenge(
 ///
 /// This is a pure builder (no payment verification, no settlement, no provider
 /// call, no budget or spend mutation) — the discovery path is read-only.
-fn chat_completions_discovery(state: &AppState) -> GatewayError {
+///
+/// `resource_url` is the endpoint being advertised (`/v1/chat/completions` or
+/// `/v1/messages`), so a discovery probe to either endpoint advertises a
+/// challenge bound to that endpoint.
+pub(crate) fn chat_completions_discovery(state: &AppState, resource_url: &str) -> GatewayError {
     let floor_atomic = discovery_floor_atomic(&state.model_registry);
     // Atomic → decimal string (6 dp) for the wire `amount`/breakdown. Integer
     // math only (solvela-fintech): split the atomic value into whole + 6-digit
@@ -1780,6 +1822,7 @@ fn chat_completions_discovery(state: &AppState) -> GatewayError {
         state,
         amount,
         cost_breakdown,
+        resource_url,
     )))
 }
 
@@ -1792,7 +1835,7 @@ fn chat_completions_discovery(state: &AppState) -> GatewayError {
 pub async fn chat_completions_discovery_get(
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, GatewayError> {
-    Err(chat_completions_discovery(&state))
+    Err(chat_completions_discovery(&state, "/v1/chat/completions"))
 }
 
 /// Inputs for one chat-path receipt (settlement-platform P2). Groups the

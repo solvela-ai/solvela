@@ -314,6 +314,17 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             "/v1/chat/completions",
             get(routes::chat::chat_completions_discovery_get).post(routes::chat::chat_completions),
         )
+        // Inbound Anthropic-Messages-compatible endpoint. POST translates the
+        // Anthropic wire format to the internal OpenAI-shaped pipeline and back,
+        // riding the SAME x402 money path as /v1/chat/completions (via the
+        // shared `chat_completions_inner` core — no forked payment logic). GET
+        // serves the x402 discovery 402 for registry health-checkers, mirroring
+        // the chat route.
+        .route(
+            "/v1/messages",
+            get(routes::messages::create_message_discovery_get)
+                .post(routes::messages::create_message),
+        )
         .route(
             "/v1/images/generations",
             post(routes::images::image_generations),
