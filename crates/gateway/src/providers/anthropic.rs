@@ -36,8 +36,18 @@ impl AnthropicProvider {
 struct AnthropicRequest {
     model: String,
     max_tokens: u32,
+    /// System prompt as a cacheable content-block array (not a flat string).
+    ///
+    /// Anthropic accepts `system` as a string OR an array of text blocks; the
+    /// array form is required to attach `cache_control`, which is what lets the
+    /// gateway pay Anthropic less via prompt caching. We emit a single text
+    /// block carrying the joined system text WITH an ephemeral cache breakpoint
+    /// (see [`to_anthropic_request`]). When there is no system message this
+    /// stays `None` and the key is omitted entirely — we never emit an empty
+    /// cached block. Prompt caching is GA under `anthropic-version: 2023-06-01`
+    /// (no beta header; verified against the Messages API docs 2026-06-17).
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Vec<AnthropicSystemBlock>>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -45,6 +55,35 @@ struct AnthropicRequest {
     top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+}
+
+/// A cacheable system content block. Outbound-only (request) — no `Deserialize`.
+///
+/// Serializes to `{"type":"text","text":"…","cache_control":{"type":"ephemeral"}}`.
+/// `cache_control` is omitted when `None` so non-cached blocks stay minimal.
+#[derive(Debug, Serialize)]
+struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    block_type: AnthropicTextBlockType,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<AnthropicCacheControl>,
+}
+
+/// The `"text"` discriminant for [`AnthropicSystemBlock`]. A dedicated unit enum
+/// pins the literal so it serializes as `"text"` and can never drift.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AnthropicTextBlockType {
+    Text,
+}
+
+/// Cache breakpoint marker. Serializes to `{"type":"ephemeral"}`.
+/// Outbound-only (request) — no `Deserialize`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicCacheControl {
+    Ephemeral,
 }
 
 /// Anthropic message content: a list of content blocks.
@@ -102,9 +141,22 @@ struct AnthropicContentBlock {
     text: Option<String>,
 }
 
+/// Anthropic token usage.
+///
+/// BILLING-CRITICAL: once prompt caching is enabled, `input_tokens` is the
+/// UNCACHED REMAINDER only — cached prompt tokens move to the two cache fields.
+/// `from_anthropic_response` reconstructs the true billed prompt size from all
+/// three so a cache hit never under-bills the agent. Both cache fields are
+/// `#[serde(default)]`: a response without them (caching not triggered / below
+/// the min cacheable prefix) yields 0/0, so `billed_prompt == input_tokens` —
+/// bit-identical to pre-caching billing.
 #[derive(Debug, Deserialize)]
 struct AnthropicUsage {
     input_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
     output_tokens: u32,
 }
 
@@ -156,14 +208,16 @@ fn content_to_anthropic_blocks(
 ///
 /// Fallible: a malformed image data URI in any user/assistant message
 /// surfaces as `Err` rather than dropping the image. System messages are
-/// always flattened to text (Anthropic's `system` param is a plain string).
+/// flattened into a single cacheable text block (Anthropic's `system` param
+/// is emitted as a one-element content-block array so it can carry a
+/// `cache_control` breakpoint; it never carries image blocks).
 fn to_anthropic_request(req: &ChatRequest) -> Result<AnthropicRequest, String> {
     // Extract system message(s) — Anthropic takes system as a separate param
     // (a plain string), so it cannot carry image blocks. An image in a
     // system/developer message would be silently dropped by `as_text()` while
     // the vision gate still accepts the request — the agent pays but the model
     // never sees the image. Reject it explicitly instead.
-    let system: Option<String> = {
+    let system: Option<Vec<AnthropicSystemBlock>> = {
         let mut system_msgs: Vec<String> = Vec::new();
         for m in req
             .messages
@@ -181,9 +235,35 @@ fn to_anthropic_request(req: &ChatRequest) -> Result<AnthropicRequest, String> {
         }
 
         if system_msgs.is_empty() {
+            // No system message → omit `system` entirely. Do NOT emit an empty
+            // cached block: caching an empty prefix is pointless and a below-
+            // threshold block is a silent no-op anyway.
             None
         } else {
-            Some(system_msgs.join("\n\n"))
+            // Emit a SINGLE text block carrying the joined system text with the
+            // cache breakpoint on it (the breakpoint goes on the last/only block
+            // of the cacheable prefix). We ALWAYS mark it: Anthropic silently
+            // no-ops caching below its minimum cacheable prefix (~1024 tok, ~2048
+            // for Haiku), so there is no benefit to gating on a token estimate.
+            //
+            // The one honest downside: a large one-shot system prompt never
+            // reused within the 5-minute TTL pays the ~1.25x cache-WRITE premium
+            // with no read to amortize it. That is bounded by the write premium
+            // and is acceptable; the common multi-turn / shared-prefix case wins
+            // far more than it costs. Billing to the AGENT is unaffected either
+            // way — `from_anthropic_response` reconstructs the full prompt-token
+            // count (see Change B), so the cache only changes what the gateway
+            // pays Anthropic, never what the agent is charged.
+            //
+            // The system block is the ONLY cacheable prefix today: tool
+            // definitions are not forwarded to Anthropic (`AnthropicRequest` has
+            // no tools field; `ChatRequest.tools` is dropped), so tool-definition
+            // caching is a future follow-up gated on tool forwarding.
+            Some(vec![AnthropicSystemBlock {
+                block_type: AnthropicTextBlockType::Text,
+                text: system_msgs.join("\n\n"),
+                cache_control: Some(AnthropicCacheControl::Ephemeral),
+            }])
         }
     };
 
@@ -276,13 +356,29 @@ fn from_anthropic_response(resp: AnthropicResponse, original_model: &str) -> Cha
             },
             finish_reason,
         }],
-        // `Usage::new` does the saturating add for total_tokens. A plain
-        // `prompt + completion` panics in debug builds on overflow and
-        // silently wraps in release; the gateway billing path
-        // (`cap_usage_to_request_limits`) reads `total_tokens` directly,
-        // so a wrapped value would propagate into spend tracking.
+        // BILLING INTEGRITY: reconstruct the TRUE billed prompt size.
+        //
+        // With prompt caching on, Anthropic's `input_tokens` is only the
+        // uncached remainder; cached tokens live in `cache_creation_input_tokens`
+        // (cache write) and `cache_read_input_tokens` (cache read). Pre-caching,
+        // Anthropic reported the whole prompt as `input_tokens`, and the gateway
+        // billing path (`cap_usage_to_request_limits` → `estimate_cost`) charges
+        // the agent on `prompt_tokens`. To keep the agent's charge IDENTICAL
+        // across caching-off vs caching-on for the same prompt — and to honor the
+        // "agent pays full rate regardless of cache" invariant — fold all three
+        // back together. Mapping `input_tokens` alone would silently UNDER-BILL
+        // every cache hit.
+        //
+        // Saturating adds: belt-and-suspenders against overflow (Claude's 200K
+        // context is ~0.005% of u32::MAX, so this never actually saturates, but
+        // a wrapped value must never reach billing). The reconstructed
+        // `billed_prompt` is bounded by the model's context window, so
+        // `cap_usage_to_request_limits` does not spuriously clamp it.
         usage: Some(Usage::new(
-            resp.usage.input_tokens,
+            resp.usage
+                .input_tokens
+                .saturating_add(resp.usage.cache_creation_input_tokens)
+                .saturating_add(resp.usage.cache_read_input_tokens),
             resp.usage.output_tokens,
         )),
     }
@@ -912,13 +1008,175 @@ mod tests {
         };
 
         let anthropic_req = to_anthropic_request(&req).unwrap();
-        assert_eq!(
-            anthropic_req.system,
-            Some("You are a helpful assistant.".to_string())
-        );
+        // `system` is now a cacheable content-block array (Change A). The
+        // extraction semantics are unchanged: the same joined text is carried,
+        // just in block form so it can attach `cache_control`.
+        let system = anthropic_req.system.as_ref().expect("system present");
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0].text, "You are a helpful assistant.");
+        assert!(system[0].cache_control.is_some());
         assert_eq!(anthropic_req.messages.len(), 1);
         assert_eq!(anthropic_req.messages[0].role, "user");
         assert_eq!(anthropic_req.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn test_system_serializes_as_cacheable_block_array() {
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: Role::System,
+                    content: "You are a helpful assistant.".into(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: "Hello!".into(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            ],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let anthropic_req = to_anthropic_request(&req).unwrap();
+        // Exact wire shape: a single text block carrying the breakpoint.
+        // Anthropic accepts `system` as a string OR an array of text blocks;
+        // the array form is required to attach `cache_control`. Prompt caching
+        // is GA under `anthropic-version: 2023-06-01` (no beta header).
+        let v = serde_json::to_value(&anthropic_req.system).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!([
+                {
+                    "type": "text",
+                    "text": "You are a helpful assistant.",
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn test_no_system_omits_system_field() {
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: "Hello!".into(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let anthropic_req = to_anthropic_request(&req).unwrap();
+        // No system message → `system` stays None; do NOT emit an empty cached
+        // block. The serialized request must have no `system` key at all
+        // (`#[serde(skip_serializing_if = "Option::is_none")]`).
+        assert!(anthropic_req.system.is_none());
+        let v = serde_json::to_value(&anthropic_req).unwrap();
+        assert!(
+            v.get("system").is_none(),
+            "request with no system message must omit the system key entirely"
+        );
+    }
+
+    #[test]
+    fn test_billing_integrity_cache_hit_reconstructs_full_prompt_tokens() {
+        // Once prompt caching is on, Anthropic reports the UNCACHED REMAINDER in
+        // `input_tokens`; cached tokens move to `cache_read_input_tokens` /
+        // `cache_creation_input_tokens`. Billing must reconstruct the true total
+        // prompt size so the agent is charged the full rate regardless of cache.
+        let anthropic_resp = AnthropicResponse {
+            id: "msg_cache_hit".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            content: vec![AnthropicContentBlock {
+                content_type: "text".to_string(),
+                text: Some("ok".to_string()),
+            }],
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 200,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 1800,
+                output_tokens: 50,
+            },
+        };
+
+        let chat_resp = from_anthropic_response(anthropic_resp, "anthropic/claude-sonnet-4-6");
+        let usage = chat_resp.usage.as_ref().unwrap();
+        // 200 uncached + 1800 cache-read = 2000 true prompt tokens.
+        assert_eq!(usage.prompt_tokens, 2000);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(usage.total_tokens, 2050);
+    }
+
+    #[test]
+    fn test_billing_unchanged_when_cache_fields_absent() {
+        // A response WITHOUT cache fields (caching not triggered / below the min
+        // cacheable prefix) must deserialize with the cache fields defaulting to
+        // 0, yielding billing bit-identical to pre-caching behaviour.
+        let raw = r#"{"input_tokens":2000,"output_tokens":50}"#;
+        let usage: AnthropicUsage = serde_json::from_str(raw).unwrap();
+        assert_eq!(usage.input_tokens, 2000);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+        assert_eq!(usage.output_tokens, 50);
+
+        let anthropic_resp = AnthropicResponse {
+            id: "msg_no_cache".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            content: vec![AnthropicContentBlock {
+                content_type: "text".to_string(),
+                text: Some("ok".to_string()),
+            }],
+            stop_reason: Some("end_turn".to_string()),
+            usage,
+        };
+        let chat_resp = from_anthropic_response(anthropic_resp, "anthropic/claude-sonnet-4-6");
+        // billed_prompt == input_tokens when cache fields are 0.
+        assert_eq!(chat_resp.usage.as_ref().unwrap().prompt_tokens, 2000);
+    }
+
+    #[test]
+    fn test_cache_write_counted_in_prompt_tokens() {
+        // On a cache WRITE, the written tokens appear in
+        // `cache_creation_input_tokens`. They must fold into prompt_tokens so the
+        // agent is billed for the full prompt the model actually processed.
+        let anthropic_resp = AnthropicResponse {
+            id: "msg_cache_write".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            content: vec![AnthropicContentBlock {
+                content_type: "text".to_string(),
+                text: Some("ok".to_string()),
+            }],
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 100,
+                cache_creation_input_tokens: 500,
+                cache_read_input_tokens: 0,
+                output_tokens: 20,
+            },
+        };
+        let chat_resp = from_anthropic_response(anthropic_resp, "anthropic/claude-sonnet-4-6");
+        // 100 uncached + 500 cache-write = 600 true prompt tokens.
+        assert_eq!(chat_resp.usage.as_ref().unwrap().prompt_tokens, 600);
     }
 
     #[test]
@@ -958,11 +1216,16 @@ mod tests {
 
         let anthropic_req = to_anthropic_request(&req).unwrap();
 
-        // Both System and Developer messages should be extracted into the system param
+        // Both System and Developer messages should be extracted into the system
+        // param, joined into a SINGLE cacheable text block (Change A). The
+        // extraction/join semantics are unchanged; only the carrier shape is.
+        let system = anthropic_req.system.as_ref().expect("system present");
+        assert_eq!(system.len(), 1);
         assert_eq!(
-            anthropic_req.system,
-            Some("You are a helpful assistant.\n\nAlways respond in JSON.".to_string())
+            system[0].text,
+            "You are a helpful assistant.\n\nAlways respond in JSON."
         );
+        assert!(system[0].cache_control.is_some());
         // Only the User message should remain in messages
         assert_eq!(anthropic_req.messages.len(), 1);
         assert_eq!(anthropic_req.messages[0].role, "user");
@@ -1016,6 +1279,8 @@ mod tests {
             stop_reason: Some("end_turn".to_string()),
             usage: AnthropicUsage {
                 input_tokens: 10,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
                 output_tokens: 8,
             },
         };
