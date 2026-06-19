@@ -25,12 +25,16 @@
 //!   semantics; the Anthropic response exposes `input_tokens`/`output_tokens`
 //!   (which Claude Code reads).
 //!
-//! SCOPE (PR1): text-only, non-streaming. Streaming (SSE), tools/`tool_use`/
-//! `tool_result`, `count_tokens`, and images are OUT OF SCOPE. Image content is
-//! deferred: the inbound content parser rejects image blocks with a clear error
-//! rather than silently dropping them (a dropped image would change the prompt's
-//! meaning while still billing the agent — the same fail-loud posture the
-//! outbound adapter takes for system/tool-role images).
+//! SCOPE (PR1): text-only, non-streaming. Streaming (SSE), tools (top-level
+//! `tools`/`tool_choice` definitions AND `tool_use`/`tool_result` content
+//! blocks), `count_tokens`, and images are OUT OF SCOPE. Every one of these is
+//! rejected LOUDLY rather than silently dropped: a dropped image or a discarded
+//! tool definition would change the prompt's meaning (or strip tool-calling)
+//! while still billing the agent — the same fail-loud posture the outbound
+//! adapter takes for system/tool-role images. Tool definitions in particular
+//! must be modeled on the wire (`AnthropicMessagesRequest::tools`), not left to
+//! serde's ignore-unknown-fields default, because Claude Code attaches them to
+//! nearly every request.
 
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +60,18 @@ pub enum AnthropicInboundError {
          (image support is planned for a later release)"
     )]
     ImageUnsupported,
+
+    /// A tool definition (top-level `tools`/`tool_choice`) OR a tool content
+    /// block (`tool_use`/`tool_result`) was present. Tools are OUT OF SCOPE for
+    /// PR1; reject loudly rather than silently dropping the tool definitions and
+    /// billing the agent for a tool-blind text answer (Claude Code attaches its
+    /// tool definitions to nearly every request, so a silent drop is the common
+    /// case, not the edge case).
+    #[error(
+        "tool use is not yet supported on POST /v1/messages; remove `tools`/`tool_choice` \
+         and tool content blocks (tool support is planned for a later release)"
+    )]
+    ToolUseUnsupported,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +105,21 @@ pub struct AnthropicMessagesRequest {
     /// non-streaming (which would break a client expecting SSE).
     #[serde(default)]
     pub stream: bool,
+    /// Top-level tool DEFINITIONS. Tools are OUT OF SCOPE for PR1, but the field
+    /// MUST be modeled: Claude Code attaches `tools` to nearly every request, and
+    /// without a field here serde would silently discard them (unknown fields are
+    /// ignored) → the provider gets a tool-blind call and the agent PAYS for a
+    /// degraded text answer. Captured so a request carrying tools is rejected
+    /// loudly BEFORE the money path, mirroring the `stream:true` rejection. A
+    /// JSON `null` (absent) is the only accepted value.
+    #[serde(default)]
+    pub tools: Option<serde_json::Value>,
+    /// Tool-choice directive. OUT OF SCOPE for PR1 and rejected for the same
+    /// reason as `tools` (a `tool_choice` without `tools` is degenerate, but a
+    /// present value still signals the client expects tool-calling behavior we do
+    /// not yet support — reject rather than silently ignore).
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 /// The `system` field: a bare string OR an array of text blocks.
@@ -249,9 +280,12 @@ pub struct AnthropicResponseUsage {
 ///
 /// Text-only content (bare string, or array of text blocks) becomes
 /// [`MessageContent::Text`] — the same flattened representation the internal
-/// pipeline expects for text. An image (or any non-text) block returns
-/// [`AnthropicInboundError::ImageUnsupported`] so the request is rejected rather
-/// than billed with a silently-dropped image (PR1 is text-only).
+/// pipeline expects for text. An image block returns
+/// [`AnthropicInboundError::ImageUnsupported`]; any other non-text block
+/// (`tool_use`/`tool_result`) returns
+/// [`AnthropicInboundError::ToolUseUnsupported`] so the request is rejected with
+/// an accurate diagnostic rather than billed with a silently-dropped block (PR1
+/// is text-only).
 fn inbound_content_to_message_content(
     content: &AnthropicInboundContent,
 ) -> Result<MessageContent, AnthropicInboundError> {
@@ -262,8 +296,15 @@ fn inbound_content_to_message_content(
             for block in blocks {
                 match block {
                     AnthropicInboundContentBlock::Text { text } => texts.push(text.as_str()),
-                    AnthropicInboundContentBlock::Image | AnthropicInboundContentBlock::Other => {
+                    AnthropicInboundContentBlock::Image => {
                         return Err(AnthropicInboundError::ImageUnsupported);
+                    }
+                    // `tool_use`/`tool_result` (and any future non-text block)
+                    // land here. Return the tool-specific error so the client
+                    // gets an accurate diagnostic, not a misleading "image"
+                    // message that sends it down the wrong path.
+                    AnthropicInboundContentBlock::Other => {
+                        return Err(AnthropicInboundError::ToolUseUnsupported);
                     }
                 }
             }
@@ -300,8 +341,9 @@ fn inbound_role(role: &str) -> Role {
 ///   ignored for now (documented; a later PR can thread it through). It is NOT
 ///   silently lost in a money-relevant way: it does not affect cost.
 ///
-/// Streaming requests are rejected here (PR1 is non-streaming) rather than
-/// silently served as a single JSON body.
+/// Streaming requests, and requests carrying top-level tool definitions
+/// (`tools`/`tool_choice`) or tool content blocks, are rejected here (PR1 is
+/// text-only, non-streaming, no tools) rather than silently served / degraded.
 pub fn anthropic_request_to_chat(
     req: AnthropicMessagesRequest,
 ) -> Result<ChatRequest, AnthropicInboundError> {
@@ -311,6 +353,15 @@ pub fn anthropic_request_to_chat(
              set \"stream\": false (SSE support is planned for a later release)"
                 .to_string(),
         ));
+    }
+
+    // Reject top-level tool definitions LOUDLY, BEFORE the money path. Without
+    // this, a request carrying `tools`/`tool_choice` would translate to a
+    // tool-blind `ChatRequest` (we hard-code `tools: None` below) and the agent
+    // would PAY for a degraded text answer — the silent-degradation failure mode
+    // this endpoint explicitly forbids. Mirror the `stream:true` rejection.
+    if req.tools.is_some() || req.tool_choice.is_some() {
+        return Err(AnthropicInboundError::ToolUseUnsupported);
     }
 
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(req.messages.len() + 1);
@@ -553,7 +604,8 @@ mod tests {
     }
 
     /// A `tool_use`/`tool_result` (any non-text) block is rejected (OUT OF
-    /// SCOPE for PR1) rather than silently dropped.
+    /// SCOPE for PR1) rather than silently dropped — and with the TOOL-specific
+    /// error, not the misleading image error.
     #[test]
     fn tool_block_is_rejected() {
         let body = r#"{
@@ -564,7 +616,100 @@ mod tests {
             ]}]
         }"#;
         let parsed: AnthropicMessagesRequest = serde_json::from_str(body).unwrap();
-        assert!(anthropic_request_to_chat(parsed).is_err());
+        let err = anthropic_request_to_chat(parsed).unwrap_err();
+        assert!(
+            matches!(err, AnthropicInboundError::ToolUseUnsupported),
+            "a tool content block must yield ToolUseUnsupported, not the image error; got {err:?}"
+        );
+        // The diagnostic must talk about tools, not images.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tool use is not yet supported"),
+            "tool-block error message must reference tools, got: {msg}"
+        );
+        assert!(
+            !msg.contains("image"),
+            "tool-block error message must not mislead about images, got: {msg}"
+        );
+    }
+
+    /// A `tool_result` content block (the other tool block shape) is likewise
+    /// rejected with the tool-specific error.
+    #[test]
+    fn tool_result_block_is_rejected() {
+        let body = r#"{
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+            ]}]
+        }"#;
+        let parsed: AnthropicMessagesRequest = serde_json::from_str(body).unwrap();
+        let err = anthropic_request_to_chat(parsed).unwrap_err();
+        assert!(matches!(err, AnthropicInboundError::ToolUseUnsupported));
+    }
+
+    /// A request carrying TOP-LEVEL `tools` definitions is rejected loudly
+    /// (PR1 has no tool support) rather than silently dropping the tools and
+    /// billing the agent for a tool-blind text answer. Claude Code attaches
+    /// these to nearly every request, so this is the common case.
+    #[test]
+    fn tools_definition_is_rejected() {
+        let body = r#"{
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 100,
+            "tools": [
+                {"name": "get_weather", "description": "Get weather",
+                 "input_schema": {"type": "object", "properties": {}}}
+            ],
+            "messages": [{"role": "user", "content": "What is the weather?"}]
+        }"#;
+        let parsed: AnthropicMessagesRequest = serde_json::from_str(body).unwrap();
+        // The tools array MUST deserialize into the field, not be discarded.
+        assert!(
+            parsed.tools.is_some(),
+            "top-level `tools` must deserialize into the modeled field, not be ignored"
+        );
+        let err = anthropic_request_to_chat(parsed).unwrap_err();
+        assert!(
+            matches!(err, AnthropicInboundError::ToolUseUnsupported),
+            "a top-level `tools` array must be rejected with ToolUseUnsupported; got {err:?}"
+        );
+    }
+
+    /// A top-level `tool_choice` (without `tools`) is also rejected — a present
+    /// value still signals the client expects tool-calling behavior PR1 does not
+    /// support.
+    #[test]
+    fn tool_choice_is_rejected() {
+        let body = r#"{
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 100,
+            "tool_choice": {"type": "auto"},
+            "messages": [{"role": "user", "content": "hi"}]
+        }"#;
+        let parsed: AnthropicMessagesRequest = serde_json::from_str(body).unwrap();
+        assert!(parsed.tool_choice.is_some());
+        let err = anthropic_request_to_chat(parsed).unwrap_err();
+        assert!(matches!(err, AnthropicInboundError::ToolUseUnsupported));
+    }
+
+    /// A request with NO `tools`/`tool_choice` is unaffected — the fields
+    /// default to `None` and the request translates normally.
+    #[test]
+    fn no_tools_field_translates_normally() {
+        let body = r#"{
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hi"}]
+        }"#;
+        let parsed: AnthropicMessagesRequest = serde_json::from_str(body).unwrap();
+        assert!(parsed.tools.is_none());
+        assert!(parsed.tool_choice.is_none());
+        let chat = anthropic_request_to_chat(parsed).unwrap();
+        assert_eq!(chat.messages.len(), 1);
+        assert!(chat.tools.is_none());
+        assert!(chat.tool_choice.is_none());
     }
 
     /// A `stream: true` request is rejected (PR1 is non-streaming) rather than

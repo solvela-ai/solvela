@@ -15875,6 +15875,15 @@ mod messages_endpoint_tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        // The canonical x402 v2 PAYMENT-REQUIRED header (read by registry probes
+        // BEFORE body parse) must be present on the messages 402, exactly as on
+        // the chat 402.
+        assert!(
+            response
+                .headers()
+                .contains_key(CANONICAL_PAYMENT_REQUIRED_HEADER),
+            "messages unpaid 402 must carry the canonical payment-required header"
+        );
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
@@ -16180,6 +16189,13 @@ mod messages_endpoint_tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        // Registry health-checkers read the canonical header before the body.
+        assert!(
+            response
+                .headers()
+                .contains_key(CANONICAL_PAYMENT_REQUIRED_HEADER),
+            "messages discovery GET 402 must carry the canonical payment-required header"
+        );
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["x402_version"], 2);
@@ -16247,5 +16263,275 @@ mod messages_endpoint_tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"]["type"], "invalid_payment");
+    }
+
+    /// REVERSE replay direction (the inverse of
+    /// `messages_rejects_payment_signed_for_other_endpoint`): a payment signed
+    /// for `/v1/messages` must NOT be accepted at `/v1/chat/completions`. The
+    /// resource.url binding is symmetric — cross-endpoint replay is rejected in
+    /// BOTH directions with an invalid-payment 402.
+    #[tokio::test]
+    async fn chat_rejects_payment_signed_for_messages_endpoint() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "openai/gpt-4o",
+            "messages": [{"role": "user", "content": "Hello!"}],
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    // Header signed for /v1/messages, presented at the chat route.
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["type"], "invalid_payment");
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not match"));
+    }
+
+    /// A request carrying top-level `tools` definitions is rejected with a 400
+    /// in the Anthropic error envelope — Claude Code attaches tools to nearly
+    /// every request, so silently dropping them and billing for a tool-blind
+    /// answer is the common-case failure this guards against.
+    #[tokio::test]
+    async fn messages_tools_definition_rejected_with_anthropic_envelope() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "tools": [
+                {"name": "get_weather", "description": "Get the weather",
+                 "input_schema": {"type": "object", "properties": {}}}
+            ],
+            "messages": [{"role": "user", "content": "What is the weather?"}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // 400 (NOT 415 — tools is an unsupported request feature, not media).
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+        // The message must reference tools, not images.
+        let msg = v["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("tool"),
+            "tools rejection must reference tools, got: {msg}"
+        );
+    }
+
+    /// A tool CONTENT block (`tool_use`) is rejected with a 400 and a
+    /// tool-specific diagnostic — NOT the misleading image error/415.
+    #[tokio::test]
+    async fn messages_tool_content_block_rejected_with_anthropic_envelope() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [{"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "f", "input": {}}
+            ]}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+        let msg = v["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("tool"), "must reference tools, got: {msg}");
+        assert!(
+            !msg.contains("image"),
+            "tool-block error must not mislead about images, got: {msg}"
+        );
+    }
+
+    /// Money-path proof: streaming, image, AND tools rejections all occur with
+    /// NO settlement. We inject a `SettleRecordingVerifier`; for each rejected
+    /// request the settle flag must stay `false` — the agent is never charged
+    /// for a request that is rejected at the translation boundary, BEFORE the
+    /// money path.
+    #[tokio::test]
+    async fn messages_rejections_never_settle() {
+        // Each rejected shape, asserted independently with its own fresh app and
+        // settle flag.
+        let cases: Vec<(&str, serde_json::Value, StatusCode)> = vec![
+            (
+                "streaming",
+                serde_json::json!({
+                    "model": "anthropic/claude-sonnet-4-6",
+                    "max_tokens": 64,
+                    "stream": true,
+                    "messages": [{"role": "user", "content": "hi"}]
+                }),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "image",
+                serde_json::json!({
+                    "model": "anthropic/claude-sonnet-4-6",
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "text", "text": "what is this?"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBOR"}}
+                    ]}]
+                }),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ),
+            (
+                "tools",
+                serde_json::json!({
+                    "model": "anthropic/claude-sonnet-4-6",
+                    "max_tokens": 64,
+                    "tools": [{"name": "f", "description": "d",
+                               "input_schema": {"type": "object", "properties": {}}}],
+                    "messages": [{"role": "user", "content": "hi"}]
+                }),
+                StatusCode::BAD_REQUEST,
+            ),
+        ];
+
+        for (label, body, expected_status) in cases {
+            let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (app, _state) =
+                test_app_with_mock_provider_and_exact_verifier(Arc::new(SettleRecordingVerifier {
+                    settled: Arc::clone(&settled),
+                }));
+
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/messages")
+                        .header("content-type", "application/json")
+                        // A VALID payment header is attached so the only reason
+                        // settlement does not fire is the translation-boundary
+                        // rejection (not a missing/invalid payment).
+                        .header("payment-signature", valid_payment_header("/v1/messages"))
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                response.status(),
+                expected_status,
+                "{label} request must be rejected at the translation boundary"
+            );
+            assert!(
+                !settled.load(std::sync::atomic::Ordering::SeqCst),
+                "{label} rejection must NOT reach settlement — the agent must not be charged"
+            );
+        }
+    }
+
+    /// DB-backed: a PAID /v1/messages response must forward the
+    /// `x-solvela-receipt` header through `translate_success_response` (the
+    /// receipt issued by the shared money path is not dropped on this endpoint).
+    /// Self-skips when Postgres is unavailable (mirrors the chat receipt tests).
+    #[tokio::test]
+    async fn messages_paid_forwards_receipt_header() {
+        let Some(pool) = try_receipts_db_pool().await else {
+            return;
+        };
+        let (app, _state) =
+            test_app_with_db_pool(mock_provider_registry(), Arc::new(AlwaysPassVerifier), pool);
+
+        let body = serde_json::json!({
+            "model": "openai/gpt-4o",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let path = receipt_header_path(&response);
+        assert!(
+            path.starts_with("/v1/receipts/"),
+            "messages receipt header must be the receipt path, got: {path}"
+        );
+    }
+
+    /// DB-less mirror: a paid /v1/messages response must NOT advertise a receipt
+    /// header (rule 12 graceful degradation — never promise an unfetchable
+    /// receipt).
+    #[tokio::test]
+    async fn messages_dbless_paid_emits_no_receipt_header() {
+        let app = test_app_with_mock_provider();
+
+        let body = serde_json::json!({
+            "model": "openai/gpt-4o",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers().get("x-solvela-receipt").is_none(),
+            "a DB-less gateway must not advertise an unfetchable receipt on /v1/messages"
+        );
     }
 }

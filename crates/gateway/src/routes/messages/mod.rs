@@ -52,11 +52,11 @@ use crate::AppState;
 /// vice versa) — see the resource-URL check in `chat_completions_inner`.
 const MESSAGES_RESOURCE_URL: &str = "/v1/messages";
 
-/// Upper bound when buffering the inner-core response body to re-translate it.
-/// The served response is a serialized `ChatResponse` (an LLM completion);
-/// 10 MiB matches the `RequestBodyLimitLayer` ceiling and is well above any
-/// realistic completion. Exceeding it fails closed (a 502) rather than
-/// allocating unbounded memory.
+/// Upper bound when buffering the inner-core RESPONSE body (the upstream LLM
+/// completion) so it can be re-translated into the Anthropic shape. This is a
+/// RESPONSE-buffer ceiling — distinct from `RequestBodyLimitLayer`, which gates
+/// inbound REQUEST bodies. 10 MiB is well above any realistic completion;
+/// exceeding it fails closed (a 502) rather than allocating unbounded memory.
 const MAX_RESPONSE_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 /// Response headers worth carrying across from the inner OpenAI response onto
@@ -128,10 +128,15 @@ pub async fn create_message(
                 // Images are accepted on the wire but not yet processed — 415,
                 // matching the chat route's `UnsupportedMediaType` posture.
                 AnthropicInboundError::ImageUnsupported => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                // Tools are an unsupported REQUEST feature, not an unsupported
+                // media type — 400 (415 is media-type-specific and would be a
+                // misleading status for `tools`/`tool_use`).
+                AnthropicInboundError::ToolUseUnsupported => StatusCode::BAD_REQUEST,
             };
             let error_type = match &e {
                 AnthropicInboundError::InvalidBody(_) => "invalid_request_error",
                 AnthropicInboundError::ImageUnsupported => "invalid_request_error",
+                AnthropicInboundError::ToolUseUnsupported => "invalid_request_error",
             };
             return anthropic_error_response(status, error_type, e.to_string());
         }
