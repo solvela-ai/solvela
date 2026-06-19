@@ -1264,6 +1264,122 @@ mod tests {
         assert_eq!(chat_resp.usage.as_ref().unwrap().prompt_tokens, 600);
     }
 
+    /// GOLDEN-VECTOR SCHEMA-DRIFT GUARD for the Anthropic prompt-cache billing
+    /// reconstruction. This locks the *field-level* deserialization of a full,
+    /// realistic Anthropic Messages API response against silent schema drift.
+    ///
+    /// THE MONEY-PATH RISK THIS GUARDS:
+    /// Anthropic is the only provider whose API EXCLUDES cached prompt tokens
+    /// from `input_tokens` — once caching triggers, `input_tokens` is the
+    /// UNCACHED REMAINDER and the cached tokens move into
+    /// `cache_creation_input_tokens` (cache write) and `cache_read_input_tokens`
+    /// (cache read). `from_anthropic_response` reconstructs the TRUE billable
+    /// prompt size by folding all three back together
+    /// (`input + cache_creation + cache_read`, saturating). The agent is billed
+    /// in USDC on that reconstructed `prompt_tokens`, while the gateway pays
+    /// Anthropic in full.
+    ///
+    /// Both cache fields carry `#[serde(default)]`. That is CORRECT today
+    /// (they are genuinely absent on no-cache responses). But it makes a future
+    /// field RENAME silent: if Anthropic ever renames, say,
+    /// `cache_read_input_tokens`, serde would not error — it would fill the
+    /// Rust field with its default `0`, deserialization would still succeed,
+    /// and the fold would collapse `prompt_tokens` to roughly just
+    /// `input_tokens`. The gateway would then UNDER-BILL the agent for every
+    /// cached request (paying Anthropic full price) with no error and no log.
+    /// A high `cache_read` is the realistic, high-cost case, so we use a large
+    /// value (50_000) to make the dollar impact of such a silent drop concrete.
+    ///
+    /// WHY TWO ASSERTIONS — they catch DIFFERENT failure modes; do NOT loosen
+    /// or delete either if this test ever fails:
+    ///   1. FIELD-LEVEL (parsed `AnthropicUsage`): pins each cache field to its
+    ///      distinct, nonzero golden value. If a future edit renames a Rust
+    ///      field to track an Anthropic rename WITHOUT updating this fixture's
+    ///      JSON key, `#[serde(default)]` would zero that field and this
+    ///      assertion FAILS — surfacing the rename a sum-only test could miss
+    ///      (a sum test passes if some other field happens to absorb the
+    ///      delta, but fails to localize the bug).
+    ///   2. SUM (reconstructed `ChatResponse.usage.prompt_tokens`): pins the
+    ///      fold result. If someone regresses the reconstruction itself (e.g.
+    ///      drops a `.saturating_add`, or maps only `input_tokens`), the
+    ///      field-level parse can still be correct while billing is wrong — so
+    ///      this catches a fold regression the field-level assertion misses.
+    ///
+    /// Distinct nonzero values on every field also mean any conflation, swap,
+    /// or drop is caught: 1000 / 200 / 50_000 / 300 are mutually distinguishable
+    /// and none is a multiple of another by accident.
+    ///
+    /// If this test fails: the canonical reconstruction is ground truth. Fix
+    /// the deserialization or the fold to reproduce these golden values — do
+    /// NOT edit the expected numbers to match new output, and do NOT relax the
+    /// assertions. A drop in `prompt_tokens` here is a real under-billing bug.
+    #[test]
+    fn test_cache_billing_reconstruction_golden_vector_field_and_sum() {
+        // A realistic FULL Anthropic Messages API response with caching active.
+        // Distinct, nonzero values per usage field; a large cache_read models
+        // the high-cost cache-hit case where a silent field drop is most
+        // expensive.
+        let response_json = serde_json::json!({
+            "id": "msg_01CacheDriftGuard",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "content": [
+                { "type": "text", "text": "ok" }
+            ],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {
+                "input_tokens": 1000,
+                "cache_creation_input_tokens": 200,
+                "cache_read_input_tokens": 50000,
+                "output_tokens": 300
+            }
+        });
+
+        // Deserialize through the SAME production type the gateway's
+        // `.json::<AnthropicResponse>()` path uses — not a hand-rolled parse.
+        let anthropic_resp: AnthropicResponse = serde_json::from_value(response_json)
+            .expect("realistic Anthropic response must deserialize");
+
+        // (1) FIELD-LEVEL golden values on the parsed usage struct. A future
+        // rename masked by `#[serde(default)]` would zero one of these.
+        assert_eq!(
+            anthropic_resp.usage.input_tokens, 1000,
+            "input_tokens must deserialize from the `input_tokens` key"
+        );
+        assert_eq!(
+            anthropic_resp.usage.cache_creation_input_tokens, 200,
+            "cache_creation_input_tokens must deserialize from its key — a serde(default) \
+             zero here means a silent rename and under-billing of cache writes"
+        );
+        assert_eq!(
+            anthropic_resp.usage.cache_read_input_tokens, 50000,
+            "cache_read_input_tokens must deserialize from its key — a serde(default) \
+             zero here means a silent rename and under-billing of cache reads (the \
+             high-cost case)"
+        );
+
+        // (2) SUM: the billing reconstruction folds all three prompt-side
+        // fields. 1000 + 200 + 50000 = 51200. A fold regression (e.g. a dropped
+        // saturating_add) breaks this even when the field-level parse is fine.
+        let chat_resp = from_anthropic_response(anthropic_resp, "anthropic/claude-sonnet-4-6");
+        let usage = chat_resp.usage.as_ref().expect("usage must be present");
+        assert_eq!(
+            usage.prompt_tokens, 51200,
+            "billed prompt_tokens must fold input + cache_creation + cache_read"
+        );
+        // Completion is the output side, carried through untouched.
+        assert_eq!(
+            usage.completion_tokens, 300,
+            "completion_tokens must equal output_tokens"
+        );
+        assert_eq!(
+            usage.total_tokens, 51500,
+            "total = 51200 prompt + 300 completion"
+        );
+    }
+
     #[test]
     fn test_developer_role_extracted_as_system() {
         let req = ChatRequest {
