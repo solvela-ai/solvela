@@ -39,6 +39,11 @@ use cost::{
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
+
+// Re-export the SSE wire-dialect selector so the `/v1/messages` Anthropic
+// adapter can pass `StreamWire::Anthropic` into the shared core (symmetric with
+// how it imports `chat_completions_inner`).
+pub(crate) use provider::StreamWire;
 use response::{build_session_token, validate_session_id, validate_tenant};
 
 // Re-export `uses_durable_nonce` for use by `crate::routes::proxy`
@@ -134,7 +139,18 @@ pub async fn chat_completions(
     // `/v1/messages` (the Anthropic Messages adapter) calls the SAME core with
     // its own `resource_url`, so the 402/cost/verify/settle/record logic is
     // never forked — CLAUDE.md requires the payment path to live in one place.
-    chat_completions_inner(state, peer_addr, headers, req, "/v1/chat/completions").await
+    //
+    // The OpenAI route always frames streaming responses in the OpenAI SSE
+    // dialect (`StreamWire::OpenAi`), so its behavior is byte-for-byte unchanged.
+    chat_completions_inner(
+        state,
+        peer_addr,
+        headers,
+        req,
+        "/v1/chat/completions",
+        StreamWire::OpenAi,
+    )
+    .await
 }
 
 /// Shared inner core for every OpenAI-shaped chat request, regardless of the
@@ -152,12 +168,20 @@ pub async fn chat_completions(
 /// (rather than duplicating it) keeps a single home for the payment logic; the
 /// `/v1/chat/completions` behavior is byte-for-byte unchanged because it passes
 /// the same `"/v1/chat/completions"` it always hard-coded.
+///
+/// `stream_wire` selects the SSE dialect for a STREAMING response: the OpenAI
+/// route passes [`StreamWire::OpenAi`] (its framing is byte-for-byte unchanged);
+/// the Anthropic Messages adapter passes [`StreamWire::Anthropic`] so the same
+/// money path produces an Anthropic-framed SSE stream WITHOUT forking. It only
+/// affects streaming response framing — never the cost/verify/settle/record
+/// logic — and is ignored for non-streaming requests.
 pub(crate) async fn chat_completions_inner(
     state: Arc<AppState>,
     peer_addr: crate::middleware::rate_limit::PeerAddr,
     headers: HeaderMap,
     mut req: ChatRequest,
     resource_url: &str,
+    stream_wire: StreamWire,
 ) -> Result<Response, GatewayError> {
     let request_start = Instant::now();
     let debug_enabled = is_debug_enabled(&headers);
@@ -407,6 +431,7 @@ pub(crate) async fn chat_completions_inner(
             routing_profile: &routing_profile,
             session_id: &session_id,
             payment_status: PaymentStatus::DevBypass,
+            stream_wire,
         };
 
         return provider::execute_provider_call(&ctx)
@@ -559,6 +584,7 @@ pub(crate) async fn chat_completions_inner(
             routing_profile: &routing_profile,
             session_id: &session_id,
             payment_status: PaymentStatus::Free,
+            stream_wire,
         };
 
         return match provider::execute_provider_call(&ctx).await {
@@ -1158,6 +1184,7 @@ pub(crate) async fn chat_completions_inner(
         routing_profile: &routing_profile,
         session_id: &session_id,
         payment_status: PaymentStatus::Verified,
+        stream_wire,
     };
 
     match provider::execute_provider_call(&ctx).await {

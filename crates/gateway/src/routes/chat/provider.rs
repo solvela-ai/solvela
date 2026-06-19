@@ -23,7 +23,8 @@ use crate::routes::debug_headers::{attach_debug_headers, CacheStatus, PaymentSta
 use crate::AppState;
 
 use super::cost::{
-    cap_usage_to_request_limits, estimate_input_tokens, semantic_hit_full_atomic, SemanticDiscount,
+    cap_usage_to_request_limits, completion_token_ceiling, estimate_input_tokens,
+    semantic_hit_full_atomic, SemanticDiscount,
 };
 use super::response::{attach_session_id, build_debug_info};
 
@@ -71,6 +72,23 @@ pub(crate) fn parse_fallback_preference(header: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// Which SSE wire dialect a STREAMING response is framed in.
+///
+/// Threaded through the shared core (symmetric with `resource_url`) so the
+/// streaming framer in [`execute_streaming_call`] knows which event shape to
+/// emit, WITHOUT forking the money path. The OpenAI route always selects
+/// [`StreamWire::OpenAi`] (its framing is byte-for-byte unchanged); the
+/// Anthropic Messages adapter selects [`StreamWire::Anthropic`].
+///
+/// Non-streaming requests ignore this field entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamWire {
+    /// OpenAI `data: {ChatChunk}` SSE frames (the existing behavior).
+    OpenAi,
+    /// Anthropic Messages SSE event sequence (message_start → … → message_stop).
+    Anthropic,
+}
+
 /// Context for a provider call -- captures all routing/debug metadata that
 /// both the paid and dev-bypass paths need.
 pub(crate) struct ProviderCallContext<'a> {
@@ -85,6 +103,9 @@ pub(crate) struct ProviderCallContext<'a> {
     pub routing_profile: &'a str,
     pub session_id: &'a Option<String>,
     pub payment_status: PaymentStatus,
+    /// The SSE dialect to frame a streaming response in. Ignored for
+    /// non-streaming requests.
+    pub stream_wire: StreamWire,
 }
 
 /// Metadata returned alongside the HTTP response from a provider call.
@@ -358,35 +379,74 @@ async fn execute_streaming_call(
 
     match result {
         Ok(result) => {
+            // Capture model/usage-estimate inputs the Anthropic framer needs
+            // BEFORE `result.data` is moved into the heartbeat wrapper. These are
+            // computed here (provider.rs has `model_info`; the inbound adapter
+            // does not) and are consistent with the streaming BILLING estimate:
+            //   - `input_tokens`  = `estimate_input_tokens(req)` — the input figure
+            //     the estimate prices and the `EstimateFallback` spend row records.
+            //   - `output_tokens` = `completion_token_ceiling(req.max_tokens,
+            //     model_info)` — the completion-token count the billing estimate
+            //     RESERVES (the streaming charge). The stream carries no usage, so
+            //     this reserved ceiling is the honest, billing-consistent figure to
+            //     surface (see `frame_anthropic_stream`'s money-path note and
+            //     solvela-fintech §3). Integer `u32` — no f64 on the money path.
+            let anthropic_model = result.actual_model.clone();
+            let anthropic_input_tokens = estimate_input_tokens(ctx.req);
+            let anthropic_output_tokens =
+                completion_token_ceiling(ctx.req.max_tokens, ctx.model_info);
+
             // Wrap with adaptive heartbeat
             let heartbeat_stream = HeartbeatStream::new(result.data, HeartbeatConfig::default());
 
-            // S3 FIX: Generic error message instead of raw provider errors
-            let sse_stream = heartbeat_stream.map(|item| match item {
-                HeartbeatItem::Chunk(Ok(chunk)) => match serde_json::to_string(&chunk) {
-                    Ok(json) => Ok::<_, Infallible>(sse::Event::default().data(json)),
-                    // A serialise failure here is essentially impossible
-                    // (`ChatChunk` is plain strings + numbers), but if it ever
-                    // happens we must NOT emit `data:` with an empty body —
-                    // that frame is structurally valid SSE and the agent would
-                    // bill on close having received zero content. Emit a
-                    // typed error frame instead so the client can distinguish
-                    // it from a normal chunk and surface a failure upstream.
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to serialise chat chunk for SSE");
-                        Ok(sse::Event::default()
-                            .data("{\"error\": \"stream serialisation error\"}"))
-                    }
-                },
-                HeartbeatItem::Chunk(Err(e)) => {
-                    tracing::error!(error = %e, "stream chunk error (details redacted from client)");
-                    Ok(sse::Event::default()
-                        .data("{\"error\": \"stream processing error\"}"))
+            // Build the SSE response BODY per wire dialect. The OpenAi arm is the
+            // existing framing, byte-for-byte unchanged. The Anthropic arm hands
+            // the same heartbeat stream to the inbound adapter's event state
+            // machine. Both then attach the SAME fallback/session/debug headers
+            // below — the only dialect-specific code is the body framing.
+            let mut resp = match ctx.stream_wire {
+                StreamWire::OpenAi => {
+                    // S3 FIX: Generic error message instead of raw provider errors
+                    let sse_stream = heartbeat_stream.map(|item| match item {
+                        HeartbeatItem::Chunk(Ok(chunk)) => match serde_json::to_string(&chunk) {
+                            Ok(json) => Ok::<_, Infallible>(sse::Event::default().data(json)),
+                            // A serialise failure here is essentially impossible
+                            // (`ChatChunk` is plain strings + numbers), but if it
+                            // ever happens we must NOT emit `data:` with an empty
+                            // body — that frame is structurally valid SSE and the
+                            // agent would bill on close having received zero
+                            // content. Emit a typed error frame instead so the
+                            // client can distinguish it from a normal chunk and
+                            // surface a failure upstream.
+                            Err(e) => {
+                                tracing::error!(error = %e, "failed to serialise chat chunk for SSE");
+                                Ok(sse::Event::default()
+                                    .data("{\"error\": \"stream serialisation error\"}"))
+                            }
+                        },
+                        HeartbeatItem::Chunk(Err(e)) => {
+                            tracing::error!(error = %e, "stream chunk error (details redacted from client)");
+                            Ok(sse::Event::default()
+                                .data("{\"error\": \"stream processing error\"}"))
+                        }
+                        HeartbeatItem::KeepAlive => Ok(sse::Event::default().comment("keep-alive")),
+                    });
+                    sse::Sse::new(sse_stream).into_response()
                 }
-                HeartbeatItem::KeepAlive => Ok(sse::Event::default().comment("keep-alive")),
-            });
-
-            let mut resp = sse::Sse::new(sse_stream).into_response();
+                StreamWire::Anthropic => {
+                    // `frame_anthropic_stream` is generic over the upstream item
+                    // stream; box-pin the (`!Unpin`) heartbeat stream so it
+                    // satisfies the framer's `Unpin` bound.
+                    let upstream = Box::pin(heartbeat_stream);
+                    let sse_stream = crate::providers::anthropic_inbound::frame_anthropic_stream(
+                        upstream,
+                        anthropic_model,
+                        anthropic_input_tokens,
+                        anthropic_output_tokens,
+                    );
+                    sse::Sse::new(sse_stream).into_response()
+                }
+            };
 
             // Add fallback header if served by a different model
             if result.was_fallback {

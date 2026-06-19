@@ -8,10 +8,13 @@
 //! translate → call-core → translate wrapper (CLAUDE.md rule #14 posture: a
 //! protocol adapter, not new payment logic).
 //!
-//! SCOPE (PR1): text-only, non-streaming. Streaming (SSE), tools, `count_tokens`,
-//! and bearer/spend-down auth are LATER PRs. The translation layer rejects
-//! `stream:true`, image content, and tool blocks with a clear error rather than
-//! silently degrading.
+//! SCOPE (PR2): text-only, streaming (SSE) AND non-streaming. A `stream:true`
+//! request is framed into the Anthropic Messages SSE event sequence inside the
+//! shared money path (see [`StreamWire::Anthropic`]); a `stream:false`/absent
+//! request is buffered and re-shaped into the Anthropic non-streaming JSON body.
+//! Tools, `count_tokens`, images, and bearer/spend-down auth are LATER PRs. The
+//! translation layer rejects image content and tool blocks with a clear error
+//! rather than silently degrading.
 //!
 //! ## Error envelopes
 //!
@@ -44,7 +47,7 @@ use crate::providers::anthropic_inbound::{
     anthropic_request_to_chat, chat_response_to_anthropic, AnthropicInboundError,
     AnthropicMessagesRequest,
 };
-use crate::routes::chat::{chat_completions_discovery, chat_completions_inner};
+use crate::routes::chat::{chat_completions_discovery, chat_completions_inner, StreamWire};
 use crate::AppState;
 
 /// The resource URL this endpoint binds payments to. A payment signed for
@@ -118,8 +121,10 @@ pub async fn create_message(
     };
 
     // Translate the Anthropic request into the internal ChatRequest. A
-    // translation error (image/tool block, or `stream:true`) is a client 4xx in
-    // the Anthropic envelope — it never reaches the money path.
+    // translation error (image or tool block) is a client 4xx in the Anthropic
+    // envelope — it never reaches the money path. `stream:true` is NO LONGER a
+    // rejection (PR2): it carries through to the shared core, which frames the
+    // Anthropic SSE event sequence.
     let chat_req = match anthropic_request_to_chat(anthropic_req) {
         Ok(req) => req,
         Err(e) => {
@@ -142,11 +147,43 @@ pub async fn create_message(
         }
     };
 
+    // Capture the streaming flag BEFORE handing `chat_req` to the core. A
+    // streaming request reaches the core with `StreamWire::Anthropic`, which
+    // frames the provider stream as an Anthropic SSE event sequence inside the
+    // shared money path — so the response is ALREADY in the Anthropic dialect and
+    // must be returned verbatim (NOT buffered/re-translated).
+    let is_stream = chat_req.stream;
+
     // Run the SHARED money-path core. `/v1/messages` does NOT fork any
     // 402/cost/verify/settle/record logic — it reuses the exact same inner core
-    // as `/v1/chat/completions`, only with its own `resource_url`.
-    match chat_completions_inner(state, peer_addr, headers, chat_req, MESSAGES_RESOURCE_URL).await {
-        Ok(response) => translate_success_response(response).await,
+    // as `/v1/chat/completions`, only with its own `resource_url` and the
+    // Anthropic streaming dialect.
+    match chat_completions_inner(
+        state,
+        peer_addr,
+        headers,
+        chat_req,
+        MESSAGES_RESOURCE_URL,
+        StreamWire::Anthropic,
+    )
+    .await
+    {
+        Ok(response) => {
+            if is_stream {
+                // The core already produced an Anthropic-framed SSE response
+                // (text/event-stream). Return it directly — buffering or
+                // re-translating it would break the stream and is wrong (the
+                // body is the Anthropic event sequence, not a JSON ChatResponse).
+                response
+            } else {
+                // Non-streaming: the core returned a JSON ChatResponse; buffer
+                // and re-shape it into the Anthropic non-streaming response.
+                translate_success_response(response).await
+            }
+        }
+        // Pre-stream errors (402 challenge, invalid payment, validation) are
+        // unchanged for streaming requests — they fire BEFORE any provider call,
+        // so `translate_error` handles them identically regardless of `is_stream`.
         Err(err) => translate_error(err).await,
     }
 }
@@ -164,12 +201,16 @@ pub async fn create_message_discovery_get(State(state): State<Arc<AppState>>) ->
 /// Translate a successful inner-core [`Response`] (a serialized OpenAI
 /// [`ChatResponse`] JSON body) into the Anthropic Messages response shape.
 ///
-/// PR1 is non-streaming, so the inner response is always a JSON body; we
-/// buffer it, deserialize into a [`ChatResponse`], and re-emit as the Anthropic
-/// shape. Payment/audit headers (receipt, session) are carried across. If the
-/// body cannot be deserialized into a [`ChatResponse`] (e.g. an unexpected stub
-/// shape), we fail closed with a 502 in the Anthropic envelope rather than
-/// emitting a malformed Anthropic body.
+/// This is called ONLY on the non-streaming branch (`is_stream == false`) in
+/// [`create_message`]: the inner response is then a JSON [`ChatResponse`] body,
+/// which we buffer, deserialize, and re-emit as the Anthropic non-streaming
+/// shape. (A streaming request is returned verbatim by `create_message` BEFORE
+/// reaching here, because the core already produced an Anthropic-framed SSE
+/// body — re-buffering it would break the stream.) Payment/audit headers
+/// (receipt, session) are carried across. If the body cannot be deserialized
+/// into a [`ChatResponse`] (e.g. an unexpected stub shape), we fail closed with
+/// a 502 in the Anthropic envelope rather than emitting a malformed Anthropic
+/// body.
 async fn translate_success_response(response: Response) -> Response {
     let status = response.status();
     let (parts, body) = response.into_parts();

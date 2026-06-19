@@ -16107,10 +16107,12 @@ mod messages_endpoint_tests {
         assert!(v["error"]["message"].is_string());
     }
 
-    /// A `stream: true` request is rejected (PR1 is non-streaming) with a 400 in
-    /// the Anthropic error envelope rather than silently served non-streaming.
+    /// A `stream: true` request is now ACCEPTED (PR2) and served as an Anthropic
+    /// SSE stream — NOT rejected with a 400 (the PR1 behavior this replaces).
+    /// (The full event-sequence assertions live in
+    /// `messages_paid_streaming_returns_anthropic_sse_sequence`.)
     #[tokio::test]
-    async fn messages_streaming_request_rejected_with_anthropic_envelope() {
+    async fn messages_streaming_request_is_accepted_as_sse() {
         let app = test_app_with_mock_provider();
         let body = serde_json::json!({
             "model": "anthropic/claude-sonnet-4-6",
@@ -16132,11 +16134,21 @@ mod messages_endpoint_tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["type"], "error");
-        assert_eq!(v["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "stream:true is now accepted (PR2), not rejected with a 400"
+        );
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .expect("streaming response must carry a content-type")
+            .to_str()
+            .unwrap();
+        assert!(
+            content_type.contains("text/event-stream"),
+            "an accepted streaming /v1/messages request must be SSE, got: {content_type}"
+        );
     }
 
     /// An image content block is rejected (PR1 is text-only) with a 415 in the
@@ -16385,26 +16397,19 @@ mod messages_endpoint_tests {
         );
     }
 
-    /// Money-path proof: streaming, image, AND tools rejections all occur with
-    /// NO settlement. We inject a `SettleRecordingVerifier`; for each rejected
-    /// request the settle flag must stay `false` — the agent is never charged
-    /// for a request that is rejected at the translation boundary, BEFORE the
-    /// money path.
+    /// Money-path proof: image AND tools rejections occur with NO settlement.
+    /// We inject a `SettleRecordingVerifier`; for each rejected request the
+    /// settle flag must stay `false` — the agent is never charged for a request
+    /// that is rejected at the translation boundary, BEFORE the money path.
+    ///
+    /// NOTE (PR2): streaming is no longer a translation-boundary rejection — it
+    /// is a valid paid path that DOES settle, so it is intentionally NOT in this
+    /// "rejections never settle" set. Images and tools remain rejected.
     #[tokio::test]
     async fn messages_rejections_never_settle() {
         // Each rejected shape, asserted independently with its own fresh app and
         // settle flag.
         let cases: Vec<(&str, serde_json::Value, StatusCode)> = vec![
-            (
-                "streaming",
-                serde_json::json!({
-                    "model": "anthropic/claude-sonnet-4-6",
-                    "max_tokens": 64,
-                    "stream": true,
-                    "messages": [{"role": "user", "content": "hi"}]
-                }),
-                StatusCode::BAD_REQUEST,
-            ),
             (
                 "image",
                 serde_json::json!({
@@ -16534,4 +16539,565 @@ mod messages_endpoint_tests {
             "a DB-less gateway must not advertise an unfetchable receipt on /v1/messages"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // PR2: streaming /v1/messages (Anthropic SSE event sequence)
+    // -----------------------------------------------------------------------
+
+    /// A PAID `stream:true` request to /v1/messages returns an Anthropic-framed
+    /// SSE response (`text/event-stream`) whose body contains the full Anthropic
+    /// event sequence IN ORDER (message_start → content_block_start →
+    /// content_block_delta → content_block_stop → message_delta → message_stop).
+    /// Drives the REAL route through `oneshot(test_app_with_mock_provider())`
+    /// (CLAUDE.md rule 10): the AlwaysPassVerifier exact path reaches the mock
+    /// provider's streaming impl with no real keys.
+    #[tokio::test]
+    async fn messages_paid_streaming_returns_anthropic_sse_sequence() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Must be an SSE response — NOT a buffered JSON ChatResponse.
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .expect("streaming /v1/messages response must carry a content-type")
+            .to_str()
+            .unwrap();
+        assert!(
+            content_type.contains("text/event-stream"),
+            "streaming /v1/messages must be SSE, got: {content_type}"
+        );
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8_lossy(&bytes);
+
+        // The Anthropic event NAMES must appear, in order, as `event:` lines.
+        let expected_order = [
+            "event: message_start",
+            "event: content_block_start",
+            "event: content_block_delta",
+            "event: content_block_stop",
+            "event: message_delta",
+            "event: message_stop",
+        ];
+        let mut search_from = 0usize;
+        for name in expected_order {
+            let idx = body_str[search_from..].find(name).unwrap_or_else(|| {
+                panic!(
+                    "missing or out-of-order Anthropic SSE event {name:?} in stream body:\n{body_str}"
+                )
+            });
+            search_from += idx + name.len();
+        }
+
+        // The mock stream's "[mock stream response]" content must surface as a
+        // text_delta, and message_start must carry the usage object.
+        assert!(
+            body_str.contains("\"type\":\"text_delta\"")
+                && body_str.contains("[mock stream response]"),
+            "the content_block_delta must carry the streamed text_delta:\n{body_str}"
+        );
+        assert!(
+            body_str.contains("\"input_tokens\"") && body_str.contains("\"output_tokens\""),
+            "message_start/message_delta must carry the usage token fields:\n{body_str}"
+        );
+        // The mock's "stop" finish_reason must map to the Anthropic end_turn.
+        assert!(
+            body_str.contains("\"stop_reason\":\"end_turn\""),
+            "message_delta must carry the mapped end_turn stop_reason:\n{body_str}"
+        );
+    }
+
+    /// A PAID STREAMING /v1/messages response must emit the `x-solvela-receipt`
+    /// header AND persist a receipt recording the BILLED ESTIMATE — the same
+    /// shared-core behavior locked at /v1/chat/completions by
+    /// [`super::paid_streaming_chat_emits_receipt_header_and_records_estimate`],
+    /// now pinned at the Anthropic surface. This guards two things at once:
+    /// (1) `create_message`'s verbatim streaming pass-through preserves the
+    /// receipt header that `emit_chat_receipt` puts on the response HEAD before
+    /// the SSE body streams, and (2) the stored amount is the 402-quoted
+    /// estimate (no usage exists at head time for a stream), billed in full on
+    /// the `exact` scheme (no refund path), so `amount_paid_atomic` and
+    /// `cost_breakdown.total_atomic` both equal that reservation.
+    ///
+    /// The receipt header is DB-gated (`emit_chat_receipt` returns early when
+    /// `db_pool.is_none()`; the header is a path to a DB-stored resource), so
+    /// this uses a real Postgres pool and SELF-SKIPS when one is unavailable —
+    /// a no-op in CI without Postgres, exactly like the chat receipt test.
+    #[tokio::test]
+    async fn messages_paid_streaming_emits_receipt_header_and_records_estimate() {
+        let Some(pool) = try_receipts_db_pool().await else {
+            return;
+        };
+        // Anthropic /v1/messages body: same model/shape as the chat receipt test
+        // (`openai/gpt-4o`, which the messages route accepts), streaming.
+        let body = serde_json::json!({
+            "model": "openai/gpt-4o",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello!"}],
+        });
+        // The reservation/estimate observed through the REAL /v1/messages 402
+        // (the same endpoint we pay) — the amount the streaming receipt must
+        // record (no usage at head time → the billed estimate).
+        let reserved_atomic = messages_quote_402_amount_atomic(&body).await;
+
+        let (app, _state) =
+            test_app_with_db_pool(mock_provider_registry(), Arc::new(AlwaysPassVerifier), pool);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .expect("streaming /v1/messages response has content-type")
+            .to_str()
+            .unwrap();
+        assert!(
+            content_type.contains("text/event-stream"),
+            "must be an SSE response, got {content_type}"
+        );
+        // Header present on the response HEAD — decided before the body streams,
+        // and preserved through `create_message`'s verbatim pass-through.
+        let path = receipt_header_path(&response);
+
+        let receipt = poll_receipt_until_ok(&app, &path).await;
+        assert_eq!(receipt["payment_scheme"], "exact");
+        assert_eq!(
+            receipt["amount_paid_atomic"].as_u64(),
+            Some(reserved_atomic),
+            "streaming /v1/messages receipt must record the billed estimate \
+             (the 402-quoted amount)"
+        );
+        assert_eq!(
+            receipt["cost_breakdown"]["total_atomic"].as_u64(),
+            Some(reserved_atomic),
+            "streaming /v1/messages receipt breakdown total must equal the quoted estimate"
+        );
+        assert!(
+            receipt.get("vendor").is_none(),
+            "chat-core receipts must not carry vendor fields"
+        );
+    }
+
+    /// T1 — streaming settlement proof. A PAID `stream:true` /v1/messages request
+    /// MUST reach on-chain settlement (the deferred `exact` broadcast fires once
+    /// the streamed provider response is constructed). We inject a
+    /// `SettleRecordingVerifier`; the settle flag must flip `true`. Without this
+    /// guard, a future regression that returned the SSE response BEFORE settlement
+    /// (delivering the stream for free) would pass unnoticed — the agent paid the
+    /// estimate on-chain, so the gateway must actually collect it.
+    #[tokio::test]
+    async fn messages_streaming_paid_request_settles() {
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (app, _state) = test_app_with_provider_registry_and_exact_verifier(
+            mock_provider_registry(),
+            Arc::new(SettleRecordingVerifier {
+                settled: Arc::clone(&settled),
+            }),
+        );
+
+        let body = serde_json::json!({
+            "model": "openai/gpt-4o",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello!"}],
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a delivered paid streaming /v1/messages request must return 200"
+        );
+        // Drain the SSE body so the constructed response (and its post-delivery
+        // settle) fully completes before we inspect the flag.
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.contains("text/event-stream"),
+            "streaming /v1/messages must be SSE, got: {content_type}"
+        );
+        let _ = response.into_body().collect().await.unwrap().to_bytes();
+
+        assert!(
+            settled.load(std::sync::atomic::Ordering::SeqCst),
+            "EXACT settlement MUST be reached for a paid streaming /v1/messages \
+             request — returning the SSE response must not drop the deferred \
+             broadcast (the agent paid the estimate on-chain)"
+        );
+    }
+
+    /// T2 — streaming spend-log proof. A settled paid `stream:true` /v1/messages
+    /// request (usage absent, no semantic-cache hit) must write EXACTLY ONE
+    /// spend-log entry at the ESTIMATE — the `EstimateFallback` arm — mirroring
+    /// `streaming_paid_request_logs_spend_from_estimate` but for the Anthropic
+    /// endpoint. Output tokens are recorded as 0 (no usage on the stream).
+    #[tokio::test]
+    async fn messages_streaming_paid_request_logs_spend_from_estimate() {
+        use tracing::instrument::WithSubscriber;
+
+        let body = serde_json::json!({
+            "model": "openai/gpt-4o",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello!"}],
+        });
+
+        // The /v1/messages 402 amount is the observable proxy for the reserved
+        // estimate on this exact request shape.
+        let reserved_atomic = messages_quote_402_amount_atomic(&body).await;
+
+        let app = test_app_with_mock_provider();
+        let capture = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // Drain the SSE body so the (fire-and-forget) spend-log event is emitted
+        // before we read the capture buffer.
+        let _ = response.into_body().collect().await.unwrap().to_bytes();
+
+        let events = spend_logged_events(&capture);
+        assert_eq!(
+            events.len(),
+            1,
+            "a settled streaming paid /v1/messages request MUST write exactly one \
+             spend entry (got {}): the agent paid the estimate on-chain",
+            events.len()
+        );
+        let logged_usdc = events[0]["cost_usdc"]
+            .as_f64()
+            .expect("spend logged event carries cost_usdc");
+        let logged_atomic = (logged_usdc * 1_000_000.0).round() as u64;
+        assert!(
+            logged_atomic.abs_diff(reserved_atomic) <= 1,
+            "streaming /v1/messages spend must be billed at the reserved estimate \
+             ({reserved_atomic} atomic), got {logged_atomic} atomic"
+        );
+        assert_eq!(
+            events[0]["output_tokens"].as_u64(),
+            Some(0),
+            "streaming has no token usage — output_tokens must be recorded as 0"
+        );
+        assert!(
+            events[0]["input_tokens"].as_u64().unwrap_or(0) >= 1,
+            "input tokens are estimated from the request (minimum 1)"
+        );
+    }
+
+    /// T3 — non-streaming still translates. A PAID `stream:false` (here omitted)
+    /// /v1/messages request must return the Anthropic NON-streaming JSON body
+    /// (`{"type":"message",...}`), proving `translate_success_response` is still
+    /// reached after the `is_stream` refactor — i.e. a non-streaming response is
+    /// NOT accidentally framed as an SSE stream.
+    #[tokio::test]
+    async fn messages_non_streaming_paid_still_translates_json() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hello!"}],
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // It must be a JSON body, NOT an SSE stream.
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.contains("application/json"),
+            "a non-streaming /v1/messages response must be JSON (not SSE), got: {content_type}"
+        );
+        assert!(
+            !content_type.contains("text/event-stream"),
+            "a non-streaming /v1/messages response must NOT be framed as SSE"
+        );
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["type"], "message",
+            "non-streaming /v1/messages must return the Anthropic message shape, got: {v}"
+        );
+        assert_eq!(v["role"], "assistant");
+        assert!(
+            v["content"].is_array() && v["content"][0]["type"] == "text",
+            "non-streaming /v1/messages must carry a text content block, got: {v}"
+        );
+        assert!(
+            v["usage"]["input_tokens"].is_u64() && v["usage"]["output_tokens"].is_u64(),
+            "non-streaming /v1/messages must carry usage tokens, got: {v}"
+        );
+    }
+
+    /// T4 — exact token values end-to-end. The streamed `message_start` /
+    /// `message_delta` usage figures must be the SAME billing-consistent values
+    /// that drive the spend ledger: `input_tokens` = the request's input estimate
+    /// and `output_tokens` = the completion-token ceiling
+    /// (`completion_token_ceiling(max_tokens, model_info)`). We prove this by
+    /// feeding the streamed `(input_tokens, output_tokens)` back through the
+    /// registry quote and asserting it reproduces the endpoint's own 402 estimate
+    /// — i.e. the framer surfaces exactly the billed reservation, not a fabricated
+    /// count. We also pin `output_tokens` to the deterministic ceiling (max_tokens
+    /// 64, no tighter model cap in the test registry → 64).
+    #[tokio::test]
+    async fn messages_streaming_usage_matches_billed_estimate() {
+        let body = serde_json::json!({
+            "model": "openai/gpt-4o",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello!"}],
+        });
+
+        // The endpoint's own reserved/quoted estimate for this exact request.
+        let reserved_atomic = messages_quote_402_amount_atomic(&body).await;
+
+        let app = test_app_with_mock_provider();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let wire = String::from_utf8_lossy(&bytes).to_string();
+
+        // Parse the message_start data JSON and extract the usage tokens.
+        let ms_data = sse_frame_data(&wire, "message_start");
+        let streamed_input = ms_data["message"]["usage"]["input_tokens"]
+            .as_u64()
+            .expect("message_start.usage.input_tokens present") as u32;
+        assert_eq!(
+            ms_data["message"]["usage"]["output_tokens"].as_u64(),
+            Some(0),
+            "message_start output_tokens must be 0 at start"
+        );
+
+        let md_data = sse_frame_data(&wire, "message_delta");
+        let streamed_output = md_data["usage"]["output_tokens"]
+            .as_u64()
+            .expect("message_delta.usage.output_tokens present")
+            as u32;
+
+        // The completion-token ceiling for this request: max_tokens=64, and the
+        // test registry declares no tighter `max_output_tokens` for gpt-4o, and
+        // the default cap is 8192 — so the ceiling is 64.
+        assert_eq!(
+            streamed_output, 64,
+            "message_delta output_tokens must equal completion_token_ceiling \
+             (max_tokens 64, no tighter cap) — the billed completion reservation"
+        );
+
+        // Feeding the streamed (input, output) back through the SAME registry
+        // quote the route uses must reproduce the endpoint's 402 reservation,
+        // proving the streamed usage IS the billed estimate (not a fabrication).
+        let streamed_quote =
+            registry_quote_atomic("openai/gpt-4o", streamed_input, streamed_output);
+        assert!(
+            streamed_quote.abs_diff(reserved_atomic) <= 1,
+            "streamed usage ({streamed_input} in / {streamed_output} out) must \
+             reproduce the endpoint's reserved estimate ({reserved_atomic} atomic), \
+             got {streamed_quote} atomic — the framer must surface the billed values"
+        );
+    }
+
+    /// T5 — `data.type == event name` at the integration level. The
+    /// `@anthropic-ai/sdk` requires each SSE frame's data JSON `"type"` to equal
+    /// its `event:` name. Parse every frame in the real streamed response and
+    /// assert the equality holds on the actual transmitted bytes.
+    #[tokio::test]
+    async fn messages_streaming_every_frame_data_type_matches_event_name() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "openai/gpt-4o",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello!"}],
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let wire = String::from_utf8_lossy(&bytes).to_string();
+
+        let mut frames_checked = 0usize;
+        for frame in wire.split("\n\n").filter(|f| !f.trim().is_empty()) {
+            let mut name = None;
+            let mut data = None;
+            for line in frame.lines() {
+                if let Some(rest) = line.strip_prefix("event:") {
+                    name = Some(rest.trim().to_string());
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    data = Some(rest.trim().to_string());
+                }
+            }
+            let name = name.expect("every Anthropic SSE frame must set an event: name");
+            let data = data.expect("every Anthropic SSE frame must set a data: line");
+            let json: serde_json::Value =
+                serde_json::from_str(&data).expect("data line must be valid JSON");
+            assert_eq!(
+                json["type"].as_str(),
+                Some(name.as_str()),
+                "data.type must equal the event name for every frame; \
+                 mismatch on {name}: {data}"
+            );
+            frames_checked += 1;
+        }
+        assert!(
+            frames_checked >= 6,
+            "expected the full Anthropic event sequence (>= 6 frames), got {frames_checked}"
+        );
+    }
+}
+
+/// Parse the `data:` JSON of the first SSE frame whose `event:` name is
+/// `event_name` from a collected SSE wire body.
+fn sse_frame_data(wire: &str, event_name: &str) -> serde_json::Value {
+    let needle = format!("event: {event_name}");
+    let frame = wire
+        .split("\n\n")
+        .find(|f| f.lines().any(|l| l.trim() == needle))
+        .unwrap_or_else(|| panic!("missing SSE frame for event {event_name}:\n{wire}"));
+    let data_line = frame
+        .lines()
+        .find_map(|l| l.strip_prefix("data:"))
+        .unwrap_or_else(|| panic!("SSE frame for {event_name} has no data line:\n{frame}"));
+    serde_json::from_str(data_line.trim()).expect("SSE data line must be valid JSON")
+}
+
+/// Fetch the `exact`-scheme reserved/quoted atomic amount from the /v1/messages
+/// 402 challenge for an Anthropic-shaped request body. Mirrors
+/// [`quote_402_amount_atomic`] but posts the Anthropic request shape to
+/// `/v1/messages` (the estimate is over the TRANSLATED ChatRequest, so this is
+/// the right reservation proxy for a /v1/messages streaming request).
+async fn messages_quote_402_amount_atomic(body: &serde_json::Value) -> u64 {
+    let app = test_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "no-payment /v1/messages request must return 402"
+    );
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let pr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let accepts = pr["accepts"].as_array().expect("accepts array");
+    let exact = accepts
+        .iter()
+        .find(|a| a["scheme"] == "exact")
+        .expect("exact scheme present");
+    exact["amount"]
+        .as_str()
+        .expect("amount is a string")
+        .parse()
+        .expect("amount parses as u64 atomic units")
 }
