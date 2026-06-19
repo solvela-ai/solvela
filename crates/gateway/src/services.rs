@@ -969,4 +969,28 @@ internal = true
         let registry = ServiceRegistry::from_toml(ok).expect("internal-without-price must load");
         assert_eq!(registry.all().len(), 1);
     }
+
+    /// Drift guard: the SHIPPED `config/services.toml` must parse, and its live
+    /// `web-search` tool entry must stay internal + priced + served at
+    /// `/v1/search`. The `/v1/search` route reads its price from this entry, so
+    /// a TOML edit that drops the price or flips `internal` would silently 503
+    /// the live tool — fail loudly here instead.
+    #[test]
+    fn shipped_services_toml_parses_and_lists_web_search() {
+        let toml = include_str!("../../../config/services.toml");
+        let registry =
+            ServiceRegistry::from_toml(toml).expect("shipped config/services.toml must parse");
+        let ws = registry
+            .get("web-search")
+            .expect("config/services.toml must register the web-search tool");
+        assert!(ws.internal, "web-search is a gateway-hosted internal tool");
+        assert_eq!(ws.endpoint, "/v1/search");
+        assert_eq!(ws.category, "search");
+        assert!(ws.x402_enabled);
+        assert_eq!(
+            ws.price_per_request_usdc,
+            Some(0.01),
+            "web-search must stay priced — /v1/search reads this and 503s without it"
+        );
+    }
 }

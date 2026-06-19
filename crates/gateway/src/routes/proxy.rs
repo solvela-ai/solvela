@@ -25,91 +25,13 @@ use crate::error::GatewayError;
 use crate::middleware::x402::decode_payment_header;
 use crate::payment_util::extract_payer_wallet;
 use crate::receipts;
+use crate::routes::service_payment::{compute_service_cost, ServiceCost};
 use crate::security;
 use crate::usage::{SpendLogEntry, VendorSettlement};
 use crate::AppState;
 
 /// Upstream request timeout for external service proxying.
 const PROXY_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Upper bound for `price_per_request_usdc` that the integer cost path will accept.
-///
-/// Multiplying by 1_000_000 (USDC → atomic units) must not overflow `u64`.
-/// We cap at `u64::MAX / 1_000_000` ≈ $18.4 trillion per request, which is far
-/// beyond any realistic external-service price.
-const PRICE_USDC_MAX: f64 = (u64::MAX / 1_000_000) as f64;
-
-/// Validate a `price_per_request_usdc` value before it is cast to `u64`.
-///
-/// A naked `as u64` cast is fail-open for adversarial values:
-/// - `NaN as u64` → 0 (service served for free)
-/// - `f64::INFINITY as u64` → `u64::MAX` (panics on later arithmetic)
-/// - negative `as u64` → giant positive number (also serves for free after `% 105 / 100`
-///   because the price would be parsed but the comparison against `client_amount`
-///   could overflow or under-charge).
-fn validate_price_usdc(price_usdc: f64) -> Result<(), String> {
-    if !price_usdc.is_finite() {
-        return Err(format!(
-            "price_per_request_usdc is non-finite ({price_usdc}); \
-             refusing to cast NaN/∞ to u64"
-        ));
-    }
-    if price_usdc < 0.0 {
-        return Err(format!(
-            "price_per_request_usdc is negative ({price_usdc}); \
-             negative USDC amounts are invalid"
-        ));
-    }
-    if price_usdc > PRICE_USDC_MAX {
-        return Err(format!(
-            "price_per_request_usdc ({price_usdc}) exceeds u64 range \
-             after ×1_000_000 conversion"
-        ));
-    }
-    Ok(())
-}
-
-/// All three atomic-USDC components of a paid service request, derived from a
-/// single `price_per_request_usdc` value.
-///
-/// Centralising the breakdown in one struct (instead of recomputing each field
-/// inline at the call site) prevents drift if the platform-fee percentage ever
-/// changes — the call site only knows about `total_atomic`, `provider_atomic`,
-/// and `fee_atomic` as derived values, never as independent expressions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ServiceCost {
-    /// Amount the upstream provider receives, in atomic USDC (6 decimals).
-    provider_atomic: u64,
-    /// Platform fee on top of the provider amount, in atomic USDC.
-    fee_atomic: u64,
-    /// Total amount the client must pay, in atomic USDC. Always equals
-    /// `provider_atomic + fee_atomic`.
-    total_atomic: u64,
-}
-
-/// Compute the full atomic-USDC cost breakdown for a service request.
-///
-/// Uses integer arithmetic to avoid floating-point precision loss on financial
-/// amounts: the `price_usdc` is converted to atomic units (6 decimals) once via
-/// the only `f64 → u64` cast in the path, then the 5% platform fee is applied
-/// in pure integer math.
-///
-/// Returns `Err` (not `Ok` with zeros) on NaN/Inf/negative/overflow input so the
-/// caller fails-closed — a corrupt registry entry must reject the request, not
-/// serve it for free. See `validate_price_usdc` for the rationale.
-fn compute_service_cost(price_usdc: f64) -> Result<ServiceCost, String> {
-    validate_price_usdc(price_usdc)?;
-    let provider_atomic = (price_usdc * 1_000_000.0).round() as u64;
-    // 5% platform fee: total = provider * 105 / 100. `saturating_mul` is
-    // belt-and-braces — `validate_price_usdc` already capped the magnitude.
-    let total_atomic = provider_atomic.saturating_mul(105) / 100;
-    let fee_atomic = total_atomic.saturating_sub(provider_atomic);
-    Ok(ServiceCost {
-        provider_atomic,
-        fee_atomic,
-        total_atomic,
-    })
-}
 
 /// Where a paid service request settles, with the amounts attached to each leg.
 ///
@@ -923,123 +845,10 @@ mod tests {
     use crate::payment_util::extract_signer_from_base64_tx;
     use solvela_x402::types::USDC_MINT;
 
-    /// Convenience: total atomic cost only — most existing tests only care
-    /// about the total, not the full breakdown.
-    fn total_atomic(price_usdc: f64) -> Result<u64, String> {
-        compute_service_cost(price_usdc).map(|c| c.total_atomic)
-    }
-
-    #[test]
-    fn test_compute_service_cost_basic() {
-        // 0.01 USDC = 10_000 atomic; with 5% fee = 10_500 total, fee = 500
-        let cost = compute_service_cost(0.01).unwrap();
-        assert_eq!(cost.provider_atomic, 10_000);
-        assert_eq!(cost.fee_atomic, 500);
-        assert_eq!(cost.total_atomic, 10_500);
-    }
-
-    #[test]
-    fn test_compute_service_cost_breakdown_sums_to_total() {
-        // The invariant the call site relies on for the 402 response: the
-        // displayed provider + fee always reconstruct the total.
-        for price in [0.0, 0.001, 0.01, 0.0042, 1.0, 12.345, 1_000.0] {
-            let cost = compute_service_cost(price).unwrap();
-            assert_eq!(
-                cost.provider_atomic + cost.fee_atomic,
-                cost.total_atomic,
-                "breakdown invariant broken for price={price}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_compute_service_cost_small() {
-        assert_eq!(total_atomic(0.001).unwrap(), 1_050);
-    }
-
-    #[test]
-    fn test_compute_service_cost_zero() {
-        assert_eq!(total_atomic(0.0).unwrap(), 0);
-    }
-
-    #[test]
-    fn test_compute_service_cost_large() {
-        assert_eq!(total_atomic(1.0).unwrap(), 1_050_000);
-    }
-
-    #[test]
-    fn test_compute_service_cost_consistency() {
-        let price = 0.002625;
-        let result1 = compute_service_cost(price).unwrap();
-        let result2 = compute_service_cost(price).unwrap();
-        assert_eq!(result1, result2);
-    }
-
-    #[test]
-    fn test_compute_service_cost_uses_round_not_truncate() {
-        // 0.0000015 USDC = 1.5 atomic -> rounds to 2 -> 2 * 105/100 = 2
-        assert_eq!(total_atomic(0.0000015).unwrap(), 2);
-    }
-
-    // =========================================================================
-    // HIGH-2: NaN/Inf/negative/overflow guards on price_per_request_usdc
-    //
-    // Without these guards, a corrupt `services.toml` entry with `price = nan`
-    // makes `(price * 1e6).round() as u64` return 0, and the proxy serves the
-    // upstream request for free.
-    // =========================================================================
-
-    #[test]
-    fn test_compute_service_cost_rejects_nan() {
-        let result = compute_service_cost(f64::NAN);
-        assert!(result.is_err(), "NaN price must be rejected");
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("non-finite"),
-            "error must mention non-finite, got: {err}"
-        );
-    }
-
-    #[test]
-    fn test_compute_service_cost_rejects_positive_infinity() {
-        let result = compute_service_cost(f64::INFINITY);
-        assert!(result.is_err(), "+inf price must be rejected");
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("non-finite"),
-            "error must mention non-finite, got: {err}"
-        );
-    }
-
-    #[test]
-    fn test_compute_service_cost_rejects_negative_infinity() {
-        let result = compute_service_cost(f64::NEG_INFINITY);
-        assert!(result.is_err(), "-inf price must be rejected");
-    }
-
-    #[test]
-    fn test_compute_service_cost_rejects_negative() {
-        let result = compute_service_cost(-0.001);
-        assert!(result.is_err(), "negative price must be rejected");
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("negative"),
-            "error must mention negative, got: {err}"
-        );
-    }
-
-    #[test]
-    fn test_compute_service_cost_rejects_overflow() {
-        // PRICE_USDC_MAX ≈ 1.84e13. Anything above must reject so the
-        // ×1_000_000 multiplication cannot overflow u64.
-        let result = compute_service_cost(1.0e18_f64);
-        assert!(result.is_err(), "overflowing price must be rejected");
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("exceeds u64 range") || err.contains("overflow"),
-            "error must mention overflow/range, got: {err}"
-        );
-    }
+    // The flat-price + 5%-fee cost math (`compute_service_cost`) now lives in
+    // `routes/service_payment.rs` (shared with the `/v1/search` tool route) and
+    // is unit-tested there. The proxy tests below exercise the proxy handler's
+    // use of it end-to-end.
 
     #[test]
     fn test_extract_payer_wallet_escrow() {
@@ -1213,6 +1022,7 @@ mod tests {
             .expect("valid placeholder model TOML"), // safe: known-good test data
             service_registry: RwLock::new(reg),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            search_provider: None,
             facilitator: Facilitator::new(vec![]),
             usage: UsageTracker::noop(),
             cache: None, // no Redis — triggers the LRU fallback path
@@ -1365,6 +1175,7 @@ mod tests {
             .expect("valid placeholder model TOML"),
             service_registry: RwLock::new(reg),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            search_provider: None,
             facilitator: Facilitator::new(vec![]),
             usage: UsageTracker::noop(),
             cache: None,

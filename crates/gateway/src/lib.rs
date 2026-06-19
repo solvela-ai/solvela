@@ -55,6 +55,11 @@ pub struct AppState {
     pub model_registry: ModelRegistry,
     pub service_registry: RwLock<ServiceRegistry>,
     pub providers: ProviderRegistry,
+    /// Web-search tool upstream adapter (e.g. Tavily). `None` unless a search
+    /// API key is configured (`TAVILY_API_KEY`) — mirrors [`ProviderRegistry`]
+    /// env-gating. When `None`, `POST /v1/search` returns 503 (never a free or
+    /// stub-paid response). See [`crate::providers::search`].
+    pub search_provider: Option<Arc<dyn providers::search::SearchProvider>>,
     pub facilitator: Facilitator,
     pub usage: usage::UsageTracker,
     pub cache: Option<cache::ResponseCache>,
@@ -188,7 +193,7 @@ impl AppState {
 
     /// Create a new in-memory replay set (per-path bucketed LRU cache).
     ///
-    /// Returns a [`ReplaySet`] with three independent 10,000-entry LRU
+    /// Returns a [`ReplaySet`] with four independent 10,000-entry LRU
     /// buckets — one per route group. Construction sites continue to
     /// call this helper unchanged; lookup sites navigate via
     /// [`ReplaySet::for_path`].
@@ -209,19 +214,22 @@ pub enum ReplayPath {
     Proxy,
     /// `POST /a2a` (`message/send` flow)
     A2a,
+    /// `POST /v1/search` (internal web-search tool)
+    Search,
 }
 
 /// In-memory replay protection fallback used when Redis is absent.
 ///
-/// Holds three independent LRUs keyed by [`ReplayPath`] so eviction in
+/// Holds four independent LRUs keyed by [`ReplayPath`] so eviction in
 /// one path's bucket does not affect the others. Per-bucket capacity
-/// matches the previous shared capacity (10K) — total memory is 3× the
-/// prior single-LRU footprint, but the absolute size is small (≈6 MB
+/// matches the previous shared capacity (10K) — total memory is 4× the
+/// prior single-LRU footprint, but the absolute size is small (≈8 MB
 /// worst case for ~200-byte entries).
 pub struct ReplaySet {
     chat: Mutex<LruCache<String, std::time::Instant>>,
     proxy: Mutex<LruCache<String, std::time::Instant>>,
     a2a: Mutex<LruCache<String, std::time::Instant>>,
+    search: Mutex<LruCache<String, std::time::Instant>>,
 }
 
 impl ReplaySet {
@@ -238,6 +246,7 @@ impl ReplaySet {
             chat: bucket(),
             proxy: bucket(),
             a2a: bucket(),
+            search: bucket(),
         }
     }
 
@@ -249,6 +258,7 @@ impl ReplaySet {
             ReplayPath::Chat => &self.chat,
             ReplayPath::Proxy => &self.proxy,
             ReplayPath::A2a => &self.a2a,
+            ReplayPath::Search => &self.search,
         }
     }
 }
@@ -308,6 +318,7 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             "/v1/images/generations",
             post(routes::images::image_generations),
         )
+        .route("/v1/search", post(routes::search::search))
         .route("/v1/models", get(routes::models::list_models))
         .route("/v1/services", get(routes::services::list_services))
         .route(
@@ -659,15 +670,19 @@ mod replay_set_tests {
 
     #[test]
     fn for_path_returns_distinct_buckets() {
-        // Three buckets, three distinct memory addresses — the wrapper
+        // Four buckets, four distinct memory addresses — the wrapper
         // hands out independent Mutex pointers per path.
         let rs = ReplaySet::new();
         let chat = rs.for_path(ReplayPath::Chat) as *const _;
         let proxy = rs.for_path(ReplayPath::Proxy) as *const _;
         let a2a = rs.for_path(ReplayPath::A2a) as *const _;
+        let search = rs.for_path(ReplayPath::Search) as *const _;
         assert_ne!(chat, proxy, "chat and proxy buckets must differ");
         assert_ne!(chat, a2a, "chat and a2a buckets must differ");
         assert_ne!(proxy, a2a, "proxy and a2a buckets must differ");
+        assert_ne!(search, chat, "search and chat buckets must differ");
+        assert_ne!(search, proxy, "search and proxy buckets must differ");
+        assert_ne!(search, a2a, "search and a2a buckets must differ");
     }
 
     #[test]

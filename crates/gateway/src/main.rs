@@ -299,6 +299,15 @@ async fn main() -> anyhow::Result<()> {
     let configured = providers.configured_providers();
     info!(providers = ?configured, "initialized provider registry");
 
+    // Initialize the web-search tool adapter (env-gated: only present when a
+    // search API key is configured, e.g. TAVILY_API_KEY). When absent,
+    // `POST /v1/search` returns 503 rather than serving free.
+    let search_provider = gateway::providers::search::search_provider_from_env(http_client.clone());
+    info!(
+        search_provider = search_provider.as_ref().map(|p| p.name()),
+        "initialized web-search provider"
+    );
+
     // Initialize Solana payment verifier.
     //
     // SECURITY: In production mode (RCR_ENV=production), a valid Solana config
@@ -800,6 +809,7 @@ async fn main() -> anyhow::Result<()> {
         model_registry,
         service_registry,
         providers,
+        search_provider,
         facilitator,
         usage,
         cache: response_cache,

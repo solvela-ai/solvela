@@ -14,6 +14,8 @@ pub mod orgs;
 pub mod pricing;
 pub mod proxy;
 pub mod receipts;
+pub mod search;
+pub mod service_payment;
 pub mod services;
 pub mod stats;
 pub mod supported;

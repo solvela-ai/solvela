@@ -1,11 +1,30 @@
 # x402 Service Marketplace Registry
-# Phase 6: Registered x402-compatible services available through the gateway.
+# Registered x402-compatible services available through the gateway.
 #
-# Phase 6 is NOT YET IMPLEMENTED. All entries below are commented out to
-# prevent health-check warnings on the deployed gateway. Uncomment and
-# update endpoints when the service marketplace code is wired in.
+# Active entries below are loaded at startup and listed by `GET /v1/services`.
+# Commented-out entries are placeholders/examples — do not enable without a
+# real endpoint.
 #
 # ── Internal services (served by this gateway) ──────────────────────
+#
+# Web search tool (Agent Toolbelt PR #1). Served by THIS gateway at
+# `POST /v1/search`, x402-paid, flat per-call price + 5% platform fee. The
+# gateway proxies an upstream search API (Tavily) using its own
+# `TAVILY_API_KEY`; the route returns 503 when no key is configured. Pricing
+# lives here so it is the single source of truth and `/v1/search` reads it.
+#
+# `price_per_request_usdc` = upstream-cost-covering default ($0.01; Tavily is
+# ~$0.008/call). The agent pays price × 1.05 = $0.0105 (5% platform fee on top).
+[services.web-search]
+name = "Web Search"
+endpoint = "/v1/search"
+category = "search"
+x402_enabled = true
+internal = true
+description = "x402-paid web search (Tavily upstream); normalized title/url/snippet results"
+pricing_label = "$0.0105/query (incl. 5% platform fee)"
+price_per_request_usdc = 0.01
+
 #
 # [services.llm-gateway]
 # name = "LLM Intelligence"
