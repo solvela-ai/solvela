@@ -7,7 +7,11 @@ use solvela_protocol::{
     MessageContent, ModelRegistration, ParseImageError, ParsedImage, Role, Usage,
 };
 
+use super::cache_usage::CacheUsage;
 use super::{ChatStream, LLMProvider, ProviderError};
+
+/// Provider label used for cache-token metering counters.
+const PROVIDER_LABEL: &str = "anthropic";
 
 /// Anthropic provider adapter.
 ///
@@ -158,6 +162,51 @@ struct AnthropicUsage {
     #[serde(default)]
     cache_read_input_tokens: u32,
     output_tokens: u32,
+}
+
+impl AnthropicUsage {
+    /// Project the cache fields into the internal metering struct.
+    ///
+    /// OBSERVABILITY ONLY — this does not affect billing. Billing reconstructs
+    /// the agent's `prompt_tokens` separately in `from_anthropic_response`
+    /// (folding both cache fields back into `prompt_tokens`); this is a parallel
+    /// read of the same `#[serde(default)]` fields purely to drive counters.
+    /// `cache_read_input_tokens` → read; `cache_creation_input_tokens` → write.
+    fn cache_usage(&self) -> CacheUsage {
+        CacheUsage {
+            cache_read_tokens: self.cache_read_input_tokens,
+            cache_write_tokens: self.cache_creation_input_tokens,
+        }
+    }
+}
+
+/// Streaming `message_start.message.usage` cache fields.
+///
+/// On a streaming response the per-token prompt-cache counts arrive once, in
+/// the `message_start` event's `message.usage` object (verified against the
+/// Anthropic streaming docs 2026-06-17: the object carries `input_tokens`,
+/// `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`;
+/// the two cache fields are ABSENT when caching did not trigger, hence
+/// `#[serde(default)]`). We capture only the two cache fields here for metering.
+///
+/// OBSERVABILITY ONLY: streaming BILLING is unaffected — the streaming path
+/// bills off a request-side estimate, never response usage (`ChatChunk` carries
+/// no usage block). This struct never reaches billing or the public wire types.
+#[derive(Debug, Default, Deserialize)]
+struct AnthropicStreamUsage {
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
+}
+
+impl AnthropicStreamUsage {
+    fn cache_usage(&self) -> CacheUsage {
+        CacheUsage {
+            cache_read_tokens: self.cache_read_input_tokens,
+            cache_write_tokens: self.cache_creation_input_tokens,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +389,14 @@ fn from_anthropic_response(resp: AnthropicResponse, original_model: &str) -> Cha
         other => other.to_string(),
     });
 
+    // OBSERVABILITY ONLY: emit prompt-cache token counters. This reads the same
+    // `#[serde(default)]` cache fields the billing reconstruction below uses,
+    // but only to drive Prometheus counters — it does not change `prompt_tokens`
+    // or anything the agent is charged.
+    resp.usage
+        .cache_usage()
+        .emit(PROVIDER_LABEL, original_model);
+
     ChatResponse {
         id: resp.id,
         object: "chat.completion".to_string(),
@@ -397,6 +454,12 @@ struct AnthropicMessageStart {
 struct AnthropicMessageStartBody {
     id: String,
     model: String,
+    /// Prompt-cache token counts for this stream, reported once in
+    /// `message_start`. Optional + `#[serde(default)]` so a response that omits
+    /// `usage` (older shape / no caching) parses cleanly to no metering. Used
+    /// for OBSERVABILITY ONLY (streaming billing is request-side estimated).
+    #[serde(default)]
+    usage: Option<AnthropicStreamUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -462,6 +525,28 @@ fn spawn_anthropic_sse_parser(response: reqwest::Response, model: String) -> Cha
                             "message_start" => {
                                 match serde_json::from_str::<AnthropicMessageStart>(&data) {
                                     Ok(msg) => {
+                                        // OBSERVABILITY ONLY: streaming cache-token
+                                        // metering. The prompt-cache counts arrive
+                                        // once, here in message_start. Emitting does
+                                        // NOT change the streamed `ChatChunk` shape
+                                        // (we only read `message.usage`) and does NOT
+                                        // affect streaming billing, which is a
+                                        // request-side estimate, never response usage.
+                                        //
+                                        // Emit the denominator UNCONDITIONALLY for
+                                        // every successfully parsed message_start —
+                                        // even when `usage` is absent — so the
+                                        // `requests_total` flatline-detection signal
+                                        // counts every streamed response, matching the
+                                        // non-streaming path. An absent usage block
+                                        // emits CacheUsage::default() (0 read / 0
+                                        // write).
+                                        msg.message
+                                            .usage
+                                            .as_ref()
+                                            .map(AnthropicStreamUsage::cache_usage)
+                                            .unwrap_or_default()
+                                            .emit(PROVIDER_LABEL, &model);
                                         message_id = msg.message.id.clone();
                                         let chunk = ChatChunk {
                                             id: msg.message.id,
@@ -1295,5 +1380,268 @@ mod tests {
         );
         assert_eq!(chat_resp.choices[0].finish_reason, Some("stop".to_string()));
         assert_eq!(chat_resp.usage.as_ref().unwrap().total_tokens, 18);
+    }
+
+    // -----------------------------------------------------------------------
+    // PR-2 cross-provider cache-token metering (OBSERVABILITY ONLY).
+    // -----------------------------------------------------------------------
+
+    use crate::cache::test_metrics::{counter_value_filtered, install_test_recorder};
+
+    /// `AnthropicUsage::cache_usage()` maps the read field to read and the
+    /// write field to write. A usage WITHOUT cache fields yields
+    /// `CacheUsage::default()` (0/0) — never a parse error.
+    #[test]
+    fn anthropic_usage_projects_cache_usage() {
+        let usage = AnthropicUsage {
+            input_tokens: 200,
+            cache_creation_input_tokens: 500,
+            cache_read_input_tokens: 1800,
+            output_tokens: 50,
+        };
+        let cu = usage.cache_usage();
+        assert_eq!(cu.cache_read_tokens, 1800);
+        assert_eq!(cu.cache_write_tokens, 500);
+
+        // Caching-off shape (no cache fields present) → 0/0, not an error.
+        let raw = r#"{"input_tokens":2000,"output_tokens":50}"#;
+        let usage_no_cache: AnthropicUsage = serde_json::from_str(raw).unwrap();
+        assert_eq!(usage_no_cache.cache_usage(), CacheUsage::default());
+    }
+
+    /// `from_anthropic_response` emits the read, write, and denominator counters
+    /// by the parsed amounts — AND leaves `prompt_tokens` identical to the
+    /// billing-reconstruction value (metering is additive, not a billing
+    /// change). Falsifiable: if `emit` were not called, the counter deltas
+    /// would be 0; if metering altered billing, `prompt_tokens` would differ
+    /// from the PR-1 reconstruction (200 + 500 + 1800 = 2500).
+    #[test]
+    fn from_anthropic_response_emits_counters_without_touching_billing() {
+        let handle = install_test_recorder();
+        // Unique model label isolates this test's series from concurrent tests
+        // touching the same counter families (single process-wide recorder).
+        let model = "anthropic/metering-nonstream-unique";
+        let key = format!("model=\"{model}\"");
+        let read_before =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let write_before =
+            counter_value_filtered(&handle, "solvela_provider_cache_write_tokens_total", &key);
+        let req_before = counter_value_filtered(&handle, "solvela_provider_requests_total", &key);
+
+        let anthropic_resp = AnthropicResponse {
+            id: "msg_metering".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            content: vec![AnthropicContentBlock {
+                content_type: "text".to_string(),
+                text: Some("ok".to_string()),
+            }],
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 200,
+                cache_creation_input_tokens: 500,
+                cache_read_input_tokens: 1800,
+                output_tokens: 50,
+            },
+        };
+        let chat_resp = from_anthropic_response(anthropic_resp, model);
+
+        // Billing is UNCHANGED: full prompt reconstruction (200 + 500 + 1800).
+        assert_eq!(
+            chat_resp.usage.as_ref().unwrap().prompt_tokens,
+            2500,
+            "metering must not change the agent's billed prompt_tokens"
+        );
+
+        let read_after =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let write_after =
+            counter_value_filtered(&handle, "solvela_provider_cache_write_tokens_total", &key);
+        let req_after = counter_value_filtered(&handle, "solvela_provider_requests_total", &key);
+        assert_eq!(read_after - read_before, 1800, "read counter delta");
+        assert_eq!(write_after - write_before, 500, "write counter delta");
+        assert_eq!(req_after - req_before, 1, "denominator delta");
+    }
+
+    /// The streaming `message_start.message.usage` cache fields deserialize into
+    /// an `AnthropicStreamUsage` and project to the right `CacheUsage`. Uses a
+    /// real `message_start` data payload captured from the Anthropic streaming
+    /// docs shape.
+    #[test]
+    fn message_start_usage_parses_cache_fields() {
+        let data = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":2679,"cache_creation_input_tokens":120,"cache_read_input_tokens":2400,"output_tokens":3}}}"#;
+        let parsed: AnthropicMessageStart =
+            serde_json::from_str(data).expect("message_start with usage must parse");
+        let usage = parsed
+            .message
+            .usage
+            .as_ref()
+            .expect("usage must be present");
+        let cu = usage.cache_usage();
+        assert_eq!(cu.cache_read_tokens, 2400);
+        assert_eq!(cu.cache_write_tokens, 120);
+    }
+
+    /// A `message_start` WITHOUT a `usage` object (older shape / caching off)
+    /// still parses — `usage` is `None` (no metering), never a parse error.
+    /// This guards the streaming backward-compat path.
+    #[test]
+    fn message_start_without_usage_parses_to_none() {
+        let data = r#"{"type":"message_start","message":{"id":"msg_02","type":"message","role":"assistant","content":[],"model":"claude-opus-4-8","stop_reason":null,"stop_sequence":null}}"#;
+        let parsed: AnthropicMessageStart =
+            serde_json::from_str(data).expect("message_start without usage must still parse");
+        assert!(
+            parsed.message.usage.is_none(),
+            "absent usage must deserialize to None, not error"
+        );
+        assert_eq!(parsed.message.id, "msg_02");
+        assert_eq!(parsed.message.model, "claude-opus-4-8");
+    }
+
+    /// End-to-end streaming metering: feed a real Anthropic SSE byte stream
+    /// (message_start with cache usage → content_block_delta → message_stop)
+    /// through `spawn_anthropic_sse_parser` and assert (a) the read/write
+    /// counters incremented by the message_start cache amounts and (b) the
+    /// streamed `ChatChunk` shape is unchanged (role chunk then a content
+    /// chunk), proving metering did not alter the stream the client receives.
+    #[tokio::test]
+    async fn streaming_metering_emits_counters_and_preserves_chunk_shape() {
+        use futures::StreamExt;
+
+        let handle = install_test_recorder();
+        // Unique model label isolates this test's counter series.
+        let model = "anthropic/metering-stream-unique";
+        let key = format!("model=\"{model}\"");
+        let read_before =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let write_before =
+            counter_value_filtered(&handle, "solvela_provider_cache_write_tokens_total", &key);
+
+        // A minimal but real Anthropic SSE event sequence: message_start
+        // carrying cache usage, one content delta, then message_stop.
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":50,\"cache_creation_input_tokens\":10,\"cache_read_input_tokens\":900,\"output_tokens\":1}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+
+        // Build a `reqwest::Response` in-process from the raw SSE body — no
+        // network, no mock server, no extra dependency. `reqwest::Response`
+        // implements `From<http::Response<B>>`, and axum re-exports the same
+        // `http` crate. `bytes_stream()` then yields the whole body so the
+        // parser exercises the real byte-buffer split + event dispatch path.
+        let http_resp = axum::http::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse.as_bytes().to_vec())
+            .expect("response build must succeed");
+        let response = reqwest::Response::from(http_resp);
+
+        let mut stream = spawn_anthropic_sse_parser(response, model.to_string());
+
+        let mut chunks = Vec::new();
+        while let Some(item) = stream.next().await {
+            chunks.push(item.expect("chunk must be Ok"));
+        }
+
+        // Chunk shape unchanged: first chunk is the role marker, then a content
+        // chunk carrying "hi". Metering reads message.usage but emits no extra
+        // chunk and mutates no field.
+        assert_eq!(chunks.len(), 2, "expected role chunk + one content chunk");
+        assert_eq!(chunks[0].choices[0].delta.role, Some(Role::Assistant));
+        assert_eq!(chunks[0].choices[0].delta.content, None);
+        assert_eq!(
+            chunks[1].choices[0].delta.content.as_deref(),
+            Some("hi"),
+            "content chunk must be forwarded unchanged"
+        );
+
+        let read_after =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let write_after =
+            counter_value_filtered(&handle, "solvela_provider_cache_write_tokens_total", &key);
+        assert_eq!(
+            read_after - read_before,
+            900,
+            "streaming read counter must increment by message_start cache_read_input_tokens"
+        );
+        assert_eq!(
+            write_after - write_before,
+            10,
+            "streaming write counter must increment by message_start cache_creation_input_tokens"
+        );
+    }
+
+    /// Streaming denominator gap (Finding 2): a `message_start` that parses
+    /// successfully but carries NO `usage` block must STILL increment the
+    /// `requests_total` denominator (emitting `CacheUsage::default()`), matching
+    /// the non-streaming path which emits unconditionally. Without the
+    /// denominator, a streaming-only flatline of cache reads would be invisible
+    /// (the flatline-detection signal that guards against a silent Anthropic
+    /// cache-field rename). Falsifiable: with the old `if let Some(usage)`
+    /// gating, the denominator delta would be 0 here.
+    #[tokio::test]
+    async fn streaming_message_start_without_usage_still_increments_denominator() {
+        use futures::StreamExt;
+
+        let handle = install_test_recorder();
+        let model = "anthropic/metering-stream-no-usage-unique";
+        let key = format!("model=\"{model}\"");
+        let read_before =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let write_before =
+            counter_value_filtered(&handle, "solvela_provider_cache_write_tokens_total", &key);
+        let req_before = counter_value_filtered(&handle, "solvela_provider_requests_total", &key);
+
+        // A real message_start with NO `usage` object (caching off / older shape),
+        // followed by a content delta and message_stop.
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_no_usage\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"stop_reason\":null}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+
+        let http_resp = axum::http::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse.as_bytes().to_vec())
+            .expect("response build must succeed");
+        let response = reqwest::Response::from(http_resp);
+
+        let mut stream = spawn_anthropic_sse_parser(response, model.to_string());
+        let mut chunks = Vec::new();
+        while let Some(item) = stream.next().await {
+            chunks.push(item.expect("chunk must be Ok"));
+        }
+
+        // Chunk shape unchanged: role chunk + content chunk.
+        assert_eq!(chunks.len(), 2, "expected role chunk + one content chunk");
+
+        let read_after =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let write_after =
+            counter_value_filtered(&handle, "solvela_provider_cache_write_tokens_total", &key);
+        let req_after = counter_value_filtered(&handle, "solvela_provider_requests_total", &key);
+
+        assert_eq!(
+            req_after - req_before,
+            1,
+            "denominator must increment once even when message_start carries no usage block"
+        );
+        assert_eq!(
+            read_after - read_before,
+            0,
+            "no usage block ⇒ zero cache reads"
+        );
+        assert_eq!(
+            write_after - write_before,
+            0,
+            "no usage block ⇒ zero cache writes"
+        );
     }
 }
