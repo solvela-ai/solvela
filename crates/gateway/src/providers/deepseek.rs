@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
+use tracing::warn;
 
 use solvela_protocol::{ChatRequest, ChatResponse, ModelRegistration};
 
@@ -30,11 +31,25 @@ struct DeepSeekUsage {
 /// Returns `CacheUsage::default()` (0/0) when `usage` or the field is absent —
 /// fail-safe, never an error.
 fn cache_usage_from_deepseek_body(body: &serde_json::Value) -> CacheUsage {
-    let read = body
-        .get("usage")
-        .and_then(|u| serde_json::from_value::<DeepSeekUsage>(u.clone()).ok())
-        .map(|u| u.prompt_cache_hit_tokens)
-        .unwrap_or(0);
+    // Absent `usage` (or no-cache) ⇒ 0 silently — the normal fail-safe. A
+    // `usage` block that is PRESENT but fails to deserialize is a real error
+    // (e.g. the provider sends `prompt_cache_hit_tokens` as a string/float/null,
+    // or renames the field): log it before falling back to 0 so the counter
+    // reading 0 is not silent (Finding 1). Only an actual deserialize error
+    // warns; the absent/no-cache path stays quiet.
+    let read = match body.get("usage") {
+        None => 0,
+        Some(usage) => match serde_json::from_value::<DeepSeekUsage>(usage.clone()) {
+            Ok(parsed) => parsed.prompt_cache_hit_tokens,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "deepseek: failed to parse usage details for cache metering; cache counts will be 0"
+                );
+                0
+            }
+        },
+    };
     CacheUsage {
         cache_read_tokens: read,
         cache_write_tokens: 0,
@@ -275,6 +290,24 @@ mod tests {
         assert_eq!(cache_usage_from_deepseek_body(&body), CacheUsage::default());
 
         let body = serde_json::json!({ "id": "x", "choices": [] });
+        assert_eq!(cache_usage_from_deepseek_body(&body), CacheUsage::default());
+    }
+
+    /// A `usage` block whose `prompt_cache_hit_tokens` has the WRONG type
+    /// (string / negative) is a real deserialize error: the parser must fall
+    /// back to `CacheUsage::default()` (0/0) — never panic — while flagging the
+    /// failure (Finding 1: the old `.ok()` swallowed this silently). Falsifiable:
+    /// an `unwrap` on the parse Result would panic here.
+    #[test]
+    fn cache_usage_from_deepseek_body_falls_back_on_parse_error() {
+        let body = serde_json::json!({
+            "usage": { "prompt_tokens": 1000, "prompt_cache_hit_tokens": "not-a-number" }
+        });
+        assert_eq!(cache_usage_from_deepseek_body(&body), CacheUsage::default());
+
+        let body = serde_json::json!({
+            "usage": { "prompt_cache_hit_tokens": -7 }
+        });
         assert_eq!(cache_usage_from_deepseek_body(&body), CacheUsage::default());
     }
 

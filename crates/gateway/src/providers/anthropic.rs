@@ -532,9 +532,21 @@ fn spawn_anthropic_sse_parser(response: reqwest::Response, model: String) -> Cha
                                         // (we only read `message.usage`) and does NOT
                                         // affect streaming billing, which is a
                                         // request-side estimate, never response usage.
-                                        if let Some(usage) = &msg.message.usage {
-                                            usage.cache_usage().emit(PROVIDER_LABEL, &model);
-                                        }
+                                        //
+                                        // Emit the denominator UNCONDITIONALLY for
+                                        // every successfully parsed message_start —
+                                        // even when `usage` is absent — so the
+                                        // `requests_total` flatline-detection signal
+                                        // counts every streamed response, matching the
+                                        // non-streaming path. An absent usage block
+                                        // emits CacheUsage::default() (0 read / 0
+                                        // write).
+                                        msg.message
+                                            .usage
+                                            .as_ref()
+                                            .map(AnthropicStreamUsage::cache_usage)
+                                            .unwrap_or_default()
+                                            .emit(PROVIDER_LABEL, &model);
                                         message_id = msg.message.id.clone();
                                         let chunk = ChatChunk {
                                             id: msg.message.id,
@@ -1559,6 +1571,77 @@ mod tests {
             write_after - write_before,
             10,
             "streaming write counter must increment by message_start cache_creation_input_tokens"
+        );
+    }
+
+    /// Streaming denominator gap (Finding 2): a `message_start` that parses
+    /// successfully but carries NO `usage` block must STILL increment the
+    /// `requests_total` denominator (emitting `CacheUsage::default()`), matching
+    /// the non-streaming path which emits unconditionally. Without the
+    /// denominator, a streaming-only flatline of cache reads would be invisible
+    /// (the flatline-detection signal that guards against a silent Anthropic
+    /// cache-field rename). Falsifiable: with the old `if let Some(usage)`
+    /// gating, the denominator delta would be 0 here.
+    #[tokio::test]
+    async fn streaming_message_start_without_usage_still_increments_denominator() {
+        use futures::StreamExt;
+
+        let handle = install_test_recorder();
+        let model = "anthropic/metering-stream-no-usage-unique";
+        let key = format!("model=\"{model}\"");
+        let read_before =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let write_before =
+            counter_value_filtered(&handle, "solvela_provider_cache_write_tokens_total", &key);
+        let req_before = counter_value_filtered(&handle, "solvela_provider_requests_total", &key);
+
+        // A real message_start with NO `usage` object (caching off / older shape),
+        // followed by a content delta and message_stop.
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_no_usage\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"stop_reason\":null}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+
+        let http_resp = axum::http::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse.as_bytes().to_vec())
+            .expect("response build must succeed");
+        let response = reqwest::Response::from(http_resp);
+
+        let mut stream = spawn_anthropic_sse_parser(response, model.to_string());
+        let mut chunks = Vec::new();
+        while let Some(item) = stream.next().await {
+            chunks.push(item.expect("chunk must be Ok"));
+        }
+
+        // Chunk shape unchanged: role chunk + content chunk.
+        assert_eq!(chunks.len(), 2, "expected role chunk + one content chunk");
+
+        let read_after =
+            counter_value_filtered(&handle, "solvela_provider_cache_read_tokens_total", &key);
+        let write_after =
+            counter_value_filtered(&handle, "solvela_provider_cache_write_tokens_total", &key);
+        let req_after = counter_value_filtered(&handle, "solvela_provider_requests_total", &key);
+
+        assert_eq!(
+            req_after - req_before,
+            1,
+            "denominator must increment once even when message_start carries no usage block"
+        );
+        assert_eq!(
+            read_after - read_before,
+            0,
+            "no usage block ⇒ zero cache reads"
+        );
+        assert_eq!(
+            write_after - write_before,
+            0,
+            "no usage block ⇒ zero cache writes"
         );
     }
 }

@@ -43,6 +43,14 @@
 //! `prompt_tokens`); this metering is the mitigation, and pairing the read
 //! counter with `requests_total` makes the flatline detectable on a dashboard
 //! rather than invisible.
+//!
+//! ## Streaming scope
+//!
+//! For OpenAI/xAI/DeepSeek the `requests_total` denominator counts NON-STREAMING
+//! completions only: their streaming SSE path exposes no usage block, so it is
+//! not instrumented. Anthropic streaming IS metered (counts arrive in
+//! `message_start`). Read cross-provider or streaming-vs-non-streaming ratios
+//! with that caveat — an OpenAI denominator omits its streamed traffic.
 
 use metrics::counter;
 

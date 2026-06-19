@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
+use tracing::warn;
 
 use solvela_protocol::{ChatRequest, ChatResponse, ModelRegistration};
 
@@ -43,12 +44,28 @@ struct OpenAiPromptTokensDetails {
 /// fail-safe, never an error. Shared by OpenAI and xAI (xAI mirrors OpenAI's
 /// usage shape).
 pub(super) fn cache_usage_from_openai_body(body: &serde_json::Value) -> CacheUsage {
-    let read = body
-        .get("usage")
-        .and_then(|u| serde_json::from_value::<OpenAiExtendedUsage>(u.clone()).ok())
-        .and_then(|u| u.prompt_tokens_details)
-        .map(|d| d.cached_tokens)
-        .unwrap_or(0);
+    // Absent `usage` (or no-cache) ⇒ 0 silently — that is the normal fail-safe.
+    // A `usage` block that is PRESENT but fails to deserialize is a real error
+    // (e.g. the provider sends `cached_tokens` as a string/float/null, or
+    // renames the field shape): log it before falling back to 0 so the counter
+    // reading 0 is not silent (Finding 1). Only an actual deserialize error
+    // warns; the absent/no-cache path stays quiet.
+    let read = match body.get("usage") {
+        None => 0,
+        Some(usage) => match serde_json::from_value::<OpenAiExtendedUsage>(usage.clone()) {
+            Ok(parsed) => parsed
+                .prompt_tokens_details
+                .map(|d| d.cached_tokens)
+                .unwrap_or(0),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "openai: failed to parse usage details for cache metering; cache counts will be 0"
+                );
+                0
+            }
+        },
+    };
     CacheUsage {
         cache_read_tokens: read,
         cache_write_tokens: 0,
@@ -328,6 +345,30 @@ mod tests {
 
         // No usage block at all.
         let body = serde_json::json!({ "id": "x", "choices": [] });
+        assert_eq!(cache_usage_from_openai_body(&body), CacheUsage::default());
+    }
+
+    /// A `usage` block whose `prompt_tokens_details.cached_tokens` has the WRONG
+    /// type (string instead of integer) is a real deserialize error: the parser
+    /// must fall back to `CacheUsage::default()` (0/0) — never panic — while
+    /// still flagging the failure (Finding 1: the old `.ok()` swallowed this
+    /// silently, so the counter read 0 with no signal). Falsifiable: an `unwrap`
+    /// on the parse Result would panic here.
+    #[test]
+    fn cache_usage_from_openai_body_falls_back_on_parse_error() {
+        // `cached_tokens` as a string is not deserializable into u32.
+        let body = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 1000,
+                "prompt_tokens_details": { "cached_tokens": "not-a-number" }
+            }
+        });
+        assert_eq!(cache_usage_from_openai_body(&body), CacheUsage::default());
+
+        // `cached_tokens` as a negative number also fails u32 deserialization.
+        let body = serde_json::json!({
+            "usage": { "prompt_tokens_details": { "cached_tokens": -5 } }
+        });
         assert_eq!(cache_usage_from_openai_body(&body), CacheUsage::default());
     }
 
