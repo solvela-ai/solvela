@@ -4,7 +4,7 @@
 
 **Last Updated:** 2026-05-27  
 **Provider:** PostgreSQL 16 (optional; gateway degrades gracefully without it)  
-**Migrations:** `migrations/` (13 files, idempotent, auto-run on startup)  
+**Migrations:** `migrations/` (14 files, idempotent, auto-run on startup)  
 **ORM:** sqlx (runtime-checked SQL via `sqlx::query`/`query_as`; no compile-time `query!` macros)
 
 ## Schema Overview

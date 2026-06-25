@@ -172,7 +172,7 @@ Return Task (completed) with artifacts + receipt
 | `tenant_budgets` | Per-tenant spend caps (forgeable `x-tenant`; cooperative accounting, not isolation) | wallet_address+tenant (PK), hourly/daily/monthly_limit_usdc |
 | `receipts` | Client-facing payment receipts (one per paid request) | id (UUID PK), model, payment_scheme, payer_wallet, amount_paid_atomic, provider_cost_atomic, platform_fee_atomic, total_atomic, vendor_* |
 
-Migrations in `migrations/`: 001 (spend_logs, budgets) → 013 (receipts); see [data.md](data.md) for the per-migration breakdown.
+Migrations in `migrations/`: 001 (spend_logs, budgets) → 014 (gas_drips); see [data.md](data.md) for the per-migration breakdown.
 
 ## x402 Crate (Protocol)
 
