@@ -1022,6 +1022,7 @@ mod tests {
             .expect("valid placeholder model TOML"), // safe: known-good test data
             service_registry: RwLock::new(reg),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
             search_provider: None,
             facilitator: Facilitator::new(vec![]),
             usage: UsageTracker::noop(),
@@ -1175,6 +1176,7 @@ mod tests {
             .expect("valid placeholder model TOML"),
             service_registry: RwLock::new(reg),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
             search_provider: None,
             facilitator: Facilitator::new(vec![]),
             usage: UsageTracker::noop(),

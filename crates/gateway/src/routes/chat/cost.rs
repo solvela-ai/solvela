@@ -270,6 +270,96 @@ pub(crate) fn estimate_input_tokens(req: &ChatRequest) -> u32 {
     text_tokens.saturating_add(image_tokens).max(1)
 }
 
+/// Approximate chars-per-token used by the upfront input-token estimate. Mirrors
+/// the ~4-chars/token heuristic in [`estimate_input_tokens`] so the native
+/// `/v1/messages` estimate and the OpenAI-path estimate are calibrated the same.
+const CHARS_PER_TOKEN: usize = 4;
+
+/// Upfront input-token estimate for the NATIVE `/v1/messages` passthrough,
+/// computed DIRECTLY from the original Anthropic request bytes.
+///
+/// MONEY-PATH (#500 class): the native bill is priced from provider-reported
+/// `usage`, but the upfront 402 quote + budget reservation are priced from THIS
+/// estimate. It MUST count ALL input the agent will be billed for so the quote
+/// is never UNDER-reserved relative to the native bill:
+///   - the `system` prompt (string OR array-of-blocks form),
+///   - every message's text content (string OR array-of-blocks, including
+///     `thinking` / `tool_use` / `tool_result` block text — the native path
+///     forwards them, so they cost input tokens),
+///   - the SERIALIZED `tools` definitions (tool schemas can be large; omitting
+///     them under-reserves the quote vs the native bill — a #500-class bug).
+///
+/// It deliberately over-counts rather than under-counts: it sums the byte length
+/// of the relevant JSON sub-values at the same ~4-chars/token rate as
+/// [`estimate_input_tokens`]. The final charge is reconciled to provider usage
+/// at settlement, so a conservative (slightly high) estimate only ever
+/// over-reserves the budget, never over-bills. Returns at least 1 (a degenerate
+/// empty body still quotes a non-zero token count, matching the OpenAI path).
+///
+/// Fail-OPEN on a parse miss is intentional and SAFE here: this is reached ONLY
+/// after the route has confirmed the body parses as JSON (an unparseable body is
+/// rejected earlier with a 400 / discovery-402), so the `serde_json::from_slice`
+/// below succeeds in practice. If it somehow did not, the caller still gates the
+/// resulting cost through the existing fail-closed `usdc_atomic_amount_checked`
+/// / non-finite guards — a zero token count cannot bypass those.
+pub(crate) fn estimate_native_anthropic_input_tokens(body: &[u8]) -> u32 {
+    let value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        // Unreachable in practice (the body already parsed at the route), but if
+        // it ever is, floor at 1 token rather than 0 so the quote is never $0.
+        Err(_) => return 1,
+    };
+
+    // Recursively sum the byte length of every JSON string value reachable from
+    // `node`. This counts text in `system` (string or block array), message
+    // `content` (string or block array, every block type), and serialized tool
+    // schemas — without modeling each Anthropic content-block shape (which would
+    // drift). Keys are NOT counted (they are structural, not agent prose); only
+    // string VALUES contribute, which is the conservative measure of the prompt
+    // content the model actually tokenizes.
+    fn sum_string_bytes(node: &serde_json::Value, acc: &mut usize) {
+        match node {
+            serde_json::Value::String(s) => *acc = acc.saturating_add(s.len()),
+            serde_json::Value::Array(arr) => {
+                for v in arr {
+                    sum_string_bytes(v, acc);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (_k, v) in map {
+                    sum_string_bytes(v, acc);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut chars: usize = 0;
+    // `system` — string or array of text blocks.
+    if let Some(system) = value.get("system") {
+        sum_string_bytes(system, &mut chars);
+    }
+    // `messages` — every message's content (string or block array, all types).
+    if let Some(messages) = value.get("messages") {
+        sum_string_bytes(messages, &mut chars);
+    }
+    // `tools` — the SERIALIZED tool definitions (schemas can be large). Count
+    // the compact JSON byte length so the quote reserves for them; falling back
+    // to the string-value sum keeps a value even if re-serialization fails.
+    if let Some(tools) = value.get("tools") {
+        let tool_chars = serde_json::to_vec(tools).map(|b| b.len()).unwrap_or(0);
+        if tool_chars > 0 {
+            chars = chars.saturating_add(tool_chars);
+        } else {
+            sum_string_bytes(tools, &mut chars);
+        }
+    }
+
+    let tokens = chars / CHARS_PER_TOKEN;
+    // Floor at 1 (a degenerate empty body still quotes a non-zero token count).
+    u32::try_from(tokens).unwrap_or(u32::MAX).max(1)
+}
+
 /// Compute the actual cost in atomic USDC units from token usage.
 ///
 /// Uses integer arithmetic to avoid f64 precision loss on financial amounts.
@@ -1192,6 +1282,157 @@ supports_vision = false
             supports_batch: false,
             max_output_tokens: Some(2048),
         }
+    }
+
+    /// A Sonnet-priced model ($3/M input, $15/M output) for the native
+    /// passthrough cost-pin (matches `TEST_MODELS_TOML` `claude-sonnet-4-6`).
+    fn sonnet_model_info() -> ModelRegistration {
+        ModelRegistration {
+            id: "anthropic/claude-sonnet-4-6".to_string(),
+            provider: "anthropic".to_string(),
+            model_id: "claude-sonnet-4-6".to_string(),
+            display_name: "Claude Sonnet 4.6".to_string(),
+            input_cost_per_million: 3.00,
+            output_cost_per_million: 15.00,
+            context_window: 200_000,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_vision: true,
+            reasoning: false,
+            supports_structured_output: false,
+            supports_batch: false,
+            max_output_tokens: Some(64_000),
+        }
+    }
+
+    /// NATIVE PASSTHROUGH BILLING PIN (#614–616 + 5% fee).
+    ///
+    /// Pins the native relay's billing chain against the golden Anthropic usage
+    /// fixture used by the `/v1/messages` integration test
+    /// (`input_tokens:40`, `cache_creation_input_tokens:200`,
+    /// `cache_read_input_tokens:1800`, `output_tokens:25`):
+    ///   1. the SHARED cache-token fold (`AnthropicUsage::to_billed_usage`)
+    ///      reconstructs `prompt_tokens = 40 + 200 + 1800 = 2040` — the same
+    ///      figure the reshape path computes (no drift between paths), AND
+    ///   2. `compute_actual_atomic_cost(2040, 25, sonnet)` applies the 5% fee
+    ///      EXACTLY ONCE to the EXACT golden atomic value.
+    ///
+    /// Integer math (atomic micro-USDC):
+    ///   input  = 2040 * 3  = 6120
+    ///   output = 25   * 15 = 375
+    ///   provider = 6495 ; total = 6495 * 105 / 100 = 681975 / 100 = 6819 (floor).
+    /// If a future edit double-applied the fee or dropped a cache field, this
+    /// fails LOUDLY with a concrete dollar delta.
+    #[test]
+    fn native_relay_fold_and_cost_pins_5pct_fee() {
+        // Parse the fixture's usage exactly as the relay does (deserialize-only;
+        // `AnthropicUsage` has no public constructor — JSON is the boundary).
+        let usage: crate::providers::anthropic::AnthropicUsage = serde_json::from_str(
+            r#"{"input_tokens":40,"cache_creation_input_tokens":200,"cache_read_input_tokens":1800,"output_tokens":25}"#,
+        )
+        .unwrap();
+
+        // (1) The shared #614–616 fold folds all three prompt-side fields.
+        let billed = usage.to_billed_usage();
+        assert_eq!(
+            billed.prompt_tokens, 2040,
+            "native fold must reconstruct prompt = input + cache_creation + cache_read"
+        );
+        assert_eq!(billed.completion_tokens, 25);
+
+        // (2) The exact billed atomic cost with the 5% fee applied once.
+        let model = sonnet_model_info();
+        let atomic =
+            compute_actual_atomic_cost(billed.prompt_tokens, billed.completion_tokens, &model)
+                .expect("sonnet pricing must produce a finite cost");
+        assert_eq!(
+            atomic, 6819,
+            "native bill = (2040*3 + 25*15) * 105/100 = 6819 atomic micro-USDC \
+             (5% fee applied exactly once); a different value means a double-fee \
+             or a dropped cache field"
+        );
+    }
+
+    /// The native input-token estimate counts system + every message's text +
+    /// the SERIALIZED tools (a #500-class under-reservation if tools are
+    /// omitted), and floors at 1 for a degenerate body.
+    #[test]
+    fn native_input_estimate_counts_system_messages_and_tools() {
+        // Body WITHOUT tools.
+        let no_tools = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "system": "You are a helpful assistant with a long preamble here.",
+            "messages": [{"role": "user", "content": "Explain entropy in detail please."}]
+        });
+        let no_tools_est =
+            estimate_native_anthropic_input_tokens(&serde_json::to_vec(&no_tools).unwrap());
+
+        // Same body WITH a (large) tools array. The estimate MUST grow — the
+        // serialized tool schema is billable input on the native path.
+        let with_tools = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "system": "You are a helpful assistant with a long preamble here.",
+            "tools": [{
+                "name": "get_weather",
+                "description": "Fetch the current weather for a city, with a long \
+                                description that pushes the serialized schema size up.",
+                "input_schema": {"type": "object", "properties": {
+                    "city": {"type": "string", "description": "The city name"},
+                    "units": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                }, "required": ["city"]}
+            }],
+            "messages": [{"role": "user", "content": "Explain entropy in detail please."}]
+        });
+        let with_tools_est =
+            estimate_native_anthropic_input_tokens(&serde_json::to_vec(&with_tools).unwrap());
+
+        assert!(
+            with_tools_est > no_tools_est,
+            "adding tools must INCREASE the native estimate (under-reserving by \
+             omitting tool schemas is a #500-class bug): no_tools={no_tools_est}, \
+             with_tools={with_tools_est}"
+        );
+
+        // A degenerate empty/near-empty body still floors at >= 1 token.
+        let empty = serde_json::json!({"model": "anthropic/claude-sonnet-4-6", "messages": []});
+        let empty_est =
+            estimate_native_anthropic_input_tokens(&serde_json::to_vec(&empty).unwrap());
+        assert!(empty_est >= 1, "native estimate must floor at 1 token");
+    }
+
+    /// The native estimate also counts text inside `thinking` / `tool_use` /
+    /// `tool_result` history blocks (the native path forwards them, so they cost
+    /// input tokens the quote must reserve for).
+    #[test]
+    fn native_input_estimate_counts_thinking_and_tool_history() {
+        let plain = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let plain_est =
+            estimate_native_anthropic_input_tokens(&serde_json::to_vec(&plain).unwrap());
+
+        let with_history = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "a long thinking trace that costs input tokens", "signature": "sig"},
+                    {"type": "tool_use", "id": "t1", "name": "f", "input": {"q": "a fairly long argument value"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "a long tool result that also costs input tokens"}
+                ]}
+            ]
+        });
+        let with_history_est =
+            estimate_native_anthropic_input_tokens(&serde_json::to_vec(&with_history).unwrap());
+
+        assert!(
+            with_history_est > plain_est,
+            "thinking + tool_use + tool_result history must increase the native \
+             estimate: plain={plain_est}, with_history={with_history_est}"
+        );
     }
 
     fn req_with_max_tokens(max: Option<u32>) -> ChatRequest {

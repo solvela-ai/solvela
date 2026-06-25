@@ -13,6 +13,45 @@ use super::{ChatStream, LLMProvider, ProviderError};
 /// Provider label used for cache-token metering counters.
 const PROVIDER_LABEL: &str = "anthropic";
 
+/// Default Anthropic Messages API base URL. Overridable per-instance via
+/// [`AnthropicProvider::with_base_url`] so tests can point the REAL relay at a
+/// local mock server (HALT #1 resolution: prove byte-survival through the real
+/// reqwest serialize → passthrough, not a canned-bytes trait).
+const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
+
+/// The default Anthropic API version sent upstream when the inbound client
+/// omits `anthropic-version`. Prompt caching is GA under this version.
+pub(crate) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// Errors from the native `/v1/messages` passthrough relay.
+///
+/// MONEY-PATH / SECRET-REDACTION: the relay holds the gateway's `x-api-key`.
+/// On ANY error this type carries ONLY a fixed, internals-free category — never
+/// the gateway key, the raw upstream body, or a raw reqwest/transport error
+/// (GHSA-cgqx-mg48-949v). The caller maps each variant to the Anthropic error
+/// envelope without ever surfacing the inner detail to the client; full detail
+/// is logged server-side at the call site via the [`tracing::warn!`] there.
+#[derive(Debug, thiserror::Error)]
+pub enum NativeRelayError {
+    /// The HTTP request to Anthropic could not be sent or the connection
+    /// failed (DNS, TCP, TLS, timeout). The underlying `reqwest::Error` may
+    /// carry the upstream URL — never surface it to the client.
+    #[error("native upstream request failed")]
+    Transport,
+
+    /// Anthropic returned a non-2xx status. The numeric status is retained for
+    /// server-side logging and to decide the client-facing status; the upstream
+    /// body is NOT carried here (it can echo attacker/provider-controlled bytes).
+    #[error("native upstream returned status {0}")]
+    UpstreamStatus(u16),
+
+    /// The upstream 2xx response body could not be read or did not carry a
+    /// parseable `usage` object (so billing cannot be computed from it). Fail
+    /// closed rather than bill from a fabricated/zero usage.
+    #[error("native upstream response could not be read or billed")]
+    Unbillable,
+}
+
 /// Anthropic provider adapter.
 ///
 /// Translates between OpenAI format and Anthropic's Messages API format.
@@ -24,11 +63,120 @@ const PROVIDER_LABEL: &str = "anthropic";
 pub struct AnthropicProvider {
     api_key: String,
     client: reqwest::Client,
+    /// Base URL for the Anthropic Messages API (no trailing slash). Defaults to
+    /// the public API; overridable in tests via [`with_base_url`].
+    base_url: String,
 }
 
 impl AnthropicProvider {
     pub fn new(client: reqwest::Client, api_key: String) -> Self {
-        Self { api_key, client }
+        Self {
+            api_key,
+            client,
+            base_url: DEFAULT_ANTHROPIC_BASE_URL.to_string(),
+        }
+    }
+
+    /// Override the Anthropic API base URL (no trailing slash). The supplied
+    /// value is used verbatim for BOTH the OpenAI-shaped `chat_completion` path
+    /// and the native `relay_native` path, so a test mock server intercepts the
+    /// same real reqwest call production makes.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into().trim_end_matches('/').to_string();
+        self
+    }
+
+    /// The `/v1/messages` endpoint URL on the configured base.
+    fn messages_url(&self) -> String {
+        format!("{}/v1/messages", self.base_url)
+    }
+
+    /// Native `/v1/messages` passthrough relay.
+    ///
+    /// Forwards the ORIGINAL validated Anthropic request `body` to
+    /// `{base_url}/v1/messages` VERBATIM (byte-for-byte), authenticating upstream
+    /// with the gateway's OWN `x-api-key`. On a 2xx it returns the upstream
+    /// response bytes UNTOUCHED — preserving thinking-block `signature`s,
+    /// `redacted_thinking`, native `tool_use` blocks, and the cache-token usage
+    /// breakdown that the OpenAI reshape structurally cannot carry — together
+    /// with the parsed [`AnthropicUsage`] (the ONLY thing the gateway reads from
+    /// the body, for billing). The billed [`Usage`] is derived from that usage
+    /// via the shared [`AnthropicUsage::to_billed_usage`] fold, identical to the
+    /// reshape path.
+    ///
+    /// Headers:
+    /// - `x-api-key`: the gateway's key (NEVER the inbound Solvela bearer).
+    /// - `anthropic-version`: forwarded from the inbound request verbatim, or
+    ///   [`DEFAULT_ANTHROPIC_VERSION`] when the client omits it.
+    /// - `anthropic-beta`: forwarded verbatim when present (opaque pass-through;
+    ///   no allowlist in v1).
+    ///
+    /// SECRET-REDACTION: every error path returns a [`NativeRelayError`] carrying
+    /// only a fixed category — the gateway key, the raw upstream body, and the
+    /// raw reqwest/transport error are NEVER carried out (GHSA-cgqx-mg48-949v).
+    /// `stream` is NOT handled here — the route rejects `stream:true` before this
+    /// is reached (native SSE is a follow-up).
+    pub(crate) async fn relay_native(
+        &self,
+        body: axum::body::Bytes,
+        anthropic_version: Option<&str>,
+        anthropic_beta: Option<&str>,
+    ) -> Result<(axum::body::Bytes, AnthropicUsage), NativeRelayError> {
+        let version = anthropic_version.unwrap_or(DEFAULT_ANTHROPIC_VERSION);
+
+        let mut request = self
+            .client
+            .post(self.messages_url())
+            .timeout(std::time::Duration::from_secs(90))
+            // Gateway key replaces the client's auth — the inbound Solvela bearer
+            // is NEVER forwarded to Anthropic.
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", version)
+            .header("content-type", "application/json")
+            // The ORIGINAL validated bytes, verbatim — `.body()` (not `.json()`)
+            // so no re-serialization can perturb a single byte.
+            .body(body);
+
+        if let Some(beta) = anthropic_beta {
+            request = request.header("anthropic-beta", beta);
+        }
+
+        // Transport / send failure: redact (the inner reqwest::Error can carry
+        // the upstream URL). Full detail is logged at the call site.
+        let response = request.send().await.map_err(|e| {
+            // Log here at debug so the call-site warn! stays the single
+            // client-facing decision point; never bubble `e` to the client.
+            tracing::debug!(error = %e, "native relay transport error (redacted from client)");
+            NativeRelayError::Transport
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            // Do NOT carry the upstream body (attacker/provider-controlled bytes,
+            // GHSA-cgqx-mg48-949v). Only the numeric status survives.
+            return Err(NativeRelayError::UpstreamStatus(status.as_u16()));
+        }
+
+        // Read the raw 2xx body. This is the bytes we relay UNTOUCHED.
+        let raw = response.bytes().await.map_err(|e| {
+            tracing::debug!(error = %e, "native relay body read error (redacted from client)");
+            NativeRelayError::Unbillable
+        })?;
+
+        // Parse ONLY `usage` for billing — fail closed if it is absent/unparseable
+        // (never bill from a fabricated/zero usage). We deserialize a minimal
+        // wrapper so unrelated body shape changes (new content-block types,
+        // etc.) never break billing — only the `usage` object must be present.
+        #[derive(Deserialize)]
+        struct UsageEnvelope {
+            usage: AnthropicUsage,
+        }
+        let envelope: UsageEnvelope = serde_json::from_slice(&raw).map_err(|e| {
+            tracing::debug!(error = %e, "native relay usage parse error (redacted from client)");
+            NativeRelayError::Unbillable
+        })?;
+
+        Ok((raw, envelope.usage))
     }
 }
 
@@ -155,7 +303,7 @@ struct AnthropicContentBlock {
 /// the min cacheable prefix) yields 0/0, so `billed_prompt == input_tokens` —
 /// bit-identical to pre-caching billing.
 #[derive(Debug, Deserialize)]
-struct AnthropicUsage {
+pub(crate) struct AnthropicUsage {
     input_tokens: u32,
     #[serde(default)]
     cache_creation_input_tokens: u32,
@@ -168,7 +316,7 @@ impl AnthropicUsage {
     /// Project the cache fields into the internal metering struct.
     ///
     /// OBSERVABILITY ONLY — this does not affect billing. Billing reconstructs
-    /// the agent's `prompt_tokens` separately in `from_anthropic_response`
+    /// the agent's `prompt_tokens` separately via [`Self::to_billed_usage`]
     /// (folding both cache fields back into `prompt_tokens`); this is a parallel
     /// read of the same `#[serde(default)]` fields purely to drive counters.
     /// `cache_read_input_tokens` → read; `cache_creation_input_tokens` → write.
@@ -177,6 +325,39 @@ impl AnthropicUsage {
             cache_read_tokens: self.cache_read_input_tokens,
             cache_write_tokens: self.cache_creation_input_tokens,
         }
+    }
+
+    /// SINGLE source of truth for the cache-token billing fold (#614–616).
+    ///
+    /// Reconstruct the TRUE billed prompt size: once prompt caching is on,
+    /// Anthropic's `input_tokens` is only the UNCACHED remainder — cached prompt
+    /// tokens move to `cache_creation_input_tokens` (cache write) and
+    /// `cache_read_input_tokens` (cache read). The agent is billed on the FULL
+    /// prompt regardless of the gateway's cache savings ("agent pays full rate
+    /// regardless of cache"), so all three prompt-side fields fold together.
+    ///
+    /// Both the OpenAI-reshape path ([`from_anthropic_response`]) AND the native
+    /// `/v1/messages` relay derive the billed [`Usage`] from THIS method, so the
+    /// two can never drift on the fold. Saturating adds are belt-and-suspenders
+    /// against overflow (Claude's 200K/1M context is a rounding error vs
+    /// `u32::MAX`; a wrapped value must never reach billing). The reconstructed
+    /// prompt is bounded by the model's context window, so
+    /// `cap_usage_to_request_limits` does not spuriously clamp it.
+    pub(crate) fn to_billed_usage(&self) -> Usage {
+        Usage::new(
+            self.input_tokens
+                .saturating_add(self.cache_creation_input_tokens)
+                .saturating_add(self.cache_read_input_tokens),
+            self.output_tokens,
+        )
+    }
+
+    /// Emit the cross-provider prompt-cache observability counters for one
+    /// metered response, labelled by `provider` + `model`. Shared by the
+    /// reshape and native relay paths so both surface the same metrics. Pure
+    /// observability; touches no money path.
+    pub(crate) fn emit_cache_metrics(&self, model: &str) {
+        self.cache_usage().emit(PROVIDER_LABEL, model);
     }
 }
 
@@ -393,9 +574,7 @@ fn from_anthropic_response(resp: AnthropicResponse, original_model: &str) -> Cha
     // `#[serde(default)]` cache fields the billing reconstruction below uses,
     // but only to drive Prometheus counters — it does not change `prompt_tokens`
     // or anything the agent is charged.
-    resp.usage
-        .cache_usage()
-        .emit(PROVIDER_LABEL, original_model);
+    resp.usage.emit_cache_metrics(original_model);
 
     ChatResponse {
         id: resp.id,
@@ -413,31 +592,11 @@ fn from_anthropic_response(resp: AnthropicResponse, original_model: &str) -> Cha
             },
             finish_reason,
         }],
-        // BILLING INTEGRITY: reconstruct the TRUE billed prompt size.
-        //
-        // With prompt caching on, Anthropic's `input_tokens` is only the
-        // uncached remainder; cached tokens live in `cache_creation_input_tokens`
-        // (cache write) and `cache_read_input_tokens` (cache read). Pre-caching,
-        // Anthropic reported the whole prompt as `input_tokens`, and the gateway
-        // billing path (`cap_usage_to_request_limits` → `estimate_cost`) charges
-        // the agent on `prompt_tokens`. To keep the agent's charge IDENTICAL
-        // across caching-off vs caching-on for the same prompt — and to honor the
-        // "agent pays full rate regardless of cache" invariant — fold all three
-        // back together. Mapping `input_tokens` alone would silently UNDER-BILL
-        // every cache hit.
-        //
-        // Saturating adds: belt-and-suspenders against overflow (Claude's 200K
-        // context is ~0.005% of u32::MAX, so this never actually saturates, but
-        // a wrapped value must never reach billing). The reconstructed
-        // `billed_prompt` is bounded by the model's context window, so
-        // `cap_usage_to_request_limits` does not spuriously clamp it.
-        usage: Some(Usage::new(
-            resp.usage
-                .input_tokens
-                .saturating_add(resp.usage.cache_creation_input_tokens)
-                .saturating_add(resp.usage.cache_read_input_tokens),
-            resp.usage.output_tokens,
-        )),
+        // BILLING INTEGRITY: reconstruct the TRUE billed prompt size via the
+        // SHARED cache-token fold (#614–616). `to_billed_usage` is the single
+        // source of truth used by BOTH this reshape path and the native
+        // `/v1/messages` relay, so the fold can never drift between them.
+        usage: Some(resp.usage.to_billed_usage()),
     }
 }
 
@@ -710,12 +869,13 @@ impl LLMProvider for AnthropicProvider {
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
         let req_body = serde_json::to_value(&anthropic_req)?;
+        let url = self.messages_url();
         let response = super::retry_with_backoff(2, || {
             self.client
-                .post("https://api.anthropic.com/v1/messages")
+                .post(&url)
                 .timeout(std::time::Duration::from_secs(90))
                 .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
+                .header("anthropic-version", DEFAULT_ANTHROPIC_VERSION)
                 .header("content-type", "application/json")
                 .json(&req_body)
                 .send()
@@ -740,10 +900,10 @@ impl LLMProvider for AnthropicProvider {
 
         let response = self
             .client
-            .post("https://api.anthropic.com/v1/messages")
+            .post(self.messages_url())
             .timeout(std::time::Duration::from_secs(90))
             .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", DEFAULT_ANTHROPIC_VERSION)
             .header("content-type", "application/json")
             .json(&anthropic_req)
             .send()

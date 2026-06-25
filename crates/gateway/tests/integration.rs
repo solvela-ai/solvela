@@ -566,6 +566,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()), // No keys set in test env
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -625,6 +626,7 @@ fn test_app_with_usdc_mint_and_providers(mint: &str, providers: ProviderRegistry
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers,
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -955,15 +957,91 @@ fn failing_provider_registry() -> ProviderRegistry {
     ProviderRegistry::from_providers(providers)
 }
 
-/// Build a test app with mock providers so paid requests succeed.
+/// The golden NATIVE Anthropic response fixture for the `/v1/messages`
+/// passthrough byte-survival tests.
+///
+/// It carries every feature the OpenAI reshape STRUCTURALLY cannot preserve: a
+/// `thinking` block WITH a cryptographic `signature`, a native `tool_use` block,
+/// and `usage` with all THREE cache fields (`cache_creation_input_tokens` 1.25x,
+/// `cache_read_input_tokens` 0.1x). The native relay must return THESE BYTES
+/// byte-identical to the client, and bill from THIS `usage` (folded via the
+/// shared #614–616 helper).
+const NATIVE_ANTHROPIC_FIXTURE: &str = r#"{"id":"msg_native_fixture_01","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"thinking","thinking":"Let me reason about this carefully.","signature":"ErcBCkgIARABGAIiQ_GOLDEN_SIGNATURE_BYTES_xyz=="},{"type":"text","text":"The answer involves a tool."},{"type":"tool_use","id":"toolu_native_01","name":"get_weather","input":{"city":"SF"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":40,"cache_creation_input_tokens":200,"cache_read_input_tokens":1800,"output_tokens":25}}"#;
+
+/// Spawn a minimal local mock Anthropic Messages server that returns the given
+/// `fixture` verbatim for `POST /v1/messages`, and return its base URL (e.g.
+/// `http://127.0.0.1:PORT`). Synchronous (no `.await`, no `block_in_place`) so
+/// it works under the single-threaded `#[tokio::test]` runtime: the std listener
+/// is bound without a runtime, then `from_std` + `tokio::spawn` register on the
+/// ambient test runtime. The server runs on a detached task for the lifetime of
+/// the test runtime (an ephemeral leak, acceptable in tests). Pointing the REAL
+/// `AnthropicProvider::relay_native` at this proves byte-survival THROUGH the
+/// real reqwest serialize → passthrough (HALT #1).
+fn spawn_mock_anthropic_server(fixture: &'static str) -> String {
+    use axum::routing::post;
+    use axum::Router as AxumRouter;
+
+    let app = AxumRouter::new().route(
+        "/v1/messages",
+        post(move || async move {
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("application/json"),
+                )],
+                fixture,
+            )
+        }),
+    );
+
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+/// Build a native Anthropic relay handle pointed at the given mock-server base
+/// URL. A non-empty test key satisfies the `relay_native` send (the mock server
+/// ignores auth).
+fn native_relay_pointed_at(
+    base_url: &str,
+) -> Arc<gateway::providers::anthropic::AnthropicProvider> {
+    Arc::new(
+        gateway::providers::anthropic::AnthropicProvider::new(
+            reqwest::Client::new(),
+            "test-anthropic-key".to_string(),
+        )
+        .with_base_url(base_url),
+    )
+}
+
+/// Build a test app with mock providers so paid requests succeed, AND a native
+/// Anthropic relay pointed at a local mock server. An Anthropic-resolved
+/// `/v1/messages` request therefore takes the NATIVE passthrough (returning the
+/// golden fixture byte-for-byte); a non-Anthropic-resolved one takes the reshape
+/// path served by the mock `ProviderRegistry`.
 fn test_app_with_mock_provider() -> axum::Router {
     let (router, _state) = test_app_with_mock_provider_and_state();
     router
 }
 
-/// Build a test app with mock providers and return both the router and state.
+/// Build a test app with mock providers + a native Anthropic relay (mock
+/// server), and return both the router and state.
 fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
-    test_app_with_mock_provider_and_exact_verifier(Arc::new(AlwaysPassVerifier))
+    // Spin the mock Anthropic server on the ambient test runtime and point the
+    // native relay at it. Synchronous spawn keeps this helper's signature
+    // unchanged for the many existing callers (it is invoked from within a
+    // `#[tokio::test]`, so a tokio runtime is always present).
+    let base_url = spawn_mock_anthropic_server(NATIVE_ANTHROPIC_FIXTURE);
+    test_app_with_provider_registry_and_exact_verifier_native(
+        mock_provider_registry(),
+        Arc::new(AlwaysPassVerifier),
+        Some(native_relay_pointed_at(&base_url)),
+    )
 }
 
 /// Like [`test_app_with_mock_provider_and_state`] but lets the caller inject the
@@ -974,15 +1052,36 @@ fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
 fn test_app_with_mock_provider_and_exact_verifier(
     exact_verifier: Arc<dyn PaymentVerifier>,
 ) -> (axum::Router, Arc<AppState>) {
-    test_app_with_provider_registry_and_exact_verifier(mock_provider_registry(), exact_verifier)
+    test_app_with_provider_registry_and_exact_verifier_native(
+        mock_provider_registry(),
+        exact_verifier,
+        None,
+    )
 }
 
 /// Like [`test_app_with_mock_provider_and_exact_verifier`] but also lets the
 /// caller inject the `ProviderRegistry`, so a fully-failing provider set can be
 /// wired to exercise the `AllProvidersFailed` arm end-to-end (#486).
+///
+/// Wires NO native Anthropic relay (the native `/v1/messages` fork fails closed)
+/// — used by the `AllProvidersFailed` / fail-closed tests. Use
+/// [`test_app_with_provider_registry_and_exact_verifier_native`] to inject a
+/// native relay (pointed at a local mock server).
 fn test_app_with_provider_registry_and_exact_verifier(
     providers: ProviderRegistry,
     exact_verifier: Arc<dyn PaymentVerifier>,
+) -> (axum::Router, Arc<AppState>) {
+    test_app_with_provider_registry_and_exact_verifier_native(providers, exact_verifier, None)
+}
+
+/// As above, but lets the caller inject the dedicated NATIVE Anthropic relay
+/// handle (`Some` pointed at a local mock server) so the `/v1/messages` native
+/// passthrough can be exercised end-to-end; `None` makes the native fork fail
+/// closed.
+fn test_app_with_provider_registry_and_exact_verifier_native(
+    providers: ProviderRegistry,
+    exact_verifier: Arc<dyn PaymentVerifier>,
+    native_anthropic: Option<Arc<gateway::providers::anthropic::AnthropicProvider>>,
 ) -> (axum::Router, Arc<AppState>) {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
@@ -996,6 +1095,7 @@ fn test_app_with_provider_registry_and_exact_verifier(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers,
+        native_anthropic,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -1055,6 +1155,7 @@ fn test_app_with_models_and_providers(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers,
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -1257,6 +1358,7 @@ fn app_with_semantic_cache(sem: Arc<gateway::cache::semantic::SemanticCache>) ->
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -1574,6 +1676,7 @@ fn app_with_semantic_cache_and_escrow(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -1656,6 +1759,7 @@ fn app_with_semantic_cache_escrow_and_db_pool(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
@@ -2322,6 +2426,7 @@ fn test_app_with_provider_registry_and_escrow_verifier(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers,
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -2411,6 +2516,7 @@ fn test_app_with_escrow_and_usdc_mint(mint: &str) -> axum::Router {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -2884,6 +2990,7 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client.clone())),
@@ -5414,6 +5521,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -7453,6 +7561,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -7624,6 +7733,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -7865,6 +7975,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -8402,6 +8513,7 @@ async fn test_proxy_require_tenant_wallet_rejected_before_settlement() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(None, Some(client.clone())),
@@ -9929,6 +10041,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -10582,6 +10695,7 @@ fn test_app_with_free_limit(free_max: u32) -> axum::Router {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -10943,6 +11057,7 @@ async fn dev_bypass_still_works() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -11030,6 +11145,7 @@ fn test_app_with_global_cap(global_cap: u32) -> axum::Router {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -11161,6 +11277,7 @@ async fn free_per_ip_and_global_cap_are_independent() {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -12053,6 +12170,7 @@ fn test_app_with_db_pool(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers,
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
@@ -12699,6 +12817,7 @@ fn test_app_with_receipts_limit(max: u32) -> axum::Router {
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
@@ -13080,6 +13199,7 @@ fn a2a_app_with_redis_db_and_providers(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers,
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
@@ -13508,6 +13628,7 @@ fn a2a_app_with_verifier_and_db(
         model_registry,
         service_registry: RwLock::new(service_registry),
         providers: mock_provider_registry(),
+        native_anthropic: None,
         search_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
@@ -14199,6 +14320,7 @@ mod faucet_route_tests {
             model_registry,
             service_registry: RwLock::new(service_registry),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
             search_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
@@ -14384,6 +14506,7 @@ mod faucet_route_tests {
             model_registry,
             service_registry: RwLock::new(service_registry),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
             search_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
@@ -14918,6 +15041,7 @@ mod escrow_deposit_tx_tests {
             model_registry,
             service_registry: RwLock::new(service_registry),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
             search_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
@@ -15269,6 +15393,7 @@ mod escrow_deposit_tx_tests {
             model_registry,
             service_registry: RwLock::new(service_registry),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
             search_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
@@ -15467,6 +15592,7 @@ price_per_request_usdc = 0.01
             model_registry,
             service_registry: RwLock::new(service_registry),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
             search_provider: provider,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
@@ -15800,6 +15926,7 @@ price_per_request_usdc = 0.01
             model_registry,
             service_registry: RwLock::new(service_registry),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
             search_provider: provider,
             facilitator,
             usage: gateway::usage::UsageTracker::new(None, Some(redis_client)),
@@ -15952,6 +16079,7 @@ price_per_request_usdc = 0.01
             model_registry,
             service_registry: RwLock::new(service_registry),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
             search_provider: Some(Arc::new(StubSearchProvider)),
             facilitator,
             usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
@@ -16073,15 +16201,20 @@ mod messages_endpoint_tests {
         );
     }
 
-    /// A PAID request (exact scheme, AlwaysPassVerifier) returns a valid
-    /// Anthropic Messages response: type:"message", role:"assistant", a text
-    /// content block, stop_reason mapped from the mock's "stop" → "end_turn",
-    /// and usage.{input_tokens,output_tokens} Claude Code reads.
+    /// A PAID request whose RESOLVED model is NON-Anthropic (so it takes the
+    /// reshape branch, not the native passthrough) returns a valid Anthropic
+    /// Messages response: type:"message", role:"assistant", a text content block,
+    /// stop_reason mapped from the mock's "stop" → "end_turn", and
+    /// usage.{input_tokens,output_tokens} Claude Code reads. After the native
+    /// fork, an `anthropic/*` model would relay natively (covered by the
+    /// `messages_native_*` tests); this test pins the CROSS-PROVIDER reshape
+    /// surface, which still rebuilds the response from the OpenAI `ChatResponse`.
     #[tokio::test]
     async fn messages_paid_returns_anthropic_response_shape() {
         let app = test_app_with_mock_provider();
         let body = serde_json::json!({
-            "model": "anthropic/claude-sonnet-4-6",
+            // openai/gpt-4o resolves to the openai provider → reshape branch.
+            "model": "openai/gpt-4o",
             "max_tokens": 64,
             "messages": [{"role": "user", "content": "Hello!"}]
         });
@@ -16103,7 +16236,7 @@ mod messages_endpoint_tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
-        // Anthropic Messages response shape.
+        // Anthropic Messages response shape (re-emitted from the OpenAI reshape).
         assert_eq!(v["type"], "message");
         assert_eq!(v["role"], "assistant");
         assert_eq!(v["content"][0]["type"], "text");
@@ -16116,18 +16249,20 @@ mod messages_endpoint_tests {
         assert_eq!(v["usage"]["output_tokens"], 5);
         // The internal `id` is carried through.
         assert_eq!(v["id"], "mock-chatcmpl-001");
-        assert_eq!(v["model"], "anthropic/claude-sonnet-4-6");
+        assert_eq!(v["model"], "openai/gpt-4o");
     }
 
     /// A PAID request whose `system` is the ARRAY-OF-BLOCKS form Claude Code
     /// sends (multi-turn) is accepted end-to-end and returns 200 — proving the
-    /// inbound translation reaches the served path with the system prompt
-    /// extracted, not rejected.
+    /// inbound (reshape) translation reaches the served path with the system
+    /// prompt extracted, not rejected. Routed to a NON-Anthropic model so it
+    /// exercises the reshape branch (an `anthropic/*` model would relay
+    /// natively — see the native tests).
     #[tokio::test]
     async fn messages_paid_system_as_array_multiturn_succeeds() {
         let app = test_app_with_mock_provider();
         let body = serde_json::json!({
-            "model": "anthropic/claude-sonnet-4-6",
+            "model": "openai/gpt-4o",
             "max_tokens": 128,
             "system": [
                 {"type": "text", "text": "You are a coding assistant."},
@@ -16160,18 +16295,28 @@ mod messages_endpoint_tests {
         assert_eq!(v["content"][0]["text"], "[mock response]");
     }
 
-    /// COST PARITY (the key money-path assertion): an IDENTICAL prompt to
-    /// /v1/chat/completions and /v1/messages must produce the SAME 402
-    /// cost_breakdown. This proves /v1/messages does not fork the cost/fee math
-    /// — it computes cost through the same `chat_completions_inner` core. The
-    /// Anthropic `system` + user message maps to the same internal System +
-    /// User ChatRequest as the OpenAI body, so the token estimate (and thus the
-    /// 5%-fee-inclusive total) is identical.
+    /// COST PARITY on the RESHAPE branch (the key money-path assertion for the
+    /// cross-provider path): an IDENTICAL prompt to /v1/chat/completions and
+    /// /v1/messages, routed to a NON-Anthropic model, must produce the SAME 402
+    /// cost_breakdown. This proves the reshape `/v1/messages` path does not fork
+    /// the cost/fee math — it computes cost through the same
+    /// `chat_completions_inner` core with the same `estimate_input_tokens`
+    /// source. The Anthropic `system` + user message reshapes to the same
+    /// internal System + User ChatRequest as the OpenAI body, so the token
+    /// estimate (and the 5%-fee-inclusive total) is identical.
+    ///
+    /// NOTE: this parity holds on the RESHAPE branch by design. The NATIVE
+    /// branch (an `anthropic/*` model) deliberately swaps the estimate SOURCE to
+    /// a direct read of the original Anthropic body (counting system + tools +
+    /// thinking), so its quote is NOT required to equal the OpenAI-shaped chat
+    /// estimate — that is the whole point of the native fork. Routing to a
+    /// non-Anthropic model keeps this test on the reshape branch where parity is
+    /// the contract.
     #[tokio::test]
     async fn messages_and_chat_have_identical_cost_breakdown() {
         // OpenAI-shaped body: a system message + a user message.
         let chat_body = serde_json::json!({
-            "model": "anthropic/claude-sonnet-4-6",
+            "model": "openai/gpt-4o",
             "max_tokens": 100,
             "messages": [
                 {"role": "system", "content": "You are helpful."},
@@ -16181,7 +16326,7 @@ mod messages_endpoint_tests {
         // Anthropic-shaped body carrying the SAME logical content: the `system`
         // string becomes the leading System message, and the user turn matches.
         let messages_body = serde_json::json!({
-            "model": "anthropic/claude-sonnet-4-6",
+            "model": "openai/gpt-4o",
             "max_tokens": 100,
             "system": "You are helpful.",
             "messages": [
@@ -16312,13 +16457,15 @@ mod messages_endpoint_tests {
         assert_eq!(v["error"]["type"], "invalid_request_error");
     }
 
-    /// An image content block is rejected (PR1 is text-only) with a 415 in the
-    /// Anthropic envelope, never billed-then-silently-dropped.
+    /// On the RESHAPE branch (a NON-Anthropic resolved model) an image content
+    /// block is rejected (reshape PR1 is text-only) with a 415 in the Anthropic
+    /// envelope, never billed-then-silently-dropped. (An `anthropic/*` model
+    /// relays images natively to the vision-capable API — see the native tests.)
     #[tokio::test]
     async fn messages_image_content_rejected_with_anthropic_envelope() {
         let app = test_app_with_mock_provider();
         let body = serde_json::json!({
-            "model": "anthropic/claude-sonnet-4-6",
+            "model": "openai/gpt-4o",
             "max_tokens": 64,
             "messages": [{"role": "user", "content": [
                 {"type": "text", "text": "what is this?"},
@@ -16475,15 +16622,18 @@ mod messages_endpoint_tests {
             .contains("does not match"));
     }
 
-    /// A request carrying top-level `tools` definitions is rejected with a 400
-    /// in the Anthropic error envelope — Claude Code attaches tools to nearly
-    /// every request, so silently dropping them and billing for a tool-blind
-    /// answer is the common-case failure this guards against.
+    /// On the RESHAPE branch (a NON-Anthropic resolved model) a request carrying
+    /// top-level `tools` definitions is rejected with a 400 in the Anthropic
+    /// error envelope — the reshape path silently dropping them and billing for a
+    /// tool-blind answer is the common-case failure this guards against. (An
+    /// `anthropic/*` model forwards `tools` NATIVELY — see the native tests; the
+    /// loud guard is for the lossy cross-provider reshape exception, which is the
+    /// only path that cannot carry tools.)
     #[tokio::test]
     async fn messages_tools_definition_rejected_with_anthropic_envelope() {
         let app = test_app_with_mock_provider();
         let body = serde_json::json!({
-            "model": "anthropic/claude-sonnet-4-6",
+            "model": "openai/gpt-4o",
             "max_tokens": 64,
             "tools": [
                 {"name": "get_weather", "description": "Get the weather",
@@ -16519,13 +16669,15 @@ mod messages_endpoint_tests {
         );
     }
 
-    /// A tool CONTENT block (`tool_use`) is rejected with a 400 and a
-    /// tool-specific diagnostic — NOT the misleading image error/415.
+    /// On the RESHAPE branch (a NON-Anthropic resolved model) a tool CONTENT
+    /// block (`tool_use`) is rejected with a 400 and a tool-specific diagnostic —
+    /// NOT the misleading image error/415. (An `anthropic/*` model forwards
+    /// `tool_use` blocks NATIVELY — see the native tests.)
     #[tokio::test]
     async fn messages_tool_content_block_rejected_with_anthropic_envelope() {
         let app = test_app_with_mock_provider();
         let body = serde_json::json!({
-            "model": "anthropic/claude-sonnet-4-6",
+            "model": "openai/gpt-4o",
             "max_tokens": 64,
             "messages": [{"role": "assistant", "content": [
                 {"type": "tool_use", "id": "t1", "name": "f", "input": {}}
@@ -16558,11 +16710,15 @@ mod messages_endpoint_tests {
         );
     }
 
-    /// Money-path proof: streaming, image, AND tools rejections all occur with
-    /// NO settlement. We inject a `SettleRecordingVerifier`; for each rejected
-    /// request the settle flag must stay `false` — the agent is never charged
-    /// for a request that is rejected at the translation boundary, BEFORE the
-    /// money path.
+    /// Money-path proof: on the RESHAPE branch (NON-Anthropic resolved model),
+    /// streaming, image, AND tools rejections all occur with NO settlement. We
+    /// inject a `SettleRecordingVerifier`; for each rejected request the settle
+    /// flag must stay `false` — the agent is never charged for a request that is
+    /// rejected at the translation boundary, BEFORE the money path. (An
+    /// `anthropic/*` model forwards image/tools NATIVELY; the loud
+    /// translation-boundary rejections are the cross-provider reshape guard. The
+    /// `stream:true` rejection fires for BOTH branches — it is rejected in
+    /// `create_message` before the native/reshape fork.)
     #[tokio::test]
     async fn messages_rejections_never_settle() {
         // Each rejected shape, asserted independently with its own fresh app and
@@ -16571,7 +16727,7 @@ mod messages_endpoint_tests {
             (
                 "streaming",
                 serde_json::json!({
-                    "model": "anthropic/claude-sonnet-4-6",
+                    "model": "openai/gpt-4o",
                     "max_tokens": 64,
                     "stream": true,
                     "messages": [{"role": "user", "content": "hi"}]
@@ -16581,7 +16737,7 @@ mod messages_endpoint_tests {
             (
                 "image",
                 serde_json::json!({
-                    "model": "anthropic/claude-sonnet-4-6",
+                    "model": "openai/gpt-4o",
                     "max_tokens": 64,
                     "messages": [{"role": "user", "content": [
                         {"type": "text", "text": "what is this?"},
@@ -16593,7 +16749,7 @@ mod messages_endpoint_tests {
             (
                 "tools",
                 serde_json::json!({
-                    "model": "anthropic/claude-sonnet-4-6",
+                    "model": "openai/gpt-4o",
                     "max_tokens": 64,
                     "tools": [{"name": "f", "description": "d",
                                "input_schema": {"type": "object", "properties": {}}}],
@@ -16706,5 +16862,455 @@ mod messages_endpoint_tests {
             response.headers().get("x-solvela-receipt").is_none(),
             "a DB-less gateway must not advertise an unfetchable receipt on /v1/messages"
         );
+    }
+}
+
+// ===========================================================================
+// POST /v1/messages — NATIVE ANTHROPIC PASSTHROUGH (end-to-end contract)
+//
+// These tests pin the CONTRACT of the native passthrough, now implemented:
+// when `/v1/messages` resolves to an Anthropic-provider model, the gateway
+// forwards the ORIGINAL validated Anthropic request to Anthropic and relays the
+// response BYTES untouched, parsing only `usage` for billing. The OpenAI reshape
+// path structurally CANNOT carry the cryptographic thinking-block `signature`,
+// native `tool_use` blocks, or the cache-token usage breakdown — these tests
+// prove the native relay does.
+//
+// HOW THEY EXERCISE THE REAL PATH: each drives the REAL route through
+// `oneshot(test_app_with_mock_provider())`, which wires the native relay at a
+// local mock Anthropic server returning `NATIVE_ANTHROPIC_FIXTURE` (see
+// `spawn_mock_anthropic_server`). The relay runs the REAL `relay_native` reqwest
+// call against that mock, so byte-survival is proven THROUGH the real
+// serialize→passthrough (HALT #1), not a canned trait. The byte-identity golden
+// vector is `native_response_is_byte_identical_to_upstream_fixture`: it would
+// FAIL on the pre-implementation reshape path (which rebuilds the body from an
+// OpenAI `ChatResponse` and drops the signature/tool_use/cache fields) and
+// PASSES here because the native relay forwards the upstream bytes verbatim.
+// ===========================================================================
+mod messages_native_passthrough_tests {
+    use super::*;
+
+    /// Helper: POST an Anthropic body to /v1/messages with a valid exact
+    /// payment, through the mock-provider test app, and return the parsed JSON
+    /// response body (200-path) for inspection.
+    async fn post_messages_paid(body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let app = test_app_with_mock_provider();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    /// TEST 1 (byte-survival: thinking + signature).
+    ///
+    /// A multi-turn request whose assistant history carries a `thinking` block
+    /// with a cryptographic `signature` must be forwarded NATIVELY. The current
+    /// reshape path rejects tool/thinking content (`anthropic_inbound.rs` maps an
+    /// unknown content block to `Other` → `ToolUseUnsupported`, a 400). The
+    /// native path must instead ACCEPT it (forward the original bytes), serve a
+    /// 200, and (with a native fixture) echo the thinking+signature verbatim.
+    ///
+    /// The reshape path would reject the `thinking` block before the money path
+    /// even runs (400, Anthropic envelope), so the request would never be served.
+    /// The native fork routes an Anthropic-resolved model AROUND
+    /// `anthropic_request_to_chat`'s content rejection — this asserts it serves
+    /// 200 instead.
+    #[tokio::test]
+    async fn native_thinking_block_request_is_served_not_rejected() {
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 256,
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "messages": [
+                {"role": "user", "content": "Solve it."},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "step one…",
+                     "signature": "ErcBCkgIARABGAIiQ_SIGNATURE_BYTES_xyz=="},
+                    {"type": "text", "text": "The answer is 42."}
+                ]},
+                {"role": "user", "content": "Now explain."}
+            ]
+        });
+        let (status, v) = post_messages_paid(body).await;
+        // CONTRACT: a thinking-bearing multi-turn Anthropic request to an
+        // Anthropic-resolved model is SERVED, not 400-rejected as an unsupported
+        // content block (the reshape path would reject it with ToolUseUnsupported).
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "native passthrough must SERVE a thinking+signature multi-turn request, \
+             not reject it as unsupported content; got {status} body={v}"
+        );
+    }
+
+    /// TEST 2 (byte-survival: native tool_use blocks).
+    ///
+    /// A request carrying top-level `tools` and an assistant turn with a
+    /// `tool_use` block + a following `tool_result` must be forwarded natively
+    /// and served. The current path rejects BOTH top-level `tools` (400
+    /// ToolUseUnsupported) and the `tool_use`/`tool_result` content blocks. The
+    /// native fork accepts and forwards them. (On the reshape path top-level
+    /// `tools` is rejected pre-money-path with a 400 — this asserts the native
+    /// fork serves 200 instead.)
+    #[tokio::test]
+    async fn native_tool_use_request_is_served_not_rejected() {
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 256,
+            "tools": [
+                {"name": "get_weather", "description": "Get weather",
+                 "input_schema": {"type": "object", "properties": {}}}
+            ],
+            "messages": [
+                {"role": "user", "content": "Weather in SF?"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "Let me check."},
+                    {"type": "tool_use", "id": "toolu_1", "name": "get_weather",
+                     "input": {"city": "SF"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1",
+                     "content": "62F and sunny"}
+                ]}
+            ]
+        });
+        let (status, v) = post_messages_paid(body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "native passthrough must SERVE a tools + tool_use + tool_result request, \
+             not reject it as unsupported; got {status} body={v}"
+        );
+    }
+
+    /// TEST 3 (usage-parse incl. the 3 cache fields; 5% fee unchanged).
+    ///
+    /// A native Anthropic response reports usage as
+    /// `{input_tokens, cache_creation_input_tokens (1.25x), cache_read_input_tokens
+    /// (0.1x), output_tokens}`. Billing MUST reconstruct the agent's billed
+    /// prompt size by folding all three prompt-side fields together (consistent
+    /// with `from_anthropic_response` / #614-616), then apply the SAME 5% fee.
+    /// The Anthropic RESPONSE must surface those usage fields to the client.
+    ///
+    /// The reshape path would return the mock's flat
+    /// `usage:{input_tokens,output_tokens}` with NO cache breakdown, so
+    /// `cache_read_input_tokens` would be absent. The native relay surfaces the
+    /// upstream fixture's cache fields verbatim — this asserts they are present.
+    /// (The exact billed atomic cost + 5%-fee invariance is pinned by the unit
+    /// test `native_relay_fold_and_cost_pins_5pct_fee` in
+    /// `providers/anthropic.rs`; receipts are DB-gated and absent in this DB-less
+    /// test app, so the on-wire usage the bill reads from is pinned here.)
+    #[tokio::test]
+    async fn native_usage_surfaces_cache_fields_and_keeps_fee() {
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let (status, v) = post_messages_paid(body).await;
+        assert_eq!(status, StatusCode::OK, "paid native request must serve 200");
+        // CONTRACT: a native Anthropic usage object carries the prompt-cache
+        // breakdown. Today the reshaped usage object has only
+        // input_tokens/output_tokens — no cache fields — so this is absent.
+        assert!(
+            v["usage"].get("cache_read_input_tokens").is_some(),
+            "native passthrough must surface the Anthropic cache-token usage \
+             breakdown (cache_read_input_tokens) on the response; reshape drops it. \
+             body={v}"
+        );
+    }
+
+    /// TEST 4 (fork routing).
+    ///
+    /// 4a — /v1/messages with an Anthropic-resolved model → NATIVE path: a
+    /// thinking-bearing request is SERVED (covered by TEST 1; cross-referenced
+    /// here for the routing matrix).
+    ///
+    /// 4b — /v1/messages with a NON-Anthropic-resolved model (via the `eco`
+    /// routing alias, which can resolve to a non-Anthropic provider) → RESHAPE
+    /// path. A plain text request still succeeds (reshape is lossy only for
+    /// thinking/tools, which a plain request lacks). This proves the reshape
+    /// branch stays reachable for the cross-provider case.
+    #[tokio::test]
+    async fn fork_non_anthropic_resolved_model_still_reshapes_plain_text() {
+        // `eco` is a routing profile alias; a Simple-tier prompt resolves it to
+        // a cheap (often non-Anthropic) model. A PLAIN text request must still be
+        // served via the existing reshape path regardless of which provider the
+        // alias lands on.
+        let body = serde_json::json!({
+            "model": "eco",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+        let (status, v) = post_messages_paid(body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a plain-text /v1/messages request via a routing alias must still be \
+             served (reshape path); got {status} body={v}"
+        );
+        // It returns the Anthropic response envelope (the endpoint always speaks
+        // the Anthropic wire shape outward).
+        assert_eq!(v["type"], "message");
+    }
+
+    /// TEST 4c (fork routing — chat endpoint unaffected).
+    ///
+    /// `/v1/chat/completions` with an Anthropic model must STAY on the OpenAI
+    /// reshape path — the native passthrough is `/v1/messages`-only. The chat
+    /// endpoint returns the OpenAI `chat.completion` object, never the Anthropic
+    /// `{"type":"message"}` envelope. This already passes today and must KEEP
+    /// passing after the fork lands (regression guard).
+    #[tokio::test]
+    async fn fork_chat_completions_with_anthropic_model_stays_openai() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header(
+                        "payment-signature",
+                        valid_payment_header("/v1/chat/completions"),
+                    )
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // OpenAI shape — NOT the Anthropic envelope.
+        assert_eq!(v["object"], "chat.completion");
+        assert!(
+            v["type"].is_null(),
+            "/v1/chat/completions must never emit the Anthropic {{type:message}} envelope"
+        );
+    }
+
+    /// TEST 5 (replay / resource-url binding still rejects cross-endpoint replay).
+    ///
+    /// A payment SIGNED for /v1/chat/completions presented at /v1/messages must
+    /// be rejected (402, InvalidPayment) — the native fork must NOT weaken the
+    /// resource-url binding enforced inside `chat_completions_inner`. This must
+    /// pass BOTH before and after the fork (regression guard for the money path).
+    #[tokio::test]
+    async fn native_rejects_payment_signed_for_other_endpoint() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    // Header signed for the OTHER endpoint.
+                    .header(
+                        "payment-signature",
+                        valid_payment_header("/v1/chat/completions"),
+                    )
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYMENT_REQUIRED,
+            "a payment signed for /v1/chat/completions must be rejected at /v1/messages \
+             even on the native path"
+        );
+    }
+
+    /// TEST 6 (fail-closed on upstream/relay error: redacted Anthropic envelope,
+    /// no charge, no key leak).
+    ///
+    /// When the native upstream relay fails (modeled here by an ALL-providers-
+    /// failing registry on an Anthropic-resolved model), the response must be a
+    /// redacted Anthropic ERROR envelope (`{"type":"error",...}`), never a
+    /// charge-without-delivery, and must NOT leak the gateway API key or raw RPC
+    /// internals. The money path's existing `AllProvidersFailed` arm releases the
+    /// budget reservation and returns a retryable error; the native fork must map
+    /// that to the Anthropic envelope and never settle.
+    ///
+    /// NOTE: routed via `anthropic/claude-sonnet-4-6` so the model resolves to
+    /// the Anthropic provider (the native fork's predicate) while every provider
+    /// in the fallback chain fails.
+    #[tokio::test]
+    async fn native_upstream_error_is_failclosed_anthropic_envelope() {
+        // `failing_provider_registry()` registers failing openai+anthropic+deepseek,
+        // exhausting the fallback chain for an Anthropic-resolved model.
+        let (app, _state) = test_app_with_provider_registry_and_exact_verifier(
+            failing_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+        );
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Upstream failure → non-2xx, mapped to the Anthropic error envelope.
+        assert!(
+            response.status().is_server_error() || response.status().is_client_error(),
+            "an all-providers-failed native request must NOT return 200 (no \
+             charge-without-delivery); got {}",
+            response.status()
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // Anthropic error envelope on the non-402 error path.
+        assert_eq!(
+            v["type"], "error",
+            "a native upstream failure must surface the Anthropic error envelope; body={v}"
+        );
+        // No secret leak: the body must not contain anything resembling an API key.
+        let body_str = v.to_string();
+        assert!(
+            !body_str.contains("sk-") && !body_str.to_lowercase().contains("api_key"),
+            "fail-closed error envelope must never leak the gateway key; body={body_str}"
+        );
+    }
+
+    /// Helper: POST a paid `/v1/messages` request through the mock-provider app
+    /// (which wires the native relay at a mock Anthropic server returning
+    /// [`NATIVE_ANTHROPIC_FIXTURE`]) and return the RAW response bytes — so a
+    /// byte-identity assertion sees the exact bytes the client receives.
+    async fn post_messages_paid_raw(body: serde_json::Value) -> (StatusCode, axum::body::Bytes) {
+        let app = test_app_with_mock_provider();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes)
+    }
+
+    /// BYTE-SURVIVAL GOLDEN VECTOR (the core native-passthrough contract).
+    ///
+    /// A paid `/v1/messages` request to an Anthropic-resolved model takes the
+    /// NATIVE relay, which forwards the original bytes to the mock Anthropic
+    /// server (via the REAL `relay_native` reqwest call) and relays the upstream
+    /// response bytes UNTOUCHED. The client must receive the upstream fixture
+    /// BYTE-FOR-BYTE — proving the thinking-block `signature`, the native
+    /// `tool_use` block, and the cache-token `usage` survive the passthrough
+    /// (none of which the OpenAI reshape can carry). This goes through the real
+    /// relay end-to-end (`oneshot(test_app_with_mock_provider())`), not a canned
+    /// trait, so it proves byte-survival through the real reqwest
+    /// serialize→passthrough (HALT #1).
+    #[tokio::test]
+    async fn native_response_is_byte_identical_to_upstream_fixture() {
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 256,
+            "thinking": {"type": "adaptive"},
+            "tools": [
+                {"name": "get_weather", "description": "Get weather",
+                 "input_schema": {"type": "object", "properties": {}}}
+            ],
+            "messages": [{"role": "user", "content": "Weather in SF, think first."}]
+        });
+        let (status, bytes) = post_messages_paid_raw(body).await;
+        assert_eq!(status, StatusCode::OK, "native paid request must serve 200");
+
+        // The relayed body MUST equal the upstream fixture byte-for-byte.
+        assert_eq!(
+            bytes.as_ref(),
+            NATIVE_ANTHROPIC_FIXTURE.as_bytes(),
+            "native passthrough must relay the upstream Anthropic response bytes \
+             UNTOUCHED — the thinking signature, tool_use block, and cache usage \
+             must all survive byte-for-byte"
+        );
+
+        // Spot-pin the load-bearing fields the OpenAI reshape would have dropped,
+        // for a readable failure if the byte-equality above ever regresses.
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["content"][0]["type"], "thinking",
+            "the thinking block must survive natively"
+        );
+        assert_eq!(
+            v["content"][0]["signature"], "ErcBCkgIARABGAIiQ_GOLDEN_SIGNATURE_BYTES_xyz==",
+            "the cryptographic thinking signature must survive byte-identical"
+        );
+        assert_eq!(
+            v["content"][2]["type"], "tool_use",
+            "the native tool_use block must survive"
+        );
+        assert_eq!(v["content"][2]["name"], "get_weather");
+        // All three cache-usage fields survive on the response.
+        assert_eq!(v["usage"]["cache_creation_input_tokens"], 200);
+        assert_eq!(v["usage"]["cache_read_input_tokens"], 1800);
+        assert_eq!(v["usage"]["input_tokens"], 40);
+        assert_eq!(v["usage"]["output_tokens"], 25);
+    }
+
+    /// USAGE-PARSE / BILLING SURFACE: the native response surfaces the full
+    /// Anthropic cache-token usage breakdown (input + the two cache fields +
+    /// output) to the client byte-identical. The gateway bills from THIS usage
+    /// via the shared #614–616 fold (`input + cache_creation + cache_read`); the
+    /// exact billed atomic cost (and the 5% fee invariance) is pinned by the unit
+    /// test `native_relay_fold_and_cost_pins_5pct_fee` in `providers/anthropic.rs`
+    /// (the billed atomic amount is internal — receipts are DB-gated, absent in
+    /// this DB-less test app). Here we pin the on-wire usage the bill reads from.
+    #[tokio::test]
+    async fn native_usage_breakdown_surfaces_all_cache_fields() {
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let (status, v) = post_messages_paid(body).await;
+        assert_eq!(status, StatusCode::OK);
+        // The three prompt-side fields the bill folds together (#614–616), plus
+        // output, are all present and match the upstream fixture verbatim.
+        assert_eq!(v["usage"]["input_tokens"], 40);
+        assert_eq!(v["usage"]["cache_creation_input_tokens"], 200);
+        assert_eq!(v["usage"]["cache_read_input_tokens"], 1800);
+        assert_eq!(v["usage"]["output_tokens"], 25);
     }
 }

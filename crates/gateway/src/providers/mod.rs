@@ -194,6 +194,28 @@ impl ProviderRegistry {
         Self { providers }
     }
 
+    /// Build the dedicated NATIVE Anthropic relay handle for `POST /v1/messages`.
+    ///
+    /// Returns a concrete [`anthropic::AnthropicProvider`] (NOT a boxed
+    /// `dyn LLMProvider`) because the native passthrough calls
+    /// [`anthropic::AnthropicProvider::relay_native`], which is an inherent
+    /// method — the OpenAI-shaped `LLMProvider` trait cannot carry it. Gated on
+    /// the SAME `ANTHROPIC_API_KEY` env var as the OpenAI-shaped registry entry,
+    /// so the native relay is present exactly when the reshape adapter is, and
+    /// `None` (the native fork falls back to the reshape branch / fails closed)
+    /// when no Anthropic key is configured. Shares the registry's `reqwest`
+    /// client so connection reuse is unchanged.
+    pub fn native_anthropic_from_env(
+        client: reqwest::Client,
+    ) -> Option<Arc<anthropic::AnthropicProvider>> {
+        match std::env::var("ANTHROPIC_API_KEY") {
+            Ok(key) if !key.is_empty() => {
+                Some(Arc::new(anthropic::AnthropicProvider::new(client, key)))
+            }
+            _ => None,
+        }
+    }
+
     /// Look up a provider by name.
     pub fn get(&self, provider_name: &str) -> Option<&Arc<dyn LLMProvider>> {
         self.providers.get(provider_name)

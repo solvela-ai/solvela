@@ -402,6 +402,99 @@ pub fn anthropic_request_to_chat(
     })
 }
 
+/// Build a LENIENT internal [`ChatRequest`] SKELETON for the NATIVE
+/// `/v1/messages` passthrough.
+///
+/// This is the deliberate counterpart to the strict [`anthropic_request_to_chat`]
+/// (HALT #2: the strict translator stays UNTOUCHED and keeps its loud
+/// tool/thinking/image rejection for the reshape path). The native path forwards
+/// the ORIGINAL request bytes verbatim, so it must NOT reject tools / thinking /
+/// images — but the shared money-path core still needs a `ChatRequest` for its
+/// STRUCTURAL needs ONLY:
+/// - model resolution (alias/profile → resolved id),
+/// - the message-count cap and the empty-prompt check,
+/// - the prompt guard (run on the flattened text).
+///
+/// This skeleton is NEVER serialized to a provider (the raw body is relayed) and
+/// is NEVER used to compute the native cost estimate (that is computed directly
+/// from the original bytes by `estimate_native_anthropic_input_tokens`). So it
+/// only needs to carry: the model, `max_tokens`, and the flattened text of the
+/// `system` prompt + every message — including the text inside `thinking` /
+/// `tool_use` / `tool_result` / image blocks — so the empty-prompt check sees
+/// real content and the guard scans it. All content is flattened to
+/// [`MessageContent::Text`] (never `Parts`), so the inner vision-gate /
+/// image-validation path is not engaged for the relay's verbatim images.
+///
+/// Infallible by design: the native path rejects only `stream:true` (handled by
+/// the route before this is called); every other shape is forwarded.
+pub fn anthropic_request_to_native_skeleton(req: &AnthropicMessagesRequest) -> ChatRequest {
+    let mut messages: Vec<ChatMessage> = Vec::with_capacity(req.messages.len() + 1);
+
+    if let Some(ref system) = req.system {
+        if !system.is_empty() {
+            messages.push(ChatMessage {
+                role: Role::System,
+                content: MessageContent::Text(system.flatten()),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+    }
+
+    for m in &req.messages {
+        messages.push(ChatMessage {
+            role: inbound_role(&m.role),
+            content: MessageContent::Text(flatten_inbound_content_lenient(&m.content)),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+
+    ChatRequest {
+        model: req.model.clone(),
+        messages,
+        max_tokens: req.max_tokens,
+        temperature: req.temperature,
+        top_p: req.top_p,
+        stream: false,
+        tools: None,
+        tool_choice: None,
+    }
+}
+
+/// Flatten an inbound content value to plain text for the NATIVE skeleton.
+///
+/// Unlike [`inbound_content_to_message_content`] (which REJECTS image/tool
+/// blocks), this never rejects: text blocks contribute their text; an image
+/// block contributes a single-space placeholder so an image-only message is not
+/// flattened to empty (which would trip the empty-prompt guard for a legitimate
+/// native vision request the relay forwards verbatim); any other block
+/// (`tool_use`/`tool_result`/`thinking`/future types) contributes a single space
+/// as a content-present marker. The skeleton is structural only — the precise
+/// text does not affect billing (the native estimate reads the raw bytes).
+fn flatten_inbound_content_lenient(content: &AnthropicInboundContent) -> String {
+    match content {
+        AnthropicInboundContent::Text(s) => s.clone(),
+        AnthropicInboundContent::Blocks(blocks) => {
+            let parts: Vec<&str> = blocks
+                .iter()
+                .map(|b| match b {
+                    AnthropicInboundContentBlock::Text { text } => text.as_str(),
+                    // Non-text blocks contribute a content-present marker so the
+                    // message is not seen as empty; their real content is
+                    // forwarded verbatim in the relayed body.
+                    AnthropicInboundContentBlock::Image | AnthropicInboundContentBlock::Other => {
+                        " "
+                    }
+                })
+                .collect();
+            parts.join(" ")
+        }
+    }
+}
+
 /// Map an internal OpenAI-style `finish_reason` to an Anthropic `stop_reason`.
 ///
 /// This is the INVERSE of the outbound `from_anthropic_response` map in
