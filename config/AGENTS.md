@@ -10,7 +10,7 @@ Static TOML configuration consumed by the gateway at startup. Non-secret values 
 | File | Description |
 |------|-------------|
 | `default.toml` | Server defaults — host/port, Solana RPC URL, monitor thresholds, CORS, rate-limit defaults |
-| `models.toml` | Model registry — per-model ID, provider, context window, per-token pricing (input / output / cached). Loaded by `crates/router/src/models.rs`. Covers 5 providers, 26+ models |
+| `models.toml` | Model registry — per-model ID, provider, context window, per-token pricing (input / output / cached). Loaded by `crates/router/src/models.rs`. Covers 6 providers, 44+ models |
 | `services.toml` | x402 service marketplace registry — service id, description, price, endpoint metadata. Loaded by `crates/gateway/src/services.rs` |
 
 ## Subdirectories

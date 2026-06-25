@@ -58,7 +58,7 @@ This means any HTTP client (including AI agents) can pay for API calls using a s
 
 Not every question needs the most expensive model. Asking "what's 2+2?" doesn't require the same horsepower as "write me a compiler."
 
-Solvela's smart router analyzes each request across 15 dimensions -- things like whether the request contains code, requires reasoning, uses technical terminology, or needs creative writing. Based on this analysis, it picks the best model from five providers (OpenAI, Anthropic, Google, xAI, DeepSeek) for the job.
+Solvela's smart router analyzes each request across 15 dimensions -- things like whether the request contains code, requires reasoning, uses technical terminology, or needs creative writing. Based on this analysis, it picks the best model from six providers (OpenAI, Anthropic, Google, xAI, DeepSeek, NVIDIA) for the job.
 
 The agent sends one request and gets the optimal response. No need to know which provider to call or which model to pick.
 

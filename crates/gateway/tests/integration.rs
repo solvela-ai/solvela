@@ -1032,6 +1032,179 @@ fn test_app_with_provider_registry_and_exact_verifier(
     (router, state)
 }
 
+/// Like [`test_app_with_provider_registry_and_exact_verifier`] but lets the
+/// caller supply the models TOML, so a feature that adds a NEW provider/model
+/// (e.g. NVIDIA) can be exercised end-to-end through the real route without
+/// disturbing the shared `TEST_MODELS_TOML` fixture (which several tests pin to
+/// an exact model count). Uses [`AlwaysPassVerifier`] for the `exact` scheme.
+fn test_app_with_models_and_providers(
+    models_toml: &str,
+    providers: ProviderRegistry,
+) -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(models_toml).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![
+        Arc::new(AlwaysPassVerifier) as Arc<dyn PaymentVerifier>,
+    ]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers,
+        search_provider: None,
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        faucet: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        auth_provider: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+    });
+    build_router(state, RateLimiter::new(RateLimitConfig::default()))
+}
+
+/// Minimal models TOML carrying one free + one paid NVIDIA model, used by the
+/// NVIDIA end-to-end route tests below. The `model_id` values are the FULL
+/// publisher-qualified ids NVIDIA expects, so the canonical Solvela keys are
+/// `nvidia/nvidia/...` and `nvidia/meta/...` — exactly the shape the adapter's
+/// `nvidia_model_id` round-trip handles.
+const NVIDIA_TEST_MODELS_TOML: &str = r#"
+[models.nvidia-llama-3-1-nemotron-nano-8b-v1]
+provider = "nvidia"
+model_id = "nvidia/llama-3.1-nemotron-nano-8b-v1"
+display_name = "Llama 3.1 Nemotron Nano 8B (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 131072
+supports_streaming = true
+supports_tools = true
+
+[models.nvidia-nemotron-nano-9b-v2]
+provider = "nvidia"
+model_id = "nvidia/nvidia-nemotron-nano-9b-v2"
+display_name = "NVIDIA Nemotron Nano 9B v2"
+input_cost_per_million = 0.04
+output_cost_per_million = 0.16
+context_window = 131072
+supports_streaming = true
+supports_tools = true
+reasoning = true
+"#;
+
+/// E2E (real route, `oneshot` + `build_router`): a FREE NVIDIA model resolves
+/// by its canonical key, dispatches to the `nvidia` provider, and serves at $0
+/// without a payment header. `MockProvider::mock_response` echoes back the
+/// model string it received, proving the dispatch carried the canonical NVIDIA
+/// key all the way to the adapter (the adapter's own `nvidia_model_id`
+/// normalization is unit-tested in providers/nvidia.rs).
+#[tokio::test]
+async fn test_nvidia_free_model_served_e2e() {
+    let mut providers: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+    providers.insert("nvidia".to_string(), Arc::new(MockProvider::new("nvidia")));
+    let app = test_app_with_models_and_providers(
+        NVIDIA_TEST_MODELS_TOML,
+        ProviderRegistry::from_providers(providers),
+    );
+
+    let body = serde_json::json!({
+        "model": "nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                // No payment header: a 0.0/0.0 model is free-tier and served at $0.
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "free NVIDIA model must be served at $0 (no 402)"
+    );
+    let resp_body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+    // The mock echoes the resolved canonical model that reached the provider.
+    assert_eq!(
+        json["model"], "nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1",
+        "dispatch must carry the canonical NVIDIA model to the provider"
+    );
+}
+
+/// E2E: a PAID NVIDIA model with no payment header returns a 402 carrying the
+/// USDC cost breakdown (5% fee, USDC currency). Proves a paid NVIDIA model
+/// flows through the same money-path 402 builder as every other provider.
+#[tokio::test]
+async fn test_nvidia_paid_model_returns_402_e2e() {
+    let mut providers: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+    providers.insert("nvidia".to_string(), Arc::new(MockProvider::new("nvidia")));
+    let app = test_app_with_models_and_providers(
+        NVIDIA_TEST_MODELS_TOML,
+        ProviderRegistry::from_providers(providers),
+    );
+
+    let body = serde_json::json!({
+        "model": "nvidia/nvidia/nvidia-nemotron-nano-9b-v2",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYMENT_REQUIRED,
+        "paid NVIDIA model with no payment header must return 402"
+    );
+    let resp_body = response.into_body().collect().await.unwrap().to_bytes();
+    let payment_info: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+    assert_eq!(payment_info["x402_version"], 2);
+    assert!(payment_info["accepts"].is_array());
+    assert!(payment_info["cost_breakdown"]["total"].is_string());
+    assert_eq!(payment_info["cost_breakdown"]["currency"], "USDC");
+    assert_eq!(payment_info["cost_breakdown"]["fee_percent"], 5);
+}
+
 // ---------------------------------------------------------------------------
 // Semantic cache (Tier 2) — end-to-end
 // ---------------------------------------------------------------------------

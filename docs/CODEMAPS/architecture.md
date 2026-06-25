@@ -249,7 +249,7 @@ Key files:
 | File | Purpose | Format |
 |------|---------|--------|
 | `config/default.toml` | Server defaults | TOML: host, port, Solana RPC URL, log level |
-| `config/models.toml` | Model registry + pricing | TOML: 26+ models, per-token costs, context windows |
+| `config/models.toml` | Model registry + pricing | TOML: 44+ models, per-token costs, context windows |
 | `config/services.toml` | Service marketplace | TOML: external LLM services |
 | `.env.example` | Required env vars | Bash: API keys, wallet keys, database URL |
 | `Cargo.toml` | Workspace manifest | TOML: workspace members, shared deps |

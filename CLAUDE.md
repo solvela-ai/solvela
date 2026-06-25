@@ -107,7 +107,7 @@ Trustless USDC-SPL escrow with deposit/claim/refund instructions. **NOT a worksp
 
 ### Configuration (`config/`)
 
-- `models.toml` — Model registry with per-token pricing (5 providers, 26+ models)
+- `models.toml` — Model registry with per-token pricing (6 providers, 44+ models)
 - `default.toml` — Server host/port, Solana RPC URL, monitor thresholds
 - `services.toml` — x402 service marketplace registry
 

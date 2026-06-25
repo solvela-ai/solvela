@@ -411,7 +411,7 @@ ttl_secs = 600
 There are no `[logging]` or `[rate_limit]` sections in `config/default.toml`; log level is set via `RUST_LOG` and rate-limit defaults live in `crates/gateway/src/middleware/rate_limit.rs` (60 req / 60 s per wallet, hard-coded).
 
 ### config/models.toml
-Model registry; 26+ models with per-token pricing.
+Model registry; 44+ models with per-token pricing.
 
 ```toml
 [models.openai-gpt-4o]

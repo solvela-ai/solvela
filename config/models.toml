@@ -312,3 +312,211 @@ context_window = 131072
 supports_streaming = true
 supports_tools = true
 reasoning = true
+
+# --- NVIDIA ---
+#
+# NVIDIA NIM (https://integrate.api.nvidia.com/v1) is OpenAI-compatible. Each
+# model is registered with `provider = "nvidia"` and `model_id` set to the FULL
+# publisher-qualified id NVIDIA expects in the request `model` field (e.g.
+# "nvidia/llama-...", "meta/llama-...", "deepseek-ai/deepseek-r1"). The canonical
+# Solvela key therefore becomes "nvidia/<publisher>/<model>" — addressable by
+# that canonical key or by the TOML key below. The adapter (providers/nvidia.rs)
+# strips exactly one leading Solvela "nvidia/" prefix to recover the
+# publisher-qualified id.
+#
+# Model ids verified against NVIDIA's live catalog (docs.api.nvidia.com /
+# build.nvidia.com modelcards), 2026-06-17. All models are free-tier (0.0/0.0)
+# except the two paid Nemotron models, whose rates are cited inline.
+# Content-safety/guard/moderation/embedding/reranking models and the deprecated
+# nvidia/llama-3.1-nemotron-70b-instruct are intentionally NOT registered.
+
+# Nemotron — free tier
+[models.nvidia-llama-3-1-nemotron-nano-8b-v1]
+provider = "nvidia"
+model_id = "nvidia/llama-3.1-nemotron-nano-8b-v1"
+display_name = "Llama 3.1 Nemotron Nano 8B (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 131072
+supports_streaming = true
+supports_tools = true
+
+[models.nvidia-llama-3-1-nemotron-ultra-253b-v1]
+provider = "nvidia"
+model_id = "nvidia/llama-3.1-nemotron-ultra-253b-v1"
+display_name = "Llama 3.1 Nemotron Ultra 253B (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 131072
+supports_streaming = true
+supports_tools = true
+reasoning = true
+
+[models.nvidia-llama-3-3-nemotron-super-49b-v1]
+provider = "nvidia"
+model_id = "nvidia/llama-3.3-nemotron-super-49b-v1"
+display_name = "Llama 3.3 Nemotron Super 49B (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 131072
+supports_streaming = true
+supports_tools = true
+reasoning = true
+
+[models.nvidia-nemotron-3-nano-30b-a3b]
+provider = "nvidia"
+model_id = "nvidia/nemotron-3-nano-30b-a3b"
+display_name = "Nemotron 3 Nano 30B-A3B (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 131072
+supports_streaming = true
+supports_tools = true
+reasoning = true
+
+[models.nvidia-nemotron-3-super-120b-a12b]
+provider = "nvidia"
+model_id = "nvidia/nemotron-3-super-120b-a12b"
+display_name = "Nemotron 3 Super 120B-A12B (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 131072
+supports_streaming = true
+supports_tools = true
+reasoning = true
+
+[models.nvidia-nemotron-3-ultra-550b-a55b]
+provider = "nvidia"
+model_id = "nvidia/nemotron-3-ultra-550b-a55b"
+display_name = "Nemotron 3 Ultra 550B-A55B (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 131072
+supports_streaming = true
+supports_tools = true
+reasoning = true
+
+[models.nvidia-nemotron-mini-4b-instruct]
+provider = "nvidia"
+model_id = "nvidia/nemotron-mini-4b-instruct"
+display_name = "Nemotron Mini 4B Instruct (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 4096
+supports_streaming = true
+supports_tools = true
+
+# Nemotron — paid. Rates from build.nvidia.com pricing, cited 2026-06-17.
+[models.nvidia-llama-3-3-nemotron-super-49b-v1-5]
+provider = "nvidia"
+model_id = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
+display_name = "Llama 3.3 Nemotron Super 49B v1.5"
+# Source: build.nvidia.com pricing, 2026-06-17 — $0.10 in / $0.40 out per 1M.
+input_cost_per_million = 0.10
+output_cost_per_million = 0.40
+context_window = 131072
+supports_streaming = true
+supports_tools = true
+reasoning = true
+
+[models.nvidia-nemotron-nano-9b-v2]
+provider = "nvidia"
+model_id = "nvidia/nvidia-nemotron-nano-9b-v2"
+display_name = "NVIDIA Nemotron Nano 9B v2"
+# Source: build.nvidia.com pricing, 2026-06-17 — $0.04 in / $0.16 out per 1M.
+input_cost_per_million = 0.04
+output_cost_per_million = 0.16
+context_window = 131072
+supports_streaming = true
+supports_tools = true
+reasoning = true
+
+# Meta Llama 4 (natively multimodal) — free tier
+[models.nvidia-meta-llama-4-maverick]
+provider = "nvidia"
+model_id = "meta/llama-4-maverick-17b-128e-instruct"
+display_name = "Llama 4 Maverick 17B-128E (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 1000000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+
+[models.nvidia-meta-llama-4-scout]
+provider = "nvidia"
+model_id = "meta/llama-4-scout-17b-16e-instruct"
+display_name = "Llama 4 Scout 17B-16E (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 1000000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+
+# Meta Llama 3.3 70B Instruct — free tier
+[models.nvidia-meta-llama-3-3-70b-instruct]
+provider = "nvidia"
+model_id = "meta/llama-3.3-70b-instruct"
+display_name = "Llama 3.3 70B Instruct (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 131072
+supports_streaming = true
+supports_tools = true
+
+# Qwen3 Coder 480B (agentic coding) — free tier
+[models.nvidia-qwen-qwen3-coder-480b-a35b-instruct]
+provider = "nvidia"
+model_id = "qwen/qwen3-coder-480b-a35b-instruct"
+display_name = "Qwen3 Coder 480B-A35B Instruct (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 262144
+supports_streaming = true
+supports_tools = true
+
+# DeepSeek-R1 (reasoning) — free tier
+[models.nvidia-deepseek-ai-deepseek-r1]
+provider = "nvidia"
+model_id = "deepseek-ai/deepseek-r1"
+display_name = "DeepSeek-R1 (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 163840
+supports_streaming = true
+supports_tools = true
+reasoning = true
+
+# Mistral Large 3 (general) — free tier
+[models.nvidia-mistralai-mistral-large-3-675b-instruct-2512]
+provider = "nvidia"
+model_id = "mistralai/mistral-large-3-675b-instruct-2512"
+display_name = "Mistral Large 3 675B Instruct (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 262144
+supports_streaming = true
+supports_tools = true
+
+# MiniMax — free tier
+[models.nvidia-minimaxai-minimax-m2-7]
+provider = "nvidia"
+model_id = "minimaxai/minimax-m2.7"
+display_name = "MiniMax M2.7 (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 204800
+supports_streaming = true
+supports_tools = true
+
+[models.nvidia-minimaxai-minimax-m3]
+provider = "nvidia"
+model_id = "minimaxai/minimax-m3"
+display_name = "MiniMax M3 (Free)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 204800
+supports_streaming = true
+supports_tools = true
+supports_vision = true

@@ -8,12 +8,12 @@
  *
  * Assertions:
  *   1. Banner — file starts with the exact AUTO-GENERATED banner (em-dash U+2014).
- *   2. Union members — SolvelaModelId union contains exactly the 27 known model IDs.
+ *   2. Union members — SolvelaModelId union contains exactly the 44 known model IDs.
  *   3. Escape-hatch tail — last union member is `| (string & {})`.
  *   4. Type-level assignability — a non-enumerated string is assignable to SolvelaModelId
  *      without a TypeScript error (runtime proof of the `(string & {})` tail).
- *   5. MODELS array — exports an array of exactly 27 entries.
- *   6. MODELS id coverage — every entry's `id` field is one of the 27 known keys.
+ *   5. MODELS array — exports an array of exactly 44 entries.
+ *   6. MODELS id coverage — every entry's `id` field is one of the 44 known keys.
  *   7. Drift guard — re-running the codegen script produces byte-identical output.
  *
  * Note on type-level test (assertion 4):
@@ -21,9 +21,10 @@
  *   does not validate this file. The runtime assertion below proves only that a plain
  *   string value can be constructed as a SolvelaModelId variable; the real TS safety is
  *   that the type does NOT extend `string` without the `(string & {})` tail — if the
- *   tail were removed, only the 27 literal members would be valid at compile time. The
+ *   tail were removed, only the 44 literal members would be valid at compile time. The
  *   comment below doubles as an in-file annotation that reviewers can copy into a
- *   strict-tsc context to verify.
+ *   strict-tsc context to verify. If the tail were removed, only the 44 literal
+ *   members would be valid at compile time.
  *
  *   // @ts-expect-no-error (verified manually / CI tsc pass over tests when added):
  *   // const _t: SolvelaModelId = "hypothetical-future-model";
@@ -51,7 +52,7 @@ const PACKAGE_ROOT = path.resolve(__dirname, "../../");
 const GENERATED_FILE = path.resolve(PACKAGE_ROOT, "src/generated/models.ts");
 
 // ---------------------------------------------------------------------------
-// The 27 known model IDs (sorted alphabetically — matches script's `sortedKeys`).
+// The 44 known model IDs (sorted alphabetically — matches script's `sortedKeys`).
 // Update this list when config/models.toml gains new entries.
 // ---------------------------------------------------------------------------
 
@@ -83,9 +84,28 @@ const KNOWN_MODEL_IDS: readonly string[] = [
   "xai-grok-3-mini",
   "xai-grok-4-fast-reasoning",
   "xai-grok-code-fast-1",
+  // Added with the NVIDIA NIM provider. The set-equality assertions below sort
+  // both sides, so order here is not significant.
+  "nvidia-deepseek-ai-deepseek-r1",
+  "nvidia-llama-3-1-nemotron-nano-8b-v1",
+  "nvidia-llama-3-1-nemotron-ultra-253b-v1",
+  "nvidia-llama-3-3-nemotron-super-49b-v1",
+  "nvidia-llama-3-3-nemotron-super-49b-v1-5",
+  "nvidia-meta-llama-3-3-70b-instruct",
+  "nvidia-meta-llama-4-maverick",
+  "nvidia-meta-llama-4-scout",
+  "nvidia-minimaxai-minimax-m2-7",
+  "nvidia-minimaxai-minimax-m3",
+  "nvidia-mistralai-mistral-large-3-675b-instruct-2512",
+  "nvidia-nemotron-3-nano-30b-a3b",
+  "nvidia-nemotron-3-super-120b-a12b",
+  "nvidia-nemotron-3-ultra-550b-a55b",
+  "nvidia-nemotron-mini-4b-instruct",
+  "nvidia-nemotron-nano-9b-v2",
+  "nvidia-qwen-qwen3-coder-480b-a35b-instruct",
 ] as const;
 
-const EXPECTED_COUNT = 27;
+const EXPECTED_COUNT = 44;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -146,13 +166,13 @@ describe("codegen — src/generated/models.ts", () => {
   // 2. Union members
   // -------------------------------------------------------------------------
 
-  it("SolvelaModelId union contains exactly 27 enumerated string members", () => {
+  it("SolvelaModelId union contains exactly 44 enumerated string members", () => {
     const text = generatedFileText();
     const members = extractUnionMembers(text);
     expect(members).toHaveLength(EXPECTED_COUNT);
   });
 
-  it("SolvelaModelId union members match the known set of 27 model IDs exactly", () => {
+  it("SolvelaModelId union members match the known set of 44 model IDs exactly", () => {
     const text = generatedFileText();
     const members = extractUnionMembers(text);
     // Sort both for set-equality regardless of insertion order (though the
@@ -195,7 +215,7 @@ describe("codegen — src/generated/models.ts", () => {
 
   it("a non-enumerated string is assignable to SolvelaModelId at runtime without error", () => {
     // This proves the (string & {}) tail is present and effective.
-    // If the tail were absent, only the 27 literal members would be the type —
+    // If the tail were absent, only the 44 literal members would be the type —
     // but the runtime assignment below would still succeed because JS has no
     // type guards. The real TS proof is in the comment at the top of this file.
     //
@@ -218,7 +238,7 @@ describe("codegen — src/generated/models.ts", () => {
     expect(Array.isArray(MODELS)).toBe(true);
   });
 
-  it("MODELS contains exactly 27 entries", () => {
+  it("MODELS contains exactly 44 entries", () => {
     expect(MODELS).toHaveLength(EXPECTED_COUNT);
   });
 
@@ -226,7 +246,7 @@ describe("codegen — src/generated/models.ts", () => {
   // 6. MODELS id coverage
   // -------------------------------------------------------------------------
 
-  it("every MODELS entry has an id that is in the known 27-key set", () => {
+  it("every MODELS entry has an id that is in the known 44-key set", () => {
     const knownSet = new Set<string>(KNOWN_MODEL_IDS);
     for (const model of MODELS) {
       expect(knownSet.has(model.id), `unexpected id: ${model.id}`).toBe(true);

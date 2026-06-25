@@ -6,6 +6,7 @@ pub mod fallback;
 pub mod google;
 pub mod health;
 pub mod heartbeat;
+pub mod nvidia;
 pub mod openai;
 pub mod search;
 pub mod xai;
@@ -161,6 +162,15 @@ impl ProviderRegistry {
                 providers.insert(
                     "xai".to_string(),
                     Arc::new(xai::XAIProvider::new(client.clone(), key)),
+                );
+            }
+        }
+
+        if let Ok(key) = std::env::var("NVIDIA_API_KEY") {
+            if !key.is_empty() {
+                providers.insert(
+                    "nvidia".to_string(),
+                    Arc::new(nvidia::NvidiaProvider::new(client.clone(), key)),
                 );
             }
         }
