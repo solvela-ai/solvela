@@ -140,7 +140,33 @@ pub async fn create_message(
     // core uses for its structural checks on the native branch. The core
     // re-resolves and re-checks `provider == "anthropic"` itself, so this only
     // selects the inbound translation — it is not authoritative.
-    let native_skeleton = anthropic_request_to_native_skeleton(&anthropic_req);
+    let mut native_skeleton = anthropic_request_to_native_skeleton(&anthropic_req);
+
+    // INBOUND MODEL-ID CONTRACT (`/v1/messages` only): Claude Code and every
+    // native `api.anthropic.com` client address models by their BARE Anthropic id
+    // (e.g. `claude-sonnet-4-6`, or `ANTHROPIC_SMALL_FAST_MODEL`'s haiku), NOT by
+    // the gateway-canonical `anthropic/<id>` used on `/v1/models` and
+    // `/v1/chat/completions`. A bare id is not a registry key, so without this it
+    // resolves to `ModelNotFound` (the native passthrough never engages).
+    //
+    // If the inbound model does NOT already resolve (alias / profile / canonical
+    // id all miss) but IS a known bare Anthropic id, rewrite the skeleton's model
+    // to the canonical id so the existing resolver routes it native. This is
+    // additive and `/v1/messages`-scoped — it never reinterprets a model that
+    // already resolves, and it never default-routes an unknown id (an unresolved
+    // non-Anthropic-bare id still falls through to `ModelNotFound` downstream).
+    // The relay still rewrites the relayed `model` field to the bare upstream id
+    // (see `run_native_relay`), so this canonicalization is purely for routing.
+    if resolve_model_provider(&native_skeleton, &state).is_none() {
+        if let Some(canonical) = state
+            .model_registry
+            .resolve_anthropic_model_id(&native_skeleton.model)
+            .map(|m| m.id.clone())
+        {
+            native_skeleton.model = canonical;
+        }
+    }
+
     let is_native =
         resolve_model_provider(&native_skeleton, &state).as_deref() == Some("anthropic");
 

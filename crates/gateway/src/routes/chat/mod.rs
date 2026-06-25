@@ -1850,12 +1850,40 @@ async fn run_native_relay(
         });
     };
 
+    // MODEL-ID REWRITE (inbound contract → upstream contract): the inbound body's
+    // `model` is the gateway-facing id — either the bare Anthropic id Claude Code
+    // sent, or (when a client used the canonical form, or the route canonicalized
+    // a bare id for routing) `anthropic/<id>`. `api.anthropic.com` ONLY accepts
+    // the bare id, so the relayed body's `model` MUST be the registry entry's bare
+    // `model_id` (`model_info.model_id`, the internal-only upstream address).
+    // Everything else in the body is forwarded UNCHANGED so thinking-block
+    // `signature`s, `redacted_thinking`, native `tool_use` blocks, and tools all
+    // survive. If the rewrite cannot be applied (body is not a JSON object, or
+    // serialization fails), fail CLOSED via the all-providers-failed arm rather
+    // than relaying a body that would 404 upstream or silently mis-bill.
+    let relay_body = match rewrite_relayed_model(body, &model_info.model_id) {
+        Ok(rewritten) => rewritten,
+        Err(e) => {
+            warn!(
+                model = %req.model,
+                error = %e,
+                "failed to set the upstream model id on the native /v1/messages body \
+                 — failing closed (no charge)"
+            );
+            return Err(ProviderCallError::AllProvidersFailed {
+                model: req.model.clone(),
+                provider: "anthropic".to_string(),
+                error: "could not prepare native request for upstream".to_string(),
+            });
+        }
+    };
+
     info!(model = %req.model, "native /v1/messages passthrough to Anthropic");
     let provider_start = Instant::now();
     let relay_result = relay
-        // Forward the ORIGINAL validated bytes verbatim. `body.clone()` is a
-        // cheap `Bytes` refcount bump, not a copy.
-        .relay_native(body.clone(), anthropic_version, anthropic_beta)
+        // Forward the body with ONLY the top-level `model` rewritten to the bare
+        // upstream id; every other byte of meaning is preserved.
+        .relay_native(relay_body, anthropic_version, anthropic_beta)
         .await;
     histogram!(
         "solvela_provider_request_duration_seconds",
@@ -1923,6 +1951,43 @@ async fn run_native_relay(
         actual_provider: Some("anthropic".to_string()),
         cost_outcome: None,
     })
+}
+
+/// Rewrite ONLY the top-level `model` field of an inbound Anthropic Messages
+/// request body to `upstream_model_id` (the bare Anthropic id), preserving every
+/// other field.
+///
+/// `api.anthropic.com` accepts ONLY the bare model id (e.g. `claude-sonnet-4-6`),
+/// never the gateway-facing `anthropic/<id>` form. The inbound body may carry
+/// either form (a bare id from Claude Code, or the canonical form from an x402
+/// client / after route canonicalization), so the relayed body must always be
+/// normalized to the bare upstream id before forwarding.
+///
+/// Re-serializing through `serde_json::Value` may reorder keys, but it preserves
+/// every value byte-exactly — including the cryptographic thinking-block
+/// `signature` strings, which Anthropic validates by content, not by request-byte
+/// position. The native RESPONSE is still relayed untouched (the byte-identity
+/// guarantee is on the response, not the request).
+///
+/// Returns `Err` (caller fails closed) if the body is not a JSON object or
+/// re-serialization fails — never a silently-unmodified or empty body.
+fn rewrite_relayed_model(
+    body: &axum::body::Bytes,
+    upstream_model_id: &str,
+) -> Result<axum::body::Bytes, serde_json::Error> {
+    let mut value: serde_json::Value = serde_json::from_slice(body)?;
+    let obj = value.as_object_mut().ok_or_else(|| {
+        serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "native /v1/messages body is not a JSON object",
+        ))
+    })?;
+    obj.insert(
+        "model".to_string(),
+        serde_json::Value::String(upstream_model_id.to_string()),
+    );
+    let bytes = serde_json::to_vec(&value)?;
+    Ok(axum::body::Bytes::from(bytes))
 }
 
 /// Build the x402 [`PaymentRequired`] challenge for `/v1/chat/completions`.

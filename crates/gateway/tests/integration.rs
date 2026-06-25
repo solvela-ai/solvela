@@ -482,6 +482,17 @@ supports_streaming = true
 supports_tools = true
 supports_vision = true
 
+# Dated bare id — exercises the ANTHROPIC_SMALL_FAST_MODEL (haiku) inbound case
+# Claude Code sends (`claude-haiku-4-5-20251001`), mirroring config/models.toml.
+[models.anthropic-claude-haiku]
+provider = "anthropic"
+model_id = "claude-haiku-4-5-20251001"
+display_name = "Claude Haiku 4.5"
+input_cost_per_million = 1.00
+output_cost_per_million = 5.00
+context_window = 200000
+supports_streaming = true
+
 [models.google-gemini-flash-lite]
 provider = "google"
 model_id = "gemini-3.1-flash-lite"
@@ -1004,6 +1015,49 @@ fn spawn_mock_anthropic_server(fixture: &'static str) -> String {
     format!("http://{addr}")
 }
 
+/// Spawn a mock Anthropic server that CAPTURES the relayed request's top-level
+/// `model` field into the returned shared slot, then responds with
+/// [`NATIVE_ANTHROPIC_FIXTURE`]. Lets a test assert the EXACT `model` string the
+/// gateway forwarded upstream (api.anthropic.com only accepts the bare id, so the
+/// relayed body must carry the bare id, never the gateway-canonical
+/// `anthropic/<id>` form). Returns `(base_url, captured_model_slot)`.
+fn spawn_model_capturing_anthropic_server() -> (String, Arc<tokio::sync::Mutex<Option<String>>>) {
+    use axum::routing::post;
+    use axum::Router as AxumRouter;
+
+    let captured: Arc<tokio::sync::Mutex<Option<String>>> = Arc::new(tokio::sync::Mutex::new(None));
+    let captured_for_handler = captured.clone();
+
+    let app = AxumRouter::new().route(
+        "/v1/messages",
+        post(move |req_body: axum::body::Bytes| {
+            let slot = captured_for_handler.clone();
+            async move {
+                let model = serde_json::from_slice::<serde_json::Value>(&req_body)
+                    .ok()
+                    .and_then(|v| v["model"].as_str().map(str::to_owned));
+                *slot.lock().await = model;
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        axum::http::HeaderValue::from_static("application/json"),
+                    )],
+                    NATIVE_ANTHROPIC_FIXTURE,
+                )
+            }
+        }),
+    );
+
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), captured)
+}
+
 /// Build a native Anthropic relay handle pointed at the given mock-server base
 /// URL. A non-empty test key satisfies the `relay_native` send (the mock server
 /// ignores auth).
@@ -1027,6 +1081,21 @@ fn native_relay_pointed_at(
 fn test_app_with_mock_provider() -> axum::Router {
     let (router, _state) = test_app_with_mock_provider_and_state();
     router
+}
+
+/// Like [`test_app_with_mock_provider`] but the native relay points at a
+/// CAPTURING mock Anthropic server. Returns the router plus the shared slot that
+/// records the `model` field the gateway forwarded upstream — so a test can prove
+/// the relay rewrites it to the bare Anthropic id (never `anthropic/<id>`).
+fn test_app_with_model_capturing_native_relay(
+) -> (axum::Router, Arc<tokio::sync::Mutex<Option<String>>>) {
+    let (base_url, captured) = spawn_model_capturing_anthropic_server();
+    let (router, _state) = test_app_with_provider_registry_and_exact_verifier_native(
+        mock_provider_registry(),
+        Arc::new(AlwaysPassVerifier),
+        Some(native_relay_pointed_at(&base_url)),
+    );
+    (router, captured)
 }
 
 /// Build a test app with mock providers + a native Anthropic relay (mock
@@ -2730,9 +2799,10 @@ async fn test_models_endpoint() {
     assert_eq!(json["object"], "list");
 
     let data = json["data"].as_array().unwrap();
-    // 4 models in TEST_MODELS_TOML: gpt-4o, deepseek-chat, claude-sonnet, and
-    // the free google/gemini-3.1-flash-lite (added for the free-tier tests).
-    assert_eq!(data.len(), 4);
+    // 5 models in TEST_MODELS_TOML: gpt-4o, deepseek-chat, claude-sonnet,
+    // claude-haiku (the dated bare-id case Claude Code's ANTHROPIC_SMALL_FAST_MODEL
+    // exercises), and the free google/gemini-3.1-flash-lite (free-tier tests).
+    assert_eq!(data.len(), 5);
 
     // Lock in the full wire shape. The route serializes
     // `solvela_protocol::ModelInfo`, whose nested layout is the contract the
@@ -17312,5 +17382,173 @@ mod messages_native_passthrough_tests {
         assert_eq!(v["usage"]["cache_creation_input_tokens"], 200);
         assert_eq!(v["usage"]["cache_read_input_tokens"], 1800);
         assert_eq!(v["usage"]["output_tokens"], 25);
+    }
+
+    // =======================================================================
+    // INBOUND MODEL-ID CONTRACT + UPSTREAM MODEL REWRITE
+    //
+    // These pin the two defects the live end-to-end run found: (1) a BARE
+    // Anthropic id (what Claude Code sends, e.g. `claude-sonnet-4-6`) must
+    // resolve and route NATIVE — not 404 with `model_not_found`; (2) the
+    // relayed upstream `model` field must be the BARE Anthropic id, never the
+    // gateway-canonical `anthropic/<id>` (api.anthropic.com rejects the latter).
+    // Both FAIL on the pre-fix code (bare id → ModelNotFound; canonical id →
+    // forwarded verbatim and 404'd upstream) and PASS after the fix.
+    // =======================================================================
+
+    /// Helper: POST a body and return (status, captured-upstream-model, parsed
+    /// response body), driving the REAL route + relay through the capturing mock
+    /// Anthropic upstream.
+    async fn post_messages_capturing(
+        body: serde_json::Value,
+    ) -> (StatusCode, Option<String>, serde_json::Value) {
+        let (app, captured) = test_app_with_model_capturing_native_relay();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        let model = captured.lock().await.clone();
+        (status, model, v)
+    }
+
+    /// CONTRACT (c) + (d): a BARE Anthropic id (what Claude Code sends) resolves,
+    /// routes NATIVE, returns the native Anthropic message shape, AND the gateway
+    /// forwards the BARE id upstream. Pre-fix this was a 404 `model_not_found`.
+    #[tokio::test]
+    async fn bare_claude_id_routes_native_and_forwards_bare_id_upstream() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 256,
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "messages": [{"role": "user", "content": "What is 17*23?"}]
+        });
+        let (status, upstream_model, v) = post_messages_capturing(body).await;
+
+        // (c) bare id resolves + routes native (served, not ModelNotFound).
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a bare Anthropic id (claude-sonnet-4-6) must resolve and route native, \
+             not 404 model_not_found; got {status} body={v}"
+        );
+        // (a) native Anthropic message shape (not the OpenAI chat.completion shape).
+        assert_eq!(
+            v["type"], "message",
+            "native passthrough must return the Anthropic message shape, \
+             not OpenAI chat.completion; body={v}"
+        );
+        // (b) thinking block + signature survive byte-identical.
+        assert_eq!(v["content"][0]["type"], "thinking");
+        assert_eq!(
+            v["content"][0]["signature"],
+            "ErcBCkgIARABGAIiQ_GOLDEN_SIGNATURE_BYTES_xyz=="
+        );
+        // (d) the relayed upstream `model` field is the BARE id.
+        assert_eq!(
+            upstream_model.as_deref(),
+            Some("claude-sonnet-4-6"),
+            "the relayed upstream model must be the bare Anthropic id \
+             (api.anthropic.com rejects anthropic/<id>); got {upstream_model:?}"
+        );
+    }
+
+    /// CONTRACT (d): the canonical `anthropic/<id>` inbound form is ALSO rewritten
+    /// to the bare id upstream. Pre-fix the canonical id was forwarded verbatim —
+    /// api.anthropic.com would 404 it. (The reshape-only mock test passed because
+    /// the old mock ignored the relayed model field entirely.)
+    #[tokio::test]
+    async fn canonical_inbound_id_is_rewritten_to_bare_id_upstream() {
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let (status, upstream_model, v) = post_messages_capturing(body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "canonical id must serve native; body={v}"
+        );
+        assert_eq!(
+            upstream_model.as_deref(),
+            Some("claude-sonnet-4-6"),
+            "a canonical anthropic/<id> inbound model must be rewritten to the bare \
+             id before relaying upstream; got {upstream_model:?}"
+        );
+    }
+
+    /// CONTRACT (c): the dated bare id Claude Code's ANTHROPIC_SMALL_FAST_MODEL
+    /// uses (haiku) also resolves native and forwards its bare id upstream.
+    #[tokio::test]
+    async fn bare_dated_haiku_id_routes_native_and_forwards_bare_id_upstream() {
+        let body = serde_json::json!({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let (status, upstream_model, v) = post_messages_capturing(body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "bare dated haiku id must serve native; body={v}"
+        );
+        assert_eq!(v["type"], "message");
+        assert_eq!(
+            upstream_model.as_deref(),
+            Some("claude-haiku-4-5-20251001"),
+            "the relayed upstream model must be the bare dated haiku id; \
+             got {upstream_model:?}"
+        );
+    }
+
+    /// NO SILENT DEFAULT-ROUTE: an UNKNOWN bare Anthropic-looking id must NOT be
+    /// canonicalized to some default Anthropic model — it fails closed with
+    /// `model_not_found` (404, Anthropic envelope). Pins the fail-closed posture
+    /// against a future "fuzzy match" regression.
+    #[tokio::test]
+    async fn unknown_bare_id_fails_closed_not_default_routed() {
+        let body = serde_json::json!({
+            "model": "claude-does-not-exist-9-9",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let app = test_app_with_mock_provider();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "an unknown bare id must fail closed (model_not_found), never default-route; \
+             got {status} body={v}"
+        );
+        // Anthropic error envelope (top-level type:"error").
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["error"]["type"], "model_not_found");
     }
 }
