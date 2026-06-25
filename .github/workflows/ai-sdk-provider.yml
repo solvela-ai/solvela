@@ -33,7 +33,7 @@ jobs:
     name: Docs key-leak check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -58,7 +58,7 @@ jobs:
         # permissive for consumers (undici is dev-only).
         node: ['22']
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: install
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: install
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -117,7 +117,7 @@ jobs:
         # permissive for consumers (undici is dev-only).
         node: ['22']
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
@@ -143,7 +143,7 @@ jobs:
         # permissive for consumers (undici is dev-only).
         node: ['22']
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
@@ -160,7 +160,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: install
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -178,7 +178,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: install
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -214,7 +214,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: install
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
@@ -239,7 +239,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: install
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '22'
