@@ -73,7 +73,7 @@ pub fn resolve_model(profile: Profile, tier: Tier) -> &'static str {
         // PREMIUM: best quality regardless of cost
         (Profile::Premium, Tier::Simple) => "openai/gpt-4o",
         (Profile::Premium, Tier::Medium) => "anthropic/claude-sonnet-4-6",
-        (Profile::Premium, Tier::Complex) => "anthropic/claude-opus-4-6",
+        (Profile::Premium, Tier::Complex) => "anthropic/claude-opus-4-8",
         (Profile::Premium, Tier::Reasoning) => "openai/o3",
 
         // FREE: only free-tier models
@@ -89,7 +89,7 @@ pub fn resolve_alias(alias: &str) -> Option<&'static str> {
     match alias.to_lowercase().as_str() {
         "gpt5" | "gpt-5" => Some("openai/gpt-5.2"),
         "sonnet" | "claude-sonnet" => Some("anthropic/claude-sonnet-4-6"),
-        "opus" | "claude-opus" => Some("anthropic/claude-opus-4-6"),
+        "opus" | "claude-opus" => Some("anthropic/claude-opus-4-8"),
         // The canonical key here MUST match one registered by `from_toml`
         // — see the cross-check test below. Previously this pointed at
         // `claude-3-5-haiku-20241022`, which has never been in
@@ -200,10 +200,55 @@ mod tests {
         );
     }
 
+    /// The `opus` / `claude-opus` aliases and the Premium/Complex tier MUST
+    /// point at the newest registered Opus (`claude-opus-4-8`). Pins the
+    /// 2026-06 repoint off 4.6 onto 4.8 so a future drift back to an older
+    /// (or unregistered) Opus is a test failure, not a silent regression.
+    #[test]
+    fn opus_alias_and_premium_complex_route_to_opus_4_8() {
+        assert_eq!(resolve_alias("opus"), Some("anthropic/claude-opus-4-8"));
+        assert_eq!(
+            resolve_alias("claude-opus"),
+            Some("anthropic/claude-opus-4-8")
+        );
+        assert_eq!(
+            resolve_model(Profile::Premium, Tier::Complex),
+            "anthropic/claude-opus-4-8"
+        );
+        // The alias and the Premium/Complex tier must agree on the Opus target.
+        assert_eq!(
+            resolve_alias("opus"),
+            Some(resolve_model(Profile::Premium, Tier::Complex))
+        );
+    }
+
+    /// The two newest Opus entries MUST load from the production
+    /// `config/models.toml` with the agreed Opus-tier pricing and the repo's
+    /// uniform 200K context-window convention. A pricing typo in the TOML
+    /// would otherwise mis-bill every Opus request (the 5% fee is applied to
+    /// these per-million rates).
+    #[test]
+    fn opus_4_8_and_4_7_load_with_correct_pricing() {
+        let toml_str = include_str!("../../../config/models.toml");
+        let registry = crate::models::ModelRegistry::from_toml(toml_str)
+            .expect("config/models.toml must parse");
+
+        for id in ["anthropic/claude-opus-4-8", "anthropic/claude-opus-4-7"] {
+            let m = registry
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} must be registered in models.toml"));
+            assert_eq!(m.input_cost_per_million, 5.00, "{id} input cost");
+            assert_eq!(m.output_cost_per_million, 25.00, "{id} output cost");
+            assert_eq!(m.context_window, 200_000, "{id} context window");
+            assert!(m.reasoning, "{id} must be reasoning-capable");
+        }
+    }
+
     #[test]
     fn test_resolve_alias() {
         assert_eq!(resolve_alias("gpt5"), Some("openai/gpt-5.2"));
         assert_eq!(resolve_alias("sonnet"), Some("anthropic/claude-sonnet-4-6"));
+        assert_eq!(resolve_alias("opus"), Some("anthropic/claude-opus-4-8"));
         // R1 regression: this used to point at the unregistered
         // `claude-3-5-haiku-20241022`. The canonical key MUST match a
         // model registered in `config/models.toml`.

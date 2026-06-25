@@ -57,6 +57,30 @@ supports_streaming = true
 
 # --- Anthropic ---
 
+[models.anthropic-claude-opus-4-8]
+provider = "anthropic"
+model_id = "claude-opus-4-8"
+display_name = "Claude Opus 4.8"
+input_cost_per_million = 5.00
+output_cost_per_million = 25.00
+context_window = 200000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+
+[models.anthropic-claude-opus-4-7]
+provider = "anthropic"
+model_id = "claude-opus-4-7"
+display_name = "Claude Opus 4.7"
+input_cost_per_million = 5.00
+output_cost_per_million = 25.00
+context_window = 200000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+
 [models.anthropic-claude-opus-4-6]
 provider = "anthropic"
 model_id = "claude-opus-4-6"

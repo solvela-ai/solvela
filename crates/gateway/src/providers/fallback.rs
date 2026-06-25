@@ -537,6 +537,23 @@ pub fn fallback_chain(primary: &str) -> Vec<String> {
 pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a str, &'a str)> {
     let chain: Vec<(&str, &str)> = match (provider, model) {
         // --- Premium tier (reasoning, high capability) ---
+        // Opus degrades newest -> older within Anthropic first, then falls
+        // through to the same cross-provider tail the 4.6 chain uses.
+        ("anthropic", "claude-opus-4-8") => vec![
+            ("anthropic", "claude-opus-4-8"),
+            ("anthropic", "claude-opus-4-7"),
+            ("anthropic", "claude-opus-4-6"),
+            ("openai", "gpt-5.2"),
+            ("google", "gemini-3.1-pro"),
+            ("openai", "o3"),
+        ],
+        ("anthropic", "claude-opus-4-7") => vec![
+            ("anthropic", "claude-opus-4-7"),
+            ("anthropic", "claude-opus-4-6"),
+            ("openai", "gpt-5.2"),
+            ("google", "gemini-3.1-pro"),
+            ("openai", "o3"),
+        ],
         ("anthropic", "claude-opus-4-6") => vec![
             ("anthropic", "claude-opus-4-6"),
             ("openai", "gpt-5.2"),
@@ -1234,6 +1251,25 @@ supports_streaming = true
         assert!(chain.iter().any(|(p, _)| *p != "anthropic"));
     }
 
+    /// The newest Opus models degrade newest -> older within Anthropic before
+    /// crossing providers. Pins the 2026-06 4.8/4.7 additions so the
+    /// degradation order can't silently regress.
+    #[test]
+    fn test_model_fallback_chain_opus_4_8_and_4_7() {
+        let chain = model_fallback_chain("anthropic", "claude-opus-4-8");
+        assert_eq!(chain[0], ("anthropic", "claude-opus-4-8"));
+        // Anthropic-internal degradation: 4.8 -> 4.7 -> 4.6 come first, in order.
+        assert_eq!(chain[1], ("anthropic", "claude-opus-4-7"));
+        assert_eq!(chain[2], ("anthropic", "claude-opus-4-6"));
+        // Then cross-provider fallbacks.
+        assert!(chain.iter().any(|(p, _)| *p != "anthropic"));
+
+        let chain = model_fallback_chain("anthropic", "claude-opus-4-7");
+        assert_eq!(chain[0], ("anthropic", "claude-opus-4-7"));
+        assert_eq!(chain[1], ("anthropic", "claude-opus-4-6"));
+        assert!(chain.iter().any(|(p, _)| *p != "anthropic"));
+    }
+
     #[test]
     fn test_model_fallback_chain_gpt4o() {
         let chain = model_fallback_chain("openai", "gpt-4o");
@@ -1281,6 +1317,8 @@ supports_streaming = true
     /// `every_fallback_chain_id_is_registered` exercises it.
     fn fallback_chain_keys() -> Vec<(&'static str, &'static str)> {
         vec![
+            ("anthropic", "claude-opus-4-8"),
+            ("anthropic", "claude-opus-4-7"),
             ("anthropic", "claude-opus-4-6"),
             ("openai", "gpt-5.2"),
             ("google", "gemini-3.1-pro"),
