@@ -619,10 +619,14 @@ mod tests {
     }
 
     /// home_dir() returns Err when neither HOME nor USERPROFILE is set.
-    #[test]
-    fn test_home_dir_err_when_unset() {
-        // Cannot use ENV_MUTEX here (sync test) — this is a unit test of the logic only.
-        // We remove HOME and USERPROFILE temporarily.
+    #[tokio::test]
+    async fn test_home_dir_err_when_unset() {
+        // MUST hold ENV_MUTEX: this test *removes* HOME/USERPROFILE, and any
+        // concurrent locked test reading HOME (e.g. run_install) would otherwise
+        // panic with "neither HOME nor USERPROFILE is set". std::env is
+        // process-global, so the remove + restore must stay inside the critical
+        // section. _lock is declared first so it drops last (after restore).
+        let _lock = crate::ENV_MUTEX.lock().await;
         let old_home = std::env::var("HOME").ok();
         let old_up = std::env::var("USERPROFILE").ok();
         std::env::remove_var("HOME");
