@@ -36,7 +36,7 @@ jobs:
     name: cargo fmt --check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -46,7 +46,7 @@ jobs:
     name: cargo clippy --all-targets --features … -- -D warnings
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -64,7 +64,7 @@ jobs:
     name: Unit tests (no .so required)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # tests/unit.rs has no feature gate; tests/integration.rs is gated
       # behind `--features sbf`. Default `cargo test` runs the unit suite
@@ -75,7 +75,7 @@ jobs:
     name: mainnet build + USDC-mint guard
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # Mainnet deploys MUST be built with `--features mainnet` — without
       # it the program targets the devnet USDC mint and would silently
@@ -98,7 +98,7 @@ jobs:
     name: cargo build-sbf
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Solana CLI
         # `release.anza.xyz` is the post-rebrand canonical URL after
         # Solana Labs → Anza handover; `release.solana.com` still
@@ -124,7 +124,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: sbf-build
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/download-artifact@v8
         with:
