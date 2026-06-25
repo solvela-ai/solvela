@@ -177,6 +177,8 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 | OpenAI | `o3-mini` | $1.10 | $4.40 | 200K |
 | OpenAI | `o4-mini` | $1.10 | $4.40 | 200K |
 | OpenAI | `gpt-oss-120b` | Free | Free | 128K |
+| Anthropic | `claude-opus-4-8` | $5.00 | $25.00 | 200K |
+| Anthropic | `claude-opus-4-7` | $5.00 | $25.00 | 200K |
 | Anthropic | `claude-opus-4-6` | $5.00 | $25.00 | 200K |
 | Anthropic | `claude-sonnet-4-6` | $3.00 | $15.00 | 200K |
 | Anthropic | `claude-sonnet-4-5-20250929` | $3.00 | $15.00 | 200K |

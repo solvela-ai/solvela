@@ -100,6 +100,34 @@ export const SOLVELA_MODELS: SolvelaModel[] = [
     "reasoning": false
   },
   {
+    "id": "solvela/claude-opus-4-8",
+    "name": "Claude Opus 4.8",
+    "provider": "anthropic",
+    "contextWindow": 200000,
+    "maxTokens": 32768,
+    "inputCostPerMillion": 5,
+    "outputCostPerMillion": 25,
+    "supportsStreaming": true,
+    "supportsTools": true,
+    "supportsVision": true,
+    "supportsStructuredOutput": false,
+    "reasoning": true
+  },
+  {
+    "id": "solvela/claude-opus-4-7",
+    "name": "Claude Opus 4.7",
+    "provider": "anthropic",
+    "contextWindow": 200000,
+    "maxTokens": 32768,
+    "inputCostPerMillion": 5,
+    "outputCostPerMillion": 25,
+    "supportsStreaming": true,
+    "supportsTools": true,
+    "supportsVision": true,
+    "supportsStructuredOutput": false,
+    "reasoning": true
+  },
+  {
     "id": "solvela/claude-opus-4-6",
     "name": "Claude Opus 4.6",
     "provider": "anthropic",
@@ -381,4 +409,4 @@ export const SOLVELA_MODELS: SolvelaModel[] = [
   }
 ];
 
-export const MODEL_COUNT = 25;
+export const MODEL_COUNT = 27;

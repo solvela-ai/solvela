@@ -40,7 +40,7 @@ pub async fn chat(
 ### Anthropic (providers/anthropic.rs)
 **Endpoint:** https://api.anthropic.com/v1/messages  
 **Auth:** `x-api-key: {ANTHROPIC_API_KEY}`  
-**Models:** Claude Opus 4.6, Claude Sonnet 4.6, Claude Haiku 4.5  
+**Models:** Claude Opus 4.8, Claude Opus 4.7, Claude Opus 4.6, Claude Sonnet 4.6, Claude Haiku 4.5  
 **Features:** Streaming, vision, tools, extended thinking (native support)  
 **Cost:** Per-token pricing (input/output may differ)
 

@@ -4,6 +4,8 @@
 export type SolvelaModelId =
   | "anthropic-claude-haiku-4-5"
   | "anthropic-claude-opus-4-6"
+  | "anthropic-claude-opus-4-7"
+  | "anthropic-claude-opus-4-8"
   | "anthropic-claude-sonnet-4-5"
   | "anthropic-claude-sonnet-4-6"
   | "deepseek-chat"
@@ -49,6 +51,34 @@ export const MODELS = [
     provider: "anthropic",
     modelId: "claude-opus-4-6",
     displayName: "Claude Opus 4.6",
+    inputCostPerMillion: 5,
+    outputCostPerMillion: 25,
+    contextWindow: 200000,
+    supportsStreaming: true,
+    supportsTools: true,
+    supportsVision: true,
+    reasoning: true,
+    supportsStructuredOutput: false,
+  },
+  {
+    id: "anthropic-claude-opus-4-7",
+    provider: "anthropic",
+    modelId: "claude-opus-4-7",
+    displayName: "Claude Opus 4.7",
+    inputCostPerMillion: 5,
+    outputCostPerMillion: 25,
+    contextWindow: 200000,
+    supportsStreaming: true,
+    supportsTools: true,
+    supportsVision: true,
+    reasoning: true,
+    supportsStructuredOutput: false,
+  },
+  {
+    id: "anthropic-claude-opus-4-8",
+    provider: "anthropic",
+    modelId: "claude-opus-4-8",
+    displayName: "Claude Opus 4.8",
     inputCostPerMillion: 5,
     outputCostPerMillion: 25,
     contextWindow: 200000,
