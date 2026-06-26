@@ -1098,6 +1098,137 @@ fn test_app_with_model_capturing_native_relay(
     (router, captured)
 }
 
+/// Build a test app whose `/v1/messages` native fork is exercised on the
+/// DEV-BYPASS path (no payment header) — `dev_bypass_payment = true`, a
+/// model-capturing native Anthropic relay, and mock OpenAI-shaped providers.
+///
+/// This mirrors the LIVE validation harness (`SOLVELA_DEV_BYPASS_PAYMENT=true`),
+/// which is the path the existing native tests did NOT cover: every other native
+/// test sends a `payment-signature` header and so takes the PAID dispatch. The
+/// dev-bypass branch is a SEPARATE provider-dispatch site, and the bug was that
+/// it ignored the native fork and always reshaped through the OpenAI pipeline.
+/// Returns the router plus the slot recording the `model` the gateway relayed
+/// upstream (`None` when the native relay was never called — i.e. it reshaped).
+fn test_app_dev_bypass_capturing_native_relay(
+) -> (axum::Router, Arc<tokio::sync::Mutex<Option<String>>>) {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    let (base_url, captured) = spawn_model_capturing_anthropic_server();
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        native_anthropic: Some(native_relay_pointed_at(&base_url)),
+        search_provider: None,
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        faucet: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        auth_provider: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: true,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+    });
+    let router = build_router(
+        Arc::clone(&state),
+        RateLimiter::new(RateLimitConfig::default()),
+    );
+    (router, captured)
+}
+
+/// Like [`test_app_dev_bypass_capturing_native_relay`] but builds the registry
+/// from a config in which `claude-sonnet-4-6` is priced at $0, so the zero-cost
+/// FREE-tier bypass branch is reachable for an Anthropic model. Used to pin the
+/// free path's native fork (no payment header → free path → must relay native).
+fn test_app_free_anthropic_capturing_native_relay(
+) -> (axum::Router, Arc<tokio::sync::Mutex<Option<String>>>) {
+    const FREE_ANTHROPIC_TOML: &str = r#"
+[models.anthropic-claude-sonnet]
+provider = "anthropic"
+model_id = "claude-sonnet-4-6"
+display_name = "Claude Sonnet 4.6 (free test)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 200000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+"#;
+    let model_registry = ModelRegistry::from_toml(FREE_ANTHROPIC_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    let (base_url, captured) = spawn_model_capturing_anthropic_server();
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        native_anthropic: Some(native_relay_pointed_at(&base_url)),
+        search_provider: None,
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        faucet: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        auth_provider: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+    });
+    let router = build_router(
+        Arc::clone(&state),
+        RateLimiter::new(RateLimitConfig::default()),
+    );
+    (router, captured)
+}
+
 /// Build a test app with mock providers + a native Anthropic relay (mock
 /// server), and return both the router and state.
 fn test_app_with_mock_provider_and_state() -> (axum::Router, Arc<AppState>) {
@@ -17461,6 +17592,155 @@ mod messages_native_passthrough_tests {
             Some("claude-sonnet-4-6"),
             "the relayed upstream model must be the bare Anthropic id \
              (api.anthropic.com rejects anthropic/<id>); got {upstream_model:?}"
+        );
+    }
+
+    /// REGRESSION (dev-bypass native fork): the native `/v1/messages` passthrough
+    /// MUST engage on the DEV-BYPASS path (`SOLVELA_DEV_BYPASS_PAYMENT=true`, no
+    /// payment header) — the exact path the live validation used and the one the
+    /// existing native tests never exercised (they all send a payment header and
+    /// so take the PAID dispatch).
+    ///
+    /// Pre-fix the dev-bypass branch ignored `native_source` and ALWAYS reshaped
+    /// through the OpenAI provider pipeline: it returned the OpenAI
+    /// `chat.completion` shape (`object:"chat.completion"`, `completion_tokens`
+    /// usage, NO thinking block, canonical `anthropic/<id>` echoed) and NEVER
+    /// called the native relay. That destroys the extended-thinking `signature`
+    /// (the OpenAI reshape has no field to carry it), which hard-400s Claude Code
+    /// on the next multi-turn request.
+    ///
+    /// This drives the request EXACTLY like the live HTTP path: a bare Anthropic
+    /// id, a Claude-Code-shaped body (content/system as block arrays, tools, a
+    /// prior assistant thinking block with a signature), NO payment header. It
+    /// asserts the native Anthropic message shape, that the relay was actually
+    /// called with the BARE upstream id, and that a thinking `signature` survives
+    /// byte-identical.
+    #[tokio::test]
+    async fn dev_bypass_bare_claude_id_routes_native_not_openai_reshape() {
+        let (app, captured) = test_app_dev_bypass_capturing_native_relay();
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 256,
+            "stream": false,
+            "system": [{"type": "text", "text": "You are Claude Code."}],
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "tools": [{"name": "Bash", "description": "run", "input_schema": {"type": "object"}}],
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "What is 17*23?"}]},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "let me think", "signature": "PRIOR_SIG_abc=="},
+                    {"type": "text", "text": "Let me compute."}
+                ]},
+                {"role": "user", "content": [{"type": "text", "text": "go on"}]}
+            ]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    // NO payment-signature header → dev-bypass path.
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        let upstream_model = captured.lock().await.clone();
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "dev-bypass native must serve; body={v}"
+        );
+        // Native Anthropic message shape — NOT the OpenAI chat.completion shape.
+        assert_eq!(
+            v["type"], "message",
+            "dev-bypass /v1/messages must take the NATIVE passthrough, not the \
+             OpenAI reshape; got body={v}"
+        );
+        assert!(
+            v["object"].is_null(),
+            "must NOT be the OpenAI chat.completion shape (no `object` field); body={v}"
+        );
+        // The relay was actually invoked, with the BARE upstream id.
+        assert_eq!(
+            upstream_model.as_deref(),
+            Some("claude-sonnet-4-6"),
+            "the native relay must be called with the bare Anthropic id on the \
+             dev-bypass path (None means it reshaped and never relayed); \
+             got {upstream_model:?}"
+        );
+        // The thinking block + signature survive byte-identical (the whole point).
+        assert_eq!(v["content"][0]["type"], "thinking");
+        assert_eq!(
+            v["content"][0]["signature"],
+            "ErcBCkgIARABGAIiQ_GOLDEN_SIGNATURE_BYTES_xyz=="
+        );
+        // Native usage shape (output_tokens), not the OpenAI completion_tokens.
+        assert!(
+            v["usage"]["output_tokens"].is_number(),
+            "native usage must carry output_tokens; body={v}"
+        );
+    }
+
+    /// REGRESSION (free-tier native fork): the THIRD provider-dispatch site — the
+    /// zero-cost free-tier bypass — must ALSO honor the native fork. No Anthropic
+    /// model is priced at $0 in the shipped config, so this path is not reachable
+    /// for one today; this test pins the behavior with a $0-priced Anthropic model
+    /// so a future free-tier Anthropic entry can never silently reshape (which
+    /// would drop the thinking `signature`). Drives the free path (no payment
+    /// header, estimate == $0) and asserts the native Anthropic shape + relay call.
+    #[tokio::test]
+    async fn free_tier_anthropic_routes_native_not_openai_reshape() {
+        let (app, captured) = test_app_free_anthropic_capturing_native_relay();
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64,
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    // NO payment header → free-tier path (model is $0).
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        let upstream_model = captured.lock().await.clone();
+
+        assert_eq!(status, StatusCode::OK, "free native must serve; body={v}");
+        assert_eq!(
+            v["type"], "message",
+            "free-tier /v1/messages must take the NATIVE passthrough, not the \
+             OpenAI reshape; got body={v}"
+        );
+        assert!(
+            v["object"].is_null(),
+            "must not be chat.completion; body={v}"
+        );
+        assert_eq!(
+            upstream_model.as_deref(),
+            Some("claude-sonnet-4-6"),
+            "the native relay must be called on the free path; got {upstream_model:?}"
+        );
+        assert_eq!(v["content"][0]["type"], "thinking");
+        assert_eq!(
+            v["content"][0]["signature"],
+            "ErcBCkgIARABGAIiQ_GOLDEN_SIGNATURE_BYTES_xyz=="
         );
     }
 

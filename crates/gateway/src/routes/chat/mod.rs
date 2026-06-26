@@ -484,32 +484,43 @@ pub(crate) async fn chat_completions_inner(
         // Dev-bypass still reaches a provider, so it must run the guard.
         run_prompt_guard(&req.messages)?;
 
-        let ctx = ProviderCallContext {
-            state: &state,
-            req: &req,
-            model_info,
-            headers: &headers,
-            debug_enabled,
-            request_start,
-            routing_tier: &routing_tier,
-            routing_score,
-            routing_profile: &routing_profile,
-            session_id: &session_id,
-            payment_status: PaymentStatus::DevBypass,
+        // Dev-bypass must honor the SAME native-vs-reshape fork as the paid path
+        // (the dispatch at "Step 5" below). An Anthropic-resolved `/v1/messages`
+        // request (`native_source` is `Some`) takes the byte-verbatim native
+        // relay so the extended-thinking `signature` survives; without this, the
+        // dev-bypass branch would reshape through the OpenAI pipeline (losing the
+        // signature → Claude Code hard-400s the next multi-turn request) and
+        // serve a `chat.completion` shape for an endpoint that promises native
+        // Anthropic bytes. Mirrors the verified-path dispatch verbatim except for
+        // the (here irrelevant) settlement that only the paid path performs.
+        let dev_bypass_call = if let Some((body, version, beta)) = native_source {
+            run_native_relay(&state, &req, model_info, body, version, beta, &session_id).await
+        } else {
+            let ctx = ProviderCallContext {
+                state: &state,
+                req: &req,
+                model_info,
+                headers: &headers,
+                debug_enabled,
+                request_start,
+                routing_tier: &routing_tier,
+                routing_score,
+                routing_profile: &routing_profile,
+                session_id: &session_id,
+                payment_status: PaymentStatus::DevBypass,
+            };
+            provider::execute_provider_call(&ctx).await
         };
 
-        return provider::execute_provider_call(&ctx)
-            .await
-            .map(|r| r.response)
-            .map_err(|e| match e {
-                ProviderCallError::AllProvidersFailed { model, error, .. } => {
-                    GatewayError::Internal(format!(
-                        "all providers failed for model '{}' (dev bypass): {}",
-                        model, error
-                    ))
-                }
-                ProviderCallError::Internal(msg) => GatewayError::Internal(msg),
-            });
+        return dev_bypass_call.map(|r| r.response).map_err(|e| match e {
+            ProviderCallError::AllProvidersFailed { model, error, .. } => {
+                GatewayError::Internal(format!(
+                    "all providers failed for model '{}' (dev bypass): {}",
+                    model, error
+                ))
+            }
+            ProviderCallError::Internal(msg) => GatewayError::Internal(msg),
+        });
     }
 
     // Compute the upfront cost estimate ONCE. This same `atomic_amount` is the
@@ -640,21 +651,33 @@ pub(crate) async fn chat_completions_inner(
         // the dev-bypass and paid paths).
         run_prompt_guard(&req.messages)?;
 
-        let ctx = ProviderCallContext {
-            state: &state,
-            req: &req,
-            model_info,
-            headers: &headers,
-            debug_enabled,
-            request_start,
-            routing_tier: &routing_tier,
-            routing_score,
-            routing_profile: &routing_profile,
-            session_id: &session_id,
-            payment_status: PaymentStatus::Free,
+        // Honor the SAME native-vs-reshape fork as the dev-bypass and paid paths.
+        // No Anthropic model is currently priced at $0 (so this branch is not
+        // reachable for one today), but keeping the dispatch consistent across ALL
+        // three provider-call sites is exactly what prevents the class of bug where
+        // one site silently reshapes an Anthropic-resolved `/v1/messages` request
+        // (losing the thinking `signature`) while the others relay natively. A
+        // future free-tier Anthropic model can never regress to the OpenAI shape.
+        let free_call = if let Some((body, version, beta)) = native_source {
+            run_native_relay(&state, &req, model_info, body, version, beta, &session_id).await
+        } else {
+            let ctx = ProviderCallContext {
+                state: &state,
+                req: &req,
+                model_info,
+                headers: &headers,
+                debug_enabled,
+                request_start,
+                routing_tier: &routing_tier,
+                routing_score,
+                routing_profile: &routing_profile,
+                session_id: &session_id,
+                payment_status: PaymentStatus::Free,
+            };
+            provider::execute_provider_call(&ctx).await
         };
 
-        return match provider::execute_provider_call(&ctx).await {
+        return match free_call {
             Ok(result) => {
                 // Log spend at $0 via the existing fire-and-forget path so the
                 // free tier still shows up in usage/observability. `cost_usdc`
