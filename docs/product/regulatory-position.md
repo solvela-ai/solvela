@@ -240,7 +240,7 @@ This document describes system behavior at the date noted in the header. It is i
 
 1. Confirm `PLATFORM_FEE_PERCENT` in `crates/protocol/src/constants.rs` still matches the percentage stated here.
 2. Confirm `USDC_MINT` constant still hardcoded to mainnet USDC; confirm verifier still rejects other mints.
-3. Confirm provider list in `crates/gateway/src/providers/` matches the count and names referenced anywhere in this doc (currently: `openai.rs`, `anthropic.rs`, `google.rs`, `xai.rs`, `deepseek.rs` — five providers).
+3. Confirm provider list in `crates/gateway/src/providers/` matches the count and names referenced anywhere in this doc (currently: `openai.rs`, `anthropic.rs`, `google.rs`, `xai.rs`, `deepseek.rs`, `nvidia.rs` — six providers).
 4. Confirm escrow program ID in `programs/escrow/src/lib.rs` (`declare_id!()`) matches the ID quoted here.
 5. Confirm escrow test count by counting `fn test_` in `programs/escrow/tests/*.rs`.
 6. Run `solana program show <program-id>` against mainnet and update the upgrade-authority status above (still retained vs finalized).

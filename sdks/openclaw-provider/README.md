@@ -123,7 +123,7 @@ After installing, OpenClaw's model picker shows:
   - `Solvela Eco` — force cheapest tier
   - `Solvela Premium` — force best-quality tier
   - `Solvela Free` — open-source models only
-- **Real models** (direct gateway access): all 26+ models from the Solvela
+- **Real models** (direct gateway access): all 44+ models from the Solvela
   model registry (GPT-5.2, Claude Sonnet 4.6, Gemini 3.1 Pro, etc.)
 
 ## Security

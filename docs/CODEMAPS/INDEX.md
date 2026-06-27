@@ -179,7 +179,7 @@ The dashboard has no `e2e` npm script — Playwright is pulled in only as a tran
 
 ### TOML Files
 - `config/default.toml` — Server defaults, Solana RPC
-- `config/models.toml` — Model registry (26+ models)
+- `config/models.toml` — Model registry (44+ models)
 - `config/services.toml` — Service marketplace
 
 ### Environment Variables

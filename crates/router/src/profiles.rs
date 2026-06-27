@@ -76,11 +76,20 @@ pub fn resolve_model(profile: Profile, tier: Tier) -> &'static str {
         (Profile::Premium, Tier::Complex) => "anthropic/claude-opus-4-8",
         (Profile::Premium, Tier::Reasoning) => "openai/o3",
 
-        // FREE: only free-tier models
-        (Profile::Free, Tier::Simple) => "google/gemini-3.1-flash-lite",
-        (Profile::Free, Tier::Medium) => "google/gemini-3.1-flash-lite",
-        (Profile::Free, Tier::Complex) => "google/gemini-3.1-flash-lite",
-        (Profile::Free, Tier::Reasoning) => "google/gemini-3.1-flash-lite",
+        // FREE: NVIDIA NIM free-tier Nemotron models ($0/$0), tiered by
+        // complexity (nano → super → ultra). The canonical Solvela key is
+        // `nvidia/<model_id>` where model_id is itself the publisher-qualified
+        // NVIDIA id (`nvidia/llama-...`), so these keys carry a doubled
+        // `nvidia/` — that is the real registry key (see config/models.toml +
+        // crates/router/src/models.rs `format!("{provider}/{model_id}")`).
+        // Every target here MUST be a $0/$0 model — enforced by
+        // `free_profile_targets_are_all_zero_cost` below — so free-tier callers
+        // are never charged. A NIM outage/rate-limit falls back to
+        // google/gemini-3.1-flash-lite (see `model_fallback_chain` in gateway).
+        (Profile::Free, Tier::Simple) => "nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1",
+        (Profile::Free, Tier::Medium) => "nvidia/nvidia/llama-3.3-nemotron-super-49b-v1",
+        (Profile::Free, Tier::Complex) => "nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1",
+        (Profile::Free, Tier::Reasoning) => "nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1",
     }
 }
 
@@ -101,7 +110,9 @@ pub fn resolve_alias(alias: &str) -> Option<&'static str> {
         "grok" | "grok-fast" => Some("xai/grok-4-fast-reasoning"),
         "deepseek" | "ds" => Some("deepseek/deepseek-chat"),
         "deepseek-r" | "reasoner" => Some("deepseek/deepseek-reasoner"),
-        "free" | "oss" => Some("google/gemini-3.1-flash-lite"),
+        // Must agree with Profile::Free's Simple target (the free-tier entry
+        // point) — see `free_and_oss_aliases_resolve_to_free_nemotron`.
+        "free" | "oss" => Some("nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1"),
         "o3-mini" | "o3mini" => Some("openai/o3-mini"),
         "o4-mini" | "o4mini" => Some("openai/o4-mini"),
         "gpt4.1" | "gpt-4.1" | "gpt41" => Some("openai/gpt-4.1"),
@@ -143,7 +154,7 @@ mod tests {
     fn test_resolve_model() {
         assert_eq!(
             resolve_model(Profile::Free, Tier::Reasoning),
-            "google/gemini-3.1-flash-lite"
+            "nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1"
         );
         assert_eq!(
             resolve_model(Profile::Premium, Tier::Reasoning),
@@ -155,49 +166,103 @@ mod tests {
         );
     }
 
-    /// The free tier maps EVERY complexity tier to the canonical Gemini 3.1
-    /// Flash-Lite key. Pins the 2026-06 repoint off `openai/gpt-oss-120b`
-    /// (which was never served free by OpenAI's API) onto Google's free-tier
-    /// model. The companion `every_alias_and_profile_tier_resolves_to_a_registered_model`
-    /// test guarantees this key is registered in `config/models.toml`.
+    /// Free tier routes to NVIDIA NIM free Nemotron models, tiered by
+    /// complexity (nano → super → ultra). Replaces the prior all-tiers→Gemini
+    /// mapping (2026-06 repoint; cf BlockRun, where NVIDIA *is* the free tier).
+    /// `every_alias_and_profile_tier_resolves_to_a_registered_model` guarantees
+    /// these are registered; `free_profile_targets_are_all_zero_cost` guarantees
+    /// they bill $0; the gateway's `model_fallback_chain` falls them back to
+    /// Gemini if NIM is unavailable.
     #[test]
-    fn free_profile_every_tier_resolves_to_gemini_flash_lite() {
+    fn free_profile_tiers_to_nvidia_nemotron() {
+        assert_eq!(
+            resolve_model(Profile::Free, Tier::Simple),
+            "nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1"
+        );
+        assert_eq!(
+            resolve_model(Profile::Free, Tier::Medium),
+            "nvidia/nvidia/llama-3.3-nemotron-super-49b-v1"
+        );
+        assert_eq!(
+            resolve_model(Profile::Free, Tier::Complex),
+            "nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1"
+        );
+        assert_eq!(
+            resolve_model(Profile::Free, Tier::Reasoning),
+            "nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1"
+        );
+        // Every Free target is an nvidia-provider model.
         for tier in [Tier::Simple, Tier::Medium, Tier::Complex, Tier::Reasoning] {
-            assert_eq!(
-                resolve_model(Profile::Free, tier),
-                "google/gemini-3.1-flash-lite",
-                "Profile::Free tier {tier:?} must route to the free Gemini model"
+            assert!(
+                resolve_model(Profile::Free, tier).starts_with("nvidia/"),
+                "Profile::Free tier {tier:?} must route to an NVIDIA free model"
             );
         }
     }
 
     /// The `free` / `oss` aliases resolve to the same canonical free-tier key
-    /// as `Profile::Free`. Guards against the alias and the profile drifting
-    /// apart (which would silently route alias users to a different model).
+    /// as `Profile::Free`'s Simple tier (the free-tier entry point). Guards
+    /// against the alias and the profile drifting apart (which would silently
+    /// route alias users to a different model).
     #[test]
-    fn free_and_oss_aliases_resolve_to_gemini_flash_lite() {
-        assert_eq!(resolve_alias("free"), Some("google/gemini-3.1-flash-lite"));
-        assert_eq!(resolve_alias("oss"), Some("google/gemini-3.1-flash-lite"));
-        // Alias and profile must agree on the free-tier target.
+    fn free_and_oss_aliases_resolve_to_free_nemotron() {
+        assert_eq!(
+            resolve_alias("free"),
+            Some("nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1")
+        );
+        assert_eq!(
+            resolve_alias("oss"),
+            Some("nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1")
+        );
+        // Alias and profile must agree on the free-tier entry point.
         assert_eq!(
             resolve_alias("free"),
             Some(resolve_model(Profile::Free, Tier::Simple))
         );
     }
 
-    /// The free-tier model key MUST exist in the production `config/models.toml`
+    /// Every Free-tier model key MUST exist in the production `config/models.toml`
     /// registry. A repoint that named an unregistered model would 500 every
     /// free-tier request at the registry lookup (the same class of bug the
     /// `haiku` alias previously had).
     #[test]
-    fn free_tier_model_is_registered_in_models_toml() {
+    fn free_tier_models_are_registered_in_models_toml() {
         let toml_str = include_str!("../../../config/models.toml");
         let registry = crate::models::ModelRegistry::from_toml(toml_str)
             .expect("config/models.toml must parse");
-        assert!(
-            registry.get("google/gemini-3.1-flash-lite").is_some(),
-            "the free-tier model google/gemini-3.1-flash-lite must be in models.toml"
-        );
+        for tier in [Tier::Simple, Tier::Medium, Tier::Complex, Tier::Reasoning] {
+            let target = resolve_model(Profile::Free, tier);
+            assert!(
+                registry.get(target).is_some(),
+                "free-tier model {target:?} (Profile::Free {tier:?}) must be in models.toml"
+            );
+        }
+    }
+
+    /// MONEY-PATH GUARD: every `Profile::Free` target must be a $0/$0 model so
+    /// free-tier callers are never charged USDC. Without this, repointing Free
+    /// at a *paid* NVIDIA model (e.g. the paid Nemotron Super v1.5 at $0.10/$0.40
+    /// or Nano 9B v2 at $0.04/$0.16) would silently start billing "free" users.
+    #[test]
+    fn free_profile_targets_are_all_zero_cost() {
+        let toml_str = include_str!("../../../config/models.toml");
+        let registry = crate::models::ModelRegistry::from_toml(toml_str)
+            .expect("config/models.toml must parse");
+        for tier in [Tier::Simple, Tier::Medium, Tier::Complex, Tier::Reasoning] {
+            let target = resolve_model(Profile::Free, tier);
+            let m = registry
+                .get(target)
+                .unwrap_or_else(|| panic!("free-tier target {target:?} not registered"));
+            assert_eq!(
+                m.input_cost_per_million, 0.0,
+                "Profile::Free {tier:?} → {target:?} must have $0 input cost \
+                 (free-tier callers must never be charged)"
+            );
+            assert_eq!(
+                m.output_cost_per_million, 0.0,
+                "Profile::Free {tier:?} → {target:?} must have $0 output cost"
+            );
+        }
     }
 
     /// The `opus` / `claude-opus` aliases and the Premium/Complex tier MUST

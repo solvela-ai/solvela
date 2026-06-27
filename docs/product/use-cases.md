@@ -6,7 +6,7 @@ AI agents that run continuously -- monitoring markets, managing infrastructure, 
 
 ## Multi-Model Routing
 
-Different questions need different models. A simple classification task doesn't need the same model as a complex reasoning problem. Solvela's smart router analyzes each request across 15 dimensions and selects the best model from five providers (OpenAI, Anthropic, Google, xAI, DeepSeek). The agent sends one request to one endpoint, pays one price, and gets the optimal response. No need to manage multiple API keys or learn each provider's pricing.
+Different questions need different models. A simple classification task doesn't need the same model as a complex reasoning problem. Solvela's smart router analyzes each request across 15 dimensions and selects the best model from six providers (OpenAI, Anthropic, Google, xAI, DeepSeek, NVIDIA). The agent sends one request to one endpoint, pays one price, and gets the optimal response. No need to manage multiple API keys or learn each provider's pricing.
 
 ## Pay-Per-Call Billing
 

@@ -199,7 +199,7 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 
 All prices are provider cost in USDC. A 5% platform fee is applied on top. See `config/models.toml` for the full registry or query `GET /pricing` at runtime.
 
-> **Free-tier data-use notice.** `gemini-3.1-flash-lite` is the `free` profile's model and is served via Google's **free** Gemini API tier. On that tier Google may use submitted prompts and generated responses to improve its products, and human reviewers may read, annotate, and process them — do not send sensitive data through the free tier. The free tier is also rate-limited (~15 requests/min, shared per gateway key), so treat it as a demo/evaluation tier rather than a model to build production load on. Paid models on this list are not subject to that data-use policy.
+> **Free-tier data-use notice.** The `free` profile routes to NVIDIA NIM free-tier Nemotron models (tiered by complexity), with `gemini-3.1-flash-lite` as a fallback if NIM is unavailable. These are served via the upstream providers' **free** API tiers, whose terms may permit the provider to use submitted prompts and generated responses to improve their products (and human reviewers may process them) — do not send sensitive data through the free tier. The free tier is also rate-limited and shared per gateway key, so treat it as a demo/evaluation tier rather than a model to build production load on. Paid models on this list are not subject to those free-tier data-use policies.
 
 ---
 
@@ -404,7 +404,7 @@ Environment variables use the `SOLVELA_` prefix. Provider API keys follow the st
 
 See [`.env.example`](.env.example) for the full reference. Configuration files live in `config/`:
 
-- `models.toml` -- Model registry with per-token pricing (5 providers, 26 models)
+- `models.toml` -- Model registry with per-token pricing (6 providers, 44 models)
 - `default.toml` -- Server host/port, Solana RPC URL, monitor thresholds
 - `services.toml` -- x402 service marketplace registry
 

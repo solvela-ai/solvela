@@ -646,6 +646,24 @@ pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a s
             ("xai", "grok-3-mini"),
         ],
 
+        // --- NVIDIA NIM free tier (Profile::Free) ---
+        // If NIM is unavailable or rate-limited, fall back to Google's free
+        // Gemini so the free tier degrades gracefully instead of erroring.
+        // Keyed on the FULL canonical string `resolve_model()` emits (the
+        // doubled-`nvidia/` form — `nvidia/` provider prefix + the
+        // publisher-qualified `nvidia/...` model_id), because THAT is exactly
+        // what reaches `model_fallback_chain` at runtime (`req.model`). The
+        // Gemini target is bare, matching the chain convention; `google.rs`
+        // strips no prefix off a bare id. These keys are intentionally NOT in
+        // `fallback_chain_keys()` (whose `every_fallback_chain_id_is_registered`
+        // helper prepends `provider/` and would mis-derive a triple prefix);
+        // `nvidia_free_models_fall_back_to_gemini` proves they fire + register.
+        ("nvidia", "nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1")
+        | ("nvidia", "nvidia/nvidia/llama-3.3-nemotron-super-49b-v1")
+        | ("nvidia", "nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1") => {
+            vec![(provider, model), ("google", "gemini-3.1-flash-lite")]
+        }
+
         // --- Unknown model: just return itself ---
         _ => vec![(provider, model)],
     };
@@ -1230,7 +1248,7 @@ supports_streaming = true
 
     #[test]
     fn test_fallback_chain_no_duplicates() {
-        for provider in &["openai", "anthropic", "google", "deepseek", "xai"] {
+        for provider in &["openai", "anthropic", "google", "deepseek", "xai", "nvidia"] {
             let chain = fallback_chain(provider);
             let mut seen = std::collections::HashSet::new();
             for name in &chain {
@@ -1391,5 +1409,50 @@ supports_streaming = true
                 );
             }
         }
+    }
+
+    /// Proves the NVIDIA free-tier → Gemini fallback ACTUALLY fires for the
+    /// exact canonical string `resolve_model(Profile::Free, _)` emits at runtime
+    /// (the doubled-`nvidia/` form), and that the fallback target is a
+    /// registered model. This is the load-bearing check: the other
+    /// `model_fallback_chain` arms are keyed on BARE model_ids while the runtime
+    /// passes the canonical `provider/model_id`, so they silently drop to
+    /// primary-only. The NVIDIA arms are deliberately keyed on the canonical
+    /// string so they actually match — this test pins that, and would catch any
+    /// future drift between `profiles::resolve_model` and these keys.
+    #[test]
+    fn nvidia_free_models_fall_back_to_gemini() {
+        use solvela_router::profiles::{resolve_model, Profile, Tier};
+
+        let toml_str = include_str!("../../../../config/models.toml");
+        let registry = ModelRegistry::from_toml(toml_str).expect("config/models.toml must parse");
+
+        for tier in [Tier::Simple, Tier::Medium, Tier::Complex, Tier::Reasoning] {
+            let target = resolve_model(Profile::Free, tier);
+            assert!(
+                target.starts_with("nvidia/"),
+                "precondition: Profile::Free {tier:?} should route to NVIDIA, got {target:?}"
+            );
+
+            let chain = model_fallback_chain("nvidia", target);
+            assert_eq!(
+                chain.first(),
+                Some(&("nvidia", target)),
+                "primary must be first in the chain for {target:?}"
+            );
+            assert!(
+                chain
+                    .iter()
+                    .any(|(p, m)| *p == "google" && *m == "gemini-3.1-flash-lite"),
+                "Free NVIDIA model {target:?} must fall back to gemini-3.1-flash-lite, \
+                 got chain {chain:?} (arm not firing → no graceful degradation)"
+            );
+        }
+
+        // The fallback target must itself be a registered model.
+        assert!(
+            registry.get("google/gemini-3.1-flash-lite").is_some(),
+            "fallback target google/gemini-3.1-flash-lite must be in config/models.toml"
+        );
     }
 }
