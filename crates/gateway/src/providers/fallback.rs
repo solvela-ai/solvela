@@ -646,7 +646,7 @@ pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a s
             ("xai", "grok-3-mini"),
         ],
 
-        // --- NVIDIA NIM free tier (Profile::Free) ---
+        // --- NVIDIA NIM free tier (every $0 NVIDIA model) ---
         // If NIM is unavailable or rate-limited, fall back to Google's free
         // Gemini so the free tier degrades gracefully instead of erroring.
         // Keyed on the FULL canonical string `resolve_model()` emits (the
@@ -658,9 +658,29 @@ pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a s
         // `fallback_chain_keys()` (whose `every_fallback_chain_id_is_registered`
         // helper prepends `provider/` and would mis-derive a triple prefix);
         // `nvidia_free_models_fall_back_to_gemini` proves they fire + register.
+        //
+        // EVERY free ($0/$0) NVIDIA model in config/models.toml is listed here
+        // so any of them degrades to the free Gemini — not just the 3 the Free
+        // profile routes to. The fallback target gemini-3.1-flash-lite is itself
+        // $0/$0, so the degraded path stays free. The 2 PAID NVIDIA models
+        // (nemotron-super-49b-v1.5, nvidia-nemotron-nano-9b-v2) are deliberately
+        // OMITTED: a paid request must never silently fall back to a
+        // differently-priced/$0 model — they keep the primary-only `_` behavior.
         ("nvidia", "nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1")
+        | ("nvidia", "nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1")
         | ("nvidia", "nvidia/nvidia/llama-3.3-nemotron-super-49b-v1")
-        | ("nvidia", "nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1") => {
+        | ("nvidia", "nvidia/nvidia/nemotron-3-nano-30b-a3b")
+        | ("nvidia", "nvidia/nvidia/nemotron-3-super-120b-a12b")
+        | ("nvidia", "nvidia/nvidia/nemotron-3-ultra-550b-a55b")
+        | ("nvidia", "nvidia/nvidia/nemotron-mini-4b-instruct")
+        | ("nvidia", "nvidia/meta/llama-4-maverick-17b-128e-instruct")
+        | ("nvidia", "nvidia/meta/llama-4-scout-17b-16e-instruct")
+        | ("nvidia", "nvidia/meta/llama-3.3-70b-instruct")
+        | ("nvidia", "nvidia/qwen/qwen3-coder-480b-a35b-instruct")
+        | ("nvidia", "nvidia/deepseek-ai/deepseek-r1")
+        | ("nvidia", "nvidia/mistralai/mistral-large-3-675b-instruct-2512")
+        | ("nvidia", "nvidia/minimaxai/minimax-m2.7")
+        | ("nvidia", "nvidia/minimaxai/minimax-m3") => {
             vec![(provider, model), ("google", "gemini-3.1-flash-lite")]
         }
 
@@ -1453,6 +1473,97 @@ supports_streaming = true
         assert!(
             registry.get("google/gemini-3.1-flash-lite").is_some(),
             "fallback target google/gemini-3.1-flash-lite must be in config/models.toml"
+        );
+    }
+
+    /// Coverage guard for the WHOLE free NVIDIA catalog — not just the 3 models
+    /// `Profile::Free` happens to route to. Enumerates every NVIDIA entry in the
+    /// production `config/models.toml`, derives the exact canonical runtime key
+    /// (`provider/model_id`, the doubled-`nvidia/` form), and asserts:
+    ///   * every FREE ($0 in AND $0 out) NVIDIA model falls back to the free
+    ///     `google/gemini-3.1-flash-lite`, so NIM downtime degrades gracefully
+    ///     instead of 503-ing;
+    ///   * every PAID NVIDIA model keeps primary-only behavior (NO Gemini arm) —
+    ///     a paid request must never silently fall back to a differently-priced
+    ///     / $0 model;
+    ///   * the Gemini fallback target is itself $0/$0, so a free model's degraded
+    ///     path stays free.
+    ///
+    /// Without this, a new free NVIDIA model added to models.toml but not to the
+    /// `model_fallback_chain` arm silently drops to the primary-only `_` arm and
+    /// 503s when NIM is down — the exact gap this fixes.
+    #[test]
+    fn all_free_nvidia_models_fall_back_to_gemini_paid_do_not() {
+        let toml_str = include_str!("../../../../config/models.toml");
+        let registry = ModelRegistry::from_toml(toml_str).expect("config/models.toml must parse");
+
+        let gemini = ("google", "gemini-3.1-flash-lite");
+
+        // The fallback target must be free, else a free model's degraded path
+        // would start billing.
+        let target = registry
+            .get("google/gemini-3.1-flash-lite")
+            .expect("fallback target google/gemini-3.1-flash-lite must be registered");
+        assert_eq!(
+            (
+                target.input_cost_per_million,
+                target.output_cost_per_million
+            ),
+            (0.0, 0.0),
+            "fallback target gemini-3.1-flash-lite must be $0/$0 so the degraded path stays free"
+        );
+
+        let mut free_seen = 0usize;
+        let mut paid_seen = 0usize;
+        for entry in registry.all() {
+            if entry.provider != "nvidia" {
+                continue;
+            }
+            // Canonical runtime key == what reaches model_fallback_chain.
+            let canonical = format!("{}/{}", entry.provider, entry.model_id);
+            let chain = model_fallback_chain("nvidia", &canonical);
+            assert_eq!(
+                chain.first(),
+                Some(&("nvidia", canonical.as_str())),
+                "primary must be first in the chain for {canonical:?}"
+            );
+            let falls_back_to_gemini = chain.iter().any(|(p, m)| (*p, *m) == (gemini.0, gemini.1));
+            let is_free =
+                entry.input_cost_per_million == 0.0 && entry.output_cost_per_million == 0.0;
+
+            if is_free {
+                free_seen += 1;
+                assert!(
+                    falls_back_to_gemini,
+                    "FREE NVIDIA model {canonical:?} must fall back to gemini-3.1-flash-lite \
+                     (got chain {chain:?}) — missing arm → 503 when NIM is down"
+                );
+            } else {
+                paid_seen += 1;
+                assert!(
+                    !falls_back_to_gemini,
+                    "PAID NVIDIA model {canonical:?} must NOT fall back to the free Gemini \
+                     (got chain {chain:?}) — a paid request must never silently degrade to \
+                     a differently-priced/$0 model"
+                );
+                // Paid models keep primary-only behavior.
+                assert_eq!(
+                    chain.len(),
+                    1,
+                    "PAID NVIDIA model {canonical:?} must keep primary-only fallback, got {chain:?}"
+                );
+            }
+        }
+
+        // Sanity: the catalog actually has both kinds, so the assertions above
+        // were meaningfully exercised (catches an empty-iteration false pass).
+        assert!(
+            free_seen >= 15,
+            "expected >=15 free NVIDIA models exercised, saw {free_seen}"
+        );
+        assert!(
+            paid_seen >= 2,
+            "expected >=2 paid NVIDIA models exercised, saw {paid_seen}"
         );
     }
 }
