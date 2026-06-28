@@ -187,8 +187,6 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 | Google | `gemini-3.1-pro` | $2.00 | $12.00 | 1M |
 | Google | `gemini-2.5-flash` | $0.30 | $2.50 | 1M |
 | Google | `gemini-2.5-flash-lite` | $0.10 | $0.40 | 1M |
-| Google | `gemini-2.0-flash` | $0.10 | $0.40 | 1M |
-| Google | `gemini-2.0-flash-lite` | $0.075 | $0.30 | 1M |
 | xAI | `grok-3` | $3.00 | $15.00 | 131K |
 | xAI | `grok-3-mini` | $0.30 | $0.50 | 131K |
 | xAI | `grok-4-fast-reasoning` | $0.20 | $0.50 | 2M |
@@ -196,6 +194,23 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 | DeepSeek | `deepseek-chat` | $0.28 | $0.42 | 128K |
 | DeepSeek | `deepseek-reasoner` | $0.28 | $0.42 | 128K |
 | DeepSeek | `deepseek-coder` | $0.28 | $0.42 | 128K |
+| NVIDIA | `nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1` | Free | Free | 131K |
+| NVIDIA | `nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1` | Free | Free | 131K |
+| NVIDIA | `nvidia/nvidia/llama-3.3-nemotron-super-49b-v1` | Free | Free | 131K |
+| NVIDIA | `nvidia/nvidia/nemotron-3-nano-30b-a3b` | Free | Free | 131K |
+| NVIDIA | `nvidia/nvidia/nemotron-3-super-120b-a12b` | Free | Free | 131K |
+| NVIDIA | `nvidia/nvidia/nemotron-3-ultra-550b-a55b` | Free | Free | 131K |
+| NVIDIA | `nvidia/nvidia/nemotron-mini-4b-instruct` | Free | Free | 4K |
+| NVIDIA | `nvidia/meta/llama-4-maverick-17b-128e-instruct` | Free | Free | 1M |
+| NVIDIA | `nvidia/meta/llama-4-scout-17b-16e-instruct` | Free | Free | 1M |
+| NVIDIA | `nvidia/meta/llama-3.3-70b-instruct` | Free | Free | 131K |
+| NVIDIA | `nvidia/qwen/qwen3-coder-480b-a35b-instruct` | Free | Free | 256K |
+| NVIDIA | `nvidia/deepseek-ai/deepseek-r1` | Free | Free | 160K |
+| NVIDIA | `nvidia/mistralai/mistral-large-3-675b-instruct-2512` | Free | Free | 256K |
+| NVIDIA | `nvidia/minimaxai/minimax-m2.7` | Free | Free | 200K |
+| NVIDIA | `nvidia/minimaxai/minimax-m3` | Free | Free | 200K |
+| NVIDIA | `nvidia/nvidia/llama-3.3-nemotron-super-49b-v1.5` | $0.10 | $0.40 | 131K |
+| NVIDIA | `nvidia/nvidia/nvidia-nemotron-nano-9b-v2` | $0.04 | $0.16 | 131K |
 
 All prices are provider cost in USDC. A 5% platform fee is applied on top. See `config/models.toml` for the full registry or query `GET /pricing` at runtime.
 
