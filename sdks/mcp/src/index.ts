@@ -42,6 +42,7 @@ import { getTools } from './tools.js';
 import { createSessionStore } from './session.js';
 import { validateArgs } from './validate-args.js';
 import { parseStrictUsdc } from './parse-amount.js';
+import { formatSearchResults, formatSearchCost } from './format-search.js';
 import { createPaymentHeader, decodePaymentHeader, isStubTransaction } from '@solvela/signer-core';
 import type { PaymentRequired, PaymentAccept } from '@solvela/signer-core';
 import { Connection, PublicKey } from '@solana/web3.js';
@@ -263,6 +264,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             { type: 'text', text: reply },
             { type: 'text', text: formatUsage(response) },
+          ],
+        };
+      }
+
+      case 'web_search': {
+        // T-3A: runtime-validate args before dispatch — MCP schema is advisory.
+        // Content validation (empty/over-long query, max_results bounds) lives in
+        // client.search() so it is unit-testable and shared with any other caller.
+        const { query, max_results } = validateArgs<{
+          query: string;
+          max_results?: number;
+        }>('web_search', args, {
+          query: { kind: 'string', required: true },
+          max_results: { kind: 'number', required: false },
+        });
+
+        const { results, costBreakdown } = await client.search(query, max_results);
+
+        return {
+          content: [
+            { type: 'text', text: formatSearchResults(results) },
+            { type: 'text', text: formatSearchCost(costBreakdown) },
           ],
         };
       }

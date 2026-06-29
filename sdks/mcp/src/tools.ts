@@ -80,6 +80,28 @@ const BASE_TOOLS: Tool[] = [
     },
   },
   {
+    name: 'web_search',
+    description:
+      'Search the web through the Solvela gateway and get back titled, linked result snippets. ' +
+      'Payment is handled automatically via USDC on Solana (x402): a flat per-call price plus the ' +
+      'standard 5% platform fee, settled server-side. The exact USDC amount paid is reported with ' +
+      'each result. Always available (no escrow mode required).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'The search query (1–2000 characters).',
+        },
+        max_results: {
+          type: 'number',
+          description: 'Maximum number of results to return (positive integer, clamped to 20).',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  {
     name: 'wallet_status',
     description:
       'Check the status of the configured Solana wallet and gateway connectivity. ' +

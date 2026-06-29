@@ -2,7 +2,7 @@
 
 MCP (Model Context Protocol) server for Solvela -- lets Claude Code, Claude Desktop, and any MCP-compatible host pay for LLM calls with USDC on Solana transparently.
 
-MCP is an open protocol that allows AI assistants to use external tools. This server exposes the Solvela gateway as a set of MCP tools: chat with any LLM model, use smart routing, check wallet status, list models, and track spending -- all with automatic x402 payment handling.
+MCP is an open protocol that allows AI assistants to use external tools. This server exposes the Solvela gateway as a set of MCP tools: chat with any LLM model, use smart routing, search the web, check wallet status, list models, and track spending -- all with automatic x402 payment handling.
 
 ## Quickstart
 
@@ -69,27 +69,30 @@ The manual JSON snippets for each host are below as a fallback reference.
 
 ## Installation
 
-The MCP server is **not published to npm** today (`package.json` is marked
-`private: true`). Build it from the monorepo:
+The package is published to npm, so the default path needs no manual build:
+`solvela mcp install` (Quickstart above) writes a host config that runs
+`npx -y @solvela/mcp-server`, fetching the latest version on demand. To run it
+directly:
+
+```bash
+npx -y @solvela/mcp-server
+```
+
+**Building from source** (contributors, or to run an unreleased revision):
 
 ```bash
 git clone https://github.com/solvela-ai/solvela.git
 cd solvela/sdks/mcp
 npm install
 npm run build
-# Built artifact: dist/index.js
-```
-
-Run it directly to confirm the build:
-
-```bash
+# Built artifact: dist/index.js — point a host config at its absolute path
 node dist/index.js
 ```
 
-The manual JSON snippets below use absolute paths to that built `dist/index.js`
-— `npx @solvela/mcp-server` is not available because the package is not on
-npm. The `solvela mcp install --host=<host>` flow shown in the Quickstart above
-handles the absolute path resolution for you.
+The manual JSON snippets below use the from-source absolute path
+(`"command": "node"`, `"args": ["…/dist/index.js"]`). For the published package,
+swap to `"command": "npx"`, `"args": ["-y", "@solvela/mcp-server"]` — or just run
+`solvela mcp install`, which writes the `npx` form for you.
 
 ## Setup with Claude Code
 
@@ -252,7 +255,7 @@ displayed wallet address is always derived from the resolved key.
 
 ## Available Tools
 
-The MCP server exposes five tools:
+The MCP server exposes six tools (plus `deposit_escrow` when escrow mode is enabled):
 
 ### `chat`
 
@@ -276,6 +279,15 @@ Send a prompt using the gateway smart router. It automatically picks the cheapes
 | `profile` | `string` | no | Routing profile: `eco`, `auto` (default), `premium`, `free` |
 | `system` | `string` | no | System prompt |
 | `max_tokens` | `number` | no | Maximum tokens in the response |
+
+### `web_search`
+
+Search the web through the gateway's x402-paid `POST /v1/search` endpoint. Payment is handled automatically: a flat per-call USDC price plus the standard 5% platform fee, settled on Solana. Always available (no escrow mode required). The result includes a cost line reporting the exact amount paid, e.g. `Paid 0.010500 USDC (0.010000 + 5% fee)` — derived from the 402 challenge's `cost_breakdown`, never a hardcoded value.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | `string` | yes | The search query (1--2000 characters) |
+| `max_results` | `number` | no | Maximum results to return (positive integer, clamped to 20) |
 
 ### `wallet_status`
 

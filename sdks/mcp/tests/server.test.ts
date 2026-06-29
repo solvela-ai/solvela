@@ -653,13 +653,13 @@ describe('GatewayClient', () => {
 // ---------------------------------------------------------------------------
 
 describe('TOOLS', () => {
-  it('exports exactly 5 tools', () => {
-    assert.equal(TOOLS.length, 5);
+  it('exports exactly 6 tools', () => {
+    assert.equal(TOOLS.length, 6);
   });
 
   it('tool names are correct', () => {
     const names = TOOLS.map((t) => t.name);
-    assert.deepEqual(names.sort(), ['chat', 'list_models', 'smart_chat', 'spending', 'wallet_status']);
+    assert.deepEqual(names.sort(), ['chat', 'list_models', 'smart_chat', 'spending', 'wallet_status', 'web_search']);
   });
 
   it('chat tool requires model and prompt', () => {

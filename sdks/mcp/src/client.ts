@@ -16,10 +16,23 @@ import {
   isStubHeader,
   sanitizeGatewayError,
 } from '@solvela/signer-core';
-import type { PaymentRequired, PaymentAccept, PaymentExpectations } from '@solvela/signer-core';
+import type {
+  PaymentRequired,
+  PaymentAccept,
+  PaymentExpectations,
+  CostBreakdown,
+} from '@solvela/signer-core';
 import type { SessionStore, SessionState } from './session.js';
 
-export type { PaymentRequired, PaymentAccept };
+export type { PaymentRequired, PaymentAccept, CostBreakdown };
+
+/** Max query length accepted by `POST /v1/search` (mirrors the gateway bound). */
+const SEARCH_MAX_QUERY_LEN = 2_000;
+/** Max `max_results` accepted by `POST /v1/search` (gateway clamps to this).
+ * Mirrored by `MAX_RENDERED_RESULTS` in format-search.ts (kept in two places
+ * because the test harness can't resolve a relative value import across src
+ * modules; both must track the gateway's cap). */
+const SEARCH_MAX_RESULTS = 20;
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -45,6 +58,20 @@ export interface ChatResponse {
   model: string;
   choices: ChatChoice[];
   usage?: Usage;
+}
+
+/** A single normalized web-search result (matches the gateway's stable shape). */
+export interface SearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+/** Normalized response from `POST /v1/search`. */
+export interface SearchResults {
+  query: string;
+  results: SearchResult[];
+  provider: string;
 }
 
 export interface ModelInfo {
@@ -266,6 +293,80 @@ export class GatewayClient {
     const bodyStr = JSON.stringify(body);
 
     const url = `${this.apiUrl}/v1/chat/completions`;
+    const { resp, costMicroCommitted } = await this.paidCall(url, bodyStr);
+    return this.parsePaidJson<ChatResponse>(resp, costMicroCommitted, 'chat');
+  }
+
+  /**
+   * Search the web via the gateway's x402-paid `POST /v1/search` endpoint.
+   *
+   * Reuses the SINGLE signing path ([`paidCall`]) — the same 402→sign→retry,
+   * session-budget reservation, PaymentExpectations cap, stub-header guard, and
+   * malformed-response refund that `chat` uses. There is exactly one place that
+   * signs a payment in this client; this method only differs in the URL, the
+   * request body, and the response shape it parses.
+   *
+   * Returns the normalized results plus the `cost_breakdown` from the 402
+   * challenge (the amount actually settled), so callers can surface a per-call
+   * cost line. `costBreakdown` is `null` only when no 402 was issued (dev-bypass
+   * gateway returning 200 on the first call).
+   *
+   * @param query      The search query. Must be non-empty and ≤ 2000 chars.
+   * @param maxResults Optional result cap. Must be a positive integer; clamped
+   *                   to the gateway's cap of 20 to keep the wire `u8` valid.
+   */
+  async search(
+    query: string,
+    maxResults?: number,
+  ): Promise<{ results: SearchResults; costBreakdown: CostBreakdown | null }> {
+    // Client-side fast-fail validation. The gateway re-validates (and never
+    // charges) a bad request, but rejecting here avoids a wasted round-trip and
+    // gives a clean error. NOT authoritative — the gateway remains the enforcer.
+    const trimmed = query.trim();
+    if (trimmed.length === 0) {
+      throw new Error("'query' must not be empty");
+    }
+    if (trimmed.length > SEARCH_MAX_QUERY_LEN) {
+      throw new Error(`'query' must be at most ${SEARCH_MAX_QUERY_LEN} characters`);
+    }
+    const body: { query: string; max_results?: number } = { query: trimmed };
+    if (maxResults !== undefined) {
+      if (!Number.isInteger(maxResults) || maxResults < 1) {
+        throw new Error("'max_results' must be a positive integer");
+      }
+      // Clamp to the gateway cap so the on-the-wire u8 field stays valid (the
+      // gateway clamps to the same bound; an over-255 value would fail to decode).
+      body.max_results = Math.min(maxResults, SEARCH_MAX_RESULTS);
+    }
+
+    const bodyStr = JSON.stringify(body);
+    const url = `${this.apiUrl}/v1/search`;
+    const { resp, costMicroCommitted, costBreakdown } = await this.paidCall(url, bodyStr);
+    const results = await this.parsePaidJson<SearchResults>(resp, costMicroCommitted, 'search');
+    return { results, costBreakdown };
+  }
+
+  /**
+   * The single x402 paid-call path: POST a body, handle a 402 by reserving the
+   * quoted cost against the session budget, signing exactly that amount, and
+   * retrying with the `payment-signature` header — refunding the reservation on
+   * any failure before the response is returned. Returns the settled `Response`
+   * (not yet JSON-parsed; callers use [`parsePaidJson`]), the committed cost in
+   * micro-USDC (`null` if no 402 occurred), and the 402's `cost_breakdown` (so
+   * callers can report the actual amount paid).
+   *
+   * This is the ONLY method that signs a payment. `chat` and `search` both route
+   * through it so there is one signing path, one budget-reservation policy, and
+   * one set of refund guarantees.
+   */
+  private async paidCall(
+    url: string,
+    bodyStr: string,
+  ): Promise<{
+    resp: Response;
+    costMicroCommitted: number | null;
+    costBreakdown: CostBreakdown | null;
+  }> {
     let resp = await this.fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -273,13 +374,18 @@ export class GatewayClient {
     });
 
     // HF12: track whether we committed a budget reservation so a malformed
-    // 200 body (caught by parseJson below) can roll the reservation back.
+    // 200 body (caught by parsePaidJson) can roll the reservation back.
     // Stays `null` on the initial-200 path where no reservation happened.
     let costMicroCommitted: number | null = null;
+    // The 402 cost breakdown (actual settled amount) surfaced to the caller.
+    let costBreakdown: CostBreakdown | null = null;
 
     if (resp.status === 402) {
       // HF5: parse402 throws instead of returning null.
       const paymentInfo = parse402(await resp.text());
+      // Surface the settled amount to the caller (the gateway applied the 5% fee
+      // server-side exactly once; we only echo it, never recompute).
+      costBreakdown = paymentInfo.cost_breakdown;
 
       // Defense-in-depth: parse402 also validates this field, but using Number()
       // (vs parseFloat) here means trailing-garbage like "0.001SOL" is rejected
@@ -314,12 +420,20 @@ export class GatewayClient {
       costMicroCommitted = costMicro;
 
       if (this.signingMode === 'off') {
-        // off mode: send without payment header; gateway will likely 402 again
-        resp = await this.fetchWithTimeout(url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: bodyStr,
-        });
+        // off mode: send without payment header; gateway will likely 402 again.
+        // A network error/timeout on this unsigned resend must refund the
+        // reservation made above (no payment was sent) — mirrors the signed
+        // retry-fetch refund so the session counter is never left over-counted.
+        try {
+          resp = await this.fetchWithTimeout(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: bodyStr,
+          });
+        } catch (err) {
+          await this.refundReservation(costMicro);
+          throw err;
+        }
       } else {
         // Filter accepts by signing mode before handing off to the SDK signer.
         // Bind to a typed local so TS verifies the narrowing produced by the
@@ -327,7 +441,16 @@ export class GatewayClient {
         // that silently masked the 'off' branch and would have lied if the
         // if-ladder above were ever refactored.
         const mode: 'auto' | 'escrow' | 'direct' = this.signingMode;
-        const filteredAccepts = filterAccepts(paymentInfo.accepts, mode);
+        // A scheme-filter mismatch (e.g. escrow mode vs an exact-only 402)
+        // throws BEFORE any signing — refund the reservation so the session
+        // counter is not left over-counted (fail-safe; nothing was ever signed).
+        let filteredAccepts: PaymentAccept[];
+        try {
+          filteredAccepts = filterAccepts(paymentInfo.accepts, mode);
+        } catch (err) {
+          await this.refundReservation(costMicro);
+          throw err;
+        }
         const filteredPaymentInfo = { ...paymentInfo, accepts: filteredAccepts };
         const privateKey = process.env['SOLANA_WALLET_KEY'];
 
@@ -437,14 +560,42 @@ export class GatewayClient {
       throw new Error(`Gateway error ${resp.status}: ${sanitized}`);
     }
 
-    // HF12: A status-200 with a non-JSON body (proxy timeout HTML page, truncated
-    // response) used to throw an uncaught SyntaxError and silently leave the budget
-    // reservation committed. Catch parse failures, refund the committed cost (if
-    // we came through the 402 path), decrement requestCount, and rethrow with a
-    // descriptive message so the operator can tell parse failure apart from gateway
-    // error apart from signing failure.
+    return { resp, costMicroCommitted, costBreakdown };
+  }
+
+  /**
+   * Roll back a session-budget reservation made in `paidCall` when a throw
+   * occurs before the paid request lands. No on-chain money is ever at risk on
+   * these paths (nothing was signed or sent); refunding keeps the session-spend
+   * counter honest — over-counting is fail-safe (it can only refuse future
+   * calls early, never overspend), so this is a correctness fix, not a relaxation.
+   */
+  private async refundReservation(costMicro: number): Promise<void> {
+    await this.budgetMutex.runExclusive(async () => {
+      this.sessionSpentMicro = Math.max(0, this.sessionSpentMicro - costMicro);
+      await this.persistState();
+    });
+  }
+
+  /**
+   * Parse the JSON body of a settled paid response, rolling back the committed
+   * reservation on a parse failure.
+   *
+   * HF12: A status-200 with a non-JSON body (proxy timeout HTML page, truncated
+   * response) used to throw an uncaught SyntaxError and silently leave the budget
+   * reservation committed. Catch parse failures, refund the committed cost (if we
+   * came through the 402 path), decrement requestCount, and rethrow with a
+   * descriptive message so the operator can tell parse failure apart from gateway
+   * error apart from signing failure. `label` names the endpoint in the message
+   * (`chat` / `search`).
+   */
+  private async parsePaidJson<T>(
+    resp: Response,
+    costMicroCommitted: number | null,
+    label: string,
+  ): Promise<T> {
     try {
-      return (await resp.json()) as ChatResponse;
+      return (await resp.json()) as T;
     } catch (err) {
       const parseMsg = err instanceof Error ? err.message : String(err);
       await this.budgetMutex.runExclusive(async () => {
@@ -455,7 +606,7 @@ export class GatewayClient {
         await this.persistState();
       });
       throw new Error(
-        `Gateway returned malformed JSON for chat (status ${resp.status}): ${parseMsg}`,
+        `Gateway returned malformed JSON for ${label} (status ${resp.status}): ${parseMsg}`,
       );
     }
   }
