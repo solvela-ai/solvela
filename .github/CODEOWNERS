@@ -1,0 +1,12 @@
+# Review routing. Solo-maintained — @sky64 owns everything by default.
+# This file is advisory unless "Require review from Code Owners" is enabled
+# in branch protection; PR approvals are satisfied by the Solvela-bot reviewer.
+
+* @sky64
+
+# Money path — flagged explicitly so these directories never get a casual review.
+/crates/x402/            @sky64
+/crates/gateway/src/routes/chat/   @sky64
+/crates/gateway/src/providers/     @sky64
+/programs/escrow/        @sky64
+/sdks/                   @sky64
