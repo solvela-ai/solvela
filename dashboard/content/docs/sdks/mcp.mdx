@@ -33,8 +33,8 @@ The server reads these environment variables on startup:
 
 | Variable | Required | Description |
 |---|---|---|
-| `SOLANA_WALLET_KEY` | Yes (for paid calls) | Base58-encoded Solana keypair secret |
-| `SOLANA_RPC_URL` | Yes (for paid calls) | Solana JSON-RPC endpoint |
+| `SOLANA_WALLET_KEY` | No | Base58-encoded Solana keypair secret. When unset, the server loads `~/.solvela/wallet.json`, auto-creating a new wallet on first run. Set this to use a specific keypair instead. |
+| `SOLANA_RPC_URL` | Yes, unless `SOLVELA_SIGNING_MODE=off` | Solana JSON-RPC endpoint. With signing enabled (the default) the server **exits at startup** if this is unset — set `SOLVELA_SIGNING_MODE=off` to run signing-free (e.g. just `list_models`). |
 | `SOLVELA_API_URL` | No | Gateway base URL (default `https://api.solvela.ai`) |
 | `SOLVELA_SESSION_BUDGET` | No | Per-session USDC cap (e.g. `2.00`) |
 | `SOLVELA_TIMEOUT_MS` | No | HTTP timeout for gateway calls |
