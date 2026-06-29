@@ -1,0 +1,269 @@
+name: sdk-signer-core publish
+
+# Tag-triggered npm publish for @solvela/signer-core (sdks/signer-core/).
+#
+# signer-core is the shared x402 signing/parsing library that
+# @solvela/mcp-server (and the other TS SDKs) build on. It helps sign and
+# broadcast real USDC-SPL transactions on Solana mainnet, so every
+# payment-sdk-publisher guardrail applies. It is LAYER 1 of the MCP
+# publish set: it MUST be published and visible on npm BEFORE
+# @solvela/mcp-server (which depends on it via a registry range) is
+# published. See sdk-mcp-publish.yml for the dependent layer and
+# docs/runbooks/mcp-npm-publish.md for the full firing sequence.
+#
+# Authoring provenance (tool versions cited so a future maintainer can
+# tell correct-at-the-time guidance from speculation):
+#   - Verified locally 2026-06-29 against Node 22.22.0 + npm 10.9.4:
+#     `npm ci`, `npm run build` (tsc), `npm test` (125 tests pass), and
+#     `npm publish --dry-run` -> tarball = dist/ + README.md +
+#     package.json only (the `files` allowlist holds; no src/tests/secrets
+#     leak; 38 files, 37.6 kB).
+#   - Mirrors the npm-family publish workflows in this repo
+#     (sdk-typescript-publish.yml, ai-sdk-provider-publish.yml): tag
+#     trigger, `npm-publish` environment, NODE_AUTH_TOKEN=secrets.NPM_TOKEN,
+#     `--access public --provenance`, post-publish SHA-match verify. Adopts
+#     the multi-job verify/test/publish shape (verify-first guardrail) from
+#     sdk-python-publish.yml / sdk-rust-publish.yml.
+#   - Actions left at floating major tags (@v6) to match the two npm-family
+#     publish workflows above. sdk-python-publish.yml / sdk-rust-publish.yml
+#     pin full commit SHAs; adopting that here is a clean future hardening.
+#
+# PROVENANCE PRECONDITION (read before the first tag):
+#   `npm publish --provenance` REQUIRES a `repository` field in
+#   package.json that matches (case-sensitive) the building repo, and
+#   `npm publish --dry-run` does NOT validate it (confirmed locally
+#   2026-06-29: a dry-run with --provenance and no repository field prints
+#   the tarball and exits 0). The failure only surfaces on the REAL
+#   publish. The verify job below enforces the field up front and fails
+#   closed with remediation if it is missing.
+#   Source: https://docs.npmjs.com/generating-provenance-statements
+#   As of 2026-06-29 sdks/signer-core/package.json has NO repository field
+#   (@solvela/sdk, which has one, publishes with provenance fine;
+#   @solvela/ai-sdk-provider, which lacks one, has never published). The
+#   field must be added before the first tag — see the runbook.
+
+on:
+  push:
+    tags:
+      - 'sdks/signer-core/v*'
+
+# Never cancel a publish mid-run; a cancelled publish can leave the
+# registry in a partial state.
+concurrency:
+  group: sdk-signer-core-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least privilege at the root; the publish job escalates to id-token:write
+# per-job (required for npm provenance OIDC).
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: sdks/signer-core
+
+jobs:
+  # --------------------------------------------------------------------
+  # Guardrail job: runs first, fails the whole run on any of:
+  #   - tag does not match the package.json version
+  #   - the exact version is already published on npm
+  #   - the provenance `repository` precondition is unmet
+  # Cheap checks up front so a mistagged or already-published release
+  # halts in seconds, before the test matrix or any publish step.
+  # --------------------------------------------------------------------
+  verify:
+    name: Verify tag, version, provenance precondition
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history so tag is reachable)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Verify tag matches package.json, repo + version preconditions
+        run: |
+          set -euo pipefail
+
+          # Tag format: sdks/signer-core/v0.1.0  ->  TAG_VERSION=0.1.0
+          TAG_NAME="${GITHUB_REF_NAME}"
+          TAG_VERSION="${TAG_NAME#sdks/signer-core/v}"
+          if [ "$TAG_VERSION" = "$TAG_NAME" ]; then
+            echo "ERROR: tag '$TAG_NAME' does not match 'sdks/signer-core/v<version>'"
+            exit 1
+          fi
+
+          MANIFEST_VERSION=$(jq -r '.version' package.json)
+          PKG_NAME=$(jq -r '.name' package.json)
+          echo "Package:          $PKG_NAME"
+          echo "Tag version:      $TAG_VERSION"
+          echo "Manifest version: $MANIFEST_VERSION"
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "ERROR: tag version ($TAG_VERSION) != package.json version ($MANIFEST_VERSION)"
+            echo "Bump sdks/signer-core/package.json or retag at the correct commit."
+            exit 1
+          fi
+
+          # Provenance precondition: package.json MUST carry a `repository`
+          # field pointing at this repo, or `npm publish --provenance`
+          # fails on the real publish (dry-run does NOT catch it).
+          REPO_URL=$(jq -r '.repository.url // .repository // empty' package.json)
+          echo "repository: ${REPO_URL:-<missing>}"
+          case "$REPO_URL" in
+            *github.com/solvela-ai/solvela*) : ;;
+            *)
+              echo "ERROR: package.json has no 'repository' field matching"
+              echo "github.com/solvela-ai/solvela. npm provenance requires it."
+              echo "Add, e.g.:"
+              echo '  "repository": { "type": "git",'
+              echo '    "url": "git+https://github.com/solvela-ai/solvela.git",'
+              echo '    "directory": "sdks/signer-core" }'
+              exit 1
+              ;;
+          esac
+
+          # Stop-and-ask guard: refuse to re-publish an existing version.
+          # `npm view <pkg>@<ver> version` prints the version if published,
+          # is empty for a missing version, and 404s (non-zero) for a
+          # never-published package — all three handled here.
+          PUBLISHED=$(npm view "${PKG_NAME}@${TAG_VERSION}" version 2>/dev/null || true)
+          if [ -n "$PUBLISHED" ]; then
+            echo "ERROR: ${PKG_NAME}@${TAG_VERSION} is already published on npm."
+            echo "Halting — bump the version or pick a new tag. Never re-publish over an existing version."
+            exit 1
+          fi
+          echo "OK: ${PKG_NAME}@${TAG_VERSION} is not yet published — clear to release."
+
+  # --------------------------------------------------------------------
+  # Re-run the SDK's test suite at the tagged commit. Node version, cache,
+  # and lockfile usage mirror the package's CI (mcp.yml builds signer-core
+  # the same way). Node 22 specifically: the SDKs' `node --test *.ts`
+  # runner relies on Node 22's strip-types support (see mcp.yml).
+  # --------------------------------------------------------------------
+  test:
+    name: Test (Node 22)
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sdks/signer-core/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  # --------------------------------------------------------------------
+  # Publish to npm with provenance. Depends on [verify, test] so a
+  # mistagged or failing release never reaches the registry. Runs in the
+  # `npm-publish` environment; NODE_AUTH_TOKEN comes from the repo-level
+  # NPM_TOKEN secret (same mechanism as sdk-typescript-publish.yml).
+  # --------------------------------------------------------------------
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: [verify, test]
+    environment: npm-publish
+    permissions:
+      id-token: write   # MANDATORY for npm provenance OIDC; do not remove.
+      contents: read
+    steps:
+      - name: Checkout (full history so tag is reachable)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sdks/signer-core/package-lock.json
+          # Registry URL required for NODE_AUTH_TOKEN injection by setup-node.
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies (ignore-scripts)
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      # Charter-mandated: a dry-run that exercises the package BEFORE any
+      # live publish. Verified locally that this lists dist/ + README.md +
+      # package.json only. (Note: dry-run does NOT validate provenance/
+      # repository — that precondition is enforced in the verify job.)
+      - name: Dry-run publish (verify tarball contents)
+        run: npm publish --dry-run --access public
+
+      # Determine dist-tag from the git tag name:
+      #   sdks/signer-core/v0.1.0-rc.1  -> --tag rc
+      #   sdks/signer-core/v0.1.0       -> --tag latest (default, omit flag)
+      # --access public on BOTH paths: a scoped package's first publish
+      # defaults to restricted, and provenance requires a public package.
+      - name: Publish (provenance)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG_NAME="${{ github.ref_name }}"
+          if [[ "$TAG_NAME" =~ -rc\.[0-9]+$ ]]; then
+            echo "RC tag detected — publishing with --tag rc"
+            npm publish --tag rc --access public --provenance
+          else
+            echo "Release tag detected — publishing with --tag latest"
+            npm publish --access public --provenance
+          fi
+
+      # Post-publish: poll the registry until the version is visible (npm's
+      # read path can lag the publish by seconds-to-minutes), then compare
+      # the registry tarball SHA-256 against a locally-packed one. Mirrors
+      # sdk-typescript-publish.yml.
+      - name: Verify published tarball SHA matches local build
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(jq -r '.version' package.json)
+          PKG_NAME=$(jq -r '.name' package.json)
+          echo "Verifying $PKG_NAME@$PKG_VERSION"
+
+          LOCAL_TARBALL=$(npm pack --dry-run --json 2>/dev/null | \
+            python3 -c "import sys,json; print(json.load(sys.stdin)[0]['filename'])")
+          npm pack 2>/dev/null
+          LOCAL_SHA=$(shasum -a 256 "$LOCAL_TARBALL" | awk '{print $1}')
+          echo "Local tarball SHA256: $LOCAL_SHA"
+
+          TARBALL_URL=""
+          for i in $(seq 1 30); do
+            TARBALL_URL=$(npm view "${PKG_NAME}@${PKG_VERSION}" dist.tarball 2>/dev/null || true)
+            if [ -n "$TARBALL_URL" ]; then
+              break
+            fi
+            echo "Attempt $i/30: ${PKG_NAME}@${PKG_VERSION} not visible yet; sleeping 10s"
+            sleep 10
+          done
+          if [ -z "$TARBALL_URL" ]; then
+            echo "ERROR: ${PKG_NAME}@${PKG_VERSION} not visible on the registry after ~5 minutes"
+            exit 1
+          fi
+          echo "Registry tarball URL: $TARBALL_URL"
+          curl -fsSL "$TARBALL_URL" -o registry.tgz
+          REGISTRY_SHA=$(shasum -a 256 registry.tgz | awk '{print $1}')
+          echo "Registry tarball SHA256: $REGISTRY_SHA"
+
+          if [ "$LOCAL_SHA" = "$REGISTRY_SHA" ]; then
+            echo "SHA match confirmed — tarball integrity verified."
+          else
+            echo "ERROR: SHA mismatch! Local=$LOCAL_SHA Registry=$REGISTRY_SHA"
+            exit 1
+          fi
