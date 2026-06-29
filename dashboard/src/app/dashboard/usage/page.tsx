@@ -87,6 +87,7 @@ export default async function UsagePage() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             <TerminalCard
               title="requests.by.model"
+              dots={false}
               meta={<span className="text-xxs text-text-tertiary font-mono">30d</span>}
             >
               <ModelPie data={modelUsage} />
@@ -94,6 +95,7 @@ export default async function UsagePage() {
 
             <TerminalCard
               title="spend.over.time"
+              dots={false}
               meta={<span className="text-xxs text-text-tertiary font-mono">USDC · 30d</span>}
             >
               <SpendChart data={history} />
@@ -102,7 +104,7 @@ export default async function UsagePage() {
         </div>
 
         {/* Model breakdown table */}
-        <TerminalCard title="model.breakdown" bare className="overflow-hidden">
+        <TerminalCard title="model.breakdown" dots={false} bare className="overflow-hidden">
           <div className="overflow-x-auto bg-popover">
             <table className="w-full text-sm">
               <thead>
@@ -154,7 +156,7 @@ export default async function UsagePage() {
         </TerminalCard>
 
         {/* Wallet breakdown */}
-        <TerminalCard title="wallets.by.spend">
+        <TerminalCard title="wallets.by.spend" dots={false}>
           <div className="space-y-3">
             {topWallets.map((w) => (
               <div key={w.wallet} className="flex items-center gap-4">
