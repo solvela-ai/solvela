@@ -129,7 +129,7 @@ export function LifecycleScene() {
         <div className="rule-tipped mb-7" />
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div className="flex flex-col gap-3">
-            <span className="eyebrow">one transaction, start to finish</span>
+            <span className="kicker">One transaction, start to finish</span>
             <h2
               id="lifecycle-heading"
               className="display-wonk max-w-[18ch] text-[var(--heading-color)]"

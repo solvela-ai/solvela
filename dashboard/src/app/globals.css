@@ -543,6 +543,18 @@ pre code [data-highlighted-line] {
   color: var(--accent-salmon);
 }
 
+/* Quiet companion to .eyebrow. The salmon mono-uppercase eyebrow marks the
+   loud anchor sections; .kicker opens the connective/explanatory ones in
+   sentence-case muted text, so the landing has cadence instead of the same
+   eyebrow on every section. */
+.kicker {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--muted-foreground);
+}
+
 /* ==========================================================
    SECTION HEADER UTILITY
    ========================================================== */

@@ -13,7 +13,7 @@ export function ArchitectureSection() {
     <section aria-labelledby="arch-heading" className="border-t border-border/60">
       <div className="mx-auto max-w-[1320px] px-6 py-16 lg:py-24">
         <Reveal>
-          <span className="eyebrow">under the hood</span>
+          <span className="kicker">Under the hood</span>
           <h2
             id="arch-heading"
             className="display-wonk mt-3 max-w-[18ch] text-[var(--heading-color)]"
