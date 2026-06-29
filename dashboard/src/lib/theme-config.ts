@@ -60,7 +60,7 @@ export const themeConfig = {
   ogImage: {
     gradient: '#262624',
     titleColor: '#FAF9F5',
-    sectionColor: '#DEDCD180',
+    sectionColor: '#DEDCD1B3',
     logoUrl: 'https://solvela.ai/logo.png',
   },
 }

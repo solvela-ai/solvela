@@ -199,6 +199,7 @@ export default function SettingsPage() {
           <h2 className="eyebrow mb-3">Authentication</h2>
           <TerminalCard
             title="api.key"
+            dots={false}
             meta={<span className="text-text-tertiary truncate text-xxs">Authenticate with org-scoped endpoints. Stored in localStorage only.</span>}
             className="overflow-hidden"
           >
@@ -259,6 +260,7 @@ export default function SettingsPage() {
           <div className="space-y-5">
             <TerminalCard
               title="team.management"
+              dots={false}
               meta={<span className="text-text-tertiary truncate text-xxs">Manage teams within your organization. Requires a valid API key.</span>}
               className="overflow-hidden"
             >
@@ -337,6 +339,7 @@ export default function SettingsPage() {
 
             <TerminalCard
               title="audit.log"
+              dots={false}
               meta={<span className="text-text-tertiary truncate text-xxs">Recent organization activity (last 20 entries).</span>}
               className="overflow-hidden"
             >
@@ -378,6 +381,7 @@ export default function SettingsPage() {
           <div className="space-y-5">
             <TerminalCard
               title="gateway"
+              dots={false}
               meta={<span className="text-text-tertiary truncate text-xxs">Solvela API endpoint configuration</span>}
               className="overflow-hidden"
               screenClassName="!py-0"
@@ -398,6 +402,7 @@ export default function SettingsPage() {
 
             <TerminalCard
               title="budget.limits"
+              dots={false}
               meta={<span className="text-text-tertiary truncate text-xxs">Per-wallet spend limits in USDC. Requests exceeding limits return 402.</span>}
               className="overflow-hidden"
               screenClassName="!py-0"
@@ -418,6 +423,7 @@ export default function SettingsPage() {
 
             <TerminalCard
               title="security"
+              dots={false}
               meta={<span className="text-text-tertiary truncate text-xxs">Middleware and protection settings</span>}
               className="overflow-hidden"
               screenClassName="!py-0"

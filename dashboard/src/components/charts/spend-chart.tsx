@@ -17,7 +17,7 @@ interface SpendChartProps {
 
 // Literal token values — Recharts props don't resolve CSS variables at runtime
 const GRID_STROKE   = "#C8A24030"; // --border
-const TICK_COLOR    = "#DEDCD180"; // --color-text-tertiary
+const TICK_COLOR    = "#DEDCD1B3"; // --color-text-tertiary (70%, AA ≥5:1)
 const TOOLTIP_BG    = "#30302E";   // --card
 const TOOLTIP_BORDER = "#C8A24030"; // --border
 const LINE_COLOR    = "#DEDCD1";   // --foreground (neutral, not brand orange)

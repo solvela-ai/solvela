@@ -90,7 +90,7 @@ export default async function ModelsPage() {
         )}
 
         {/* Models table */}
-        <TerminalCard title="model.registry" bare className="overflow-hidden">
+        <TerminalCard title="model.registry" dots={false} bare className="overflow-hidden">
           <div className="overflow-x-auto bg-popover">
             <table className="w-full text-sm">
               <thead>

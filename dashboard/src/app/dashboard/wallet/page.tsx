@@ -53,7 +53,7 @@ export default async function WalletPage() {
         )}
 
         {/* Balance */}
-        <TerminalCard title="Recipient wallet" meta={<StatusDot status="ok" label="Connected" />}>
+        <TerminalCard title="Recipient wallet" dots={false} meta={<StatusDot status="ok" label="Connected" />}>
             <p className="metric-xl">
               {formatUSDC(totalSpend, 2)}
             </p>
@@ -87,7 +87,7 @@ export default async function WalletPage() {
 
         {/* Escrow config */}
         {escrowConfig && (
-          <TerminalCard title="Escrow configuration">
+          <TerminalCard title="Escrow configuration" dots={false}>
             <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-5">
               <div>
                 <dt className="text-[11px] text-text-tertiary font-mono uppercase tracking-wide mb-1">Network</dt>
@@ -111,7 +111,7 @@ export default async function WalletPage() {
 
         {/* Transactions / wallets table */}
         {topWallets ? (
-          <TerminalCard title="wallet.deposits" bare className="overflow-hidden">
+          <TerminalCard title="wallet.deposits" dots={false} bare className="overflow-hidden">
             <div className="divide-y divide-border bg-popover">
               {topWallets.map((w) => (
                 <div
@@ -136,6 +136,7 @@ export default async function WalletPage() {
         ) : (
           <TerminalCard
             title="wallet.deposits"
+            dots={false}
             meta={
               <a
                 href={`https://solscan.io/account/${addr}`}
@@ -197,7 +198,7 @@ export default async function WalletPage() {
         )}
 
         {/* Fund instructions */}
-        <TerminalCard title="Fund your wallet">
+        <TerminalCard title="Fund your wallet" dots={false}>
           <ol className="space-y-1.5 text-sm text-text-secondary list-decimal list-inside">
             <li>Send USDC-SPL to your wallet address above on Solana mainnet</li>
             <li>

@@ -54,7 +54,7 @@ export function HeroPanel() {
                   <motion.span
                     className="display-wonk block text-[var(--heading-color)] will-change-transform"
                     style={{
-                      fontSize: 'clamp(3.4rem, 11vw, 9rem)',
+                      fontSize: 'clamp(3.4rem, 11vw, 7rem)',
                       fontWeight: i === 2 ? 620 : 540,
                       fontVariationSettings: `'opsz' 144, 'SOFT' ${
                         i === 2 ? 0 : 6

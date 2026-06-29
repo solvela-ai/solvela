@@ -7,8 +7,9 @@ import { DOCS_URL, ESCROW_PROGRAM_ID } from './config'
  * editorial spread rather than four identical cards.
  *
  * Layout: a wide featured claim (escrow, the trust anchor) spanning the top,
- * then three asymmetric claims below at varied widths. Each leads with an
- * oversized hairline index numeral and uses the claim-slab left-fill hover.
+ * then three asymmetric claims below at varied widths. The four are parallel
+ * peers — no ordinals — each led by its kicker label, with the claim-slab
+ * left-fill hover. Escrow leads by layout weight alone, not by a number.
  */
 export function WhySolvela() {
   return (
@@ -34,10 +35,7 @@ export function WhySolvela() {
             href={`${DOCS_URL}/docs/concepts/escrow`}
             className="claim-slab group block overflow-hidden rounded-lg border border-[var(--color-border-emphasis)] bg-[var(--card)] pl-7 transition-colors hover:bg-[var(--color-bg-surface-hover)]"
           >
-            <div className="grid min-h-[260px] items-center gap-6 py-12 pr-7 lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:gap-10 lg:py-14">
-              <span className="index-numeral text-[clamp(4rem,9vw,7.5rem)] text-[var(--accent-gold)]">
-                01
-              </span>
+            <div className="grid min-h-[260px] items-center gap-6 py-12 pr-7 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-10 lg:py-14">
               <div className="flex flex-col gap-3">
                 <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-text-faint">
                   the trust anchor
@@ -70,34 +68,28 @@ export function WhySolvela() {
           {/* cache — the wider one, paired with router below */}
           <div className="grid gap-6">
             <ClaimSlab
-              n="02"
               kicker="exact-match cache"
               title="Zero false positives, by construction."
               body="The cache keys on the exact request. Identical prompts share one upstream call; anything different is a miss. There is no fuzzy match to be wrong — so it never serves you the wrong answer."
               mono="cache · exact match"
               href={`${DOCS_URL}/docs/concepts/cache`}
-              accent="salmon"
             />
             <ClaimSlab
-              n="03"
               kicker="deterministic router"
               title="Fifteen dimensions, zero external calls."
               body="A rule-based router scores every request across 15 dimensions and picks a model — entirely in-process. No classifier API, no extra round-trip, no surprise dependency on someone else’s uptime."
               mono="router · 0 external calls"
               href={`${DOCS_URL}/docs/concepts/smart-router`}
-              accent="gold"
             />
           </div>
 
           {/* a2a — the tall companion, full-height emphasis */}
           <ClaimSlab
-            n="04"
             kicker="a2a, end to end"
             title="Agents discover, negotiate, and pay — no human."
             body="Solvela publishes a live A2A AgentCard. Another agent can fetch it, read the x402 terms, and complete a paid call from discovery to settlement without a person ever touching the loop."
             mono="GET /.well-known/agent-card.json"
             href={`${DOCS_URL}/docs/api`}
-            accent="salmon"
             tall
           />
         </div>
@@ -107,28 +99,22 @@ export function WhySolvela() {
 }
 
 interface ClaimSlabProps {
-  n: string
   kicker: string
   title: string
   body: string
   mono: string
   href: string
-  accent: 'salmon' | 'gold'
   tall?: boolean
 }
 
 function ClaimSlab({
-  n,
   kicker,
   title,
   body,
   mono,
   href,
-  accent,
   tall,
 }: ClaimSlabProps) {
-  const numColor =
-    accent === 'gold' ? 'text-[var(--accent-gold)]' : 'text-[var(--accent-salmon)]'
   return (
     <Reveal index={2} className="h-full">
       <Link
@@ -139,14 +125,9 @@ function ClaimSlab({
         }
       >
         <div className="flex flex-col gap-3">
-          <div className="flex items-start justify-between gap-4">
-            <span className={`index-numeral text-[clamp(2.5rem,5vw,4rem)] ${numColor}`}>
-              {n}
-            </span>
-            <span className="mt-2 font-mono text-[10px] uppercase tracking-[0.22em] text-text-faint">
-              {kicker}
-            </span>
-          </div>
+          <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-text-faint">
+            {kicker}
+          </span>
           <h3
             className="display-wonk text-[var(--heading-color)]"
             style={{ fontSize: tall ? 'clamp(1.5rem, 2.8vw, 2.1rem)' : 'clamp(1.25rem, 2.2vw, 1.7rem)' }}
