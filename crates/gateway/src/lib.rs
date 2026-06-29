@@ -334,6 +334,13 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             get(routes::messages::create_message_discovery_get)
                 .post(routes::messages::create_message),
         )
+        // Anthropic token-counting endpoint. Free (Anthropic does not charge for
+        // count_tokens), no payment path — a verbatim reverse-proxy to Anthropic's
+        // own count_tokens endpoint so a native Claude client gets exact counts.
+        .route(
+            "/v1/messages/count_tokens",
+            post(routes::messages::count_message_tokens),
+        )
         .route(
             "/v1/images/generations",
             post(routes::images::image_generations),
