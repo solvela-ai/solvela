@@ -286,11 +286,22 @@ async fn main() -> anyhow::Result<()> {
     // ── Shared HTTP client ─────────────────────────────────────────────────
     //
     // A single reqwest::Client is shared across all provider adapters and
-    // general-purpose outbound calls (Solana RPC, health checks). The 10s
-    // client-level timeout applies to non-LLM calls; each provider adapter
-    // overrides it with a 90s per-request timeout for LLM API calls.
+    // general-purpose outbound calls (Solana RPC, health checks). The 10s TOTAL
+    // timeout applies to non-LLM calls; each provider adapter overrides it with a
+    // longer per-request total timeout for LLM API calls.
+    //
+    // `read_timeout` is a PER-CHUNK IDLE deadline (resets on each received byte),
+    // distinct from the total `timeout` deadline. It is the correct liveness
+    // check for STREAMING responses: `timeout` is a wall-clock total across
+    // headers + body, so on a long SSE stream it would truncate the whole
+    // response mid-flight (charge-without-full-delivery on a settled `exact`
+    // request). The 120s idle timeout kills a genuinely-stalled stream but never
+    // truncates a healthy stream that keeps emitting tokens. Safe for buffered/
+    // non-streaming calls too (they pull continuously, so 120s idle is never hit
+    // legitimately). Covers idle-liveness for ALL SSE paths, native + OpenAI.
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(120))
         .build()
         .expect("failed to build HTTP client");
 

@@ -1901,6 +1901,66 @@ async fn run_native_relay(
         }
     };
 
+    // STREAMING native passthrough: relay the upstream SSE bytes VERBATIM. This
+    // is the streaming twin of the buffered path below. It returns
+    // `usage: None` / `cost_outcome: None`, so the caller takes the
+    // `EstimateFallback` settlement arm — IDENTICAL to the OpenAI streaming path:
+    // bill the request-side estimate (the amount reserved in `check_budget` and,
+    // on `exact`, settled on-chain), never `.await` settlement on the streamed
+    // bytes, and read no per-token usage out of the stream. The native streaming
+    // path adds NO new financial math. On any failure (transport / non-2xx /
+    // unbillable) the relay returns a redacted `NativeRelayError` mapped to the
+    // all-providers-failed arm below (reservation released, no settle, no body
+    // leak) — never a silent reshape fallback.
+    if req.stream {
+        info!(model = %req.model, "native /v1/messages streaming passthrough to Anthropic");
+        // No `solvela_provider_request_duration_seconds` here: `relay_native_stream`
+        // returns as soon as upstream HEADERS arrive (the body streams lazily), so
+        // recording it would measure TTFB under a metric name whose other (buffered)
+        // users mean TOTAL duration — a mislabel. Streaming latency observability
+        // can be added later under a properly-named TTFB/stream metric.
+        let stream_result = relay
+            .relay_native_stream(relay_body, anthropic_version, anthropic_beta)
+            .await;
+
+        let mut response = match stream_result {
+            Ok(resp) => resp,
+            Err(e) => {
+                let error_type = match &e {
+                    NativeRelayError::Transport => "timeout",
+                    NativeRelayError::UpstreamStatus(_) => "server_error",
+                    NativeRelayError::Unbillable => "unknown",
+                };
+                counter!(
+                    "solvela_provider_errors_total",
+                    "provider" => "anthropic".to_string(),
+                    "error_type" => error_type
+                )
+                .increment(1);
+                warn!(
+                    model = %req.model,
+                    error = %e,
+                    "native /v1/messages streaming relay failed — failing closed (no charge)"
+                );
+                return Err(ProviderCallError::AllProvidersFailed {
+                    model: req.model.clone(),
+                    provider: "anthropic".to_string(),
+                    // Fixed category only — never the upstream body / raw error.
+                    error: e.to_string(),
+                });
+            }
+        };
+        response::attach_session_id(&mut response, session_id);
+        return Ok(ProviderCallResult {
+            response,
+            // Streaming carries no response-side usage; the caller bills the
+            // estimate via the EstimateFallback arm (same as OpenAI streaming).
+            usage: None,
+            actual_provider: Some("anthropic".to_string()),
+            cost_outcome: None,
+        });
+    }
+
     info!(model = %req.model, "native /v1/messages passthrough to Anthropic");
     let provider_start = Instant::now();
     let relay_result = relay

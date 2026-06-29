@@ -418,15 +418,27 @@ pub fn anthropic_request_to_chat(
 /// This skeleton is NEVER serialized to a provider (the raw body is relayed) and
 /// is NEVER used to compute the native cost estimate (that is computed directly
 /// from the original bytes by `estimate_native_anthropic_input_tokens`). So it
-/// only needs to carry: the model, `max_tokens`, and the flattened text of the
-/// `system` prompt + every message — including the text inside `thinking` /
-/// `tool_use` / `tool_result` / image blocks — so the empty-prompt check sees
-/// real content and the guard scans it. All content is flattened to
-/// [`MessageContent::Text`] (never `Parts`), so the inner vision-gate /
-/// image-validation path is not engaged for the relay's verbatim images.
+/// only needs to carry: the model, `max_tokens`, the inbound `stream` flag, and
+/// the flattened text of the `system` prompt + every message — including the
+/// text inside `thinking` / `tool_use` / `tool_result` / image blocks — so the
+/// empty-prompt check sees real content and the guard scans it. All content is
+/// flattened to [`MessageContent::Text`] (never `Parts`), so the inner
+/// vision-gate / image-validation path is not engaged for the relay's verbatim
+/// images.
 ///
-/// Infallible by design: the native path rejects only `stream:true` (handled by
-/// the route before this is called); every other shape is forwarded.
+/// The `stream` flag is carried through (`stream: req.stream`) so the shared
+/// money-path core treats a native streaming request AS streaming — selecting the
+/// `EstimateFallback` settlement posture (no post-stream usage tap / session-token
+/// attach), identical to the OpenAI streaming path. The relayed body still
+/// carries `stream:true` itself (it is the original bytes), so the upstream
+/// request is a stream regardless; this flag only steers the core's settlement
+/// arm. The strict reshape builder ([`anthropic_request_to_chat`]) is a SEPARATE
+/// path and still hard-rejects `stream:true` — cross-provider streaming is out of
+/// scope.
+///
+/// Infallible by design: every shape is forwarded (the native streaming relay
+/// handles `stream:true`; the route still rejects `stream:true` on the reshape
+/// branch).
 pub fn anthropic_request_to_native_skeleton(req: &AnthropicMessagesRequest) -> ChatRequest {
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(req.messages.len() + 1);
 
@@ -458,7 +470,10 @@ pub fn anthropic_request_to_native_skeleton(req: &AnthropicMessagesRequest) -> C
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         top_p: req.top_p,
-        stream: false,
+        // Carry the inbound stream flag so the shared core takes the streaming
+        // settlement posture (EstimateFallback) for a native streaming relay.
+        // The reshape builder above stays non-streaming (it rejects stream:true).
+        stream: req.stream,
         tools: None,
         tool_choice: None,
     }
