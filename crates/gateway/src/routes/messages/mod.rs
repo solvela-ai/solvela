@@ -41,10 +41,12 @@ use solvela_protocol::ChatResponse;
 
 use crate::error::GatewayError;
 use crate::providers::anthropic_inbound::{
-    anthropic_request_to_chat, chat_response_to_anthropic, AnthropicInboundError,
-    AnthropicMessagesRequest,
+    anthropic_request_to_chat, anthropic_request_to_native_skeleton, chat_response_to_anthropic,
+    AnthropicInboundError, AnthropicMessagesRequest,
 };
-use crate::routes::chat::{chat_completions_discovery, chat_completions_inner};
+use crate::routes::chat::{
+    chat_completions_discovery, chat_completions_inner, resolve_model_provider, WireDialect,
+};
 use crate::AppState;
 
 /// The resource URL this endpoint binds payments to. A payment signed for
@@ -117,9 +119,102 @@ pub async fn create_message(
         }
     };
 
-    // Translate the Anthropic request into the internal ChatRequest. A
-    // translation error (image/tool block, or `stream:true`) is a client 4xx in
-    // the Anthropic envelope — it never reaches the money path.
+    // Streaming is OUT OF SCOPE on both the native and reshape branches (native
+    // SSE is a follow-up). Reject it LOUDLY here, before model resolution, so a
+    // `stream:true` request never silently serves non-streaming on either path
+    // (mirrors the strict translator's rejection; keeps the branch's current
+    // behavior per the scope decision).
+    if anthropic_req.stream {
+        return anthropic_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "streaming responses are not yet supported on POST /v1/messages; \
+             set \"stream\": false (SSE support is planned for a later release)"
+                .to_string(),
+        );
+    }
+
+    // Decide the NATIVE-vs-RESHAPE fork from the RESOLVED model's provider.
+    // Build a lenient skeleton (model + flattened text) so the resolver can run
+    // alias/profile resolution; the skeleton is also the ChatRequest the money
+    // core uses for its structural checks on the native branch. The core
+    // re-resolves and re-checks `provider == "anthropic"` itself, so this only
+    // selects the inbound translation — it is not authoritative.
+    let mut native_skeleton = anthropic_request_to_native_skeleton(&anthropic_req);
+
+    // INBOUND MODEL-ID CONTRACT (`/v1/messages` only): Claude Code and every
+    // native `api.anthropic.com` client address models by their BARE Anthropic id
+    // (e.g. `claude-sonnet-4-6`, or `ANTHROPIC_SMALL_FAST_MODEL`'s haiku), NOT by
+    // the gateway-canonical `anthropic/<id>` used on `/v1/models` and
+    // `/v1/chat/completions`. A bare id is not a registry key, so without this it
+    // resolves to `ModelNotFound` (the native passthrough never engages).
+    //
+    // If the inbound model does NOT already resolve (alias / profile / canonical
+    // id all miss) but IS a known bare Anthropic id, rewrite the skeleton's model
+    // to the canonical id so the existing resolver routes it native. This is
+    // additive and `/v1/messages`-scoped — it never reinterprets a model that
+    // already resolves, and it never default-routes an unknown id (an unresolved
+    // non-Anthropic-bare id still falls through to `ModelNotFound` downstream).
+    // The relay still rewrites the relayed `model` field to the bare upstream id
+    // (see `run_native_relay`), so this canonicalization is purely for routing.
+    if resolve_model_provider(&native_skeleton, &state).is_none() {
+        if let Some(canonical) = state
+            .model_registry
+            .resolve_anthropic_model_id(&native_skeleton.model)
+            .map(|m| m.id.clone())
+        {
+            native_skeleton.model = canonical;
+        }
+    }
+
+    let is_native =
+        resolve_model_provider(&native_skeleton, &state).as_deref() == Some("anthropic");
+
+    if is_native {
+        // NATIVE passthrough: the relay forwards the ORIGINAL bytes verbatim, so
+        // we do NOT run the strict translator (which would reject tools/thinking
+        // and defeat the entire point). Forward the inbound version/beta headers
+        // verbatim; default `anthropic-version` to the GA value when absent. The
+        // inbound Solvela bearer is NEVER forwarded (the relay sends the
+        // gateway's own `x-api-key`).
+        let anthropic_version = headers
+            .get("anthropic-version")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let anthropic_beta = headers
+            .get("anthropic-beta")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let dialect = WireDialect::AnthropicMessages {
+            original_body: body,
+            anthropic_version,
+            anthropic_beta,
+        };
+        return match chat_completions_inner(
+            state,
+            peer_addr,
+            headers,
+            native_skeleton,
+            MESSAGES_RESOURCE_URL,
+            dialect,
+        )
+        .await
+        {
+            // The native relay's `Ok` response IS the raw Anthropic body —
+            // forward it VERBATIM (do NOT re-translate; it is already the
+            // Anthropic wire shape, and re-parsing it as a `ChatResponse` would
+            // fail-close to a 502).
+            Ok(response) => forward_native_success_response(response).await,
+            Err(err) => translate_error(err).await,
+        };
+    }
+
+    // RESHAPE path (cross-provider: an Anthropic-shaped request whose resolved
+    // model is NOT an Anthropic model — reachable only via an eco/auto alias).
+    // Run the STRICT translator UNCHANGED: a translation error (image/tool
+    // block, or `stream:true`) is a client 4xx in the Anthropic envelope — it
+    // never reaches the money path. This keeps the loud silent-degradation guard
+    // fully intact for the lossy cross-provider exception.
     let chat_req = match anthropic_request_to_chat(anthropic_req) {
         Ok(req) => req,
         Err(e) => {
@@ -142,10 +237,26 @@ pub async fn create_message(
         }
     };
 
-    // Run the SHARED money-path core. `/v1/messages` does NOT fork any
-    // 402/cost/verify/settle/record logic — it reuses the exact same inner core
-    // as `/v1/chat/completions`, only with its own `resource_url`.
-    match chat_completions_inner(state, peer_addr, headers, chat_req, MESSAGES_RESOURCE_URL).await {
+    // Run the SHARED money-path core on the reshape branch. The core sees a
+    // non-Anthropic resolved model, so `WireDialect::AnthropicMessages` does NOT
+    // trigger the native relay — it takes the existing OpenAI provider pipeline,
+    // and the OpenAI `ChatResponse` is re-translated to the Anthropic shape.
+    // (The `original_body` is carried but unused on this branch.)
+    let dialect = WireDialect::AnthropicMessages {
+        original_body: body,
+        anthropic_version: None,
+        anthropic_beta: None,
+    };
+    match chat_completions_inner(
+        state,
+        peer_addr,
+        headers,
+        chat_req,
+        MESSAGES_RESOURCE_URL,
+        dialect,
+    )
+    .await
+    {
         Ok(response) => translate_success_response(response).await,
         Err(err) => translate_error(err).await,
     }
@@ -159,6 +270,34 @@ pub async fn create_message(
 /// endpoint speaks x402.
 pub async fn create_message_discovery_get(State(state): State<Arc<AppState>>) -> Response {
     chat_completions_discovery(&state, MESSAGES_RESOURCE_URL).into_response()
+}
+
+/// Forward a successful NATIVE-passthrough inner-core [`Response`] VERBATIM.
+///
+/// On the native branch the inner core's `Ok` response IS the upstream Anthropic
+/// response, relayed byte-for-byte (preserving thinking `signature`,
+/// `redacted_thinking`, native `tool_use` blocks, and cache-token usage). It is
+/// already the Anthropic Messages wire shape, so — unlike the reshape path's
+/// [`translate_success_response`] — we MUST NOT re-parse it as a `ChatResponse`
+/// and re-emit (that would fail-close to a 502). We forward it unchanged; the
+/// payment/audit headers (receipt, session) the money path attached are already
+/// on it. A non-200 reaching here is unexpected (the core's served path returns
+/// 200) — surface it as a redacted Anthropic error rather than forwarding an
+/// unknown-shape body as a success.
+async fn forward_native_success_response(response: Response) -> Response {
+    let status = response.status();
+    if status == StatusCode::OK {
+        return response;
+    }
+    warn!(
+        status = %status,
+        "unexpected non-200 status on the native-relay Ok path for /v1/messages"
+    );
+    anthropic_error_response(
+        StatusCode::BAD_GATEWAY,
+        "api_error",
+        "Upstream returned an unexpected response.".to_string(),
+    )
 }
 
 /// Translate a successful inner-core [`Response`] (a serialized OpenAI

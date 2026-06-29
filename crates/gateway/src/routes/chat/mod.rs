@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use metrics::{counter, histogram};
 use tracing::{debug, info, warn};
 
@@ -33,9 +33,10 @@ use crate::AppState;
 
 use cost::{
     cap_usage_to_request_limits, completion_token_ceiling, compute_actual_atomic_cost,
-    discovery_floor_atomic, estimate_input_tokens, estimated_atomic_cost, is_free_estimate,
-    scheme_realized_discount, select_spend_log_arm, spend_cost_atomic, usdc_atomic_amount_checked,
-    usdc_f64_to_atomic_safe, PaymentScheme, SpendLogArm,
+    discovery_floor_atomic, estimate_input_tokens, estimate_native_anthropic_input_tokens,
+    estimated_atomic_cost, is_free_estimate, scheme_realized_discount, select_spend_log_arm,
+    spend_cost_atomic, usdc_atomic_amount_checked, usdc_f64_to_atomic_safe, PaymentScheme,
+    SpendLogArm,
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
@@ -68,6 +69,53 @@ const MAX_IMAGES_PER_REQUEST: usize = 100;
 
 /// Platform-wide upper bound for `max_tokens` to prevent unbounded cost exposure.
 const MAX_TOKENS_LIMIT: u32 = 128_000;
+
+/// The inbound wire dialect a request arrived on. Threaded into
+/// [`chat_completions_inner`] alongside `resource_url` so the SAME money-path
+/// core serves both the OpenAI route and the Anthropic Messages adapter, while
+/// the latter can take the NATIVE passthrough when the resolved model is an
+/// Anthropic model.
+///
+/// CLAUDE.md Rule #4 carve-out: the gateway speaks OpenAI EXCEPT this native
+/// `/v1/messages` relay. `OpenAi` is the only dialect `/v1/chat/completions`
+/// ever passes, so that endpoint's behavior is byte-for-byte unchanged. For an
+/// `AnthropicMessages` request the fork is decided ONLY after model resolution:
+/// an Anthropic-resolved model relays natively; a non-Anthropic-resolved model
+/// (reachable only via an eco/auto routing alias) falls through to the existing
+/// reshape branch — never a silent default-route either way.
+pub(crate) enum WireDialect {
+    /// `/v1/chat/completions` — always OpenAI-shaped in and out.
+    OpenAi,
+    /// `/v1/messages` — the inbound request is Anthropic Messages JSON. Carries
+    /// the ORIGINAL validated request bytes (relayed VERBATIM on the native
+    /// path) plus the inbound version/beta headers (forwarded verbatim upstream;
+    /// the inbound Solvela bearer is NEVER forwarded).
+    AnthropicMessages {
+        original_body: axum::body::Bytes,
+        anthropic_version: Option<String>,
+        anthropic_beta: Option<String>,
+    },
+}
+
+impl WireDialect {
+    /// The native-passthrough source bytes + forwarded headers, or `None` for
+    /// the OpenAI dialect. Returns `Some` regardless of the resolved model — the
+    /// caller additionally gates on `model_info.provider == "anthropic"`.
+    fn anthropic_native_source(&self) -> Option<(&axum::body::Bytes, Option<&str>, Option<&str>)> {
+        match self {
+            WireDialect::OpenAi => None,
+            WireDialect::AnthropicMessages {
+                original_body,
+                anthropic_version,
+                anthropic_beta,
+            } => Some((
+                original_body,
+                anthropic_version.as_deref(),
+                anthropic_beta.as_deref(),
+            )),
+        }
+    }
+}
 
 /// POST /v1/chat/completions — OpenAI-compatible chat endpoint.
 ///
@@ -134,7 +182,18 @@ pub async fn chat_completions(
     // `/v1/messages` (the Anthropic Messages adapter) calls the SAME core with
     // its own `resource_url`, so the 402/cost/verify/settle/record logic is
     // never forked — CLAUDE.md requires the payment path to live in one place.
-    chat_completions_inner(state, peer_addr, headers, req, "/v1/chat/completions").await
+    // `/v1/chat/completions` always passes the `OpenAi` dialect, so this
+    // endpoint never takes the native Anthropic passthrough and its behavior is
+    // byte-for-byte unchanged.
+    chat_completions_inner(
+        state,
+        peer_addr,
+        headers,
+        req,
+        "/v1/chat/completions",
+        WireDialect::OpenAi,
+    )
+    .await
 }
 
 /// Shared inner core for every OpenAI-shaped chat request, regardless of the
@@ -158,6 +217,7 @@ pub(crate) async fn chat_completions_inner(
     headers: HeaderMap,
     mut req: ChatRequest,
     resource_url: &str,
+    dialect: WireDialect,
 ) -> Result<Response, GatewayError> {
     let request_start = Instant::now();
     let debug_enabled = is_debug_enabled(&headers);
@@ -306,6 +366,35 @@ pub(crate) async fn chat_completions_inner(
         .get(&req.model)
         .ok_or_else(|| GatewayError::ModelNotFound(req.model.clone()))?;
 
+    // Native Anthropic passthrough fork (CLAUDE.md Rule #4 carve-out). Decided
+    // ONLY after model resolution: an `/v1/messages` request whose resolved
+    // model is an Anthropic-provider model takes the native relay; an
+    // Anthropic-shaped request that resolves to a NON-Anthropic provider (only
+    // reachable via an eco/auto routing alias) falls through to the existing
+    // reshape/OpenAI path. `/v1/chat/completions` always passes `OpenAi`, so it
+    // is never native. The `original_body` + forwarded headers are captured here
+    // for the relay (and to compute the native input-token estimate below). The
+    // relay handle being absent (no `ANTHROPIC_API_KEY`) is handled at the call
+    // site — it fails closed into the all-providers-failed arm, never silently
+    // reshaping or serving free.
+    let native_source = if model_info.provider == "anthropic" {
+        dialect.anthropic_native_source()
+    } else {
+        None
+    };
+
+    // The upfront input-token estimate that feeds BOTH the 402 quote AND the C1
+    // client-amount validation / M3 budget reservation. Computed ONCE here so
+    // the two sites can never diverge. On the native path it is computed
+    // DIRECTLY from the original Anthropic body (counting system + every
+    // message's text + serialized tools + thinking history), so the quote can
+    // never UNDER-reserve relative to the native bill (#500 class); on every
+    // other path it is the existing OpenAI-shaped `estimate_input_tokens`.
+    let input_token_estimate: u32 = match native_source {
+        Some((body, _, _)) => estimate_native_anthropic_input_tokens(body),
+        None => estimate_input_tokens(&req),
+    };
+
     // Step 2a: Vision capability gate. Image content is only accepted for a
     // model whose registry entry declares `supports_vision`. A non-vision model
     // must reject (415) rather than silently strip the image (which would
@@ -395,32 +484,43 @@ pub(crate) async fn chat_completions_inner(
         // Dev-bypass still reaches a provider, so it must run the guard.
         run_prompt_guard(&req.messages)?;
 
-        let ctx = ProviderCallContext {
-            state: &state,
-            req: &req,
-            model_info,
-            headers: &headers,
-            debug_enabled,
-            request_start,
-            routing_tier: &routing_tier,
-            routing_score,
-            routing_profile: &routing_profile,
-            session_id: &session_id,
-            payment_status: PaymentStatus::DevBypass,
+        // Dev-bypass must honor the SAME native-vs-reshape fork as the paid path
+        // (the dispatch at "Step 5" below). An Anthropic-resolved `/v1/messages`
+        // request (`native_source` is `Some`) takes the byte-verbatim native
+        // relay so the extended-thinking `signature` survives; without this, the
+        // dev-bypass branch would reshape through the OpenAI pipeline (losing the
+        // signature → Claude Code hard-400s the next multi-turn request) and
+        // serve a `chat.completion` shape for an endpoint that promises native
+        // Anthropic bytes. Mirrors the verified-path dispatch verbatim except for
+        // the (here irrelevant) settlement that only the paid path performs.
+        let dev_bypass_call = if let Some((body, version, beta)) = native_source {
+            run_native_relay(&state, &req, model_info, body, version, beta, &session_id).await
+        } else {
+            let ctx = ProviderCallContext {
+                state: &state,
+                req: &req,
+                model_info,
+                headers: &headers,
+                debug_enabled,
+                request_start,
+                routing_tier: &routing_tier,
+                routing_score,
+                routing_profile: &routing_profile,
+                session_id: &session_id,
+                payment_status: PaymentStatus::DevBypass,
+            };
+            provider::execute_provider_call(&ctx).await
         };
 
-        return provider::execute_provider_call(&ctx)
-            .await
-            .map(|r| r.response)
-            .map_err(|e| match e {
-                ProviderCallError::AllProvidersFailed { model, error, .. } => {
-                    GatewayError::Internal(format!(
-                        "all providers failed for model '{}' (dev bypass): {}",
-                        model, error
-                    ))
-                }
-                ProviderCallError::Internal(msg) => GatewayError::Internal(msg),
-            });
+        return dev_bypass_call.map(|r| r.response).map_err(|e| match e {
+            ProviderCallError::AllProvidersFailed { model, error, .. } => {
+                GatewayError::Internal(format!(
+                    "all providers failed for model '{}' (dev bypass): {}",
+                    model, error
+                ))
+            }
+            ProviderCallError::Internal(msg) => GatewayError::Internal(msg),
+        });
     }
 
     // Compute the upfront cost estimate ONCE. This same `atomic_amount` is the
@@ -443,7 +543,11 @@ pub(crate) async fn chat_completions_inner(
         .model_registry
         .estimate_cost(
             &req.model,
-            estimate_input_tokens(&req),
+            // `input_token_estimate` is the SINGLE estimate source (native
+            // Anthropic body estimate on the native path, OpenAI-shaped estimate
+            // otherwise), so the 402 quote and the C1 validation below price from
+            // the same figure.
+            input_token_estimate,
             // #500: reserve for the SAME completion-token ceiling billing
             // will cap to (not a flat 1000), so an omitted-max_tokens
             // request can never bill above its reservation.
@@ -547,21 +651,33 @@ pub(crate) async fn chat_completions_inner(
         // the dev-bypass and paid paths).
         run_prompt_guard(&req.messages)?;
 
-        let ctx = ProviderCallContext {
-            state: &state,
-            req: &req,
-            model_info,
-            headers: &headers,
-            debug_enabled,
-            request_start,
-            routing_tier: &routing_tier,
-            routing_score,
-            routing_profile: &routing_profile,
-            session_id: &session_id,
-            payment_status: PaymentStatus::Free,
+        // Honor the SAME native-vs-reshape fork as the dev-bypass and paid paths.
+        // No Anthropic model is currently priced at $0 (so this branch is not
+        // reachable for one today), but keeping the dispatch consistent across ALL
+        // three provider-call sites is exactly what prevents the class of bug where
+        // one site silently reshapes an Anthropic-resolved `/v1/messages` request
+        // (losing the thinking `signature`) while the others relay natively. A
+        // future free-tier Anthropic model can never regress to the OpenAI shape.
+        let free_call = if let Some((body, version, beta)) = native_source {
+            run_native_relay(&state, &req, model_info, body, version, beta, &session_id).await
+        } else {
+            let ctx = ProviderCallContext {
+                state: &state,
+                req: &req,
+                model_info,
+                headers: &headers,
+                debug_enabled,
+                request_start,
+                routing_tier: &routing_tier,
+                routing_score,
+                routing_profile: &routing_profile,
+                session_id: &session_id,
+                payment_status: PaymentStatus::Free,
+            };
+            provider::execute_provider_call(&ctx).await
         };
 
-        return match provider::execute_provider_call(&ctx).await {
+        return match free_call {
             Ok(result) => {
                 // Log spend at $0 via the existing fire-and-forget path so the
                 // free tier still shows up in usage/observability. `cost_usdc`
@@ -771,7 +887,10 @@ pub(crate) async fn chat_completions_inner(
                 .model_registry
                 .estimate_cost(
                     &req.model,
-                    estimate_input_tokens(&req),
+                    // SAME single estimate source as the 402 quote above (native
+                    // body estimate on the native path), so the client-amount
+                    // validation can never disagree with the advertised quote.
+                    input_token_estimate,
                     // #500: same completion-token ceiling as the 402 quote above
                     // and as the settlement-time `cap_usage_to_request_limits`.
                     // This figure feeds both the client-amount validation (C1)
@@ -1146,21 +1265,34 @@ pub(crate) async fn chat_completions_inner(
     // Step 5: Proxy to provider (with cache and fallback)
     let provider_name = &model_info.provider;
 
-    let ctx = ProviderCallContext {
-        state: &state,
-        req: &req,
-        model_info,
-        headers: &headers,
-        debug_enabled,
-        request_start,
-        routing_tier: &routing_tier,
-        routing_score,
-        routing_profile: &routing_profile,
-        session_id: &session_id,
-        payment_status: PaymentStatus::Verified,
+    // The provider call. On the NATIVE Anthropic passthrough this is the
+    // byte-verbatim relay (no cache, no cross-provider fallback — it succeeds
+    // against Anthropic or fails loudly into the all-providers-failed arm,
+    // releasing the reservation and never settling). On every other path it is
+    // the existing OpenAI-shaped pipeline (cache → semantic → fallback chain).
+    // BOTH yield the SAME `Result<ProviderCallResult, ProviderCallError>` so the
+    // downstream settle / claim / spend-log / receipt arms are shared verbatim
+    // — the native path adds NO new financial math.
+    let provider_call = if let Some((body, version, beta)) = native_source {
+        run_native_relay(&state, &req, model_info, body, version, beta, &session_id).await
+    } else {
+        let ctx = ProviderCallContext {
+            state: &state,
+            req: &req,
+            model_info,
+            headers: &headers,
+            debug_enabled,
+            request_start,
+            routing_tier: &routing_tier,
+            routing_score,
+            routing_profile: &routing_profile,
+            session_id: &session_id,
+            payment_status: PaymentStatus::Verified,
+        };
+        provider::execute_provider_call(&ctx).await
     };
 
-    match provider::execute_provider_call(&ctx).await {
+    match provider_call {
         Ok(ProviderCallResult {
             mut response,
             usage,
@@ -1690,6 +1822,197 @@ pub(crate) async fn chat_completions_inner(
     }
 }
 
+/// Run the NATIVE Anthropic `/v1/messages` passthrough as a drop-in for
+/// [`provider::execute_provider_call`].
+///
+/// Returns the SAME [`ProviderCallResult`] / [`ProviderCallError`] shape so the
+/// caller's settle / claim / spend-log / receipt arms are reused verbatim — the
+/// native path introduces NO new financial math:
+/// - On success: `response` is the upstream Anthropic response bytes relayed
+///   UNTOUCHED (200, `application/json`), and `usage` is derived from the parsed
+///   [`AnthropicUsage`] via the shared [`AnthropicUsage::to_billed_usage`] fold
+///   (#614–616) — identical to the reshape path. `actual_provider` is
+///   `"anthropic"`; `cost_outcome` is `None` (no semantic-cache discount on the
+///   relay — caching is bypassed entirely).
+/// - On ANY failure (no relay handle configured, transport error, upstream
+///   non-2xx, or unbillable body): returns
+///   [`ProviderCallError::AllProvidersFailed`], so the caller RELEASES the
+///   budget reservation and NEVER settles (exact deferred / escrow unclaimed).
+///   This is the fail-closed edge: the native relay does NOT fall back to the
+///   cross-provider chain — it succeeds against Anthropic or fails loudly.
+///
+/// SECRET-REDACTION: the relay's [`NativeRelayError`] never carries the gateway
+/// key, the raw upstream body, or a raw reqwest error; the `error` string put
+/// into `AllProvidersFailed` here is a fixed category, and the caller's arm maps
+/// it to a static, internals-free client message (GHSA-cgqx-mg48-949v).
+async fn run_native_relay(
+    state: &Arc<AppState>,
+    req: &ChatRequest,
+    model_info: &solvela_protocol::ModelRegistration,
+    body: &axum::body::Bytes,
+    anthropic_version: Option<&str>,
+    anthropic_beta: Option<&str>,
+    session_id: &Option<String>,
+) -> Result<ProviderCallResult, ProviderCallError> {
+    use crate::providers::anthropic::NativeRelayError;
+
+    // No relay handle configured (no ANTHROPIC_API_KEY) → fail CLOSED. We do NOT
+    // silently reshape or serve free: the Anthropic-resolved model cannot be
+    // served natively, so this is the all-providers-failed condition (the caller
+    // releases the reservation and never settles).
+    let Some(relay) = state.native_anthropic.as_ref() else {
+        warn!(
+            model = %req.model,
+            "native /v1/messages relay requested but no Anthropic relay handle is configured \
+             (ANTHROPIC_API_KEY unset) — failing closed (no charge)"
+        );
+        return Err(ProviderCallError::AllProvidersFailed {
+            model: req.model.clone(),
+            provider: model_info.provider.clone(),
+            error: "native Anthropic relay not configured".to_string(),
+        });
+    };
+
+    // MODEL-ID REWRITE (inbound contract → upstream contract): the inbound body's
+    // `model` is the gateway-facing id — either the bare Anthropic id Claude Code
+    // sent, or (when a client used the canonical form, or the route canonicalized
+    // a bare id for routing) `anthropic/<id>`. `api.anthropic.com` ONLY accepts
+    // the bare id, so the relayed body's `model` MUST be the registry entry's bare
+    // `model_id` (`model_info.model_id`, the internal-only upstream address).
+    // Everything else in the body is forwarded UNCHANGED so thinking-block
+    // `signature`s, `redacted_thinking`, native `tool_use` blocks, and tools all
+    // survive. If the rewrite cannot be applied (body is not a JSON object, or
+    // serialization fails), fail CLOSED via the all-providers-failed arm rather
+    // than relaying a body that would 404 upstream or silently mis-bill.
+    let relay_body = match rewrite_relayed_model(body, &model_info.model_id) {
+        Ok(rewritten) => rewritten,
+        Err(e) => {
+            warn!(
+                model = %req.model,
+                error = %e,
+                "failed to set the upstream model id on the native /v1/messages body \
+                 — failing closed (no charge)"
+            );
+            return Err(ProviderCallError::AllProvidersFailed {
+                model: req.model.clone(),
+                provider: "anthropic".to_string(),
+                error: "could not prepare native request for upstream".to_string(),
+            });
+        }
+    };
+
+    info!(model = %req.model, "native /v1/messages passthrough to Anthropic");
+    let provider_start = Instant::now();
+    let relay_result = relay
+        // Forward the body with ONLY the top-level `model` rewritten to the bare
+        // upstream id; every other byte of meaning is preserved.
+        .relay_native(relay_body, anthropic_version, anthropic_beta)
+        .await;
+    histogram!(
+        "solvela_provider_request_duration_seconds",
+        "provider" => "anthropic".to_string()
+    )
+    .record(provider_start.elapsed().as_secs_f64());
+
+    let (raw, anthropic_usage) = match relay_result {
+        Ok(pair) => pair,
+        Err(e) => {
+            // Map the relay error to a metrics bucket + the all-providers-failed
+            // arm WITHOUT leaking internals. The numeric upstream status (if any)
+            // is logged server-side; the client gets the static message the
+            // caller's arm produces.
+            let error_type = match &e {
+                NativeRelayError::Transport => "timeout",
+                NativeRelayError::UpstreamStatus(_) => "server_error",
+                NativeRelayError::Unbillable => "unknown",
+            };
+            counter!(
+                "solvela_provider_errors_total",
+                "provider" => "anthropic".to_string(),
+                "error_type" => error_type
+            )
+            .increment(1);
+            warn!(
+                model = %req.model,
+                error = %e,
+                "native /v1/messages relay failed — failing closed (no charge)"
+            );
+            return Err(ProviderCallError::AllProvidersFailed {
+                model: req.model.clone(),
+                provider: "anthropic".to_string(),
+                // Fixed category only — never the upstream body / raw error.
+                error: e.to_string(),
+            });
+        }
+    };
+
+    // Build the response from the RAW Anthropic bytes — relayed UNTOUCHED so the
+    // thinking-block `signature`, `redacted_thinking`, native `tool_use` blocks,
+    // and cache-token usage survive byte-for-byte to the client.
+    let mut response = (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        )],
+        raw,
+    )
+        .into_response();
+    response::attach_session_id(&mut response, session_id);
+
+    // Bill via the EXISTING path: fold the cache-token usage with the shared
+    // helper (so the relay and `from_anthropic_response` can never drift), then
+    // the caller caps it (`cap_usage_to_request_limits`) and prices it
+    // (`compute_actual_atomic_cost`) exactly as for any other usage.
+    let usage = anthropic_usage.to_billed_usage();
+    // OBSERVABILITY ONLY: emit the cross-provider cache-token counters, same as
+    // the reshape path (the relay would otherwise be a metrics blind spot).
+    anthropic_usage.emit_cache_metrics(&req.model);
+
+    Ok(ProviderCallResult {
+        response,
+        usage: Some(usage),
+        actual_provider: Some("anthropic".to_string()),
+        cost_outcome: None,
+    })
+}
+
+/// Rewrite ONLY the top-level `model` field of an inbound Anthropic Messages
+/// request body to `upstream_model_id` (the bare Anthropic id), preserving every
+/// other field.
+///
+/// `api.anthropic.com` accepts ONLY the bare model id (e.g. `claude-sonnet-4-6`),
+/// never the gateway-facing `anthropic/<id>` form. The inbound body may carry
+/// either form (a bare id from Claude Code, or the canonical form from an x402
+/// client / after route canonicalization), so the relayed body must always be
+/// normalized to the bare upstream id before forwarding.
+///
+/// Re-serializing through `serde_json::Value` may reorder keys, but it preserves
+/// every value byte-exactly — including the cryptographic thinking-block
+/// `signature` strings, which Anthropic validates by content, not by request-byte
+/// position. The native RESPONSE is still relayed untouched (the byte-identity
+/// guarantee is on the response, not the request).
+///
+/// Returns `Err` (caller fails closed) if the body is not a JSON object or
+/// re-serialization fails — never a silently-unmodified or empty body.
+fn rewrite_relayed_model(
+    body: &axum::body::Bytes,
+    upstream_model_id: &str,
+) -> Result<axum::body::Bytes, serde_json::Error> {
+    let mut value: serde_json::Value = serde_json::from_slice(body)?;
+    let obj = value.as_object_mut().ok_or_else(|| {
+        serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "native /v1/messages body is not a JSON object",
+        ))
+    })?;
+    obj.insert(
+        "model".to_string(),
+        serde_json::Value::String(upstream_model_id.to_string()),
+    );
+    let bytes = serde_json::to_vec(&value)?;
+    Ok(axum::body::Bytes::from(bytes))
+}
+
 /// Build the x402 [`PaymentRequired`] challenge for `/v1/chat/completions`.
 ///
 /// The SINGLE source of truth for the 402 `accepts[]` shape, shared by both the
@@ -1950,6 +2273,25 @@ fn emit_chat_receipt(
     };
     let path = receipts::record_receipt(state.db_pool.as_ref(), record);
     receipts::insert_receipt_header(response, &path);
+}
+
+/// Resolve the inbound request's model to its registry PROVIDER (e.g.
+/// `"anthropic"`, `"openai"`), for the `/v1/messages` native-vs-reshape fork.
+///
+/// Reuses the SAME [`resolve_model_with_debug`] resolution the money-path core
+/// uses (aliases, eco/auto profiles via the scorer, direct IDs), then looks up
+/// the resolved model's registry entry — so `create_message`'s fork decision can
+/// never disagree with the core's. Returns `None` when the model does not
+/// resolve to a registered model (an unknown model). The core re-resolves and
+/// re-checks `model_info.provider == "anthropic"` itself, so this is only an
+/// upstream hint that selects the strict-vs-lenient inbound translation; it is
+/// not authoritative over the core's own fork decision.
+pub(crate) fn resolve_model_provider(req: &ChatRequest, state: &AppState) -> Option<String> {
+    let (resolved_model, _, _, _) = resolve_model_with_debug(req, state).ok()?;
+    state
+        .model_registry
+        .get(&resolved_model)
+        .map(|m| m.provider.clone())
 }
 
 /// Resolve model ID from aliases, smart routing profiles, or direct model IDs.

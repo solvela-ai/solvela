@@ -55,6 +55,15 @@ pub struct AppState {
     pub model_registry: ModelRegistry,
     pub service_registry: RwLock<ServiceRegistry>,
     pub providers: ProviderRegistry,
+    /// Dedicated NATIVE Anthropic relay handle for the `POST /v1/messages`
+    /// passthrough. `Some` exactly when `ANTHROPIC_API_KEY` is configured (the
+    /// same gate as the OpenAI-shaped `providers` Anthropic entry). The native
+    /// fork uses [`providers::anthropic::AnthropicProvider::relay_native`] —
+    /// an inherent method the `LLMProvider` trait cannot carry — so it lives on
+    /// a concrete handle here rather than inside [`ProviderRegistry`]. When
+    /// `None`, an Anthropic-resolved `/v1/messages` request cannot relay
+    /// natively and fails closed (no silent reshape, no silent free serve).
+    pub native_anthropic: Option<Arc<providers::anthropic::AnthropicProvider>>,
     /// Web-search tool upstream adapter (e.g. Tavily). `None` unless a search
     /// API key is configured (`TAVILY_API_KEY`) — mirrors [`ProviderRegistry`]
     /// env-gating. When `None`, `POST /v1/search` returns 503 (never a free or

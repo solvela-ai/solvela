@@ -156,6 +156,30 @@ impl ModelRegistry {
         self.models.get(model_id)
     }
 
+    /// Resolve a BARE Anthropic model id (the `model_id` field, e.g.
+    /// `"claude-sonnet-4-6"` or `"claude-haiku-4-5-20251001"`) to its registered
+    /// canonical entry.
+    ///
+    /// This is the inbound-id contract for `POST /v1/messages`: Claude Code (and
+    /// every native `api.anthropic.com` client) addresses models by their bare
+    /// Anthropic id, NOT by the gateway-canonical `anthropic/<id>` form used on
+    /// `/v1/models` and `/v1/chat/completions`. The bare id is never a registry
+    /// key (the registry is keyed by the TOML key and the canonical
+    /// `provider/model_id`), so a bare-id lookup via [`get`](Self::get) misses.
+    /// This walks the registered models and matches an `anthropic`-provider entry
+    /// whose `model_id` equals the bare id.
+    ///
+    /// Provider-scoped to `anthropic` on purpose: a bare id is meaningful as an
+    /// Anthropic-native address only, and scoping prevents an accidental
+    /// cross-provider match if two providers ever share a bare `model_id`.
+    /// Returns `None` for an unknown bare id (the caller then surfaces
+    /// `ModelNotFound` — fail closed, never default-route).
+    pub fn resolve_anthropic_model_id(&self, bare_model_id: &str) -> Option<&ModelRegistration> {
+        self.models
+            .values()
+            .find(|m| m.provider == "anthropic" && m.model_id == bare_model_id)
+    }
+
     /// Return all registered models.
     pub fn all(&self) -> Vec<&ModelRegistration> {
         // Deduplicate — each model is stored under two keys
@@ -290,6 +314,77 @@ supports_streaming = true
         let registry = ModelRegistry::from_toml(TEST_TOML).unwrap();
         let all = registry.all();
         assert_eq!(all.len(), 2);
+    }
+
+    /// `/v1/messages` inbound-id contract: a BARE Anthropic id (the form Claude
+    /// Code sends, e.g. `claude-sonnet-4-6`) is NOT a registry key (only the TOML
+    /// key and the canonical `anthropic/<id>` are), so `get()` misses — but
+    /// `resolve_anthropic_model_id` resolves it to the canonical entry. This is
+    /// the fix for the native-passthrough non-engagement: without it a bare id
+    /// fails closed with `ModelNotFound`.
+    #[test]
+    fn resolve_anthropic_model_id_maps_bare_ids_to_canonical_entries() {
+        const ANTHROPIC_TOML: &str = r#"
+[models.anthropic-claude-sonnet-4-6]
+provider = "anthropic"
+model_id = "claude-sonnet-4-6"
+display_name = "Claude Sonnet 4.6"
+input_cost_per_million = 3.00
+output_cost_per_million = 15.00
+context_window = 200000
+
+[models.anthropic-claude-haiku-4-5]
+provider = "anthropic"
+model_id = "claude-haiku-4-5-20251001"
+display_name = "Claude Haiku 4.5"
+input_cost_per_million = 1.00
+output_cost_per_million = 5.00
+context_window = 200000
+
+[models.openai-gpt-4o]
+provider = "openai"
+model_id = "gpt-4o"
+display_name = "GPT-4o"
+input_cost_per_million = 2.50
+output_cost_per_million = 10.00
+context_window = 128000
+"#;
+        let registry = ModelRegistry::from_toml(ANTHROPIC_TOML).unwrap();
+
+        // The bare id is NOT a plain key — this is the gap the helper closes.
+        assert!(
+            registry.get("claude-sonnet-4-6").is_none(),
+            "bare id must not be a direct registry key"
+        );
+
+        // The helper resolves the bare id to the canonical entry, and the
+        // canonical entry's `model_id` is the bare id the relay must forward
+        // upstream to api.anthropic.com.
+        let sonnet = registry
+            .resolve_anthropic_model_id("claude-sonnet-4-6")
+            .expect("bare sonnet id must resolve");
+        assert_eq!(sonnet.id, "anthropic/claude-sonnet-4-6");
+        assert_eq!(sonnet.model_id, "claude-sonnet-4-6");
+        assert_eq!(sonnet.provider, "anthropic");
+
+        // A dated bare id (ANTHROPIC_SMALL_FAST_MODEL / haiku) also resolves.
+        let haiku = registry
+            .resolve_anthropic_model_id("claude-haiku-4-5-20251001")
+            .expect("bare haiku id must resolve");
+        assert_eq!(haiku.id, "anthropic/claude-haiku-4-5-20251001");
+        assert_eq!(haiku.model_id, "claude-haiku-4-5-20251001");
+
+        // Provider-scoped: a bare OpenAI model_id does NOT resolve via the
+        // Anthropic-only helper.
+        assert!(
+            registry.resolve_anthropic_model_id("gpt-4o").is_none(),
+            "non-Anthropic bare id must not resolve via the Anthropic helper"
+        );
+
+        // Unknown bare id → None (caller fails closed with ModelNotFound).
+        assert!(registry
+            .resolve_anthropic_model_id("claude-does-not-exist")
+            .is_none());
     }
 
     /// R1 regression: NaN/Infinity/negative pricing must be rejected at

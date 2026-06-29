@@ -299,6 +299,16 @@ async fn main() -> anyhow::Result<()> {
     let configured = providers.configured_providers();
     info!(providers = ?configured, "initialized provider registry");
 
+    // Dedicated NATIVE Anthropic relay handle for POST /v1/messages passthrough.
+    // Gated on the same ANTHROPIC_API_KEY env var as the OpenAI-shaped registry
+    // entry; `None` when no Anthropic key is configured (the native fork then
+    // fails closed). Shares the same reqwest client.
+    let native_anthropic = ProviderRegistry::native_anthropic_from_env(http_client.clone());
+    info!(
+        native_anthropic = native_anthropic.is_some(),
+        "initialized native Anthropic relay handle for /v1/messages passthrough"
+    );
+
     // Initialize the web-search tool adapter (env-gated: only present when a
     // search API key is configured, e.g. TAVILY_API_KEY). When absent,
     // `POST /v1/search` returns 503 rather than serving free.
@@ -809,6 +819,7 @@ async fn main() -> anyhow::Result<()> {
         model_registry,
         service_registry,
         providers,
+        native_anthropic,
         search_provider,
         facilitator,
         usage,
