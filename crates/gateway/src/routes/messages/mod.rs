@@ -8,10 +8,11 @@
 //! translate → call-core → translate wrapper (CLAUDE.md rule #14 posture: a
 //! protocol adapter, not new payment logic).
 //!
-//! SCOPE (PR1): text-only, non-streaming. Streaming (SSE), tools, `count_tokens`,
-//! and bearer/spend-down auth are LATER PRs. The translation layer rejects
+//! SCOPE: text-only, non-streaming for `create_message`. Streaming (SSE), tools,
+//! and bearer/spend-down auth are LATER PRs; the translation layer rejects
 //! `stream:true`, image content, and tool blocks with a clear error rather than
-//! silently degrading.
+//! silently degrading. `POST /v1/messages/count_tokens` is also served here as a
+//! free verbatim reverse-proxy to Anthropic — see [`count_message_tokens`].
 //!
 //! ## Error envelopes
 //!
@@ -300,6 +301,127 @@ async fn forward_native_success_response(response: Response) -> Response {
     )
 }
 
+/// The upstream Anthropic count_tokens endpoint. Free of charge on Anthropic's
+/// side, so Solvela relays it without any payment gate.
+const ANTHROPIC_COUNT_TOKENS_URL: &str = "https://api.anthropic.com/v1/messages/count_tokens";
+
+/// POST /v1/messages/count_tokens — Anthropic token-counting compatibility.
+///
+/// A verbatim reverse-proxy: the inbound body is ALREADY an Anthropic
+/// count_tokens request (a native Claude client sends `model` + `messages`
+/// [+ `system`/`tools`]), so we forward it byte-for-byte to Anthropic with the
+/// gateway's own credentials swapped in, then relay the `{"input_tokens":N}`
+/// response. No translation (so any fields our typed structs would drop —
+/// `tools`, `tool_choice`, `thinking`, … — survive), and NO money path:
+/// count_tokens is free on Anthropic, and charging for it would break the
+/// drop-in contract (a native client calls it for free).
+///
+/// ponytail: free, unauthenticated relay — the per-IP `rate_limit` middleware
+/// that wraps every route is the only abuse bound. Add a paid/escrow gate if it
+/// is ever abused as a free token-counting amplifier.
+///
+/// Aliases ("sonnet", "auto") are deliberately NOT resolved here (unlike
+/// `/v1/messages`): native Anthropic clients send real model IDs, and resolving
+/// would re-couple this thin proxy to the model registry. An alias simply
+/// surfaces Anthropic's own model error, relayed verbatim.
+pub async fn count_message_tokens(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    // Source the key from the env — the same runtime-authoritative source
+    // `ProviderRegistry::from_env` reads (the `config.providers` copy is `None`
+    // at runtime; provider keys come from env only, per CLAUDE.md). The value is
+    // stable after `dotenvy::dotenv()` at startup, and this is a cold, free,
+    // rate-limited path, so a per-request env read is negligible.
+    let api_key = match std::env::var("ANTHROPIC_API_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => {
+            return anthropic_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "api_error",
+                "token counting is unavailable: no Anthropic provider is configured".to_string(),
+            );
+        }
+    };
+
+    // Validate the body is a well-formed count_tokens request before spending an
+    // upstream call. Parse to a `Value` (not a typed struct) so the ORIGINAL
+    // bytes can be forwarded verbatim, preserving fields our structs would drop.
+    let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return anthropic_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                format!("invalid count_tokens request body: {e}"),
+            );
+        }
+    };
+    if !count_tokens_body_is_valid(&parsed) {
+        return anthropic_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "count_tokens requires a non-empty `model` string and a `messages` array".to_string(),
+        );
+    }
+
+    // Forward the ORIGINAL bytes verbatim with ONLY the gateway's own auth. We
+    // never forward client headers (no client `x-api-key`/`authorization` reaches
+    // Anthropic) and never echo the gateway key back to the caller.
+    let upstream = state
+        .http_client
+        .post(ANTHROPIC_COUNT_TOKENS_URL)
+        .timeout(std::time::Duration::from_secs(30))
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await;
+
+    match upstream {
+        Ok(resp) => {
+            // Relay Anthropic's status + body verbatim. On success this is
+            // `{"input_tokens":N}`; on error it is ALREADY the Anthropic error
+            // envelope (the same shape `create_message` emits), so no reshape.
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            match resp.bytes().await {
+                Ok(bytes) => (
+                    status,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    bytes,
+                )
+                    .into_response(),
+                Err(e) => {
+                    warn!(error = %e, "failed to read Anthropic count_tokens response body");
+                    anthropic_error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "api_error",
+                        "Upstream token-count response could not be read.".to_string(),
+                    )
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Anthropic count_tokens request failed");
+            anthropic_error_response(
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                "Upstream token-count service is unreachable.".to_string(),
+            )
+        }
+    }
+}
+
+/// Shallow guard: a count_tokens request must carry a non-empty `model` string
+/// and a `messages` array (the two required Anthropic fields). Everything else
+/// is optional and forwarded as-is — deeper semantic validation (empty
+/// messages, bad roles, …) is Anthropic's job, relayed back verbatim.
+fn count_tokens_body_is_valid(body: &serde_json::Value) -> bool {
+    body.get("model")
+        .and_then(|m| m.as_str())
+        .is_some_and(|s| !s.is_empty())
+        && body.get("messages").is_some_and(|m| m.is_array())
+}
+
 /// Translate a successful inner-core [`Response`] (a serialized OpenAI
 /// [`ChatResponse`] JSON body) into the Anthropic Messages response shape.
 ///
@@ -488,6 +610,36 @@ mod tests {
     use super::*;
 
     use http_body_util::BodyExt;
+
+    #[test]
+    fn count_tokens_body_validation_requires_model_and_messages() {
+        use serde_json::json;
+        // Valid: non-empty model + messages array (empty array is fine — deeper
+        // semantic checks are Anthropic's job, relayed back).
+        assert!(count_tokens_body_is_valid(
+            &json!({"model": "claude-sonnet-4-5", "messages": []})
+        ));
+        assert!(count_tokens_body_is_valid(&json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": "you are helpful",
+            "tools": []
+        })));
+        // Missing model.
+        assert!(!count_tokens_body_is_valid(&json!({"messages": []})));
+        // Empty model string.
+        assert!(!count_tokens_body_is_valid(
+            &json!({"model": "", "messages": []})
+        ));
+        // Missing messages.
+        assert!(!count_tokens_body_is_valid(&json!({"model": "x"})));
+        // messages present but not an array.
+        assert!(!count_tokens_body_is_valid(
+            &json!({"model": "x", "messages": "nope"})
+        ));
+        // Non-object body.
+        assert!(!count_tokens_body_is_valid(&json!("just a string")));
+    }
 
     #[test]
     fn status_to_anthropic_error_type_maps_known_codes() {
