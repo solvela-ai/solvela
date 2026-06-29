@@ -7,6 +7,7 @@ pub mod a2a;
 pub mod audit;
 pub mod balance_monitor;
 pub mod cache;
+pub mod channels;
 pub mod config;
 pub mod error;
 pub mod middleware;
@@ -366,6 +367,8 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             "/v1/escrow/settle",
             post(routes::escrow_settle::handle_settle),
         )
+        .route("/v1/channel/open", post(routes::channel::open))
+        .route("/v1/channel/close", post(routes::channel::close))
         .route("/v1/faucet/gas", post(routes::faucet::gas_faucet))
         .route("/pricing", get(routes::pricing::pricing))
         .route("/health", get(routes::health::health))

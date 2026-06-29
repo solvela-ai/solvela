@@ -17832,3 +17832,104 @@ mod messages_native_passthrough_tests {
         assert_eq!(v["error"]["type"], "model_not_found");
     }
 }
+
+// ---------------------------------------------------------------------------
+// v0 spend-down channel management plane (POST /v1/channel/{open,close})
+// ---------------------------------------------------------------------------
+//
+// `test_app()` carries `db_pool: None`, so these prove the CLAUDE.md #12
+// invariant: with no DB the channel scheme is unavailable (404), never a faked
+// in-memory ledger. The on-chain-verified-credit, atomic-voucher, and
+// exact-refund money-path properties are proven by the pure-fn + DB-gated tests
+// in `channels.rs` / `routes/channel.rs` (the full credit path needs both a DB
+// and a live RPC, which `test_app` has neither of).
+mod channel_route_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn channel_open_unavailable_without_db() {
+        let app = test_app();
+        let body = serde_json::json!({
+            "agent_wallet": "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz",
+            "funding_tx": "AQID",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/channel/open")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "channel open must be unavailable (404) with no DB — never a fake ledger"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"], "channel not available");
+    }
+
+    #[tokio::test]
+    async fn channel_close_unavailable_without_db() {
+        let app = test_app();
+        let body = serde_json::json!({
+            "channel_id": "11111111111111111111111111111111",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/channel/close")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "channel close must be unavailable (404) with no DB"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"], "channel not available");
+    }
+
+    #[tokio::test]
+    async fn channel_open_rejects_client_asserted_amount() {
+        // A client cannot smuggle a `deposit`/`amount` — deny_unknown_fields
+        // rejects the body before any crediting decision. This is the wire-level
+        // half of "credit only the on-chain-verified amount".
+        let app = test_app();
+        let body = serde_json::json!({
+            "agent_wallet": "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz",
+            "funding_tx": "AQID",
+            "amount": "999999999",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/channel/open")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "an unknown client-asserted amount field must be rejected at parse time"
+        );
+    }
+}
