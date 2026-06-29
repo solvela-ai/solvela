@@ -120,20 +120,16 @@ pub async fn create_message(
         }
     };
 
-    // Streaming is OUT OF SCOPE on both the native and reshape branches (native
-    // SSE is a follow-up). Reject it LOUDLY here, before model resolution, so a
-    // `stream:true` request never silently serves non-streaming on either path
-    // (mirrors the strict translator's rejection; keeps the branch's current
-    // behavior per the scope decision).
-    if anthropic_req.stream {
-        return anthropic_error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "streaming responses are not yet supported on POST /v1/messages; \
-             set \"stream\": false (SSE support is planned for a later release)"
-                .to_string(),
-        );
-    }
+    // Streaming is supported ONLY on the NATIVE branch (an Anthropic-resolved
+    // model relays the upstream SSE bytes verbatim). The RESHAPE branch
+    // (cross-provider) still rejects `stream:true` — re-framing through the
+    // internal OpenAI `ChatChunk` stream drops the thinking-block `signature`
+    // (PR #621). The rejection is NOT done here, before the fork: it is handled
+    // per-branch below — the native branch lets `stream:true` through to the
+    // relay; the reshape branch's strict translator (`anthropic_request_to_chat`)
+    // keeps its hard `stream:true` rejection. This guarantees a native streaming
+    // request is never silently down-converted, and a reshape request is never
+    // silently served non-streaming.
 
     // Decide the NATIVE-vs-RESHAPE fork from the RESOLVED model's provider.
     // Build a lenient skeleton (model + flattened text) so the resolver can run

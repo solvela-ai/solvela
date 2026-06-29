@@ -1015,6 +1015,132 @@ fn spawn_mock_anthropic_server(fixture: &'static str) -> String {
     format!("http://{addr}")
 }
 
+/// The golden NATIVE Anthropic STREAMING (SSE) fixture for the `/v1/messages`
+/// streaming-passthrough byte-survival tests.
+///
+/// A real Anthropic Messages SSE event sequence: `message_start` (carrying
+/// `usage` with all three cache fields), a `content_block_start` for a
+/// `thinking` block, a `signature_delta` carrying the cryptographic
+/// `signature`, a text `content_block_delta`, `message_delta` (output usage +
+/// stop_reason), and `message_stop`. The native streaming relay must forward
+/// THESE BYTES byte-for-byte to the client — re-framing through the internal
+/// OpenAI `ChatChunk` stream (PR #621) DROPS the `signature_delta`, which
+/// hard-400s multi-turn extended thinking on the next turn. The literal
+/// `signature` here is the survival witness.
+const NATIVE_ANTHROPIC_STREAM_FIXTURE: &str = concat!(
+    "event: message_start\n",
+    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream_native_01\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":40,\"cache_creation_input_tokens\":200,\"cache_read_input_tokens\":1800,\"output_tokens\":1}}}\n\n",
+    "event: content_block_start\n",
+    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me reason.\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"ErcBCkgIARABGAIiQ_GOLDEN_STREAM_SIGNATURE_xyz==\"}}\n\n",
+    "event: content_block_stop\n",
+    "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    "event: content_block_start\n",
+    "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi there.\"}}\n\n",
+    "event: content_block_stop\n",
+    "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+    "event: message_delta\n",
+    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":25}}\n\n",
+    "event: message_stop\n",
+    "data: {\"type\":\"message_stop\"}\n\n",
+);
+
+/// Spawn a minimal local mock Anthropic Messages server that returns the given
+/// SSE `fixture` verbatim with `content-type: text/event-stream` for
+/// `POST /v1/messages`, and return its base URL. The twin of
+/// [`spawn_mock_anthropic_server`] for streaming: pointing the REAL
+/// `AnthropicProvider::relay_native_stream` at this proves SSE byte-survival
+/// THROUGH the real reqwest serialize → byte-stream passthrough.
+fn spawn_mock_anthropic_stream_server(fixture: &'static str) -> String {
+    use axum::routing::post;
+    use axum::Router as AxumRouter;
+
+    let app = AxumRouter::new().route(
+        "/v1/messages",
+        post(move || async move {
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("text/event-stream"),
+                )],
+                fixture,
+            )
+        }),
+    );
+
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+/// Spawn a mock Anthropic server that always responds with a non-2xx status
+/// (500) and a body that LOOKS like a leak (it contains a fake `sk-` token).
+/// Used by the streaming fail-closed test: the relay MUST check the status
+/// BEFORE returning the stream body and surface a redacted `NativeRelayError`,
+/// never forward this upstream error body. Returns its base URL.
+fn spawn_mock_anthropic_error_server() -> String {
+    use axum::routing::post;
+    use axum::Router as AxumRouter;
+
+    let app = AxumRouter::new().route(
+        "/v1/messages",
+        post(move || async move {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                // A body crafted to detect a leak: if the relay forwarded the
+                // upstream error body, this fake key would surface to the client.
+                "{\"error\":{\"type\":\"api_error\",\"message\":\"sk-leaked-upstream-key-should-never-surface\"}}",
+            )
+        }),
+    );
+
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+/// Build a test app whose native relay points at a STREAMING mock Anthropic
+/// server (returns [`NATIVE_ANTHROPIC_STREAM_FIXTURE`] as `text/event-stream`).
+/// An Anthropic-resolved `stream:true` `/v1/messages` request takes the native
+/// streaming passthrough and the client receives the SSE bytes verbatim.
+fn test_app_with_streaming_native_relay() -> axum::Router {
+    let base_url = spawn_mock_anthropic_stream_server(NATIVE_ANTHROPIC_STREAM_FIXTURE);
+    let (router, _state) = test_app_with_provider_registry_and_exact_verifier_native(
+        mock_provider_registry(),
+        Arc::new(AlwaysPassVerifier),
+        Some(native_relay_pointed_at(&base_url)),
+    );
+    router
+}
+
+/// Build a test app whose native relay points at an ERROR (500) mock Anthropic
+/// server, to exercise the streaming fail-closed path (non-2xx upstream → no
+/// charge, redacted Anthropic error envelope, no upstream body leak).
+fn test_app_with_erroring_native_relay() -> axum::Router {
+    let base_url = spawn_mock_anthropic_error_server();
+    let (router, _state) = test_app_with_provider_registry_and_exact_verifier_native(
+        mock_provider_registry(),
+        Arc::new(AlwaysPassVerifier),
+        Some(native_relay_pointed_at(&base_url)),
+    );
+    router
+}
+
 /// Spawn a mock Anthropic server that CAPTURES the relayed request's top-level
 /// `model` field into the returned shared slot, then responds with
 /// [`NATIVE_ANTHROPIC_FIXTURE`]. Lets a test assert the EXACT `model` string the
@@ -16626,11 +16752,17 @@ mod messages_endpoint_tests {
         assert!(v["error"]["message"].is_string());
     }
 
-    /// A `stream: true` request is rejected (PR1 is non-streaming) with a 400 in
-    /// the Anthropic error envelope rather than silently served non-streaming.
+    /// A `stream: true` request to an ANTHROPIC-resolved model is now SERVED via
+    /// the native SSE passthrough (200, `text/event-stream`) — the streaming
+    /// follow-up to the #635 native non-streaming relay. (Byte-survival of the
+    /// SSE frames + the thinking `signature` is pinned by
+    /// `messages_native_passthrough_tests::native_streaming_response_is_byte_identical_sse`;
+    /// the RESHAPE branch's continued `stream:true` rejection by
+    /// `reshape_branch_still_rejects_streaming`.) This asserts the native branch
+    /// no longer hard-rejects `stream:true`.
     #[tokio::test]
-    async fn messages_streaming_request_rejected_with_anthropic_envelope() {
-        let app = test_app_with_mock_provider();
+    async fn messages_native_streaming_request_is_served_as_sse() {
+        let app = test_app_with_streaming_native_relay();
         let body = serde_json::json!({
             "model": "anthropic/claude-sonnet-4-6",
             "max_tokens": 64,
@@ -16651,11 +16783,20 @@ mod messages_endpoint_tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["type"], "error");
-        assert_eq!(v["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "an Anthropic-resolved stream:true request must now be served natively, not 400-rejected"
+        );
+        let ct = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.starts_with("text/event-stream"),
+            "native streaming response must be text/event-stream; got '{ct}'"
+        );
     }
 
     /// On the RESHAPE branch (a NON-Anthropic resolved model) an image content
@@ -17830,5 +17971,201 @@ mod messages_native_passthrough_tests {
         // Anthropic error envelope (top-level type:"error").
         assert_eq!(v["type"], "error");
         assert_eq!(v["error"]["type"], "model_not_found");
+    }
+
+    // =======================================================================
+    // NATIVE SSE STREAMING passthrough (`stream: true`).
+    //
+    // The streaming twin of the byte-survival tests above. The native relay
+    // forwards the upstream `text/event-stream` body VERBATIM via
+    // `Body::from_stream(reqwest.bytes_stream())` — NEVER re-framed through the
+    // internal OpenAI `ChatChunk` stream (PR #621), which drops the
+    // `signature_delta`. These tests prove the SSE frames (event names +
+    // `signature`) survive a message → stream → replay round-trip.
+    // =======================================================================
+
+    /// BYTE-SURVIVAL GOLDEN VECTOR (streaming): a paid `stream:true`
+    /// `/v1/messages` request to an Anthropic-resolved model takes the NATIVE
+    /// streaming relay, which forwards the upstream SSE body UNTOUCHED. The
+    /// response must be `text/event-stream` and carry the literal Anthropic SSE
+    /// frames (`event: message_start` / `content_block_delta` / `message_delta`
+    /// / `message_stop`) byte-for-byte — and the thinking-block `signature` (the
+    /// thing PR #621's re-framing drops) must survive verbatim in the stream.
+    #[tokio::test]
+    async fn native_streaming_response_is_byte_identical_sse() {
+        let app = test_app_with_streaming_native_relay();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 256,
+            "stream": true,
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "messages": [{"role": "user", "content": "Think first, then answer."}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "paid native streaming request must serve 200"
+        );
+        // The content-type MUST be text/event-stream (NOT application/json) — the
+        // client is told this is an SSE stream, not a buffered body.
+        let ct = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.starts_with("text/event-stream"),
+            "native streaming response must be text/event-stream; got '{ct}'"
+        );
+
+        // Collect the whole streamed body and assert it is the upstream SSE
+        // fixture BYTE-FOR-BYTE (verbatim passthrough — no re-framing).
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            bytes.as_ref(),
+            NATIVE_ANTHROPIC_STREAM_FIXTURE.as_bytes(),
+            "native streaming passthrough must relay the upstream Anthropic SSE bytes \
+             UNTOUCHED — event names, content_block_delta, signature_delta, and \
+             message_delta usage must all survive byte-for-byte"
+        );
+
+        // Spot-pin the load-bearing SSE frames for a readable failure if the
+        // byte-equality above ever regresses.
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            text.contains("event: message_start\n"),
+            "the message_start event frame must survive verbatim"
+        );
+        assert!(
+            text.contains("event: content_block_delta\n"),
+            "content_block_delta event frames must survive verbatim"
+        );
+        assert!(
+            text.contains("event: message_delta\n"),
+            "the message_delta event frame (output usage) must survive verbatim"
+        );
+        assert!(
+            text.contains("event: message_stop\n"),
+            "the message_stop event frame must survive verbatim"
+        );
+        // THE PR #621 REGRESSION WITNESS: the cryptographic thinking-block
+        // signature, carried in a signature_delta, must survive the stream. A
+        // re-framed OpenAI ChatChunk stream cannot carry it → multi-turn extended
+        // thinking hard-400s on the next turn. Here it must be present verbatim.
+        assert!(
+            text.contains("\"type\":\"signature_delta\""),
+            "the signature_delta event must survive the native stream (re-framing drops it)"
+        );
+        assert!(
+            text.contains("ErcBCkgIARABGAIiQ_GOLDEN_STREAM_SIGNATURE_xyz=="),
+            "the literal thinking-block signature must survive the native stream verbatim — \
+             this is exactly the byte PR #621's re-framing dropped; body={text}"
+        );
+    }
+
+    /// SCOPE GUARD: the RESHAPE branch (a NON-Anthropic resolved model) still
+    /// REJECTS `stream:true` with a 400 in the Anthropic error envelope.
+    /// Cross-provider streaming is OUT OF SCOPE — only the native Anthropic
+    /// branch streams. This proves the streaming arm did not accidentally open
+    /// the reshape path to streaming (which would re-frame and drop signatures).
+    #[tokio::test]
+    async fn reshape_branch_still_rejects_streaming() {
+        let app = test_app_with_mock_provider();
+        let body = serde_json::json!({
+            // openai/gpt-4o resolves to the openai provider → reshape branch.
+            "model": "openai/gpt-4o",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "the reshape branch must still reject stream:true (cross-provider streaming is OUT)"
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+    }
+
+    /// FAIL-CLOSED (streaming): when the upstream returns a non-2xx status, the
+    /// native streaming relay must check the status BEFORE returning a stream
+    /// body, fail closed (no 200, no charge-without-delivery), surface a redacted
+    /// Anthropic error envelope, and NEVER leak the upstream error body (which
+    /// here contains a fake `sk-` token to detect a leak — GHSA-cgqx-mg48-949v).
+    #[tokio::test]
+    async fn native_streaming_upstream_error_fails_closed_redacted() {
+        let app = test_app_with_erroring_native_relay();
+        let body = serde_json::json!({
+            "model": "anthropic/claude-sonnet-4-6",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello!"}]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", valid_payment_header("/v1/messages"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Upstream non-2xx → NOT 200 (no charge-without-delivery).
+        assert!(
+            response.status().is_server_error() || response.status().is_client_error(),
+            "an upstream non-2xx on the native streaming relay must NOT return 200; got {}",
+            response.status()
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        // Redacted Anthropic error envelope.
+        assert_eq!(
+            v["type"], "error",
+            "a native streaming upstream failure must surface the Anthropic error envelope; body={v}"
+        );
+        // No upstream body / key leak: the fake upstream `sk-` token must never
+        // appear in the client-facing body.
+        let body_str = String::from_utf8(bytes.to_vec()).unwrap_or_default();
+        assert!(
+            !body_str.contains("sk-leaked-upstream-key-should-never-surface")
+                && !body_str.contains("sk-"),
+            "fail-closed streaming error must never leak the upstream body/key; body={body_str}"
+        );
     }
 }

@@ -178,6 +178,111 @@ impl AnthropicProvider {
 
         Ok((raw, envelope.usage))
     }
+
+    /// Native `/v1/messages` STREAMING passthrough relay (the twin of
+    /// [`relay_native`]).
+    ///
+    /// Forwards the ORIGINAL validated Anthropic request `body` (which already
+    /// carries `"stream": true`) to `{base_url}/v1/messages` VERBATIM, then — on
+    /// a 2xx — returns an [`axum::response::Response`] whose body is the upstream
+    /// SSE byte stream relayed UNTOUCHED via `Body::from_stream(bytes_stream())`.
+    /// The `content-type` is forced to `text/event-stream`. NO event re-framing:
+    /// the upstream event names, `content_block_delta`, `signature_delta`,
+    /// `message_delta` usage, and `ping`/error events all pass through
+    /// byte-for-byte (re-framing through the internal OpenAI `ChatChunk` stream is
+    /// what PR #621 did, and it DROPS the thinking-block `signature` → multi-turn
+    /// extended thinking hard-400s on turn 2).
+    ///
+    /// Headers are identical to [`relay_native`]: the gateway's own `x-api-key`
+    /// (NEVER the inbound Solvela bearer), `anthropic-version` (forwarded or the
+    /// GA default), and `anthropic-beta` verbatim when present.
+    ///
+    /// FAIL-CLOSED: the upstream status is checked BEFORE the stream body is
+    /// returned. On a non-2xx (or a transport failure) it returns a redacted
+    /// [`NativeRelayError`] — NEVER the upstream body or raw error
+    /// (GHSA-cgqx-mg48-949v) — so the caller maps it to `AllProvidersFailed`
+    /// (reservation released, no settle). A stream cannot be un-sent once its
+    /// 200 headers leave, so the status MUST be decided here, up front.
+    ///
+    /// Unlike [`relay_native`], this returns NO [`AnthropicUsage`]: streaming bills
+    /// off the request-side estimate (the `EstimateFallback` settlement posture),
+    /// exactly like the OpenAI streaming path. Reading per-token usage out of the
+    /// `message_delta` event would only affect the spend-log record (under x402
+    /// `exact` the client's signed quote settles regardless), not the customer
+    /// charge — so no usage tap is built here (see the route-level money-path
+    /// notes).
+    pub(crate) async fn relay_native_stream(
+        &self,
+        body: axum::body::Bytes,
+        anthropic_version: Option<&str>,
+        anthropic_beta: Option<&str>,
+    ) -> Result<axum::response::Response, NativeRelayError> {
+        use axum::response::IntoResponse;
+        // `.map_err` on the reqwest byte stream below requires `TryStreamExt`.
+        use futures::TryStreamExt;
+
+        let version = anthropic_version.unwrap_or(DEFAULT_ANTHROPIC_VERSION);
+
+        let mut request = self
+            .client
+            // ponytail: 600s is an ABSOLUTE total-deadline ceiling only — NOT the
+            // real liveness check. `timeout` is wall-clock across headers + body,
+            // so a tighter total (e.g. the buffered path's 90s) would truncate a
+            // long but healthy SSE stream mid-flight while `exact` has already
+            // settled (charge-without-full-delivery). The real liveness check is
+            // the shared client's `read_timeout` (per-chunk idle, main.rs); a
+            // healthy multi-minute Claude stream completes well within 600s.
+            .post(self.messages_url())
+            .timeout(std::time::Duration::from_secs(600))
+            // Gateway key replaces the client's auth — the inbound Solvela bearer
+            // is NEVER forwarded to Anthropic.
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", version)
+            .header("content-type", "application/json")
+            // The ORIGINAL validated bytes, verbatim — `.body()` (not `.json()`)
+            // so no re-serialization can perturb a single byte. The body already
+            // carries `"stream": true`, so the upstream request is a stream.
+            .body(body);
+
+        if let Some(beta) = anthropic_beta {
+            request = request.header("anthropic-beta", beta);
+        }
+
+        // Transport / send failure: redact (the inner reqwest::Error can carry
+        // the upstream URL). Full detail is logged at the call site.
+        let response = request.send().await.map_err(|e| {
+            tracing::debug!(error = %e, "native stream relay transport error (redacted from client)");
+            NativeRelayError::Transport
+        })?;
+
+        // FAIL-CLOSED status gate — decided BEFORE any stream body is returned.
+        // Once a 200 + SSE headers leave the gateway the stream cannot be
+        // un-sent, so a non-2xx MUST short-circuit to a redacted error here. The
+        // upstream body is NOT carried (attacker/provider-controlled bytes,
+        // GHSA-cgqx-mg48-949v) — only the numeric status survives, for logging.
+        let status = response.status();
+        if !status.is_success() {
+            return Err(NativeRelayError::UpstreamStatus(status.as_u16()));
+        }
+
+        // 2xx → relay the upstream SSE byte stream UNTOUCHED. `bytes_stream()`
+        // yields the raw response bytes as they arrive; `Body::from_stream`
+        // forwards them verbatim with no re-framing. The error type of the
+        // stream is mapped to `std::io::Error` (what `Body::from_stream`
+        // requires); a mid-stream upstream/transport error therefore terminates
+        // the body — the client sees a truncated SSE stream rather than a
+        // fabricated success frame, and no upstream error detail is surfaced.
+        let byte_stream = response.bytes_stream().map_err(std::io::Error::other);
+        let out = (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            )],
+            axum::body::Body::from_stream(byte_stream),
+        )
+            .into_response();
+        Ok(out)
+    }
 }
 
 // ---------------------------------------------------------------------------
