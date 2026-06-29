@@ -60,7 +60,7 @@ export function EnterprisePanel() {
         <div className="rule-tipped mb-10" />
         <div className="flex flex-col gap-3 pb-10 sm:flex-row sm:items-end sm:justify-between">
           <div className="flex flex-col gap-3">
-            <span className="eyebrow">for teams &amp; enterprise</span>
+            <span className="kicker">For teams &amp; enterprise</span>
             <h2
               id="enterprise-heading"
               className="display-wonk max-w-[16ch] text-[var(--heading-color)]"
