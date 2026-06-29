@@ -29,6 +29,11 @@
     "ai-agent"
   ],
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/solvela-ai/solvela.git",
+    "directory": "sdks/mcp"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@solvela/signer-core": "file:../signer-core",
