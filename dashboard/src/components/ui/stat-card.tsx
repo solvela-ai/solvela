@@ -16,7 +16,7 @@ export function StatCard({
   subtitle,
 }: StatCardProps) {
   return (
-    <TerminalCard title={title} screenClassName="!px-5 !pt-5 !pb-6">
+    <TerminalCard title={title} dots={false} screenClassName="!px-5 !pt-5 !pb-6">
       <p className="metric-lg">
         {value}
       </p>

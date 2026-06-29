@@ -18,8 +18,8 @@ export function ProviderRow() {
         <div className="grid gap-12 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] lg:gap-16">
           {/* left — the poster figure */}
           <Reveal className="flex flex-col justify-center">
-            <span className="eyebrow">providers</span>
-            <div className="mt-5 flex items-end gap-4">
+            {/* ponytail: no eyebrow — the poster "25 models" figure self-labels */}
+            <div className="flex items-end gap-4">
               <span className="poster-figure text-[clamp(6.5rem,18vw,14rem)]">
                 25
               </span>

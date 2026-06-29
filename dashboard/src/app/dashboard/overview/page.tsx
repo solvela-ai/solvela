@@ -88,6 +88,7 @@ export default async function OverviewPage() {
             {/* Hero treasury card — dominant */}
             <TerminalCard
               title="treasury.overview"
+              dots={false}
               meta={<span className="text-xxs text-text-tertiary font-mono">30d</span>}
               className="md:col-span-2 lg:row-span-2"
               screenClassName="!p-6"
@@ -133,6 +134,7 @@ export default async function OverviewPage() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             <TerminalCard
               title="spend.usdc.daily"
+              dots={false}
               meta={<span className="text-xxs text-text-tertiary font-mono">30d</span>}
             >
               <SpendChart data={history} />
@@ -140,6 +142,7 @@ export default async function OverviewPage() {
 
             <TerminalCard
               title="requests.daily"
+              dots={false}
               meta={<span className="text-xxs text-text-tertiary font-mono">30d</span>}
             >
               <RequestsBar data={history} />

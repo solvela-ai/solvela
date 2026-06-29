@@ -5,6 +5,9 @@ export interface TerminalCardProps {
   title: ReactNode;
   meta?: ReactNode;
   accentDot?: boolean;
+  /** macOS-window 3-dot chrome. Keep on genuine terminal/log/code cards;
+   *  pass false on metric/chart cards where the window metaphor is incoherent. */
+  dots?: boolean;
   bare?: boolean;
   className?: string;
   screenClassName?: string;
@@ -15,6 +18,7 @@ export function TerminalCard({
   title,
   meta,
   accentDot = false,
+  dots = true,
   bare = false,
   className,
   screenClassName,
@@ -23,16 +27,18 @@ export function TerminalCard({
   return (
     <div className={cn("terminal-card", className)}>
       <div className="terminal-card-titlebar">
-        <span className="terminal-card-dots" aria-hidden>
-          <span className="terminal-card-dot" />
-          <span className="terminal-card-dot" />
-          <span
-            className={cn(
-              "terminal-card-dot",
-              accentDot && "terminal-card-dot--accent",
-            )}
-          />
-        </span>
+        {dots && (
+          <span className="terminal-card-dots" aria-hidden>
+            <span className="terminal-card-dot" />
+            <span className="terminal-card-dot" />
+            <span
+              className={cn(
+                "terminal-card-dot",
+                accentDot && "terminal-card-dot--accent",
+              )}
+            />
+          </span>
+        )}
         <span className="truncate">{title}</span>
         {meta && <span className="ml-auto">{meta}</span>}
       </div>
