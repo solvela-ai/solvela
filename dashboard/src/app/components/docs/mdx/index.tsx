@@ -145,7 +145,7 @@ export function getMDXComponents(): MDXComponents {
     ),
     li: ({ children }) => <li className="leading-[1.7]">{children}</li>,
     blockquote: ({ children }) => (
-      <blockquote className="mt-6 border-l-4 border-border pl-4 italic text-muted-foreground">
+      <blockquote className="mt-6 border-l-2 border-border pl-4 italic text-muted-foreground">
         {children}
       </blockquote>
     ),

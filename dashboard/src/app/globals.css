@@ -127,86 +127,89 @@
   --color-border-emphasis: #C8A24060;
   --color-text-primary: #FAF9F5;
   --color-text-secondary: #DEDCD1;
-  --color-text-tertiary: #DEDCD180;
+  --color-text-tertiary: #DEDCD1B3;  /* 70% — AA (≥5:1) on every dark surface; 50% #DEDCD180 was 3.4–4.1:1 */
   --color-success: #65BB30;
   --color-warning: #fbbf24;
   --color-error: #FE8181;
   --color-info: #60a5fa;
 }
 
-/* ---- Light Mode (inverted for accessibility) ---- */
-@media (prefers-color-scheme: light) {
-  :root:not(.dark) {
-    --background: #F5F4F0;
-    --foreground: #262624;
-    --card: #EAEAE6;
-    --card-foreground: #262624;
-    --popover: #EAEAE6;
-    --popover-foreground: #262624;
+/* ---- Light Mode (explicit .light class; dark is the default) ----
+   next-themes (attribute="class", enableSystem) sets .light/.dark before first
+   paint and resolves "system" in JS, so the class is authoritative.
+   ponytail: no prefers-color-scheme fallback — no-JS on a light OS gets the dark
+   default (already true for JS via defaultTheme="dark"). Re-add an @media block
+   only if no-JS light support is required. */
+.light {
+  --background: #F5F4F0;
+  --foreground: #262624;
+  --card: #EAEAE6;
+  --card-foreground: #262624;
+  --popover: #EAEAE6;
+  --popover-foreground: #262624;
 
-    --primary: #1F1E1D;
-    --primary-foreground: #F5F4F0;
-    --secondary: #EAEAE6;
-    --secondary-foreground: #262624;
-    --muted: #EAEAE6;
-    --muted-foreground: #626158;
-    --destructive: #D25E65;
-    --border: #C8A24018;
-    --input: #EAEAE6;
-    --ring: #26262440;
+  --primary: #1F1E1D;
+  --primary-foreground: #F5F4F0;
+  --secondary: #EAEAE6;
+  --secondary-foreground: #262624;
+  --muted: #EAEAE6;
+  --muted-foreground: #626158;
+  --destructive: #D25E65;
+  --border: #C8A24018;
+  --input: #EAEAE6;
+  --ring: #26262440;
 
-    --accent: #262624;
-    --accent-foreground: #F5F4F0;
-    --accent-muted: rgba(38, 38, 36, 0.06);
+  --accent: #262624;
+  --accent-foreground: #F5F4F0;
+  --accent-muted: rgba(38, 38, 36, 0.06);
 
-    --sidebar-bg: #EAEAE6;
+  --sidebar-bg: #EAEAE6;
 
-    --heading-color: #1F1E1D;
-    --bold-color: #1F1E1D;
-    --italic-color: #626158;
-    --text-faint: #626158B3;
+  --heading-color: #1F1E1D;
+  --bold-color: #1F1E1D;
+  --italic-color: #626158;
+  --text-faint: #626158B3;
 
-    --callout-info: #626158;
-    --callout-warn: #FE8181;
-    --callout-error: #D25E65;
-    --callout-success: #65BB30;
+  --callout-info: #626158;
+  --callout-warn: #FE8181;
+  --callout-error: #D25E65;
+  --callout-success: #65BB30;
 
-    --hover: #262624;
+  --hover: #262624;
 
-    /* Accent (eyebrow labels, tab underlines, key emphasis) */
-    --accent-salmon: #FE8181;
-    --accent-salmon-hover: #ff6464;
-    --accent-gold: #a57c12;
-    --tint-gold-soft: rgba(165, 124, 18, 0.10);
-    --tint-gold-medium: rgba(165, 124, 18, 0.18);
-    --tint-salmon-glow: rgba(210, 94, 101, 0.22);
-    --tint-salmon-drop: rgba(210, 94, 101, 0.45);
-    --tint-neutral-ring: rgba(38, 38, 36, 0.16);
+  /* Accent (eyebrow labels, tab underlines, key emphasis) */
+  --accent-salmon: #FE8181;
+  --accent-salmon-hover: #ff6464;
+  --accent-gold: #a57c12;
+  --tint-gold-soft: rgba(165, 124, 18, 0.10);
+  --tint-gold-medium: rgba(165, 124, 18, 0.18);
+  --tint-salmon-glow: rgba(210, 94, 101, 0.22);
+  --tint-salmon-drop: rgba(210, 94, 101, 0.45);
+  --tint-neutral-ring: rgba(38, 38, 36, 0.16);
 
-    /* HTTP method colors */
-    --http-get: #059669;
-    --http-post: #2563eb;
-    --http-patch: #d97706;
-    --http-put: #ea580c;
-    --http-delete: #dc2626;
-    --http-head: #9333ea;
+  /* HTTP method colors */
+  --http-get: #059669;
+  --http-post: #2563eb;
+  --http-patch: #d97706;
+  --http-put: #ea580c;
+  --http-delete: #dc2626;
+  --http-head: #9333ea;
 
-    /* Dashboard-specific tokens (light) */
-    --color-bg-base: #F5F4F0;
-    --color-bg-surface: #EAEAE6;
-    --color-bg-surface-raised: #E0E0DC;
-    --color-bg-surface-hover: #D8D8D4;
-    --color-bg-inset: #EAEAE6;
-    --color-border-subtle: #C8A24010;
-    --color-border-emphasis: #C8A24040;
-    --color-text-primary: #1F1E1D;
-    --color-text-secondary: #262624;
-    --color-text-tertiary: #626158;
-    --color-success: #3F7A1F;
-    --color-warning: #d97706;
-    --color-error: #D25E65;
-    --color-info: #2563eb;
-  }
+  /* Dashboard-specific tokens (light) */
+  --color-bg-base: #F5F4F0;
+  --color-bg-surface: #EAEAE6;
+  --color-bg-surface-raised: #E0E0DC;
+  --color-bg-surface-hover: #D8D8D4;
+  --color-bg-inset: #EAEAE6;
+  --color-border-subtle: #C8A24010;
+  --color-border-emphasis: #C8A24040;
+  --color-text-primary: #1F1E1D;
+  --color-text-secondary: #262624;
+  --color-text-tertiary: #626158;
+  --color-success: #3F7A1F;
+  --color-warning: #d97706;
+  --color-error: #D25E65;
+  --color-info: #2563eb;
 }
 
 @layer base {
@@ -401,7 +404,7 @@ pre code [data-highlighted-line] {
 
 /* Blockquotes — accent left border, flat */
 .prose blockquote {
-  border-left-color: var(--border);
+  border-left: 2px solid var(--border);
   background: transparent;
   font-style: normal;
   color: var(--muted-foreground);
@@ -839,12 +842,6 @@ pre::before {
   background-size: 48px 48px, 48px 48px;
 }
 
-/* Subtle scan line for terminal screens */
-@keyframes scan-fade {
-  0%, 100% { opacity: 0; }
-  50% { opacity: 0.4; }
-}
-
 /* Provider pill hover ring */
 .provider-pill {
   transition: border-color 0.18s ease, background 0.18s ease;
@@ -1108,10 +1105,8 @@ html {
 .dark {
   --img-outline: rgba(255, 255, 255, 0.08);
 }
-@media (prefers-color-scheme: light) {
-  :root:not(.dark) {
-    --img-outline: rgba(0, 0, 0, 0.08);
-  }
+.light {
+  --img-outline: rgba(0, 0, 0, 0.08);
 }
 .prose img {
   outline: 1px solid var(--img-outline);
