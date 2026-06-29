@@ -339,14 +339,32 @@ jobs:
           done
 
           INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"publish-smoke","version":"0"}}}'
-          set +e
-          OUT=$(printf '%s\n' "$INIT" | SOLVELA_SIGNING_MODE=off timeout 120 npx -y "$PKG" 2>smoke.err)
-          set -e
-          if echo "$OUT" | grep -q '"result"'; then
-            echo "npx smoke OK — $PKG resolved, installed signer-core from the registry, and answered initialize."
-          else
-            echo "ERROR: npx smoke failed for $PKG"
-            echo "--- stdout ---"; echo "$OUT"
-            echo "--- stderr ---"; cat smoke.err
-            exit 1
-          fi
+
+          # The package metadata (npm view, above) can be visible while the
+          # tarball + its bin entry are still propagating on npm's CDN, so a
+          # fresh `npx -y` transiently fails with "solvela-mcp: not found"
+          # (observed on the @solvela/mcp-server@0.1.0 publish, 2026-06-29;
+          # the identical npx worked minutes later — false-fail, not a package
+          # defect). Retry the round-trip with backoff before declaring
+          # failure, mirroring the signer-core resolve poll above.
+          # ~10 x 15s ≈ 2.5 min covers the observed publish->CDN lag.
+          for i in $(seq 1 10); do
+            set +e
+            OUT=$(printf '%s\n' "$INIT" | SOLVELA_SIGNING_MODE=off timeout 120 npx -y "$PKG" 2>smoke.err)
+            set -e
+            if echo "$OUT" | grep -q '"result"'; then
+              echo "Attempt $i/10: npx smoke OK — $PKG resolved, installed signer-core from the registry, and answered initialize."
+              exit 0
+            fi
+            echo "Attempt $i/10: $PKG not launchable yet (publish->CDN lag); clearing npx cache and sleeping 15s"
+            # Drop any cached negative resolution so the next attempt re-fetches.
+            npm cache clean --force >/dev/null 2>&1 || true
+            CACHE_DIR=$(npm config get cache 2>/dev/null || true)
+            [ -n "$CACHE_DIR" ] && rm -rf "${CACHE_DIR}/_npx" 2>/dev/null || true
+            sleep 15
+          done
+
+          echo "ERROR: npx smoke failed for $PKG after 10 attempts (~2.5 min of publish->CDN propagation wait)"
+          echo "--- stdout ---"; echo "$OUT"
+          echo "--- stderr ---"; cat smoke.err
+          exit 1
