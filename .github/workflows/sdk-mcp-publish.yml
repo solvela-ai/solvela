@@ -1,0 +1,352 @@
+name: sdk-mcp publish
+
+# Tag-triggered npm publish for @solvela/mcp-server (sdks/mcp/).
+#
+# The MCP server signs and broadcasts real USDC-SPL transactions on
+# Solana mainnet, so every payment-sdk-publisher guardrail applies. It is
+# LAYER 2 of the MCP publish set: it depends on @solvela/signer-core
+# (LAYER 1) via `"@solvela/signer-core": "file:../signer-core"` in the
+# repo. signer-core MUST already be published and visible on npm before
+# this workflow publishes the MCP server. See sdk-signer-core-publish.yml
+# and docs/runbooks/mcp-npm-publish.md for the full firing sequence.
+#
+# DEP-ORDER + file:->registry SWAP (the two things that make this workflow
+# more than a copy of sdk-signer-core-publish.yml):
+#   1. Before publishing, this job polls npm until
+#      @solvela/signer-core@<version> (the version in the repo) is
+#      resolvable, so the MCP tarball never references a dep that isn't on
+#      the registry yet.
+#   2. The repo keeps `file:../signer-core` for local dev. This job
+#      rewrites that, on the checked-out copy ONLY, to a `^<version>`
+#      registry range so the PUBLISHED tarball carries a real npm dep —
+#      never `file:`. The swap is never committed.
+#
+# Authoring provenance (tool versions cited so a future maintainer can
+# tell correct-at-the-time guidance from speculation):
+#   - Verified locally 2026-06-29 against Node 22.22.0 + npm 10.9.4,
+#     using the publish-ready package.json from PR #646 (drops `private`,
+#     adds the `files` allowlist + `prepublishOnly`): `npm ci`,
+#     `npm run build` (tsc), `npm test` (112 tests pass), the jq swap
+#     (file:../signer-core -> ^0.1.0), and `npm publish --dry-run`
+#     -> tarball = dist/ + README.md + package.json only (34 files,
+#     54.4 kB; no src/tests/AGENTS.md/secrets; bin dist/index.js present
+#     with its `#!/usr/bin/env node` shebang; packed package.json has
+#     `private` removed and the swapped `^0.1.0` dep).
+#   - Mirrors the npm-family publish workflows (sdk-typescript-publish.yml,
+#     ai-sdk-provider-publish.yml) for the auth/provenance/verify mechanics
+#     and the multi-job verify/test/publish shape from the python/rust
+#     publish workflows. Actions at floating @v6 to match the npm family;
+#     SHA-pinning (as in the python/rust workflows) is a future hardening.
+#
+# PROVENANCE PRECONDITION (read before the first tag):
+#   `npm publish --provenance` REQUIRES a `repository` field in
+#   package.json matching (case-sensitive) the building repo, and
+#   `npm publish --dry-run` does NOT validate it — the failure only
+#   surfaces on the REAL publish. The verify job enforces it up front and
+#   fails closed. Source: https://docs.npmjs.com/generating-provenance-statements
+#   As of 2026-06-29 the #646 sdks/mcp/package.json has NO repository
+#   field; #646 (or a follow-up) must add one before the first tag — see
+#   the runbook.
+
+on:
+  push:
+    tags:
+      - 'sdks/mcp/v*'
+
+concurrency:
+  group: sdk-mcp-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: sdks/mcp
+
+jobs:
+  # --------------------------------------------------------------------
+  # Guardrail job: tag-vs-manifest, already-published, and the provenance
+  # repository precondition. Runs first; halts in seconds on any failure.
+  # --------------------------------------------------------------------
+  verify:
+    name: Verify tag, version, provenance precondition
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history so tag is reachable)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Verify tag matches package.json, repo + version preconditions
+        run: |
+          set -euo pipefail
+
+          # Tag format: sdks/mcp/v0.1.0  ->  TAG_VERSION=0.1.0
+          TAG_NAME="${GITHUB_REF_NAME}"
+          TAG_VERSION="${TAG_NAME#sdks/mcp/v}"
+          if [ "$TAG_VERSION" = "$TAG_NAME" ]; then
+            echo "ERROR: tag '$TAG_NAME' does not match 'sdks/mcp/v<version>'"
+            exit 1
+          fi
+
+          MANIFEST_VERSION=$(jq -r '.version' package.json)
+          PKG_NAME=$(jq -r '.name' package.json)
+          echo "Package:          $PKG_NAME"
+          echo "Tag version:      $TAG_VERSION"
+          echo "Manifest version: $MANIFEST_VERSION"
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "ERROR: tag version ($TAG_VERSION) != package.json version ($MANIFEST_VERSION)"
+            echo "Bump sdks/mcp/package.json or retag at the correct commit."
+            exit 1
+          fi
+
+          # Fail fast if the publish-ready manifest from #646 has not
+          # landed on this commit (e.g. someone tagged before #646 merged).
+          if [ "$(jq -r '.private // false' package.json)" = "true" ]; then
+            echo "ERROR: sdks/mcp/package.json still has \"private\": true."
+            echo "The publish-ready manifest (PR #646) must be merged to main"
+            echo "before tagging. Refusing to publish a package marked private."
+            exit 1
+          fi
+
+          # Provenance precondition (see header). dry-run does NOT catch this.
+          REPO_URL=$(jq -r '.repository.url // .repository // empty' package.json)
+          echo "repository: ${REPO_URL:-<missing>}"
+          case "$REPO_URL" in
+            *github.com/solvela-ai/solvela*) : ;;
+            *)
+              echo "ERROR: package.json has no 'repository' field matching"
+              echo "github.com/solvela-ai/solvela. npm provenance requires it."
+              echo "Add it to sdks/mcp/package.json (fold into #646), e.g.:"
+              echo '  "repository": { "type": "git",'
+              echo '    "url": "git+https://github.com/solvela-ai/solvela.git",'
+              echo '    "directory": "sdks/mcp" }'
+              exit 1
+              ;;
+          esac
+
+          # Stop-and-ask guard: never re-publish an existing version.
+          PUBLISHED=$(npm view "${PKG_NAME}@${TAG_VERSION}" version 2>/dev/null || true)
+          if [ -n "$PUBLISHED" ]; then
+            echo "ERROR: ${PKG_NAME}@${TAG_VERSION} is already published on npm."
+            echo "Halting — bump the version or pick a new tag."
+            exit 1
+          fi
+          echo "OK: ${PKG_NAME}@${TAG_VERSION} is not yet published — clear to release."
+
+  # --------------------------------------------------------------------
+  # Re-run the MCP server's test suite at the tagged commit. Mirrors
+  # mcp.yml: Node 22 (its `node --test *.ts` runner needs strip-types),
+  # and signer-core's dist/ is built first because npm does NOT auto-build
+  # a `file:` dep. Tests run against the LOCAL file: signer-core (the swap
+  # happens only in the publish job).
+  # --------------------------------------------------------------------
+  test:
+    name: Test (Node 22)
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sdks/mcp/package-lock.json
+
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  # --------------------------------------------------------------------
+  # Publish to npm with provenance. Depends on [verify, test]. Dep-order
+  # gate + file:->registry swap live here. Order matters:
+  #   build signer-core dist -> npm ci -> build mcp -> swap -> dry-run
+  #   -> poll signer-core live -> live publish -> SHA verify -> npx smoke.
+  # --------------------------------------------------------------------
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: [verify, test]
+    environment: npm-publish
+    permissions:
+      id-token: write   # MANDATORY for npm provenance OIDC; do not remove.
+      contents: read
+    steps:
+      - name: Checkout (full history so tag is reachable)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sdks/mcp/package-lock.json
+          registry-url: 'https://registry.npmjs.org'
+
+      # signer-core's dist/ must exist for mcp's `npm ci` + build + dry-run
+      # while the dep is still `file:` (npm does not auto-build a file: dep).
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci --ignore-scripts && npm run build
+
+      - name: Install dependencies (ignore-scripts)
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      # CI-only swap: rewrite the signer-core dep from file:../signer-core
+      # to the just-published `^<version>` so the PUBLISHED tarball carries
+      # a registry dep, never `file:`. Done on the checked-out copy only;
+      # never committed. <version> is read from the repo's signer-core
+      # manifest (its tag was published first, so this is the live version).
+      - name: "Swap file: dep -> published registry range"
+        run: |
+          set -euo pipefail
+          SIGNER_VERSION=$(jq -r '.version' ../signer-core/package.json)
+          if [ -z "$SIGNER_VERSION" ] || [ "$SIGNER_VERSION" = "null" ]; then
+            echo "ERROR: could not read @solvela/signer-core version from ../signer-core/package.json"
+            exit 1
+          fi
+          jq --arg v "^$SIGNER_VERSION" \
+            '.dependencies["@solvela/signer-core"] = $v' package.json > package.json.tmp
+          mv package.json.tmp package.json
+          echo "Rewrote @solvela/signer-core: file:../signer-core -> ^$SIGNER_VERSION"
+          echo "  published dependency line:"
+          jq '.dependencies["@solvela/signer-core"]' package.json
+
+      # Charter-mandated dry-run BEFORE live publish, AFTER the swap so the
+      # tarball reflects exactly what ships (dist/ + README.md + the
+      # registry dep). Does not resolve the dep from the registry.
+      - name: Dry-run publish (verify post-swap tarball)
+        run: npm publish --dry-run --access public
+
+      # Dep-order gate: do NOT publish the MCP server until its
+      # signer-core dependency is actually resolvable on npm. Polls ~5 min
+      # (30 x 10s), matching the propagation loops in the other workflows.
+      # If signer-core was tagged/published just before this run, this
+      # absorbs the index-propagation lag; if it was never published, this
+      # fails closed rather than shipping a broken dep.
+      - name: Wait for @solvela/signer-core to be resolvable on npm
+        run: |
+          set -euo pipefail
+          SIGNER_VERSION=$(jq -r '.version' ../signer-core/package.json)
+          echo "Requiring @solvela/signer-core@${SIGNER_VERSION} on the registry"
+          for i in $(seq 1 30); do
+            if npm view "@solvela/signer-core@${SIGNER_VERSION}" version >/dev/null 2>&1; then
+              echo "Attempt $i/30: @solvela/signer-core@${SIGNER_VERSION} is resolvable."
+              exit 0
+            fi
+            echo "Attempt $i/30: not resolvable yet; sleeping 10s"
+            sleep 10
+          done
+          echo "ERROR: @solvela/signer-core@${SIGNER_VERSION} is not on npm after ~5 minutes."
+          echo "Publish sdks/signer-core (tag sdks/signer-core/v${SIGNER_VERSION}) first."
+          exit 1
+
+      # --access public on both paths: scoped first publish + provenance.
+      - name: Publish (provenance)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG_NAME="${{ github.ref_name }}"
+          if [[ "$TAG_NAME" =~ -rc\.[0-9]+$ ]]; then
+            echo "RC tag detected — publishing with --tag rc"
+            npm publish --tag rc --access public --provenance
+          else
+            echo "Release tag detected — publishing with --tag latest"
+            npm publish --access public --provenance
+          fi
+
+      # Post-publish: poll until visible, then SHA-256 compare the registry
+      # tarball against a locally-packed one. The local pack reproduces the
+      # POST-SWAP tarball (the swap persists in this job's working copy), so
+      # this confirms the published bytes carry the registry dep.
+      - name: Verify published tarball SHA matches local build
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(jq -r '.version' package.json)
+          PKG_NAME=$(jq -r '.name' package.json)
+          echo "Verifying $PKG_NAME@$PKG_VERSION"
+
+          LOCAL_TARBALL=$(npm pack --dry-run --json 2>/dev/null | \
+            python3 -c "import sys,json; print(json.load(sys.stdin)[0]['filename'])")
+          npm pack 2>/dev/null
+          LOCAL_SHA=$(shasum -a 256 "$LOCAL_TARBALL" | awk '{print $1}')
+          echo "Local tarball SHA256: $LOCAL_SHA"
+
+          TARBALL_URL=""
+          for i in $(seq 1 30); do
+            TARBALL_URL=$(npm view "${PKG_NAME}@${PKG_VERSION}" dist.tarball 2>/dev/null || true)
+            if [ -n "$TARBALL_URL" ]; then
+              break
+            fi
+            echo "Attempt $i/30: ${PKG_NAME}@${PKG_VERSION} not visible yet; sleeping 10s"
+            sleep 10
+          done
+          if [ -z "$TARBALL_URL" ]; then
+            echo "ERROR: ${PKG_NAME}@${PKG_VERSION} not visible on the registry after ~5 minutes"
+            exit 1
+          fi
+          echo "Registry tarball URL: $TARBALL_URL"
+          curl -fsSL "$TARBALL_URL" -o registry.tgz
+          REGISTRY_SHA=$(shasum -a 256 registry.tgz | awk '{print $1}')
+          echo "Registry tarball SHA256: $REGISTRY_SHA"
+
+          if [ "$LOCAL_SHA" = "$REGISTRY_SHA" ]; then
+            echo "SHA match confirmed — tarball integrity verified."
+          else
+            echo "ERROR: SHA mismatch! Local=$LOCAL_SHA Registry=$REGISTRY_SHA"
+            exit 1
+          fi
+
+      # End-to-end smoke: prove `npx -y @solvela/mcp-server` resolves from a
+      # clean install (which pulls @solvela/signer-core from the registry —
+      # the real test that the dep-order publish worked) and that the bin
+      # launches. SOLVELA_SIGNING_MODE=off means no wallet/RPC is needed;
+      # we send one MCP `initialize` request and assert a JSON-RPC result.
+      # `timeout` backstops the stdio server (it may keep stdin open after
+      # responding). Mirrors the existing post-publish smoke discipline.
+      - name: Smoke test npx resolution (initialize round-trip)
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(jq -r '.version' package.json)
+          PKG="@solvela/mcp-server@${PKG_VERSION}"
+
+          # Read path can lag the publish; poll until npx can resolve it.
+          for i in $(seq 1 30); do
+            if npm view "$PKG" version >/dev/null 2>&1; then break; fi
+            echo "Attempt $i/30: $PKG not resolvable yet; sleeping 10s"
+            sleep 10
+          done
+
+          INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"publish-smoke","version":"0"}}}'
+          set +e
+          OUT=$(printf '%s\n' "$INIT" | SOLVELA_SIGNING_MODE=off timeout 120 npx -y "$PKG" 2>smoke.err)
+          set -e
+          if echo "$OUT" | grep -q '"result"'; then
+            echo "npx smoke OK — $PKG resolved, installed signer-core from the registry, and answered initialize."
+          else
+            echo "ERROR: npx smoke failed for $PKG"
+            echo "--- stdout ---"; echo "$OUT"
+            echo "--- stderr ---"; cat smoke.err
+            exit 1
+          fi
