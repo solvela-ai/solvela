@@ -571,6 +571,12 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
 
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    // Channels ship DISABLED in prod; enable them here so the channel route tests
+    // exercise the real no-DB path (404 "channel not available") rather than the
+    // disabled-gate short-circuit. The dedicated gate-off tests use
+    // `test_app_channels_disabled()`. Harmless for non-channel tests (channels
+    // still need a DB this app does not have).
+    config.channel.enabled = true;
 
     let state = Arc::new(AppState {
         config,
@@ -612,6 +618,62 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         RateLimiter::new(RateLimitConfig::default()),
     );
     (router, state)
+}
+
+/// A test app with the v0 channel scheme DISABLED (the production default).
+///
+/// Mirrors [`test_app_with_state`] but leaves `config.channel.enabled = false`,
+/// so `POST /v1/channel/{open,close}` hit the disabled gate (404 "channel not
+/// available") regardless of DB state. Used to prove the default-off gate.
+fn test_app_channels_disabled() -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML)
+        .unwrap()
+        .with_gateway_recipient(TEST_RECIPIENT_WALLET)
+        .unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    // channel.enabled stays false (AppConfig::default) — the gate under test.
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        native_anthropic: None,
+        search_provider: None,
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        faucet: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        auth_provider: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+    });
+    build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
 
 /// Build a test app with a NON-default configured USDC mint and a
@@ -17877,9 +17939,13 @@ mod channel_route_tests {
 
     #[tokio::test]
     async fn channel_close_unavailable_without_db() {
+        // Channels enabled (test_app), but no DB → 404 BEFORE any signature
+        // verification (the no-DB check precedes the loaded-row auth). A dummy
+        // 64-byte base64 signature is supplied only so the body parses.
         let app = test_app();
         let body = serde_json::json!({
             "channel_id": "11111111111111111111111111111111",
+            "signature": base64::engine::general_purpose::STANDARD.encode([0u8; 64]),
         });
         let resp = app
             .oneshot(
@@ -17897,6 +17963,66 @@ mod channel_route_tests {
             resp.status(),
             StatusCode::NOT_FOUND,
             "channel close must be unavailable (404) with no DB"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"], "channel not available");
+    }
+
+    #[tokio::test]
+    async fn channel_open_404_when_disabled() {
+        // Default-off gate: with channels disabled the open endpoint is a 404
+        // "channel not available", regardless of DB state.
+        let app = test_app_channels_disabled();
+        let body = serde_json::json!({
+            "agent_wallet": "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz",
+            "funding_tx": "AQID",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/channel/open")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "open must 404 when the channel scheme is disabled"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"], "channel not available");
+    }
+
+    #[tokio::test]
+    async fn channel_close_404_when_disabled() {
+        let app = test_app_channels_disabled();
+        let body = serde_json::json!({
+            "channel_id": "11111111111111111111111111111111",
+            "signature": base64::engine::general_purpose::STANDARD.encode([0u8; 64]),
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/channel/close")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "close must 404 when the channel scheme is disabled"
         );
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

@@ -15,15 +15,19 @@
 //!   rejected by Solana's tx dedup (the broadcast fails) and, belt-and-suspenders,
 //!   by the unique `funding_tx_sig` ledger index (migration 016).
 //!
-//! - [`close`] — cooperative close. Computes `refundable = deposited - settled`
-//!   (checked; never more than `deposited - settled`) and marks the channel
-//!   `closing`. v0 is custodial: the on-chain disbursement of the refundable
-//!   balance to the agent is performed out of band (the gateway holds the
-//!   prepaid funds and has no in-tree custodial USDC-send primitive).
+//! - [`close`] — cooperative close. Requires an ed25519 `session_key` signature
+//!   over the canonical close message (a leaked `channel_id` alone must not
+//!   force a close). Computes `refundable = deposited -
+//!   last_voucher_cumulative` (checked) — the unspent principal the agent never
+//!   drew, NOT `deposited - settled` (which lags and would over-refund). Marks
+//!   the channel `closing` with `refund_status: "pending"`. v0 is custodial and
+//!   does NOT disburse here: the on-chain refund-send is a later slice. The
+//!   response must not imply the refund completed.
 //!
-//! **DB is REQUIRED** (CLAUDE.md #12): when no `db_pool` is configured the
-//! channel scheme is simply unavailable — both endpoints return 404, never a
-//! fake in-memory ledger.
+//! **DB is REQUIRED** (CLAUDE.md #12) and the scheme ships **DISABLED by
+//! default** (`[channel] enabled = false`): when channels are disabled OR no
+//! `db_pool` is configured, both endpoints return 404 (`channel not
+//! available`), never a fake in-memory ledger.
 
 use std::sync::Arc;
 
@@ -31,6 +35,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -75,25 +80,113 @@ pub fn credit_deposit(verified_amount: Option<u64>) -> Result<u64, ChannelOpenEr
 /// Why a channel could not be closed.
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelCloseError {
-    /// `settled > deposited` — a corrupt ledger row. Refuse rather than wrap the
-    /// checked subtraction into a huge refund.
-    #[error("settled {settled} exceeds deposited {deposited} (corrupt ledger row)")]
-    SettledExceedsDeposited { deposited: u64, settled: u64 },
+    /// `last_voucher_cumulative > deposited` — a corrupt ledger row (the
+    /// `last <= deposited` CHECK should make this unreachable). Refuse rather than
+    /// wrap the checked subtraction into a huge refund.
+    #[error("last_voucher_cumulative {last_cumulative} exceeds deposited {deposited} (corrupt ledger row)")]
+    LastCumulativeExceedsDeposited {
+        deposited: u64,
+        last_cumulative: u64,
+    },
 }
 
-/// Cooperative-close refundable = `deposited - settled`, checked. Never returns
-/// more than `deposited - settled`; an underflow (settled > deposited) is a
-/// corrupt-state hard error, never a wrapped amount.
+/// Cooperative-close refundable = `deposited - last_voucher_cumulative`, checked.
+///
+/// The refundable amount is what the agent **never drew/authorized** — bounded by
+/// `last_voucher_cumulative` (the highest cumulative the agent has signed), NOT by
+/// `settled`. In v0 a draw advances `last_voucher_cumulative` while `settled` lags
+/// (invariant `settled <= last_voucher_cumulative <= deposited`, scope §2), so
+/// refunding `deposited - settled` would hand back value the agent has already
+/// authorized for service it received — over-refund / money loss. The gap
+/// `last_voucher_cumulative - settled` is what the gateway separately settles to
+/// itself; that is the future settler slice, not this cooperative close.
+///
+/// Never returns more than `deposited - last_voucher_cumulative`; an underflow
+/// (`last > deposited`) is a corrupt-state hard error, never a wrapped amount.
 pub fn compute_refundable(
     deposited_atomic: u64,
-    settled_atomic: u64,
+    last_voucher_cumulative_atomic: u64,
 ) -> Result<u64, ChannelCloseError> {
     deposited_atomic
-        .checked_sub(settled_atomic)
-        .ok_or(ChannelCloseError::SettledExceedsDeposited {
+        .checked_sub(last_voucher_cumulative_atomic)
+        .ok_or(ChannelCloseError::LastCumulativeExceedsDeposited {
             deposited: deposited_atomic,
-            settled: settled_atomic,
+            last_cumulative: last_voucher_cumulative_atomic,
         })
+}
+
+/// Why a close request could not be authorized. Distinguishes a malformed client
+/// credential (400), a corrupt stored key (500), and a credential that simply does
+/// not match the channel's `session_key` (401) — status separation per scope §3.
+#[derive(Debug, thiserror::Error)]
+pub enum CloseAuthError {
+    /// The presented `signature` is not base64 or not exactly 64 bytes. The client
+    /// sent a malformed credential → 400.
+    #[error("signature must be base64-encoded 64 bytes")]
+    MalformedSignature,
+    /// The stored `channel_id`/`session_key` is not a base58 32-byte value, or the
+    /// `session_key` bytes are not a valid ed25519 point — corrupt ledger row → 500
+    /// (a gateway-side fault, never the caller's). `which` names the field.
+    #[error("stored {which} is corrupt (not a usable key)")]
+    CorruptStoredKey { which: &'static str },
+    /// The signature did not verify against the channel's `session_key` over the
+    /// canonical close message — a bad credential (or a force-close attempt with a
+    /// leaked `channel_id`) → 401.
+    #[error("close signature does not match the channel session key")]
+    BadSignature,
+}
+
+/// Decode the base64 close `signature` to exactly 64 bytes, fail-closed.
+fn decode_close_signature(signature_b64: &str) -> Result<[u8; 64], CloseAuthError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(signature_b64)
+        .map_err(|_| CloseAuthError::MalformedSignature)?;
+    bytes
+        .try_into()
+        .map_err(|_| CloseAuthError::MalformedSignature)
+}
+
+/// Authorize a cooperative close: the client's `signature_b64` must be a valid
+/// ed25519 signature by the channel's `session_key` over the canonical close
+/// message ([`solvela_x402::channel::build_close_message`]). This upgrades the v0
+/// close from "present the 256-bit `channel_id` capability" (a leaked id is a
+/// force-close DoS) to "prove control of the channel's `session_key`".
+///
+/// There is deliberately NO refund-destination parameter — the refund goes to the
+/// DB-stored `agent_wallet`, never anything the caller supplies, so replaying a
+/// valid close signature is a harmless idempotent no-op (no nonce needed).
+///
+/// `channel_id_b58`/`session_key_b58` are the **stored** (already-validated)
+/// values; a decode failure here is corrupt gateway state, not client error.
+pub fn authorize_close(
+    session_key_b58: &str,
+    channel_id_b58: &str,
+    signature_b64: &str,
+) -> Result<(), CloseAuthError> {
+    let signature = decode_close_signature(signature_b64)?;
+    let channel_id =
+        solvela_x402::escrow::pda::decode_bs58_pubkey(channel_id_b58).map_err(|_| {
+            CloseAuthError::CorruptStoredKey {
+                which: "channel_id",
+            }
+        })?;
+    let session_key =
+        solvela_x402::escrow::pda::decode_bs58_pubkey(session_key_b58).map_err(|_| {
+            CloseAuthError::CorruptStoredKey {
+                which: "session_key",
+            }
+        })?;
+    match solvela_x402::channel::verify_close(&session_key, &channel_id, &signature) {
+        Ok(()) => Ok(()),
+        Err(solvela_x402::channel::ChannelCloseSigError::InvalidSessionKey) => {
+            Err(CloseAuthError::CorruptStoredKey {
+                which: "session_key",
+            })
+        }
+        Err(solvela_x402::channel::ChannelCloseSigError::InvalidSignature) => {
+            Err(CloseAuthError::BadSignature)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +250,14 @@ pub async fn open(
     peer_addr: PeerAddr,
     Json(req): Json<OpenChannelRequest>,
 ) -> axum::response::Response {
+    // Gate 1 (cheapest-first, mirrors the faucet's enabled-first check): channels
+    // ship DISABLED by default. When the flag is off the whole scheme is
+    // unavailable — 404 before the rate limiter or any RPC, no abuse surface to
+    // protect. Prod must accept no deposit it cannot yet programmatically refund.
+    if !state.config.channel.enabled {
+        return channel_not_available();
+    }
+
     // Per-IP cap BEFORE any RPC work (this route fans out to Solana RPC and is
     // unauthenticated). Reuses the deposit-tx limiter — same purpose: bound RPC
     // amplification on an unauthenticated money endpoint. Keyed on the TCP peer
@@ -176,11 +277,7 @@ pub async fn open(
     // Channels are DB-backed; with no pool the scheme is unavailable. 404 BEFORE
     // any RPC — never fabricate an in-memory ledger (CLAUDE.md #12).
     let Some(pool) = state.db_pool.clone() else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "channel not available" })),
-        )
-            .into_response();
+        return channel_not_available();
     };
 
     // --- Validate client inputs (no network I/O on bad input) ---
@@ -329,8 +426,15 @@ pub async fn open(
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CloseChannelRequest {
-    /// The unguessable base58 32-byte channel id (the v0 close capability).
+    /// The base58 32-byte channel id (identifies the channel to close).
     pub channel_id: String,
+    /// Base64 ed25519 signature (64 bytes) over the canonical close message
+    /// (`solvela-channel-close-v1 || channel_id`), proving control of the
+    /// channel's `session_key`. Required — the `channel_id` alone is no longer a
+    /// sufficient close capability (a leaked id must not force a close). There is
+    /// deliberately NO refund-destination field: the refund goes to the stored
+    /// `agent_wallet`, never a caller-supplied address.
+    pub signature: String,
 }
 
 /// Response body for `POST /v1/channel/close`.
@@ -339,29 +443,46 @@ pub struct CloseChannelResponse {
     pub channel_id: String,
     pub deposited_atomic: u64,
     pub settled_atomic: u64,
-    /// `deposited - settled`, the amount owed back to the agent. v0: disbursed
-    /// out of band (custodial).
+    /// `deposited - last_voucher_cumulative` — the unspent principal the agent
+    /// never drew, owed back to the agent.
     pub refundable_atomic: u64,
+    /// Lifecycle status: `closing` (never `closed`) — the refund is pending.
     pub status: String,
+    /// Refund-disbursement status. Always `pending` in v0: marking a channel
+    /// `closing` records the refund obligation but does NOT move USDC — the
+    /// custodial refund-send is a later slice. The response must not imply the
+    /// refund has settled.
+    pub refund_status: String,
 }
 
 /// POST /v1/channel/close
 ///
-/// Cooperative close. Computes `refundable = deposited - settled` (never more)
-/// and transitions an open channel to `closing` (refund pending). Idempotent on
-/// an already-closing/closed channel.
+/// Cooperative close. Verifies a `session_key` signature over the canonical close
+/// message, computes `refundable = deposited - last_voucher_cumulative` (the
+/// unspent principal the agent never drew, never more), and transitions an open
+/// channel to `closing` (refund pending). Idempotent on an already-closing/closed
+/// channel.
 ///
 /// Status codes:
-/// - 200 with the refundable amount + status.
-/// - 404 `{"error":"channel not available"}` when no DB is configured, or
-///   `{"error":"channel not found"}` for an unknown channel id.
+/// - 200 with the refundable amount + `refund_status: "pending"`.
+/// - 400 when the `signature` is not base64-encoded 64 bytes.
+/// - 401 when the signature does not match the channel's `session_key`.
+/// - 404 `{"error":"channel not available"}` when channels are disabled or no DB
+///   is configured, or `{"error":"channel not found"}` for an unknown channel id.
 /// - 429 when the per-IP rate limit is exceeded.
-/// - 500 (fail-closed) on a corrupt ledger row (`settled > deposited`).
+/// - 500 (fail-closed) on a corrupt ledger row (`last_voucher_cumulative >
+///   deposited`) or corrupt stored key material.
 pub async fn close(
     State(state): State<Arc<AppState>>,
     peer_addr: PeerAddr,
     Json(req): Json<CloseChannelRequest>,
 ) -> axum::response::Response {
+    // Gate 1 (cheapest-first): channels ship DISABLED by default → 404 before the
+    // rate limiter. See [`open`].
+    if !state.config.channel.enabled {
+        return channel_not_available();
+    }
+
     let client_id = connect_info_client_id(peer_addr.0);
     if state
         .deposit_tx_rate_limiter
@@ -375,11 +496,7 @@ pub async fn close(
     }
 
     let Some(pool) = state.db_pool.clone() else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "channel not available" })),
-        )
-            .into_response();
+        return channel_not_available();
     };
 
     let row = match channels::load_channel(&pool, &req.channel_id).await {
@@ -397,9 +514,34 @@ pub async fn close(
         }
     };
 
-    // refundable = deposited - settled, checked. A corrupt row (settled >
-    // deposited) fails closed rather than wrapping into a huge refund.
-    let refundable_atomic = match compute_refundable(row.deposited_atomic, row.settled_atomic) {
+    // Authenticate the close: the signature must prove control of the channel's
+    // `session_key` (a leaked `channel_id` alone must not force a close). The
+    // refund destination is the stored `agent_wallet`, never caller-supplied, so
+    // a replayed close signature is a harmless idempotent no-op.
+    if let Err(e) = authorize_close(&row.session_key, &row.channel_id, &req.signature) {
+        return match e {
+            CloseAuthError::MalformedSignature => {
+                GatewayError::BadRequest("signature must be base64-encoded 64 bytes".to_string())
+                    .into_response()
+            }
+            CloseAuthError::BadSignature => {
+                tracing::warn!(channel_id = %req.channel_id, "channel close: signature did not verify");
+                unauthorized("close signature does not match the channel session key")
+            }
+            CloseAuthError::CorruptStoredKey { which } => {
+                tracing::error!(channel_id = %req.channel_id, which, "channel close: corrupt stored key");
+                internal_error("channel credential material is inconsistent")
+            }
+        };
+    }
+
+    // refundable = deposited - last_voucher_cumulative, checked. Bounded by what
+    // the agent never drew/authorized — NOT by `settled` (which lags). A corrupt
+    // row (last > deposited) fails closed rather than wrapping into a huge refund.
+    let refundable_atomic = match compute_refundable(
+        row.deposited_atomic,
+        row.last_voucher_cumulative_atomic,
+    ) {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, channel_id = %req.channel_id, "channel close: corrupt ledger row");
@@ -426,6 +568,9 @@ pub async fn close(
         settled_atomic: row.settled_atomic,
         refundable_atomic,
         status,
+        // v0 never disburses on close — the refund is recorded, not sent. Be
+        // honest: the response must not imply the money has moved.
+        refund_status: REFUND_STATUS_PENDING.to_string(),
     };
     (StatusCode::OK, Json(json!(response))).into_response()
 }
@@ -434,16 +579,32 @@ pub async fn close(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// `refund_status` value returned by [`close`]. v0 never disburses on close, so
+/// the refund is always pending — see [`CloseChannelResponse::refund_status`].
+const REFUND_STATUS_PENDING: &str = "pending";
+
 /// A fresh base58 32-byte channel id. v0 generates 32 random bytes (two v4
 /// UUIDs) so the id (a) unifies with the end-state Channel-PDA base58 and (b)
 /// gives the voucher a clean 32-byte `channel_id` — a 16-byte UUID could not
-/// fill the voucher's 32-byte field. Unguessable (256-bit), so it doubles as the
-/// v0 close capability.
+/// fill the voucher's 32-byte field. Unguessable (256-bit). Note: the id is NOT
+/// itself a close capability — closing additionally requires a `session_key`
+/// signature ([`authorize_close`]).
 fn fresh_channel_id() -> String {
     let mut bytes = [0u8; 32];
     bytes[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
     bytes[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
     bs58::encode(bytes).into_string()
+}
+
+/// 404 Not Found: the channel scheme is unavailable (disabled by config or no DB
+/// pool). Same body as the no-DB path so the two are indistinguishable to a
+/// caller — the scheme is simply not offered here.
+fn channel_not_available() -> axum::response::Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": "channel not available" })),
+    )
+        .into_response()
 }
 
 /// 402 Payment Required with a fixed, safe message (never reflect RPC internals).
@@ -453,6 +614,13 @@ fn payment_required(message: &str) -> axum::response::Response {
         Json(json!({ "error": message })),
     )
         .into_response()
+}
+
+/// 401 Unauthorized: a bad close credential (signature does not match the
+/// channel's `session_key`). Distinct from 402 (payment) and 403 (policy) per
+/// scope §3. Static message free of internals.
+fn unauthorized(message: &str) -> axum::response::Response {
+    (StatusCode::UNAUTHORIZED, Json(json!({ "error": message }))).into_response()
 }
 
 /// 503 Service Unavailable (RPC unreachable), static message free of internals.
@@ -498,36 +666,52 @@ mod tests {
     }
 
     #[test]
-    fn refundable_is_deposited_minus_settled() {
+    fn refundable_over_refund_regression_uses_last_cumulative_not_settled() {
+        // THE bug this fix closes: agent deposits 50_000, draws 12_600
+        // (last_voucher_cumulative = 12_600) but NOTHING is settled yet
+        // (settled = 0). Refundable MUST be 50_000 - 12_600 = 37_400 — the amount
+        // never drawn — NOT the full 50_000 (which would be free service plus the
+        // money back). `compute_refundable` is keyed on last_voucher_cumulative,
+        // so passing 12_600 yields 37_400 regardless of `settled`.
         assert_eq!(compute_refundable(50_000, 12_600).unwrap(), 37_400);
-        // Nothing settled → full deposit refundable.
+        assert_ne!(
+            compute_refundable(50_000, 12_600).unwrap(),
+            50_000,
+            "must NOT refund the full deposit when the agent has drawn against it"
+        );
+    }
+
+    #[test]
+    fn refundable_is_deposited_minus_last_cumulative() {
+        // Nothing drawn → full deposit refundable.
         assert_eq!(compute_refundable(50_000, 0).unwrap(), 50_000);
-        // Fully settled → zero refundable, never negative.
+        // Fully drawn → zero refundable, never negative.
         assert_eq!(compute_refundable(50_000, 50_000).unwrap(), 0);
     }
 
     #[test]
-    fn refundable_never_exceeds_deposited_minus_settled() {
-        // Exhaustive small sweep: the result is always exactly deposited-settled
-        // and never more (no path can over-refund).
+    fn refundable_never_exceeds_deposited_minus_last_cumulative() {
+        // Exhaustive small sweep: the result is always exactly
+        // deposited - last_voucher_cumulative and never more (no path can
+        // over-refund).
         for deposited in 0u64..200 {
-            for settled in 0u64..=deposited {
+            for last_cumulative in 0u64..=deposited {
                 assert_eq!(
-                    compute_refundable(deposited, settled).unwrap(),
-                    deposited - settled
+                    compute_refundable(deposited, last_cumulative).unwrap(),
+                    deposited - last_cumulative
                 );
             }
         }
     }
 
     #[test]
-    fn refundable_fails_closed_when_settled_exceeds_deposited() {
-        // A corrupt row must NOT wrap into a huge refund.
+    fn refundable_fails_closed_when_last_cumulative_exceeds_deposited() {
+        // A corrupt row (last > deposited) must NOT wrap into a huge refund.
         assert!(matches!(
             compute_refundable(100, 101),
-            Err(ChannelCloseError::SettledExceedsDeposited {
+            Err(ChannelCloseError::LastCumulativeExceedsDeposited {
                 deposited: 100,
-                settled: 101
+                last_cumulative: 101
             })
         ));
         assert!(compute_refundable(0, u64::MAX).is_err());
@@ -543,5 +727,113 @@ mod tests {
         let ok = r#"{"agent_wallet":"a","funding_tx":"tx"}"#;
         let parsed: OpenChannelRequest = serde_json::from_str(ok).unwrap();
         assert!(parsed.session_key.is_none());
+    }
+
+    // -- A3: signed-close authorization (pure, no DB) -----------------------
+
+    use base64::engine::general_purpose::STANDARD as B64;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    /// (session_key_b58, channel_id_b58, valid signature_b64) for a channel id.
+    fn signed_close_fixture(channel_id: [u8; 32]) -> (String, String, String) {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let session_key_b58 = bs58::encode(key.verifying_key().to_bytes()).into_string();
+        let channel_id_b58 = bs58::encode(channel_id).into_string();
+        let msg = solvela_x402::channel::build_close_message(&channel_id);
+        let sig_b64 = B64.encode(key.sign(&msg).to_bytes());
+        (session_key_b58, channel_id_b58, sig_b64)
+    }
+
+    #[test]
+    fn authorize_close_accepts_valid_signature() {
+        let (sk, cid, sig) = signed_close_fixture([9u8; 32]);
+        assert!(authorize_close(&sk, &cid, &sig).is_ok());
+    }
+
+    #[test]
+    fn authorize_close_rejects_flipped_byte_with_bad_signature() {
+        let (sk, cid, sig) = signed_close_fixture([9u8; 32]);
+        let mut raw = B64.decode(&sig).unwrap();
+        raw[0] ^= 0xFF;
+        let bad = B64.encode(&raw);
+        assert!(matches!(
+            authorize_close(&sk, &cid, &bad),
+            Err(CloseAuthError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn authorize_close_rejects_wrong_session_key() {
+        let (_sk, cid, sig) = signed_close_fixture([9u8; 32]);
+        // A DIFFERENT key's pubkey as the channel session key → no match.
+        let other = SigningKey::from_bytes(&[8u8; 32]);
+        let other_sk = bs58::encode(other.verifying_key().to_bytes()).into_string();
+        assert!(matches!(
+            authorize_close(&other_sk, &cid, &sig),
+            Err(CloseAuthError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn authorize_close_rejects_signature_for_a_different_channel() {
+        // Signature was made over channel A; present it against channel B.
+        let (sk, _cid_a, sig) = signed_close_fixture([1u8; 32]);
+        let cid_b = bs58::encode([2u8; 32]).into_string();
+        assert!(matches!(
+            authorize_close(&sk, &cid_b, &sig),
+            Err(CloseAuthError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn authorize_close_rejects_malformed_signature() {
+        let (sk, cid, _sig) = signed_close_fixture([9u8; 32]);
+        // Not base64.
+        assert!(matches!(
+            authorize_close(&sk, &cid, "not base64 !!!"),
+            Err(CloseAuthError::MalformedSignature)
+        ));
+        // Valid base64 but wrong length (not 64 bytes).
+        let short = B64.encode([0u8; 32]);
+        assert!(matches!(
+            authorize_close(&sk, &cid, &short),
+            Err(CloseAuthError::MalformedSignature)
+        ));
+    }
+
+    #[test]
+    fn close_request_requires_signature_and_rejects_unknown_fields() {
+        // signature is required — a body without it must not parse.
+        assert!(serde_json::from_str::<CloseChannelRequest>(r#"{"channel_id":"c"}"#).is_err());
+        // deny_unknown_fields: no refund-destination field can be smuggled in.
+        let with_dest = r#"{"channel_id":"c","signature":"AA==","refund_to":"attacker"}"#;
+        assert!(serde_json::from_str::<CloseChannelRequest>(with_dest).is_err());
+        // Well-formed body parses.
+        let ok = r#"{"channel_id":"c","signature":"AA=="}"#;
+        assert!(serde_json::from_str::<CloseChannelRequest>(ok).is_ok());
+    }
+
+    // -- A4: honest close response (no false "done") ------------------------
+
+    #[test]
+    fn close_response_marks_refund_pending_and_status_closing() {
+        let resp = CloseChannelResponse {
+            channel_id: "c".to_string(),
+            deposited_atomic: 50_000,
+            settled_atomic: 0,
+            refundable_atomic: 37_400,
+            status: ChannelStatus::Closing.as_str().to_string(),
+            refund_status: REFUND_STATUS_PENDING.to_string(),
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(
+            v["refund_status"], "pending",
+            "v0 must never claim refunded"
+        );
+        assert_eq!(
+            v["status"], "closing",
+            "status must be closing, never closed"
+        );
+        assert_eq!(v["refundable_atomic"], 37_400);
     }
 }

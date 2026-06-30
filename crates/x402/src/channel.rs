@@ -318,6 +318,88 @@ pub fn verify_voucher(
 }
 
 // ---------------------------------------------------------------------------
+// Cooperative-close authorization (signed close)
+// ---------------------------------------------------------------------------
+
+/// Domain-separation prefix for the channel-close signed message. **Distinct**
+/// from [`DOMAIN_SEP`] so a voucher signature can never be replayed as a close
+/// authorization (or vice versa) — the two artifacts sign over disjoint message
+/// spaces. Versioned for the same forward-compatibility reason as the voucher tag.
+pub const CLOSE_DOMAIN_SEP: &[u8] = b"solvela-channel-close-v1";
+
+/// Total length of the canonical close message: `CLOSE_DOMAIN_SEP || channel_id(32)`.
+/// A layout regression fails the BUILD here, not at request time.
+const CLOSE_MESSAGE_LEN: usize = CLOSE_DOMAIN_SEP.len() + 32;
+const _: () = assert!(CLOSE_MESSAGE_LEN == 56);
+
+/// Byte-exact base64 (standard alphabet) of [`build_close_message`] for the fixed
+/// input `channel_id = [0x11; 32]`. Pins the close-message wire layout — a new
+/// signed artifact (solvela-x402 §6) — so any change to `CLOSE_DOMAIN_SEP` or the
+/// field order breaks the build. Computed independently from the spec byte layout
+/// (`b"solvela-channel-close-v1" || [0x11; 32]`), not from this function's output,
+/// and asserted by `close_message_matches_golden_vector`.
+///
+/// DO NOT hand-edit. If this changes, the close-message layout changed — and every
+/// SDK signer + the gateway must agree on the new bytes before it is pinned.
+pub const CLOSE_GOLDEN_VECTOR_B64: &str =
+    "c29sdmVsYS1jaGFubmVsLWNsb3NlLXYxERERERERERERERERERERERERERERERERERERERERERE=";
+
+/// Build the canonical close message the agent signs to authorize a cooperative
+/// close, byte-for-byte:
+///
+/// ```text
+/// CLOSE_DOMAIN_SEP || channel_id : [u8; 32]
+/// ```
+///
+/// **No nonce.** A close is idempotent and the refund destination is DB-sourced
+/// (the channel's `agent_wallet`), never caller-supplied — so replaying a valid
+/// close signature can only re-request the same close, a harmless no-op. Infallible
+/// (pure concatenation); both the SDK signer (later increment) and [`verify_close`]
+/// go through this single function so they cannot drift.
+pub fn build_close_message(channel_id: &[u8; 32]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(CLOSE_MESSAGE_LEN);
+    msg.extend_from_slice(CLOSE_DOMAIN_SEP);
+    msg.extend_from_slice(channel_id);
+    msg
+}
+
+/// Why a close signature was rejected. Both variants are hard refusals — there is
+/// no silent accept on a bad close credential (a leaked `channel_id` alone must
+/// not authorize a close).
+#[derive(Debug, thiserror::Error)]
+pub enum ChannelCloseSigError {
+    /// The channel's stored `session_key` bytes are not a valid ed25519 point.
+    #[error("channel session key is not a valid ed25519 public key")]
+    InvalidSessionKey,
+    /// The ed25519 signature did not verify against `session_key` over the
+    /// canonical close message.
+    #[error("close signature is invalid for the channel session key")]
+    InvalidSignature,
+}
+
+/// Verify a cooperative-close authorization: `signature` must be a valid ed25519
+/// signature by `session_key` over [`build_close_message`]`(channel_id)`.
+///
+/// Fail-closed on a malformed key or a bad signature. This is what upgrades the v0
+/// close from "present the 256-bit `channel_id` capability" (a leaked id is a
+/// force-close DoS) to "prove control of the channel's `session_key`". The refund
+/// destination is still DB-sourced (never carried in the signed message), so this
+/// only proves *who may close*, never *where funds go*.
+pub fn verify_close(
+    session_key: &[u8; 32],
+    channel_id: &[u8; 32],
+    signature: &[u8; 64],
+) -> Result<(), ChannelCloseSigError> {
+    let verifying_key = VerifyingKey::from_bytes(session_key)
+        .map_err(|_| ChannelCloseSigError::InvalidSessionKey)?;
+    let message = build_close_message(channel_id);
+    let sig = Signature::from_bytes(signature);
+    verifying_key
+        .verify(&message, &sig)
+        .map_err(|_| ChannelCloseSigError::InvalidSignature)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -638,5 +720,97 @@ mod tests {
                 settled: 5_000
             })
         ));
+    }
+
+    // -- close message: byte-exact golden vector ----------------------------
+
+    #[test]
+    fn close_message_matches_golden_vector() {
+        let msg = build_close_message(&GOLDEN_CHANNEL_ID);
+        let expected = base64::engine::general_purpose::STANDARD
+            .decode(CLOSE_GOLDEN_VECTOR_B64)
+            .expect("close golden vector must be valid base64");
+        assert_eq!(
+            msg, expected,
+            "close message bytes drifted from the pinned golden vector"
+        );
+        assert_eq!(
+            msg.len(),
+            CLOSE_MESSAGE_LEN,
+            "close message length must be 56"
+        );
+        assert!(
+            msg.starts_with(CLOSE_DOMAIN_SEP),
+            "close message must start with CLOSE_DOMAIN_SEP"
+        );
+    }
+
+    // -- verify_close -------------------------------------------------------
+
+    #[test]
+    fn verify_close_accepts_valid_signature() {
+        let key = test_signing_key();
+        let channel_id = [9u8; 32];
+        let sig = key.sign(&build_close_message(&channel_id)).to_bytes();
+        assert!(
+            verify_close(&key.verifying_key().to_bytes(), &channel_id, &sig).is_ok(),
+            "a correctly-signed close must be accepted"
+        );
+    }
+
+    #[test]
+    fn verify_close_rejects_wrong_key() {
+        let signer = test_signing_key();
+        let channel_id = [9u8; 32];
+        let sig = signer.sign(&build_close_message(&channel_id)).to_bytes();
+        // The channel's session_key is a DIFFERENT key than the one that signed.
+        let other = SigningKey::from_bytes(&[8u8; 32]);
+        assert!(matches!(
+            verify_close(&other.verifying_key().to_bytes(), &channel_id, &sig),
+            Err(ChannelCloseSigError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn verify_close_rejects_flipped_byte() {
+        let key = test_signing_key();
+        let channel_id = [9u8; 32];
+        let mut sig = key.sign(&build_close_message(&channel_id)).to_bytes();
+        sig[0] ^= 0xFF;
+        assert!(matches!(
+            verify_close(&key.verifying_key().to_bytes(), &channel_id, &sig),
+            Err(ChannelCloseSigError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn verify_close_rejects_signature_for_a_different_channel() {
+        let key = test_signing_key();
+        // Signed over channel A, presented against channel B → no force-close
+        // across channels with one leaked signature.
+        let signed_channel = [1u8; 32];
+        let other_channel = [2u8; 32];
+        let sig = key.sign(&build_close_message(&signed_channel)).to_bytes();
+        assert!(matches!(
+            verify_close(&key.verifying_key().to_bytes(), &other_channel, &sig),
+            Err(ChannelCloseSigError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn verify_close_fails_closed_on_garbage_session_key() {
+        // A garbage 32-byte session key must fail closed (never panic, never
+        // accept). Whether it is rejected at key decompression
+        // (`InvalidSessionKey`) or at verification (`InvalidSignature`) is an
+        // ed25519-dalek implementation detail — both are hard refusals, which is
+        // the money-path invariant under test.
+        let key = test_signing_key();
+        let channel_id = [9u8; 32];
+        let sig = key.sign(&build_close_message(&channel_id)).to_bytes();
+        let bad_key = [0xFFu8; 32];
+        assert!(
+            verify_close(&bad_key, &channel_id, &sig).is_err(),
+            "a garbage session key must never authorize a close"
+        );
     }
 }

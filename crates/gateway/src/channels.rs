@@ -36,8 +36,9 @@ use sqlx::PgPool;
 pub enum ChannelStatus {
     /// Funded and drawable.
     Open,
-    /// Cooperative close requested; refund of `deposited - settled` is pending
-    /// (v0: the on-chain custodial disbursement is performed out of band).
+    /// Cooperative close requested; refund of `deposited -
+    /// last_voucher_cumulative` (the unspent principal the agent never drew) is
+    /// pending (v0: the on-chain custodial disbursement is a later slice).
     Closing,
     /// Fully closed — refund completed / no balance owed.
     Closed,
