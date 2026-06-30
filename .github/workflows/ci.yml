@@ -110,7 +110,7 @@ jobs:
 
       - name: Cache cargo-llvm-cov binary
         id: cache-cargo-llvm-cov
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-llvm-cov
           # Bump the version suffix here when you want a fresh install.
@@ -201,7 +201,7 @@ jobs:
 
       - name: Cache cargo-deny binary
         id: cache-cargo-deny
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-deny
           # Bump the version suffix here when you want a fresh install.
@@ -233,7 +233,7 @@ jobs:
 
       - name: Cache cargo-audit binary
         id: cache-cargo-audit
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-audit
           # Key includes the tool version so the cache is invalidated on upgrades.
@@ -245,7 +245,7 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Cache advisory-db
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cargo/advisory-db
           # Daily key so the DB is refreshed at most once per day per runner OS.
@@ -502,7 +502,7 @@ jobs:
         # `fastembed` on first run, then reused. Caching it keeps the job fast
         # and resilient to hub hiccups. Path matches the workspace-root dir the
         # tests resolve via `CARGO_MANIFEST_DIR/../../.fastembed_cache`.
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .fastembed_cache
           # Bump the suffix to force a fresh model download.
