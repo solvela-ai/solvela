@@ -23,10 +23,8 @@ feature-depth = 1
 # ----------------------------------------------------------------------
 # Advisories — RustSec database. cargo-audit (in ci.yml) and cargo-deny
 # both consult RustSec, but cargo-audit reads the full Cargo.lock graph
-# while cargo-deny respects the [graph].targets filter above. The
-# RUSTSEC-2023-0071 ignore lives in ci.yml for cargo-audit; cargo-deny
-# doesn't see the affected crate after target filtering, so it has no
-# entry here. Add ignores below only when this tool surfaces a finding.
+# while cargo-deny respects the [graph].targets filter above. Add ignores
+# below only when this tool surfaces a finding.
 # ----------------------------------------------------------------------
 [advisories]
 yanked = "deny"
