@@ -256,12 +256,9 @@ jobs:
             ${{ runner.os }}-advisory-db-
 
       - name: Run cargo audit
-        # RUSTSEC-2023-0071 (Marvin timing sidechannel in `rsa` 0.9.x): no
-        # fixed upstream version exists. The `rsa` crate is transitive via
-        # `sqlx-mysql` only, and Solvela uses Postgres (`sqlx-postgres`) —
-        # the vulnerable code path is never reached. Re-evaluate when `rsa`
-        # ships a fix or `sqlx` drops the unused mysql/rsa transitive.
-        run: cargo audit --ignore RUSTSEC-2023-0071
+        # No `--ignore` needed: `sqlx` 0.9 dropped the `rsa` transitive, so
+        # RUSTSEC-2023-0071 no longer applies and the graph is clean.
+        run: cargo audit
 
   smoke-test:
     name: Smoke test (boot gateway + curl endpoints)

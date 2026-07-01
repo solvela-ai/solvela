@@ -28,7 +28,7 @@ A small set of advisories cannot be cleared without a major ecosystem migration.
 |---|---|---|---|
 | RUSTSEC-2024-0436 | `paste` 1.0.15 | unmaintained (info) | Maintainer archived the repo; no upstream fix. Build-time proc-macro transitive via `fastembed → tokenizers` (embedder) and `rav1e → ravif`. Ignored in [`deny.toml`](./deny.toml); not a runtime code path. |
 
-> **Resolved:** RUSTSEC-2023-0071 (`rsa` 0.9.x Marvin timing side-channel) was previously accepted here. `sqlx` 0.9 dropped the `rsa` dependency, so the crate is no longer in the workspace graph and `cargo audit` passes at HEAD without it. The `cargo audit --ignore RUSTSEC-2023-0071` line in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) is now a defensive no-op and can be dropped on the next CI touch.
+> **Resolved:** RUSTSEC-2023-0071 (`rsa` 0.9.x Marvin timing side-channel) was previously accepted here. `sqlx` 0.9 dropped the `rsa` dependency, so the crate is no longer in the workspace graph and `cargo audit` passes at HEAD without it. The `cargo audit --ignore RUSTSEC-2023-0071` line in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) has been removed accordingly.
 
 ### Rust (escrow program — `programs/escrow/Cargo.lock`)
 
