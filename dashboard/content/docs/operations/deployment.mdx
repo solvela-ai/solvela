@@ -65,6 +65,7 @@ RUN cargo build --release --bin solvela-gateway 2>/dev/null || true
 COPY crates/ crates/
 COPY config/ config/
 COPY migrations/ migrations/
+COPY docs/openapi.json docs/openapi.json
 RUN touch crates/protocol/src/lib.rs crates/x402/src/lib.rs crates/router/src/lib.rs crates/gateway/src/lib.rs crates/gateway/src/main.rs
 RUN cargo build --release --bin solvela-gateway
 
@@ -109,7 +110,7 @@ docker run -p 8402:8402 \
   solvela
 ```
 
-The canonical env-var separator is **double underscore** (Fly.io convention; see `crates/gateway/src/main.rs:70`). The legacy single-underscore form (`SOLVELA_SOLANA_RPC_URL`) is also accepted as a fallback so existing deployments keep working.
+The canonical env-var separator is **double underscore** (Fly.io convention; see `crates/gateway/src/main.rs:72`). The legacy single-underscore form (`SOLVELA_SOLANA_RPC_URL`) is also accepted as a fallback so existing deployments keep working.
 
 ## Fly.io Deployment
 

@@ -6,7 +6,7 @@ description: GET /v1/models — list available models with pricing and capabilit
 
 ## GET /v1/models
 
-Returns all available models with pricing, context window size, and capability flags. No payment required.
+Returns all available models — the paid catalog plus the free NVIDIA NIM tier — with pricing, context window size, and capability flags. No payment required.
 
 ```bash
 curl https://api.solvela.ai/v1/models
@@ -47,7 +47,7 @@ curl https://api.solvela.ai/v1/models
 |-------|------|-------------|
 | `id` | string | The model ID to pass in the `model` field of requests |
 | `object` | string | Always `"model"` (OpenAI-compatible discriminator) |
-| `provider` | string | Upstream provider: `openai`, `anthropic`, `google`, `xai`, `deepseek` |
+| `provider` | string | Upstream provider: `openai`, `anthropic`, `google`, `xai`, `deepseek`, `nvidia` |
 | `display_name` | string | Human-readable model name |
 | `context_window` | integer | Maximum tokens in the combined input + output |
 | `pricing.input_per_million` | float | Provider cost per million input tokens, in `pricing.currency` |
@@ -61,7 +61,7 @@ curl https://api.solvela.ai/v1/models
 
 ## Available models
 
-For a full pricing table, see [Pricing](/docs/concepts/pricing).
+The table below is the **paid** catalog across the five marquee providers. Separately, NVIDIA NIM adds a **free tier** of 15 zero-cost Nemotron models (plus 2 paid) — see [Free tier](/docs/concepts/free-tier). The authoritative live list of all models is always `GET /v1/models`; for a full pricing table, see [Pricing](/docs/concepts/pricing).
 
 | Model ID | Provider | Input $/M | Output $/M |
 |----------|----------|-----------|------------|
@@ -75,6 +75,8 @@ For a full pricing table, see [Pricing](/docs/concepts/pricing).
 | `openai/gpt-4.1-mini` | OpenAI | $0.40 | $1.60 |
 | `openai/gpt-4.1-nano` | OpenAI | $0.10 | $0.40 |
 | `openai/gpt-oss-120b` | OpenAI | $0.00 | $0.00 |
+| `anthropic/claude-opus-4-8` | Anthropic | $5.00 | $25.00 |
+| `anthropic/claude-opus-4-7` | Anthropic | $5.00 | $25.00 |
 | `anthropic/claude-opus-4-6` | Anthropic | $5.00 | $25.00 |
 | `anthropic/claude-sonnet-4-6` | Anthropic | $3.00 | $15.00 |
 | `anthropic/claude-sonnet-4-5-20250929` | Anthropic | $3.00 | $15.00 |

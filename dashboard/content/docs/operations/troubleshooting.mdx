@@ -7,7 +7,7 @@ description: Common issues, debug headers, and diagnostics
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Paid chat requests return 500 with `error.type = "internal_error"` and `"all providers failed"` | No upstream provider API key configured for the resolved model's provider | Set at least one matching provider key in `.env` (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`) and restart the gateway |
+| Paid chat requests return 500 with `error.type = "internal_error"` and `"all providers failed"` | No upstream provider API key configured for the resolved model's provider | Set at least one matching provider key in `.env` (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `NVIDIA_API_KEY`) and restart the gateway |
 | 402 response but SDK does not auto-pay | Wallet key env var not set, or read under the wrong name (the CLI reads `SOLANA_WALLET_KEY`; the TypeScript/Python SDK examples read `SOLANA_PRIVATE_KEY` — the env var name is whatever you pass to `Wallet.fromEnv()` / `Wallet.from_env()`) | Set the env var your code reads and verify the value is a base58-encoded Solana keypair |
 | Free-model request served at $0 even with a `PAYMENT-SIGNATURE` header | Using a free model (`google/gemini-3.1-flash-lite`) — zero-cost requests skip the 402 challenge entirely and any payment header is ignored | Expected behavior; no payment is needed for free models |
 | Redis connection refused | Redis not running | Run `docker compose up -d redis` |

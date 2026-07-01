@@ -20,7 +20,7 @@ Operational endpoints — `/health`, `/v1/models`, and `/metrics` — are exempt
 
 ## Free tier vs paid limits
 
-A request is **free** if and only if its quoted cost is exactly `0` atomic USDC — i.e. the resolved model is zero-priced in the registry (currently `openai/gpt-oss-120b` and `google/gemini-3.1-flash-lite`, with `gemini-3.1-flash-lite` being the `free` routing profile's target). Free requests are served at $0 with no `payment-signature` header and never touch the payment path. A payment header sent with a free model is ignored — the quoted amount is `0`, so there is nothing to verify or claim.
+A request is **free** if and only if its quoted cost is exactly `0` atomic USDC — i.e. the resolved model is zero-priced in the registry. The `free` / `oss` / `open` routing profile targets the NVIDIA NIM Nemotron free-tier models (tiered by complexity), and `google/gemini-3.1-flash-lite` and `openai/gpt-oss-120b` are also zero-priced (Gemini 3.1 Flash-Lite is the fallback when NVIDIA NIM is down). Free requests are served at $0 with no `payment-signature` header and never touch the payment path. A payment header sent with a free model is ignored — the quoted amount is `0`, so there is nothing to verify or claim.
 
 Because the free path is anonymous (no payer wallet), its rate-limit identity is the actual TCP peer IP — never a client-supplied header such as `X-Forwarded-For`. Two gates run, in order, before any provider call:
 

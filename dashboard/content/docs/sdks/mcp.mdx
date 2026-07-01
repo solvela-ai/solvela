@@ -10,8 +10,16 @@ The Solvela MCP server exposes the gateway's capabilities as MCP tools, enabling
 
 ## Installation
 
-The MCP server is **not published to npm** today (`package.json` is marked
-`private: true`). Build it from the monorepo:
+The MCP server is published to npm as `@solvela/mcp-server@0.1.0`. Install it
+globally, or run it on demand with `npx`:
+
+```bash
+npm install -g @solvela/mcp-server
+# or, no install:
+npx -y @solvela/mcp-server
+```
+
+Alternatively, build it from the monorepo:
 
 ```bash
 git clone https://github.com/solvela-ai/solvela.git
@@ -57,9 +65,27 @@ or your host's encrypted env-var store over a plaintext shell profile.
 
 ## Claude Desktop integration
 
-Add an entry to `claude_desktop_config.json` that points at your locally-built
-`dist/index.js` (absolute path required — `npx` is not available because the
-package is not on npm):
+Add an entry to `claude_desktop_config.json` that runs the published package via
+`npx`:
+
+```json
+{
+  "mcpServers": {
+    "solvela": {
+      "command": "npx",
+      "args": ["-y", "@solvela/mcp-server"],
+      "env": {
+        "SOLVELA_API_URL": "https://api.solvela.ai",
+        "SOLANA_WALLET_KEY": "<base58-keypair-secret>",
+        "SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com"
+      }
+    }
+  }
+}
+```
+
+If you built from source instead, point `command` at `node` and `args` at the
+absolute path to your locally-built `dist/index.js`:
 
 ```json
 {
@@ -85,6 +111,7 @@ The MCP server exposes the following tools to connected agents:
 |------|-------------|
 | `chat` | Send a prompt to a specific LLM model |
 | `smart_chat` | Send a prompt via the smart router — it auto-selects the model |
+| `web_search` | Search the web and get titled, linked result snippets (always available; no escrow mode required) |
 | `wallet_status` | Check the configured Solana wallet's status and gateway connectivity |
 | `list_models` | List available models with pricing |
 | `spending` | Show USDC spending statistics for the current session |

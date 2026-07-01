@@ -31,7 +31,7 @@ Transaction signatures are tracked to prevent double-spending:
 
 - **Redis (primary)**: `SET NX EX 120` -- if the key already exists, the payment is rejected
 - **In-memory LRU (fallback)**: bounded to 10,000 entries when Redis is unavailable
-- The 120-second TTL exceeds Solana's ~60-second blockhash expiry window
+- The 120-second TTL exceeds Solana's ~90-second blockhash expiry window
 
 <Warning>
 When Redis is unavailable, replay protection uses an in-memory LRU cache. This is a degraded mode -- it cannot protect against replays across gateway restarts or multi-instance deployments. Always use Redis in production.
@@ -52,8 +52,10 @@ Blocked ranges:
 - `172.16.0.0/12` (private)
 - `192.168.0.0/16` (private)
 - `169.254.0.0/16` (link-local)
+- `0.0.0.0/8` ("this" network)
+- `100.64.0.0/10` (CGNAT)
 - `::1` (IPv6 loopback)
-- `fc00::/7` (IPv6 unique local)
+- `fe80::/10` (IPv6 link-local)
 
 ## Rate Limiting
 
@@ -118,6 +120,8 @@ Every response includes:
 | `X-Content-Type-Options` | `nosniff` | Prevents MIME type sniffing |
 | `X-Frame-Options` | `DENY` | Prevents clickjacking |
 | `Referrer-Policy` | `no-referrer` | Prevents referrer leakage |
+| `Content-Security-Policy` | `default-src 'none'` | Blocks all resource loading (always present) |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | Enforces HTTPS (production only) |
 | `X-Solvela-Request-Id` | UUID | Request correlation (always present). The legacy `X-RCR-Request-Id` mirror is also emitted for pre-rebrand clients. |
 
 ## Prompt Guard
