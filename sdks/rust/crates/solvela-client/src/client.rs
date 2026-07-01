@@ -1287,7 +1287,9 @@ mod tests {
                     .unwrap();
                 assert_eq!(sid.len(), 32);
             }
-            PayloadData::Direct(_) => panic!("expected Escrow payload variant"),
+            PayloadData::Direct(_) | PayloadData::Channel(_) => {
+                panic!("expected Escrow payload variant")
+            }
         }
     }
 
@@ -1363,7 +1365,7 @@ mod tests {
 
         let deposit_tx_b64 = match payload.payload {
             PayloadData::Escrow(p) => p.deposit_tx,
-            PayloadData::Direct(_) => panic!("expected Escrow payload"),
+            PayloadData::Direct(_) | PayloadData::Channel(_) => panic!("expected Escrow payload"),
         };
         let tx_bytes = base64::engine::general_purpose::STANDARD
             .decode(&deposit_tx_b64)

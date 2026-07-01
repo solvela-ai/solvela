@@ -180,7 +180,7 @@ pub async fn create_channel(pool: &PgPool, ch: &NewChannel) -> Result<(), Channe
             deposited_atomic, settled_atomic, last_voucher_cumulative_atomic,
             expiry_slot, status, funding_tx_sig)
          VALUES ($1, $2, $3, $4, $5, $6, 0, 0, $7, 'open', $8)
-         ON CONFLICT (funding_tx_sig) DO NOTHING",
+         ON CONFLICT (funding_tx_sig) WHERE funding_tx_sig IS NOT NULL DO NOTHING",
     )
     .bind(&ch.channel_id)
     .bind(&ch.agent_wallet)
