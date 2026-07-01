@@ -26,7 +26,9 @@ A small set of advisories cannot be cleared without a major ecosystem migration.
 
 | ID | Crate | Severity | Reason |
 |---|---|---|---|
-| RUSTSEC-2023-0071 | `rsa` 0.9.x | medium | No upstream fix exists. Transitive via `sqlx-mysql` only; Solvela uses `sqlx-postgres`, so the vulnerable code path is unreachable. Suppressed via `cargo audit --ignore RUSTSEC-2023-0071` in CI with rationale comment. |
+| RUSTSEC-2024-0436 | `paste` 1.0.15 | unmaintained (info) | Maintainer archived the repo; no upstream fix. Build-time proc-macro transitive via `fastembed → tokenizers` (embedder) and `rav1e → ravif`. Ignored in [`deny.toml`](./deny.toml); not a runtime code path. |
+
+> **Resolved:** RUSTSEC-2023-0071 (`rsa` 0.9.x Marvin timing side-channel) was previously accepted here. `sqlx` 0.9 dropped the `rsa` dependency, so the crate is no longer in the workspace graph and `cargo audit` passes at HEAD without it. The `cargo audit --ignore RUSTSEC-2023-0071` line in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) is now a defensive no-op and can be dropped on the next CI touch.
 
 ### Rust (escrow program — `programs/escrow/Cargo.lock`)
 
@@ -62,7 +64,7 @@ The escrow program is built against the Anchor 0.31.1 / Solana SDK 2.2 toolchain
 
 ## Dependency review cadence
 
-- `cargo audit` and `npm audit` run on every PR via GitHub Actions
+- `cargo audit`, `cargo deny` (dependency hygiene), and `npm audit` run on every PR via GitHub Actions
 - Dependabot opens PRs for non-major bumps; major bumps reviewed manually
 - Quarterly review of accepted-and-documented transitive advisories
 

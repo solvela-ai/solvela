@@ -22,7 +22,7 @@ flowchart LR
     Client["Client\nSDK / CLI / MCP"]
     Gateway["Gateway\nAxum + x402 Middleware"]
     Router["Smart Router\n15-dim Scorer"]
-    Provider["Provider\nOpenAI / Anthropic / Google\nxAI / DeepSeek"]
+    Provider["Provider\nOpenAI / Anthropic / Google\nxAI / DeepSeek / NVIDIA"]
     Solana["Solana\nUSDC-SPL"]
     Cache["Redis\nResponse Cache\nReplay Protection"]
     DB["PostgreSQL\nUsage Tracking"]
@@ -43,7 +43,7 @@ flowchart LR
 
 ### Smart Routing
 
-15-dimension rule-based scorer classifies requests into complexity tiers (Simple, Medium, Complex, Reasoning) and maps them to optimal models. microsecond-scale, zero external calls per scoring decision. Routing profiles: `eco`, `auto`, `premium`, `free`. Aliases: `fast`, `cheap`, `smart`, `best`, `reason`, `code`, `creative`, `analyze`.
+15-dimension rule-based scorer classifies requests into complexity tiers (Simple, Medium, Complex, Reasoning) and maps them to optimal models. microsecond-scale, zero external calls per scoring decision. Routing profiles: `eco`, `auto`, `premium`, `free` (with aliases like `cheap`/`budget`, `balanced`/`default`, `best`/`quality`, `oss`/`open`). Model aliases resolve shortcuts to specific models: `opus`, `sonnet`, `haiku`, `gpt5`, `gemini`, `flash`, `grok`, `deepseek`, `reasoner`, `o3-mini`.
 
 ### x402 Payments
 
@@ -51,7 +51,7 @@ USDC-SPL payments on Solana via the x402 protocol. Two payment schemes: direct `
 
 ### Multi-Provider Support
 
-OpenAI, Anthropic, Google, xAI, and DeepSeek. Provider adapters translate between the gateway's OpenAI-compatible format and each provider's native API. Circuit breaker per provider with automatic fallback.
+OpenAI, Anthropic, Google, xAI, DeepSeek, and NVIDIA NIM (a free Nemotron tier plus paid models). Provider adapters translate between the gateway's OpenAI-compatible format and each provider's native API. Circuit breaker per provider with automatic fallback.
 
 ### Service Marketplace
 
@@ -223,6 +223,8 @@ All prices are provider cost in USDC. A 5% platform fee is applied on top. See `
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat (x402 paid) |
+| `POST` | `/v1/messages` | Anthropic-native `/v1/messages` relay — byte-for-byte passthrough for Anthropic-provider models (x402 paid) |
+| `POST` | `/v1/search` | Web search via the service marketplace ($0.01/query + 5% fee, x402 paid) |
 | `POST` | `/v1/images/generations` | OpenAI-compatible image generation (x402 paid) |
 | `POST` | `/v1/services/{id}/proxy` | Proxy to x402-enabled external service |
 | `POST` | `/v1/services/register` | Register external service (admin) |
@@ -315,10 +317,13 @@ The bundled `UnimplementedSigner` is a placeholder — supply a custom `Signer` 
 
 ### MCP (Claude Code)
 
+Published as [`@solvela/mcp-server`](https://www.npmjs.com/package/@solvela/mcp-server). Install with the `solvela` CLI (above) or add it directly:
+
 ```bash
-# Add to your Claude Code MCP config:
-# command: node /path/to/sdks/mcp/dist/index.js
-# Tools: chat, smart_chat, wallet_status, list_models, spending
+# Claude Code MCP config:
+# command: npx
+# args: ["-y", "@solvela/mcp-server"]
+# Tools: chat, smart_chat, web_search, wallet_status, list_models, spending, deposit_escrow
 ```
 
 ---
