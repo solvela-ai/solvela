@@ -18342,12 +18342,12 @@ price_per_request_usdc = 0.01
     /// Seed an OPEN channel ledger row directly.
     ///
     /// Deliberately a raw INSERT rather than `gateway::channels::create_channel`:
-    /// the latter uses `ON CONFLICT (funding_tx_sig)` against migration 016's
-    /// PARTIAL unique index (`WHERE funding_tx_sig IS NOT NULL`), which Postgres
-    /// cannot infer as an arbiter for a plain `ON CONFLICT (col)` — it errors
-    /// 42P10. That is a PRE-EXISTING PR1 defect in the (disabled) `open` route,
-    /// out of scope for this Pass B slice; the draw path under test only needs an
-    /// open row to exist, so we insert one without touching the buggy path.
+    /// the draw path under test only needs an OPEN row to exist, and seeding it
+    /// directly keeps these tests independent of the full open-route deposit
+    /// verification. (`create_channel`'s `ON CONFLICT (funding_tx_sig)` vs the
+    /// migration-016 partial index — a 42P10 arbiter-inference error — was fixed
+    /// in a8a27eb8; it is no longer a reason to avoid the helper, so this stays a
+    /// raw INSERT purely for test minimalism.)
     async fn create_channel(
         pool: &sqlx::PgPool,
         channel_id: [u8; 32],
