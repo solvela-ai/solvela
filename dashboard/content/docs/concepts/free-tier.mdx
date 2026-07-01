@@ -6,7 +6,15 @@ description: Zero-cost requests that skip the 402 challenge — no wallet, no si
 
 The free tier lets you call the gateway with no wallet, no USDC, and no payment signature. When the upfront cost estimate for a request is exactly zero, the gateway skips the entire 402 payment challenge and serves the request at $0. There is nothing to charge, so there is nothing to sign.
 
-The free model is `google/gemini-3.1-flash-lite`, registered with `0.0` input and output cost per million tokens.
+The free tier is a catalog of zero-cost models. The `free` / `oss` / `open` routing profile resolves to NVIDIA NIM **Nemotron** models — each registered with `0.0` input and output cost per million tokens — tiered by request complexity:
+
+| Tier | Model |
+|------|-------|
+| Simple | `nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1` |
+| Medium | `nvidia/nvidia/llama-3.3-nemotron-super-49b-v1` |
+| Complex / Reasoning | `nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1` |
+
+If NVIDIA NIM is unavailable, these degrade to the `$0` `google/gemini-3.1-flash-lite` fallback, so the free tier keeps serving. (The doubled `nvidia/nvidia/` prefix is the real model id: the provider is `nvidia`, and NVIDIA publishes its own models under an `nvidia/` namespace.)
 
 ## How to use it
 
@@ -37,7 +45,7 @@ curl -s https://api.solvela.ai/v1/chat/completions \
   }'
 ```
 
-The `free` profile (aliases: `oss`, `open`) maps every complexity tier — Simple, Medium, Complex, Reasoning — to `google/gemini-3.1-flash-lite`.
+The `free` profile (aliases: `oss`, `open`) maps each complexity tier to an NVIDIA Nemotron `$0` model — Simple → Nemotron Nano 8B, Medium → Nemotron Super 49B, Complex and Reasoning → Nemotron Ultra 253B — with `google/gemini-3.1-flash-lite` as the `$0` fallback when NVIDIA NIM is down.
 
 ## How free-ness is decided
 
@@ -55,7 +63,7 @@ This means free-ness is a property of the **model's price**, not the profile nam
 | What it is | Router feature: resolves `"free"` to a model | Payment feature: serves estimate-`0` requests at $0 |
 | Where it lives | Smart router (model resolution) | Chat handler (payment path) |
 | Trigger | `model` set to `free` / `oss` / `open` | Computed atomic cost estimate is exactly `0` |
-| Effect | Picks `google/gemini-3.1-flash-lite` for every tier | Skips 402, skips payment decode/verify/settlement |
+| Effect | Picks an NVIDIA Nemotron `$0` model per complexity tier (Gemini 3.1 Flash-Lite as fallback) | Skips 402, skips payment decode/verify/settlement |
 
 <Note>
   A `payment-signature` header sent with a free request is ignored — the quoted amount is 0, so there is nothing to verify or claim. The request is served at $0 regardless.
@@ -75,7 +83,7 @@ For comparison, the paid per-client limit defaults to 60 requests per 60s — th
 
 **Per-IP limit.** Keyed on the actual TCP peer IP, never a client-supplied header like `X-Forwarded-For` (which is trivially spoofed). `SOLVELA_FREE_TIER_RATE_LIMIT` overrides only the per-IP value; the "unknown" bucket limit is fixed. Setting the override to `0` is rejected at startup (it would disable all free access) and the default is used instead.
 
-**Global aggregate cap.** The free model is served on Google's free Gemini API tier, whose hard limit is roughly 15 requests/min shared across the gateway's entire API key. Many distinct IPs each under their per-IP cap can still collectively exceed that, so a global counter caps combined free throughput at 12/min by default — leaving headroom so the gateway returns its own clean 429 before Google's leaks through. `SOLVELA_FREE_TIER_GLOBAL_RPM=0` is likewise rejected in favor of the default. (Legacy `RCR_`-prefixed forms of both env vars are accepted as fallbacks.)
+**Global aggregate cap.** The free tier's Gemini fallback is served on Google's free Gemini API tier, whose hard limit is roughly 15 requests/min shared across the gateway's entire API key, so the global cap is sized against that ceiling. Many distinct IPs each under their per-IP cap can still collectively exceed that, so a global counter caps combined free throughput at 12/min by default — leaving headroom so the gateway returns its own clean 429 before Google's leaks through. `SOLVELA_FREE_TIER_GLOBAL_RPM=0` is likewise rejected in favor of the default. (Legacy `RCR_`-prefixed forms of both env vars are accepted as fallbacks.)
 
 The cap counter lives in Redis when configured, so it is shared across gateway instances. Without Redis — or when Redis errors at runtime — it degrades to an in-memory per-instance counter. It never goes unbounded.
 
@@ -108,7 +116,7 @@ A global-cap 429 carries `x-ratelimit-limit: 12` instead. These headers are auth
 
 ## Limitations
 
-- **One model.** The free tier serves `google/gemini-3.1-flash-lite` only. The `free` profile does not pick different models by complexity tier the way `eco`/`auto`/`premium` do.
+- **Free-tier catalog.** The `free` profile tiers across NVIDIA Nemotron `$0` models by complexity (Nano 8B → Super 49B → Ultra 253B), just like `eco`/`auto`/`premium`. Any model priced `$0/$0` in the registry — the NVIDIA Nemotron tier plus `google/gemini-3.1-flash-lite` and `openai/gpt-oss-120b` — takes the zero-cost bypass when named directly.
 - **Tight capacity.** 5 requests/min per IP and 12/min total across all users of the gateway, by default. The free tier is for trying the gateway, not running workloads.
 - **Anonymous, IP-keyed.** Clients behind a shared NAT share one per-IP bucket. There is no per-wallet allowance — paying with a wallet is the way to get the paid limits.
 - **Prompt guard still runs.** Free requests reach a real provider, so they pass the same injection/jailbreak/PII checks as paid requests.

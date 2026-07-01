@@ -12,8 +12,13 @@ export const ESCROW_PROGRAM_ID = '9neDHouXgEgHZDde5Sp'
 // claiming SLA-shaped numbers without one is the kind of statement
 // enterprise procurement will challenge. Re-add with hard data
 // behind them, not before.
+//
+// 'paid models' = the 25 paid models across the 5 marquee providers
+// below (OpenAI/Anthropic/Google/xAI/DeepSeek). The free NVIDIA NIM
+// Nemotron tier (15 zero-cost models) is surfaced as its own callout,
+// not folded into this figure. Full live list: GET /v1/models.
 export const METRICS = [
-  { label: 'models', value: 25, suffix: '+', decimals: 0 },
+  { label: 'paid models', value: 25, suffix: '+', decimals: 0 },
   { label: 'platform fee', value: 5, suffix: '%', decimals: 0 },
 ]
 

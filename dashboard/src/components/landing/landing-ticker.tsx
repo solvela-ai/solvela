@@ -4,7 +4,8 @@ import { useEffect, useRef, useState } from 'react'
 
 const TICKER_ITEMS = [
   'ESCROW · 9neDHouXgEgHZDde5Sp',
-  '25 models · 5 providers',
+  '25 paid models · 5 providers',
+  'free tier · nvidia nim · $0',
   '5% flat fee',
   'mainnet · x402 · usdc-spl',
   'a2a · agent-card · /.well-known',

@@ -1,6 +1,6 @@
 ---
 title: Pricing
-description: Per-token USDC pricing across all 25 models with 5% platform fee
+description: Per-token USDC pricing with a 5% platform fee — the paid model catalog plus a free NVIDIA NIM tier
 ---
 
 
@@ -51,6 +51,8 @@ All prices are USDC per million tokens (provider cost before the 5% fee).
 
 | Model | Model ID | Input ($/M) | Output ($/M) | Context |
 |-------|----------|-------------|--------------|---------|
+| Claude Opus 4.8 | `anthropic/claude-opus-4-8` | $5.00 | $25.00 | 200K |
+| Claude Opus 4.7 | `anthropic/claude-opus-4-7` | $5.00 | $25.00 | 200K |
 | Claude Opus 4.6 | `anthropic/claude-opus-4-6` | $5.00 | $25.00 | 200K |
 | Claude Sonnet 4.6 | `anthropic/claude-sonnet-4-6` | $3.00 | $15.00 | 200K |
 | Claude Sonnet 4.5 | `anthropic/claude-sonnet-4-5-20250929` | $3.00 | $15.00 | 200K |
@@ -81,6 +83,15 @@ All prices are USDC per million tokens (provider cost before the 5% fee).
 | DeepSeek V3.2 Chat | `deepseek/deepseek-chat` | $0.28 | $0.42 | 128K |
 | DeepSeek V3.2 Reasoner | `deepseek/deepseek-reasoner` | $0.28 | $0.42 | 128K |
 | DeepSeek Coder V3 | `deepseek/deepseek-coder` | $0.28 | $0.42 | 128K |
+
+### NVIDIA NIM
+
+The `free` / `oss` / `open` profile routes here. Fifteen Nemotron models are **free** (`$0/$0`) — see [Free tier](/docs/concepts/free-tier) for the per-tier mapping, or `GET /v1/models` for the full list. Two NVIDIA models are paid:
+
+| Model | Model ID | Input ($/M) | Output ($/M) | Context |
+|-------|----------|-------------|--------------|---------|
+| Llama 3.3 Nemotron Super 49B v1.5 | `nvidia/nvidia/llama-3.3-nemotron-super-49b-v1.5` | $0.10 | $0.40 | 128K |
+| NVIDIA Nemotron Nano 9B v2 | `nvidia/nvidia/nvidia-nemotron-nano-9b-v2` | $0.04 | $0.16 | 128K |
 
 <Note>
   These are provider list prices. The actual amount charged includes the 5% platform fee. Always check the `cost_breakdown` in the `402` response for the exact amount you will pay.

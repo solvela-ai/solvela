@@ -37,7 +37,7 @@ protocol (wire types, zero deps)
     └── gateway (Axum HTTP server — the only binary)
             ├── routes/chat/ (completions, cost, payment, provider)
             ├── middleware/ (rate limit, x402, API key, CORS)
-            ├── providers/ (OpenAI, Anthropic, Google, xAI, DeepSeek)
+            ├── providers/ (OpenAI, Anthropic, Google, xAI, DeepSeek, NVIDIA)
             └── a2a/ (Agent-to-Agent protocol adapter)
 ```
 
@@ -110,6 +110,7 @@ The `providers/` module inside `gateway` contains an adapter for each upstream L
 | Google | Gemini 3.1 Pro, Gemini 2.5 Flash, Gemini 3.1 Flash-Lite |
 | xAI | Grok 4 Fast, Grok Code Fast, Grok 3, Grok 3 Mini |
 | DeepSeek | DeepSeek V3.2 Chat, V3.2 Reasoner, Coder V3 |
+| NVIDIA | NIM Nemotron (15 free + 2 paid), Llama 4, Qwen3, DeepSeek-R1, Mistral, MiniMax |
 
 <Tip>
 All providers accept the same OpenAI-compatible request format. Switching models or providers requires only changing the `model` field — no client code changes needed.

@@ -45,12 +45,7 @@ Content-Type: application/json
 
 ```json
 {
-  "hourly_limit": 5.0,
-  "daily_limit": 50.0,
-  "monthly_limit": 500.0,
-  "hourly_spend": 1.25,
-  "daily_spend": 12.50,
-  "monthly_spend": 87.00
+  "updated": true
 }
 ```
 
@@ -63,7 +58,18 @@ GET /v1/orgs/018f1a2b-.../teams/019c3d4e-.../budget
 Authorization: Bearer <admin-token | solvela_k_...>
 ```
 
-Response shape is the same as the set response above.
+**Response** — `200 OK`
+
+```json
+{
+  "hourly_limit": 5.0,
+  "daily_limit": 50.0,
+  "monthly_limit": 500.0,
+  "hourly_spend": 1.25,
+  "daily_spend": 12.50,
+  "monthly_spend": 87.00
+}
+```
 
 ## Org budget rollup
 
