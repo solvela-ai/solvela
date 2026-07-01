@@ -969,6 +969,15 @@ pub(crate) async fn chat_completions_inner(
             let tx_raw = match &payload.payload {
                 solvela_x402::types::PayloadData::Direct(p) => &p.transaction,
                 solvela_x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
+                // Fail-closed: the chat endpoint never accepts a channel voucher
+                // (the `channel` scheme is rejected at `from_accepted_str` above;
+                // this arm is only reachable via a `scheme`/payload mismatch such
+                // as `scheme="exact"` + a channel payload). Reject, never panic.
+                solvela_x402::types::PayloadData::Channel(_) => {
+                    return Err(GatewayError::InvalidPayment(
+                        "channel scheme is not accepted on this endpoint".to_string(),
+                    ));
+                }
             };
 
             // Detect durable nonce to set appropriate replay TTL.

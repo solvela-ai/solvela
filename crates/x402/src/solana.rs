@@ -241,12 +241,20 @@ impl SolanaVerifier {
             "verifying solana payment"
         );
 
-        // Extract the direct payload variant — reject escrow payloads
+        // Extract the direct payload variant — reject escrow/channel payloads
         let solana_payload = match &payload.payload {
             PayloadData::Direct(p) => p,
             PayloadData::Escrow(_) => {
                 return Err(Error::PayloadMismatch(
                     "SolanaVerifier received escrow payload; expected direct".to_string(),
+                ));
+            }
+            // Fail-closed: the exact verifier never handles channel vouchers.
+            // Reachable only on an adversarial scheme/payload mismatch — an
+            // error, never a panic.
+            PayloadData::Channel(_) => {
+                return Err(Error::PayloadMismatch(
+                    "SolanaVerifier received channel payload; expected direct".to_string(),
                 ));
             }
         };
@@ -443,6 +451,12 @@ impl PaymentVerifier for SolanaVerifier {
             PayloadData::Escrow(_) => {
                 return Err(Error::PayloadMismatch(
                     "SolanaVerifier received escrow payload; expected direct".to_string(),
+                ));
+            }
+            // Fail-closed: the exact verifier never settles channel vouchers.
+            PayloadData::Channel(_) => {
+                return Err(Error::PayloadMismatch(
+                    "SolanaVerifier received channel payload; expected direct".to_string(),
                 ));
             }
         };

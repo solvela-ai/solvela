@@ -96,6 +96,12 @@ impl PaymentVerifier for EscrowVerifier {
                     "EscrowVerifier received direct payload; expected escrow".to_string(),
                 ));
             }
+            // Fail-closed: the escrow verifier never handles channel vouchers.
+            PayloadData::Channel(_) => {
+                return Err(Error::PayloadMismatch(
+                    "EscrowVerifier received channel payload; expected escrow".to_string(),
+                ));
+            }
         };
 
         // Decode service_id from base64
@@ -374,6 +380,12 @@ impl PaymentVerifier for EscrowVerifier {
             PayloadData::Direct(_) => {
                 return Err(Error::PayloadMismatch(
                     "EscrowVerifier received direct payload; expected escrow".to_string(),
+                ));
+            }
+            // Fail-closed: the escrow verifier never settles channel vouchers.
+            PayloadData::Channel(_) => {
+                return Err(Error::PayloadMismatch(
+                    "EscrowVerifier received channel payload; expected escrow".to_string(),
                 ));
             }
         };

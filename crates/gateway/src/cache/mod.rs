@@ -61,6 +61,25 @@ const A2A_SETTLE_LOCK_PREFIX: &str = "solvela:a2a:settle_lock:";
 /// legitimate retry inside the task's own lifetime rather than being stranded.
 pub const A2A_SETTLE_LOCK_TTL_SECS: u64 = 120;
 
+/// Redis key prefix for the v0 spend-down channel per-DRAW lock.
+///
+/// One key per `channel_id`, **distinct from the A2A `task_id` namespace**
+/// ([`A2A_SETTLE_LOCK_PREFIX`]) so the two lock domains can never collide. Held
+/// across a single channel draw (`load state → verify_voucher → serve →
+/// persist_voucher_and_advance`) so only one draw per channel is in flight —
+/// the concurrent same-base-voucher double-spend guard (channel scope R6).
+const CHANNEL_DRAW_LOCK_PREFIX: &str = "solvela:channel:draw_lock:";
+
+/// TTL (seconds) for the channel per-draw lock — the **crash backstop ONLY**.
+///
+/// Unlike the A2A settle lock (held-on-success to block re-settle), the channel
+/// draw lock is RELEASED immediately after every draw (success AND failure —
+/// see [`ResponseCache::release_channel_draw_lock`]), so the TTL is never the
+/// steady-state release: it only bounds a holder that crashed mid-draw. 120s
+/// matches the standard-tx replay window; the next sequential draw on the same
+/// channel proceeds at once on the explicit release, never waiting out this TTL.
+pub const CHANNEL_DRAW_LOCK_TTL_SECS: u64 = 120;
+
 /// Redis key prefix for the cross-instance aggregate free-tier RPM counter.
 /// The full key is `free_tier:global_rpm:<epoch_minute>` (see
 /// [`ResponseCache::incr_global_free_window`]).
@@ -335,6 +354,71 @@ impl ResponseCache {
                 task_id,
                 error = %e,
                 "A2A settlement lock release failed — lock will expire via TTL"
+            );
+        }
+    }
+
+    /// Atomically acquire the v0 spend-down channel per-DRAW lock.
+    ///
+    /// Uses `SET key 1 NX EX <ttl>` — the same atomic, cross-instance
+    /// compare-and-swap idiom as [`Self::acquire_settle_lock`] /
+    /// [`Self::check_and_record_tx`], keyed under the channel-distinct
+    /// [`CHANNEL_DRAW_LOCK_PREFIX`]. Returns:
+    /// - `Ok(true)`  — lock newly acquired (this caller is the sole drawer),
+    /// - `Ok(false)` — a concurrent draw on the same channel holds it (caller
+    ///   MUST reject without serving — the double-spend guard),
+    /// - `Err(_)`    — Redis was unreachable or the command failed.
+    ///
+    /// On `Err` the caller MUST fail closed (refuse the draw): there is
+    /// deliberately **no in-memory fallback** — an in-memory lock cannot
+    /// serialise across gateway instances, which is exactly the multi-instance
+    /// race this lock prevents. Channels require Redis for the draw.
+    pub async fn acquire_channel_draw_lock(&self, channel_id: &str) -> Result<bool, CacheError> {
+        let key = format!("{CHANNEL_DRAW_LOCK_PREFIX}{channel_id}");
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))?;
+
+        // SET key 1 NX EX <ttl> — sets (and returns Some) only if the key does
+        // NOT already exist. `None` means a concurrent draw holds it.
+        let result: Option<String> = redis::cmd("SET")
+            .arg(&key)
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(CHANNEL_DRAW_LOCK_TTL_SECS)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))?;
+
+        Ok(result.is_some())
+    }
+
+    /// Release the v0 spend-down channel per-draw lock.
+    ///
+    /// Best-effort `DEL`. **Called on BOTH the happy path AND every failure**
+    /// (the OPPOSITE of the A2A settle lock, which holds on success to block
+    /// re-settle): a channel needs the next sequential draw to proceed at once,
+    /// so the lock is released the moment a draw finishes, and the
+    /// [`CHANNEL_DRAW_LOCK_TTL_SECS`] TTL is only the crash backstop. A failed
+    /// `DEL` degrades to TTL-based release, so the error is logged/metered, not
+    /// propagated (a lost release only delays the next draw up to the TTL).
+    pub async fn release_channel_draw_lock(&self, channel_id: &str) {
+        // ponytail: unconditional DEL, no per-holder token guard — a crashed
+        // holder's TTL-expired lock re-acquired by a second drawer could be
+        // DEL'd by the first if it un-hangs, but the DB `UNIQUE(channel_id,
+        // cumulative)` is the double-spend backstop and the loss is bounded.
+        // Add a value-token CAS (release only if we still own it) together with
+        // the same upgrade to `release_settle_lock`, not piecemeal here.
+        let key = format!("{CHANNEL_DRAW_LOCK_PREFIX}{channel_id}");
+        if let Err(e) = self.del_raw(&key).await {
+            metrics::counter!("solvela_channel_draw_lock_release_failed_total").increment(1);
+            warn!(
+                channel_id,
+                error = %e,
+                "channel draw lock release failed — lock will expire via TTL"
             );
         }
     }

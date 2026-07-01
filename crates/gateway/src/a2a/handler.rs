@@ -584,6 +584,16 @@ async fn handle_payment_submitted(
         let tx_raw = match &payload.payload {
             solvela_x402::types::PayloadData::Direct(p) => &p.transaction,
             solvela_x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
+            // Fail-closed: A2A is a protocol adapter (CLAUDE.md #14) with no
+            // channel-voucher path — reject a channel payload, never panic. This
+            // is the site that compile-forces the A2A channel decision.
+            solvela_x402::types::PayloadData::Channel(_) => {
+                return Err(JsonRpcErrorData {
+                    code: ERR_PAYMENT_FAILED,
+                    message: "channel scheme is not accepted on this endpoint".to_string(),
+                    data: None,
+                });
+            }
         };
 
         let is_durable_nonce = crate::routes::chat::uses_durable_nonce(tx_raw);

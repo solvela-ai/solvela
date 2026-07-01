@@ -19,6 +19,14 @@ pub fn extract_payer_wallet(payload: &solvela_x402::types::PaymentPayload) -> St
             // Decode base64 transaction and extract first signer (fee payer)
             extract_signer_from_base64_tx(&p.transaction).unwrap_or_else(|| "unknown".to_string())
         }
+        // A channel voucher carries no `agent_pubkey`/tx, so it has no payer to
+        // extract here — return the same "unknown" extraction-failure sentinel.
+        // ponytail: this is NEVER the channel attribution source. The channel
+        // draw path sources its wallet from `ChannelRow.agent_wallet` (the DB
+        // row), so "unknown" here can only ever feed non-authoritative
+        // spend/metric labels and must keep failing closed downstream (e.g. the
+        // #499 require_tenant gate treats "unknown" as not-tenant-provisioned).
+        solvela_x402::types::PayloadData::Channel(_) => "unknown".to_string(),
     }
 }
 

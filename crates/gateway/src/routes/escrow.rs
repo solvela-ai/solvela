@@ -79,7 +79,11 @@ pub async fn escrow_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
 /// Uses a check-then-act pattern so the `Mutex` is never held across the
 /// async RPC call. Two concurrent callers may both fetch on a cache miss —
 /// this is benign for a cache.
-async fn fetch_cached_slot(state: &AppState) -> Option<u64> {
+///
+/// `pub(crate)` so the v0 spend-down channel draw (`routes/search.rs`) can
+/// source `current_slot` for `verify_voucher`'s expiry check RPC-free on the
+/// hot path (no per-call `getSlot`), fail-closed to a 503 on `None`.
+pub(crate) async fn fetch_cached_slot(state: &AppState) -> Option<u64> {
     let cache = &state.slot_cache;
 
     // 1. Acquire lock, read cached value, release immediately

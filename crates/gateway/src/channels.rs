@@ -251,22 +251,39 @@ pub async fn load_channel(
     }))
 }
 
-/// Load a [`ChannelState`] for the draw path: only `status='open'` channels are
-/// drawable, so a closed/closing channel returns `None` (the draw is refused).
+/// An open channel ready to be drawn: the verifier's [`ChannelState`] plus the
+/// DB-sourced `agent_wallet`.
+///
+/// `agent_wallet` is carried alongside because a channel voucher itself has NO
+/// `agent_pubkey`/tx (unlike an escrow payload), so the draw path MUST source
+/// the wallet — for the #499 `require_tenant` gate and the spend/receipt
+/// attribution — from the persistent ledger row, never from the voucher or
+/// `extract_payer_wallet` (which returns `"unknown"` for a voucher). See channel
+/// scope §3.13 / HALT 7.
+#[derive(Debug, Clone)]
+pub struct DrawableChannel {
+    pub state: ChannelState,
+    pub agent_wallet: String,
+}
+
+/// Load a [`DrawableChannel`] for the draw path: only `status='open'` channels
+/// are drawable, so a closed/closing channel returns `None` (the draw is
+/// refused).
 ///
 /// The persistent ledger fields are read from the row; `expected_request_digest`
 /// is supplied by the caller (the digest of the request actually being served),
 /// so the verifier can bind the voucher to this request. The 32-byte
 /// `channel_id` and `session_key` are base58-decoded — a corrupt encoding is a
-/// hard error, never a silently-empty key.
+/// hard error, never a silently-empty key. The DB-sourced `agent_wallet` is
+/// returned alongside for attribution (see [`DrawableChannel`]).
 pub async fn load_open_channel_state(
     pool: &PgPool,
     channel_id: &str,
     expected_request_digest: [u8; 32],
-) -> Result<Option<ChannelState>, ChannelRepoError> {
-    let row: Option<(String, i64, i64, i64, String)> = sqlx::query_as(
+) -> Result<Option<DrawableChannel>, ChannelRepoError> {
+    let row: Option<(String, i64, i64, i64, String, String)> = sqlx::query_as(
         "SELECT channel_id, deposited_atomic, settled_atomic,
-                last_voucher_cumulative_atomic, session_key
+                last_voucher_cumulative_atomic, session_key, agent_wallet
            FROM channels
           WHERE channel_id = $1 AND status = 'open'",
     )
@@ -274,7 +291,8 @@ pub async fn load_open_channel_state(
     .fetch_optional(pool)
     .await?;
 
-    let Some((channel_id_b58, deposited, settled, last, session_key_b58)) = row else {
+    let Some((channel_id_b58, deposited, settled, last, session_key_b58, agent_wallet)) = row
+    else {
         return Ok(None);
     };
 
@@ -283,13 +301,16 @@ pub async fn load_open_channel_state(
     let session_key = solvela_x402::escrow::pda::decode_bs58_pubkey(&session_key_b58)
         .map_err(|_| ChannelRepoError::BadSessionKey)?;
 
-    Ok(Some(ChannelState {
-        channel_id,
-        deposited_atomic: i64_to_atomic(deposited)?,
-        settled_atomic: i64_to_atomic(settled)?,
-        last_cumulative_atomic: i64_to_atomic(last)?,
-        session_key,
-        expected_request_digest,
+    Ok(Some(DrawableChannel {
+        state: ChannelState {
+            channel_id,
+            deposited_atomic: i64_to_atomic(deposited)?,
+            settled_atomic: i64_to_atomic(settled)?,
+            last_cumulative_atomic: i64_to_atomic(last)?,
+            session_key,
+            expected_request_digest,
+        },
+        agent_wallet,
     }))
 }
 
@@ -636,14 +657,18 @@ mod tests {
         .unwrap();
 
         let digest = [0x66; 32];
-        let state = load_open_channel_state(&pool, &cid, digest)
+        let drawable = load_open_channel_state(&pool, &cid, digest)
             .await
             .unwrap()
             .expect("open channel state");
+        let state = &drawable.state;
         assert_eq!(state.deposited_atomic, 50_000);
         assert_eq!(state.settled_atomic, 0);
         assert_eq!(state.last_cumulative_atomic, 0);
         assert_eq!(state.expected_request_digest, digest);
+        // The agent_wallet is DB-sourced (channel attribution never comes from
+        // the voucher) — here it is the fixture's `some_pubkey()`.
+        assert_eq!(drawable.agent_wallet, some_pubkey());
         // channel_id bytes round-trip through base58.
         assert_eq!(bs58::encode(state.channel_id).into_string(), cid);
 

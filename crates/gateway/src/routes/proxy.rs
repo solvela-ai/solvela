@@ -471,6 +471,14 @@ pub async fn proxy_service(
     let tx_raw = match &payload.payload {
         solvela_x402::types::PayloadData::Direct(p) => &p.transaction,
         solvela_x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
+        // Fail-closed: the service-marketplace proxy never accepts a channel
+        // voucher (a third paid route; reject channel like search/a2a).
+        // Reachable only via a scheme/payload mismatch — an error, never a panic.
+        solvela_x402::types::PayloadData::Channel(_) => {
+            return Err(GatewayError::InvalidPayment(
+                "channel scheme is not accepted on this endpoint".to_string(),
+            ));
+        }
     };
 
     let is_durable_nonce = crate::routes::chat::uses_durable_nonce(tx_raw);
@@ -601,6 +609,13 @@ pub async fn proxy_service(
     let tx_signature = match &payload.payload {
         solvela_x402::types::PayloadData::Direct(p) => Some(p.transaction.clone()),
         solvela_x402::types::PayloadData::Escrow(p) => Some(p.deposit_tx.clone()),
+        // Fail-closed: unreachable here (a channel voucher is rejected at the
+        // `tx_raw` extraction above, before settlement) — reject, never panic.
+        solvela_x402::types::PayloadData::Channel(_) => {
+            return Err(GatewayError::InvalidPayment(
+                "channel scheme is not accepted on this endpoint".to_string(),
+            ));
+        }
     };
 
     // Extract request ID for traceability

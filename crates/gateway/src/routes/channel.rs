@@ -103,6 +103,16 @@ pub enum ChannelCloseError {
 ///
 /// Never returns more than `deposited - last_voucher_cumulative`; an underflow
 /// (`last > deposited`) is a corrupt-state hard error, never a wrapped amount.
+///
+/// ponytail: UNCHANGED in Pass B and correct for `/v1/search`, where
+/// `quote == actual == realized == last`, so `deposited - last` IS already
+/// `deposited - realized`. The DEFERRED refund-disbursement slice MUST move
+/// this to `deposited - realized` with a NEW *synchronous* `realized` counter —
+/// NEVER `deposited - settled` (re-opens the A1 over-refund money-loss;
+/// `settled` lags at ~0 in v0) and NEVER ship a USDC disbursement on
+/// `deposited - last` (strands the quote-vs-realized gap = #600). See channel
+/// scope §0.2 / HALT 2. This close still moves NO money in v0 (it only records
+/// the obligation), so the formula is a displayed figure, not a disbursement.
 pub fn compute_refundable(
     deposited_atomic: u64,
     last_voucher_cumulative_atomic: u64,
@@ -187,6 +197,107 @@ pub fn authorize_close(
             Err(CloseAuthError::BadSignature)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// v0 spend-down channel DRAW helpers (Pass B) — pure, no DB/HTTP
+// ---------------------------------------------------------------------------
+
+/// The canonical `request_digest` bound into a channel voucher:
+/// **`SHA-256(raw request body bytes, exactly as received)`**.
+///
+/// The SDK signs what it *sends* — the raw bytes — so the raw bytes are the one
+/// preimage both parties reproduce. This deliberately does NOT reuse the
+/// wallet-agnostic response-cache normalization (`cache/exact.rs`), which merges
+/// byte-different-but-semantically-equal requests: for a voucher that would be
+/// wrong (the voucher must bind to THE specific request, not a class of them).
+/// Golden-vector-pinned below so a one-byte SDK↔gateway disagreement is caught
+/// in test, not by fail-closing every draw. See channel scope §4.3.
+pub fn request_digest(body: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(body);
+    hasher.finalize().into()
+}
+
+/// Why a channel voucher payload could not be decoded into a verifiable
+/// [`solvela_x402::channel::Voucher`]. Every variant is a hard, fail-closed
+/// client error (400) — a malformed credential is never silently coerced.
+#[derive(Debug, thiserror::Error)]
+pub enum ChannelDrawError {
+    /// `channel_id` is not a base58-encoded 32-byte value.
+    #[error("voucher channel_id must be a base58-encoded 32-byte value")]
+    MalformedChannelId,
+    /// `request_digest` is not base64 of exactly 32 bytes.
+    #[error("voucher request_digest must be base64 of exactly 32 bytes")]
+    MalformedRequestDigest,
+    /// `signature` is not base64 of exactly 64 bytes.
+    #[error("voucher signature must be base64 of exactly 64 bytes")]
+    MalformedSignature,
+    /// `nonce` exceeds `i64::MAX` — unstorable in the BIGINT ledger.
+    #[error("voucher nonce exceeds the storable range")]
+    MalformedNonce,
+    /// `expiry_slot` exceeds `i64::MAX` — unstorable in the BIGINT ledger.
+    #[error("voucher expiry_slot exceeds the storable range")]
+    MalformedExpirySlot,
+}
+
+/// Decode a wire [`solvela_x402::types::ChannelVoucherPayload`] into the frozen
+/// [`solvela_x402::channel::Voucher`] the verifier consumes, fail-closed on any
+/// malformed field.
+///
+/// The base58 `channel_id` and base64 `request_digest`/`signature` are decoded
+/// to their fixed-width byte arrays (wrong length ⇒ hard error, never truncated
+/// or zero-padded). The bare `u64` scalars `nonce`/`expiry_slot` are
+/// **range-guarded to `i64::MAX`** here — the CRITICAL guard: `verify_voucher`
+/// does NOT range-check `nonce`, and `expiry_slot = u64::MAX` passes its expiry
+/// rule, so an unchecked value would VERIFY and SERVE, then fail
+/// `persist_voucher_and_advance`'s `i64` (BIGINT) conversion → `last` never
+/// advances → the SAME voucher (`cumulative = 0 + billed`) replays free forever.
+/// Rejecting here (before the lock and before any serve) closes that
+/// unbounded-free-draw hole. (`cumulative_atomic` needs no guard — `verify_voucher`
+/// rule 7 caps it at `deposited`, itself a stored `i64`.)
+///
+/// This performs NO signature verification — the caller runs
+/// [`solvela_x402::channel::verify_voucher`], which authenticates the signature
+/// before any signed field is trusted.
+pub fn voucher_from_payload(
+    v: &solvela_x402::types::ChannelVoucherPayload,
+) -> Result<solvela_x402::channel::Voucher, ChannelDrawError> {
+    let channel_id = solvela_x402::escrow::pda::decode_bs58_pubkey(&v.channel_id)
+        .map_err(|_| ChannelDrawError::MalformedChannelId)?;
+
+    // BIGINT-storability guards (see the fn doc): reject before any serve so a
+    // voucher that could never persist can never be served-then-replayed.
+    if i64::try_from(v.nonce).is_err() {
+        return Err(ChannelDrawError::MalformedNonce);
+    }
+    if i64::try_from(v.expiry_slot).is_err() {
+        return Err(ChannelDrawError::MalformedExpirySlot);
+    }
+
+    let digest_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&v.request_digest)
+        .map_err(|_| ChannelDrawError::MalformedRequestDigest)?;
+    let request_digest: [u8; 32] = digest_bytes
+        .try_into()
+        .map_err(|_| ChannelDrawError::MalformedRequestDigest)?;
+
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&v.signature)
+        .map_err(|_| ChannelDrawError::MalformedSignature)?;
+    let signature: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| ChannelDrawError::MalformedSignature)?;
+
+    Ok(solvela_x402::channel::Voucher {
+        channel_id,
+        cumulative_atomic: v.cumulative_atomic,
+        expiry_slot: v.expiry_slot,
+        nonce: v.nonce,
+        request_digest,
+        signature,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -596,10 +707,12 @@ fn fresh_channel_id() -> String {
     bs58::encode(bytes).into_string()
 }
 
-/// 404 Not Found: the channel scheme is unavailable (disabled by config or no DB
-/// pool). Same body as the no-DB path so the two are indistinguishable to a
-/// caller — the scheme is simply not offered here.
-fn channel_not_available() -> axum::response::Response {
+/// 404 Not Found: the channel scheme is unavailable (disabled by config, no DB
+/// pool, or — for the draw fork — no Redis). Same body on every unavailable
+/// reason so the two are indistinguishable to a caller: the scheme is simply
+/// not offered here. `pub(crate)` so the search-route draw fork returns the
+/// identical 404, uniform with `open`/`close`.
+pub(crate) fn channel_not_available() -> axum::response::Response {
     (
         StatusCode::NOT_FOUND,
         Json(json!({ "error": "channel not available" })),
@@ -835,5 +948,128 @@ mod tests {
             "status must be closing, never closed"
         );
         assert_eq!(v["refundable_atomic"], 37_400);
+    }
+
+    // -- request_digest: byte-exact golden vector --------------------------
+
+    /// `request_digest` = `SHA-256(raw request body)`, pinned to a fixed body so
+    /// a one-byte SDK↔gateway disagreement is caught here, not by fail-closing
+    /// every draw. The expected value was computed INDEPENDENTLY of this
+    /// function (`printf '%s' '{"query":"solana x402"}' | sha256sum`), so it
+    /// re-derives the layout, not this code's output. See channel scope §4.3.
+    #[test]
+    fn request_digest_matches_golden_vector() {
+        let body = br#"{"query":"solana x402"}"#;
+        // 9efc2adccccf39e642e803716d2e387685d3b8a31d289ec3326818cbe0df5b3f
+        let expected: [u8; 32] = [
+            0x9e, 0xfc, 0x2a, 0xdc, 0xcc, 0xcf, 0x39, 0xe6, 0x42, 0xe8, 0x03, 0x71, 0x6d, 0x2e,
+            0x38, 0x76, 0x85, 0xd3, 0xb8, 0xa3, 0x1d, 0x28, 0x9e, 0xc3, 0x32, 0x68, 0x18, 0xcb,
+            0xe0, 0xdf, 0x5b, 0x3f,
+        ];
+        assert_eq!(
+            request_digest(body),
+            expected,
+            "request_digest bytes drifted from the pinned golden vector"
+        );
+        // A one-byte change in the body yields a different digest (binds to THE
+        // specific request, not a normalized class of them).
+        assert_ne!(request_digest(br#"{"query":"solana x403"}"#), expected);
+    }
+
+    // -- voucher_from_payload: decode + fail-closed ------------------------
+
+    fn channel_voucher_payload(
+        channel_id: [u8; 32],
+        request_digest: [u8; 32],
+        signature: [u8; 64],
+    ) -> solvela_x402::types::ChannelVoucherPayload {
+        solvela_x402::types::ChannelVoucherPayload {
+            channel_id: bs58::encode(channel_id).into_string(),
+            cumulative_atomic: 12_600,
+            expiry_slot: 1_000_750,
+            nonce: 42,
+            request_digest: B64.encode(request_digest),
+            signature: B64.encode(signature),
+        }
+    }
+
+    #[test]
+    fn voucher_from_payload_decodes_valid() {
+        let payload = channel_voucher_payload([0x11; 32], [0x22; 32], [0x33; 64]);
+        let voucher = voucher_from_payload(&payload).expect("valid payload decodes");
+        assert_eq!(voucher.channel_id, [0x11; 32]);
+        assert_eq!(voucher.request_digest, [0x22; 32]);
+        assert_eq!(voucher.signature, [0x33; 64]);
+        assert_eq!(voucher.cumulative_atomic, 12_600);
+        assert_eq!(voucher.expiry_slot, 1_000_750);
+        assert_eq!(voucher.nonce, 42);
+    }
+
+    #[test]
+    fn voucher_from_payload_fails_closed_on_malformed_fields() {
+        // Bad base58 channel_id.
+        let mut p = channel_voucher_payload([0x11; 32], [0x22; 32], [0x33; 64]);
+        p.channel_id = "not base58 0OIl".to_string();
+        assert!(matches!(
+            voucher_from_payload(&p),
+            Err(ChannelDrawError::MalformedChannelId)
+        ));
+
+        // request_digest that is valid base64 but the WRONG length (16 bytes).
+        let mut p = channel_voucher_payload([0x11; 32], [0x22; 32], [0x33; 64]);
+        p.request_digest = B64.encode([0u8; 16]);
+        assert!(matches!(
+            voucher_from_payload(&p),
+            Err(ChannelDrawError::MalformedRequestDigest)
+        ));
+
+        // signature that is valid base64 but the WRONG length (32 bytes).
+        let mut p = channel_voucher_payload([0x11; 32], [0x22; 32], [0x33; 64]);
+        p.signature = B64.encode([0u8; 32]);
+        assert!(matches!(
+            voucher_from_payload(&p),
+            Err(ChannelDrawError::MalformedSignature)
+        ));
+
+        // Non-base64 signature.
+        let mut p = channel_voucher_payload([0x11; 32], [0x22; 32], [0x33; 64]);
+        p.signature = "!!! not base64 !!!".to_string();
+        assert!(matches!(
+            voucher_from_payload(&p),
+            Err(ChannelDrawError::MalformedSignature)
+        ));
+
+        // BLOCKER guard: nonce > i64::MAX would verify + serve, then fail the
+        // BIGINT persist → last never advances → free replay forever. Reject.
+        let mut p = channel_voucher_payload([0x11; 32], [0x22; 32], [0x33; 64]);
+        p.nonce = u64::MAX;
+        assert!(matches!(
+            voucher_from_payload(&p),
+            Err(ChannelDrawError::MalformedNonce)
+        ));
+        // Exactly i64::MAX is fine (storable); i64::MAX + 1 is not.
+        let mut p = channel_voucher_payload([0x11; 32], [0x22; 32], [0x33; 64]);
+        p.nonce = i64::MAX as u64;
+        assert!(voucher_from_payload(&p).is_ok());
+        p.nonce = i64::MAX as u64 + 1;
+        assert!(matches!(
+            voucher_from_payload(&p),
+            Err(ChannelDrawError::MalformedNonce)
+        ));
+
+        // Same guard on expiry_slot, symmetric boundary cases with nonce.
+        let mut p = channel_voucher_payload([0x11; 32], [0x22; 32], [0x33; 64]);
+        p.expiry_slot = u64::MAX;
+        assert!(matches!(
+            voucher_from_payload(&p),
+            Err(ChannelDrawError::MalformedExpirySlot)
+        ));
+        p.expiry_slot = i64::MAX as u64;
+        assert!(voucher_from_payload(&p).is_ok());
+        p.expiry_slot = i64::MAX as u64 + 1;
+        assert!(matches!(
+            voucher_from_payload(&p),
+            Err(ChannelDrawError::MalformedExpirySlot)
+        ));
     }
 }

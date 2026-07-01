@@ -203,13 +203,74 @@ pub struct EscrowPayload {
     pub agent_pubkey: String,
 }
 
-/// Union of direct-transfer and escrow payment payloads.
-/// Uses untagged deserialization — EscrowPayload is tried first (it has
-/// more fields), falling back to SolanaPayload for "exact" scheme clients.
+/// v0 spend-down channel voucher payload (scheme = "channel").
+///
+/// The credential presented on a per-call channel DRAW: a cumulative voucher
+/// signed by the channel's `session_key`. Mirrors [`EscrowPayload`] as the
+/// wire-envelope for a distinct scheme — the SIGNED object is the frozen
+/// `solvela_x402::channel::Voucher` (golden-vector-pinned via
+/// `GOLDEN_VECTOR_B64`); this struct is only its base58/base64 wire encoding.
+///
+/// `deny_unknown_fields`: like [`EscrowPayload`], strict rejection lets the
+/// parent `untagged` enum disambiguate a channel voucher (field set disjoint
+/// from both Escrow's `deposit_tx`/`service_id`/`agent_pubkey` and Direct's
+/// `transaction`) rather than silently picking a variant.
+///
+/// This is a cross-repo wire contract (the PR6 SDK signer round-trips it); its
+/// JSON shape is golden-vectored the same way `EscrowPayload` is.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelVoucherPayload {
+    /// base58 of the 32-byte channel id the voucher signs over.
+    pub channel_id: String,
+    /// Signed running fee-inclusive total for this channel (atomic micro-USDC),
+    /// monotonic non-decreasing = `last_cumulative + this call's billed`.
+    pub cumulative_atomic: u64,
+    /// Slot at which the voucher expires.
+    pub expiry_slot: u64,
+    /// Per-draw audit/correlation sequence number. NOT enforced for uniqueness —
+    /// the monotonic `cumulative_atomic` advance + the gateway's per-channel lock
+    /// are the replay guard, not this field.
+    pub nonce: u64,
+    /// base64 of the 32-byte SHA-256 of the RAW request body this voucher pays
+    /// for (bound by the signature).
+    pub request_digest: String,
+    /// base64 of the 64-byte ed25519 signature over the canonical voucher
+    /// message, verified against the channel's `session_key`.
+    pub signature: String,
+}
+
+/// Byte-exact JSON of a [`ChannelVoucherPayload`] for a fixed input — the
+/// cross-repo HEADER wire contract, pinned like the signed voucher message's
+/// `solvela_x402::channel::GOLDEN_VECTOR_B64`. A field rename/reorder becomes a
+/// BUILD failure here, not a draw-time SDK break. Serde emits struct fields in
+/// declaration order; because [`PayloadData`] is `untagged`, the enum serializes
+/// IDENTICALLY to the inner payload (asserted alongside). DO NOT hand-edit.
+pub const CHANNEL_VOUCHER_PAYLOAD_GOLDEN_JSON: &str = r#"{"channel_id":"cid","cumulative_atomic":12600,"expiry_slot":1000750,"nonce":42,"request_digest":"ZA==","signature":"c2ln"}"#;
+
+/// Union of direct-transfer, escrow, and channel-voucher payment payloads.
+///
+/// `#[serde(untagged)]`: deserialization tries each variant in declaration
+/// order and takes the first that succeeds. Order does NOT affect correctness
+/// here — all three are `deny_unknown_fields` with DISJOINT required field sets
+/// (Escrow `{deposit_tx, service_id, agent_pubkey}` has FEWER fields than
+/// Channel `{channel_id, cumulative_atomic, expiry_slot, nonce, request_digest,
+/// signature}`, and Direct is just `{transaction}`), so any given object matches
+/// AT MOST one variant regardless of order.
+///
+/// LANDMINE: this soundness depends on serde's `deny_unknown_fields` +
+/// `untagged` interaction (serde-rs/serde#1546). The `Cargo.lock` serde version
+/// is load-bearing; a serde upgrade that changed untagged/deny_unknown_fields
+/// semantics would be caught by
+/// `test_payload_data_channel_disambiguates_from_escrow_and_direct` (the hybrid
+/// case must still fail to parse) before it could silently mis-route a payment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PayloadData {
     Escrow(EscrowPayload),
+    /// v0 spend-down channel voucher (scheme = "channel"). See
+    /// [`ChannelVoucherPayload`].
+    Channel(ChannelVoucherPayload),
     Direct(SolanaPayload),
 }
 
@@ -382,6 +443,7 @@ mod tests {
         match deserialized {
             PayloadData::Direct(p) => assert_eq!(p.transaction, "dGVzdA=="),
             PayloadData::Escrow(_) => panic!("expected Direct variant"),
+            PayloadData::Channel(_) => panic!("expected Direct variant"),
         }
     }
 
@@ -400,7 +462,89 @@ mod tests {
                 assert_eq!(p.agent_pubkey, "11111111111111111111111111111111");
             }
             PayloadData::Direct(_) => panic!("expected Escrow variant"),
+            PayloadData::Channel(_) => panic!("expected Escrow variant"),
         }
+    }
+
+    #[test]
+    fn channel_voucher_payload_matches_golden_json() {
+        let v = ChannelVoucherPayload {
+            channel_id: "cid".to_string(),
+            cumulative_atomic: 12_600,
+            expiry_slot: 1_000_750,
+            nonce: 42,
+            request_digest: "ZA==".to_string(),
+            signature: "c2ln".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            CHANNEL_VOUCHER_PAYLOAD_GOLDEN_JSON,
+            "ChannelVoucherPayload JSON drifted from the pinned cross-repo header contract"
+        );
+        // `untagged` PayloadData::Channel serializes IDENTICALLY to the inner
+        // payload — the header carries exactly this shape.
+        assert_eq!(
+            serde_json::to_string(&PayloadData::Channel(v)).unwrap(),
+            CHANNEL_VOUCHER_PAYLOAD_GOLDEN_JSON
+        );
+    }
+
+    #[test]
+    fn test_payload_data_channel_roundtrip() {
+        let channel = PayloadData::Channel(ChannelVoucherPayload {
+            channel_id: "11111111111111111111111111111111".to_string(),
+            cumulative_atomic: 12_600,
+            expiry_slot: 1_000_750,
+            nonce: 42,
+            request_digest: "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=".to_string(),
+            signature: "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw==".to_string(),
+        });
+        let json = serde_json::to_string(&channel).unwrap();
+        let deserialized: PayloadData = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            PayloadData::Channel(p) => {
+                assert_eq!(p.channel_id, "11111111111111111111111111111111");
+                assert_eq!(p.cumulative_atomic, 12_600);
+                assert_eq!(p.expiry_slot, 1_000_750);
+                assert_eq!(p.nonce, 42);
+            }
+            PayloadData::Escrow(_) => panic!("expected Channel variant"),
+            PayloadData::Direct(_) => panic!("expected Channel variant"),
+        }
+    }
+
+    /// The untagged `PayloadData` must disambiguate a channel voucher from BOTH
+    /// Escrow and Direct: the three field sets are disjoint and every variant
+    /// `deny_unknown_fields`, so a channel voucher can never silently decode as
+    /// Escrow/Direct (nor they as Channel). Guards the wire-format contract the
+    /// search-route channel fork keys on.
+    #[test]
+    fn test_payload_data_channel_disambiguates_from_escrow_and_direct() {
+        // A channel voucher decodes ONLY as Channel.
+        let voucher_json = r#"{"channel_id":"cid","cumulative_atomic":12600,"expiry_slot":1000750,"nonce":42,"request_digest":"ZA==","signature":"c2ln"}"#;
+        assert!(matches!(
+            serde_json::from_str::<PayloadData>(voucher_json).unwrap(),
+            PayloadData::Channel(_)
+        ));
+
+        // A Direct payload does NOT decode as Channel.
+        let direct_json = r#"{"transaction":"dGVzdA=="}"#;
+        assert!(matches!(
+            serde_json::from_str::<PayloadData>(direct_json).unwrap(),
+            PayloadData::Direct(_)
+        ));
+
+        // An Escrow payload does NOT decode as Channel.
+        let escrow_json = r#"{"deposit_tx":"dGVzdA==","service_id":"c2Vydg==","agent_pubkey":"11111111111111111111111111111111"}"#;
+        assert!(matches!(
+            serde_json::from_str::<PayloadData>(escrow_json).unwrap(),
+            PayloadData::Escrow(_)
+        ));
+
+        // A channel voucher carrying an EXTRA (Direct's) field is rejected by
+        // deny_unknown_fields — it matches no variant, never silently downgrades.
+        let hybrid = r#"{"channel_id":"cid","cumulative_atomic":1,"expiry_slot":1,"nonce":1,"request_digest":"ZA==","signature":"c2ln","transaction":"x"}"#;
+        assert!(serde_json::from_str::<PayloadData>(hybrid).is_err());
     }
 
     #[test]
