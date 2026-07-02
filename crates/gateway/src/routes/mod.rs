@@ -1,4 +1,5 @@
 pub mod admin_stats;
+pub mod channel;
 pub mod chat;
 pub mod debug_headers;
 pub mod escrow;

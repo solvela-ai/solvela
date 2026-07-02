@@ -577,7 +577,7 @@ mod tests {
 
         match &payload.payload {
             PayloadData::Direct(p) => assert_eq!(p.transaction, "dGVzdA=="),
-            PayloadData::Escrow(_) => panic!("expected Direct variant"),
+            PayloadData::Escrow(_) | PayloadData::Channel(_) => panic!("expected Direct variant"),
         }
     }
 
@@ -727,7 +727,7 @@ mod tests {
                     base64::engine::general_purpose::STANDARD.encode(service_id)
                 );
             }
-            PayloadData::Direct(_) => panic!("expected Escrow variant"),
+            PayloadData::Direct(_) | PayloadData::Channel(_) => panic!("expected Escrow variant"),
         }
     }
 

@@ -1,3 +1,4 @@
+pub mod channel;
 pub mod escrow;
 pub mod facilitator;
 pub mod fee_payer;

@@ -571,6 +571,12 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
 
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    // Channels ship DISABLED in prod; enable them here so the channel route tests
+    // exercise the real no-DB path (404 "channel not available") rather than the
+    // disabled-gate short-circuit. The dedicated gate-off tests use
+    // `test_app_channels_disabled()`. Harmless for non-channel tests (channels
+    // still need a DB this app does not have).
+    config.channel.enabled = true;
 
     let state = Arc::new(AppState {
         config,
@@ -612,6 +618,62 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         RateLimiter::new(RateLimitConfig::default()),
     );
     (router, state)
+}
+
+/// A test app with the v0 channel scheme DISABLED (the production default).
+///
+/// Mirrors [`test_app_with_state`] but leaves `config.channel.enabled = false`,
+/// so `POST /v1/channel/{open,close}` hit the disabled gate (404 "channel not
+/// available") regardless of DB state. Used to prove the default-off gate.
+fn test_app_channels_disabled() -> axum::Router {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML)
+        .unwrap()
+        .with_gateway_recipient(TEST_RECIPIENT_WALLET)
+        .unwrap();
+    let facilitator =
+        solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    // channel.enabled stays false (AppConfig::default) — the gate under test.
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: ProviderRegistry::from_env(reqwest::Client::new()),
+        native_anthropic: None,
+        search_provider: None,
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        faucet: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        auth_provider: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+    });
+    build_router(state, RateLimiter::new(RateLimitConfig::default()))
 }
 
 /// Build a test app with a NON-default configured USDC mint and a
@@ -12076,6 +12138,7 @@ async fn test_chat_canonical_payment_reaches_exact_verifier_with_mapped_payload(
     match &payload.payload {
         PayloadData::Direct(p) => assert_eq!(p.transaction, tx_b64),
         PayloadData::Escrow(_) => panic!("canonical payment must map to Direct"),
+        PayloadData::Channel(_) => panic!("canonical payment must map to Direct"),
     }
 }
 
@@ -18167,5 +18230,1506 @@ mod messages_native_passthrough_tests {
                 && !body_str.contains("sk-"),
             "fail-closed streaming error must never leak the upstream body/key; body={body_str}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v0 spend-down channel management plane (POST /v1/channel/{open,close})
+// ---------------------------------------------------------------------------
+//
+// `test_app()` carries `db_pool: None`, so these prove the CLAUDE.md #12
+// invariant: with no DB the channel scheme is unavailable (404), never a faked
+// in-memory ledger. The on-chain-verified-credit, atomic-voucher, and
+// exact-refund money-path properties are proven by the pure-fn + DB-gated tests
+// in `channels.rs` / `routes/channel.rs` (the full credit path needs both a DB
+// and a live RPC, which `test_app` has neither of).
+mod channel_route_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn channel_open_unavailable_without_db() {
+        let app = test_app();
+        let body = serde_json::json!({
+            "agent_wallet": "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz",
+            "funding_tx": "AQID",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/channel/open")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "channel open must be unavailable (404) with no DB — never a fake ledger"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"], "channel not available");
+    }
+
+    #[tokio::test]
+    async fn channel_close_unavailable_without_db() {
+        // Channels enabled (test_app), but no DB → 404 BEFORE any signature
+        // verification (the no-DB check precedes the loaded-row auth). A dummy
+        // 64-byte base64 signature is supplied only so the body parses.
+        let app = test_app();
+        let body = serde_json::json!({
+            "channel_id": "11111111111111111111111111111111",
+            "signature": base64::engine::general_purpose::STANDARD.encode([0u8; 64]),
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/channel/close")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "channel close must be unavailable (404) with no DB"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"], "channel not available");
+    }
+
+    #[tokio::test]
+    async fn channel_open_404_when_disabled() {
+        // Default-off gate: with channels disabled the open endpoint is a 404
+        // "channel not available", regardless of DB state.
+        let app = test_app_channels_disabled();
+        let body = serde_json::json!({
+            "agent_wallet": "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz",
+            "funding_tx": "AQID",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/channel/open")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "open must 404 when the channel scheme is disabled"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"], "channel not available");
+    }
+
+    #[tokio::test]
+    async fn channel_close_404_when_disabled() {
+        let app = test_app_channels_disabled();
+        let body = serde_json::json!({
+            "channel_id": "11111111111111111111111111111111",
+            "signature": base64::engine::general_purpose::STANDARD.encode([0u8; 64]),
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/channel/close")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "close must 404 when the channel scheme is disabled"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"], "channel not available");
+    }
+
+    #[tokio::test]
+    async fn channel_open_rejects_client_asserted_amount() {
+        // A client cannot smuggle a `deposit`/`amount` — deny_unknown_fields
+        // rejects the body before any crediting decision. This is the wire-level
+        // half of "credit only the on-chain-verified amount".
+        let app = test_app();
+        let body = serde_json::json!({
+            "agent_wallet": "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz",
+            "funding_tx": "AQID",
+            "amount": "999999999",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/channel/open")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "an unknown client-asserted amount field must be rejected at parse time"
+        );
+    }
+}
+
+// ===========================================================================
+// v0 spend-down channel DRAW (Pass B) — `/v1/search` channel-voucher fork
+//
+// Exercised END-TO-END through the REAL route (`build_router` + `oneshot`), per
+// CLAUDE.md #10. The pure/no-DB tests (disabled-gate 404, scheme/payload
+// mismatch reject) always run. The money-path tests are backed by the local dev
+// stack (Postgres + Redis, `docker compose up`) and SKIP cleanly when it is
+// unreachable — they never fail a bare checkout (the only sanctioned "failure"
+// is the pre-existing `escrow_queue.rs` no-DB category; these add none).
+// ===========================================================================
+mod channel_draw_tests {
+    use super::*;
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use gateway::cache::{CacheConfig, ResponseCache};
+    use gateway::providers::search::{
+        SearchError, SearchProvider, SearchQuery, SearchResult, SearchResults,
+    };
+    use std::time::Instant;
+
+    const CHANNEL_SEARCH_SERVICES_TOML: &str = r#"
+[services.web-search]
+name = "Web Search"
+endpoint = "/v1/search"
+category = "search"
+x402_enabled = true
+internal = true
+description = "x402-paid web search"
+pricing_label = "$0.0105/query"
+price_per_request_usdc = 0.01
+"#;
+
+    const SEARCH_BODY: &str = r#"{"query":"solana x402"}"#;
+    /// $0.01 provider + 5% fee = 10_500 atomic — the flat billed per draw.
+    const BILLED_ATOMIC: u64 = 10_500;
+    /// Seeded slot; the voucher expiry sits well beyond the 50-slot buffer.
+    const SEED_SLOT: u64 = 1_000_000;
+    const VOUCHER_EXPIRY_SLOT: u64 = 1_000_750;
+
+    // 127.0.0.1 (not `localhost`): the docker-compose stack publishes on the
+    // IPv4 loopback, and `localhost` can resolve to IPv6 `::1` first (nothing
+    // listens there) → a spurious skip. `DATABASE_URL`/`REDIS_URL` override.
+    const CHANNEL_DB_URL: &str = "postgres://solvela:solvela_dev_password@127.0.0.1:5432/solvela";
+    const CHANNEL_REDIS_URL: &str = "redis://127.0.0.1:6379";
+
+    fn db_url() -> String {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| CHANNEL_DB_URL.to_string())
+    }
+    fn redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| CHANNEL_REDIS_URL.to_string())
+    }
+
+    /// Acquire the live dev stack (Postgres + Redis) or `None` to SKIP.
+    ///
+    /// Mirrors the existing DB-backed integration tests: the schema is assumed
+    /// present (docker-compose applies `migrations/` on first start, incl. 015
+    /// `channels`). We do NOT run `sqlx::migrate!` here — this dev DB can carry
+    /// an out-of-band migration-checksum drift that `migrate!` treats as fatal;
+    /// a bare existence check on the `channels` table decides "schema present →
+    /// run, else skip" without ever failing the suite.
+    async fn stack() -> Option<(sqlx::PgPool, redis::Client)> {
+        let pool = sqlx::PgPool::connect(&db_url()).await.ok()?;
+        let channels_exists: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.channels')::text")
+                .fetch_one(&pool)
+                .await
+                .ok()?;
+        channels_exists?; // NULL → channel schema absent → skip cleanly
+        let client = redis::Client::open(redis_url()).ok()?;
+        // Prove Redis actually answers before we rely on it for the draw lock.
+        let cache = ResponseCache::new(&redis_url(), CacheConfig::default()).ok()?;
+        if !cache.ping().await {
+            return None;
+        }
+        Some((pool, client))
+    }
+
+    /// A stub search provider returning one canned result with no network call.
+    struct StubProvider;
+    #[async_trait]
+    impl SearchProvider for StubProvider {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        async fn search(&self, query: SearchQuery) -> Result<SearchResults, SearchError> {
+            Ok(SearchResults {
+                query: query.query,
+                results: vec![SearchResult {
+                    title: "Result One".to_string(),
+                    url: "https://example.com/1".to_string(),
+                    snippet: "first snippet".to_string(),
+                }],
+                provider: "stub".to_string(),
+            })
+        }
+    }
+
+    /// A provider that sleeps `delay` before returning — widens the serve window
+    /// so concurrent same-voucher draws genuinely contend for the per-channel
+    /// lock (the R6 double-spend guard).
+    struct DelayProvider {
+        delay: std::time::Duration,
+    }
+    #[async_trait]
+    impl SearchProvider for DelayProvider {
+        fn name(&self) -> &str {
+            "delay-stub"
+        }
+        async fn search(&self, query: SearchQuery) -> Result<SearchResults, SearchError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(SearchResults {
+                query: query.query,
+                results: vec![],
+                provider: "delay-stub".to_string(),
+            })
+        }
+    }
+
+    /// A provider that ALWAYS fails — exercises the most consequential money
+    /// branch: a served-then-failed draw must NOT advance `last` and must write
+    /// NO spend/receipt.
+    struct FailingProvider;
+    #[async_trait]
+    impl SearchProvider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing-stub"
+        }
+        async fn search(&self, _query: SearchQuery) -> Result<SearchResults, SearchError> {
+            Err(SearchError::Parse("simulated upstream failure".to_string()))
+        }
+    }
+
+    /// A provider that fails its FIRST call and succeeds afterwards — proves the
+    /// per-channel lock is released on a FAILED draw (the next draw proceeds).
+    struct FlakyProvider {
+        failed_once: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait]
+    impl SearchProvider for FlakyProvider {
+        fn name(&self) -> &str {
+            "flaky-stub"
+        }
+        async fn search(&self, query: SearchQuery) -> Result<SearchResults, SearchError> {
+            if !self
+                .failed_once
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(SearchError::Parse("first call fails".to_string()));
+            }
+            Ok(SearchResults {
+                query: query.query,
+                results: vec![],
+                provider: "flaky-stub".to_string(),
+            })
+        }
+    }
+
+    /// A minimal `/v1/search` app with channels DISABLED and no DB/Redis — for
+    /// the pure gate/mismatch tests that must run on a bare checkout.
+    fn disabled_channel_app() -> axum::Router {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(CHANNEL_SEARCH_SERVICES_TOML).unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        // channel.enabled defaults to false.
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
+            search_provider: Some(Arc::new(StubProvider)),
+            facilitator,
+            usage: gateway::usage::UsageTracker::noop(),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        build_router(state, RateLimiter::new(RateLimitConfig::default()))
+    }
+
+    /// A fully-wired `/v1/search` app with channels ENABLED, backed by the live
+    /// dev Postgres + Redis. Returns the router and the shared state (so a test
+    /// can seed the slot cache). When `seed_slot`, the RPC-free slot cache is
+    /// primed to [`SEED_SLOT`] so `fetch_cached_slot` never touches the network.
+    #[allow(clippy::too_many_arguments)]
+    async fn enabled_channel_app(
+        provider: Arc<dyn SearchProvider>,
+        verifier: Arc<dyn PaymentVerifier>,
+        pool: sqlx::PgPool,
+        redis_client: redis::Client,
+        rpc_url: &str,
+        seed_slot: bool,
+    ) -> (axum::Router, Arc<AppState>) {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(CHANNEL_SEARCH_SERVICES_TOML).unwrap();
+        let facilitator = solvela_x402::facilitator::Facilitator::new(vec![verifier]);
+        let cache = ResponseCache::new(&redis_url(), CacheConfig::default()).unwrap();
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        config.solana.rpc_url = rpc_url.to_string();
+        config.channel.enabled = true;
+
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
+            search_provider: Some(provider),
+            facilitator,
+            usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client)),
+            cache: Some(cache),
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: Some(pool),
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        if seed_slot {
+            *state.slot_cache.lock().await = Some((SEED_SLOT, Instant::now()));
+        }
+        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()));
+        (app, state)
+    }
+
+    /// 32 random bytes (two v4 UUIDs) for a fresh channel id / key seed.
+    fn rand32() -> [u8; 32] {
+        let mut b = [0u8; 32];
+        b[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        b[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        b
+    }
+
+    fn fresh_key() -> SigningKey {
+        SigningKey::from_bytes(&rand32())
+    }
+
+    /// Seed an OPEN channel ledger row directly.
+    ///
+    /// Deliberately a raw INSERT rather than `gateway::channels::create_channel`:
+    /// the draw path under test only needs an OPEN row to exist, and seeding it
+    /// directly keeps these tests independent of the full open-route deposit
+    /// verification. (`create_channel`'s `ON CONFLICT (funding_tx_sig)` vs the
+    /// migration-016 partial index — a 42P10 arbiter-inference error — was fixed
+    /// in a8a27eb8; it is no longer a reason to avoid the helper, so this stays a
+    /// raw INSERT purely for test minimalism.)
+    async fn create_channel(
+        pool: &sqlx::PgPool,
+        channel_id: [u8; 32],
+        agent_wallet: &str,
+        session_key: [u8; 32],
+        deposited: u64,
+    ) {
+        sqlx::query(
+            "INSERT INTO channels
+               (channel_id, agent_wallet, session_key, provider, mint,
+                deposited_atomic, settled_atomic, last_voucher_cumulative_atomic,
+                expiry_slot, status, funding_tx_sig)
+             VALUES ($1, $2, $3, $4, $5, $6, 0, 0, $7, 'open', $8)",
+        )
+        .bind(bs58::encode(channel_id).into_string())
+        .bind(agent_wallet)
+        .bind(bs58::encode(session_key).into_string())
+        .bind(TEST_RECIPIENT_WALLET)
+        .bind(USDC_MINT)
+        .bind(i64::try_from(deposited).unwrap())
+        .bind(VOUCHER_EXPIRY_SLOT as i64)
+        .bind(format!("sig-{}", uuid::Uuid::new_v4()))
+        .execute(pool)
+        .await
+        .expect("insert channel row");
+    }
+
+    /// Build a signed channel-voucher `PAYMENT-SIGNATURE` header (base64 JSON).
+    fn voucher_header(
+        signing_key: &SigningKey,
+        channel_id: [u8; 32],
+        cumulative_atomic: u64,
+        expiry_slot: u64,
+        nonce: u64,
+        body: &[u8],
+    ) -> String {
+        let digest = gateway::routes::channel::request_digest(body);
+        let msg = solvela_x402::channel::build_voucher_message(
+            &channel_id,
+            cumulative_atomic,
+            expiry_slot,
+            nonce,
+            &digest,
+        );
+        let signature = signing_key.sign(&msg).to_bytes();
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/search".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "channel".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                // The SDK contract: accepted.amount == the PER-CALL price
+                // (`compute_service_cost` total = $0.0105), NOT the cumulative.
+                // The fork validates this (billing still uses the gateway quote).
+                amount: BILLED_ATOMIC.to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Channel(solvela_x402::types::ChannelVoucherPayload {
+                channel_id: bs58::encode(channel_id).into_string(),
+                cumulative_atomic,
+                expiry_slot,
+                nonce,
+                request_digest: base64::engine::general_purpose::STANDARD.encode(digest),
+                signature: base64::engine::general_purpose::STANDARD.encode(signature),
+            }),
+        };
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap())
+    }
+
+    fn search_request(header: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/search")
+            .header("content-type", "application/json")
+            .header("payment-signature", header)
+            .body(Body::from(SEARCH_BODY))
+            .unwrap()
+    }
+
+    async fn status_and_json(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    async fn channel_last_cumulative(pool: &sqlx::PgPool, channel_id: [u8; 32]) -> u64 {
+        gateway::channels::load_channel(pool, &bs58::encode(channel_id).into_string())
+            .await
+            .unwrap()
+            .unwrap()
+            .last_voucher_cumulative_atomic
+    }
+
+    async fn voucher_row_count(pool: &sqlx::PgPool, channel_id: [u8; 32]) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM channel_vouchers WHERE channel_id = $1")
+            .bind(bs58::encode(channel_id).into_string())
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    // -- pure / no-DB: always run ------------------------------------------
+
+    /// R4: a channel voucher against a DISABLED channel scheme → 404 (uniform
+    /// with open/close), never a fake in-memory draw. The gate fires before any
+    /// DB/Redis/voucher work, so this needs no dev stack.
+    #[tokio::test]
+    async fn channel_draw_404_when_disabled() {
+        let app = disabled_channel_app();
+        let key = fresh_key();
+        let cid = rand32();
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        let (status, json) =
+            status_and_json(app.oneshot(search_request(&header)).await.unwrap()).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "disabled channel draw must 404"
+        );
+        assert_eq!(json["error"], "channel not available");
+    }
+
+    /// No-silent-fallback: a `scheme="channel"` header whose payload is NOT a
+    /// channel voucher (a Direct transfer) is a fail-closed reject — never
+    /// serviced as an exact transfer, never a panic.
+    #[tokio::test]
+    async fn channel_scheme_with_direct_payload_rejected() {
+        let app = disabled_channel_app();
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/search".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "channel".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "10500".to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Direct(SolanaPayload {
+                transaction: base64::engine::general_purpose::STANDARD.encode(b"not-a-voucher"),
+            }),
+        };
+        let header =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap());
+        let (status, json) =
+            status_and_json(app.oneshot(search_request(&header)).await.unwrap()).await;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a channel voucher"));
+    }
+
+    /// No-silent-fallback (the mirror image): a channel-voucher PAYLOAD carried
+    /// under a NON-"channel" scheme (`exact`) is rejected fail-closed. Exercises
+    /// the `(_, Channel)` fork arm without panicking.
+    #[tokio::test]
+    async fn channel_payload_with_exact_scheme_rejected() {
+        let app = disabled_channel_app();
+        let key = fresh_key();
+        let cid = rand32();
+        let digest = gateway::routes::channel::request_digest(SEARCH_BODY.as_bytes());
+        let msg = solvela_x402::channel::build_voucher_message(
+            &cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            &digest,
+        );
+        let sig = key.sign(&msg).to_bytes();
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/search".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "exact".to_string(), // MISMATCH: payload is a channel voucher
+                network: SOLANA_NETWORK.to_string(),
+                amount: "10500".to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Channel(solvela_x402::types::ChannelVoucherPayload {
+                channel_id: bs58::encode(cid).into_string(),
+                cumulative_atomic: BILLED_ATOMIC,
+                expiry_slot: VOUCHER_EXPIRY_SLOT,
+                nonce: 1,
+                request_digest: base64::engine::general_purpose::STANDARD.encode(digest),
+                signature: base64::engine::general_purpose::STANDARD.encode(sig),
+            }),
+        };
+        let header =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap());
+        let (status, json) =
+            status_and_json(app.oneshot(search_request(&header)).await.unwrap()).await;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("scheme is not 'channel'"));
+    }
+
+    /// §4.2: the chat endpoint's exhaustive `PayloadData::Channel` arm
+    /// (mod.rs:969) FAILS CLOSED — a `scheme="exact"` + channel-payload mismatch
+    /// on `/v1/chat/completions` is rejected without a panic (no `unreachable!`).
+    #[tokio::test]
+    async fn chat_channel_payload_mismatch_rejected_without_panic() {
+        let app = test_app(); // AlwaysPassVerifier, exact scheme
+        let key = fresh_key();
+        let cid = rand32();
+        let digest = gateway::routes::channel::request_digest(b"chat");
+        let msg =
+            solvela_x402::channel::build_voucher_message(&cid, 1, VOUCHER_EXPIRY_SLOT, 1, &digest);
+        let sig = key.sign(&msg).to_bytes();
+        // scheme="exact" + Channel payload, amount huge so the amount check passes
+        // and control reaches the exhaustive tx_raw match at mod.rs:969.
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "exact".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "999999999".to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Channel(solvela_x402::types::ChannelVoucherPayload {
+                channel_id: bs58::encode(cid).into_string(),
+                cumulative_atomic: 1,
+                expiry_slot: VOUCHER_EXPIRY_SLOT,
+                nonce: 1,
+                request_digest: base64::engine::general_purpose::STANDARD.encode(digest),
+                signature: base64::engine::general_purpose::STANDARD.encode(sig),
+            }),
+        };
+        let header =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap());
+        let body = serde_json::json!({
+            "model": "openai/gpt-4o",
+            "messages": [{ "role": "user", "content": "hi" }]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", header)
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .expect("no panic — the Channel arm returns a fail-closed error, never unreachable!");
+        // A JSON error response (any 4xx) proves the arm did not panic/drop the
+        // connection. The specific arm returns InvalidPayment → 402.
+        assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
+        let (_, json) = status_and_json(resp).await;
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("channel scheme is not accepted"));
+    }
+
+    // -- money path: DB + Redis (skip when the dev stack is down) -----------
+
+    /// Happy path: one channel draw serves the tool AFTER verifying the voucher,
+    /// advances the durable `last_voucher_cumulative`, and settles NO on-chain tx
+    /// (the fork bypasses verify_and_settle).
+    #[tokio::test]
+    async fn channel_draw_happy_path_advances_last() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping channel_draw_happy_path_advances_last: dev stack unavailable");
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        let resp = app.oneshot(search_request(&header)).await.unwrap();
+        // LEDGER INVARIANT (positive side): a successful debit MUST carry a
+        // retrievable receipt — the `x-solvela-receipt` header is present iff a
+        // receipt row was written iff `last` advanced.
+        assert!(
+            resp.headers().contains_key("x-solvela-receipt"),
+            "a debited draw must advertise a receipt"
+        );
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(status, StatusCode::OK, "a valid voucher must serve: {json}");
+        assert_eq!(json["provider"], "stub");
+        assert_eq!(json["results"][0]["title"], "Result One");
+
+        assert_eq!(
+            channel_last_cumulative(&pool, cid).await,
+            BILLED_ATOMIC,
+            "last_voucher_cumulative must advance by exactly the flat billed amount"
+        );
+        assert_eq!(voucher_row_count(&pool, cid).await, 1);
+    }
+
+    /// R6: N concurrent same-base vouchers → EXACTLY ONE served + recorded. The
+    /// per-channel Redis lock + monotonic advance close the double-spend race.
+    #[tokio::test]
+    async fn concurrent_same_voucher_draws_serve_exactly_once() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping concurrent_same_voucher_draws_serve_exactly_once: dev stack unavailable"
+            );
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        // A delaying provider widens the serve window so the losers genuinely
+        // contend for the lock while the winner holds it.
+        let (app, _state) = enabled_channel_app(
+            Arc::new(DelayProvider {
+                delay: std::time::Duration::from_millis(500),
+            }),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let app = app.clone();
+            let header = header.clone();
+            handles.push(tokio::spawn(async move {
+                app.oneshot(search_request(&header)).await.unwrap().status()
+            }));
+        }
+        let mut ok = 0;
+        for h in handles {
+            if h.await.unwrap() == StatusCode::OK {
+                ok += 1;
+            }
+        }
+        assert_eq!(ok, 1, "exactly one concurrent draw may serve");
+        assert_eq!(
+            voucher_row_count(&pool, cid).await,
+            1,
+            "exactly one voucher may be recorded (no double-spend)"
+        );
+        assert_eq!(channel_last_cumulative(&pool, cid).await, BILLED_ATOMIC);
+    }
+
+    /// §8.5: two SEQUENTIAL draws on one channel both succeed with NO TTL stall —
+    /// proves the lock is released on success (not held to the 120s TTL). The
+    /// whole test must finish far under the TTL.
+    #[tokio::test]
+    async fn sequential_draws_both_succeed_without_ttl_stall() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping sequential_draws_both_succeed_without_ttl_stall: dev stack unavailable"
+            );
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        let started = Instant::now();
+        // Draw 1: cumulative = billed.
+        let h1 = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(search_request(&h1))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        // Draw 2: cumulative = 2*billed (immediately — must not wait out any lock).
+        let h2 = voucher_header(
+            &key,
+            cid,
+            2 * BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            2,
+            SEARCH_BODY.as_bytes(),
+        );
+        assert_eq!(
+            app.oneshot(search_request(&h2)).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "sequential draws must not stall on the lock TTL (120s)"
+        );
+        assert_eq!(channel_last_cumulative(&pool, cid).await, 2 * BILLED_ATOMIC);
+        assert_eq!(voucher_row_count(&pool, cid).await, 2);
+    }
+
+    /// R9: after a draw advances `last`, a DESYNCED agent's next voucher (built
+    /// against the stale `last`) is rejected AND the rejection surfaces the
+    /// authoritative `last_cumulative` so the SDK can resync.
+    #[tokio::test]
+    async fn desynced_voucher_rejection_surfaces_last_cumulative() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping desynced_voucher_rejection_surfaces_last_cumulative: dev stack unavailable");
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        // First draw advances last → BILLED_ATOMIC.
+        let h1 = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(search_request(&h1))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+
+        // A desynced agent re-signs cumulative = BILLED_ATOMIC (thinking last is
+        // still 0). delta = billed - billed = 0 != billed → DeltaMismatch
+        // (authenticated) → reject carrying the authoritative last_cumulative.
+        let stale = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            2,
+            SEARCH_BODY.as_bytes(),
+        );
+        let (status, json) =
+            status_and_json(app.oneshot(search_request(&stale)).await.unwrap()).await;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("last_cumulative={BILLED_ATOMIC}")),
+            "an authenticated rejection must surface the authoritative last_cumulative for resync, got: {json}"
+        );
+        // The stale voucher advanced nothing.
+        assert_eq!(channel_last_cumulative(&pool, cid).await, BILLED_ATOMIC);
+    }
+
+    /// HALT 3: a channel draw reaches ZERO settlement — the fork NEVER calls
+    /// `verify_and_settle`.
+    ///
+    /// Why the SETTLE counter is the right hook for `/v1/search` (Round-1
+    /// review): the search route has NO `fire_escrow_claim` call site at all
+    /// (grep-verifiable), and `verify_and_settle` is the SOLE settlement
+    /// machinery on this endpoint AND the gateway to any escrow claim (a claim
+    /// only ever follows an escrow settle). So proving the fork never settles is
+    /// the tightest observable HALT-3 proof for this slice; the escrow-claim
+    /// path is an explicitly-deferred chat-slice concern (scope §10 R1). Uses a
+    /// COUNTING verifier so a served channel draw leaving the counter at 0 is a
+    /// meaningful bypass proof (the exact path WOULD increment it), not the
+    /// vacuous "a hook that's never called stays unset".
+    #[tokio::test]
+    async fn channel_draw_never_settles_halt3() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping channel_draw_never_settles_halt3: dev stack unavailable");
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        let settle_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let verifier = Arc::new(SettleCountingDelayVerifier {
+            settle_count: settle_count.clone(),
+            delay: std::time::Duration::ZERO,
+        });
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            verifier,
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        assert_eq!(
+            app.oneshot(search_request(&header)).await.unwrap().status(),
+            StatusCode::OK,
+            "the served draw must succeed"
+        );
+        assert_eq!(
+            settle_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a channel draw must NEVER reach verify_and_settle (HALT 3) — the exact \
+             path would have incremented this counter"
+        );
+    }
+
+    /// The most consequential money branch (Round-1 review): a served-then-FAILED
+    /// draw must be a total non-charge — `last` unchanged, NO spend row, NO
+    /// receipt, error status. Enforces the ledger invariant on the failure side.
+    #[tokio::test]
+    async fn provider_failure_is_a_total_non_charge() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping provider_failure_is_a_total_non_charge: dev stack unavailable");
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        // Belt-and-braces: no stale spend row for this fresh wallet.
+        let _ = sqlx::query("DELETE FROM spend_logs WHERE wallet_address = $1")
+            .bind(&agent)
+            .execute(&pool)
+            .await;
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(FailingProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        let resp = app.oneshot(search_request(&header)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        // NO receipt on a non-charge (ledger invariant, failure side).
+        assert!(
+            !resp.headers().contains_key("x-solvela-receipt"),
+            "a failed (non-charge) draw must NOT advertise a receipt"
+        );
+
+        // `last` did not advance and no voucher was recorded.
+        assert_eq!(channel_last_cumulative(&pool, cid).await, 0);
+        assert_eq!(voucher_row_count(&pool, cid).await, 0);
+        // No spend row was written (log_spend is never called on a non-charge).
+        // A short settle for the fire-and-forget window: there is nothing to
+        // appear, so a small fixed wait then a count of 0 is deterministic.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let spend_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM spend_logs WHERE wallet_address = $1")
+                .bind(&agent)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(spend_rows, 0, "a non-charge must write no spend row");
+    }
+
+    /// Leak boundary (Round-1 review): a voucher signed by a key that is NOT the
+    /// channel's session key → `InvalidSignature` (pre-auth) → the response body
+    /// must NOT surface `last_cumulative` (an unauthenticated caller learns
+    /// nothing about the channel's balance). Pairs with the positive resync test.
+    #[tokio::test]
+    async fn bad_signature_rejection_does_not_leak_last_cumulative() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping bad_signature_rejection_does_not_leak_last_cumulative: dev stack unavailable");
+            return;
+        };
+        let session_key = fresh_key();
+        let cid = rand32();
+        let session = session_key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        // Draw once with the real key so `last` is non-zero (something to leak).
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+        let good = voucher_header(
+            &session_key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(search_request(&good))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+
+        // A DIFFERENT (attacker) key signs a voucher against this channel id.
+        let attacker = fresh_key();
+        let forged = voucher_header(
+            &attacker,
+            cid,
+            2 * BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            2,
+            SEARCH_BODY.as_bytes(),
+        );
+        let (status, json) =
+            status_and_json(app.oneshot(search_request(&forged)).await.unwrap()).await;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+        // Assert the WHOLE serialized body is free of the balance — catches a
+        // refactor that surfaces it in ANY field, not just `error.message`.
+        let body = serde_json::to_string(&json).unwrap();
+        assert!(
+            !body.contains("last_cumulative"),
+            "a pre-auth (bad-signature) rejection must NOT surface last_cumulative anywhere: {body}"
+        );
+    }
+
+    /// Proves the per-channel lock is released on a FAILED draw: a failing draw
+    /// then an immediately-following valid draw both complete well under the
+    /// 120s TTL (the second would stall on a leaked lock).
+    #[tokio::test]
+    async fn failed_draw_releases_lock_for_next_draw() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping failed_draw_releases_lock_for_next_draw: dev stack unavailable");
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        // Fails the first call, succeeds the second — same app, same channel.
+        let (app, _state) = enabled_channel_app(
+            Arc::new(FlakyProvider {
+                failed_once: std::sync::atomic::AtomicBool::new(false),
+            }),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        // Draw 1 (fails): cumulative = billed, last stays 0.
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        let started = Instant::now();
+        assert_eq!(
+            app.clone()
+                .oneshot(search_request(&header))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_GATEWAY
+        );
+        // Draw 2 (succeeds): SAME cumulative (last still 0) — must proceed at once.
+        assert_eq!(
+            app.oneshot(search_request(&header)).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the failed draw must release the lock, not stall the next draw on the TTL"
+        );
+        assert_eq!(channel_last_cumulative(&pool, cid).await, BILLED_ATOMIC);
+    }
+
+    /// Attribution (Round-1 review): a happy-path draw's spend row is keyed on
+    /// the DB `agent_wallet`, NEVER the extraction sentinel `"unknown"`.
+    #[tokio::test]
+    async fn spend_row_uses_channel_agent_wallet() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping spend_row_uses_channel_agent_wallet: dev stack unavailable");
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+        let _ = sqlx::query("DELETE FROM spend_logs WHERE wallet_address = $1")
+            .bind(&agent)
+            .execute(&pool)
+            .await;
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        assert_eq!(
+            app.oneshot(search_request(&header)).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        // log_spend is fire-and-forget; poll briefly for the row.
+        let mut found = 0i64;
+        for _ in 0..25 {
+            found = sqlx::query_scalar("SELECT COUNT(*) FROM spend_logs WHERE wallet_address = $1")
+                .bind(&agent)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if found > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // The spend row exists under the DB agent_wallet (a base58 pubkey), which
+        // is by construction NOT the `"unknown"` extraction sentinel.
+        assert_eq!(
+            found, 1,
+            "the channel spend row must be attributed to the DB agent_wallet, not \"unknown\""
+        );
+        assert_ne!(agent, "unknown");
+    }
+
+    /// Fix 6: a voucher whose `accepted.amount` does not equal the per-call price
+    /// is rejected (SDK-contract defense) — never silently ignored.
+    #[tokio::test]
+    async fn channel_draw_rejects_amount_mismatch() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping channel_draw_rejects_amount_mismatch: dev stack unavailable");
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        // Build a valid voucher, then tamper ONLY accepted.amount (still a valid
+        // channel payload, just the wrong quoted amount).
+        let mut header_payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/search".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "channel".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: (BILLED_ATOMIC + 1).to_string(), // WRONG per-call amount
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Direct(SolanaPayload {
+                transaction: String::new(),
+            }),
+        };
+        let digest = gateway::routes::channel::request_digest(SEARCH_BODY.as_bytes());
+        let msg = solvela_x402::channel::build_voucher_message(
+            &cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            &digest,
+        );
+        let sig = key.sign(&msg).to_bytes();
+        header_payload.payload = PayloadData::Channel(solvela_x402::types::ChannelVoucherPayload {
+            channel_id: bs58::encode(cid).into_string(),
+            cumulative_atomic: BILLED_ATOMIC,
+            expiry_slot: VOUCHER_EXPIRY_SLOT,
+            nonce: 1,
+            request_digest: base64::engine::general_purpose::STANDARD.encode(digest),
+            signature: base64::engine::general_purpose::STANDARD.encode(sig),
+        });
+        let header = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&header_payload).unwrap());
+
+        let status = app.oneshot(search_request(&header)).await.unwrap().status();
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "wrong accepted.amount must be rejected"
+        );
+        assert_eq!(voucher_row_count(&pool, cid).await, 0);
+    }
+
+    /// R-slot: `fetch_cached_slot` → `None` (RPC unreachable, cache unseeded)
+    /// makes the draw REFUSE (fail closed, 503) — never serve on an unknown slot.
+    #[tokio::test]
+    async fn draw_refuses_when_slot_unavailable() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping draw_refuses_when_slot_unavailable: dev stack unavailable");
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        // Unreachable RPC + NO seeded slot → fetch_cached_slot returns None.
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "http://127.0.0.1:1/",
+            false,
+        )
+        .await;
+
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        let status = app.oneshot(search_request(&header)).await.unwrap().status();
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no cached slot must fail closed, never serve on an unknown slot"
+        );
+        assert_eq!(
+            voucher_row_count(&pool, cid).await,
+            0,
+            "a refused draw records no voucher"
+        );
+    }
+
+    /// #499: a channel whose DB `agent_wallet` is provisioned `require_tenant =
+    /// TRUE` is rejected with 403 — the gate reads `ChannelRow.agent_wallet`
+    /// (never the voucher / `extract_payer_wallet`), and no draw is recorded.
+    #[tokio::test]
+    async fn require_tenant_wallet_rejected_403() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping require_tenant_wallet_rejected_403: dev stack unavailable");
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        // Provision the channel's agent_wallet as require_tenant = TRUE and clear
+        // any cached budget config so the fresh flag is read.
+        let _ = sqlx::query("DELETE FROM tenant_budgets WHERE wallet_address = $1")
+            .bind(&agent)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM wallet_budgets WHERE wallet_address = $1")
+            .bind(&agent)
+            .execute(&pool)
+            .await;
+        sqlx::query(
+            "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc, require_tenant) \
+             VALUES ($1, 100.00, TRUE)",
+        )
+        .bind(&agent)
+        .execute(&pool)
+        .await
+        .expect("seed require_tenant wallet");
+        {
+            let mut conn = redis.get_multiplexed_async_connection().await.unwrap();
+            let _: Result<i64, _> = redis::cmd("DEL")
+                .arg(format!("budget_config:{agent}"))
+                .query_async(&mut conn)
+                .await;
+        }
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        let status = app.oneshot(search_request(&header)).await.unwrap().status();
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a require_tenant=TRUE agent_wallet must be rejected (#499)"
+        );
+        assert_eq!(
+            voucher_row_count(&pool, cid).await,
+            0,
+            "a rejected require_tenant draw records no voucher"
+        );
+
+        // Cleanup the shared-DB row so re-runs start clean.
+        let _ = sqlx::query("DELETE FROM wallet_budgets WHERE wallet_address = $1")
+            .bind(&agent)
+            .execute(&pool)
+            .await;
     }
 }

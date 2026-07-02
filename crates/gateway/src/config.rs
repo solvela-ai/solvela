@@ -19,6 +19,28 @@ pub struct AppConfig {
     /// Gas-drip faucet configuration (`[faucet]` / `SOLVELA_FAUCET__*`).
     #[serde(default)]
     pub faucet: FaucetConfig,
+    /// v0 spend-down channel configuration (`[channel]` / `SOLVELA_CHANNEL__*`).
+    #[serde(default)]
+    pub channel: ChannelConfig,
+}
+
+/// v0 spend-down channel (`POST /v1/channel/*`) configuration.
+///
+/// Ships **DISABLED by default** — the same fail-closed posture as the faucet
+/// (`enabled = false`) and the #599 inert AuthProvider. Rationale (operator
+/// decision): production must accept no channel deposit it cannot yet
+/// programmatically refund, so until the custodial refund-disbursement slice
+/// lands the whole channel management surface is gated off. When `enabled =
+/// false` the `open`/`close` endpoints return 404 (`{"error":"channel not
+/// available"}`) — identical to the no-DB-pool path; the scheme is simply
+/// unavailable. Enable per-environment via `SOLVELA_CHANNEL__ENABLED=true`.
+///
+/// No secret fields, so `Debug` is derived (nothing to redact).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ChannelConfig {
+    /// Master switch. Default `false` (channels unavailable).
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Gas-drip faucet configuration (`[faucet]`).
@@ -357,6 +379,7 @@ impl Default for AppConfig {
             monitor: MonitorConfig::default(),
             cache: CacheSettings::default(),
             faucet: FaucetConfig::default(),
+            channel: ChannelConfig::default(),
         }
     }
 }
@@ -774,6 +797,34 @@ recipient_wallet = ""
             debug_output.contains("2 keys REDACTED"),
             "debug should show redacted key count"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // v0 spend-down channel config ([channel] / SOLVELA_CHANNEL__*)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn channel_defaults_off() {
+        let config = AppConfig::default();
+        assert!(
+            !config.channel.enabled,
+            "channel MUST default off — prod accepts no deposit it cannot yet refund"
+        );
+    }
+
+    #[test]
+    fn channel_parses_enabled_from_toml() {
+        let toml = r#"
+[server]
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+recipient_wallet = ""
+[providers]
+[channel]
+enabled = true
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("valid config TOML");
+        assert!(config.channel.enabled, "[channel] enabled must parse");
     }
 
     // -------------------------------------------------------------------------

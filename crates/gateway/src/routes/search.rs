@@ -50,7 +50,7 @@ use solvela_x402::types::{
 use crate::error::GatewayError;
 use crate::middleware::x402::decode_payment_header;
 use crate::payment_util::extract_payer_wallet;
-use crate::providers::search::SearchQuery;
+use crate::providers::search::{SearchProvider, SearchQuery};
 use crate::receipts;
 use crate::routes::service_payment::{compute_service_cost, ServiceCost};
 use crate::usage::SpendLogEntry;
@@ -324,6 +324,51 @@ pub async fn search(
         ));
     }
 
+    // --- v0 spend-down channel DRAW fork (Pass B) ------------------------
+    //
+    // `search.rs` is string-keyed on the scheme, so `PayloadData::Channel`
+    // produces ZERO compile errors here — this fork is inserted BY HAND after
+    // the resource/network/asset/pay_to validation above (which applies to a
+    // channel voucher too) and BEFORE the exact-only machinery below
+    // (client_amount parse, #499 reject, scheme catch-all, tx-replay,
+    // verify_and_settle). It forks iff the scheme is "channel" AND the payload
+    // is a channel voucher; ANY channel-ish mismatch is a fail-closed reject —
+    // no silent fallback to an exact transfer. The fork bypasses
+    // `verify_and_settle` and the tx-replay cache (both exact-only; a voucher
+    // has no on-chain tx to replay/settle) and never fires an escrow claim.
+    // See channel scope §4.4 / HALT 3.
+    match (payload.accepted.scheme.as_str(), &payload.payload) {
+        ("channel", solvela_x402::types::PayloadData::Channel(voucher_payload)) => {
+            return channel_draw(
+                &state,
+                &headers,
+                &body_bytes,
+                provider.as_ref(),
+                search_query,
+                ServiceCost {
+                    provider_atomic,
+                    fee_atomic,
+                    total_atomic,
+                },
+                &payload.accepted.amount,
+                voucher_payload,
+            )
+            .await;
+        }
+        ("channel", _) => {
+            return Err(GatewayError::InvalidPayment(
+                "scheme is 'channel' but the payload is not a channel voucher".to_string(),
+            ));
+        }
+        (_, solvela_x402::types::PayloadData::Channel(_)) => {
+            return Err(GatewayError::InvalidPayment(
+                "payment payload is a channel voucher but the scheme is not 'channel'".to_string(),
+            ));
+        }
+        // Not a channel request — fall through to the exact machinery below.
+        _ => {}
+    }
+
     // Validate payment amount covers cost + fee. Bad format → 400, never 0.
     let client_amount: u64 = payload
         .accepted
@@ -391,6 +436,14 @@ pub async fn search(
         // above (only `exact` is advertised/accepted on /v1/search). Kept for
         // exhaustiveness; never executed on this path.
         solvela_x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
+        // UNREACHABLE on the exact path: a channel voucher forks (or is
+        // rejected) above and never reaches here. Fail-closed defense-in-depth
+        // (never `unreachable!`/panic on a payment path).
+        solvela_x402::types::PayloadData::Channel(_) => {
+            return Err(GatewayError::InvalidPayment(
+                "channel voucher is not accepted on the exact path".to_string(),
+            ));
+        }
     };
     let is_durable_nonce = crate::routes::chat::uses_durable_nonce(tx_raw);
 
@@ -488,6 +541,13 @@ pub async fn search(
     let tx_signature = match &payload.payload {
         solvela_x402::types::PayloadData::Direct(p) => Some(p.transaction.clone()),
         solvela_x402::types::PayloadData::Escrow(p) => Some(p.deposit_tx.clone()),
+        // UNREACHABLE on the exact path (see the `tx_raw` arm above) —
+        // fail-closed, never panic.
+        solvela_x402::types::PayloadData::Channel(_) => {
+            return Err(GatewayError::InvalidPayment(
+                "channel voucher is not accepted on the exact path".to_string(),
+            ));
+        }
     };
     // `x-request-id` is client-controlled and unbounded; cap to 128 chars
     // before it reaches the `spend_logs.request_id` TEXT column (chars-based so
@@ -572,6 +632,353 @@ pub async fn search(
             receipts::insert_receipt_header(&mut response, &receipt_header_path);
             Ok(response)
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v0 spend-down channel DRAW path (Pass B) — `/v1/search` only
+// ---------------------------------------------------------------------------
+
+/// Handle a `/v1/search` request paid by a channel voucher (the hand-inserted
+/// fork above). Gated on `channel.enabled` + a DB pool + Redis (else 404,
+/// uniform with `open`/`close`); sources `current_slot` RPC-free; acquires the
+/// per-channel lock and RELEASES it on every exit path (the TTL is only the
+/// crash backstop). All money-path invariants are enforced inside
+/// [`channel_draw_locked`]; this wrapper owns only the gate + lock lifecycle.
+// ponytail: 8 args because this hot-path handler threads request context
+// (state/headers/body/provider/query/cost/amount/voucher) into the lock scope;
+// a params struct would be pure ceremony for one call site.
+#[allow(clippy::too_many_arguments)]
+async fn channel_draw(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    body_bytes: &[u8],
+    provider: &dyn SearchProvider,
+    search_query: SearchQuery,
+    cost: ServiceCost,
+    accepted_amount: &str,
+    voucher_payload: &solvela_x402::types::ChannelVoucherPayload,
+) -> Result<Response, GatewayError> {
+    // Gate: channels ship DISABLED; the draw additionally requires a DB pool
+    // (the durable ledger) AND Redis (the per-channel lock). Any missing → the
+    // same 404 as open/close — never a fake in-memory draw. See §3.10.
+    if !state.config.channel.enabled {
+        return Ok(crate::routes::channel::channel_not_available());
+    }
+    let Some(pool) = state.db_pool.as_ref() else {
+        return Ok(crate::routes::channel::channel_not_available());
+    };
+    let Some(cache) = state.cache.as_ref() else {
+        return Ok(crate::routes::channel::channel_not_available());
+    };
+
+    // SDK-contract check: `accepted.amount` MUST equal the per-call price
+    // (`compute_service_cost` total). Billing does NOT read this field — the
+    // gateway quote is authoritative — but a mismatch signals an SDK↔gateway
+    // price disagreement; reject rather than silently ignore it. Static message
+    // (never reflect the client-controlled amount string).
+    if accepted_amount != cost.total_atomic.to_string() {
+        return Err(GatewayError::BadRequest(
+            "channel voucher accepted.amount must equal the per-call price for this endpoint"
+                .to_string(),
+        ));
+    }
+
+    // Bind the voucher to THE served request: SHA-256 of the RAW body bytes.
+    let request_digest = crate::routes::channel::request_digest(body_bytes);
+
+    // `current_slot` for the voucher expiry check — RPC-free cached slot (5s
+    // TTL). `None` (RPC degraded, no cached value) → fail closed with a 503,
+    // never serve on a stale-unknown slot. Never a per-call `getSlot`. §0.1/§3.11.
+    let Some(current_slot) = crate::routes::escrow::fetch_cached_slot(state).await else {
+        return Err(GatewayError::ServiceUnavailable(
+            "could not reach the Solana cluster to verify the voucher; please retry shortly"
+                .to_string(),
+        ));
+    };
+
+    // Decode the wire voucher into the frozen verifier `Voucher`, fail-closed on
+    // any malformed field (static, safe-to-forward messages).
+    let voucher = crate::routes::channel::voucher_from_payload(voucher_payload).map_err(|e| {
+        warn!(error = %e, "channel draw: malformed voucher payload");
+        GatewayError::BadRequest(e.to_string())
+    })?;
+
+    // The channel id (base58) is BOTH the lock key and the ledger load key.
+    let channel_id = voucher_payload.channel_id.as_str();
+
+    // Per-channel lock (Redis SET NX EX, channel-distinct prefix). Fail closed
+    // if Redis errors (no in-memory fallback — it cannot serialise across
+    // instances); reject if a concurrent draw holds it. §3.9 / HALT 4.
+    match cache.acquire_channel_draw_lock(channel_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(GatewayError::ServiceUnavailable(
+                "a draw is already in progress on this channel; please retry shortly".to_string(),
+            ));
+        }
+        Err(e) => {
+            warn!(error = %e, "channel draw: lock acquisition failed (Redis)");
+            return Err(GatewayError::ServiceUnavailable(
+                "payment service is temporarily degraded; please retry shortly".to_string(),
+            ));
+        }
+    }
+
+    // Lock HELD. Run the draw and RELEASE on ALL paths (success AND every
+    // failure) — the 120s TTL is only the crash backstop, never the steady-state
+    // release (releasing at once lets the next sequential draw proceed
+    // immediately). This is the OPPOSITE of the A2A hold-on-success. §8.5.
+    let outcome = channel_draw_locked(
+        state,
+        headers,
+        provider,
+        search_query,
+        cost,
+        request_digest,
+        current_slot,
+        &voucher,
+        channel_id,
+        pool,
+    )
+    .await;
+    // Release synchronously (NOT detached — a spawned release would race the
+    // next sequential draw). But the Redis client has NO per-command timeout, so
+    // a hung Redis must not stall the already-earned response: bound the release
+    // and fall back to the 120s TTL crash-backstop on timeout.
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        cache.release_channel_draw_lock(channel_id),
+    )
+    .await
+    .is_err()
+    {
+        warn!(
+            channel_id,
+            "channel draw lock release timed out — lock will expire via TTL (120s)"
+        );
+    }
+    outcome
+}
+
+/// The locked body of a channel draw: load state → #499 → verify voucher →
+/// serve → POST-serve persist → charge-visible spend/receipt. The caller
+/// ([`channel_draw`]) holds the per-channel lock across this whole function and
+/// releases it unconditionally afterward.
+// ponytail: 10 args threading the already-validated draw context into the
+// locked scope; a struct would be ceremony for one call site.
+#[allow(clippy::too_many_arguments)]
+async fn channel_draw_locked(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    provider: &dyn SearchProvider,
+    search_query: SearchQuery,
+    cost: ServiceCost,
+    request_digest: [u8; 32],
+    current_slot: u64,
+    voucher: &solvela_x402::channel::Voucher,
+    channel_id: &str,
+    pool: &sqlx::PgPool,
+) -> Result<Response, GatewayError> {
+    // Load the drawable open channel + its DB-sourced `agent_wallet`. A
+    // closed/closing/unknown channel is not drawable → 404.
+    let drawable =
+        match crate::channels::load_open_channel_state(pool, channel_id, request_digest).await {
+            Ok(Some(d)) => d,
+            Ok(None) => {
+                return Err(GatewayError::NotFound(
+                    "channel not found or not open".to_string(),
+                ));
+            }
+            Err(e) => {
+                warn!(error = %e, "channel draw: failed to load channel state");
+                return Err(GatewayError::Internal(
+                    "could not load the channel".to_string(),
+                ));
+            }
+        };
+    let agent_wallet = drawable.agent_wallet;
+    let state_view = drawable.state;
+
+    // #499: reject a `require_tenant = TRUE` wallet — SEARCH-exact budget
+    // posture (NO `check_budget`). The wallet is sourced from the DB
+    // `agent_wallet`, NEVER `extract_payer_wallet`/the voucher (a voucher has no
+    // `agent_pubkey` → "unknown"). §3.4 / HALT 7.
+    if state.usage.require_tenant_for_wallet(&agent_wallet).await {
+        warn!("channel draw rejected: agent wallet requires per-tenant budgeting (#499)");
+        return Err(GatewayError::Forbidden(
+            "this wallet requires per-tenant budgeting; use POST /v1/chat/completions".to_string(),
+        ));
+    }
+
+    // billed = the flat quote (= actual = realized on search; no gap, no
+    // discount). `verify_voucher` enforces `voucher.cumulative - last == billed`.
+    let billed = cost.total_atomic;
+
+    // Verify the voucher — EXACT, fail-closed on every rule. On an AUTHENTICATED
+    // rejection (signature already verified inside `verify_voucher`) surface the
+    // authoritative `last_cumulative` so a desynced SDK can resync (R9); on a
+    // pre-auth rejection surface nothing (not the caller's own ledger). §3.12.
+    if let Err(e) =
+        solvela_x402::channel::verify_voucher(&state_view, voucher, billed, current_slot)
+    {
+        return Err(map_voucher_rejection(e, state_view.last_cumulative_atomic));
+    }
+
+    // SERVE. The channel fork NEVER touches `verify_and_settle`, the tx-replay
+    // cache, or `fire_escrow_claim` (channels have no per-call on-chain tx or
+    // claim — HALT 3).
+    let results = match provider.search(search_query).await {
+        Ok(r) => r,
+        Err(e) => {
+            // Provider failure: NO persist → `last` does NOT advance → the agent
+            // keeps its draw and was NOT debited. LEDGER INVARIANT: a positive
+            // spend/receipt exists IFF `last` advanced IFF the agent was debited,
+            // so a non-charge writes NOTHING — no false spend row, no false
+            // receipt on the 502. The `warn!` is the sole audit trail. (Do not
+            // leak upstream internals — GHSA-cgqx-mg48-949v.)
+            warn!(
+                error = %e,
+                provider = %provider.name(),
+                channel_id,
+                "web-search upstream failed (channel draw) — no charge; last unchanged"
+            );
+            return Ok((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "search provider error" })),
+            )
+                .into_response());
+        }
+    };
+
+    // POST-serve persist (deliver-then-record, #486-safe): advancing `last` IS
+    // the debit, so the spend/receipt below are contingent on it committing.
+    if let Err(e) = crate::channels::persist_voucher_and_advance(
+        pool,
+        &crate::channels::VoucherRecord {
+            channel_id,
+            cumulative_atomic: voucher.cumulative_atomic,
+            call_cost_atomic: billed,
+            expiry_slot: voucher.expiry_slot,
+            nonce: voucher.nonce,
+            request_digest: &voucher.request_digest,
+            signature: &voucher.signature,
+        },
+    )
+    .await
+    {
+        // R8: a persist failure AFTER a successful serve is a BOUNDED one-call
+        // gateway loss — the agent still receives its results, but `last` did
+        // NOT advance (deposit intact), so NO debit occurred and, by the ledger
+        // invariant, NO spend/receipt is written (same non-charge rule as the
+        // provider-failure arm) and the delivered 200 carries no receipt header.
+        // Logged WITH the cumulative so the bounded loss is reconcilable. Do NOT
+        // fail the already-delivered response; the agent resyncs on its next
+        // draw (R9).
+        warn!(
+            error = %e,
+            channel_id,
+            cumulative_atomic = voucher.cumulative_atomic,
+            last_cumulative = state_view.last_cumulative_atomic,
+            "channel draw: persist failed after a successful serve — bounded \
+             one-call gateway loss, NO charge recorded (deposit intact; agent \
+             resyncs on next draw)"
+        );
+        return Ok((StatusCode::OK, Json(json!(results))).into_response());
+    }
+
+    // `last` advanced ⇒ the agent WAS debited ⇒ record the positive spend +
+    // receipt. This is the ONLY site a channel spend/receipt row is written, so
+    // the invariant "positive receipt ⟺ last advanced ⟺ agent debited" holds by
+    // construction. wallet = DB `agent_wallet`, `tx_signature = None`, scheme =
+    // "channel", no vendor leg.
+    let ServiceCost {
+        provider_atomic,
+        fee_atomic,
+        total_atomic,
+    } = cost;
+    // `x-request-id` is client-controlled/unbounded; cap to 128 chars
+    // (chars-based) before it reaches the `spend_logs.request_id` TEXT column.
+    let request_id: Option<String> = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.chars().take(128).collect());
+    let receipt_record = receipts::ReceiptRecord {
+        receipt_id: uuid::Uuid::new_v4(),
+        model: SEARCH_SERVICE_ID.to_string(),
+        payment_scheme: "channel".to_string(),
+        // ponytail: no `channel_id` receipt column in Pass B; add one when
+        // receipts need channel-scoped lookup (a migration, out of this slice).
+        tx_signature: None,
+        payer_wallet: agent_wallet.clone(),
+        amount_paid_atomic: total_atomic,
+        provider_cost_atomic: provider_atomic,
+        platform_fee_atomic: fee_atomic,
+        total_atomic,
+        vendor: None,
+    };
+    let spend_entry = SpendLogEntry {
+        wallet_address: agent_wallet,
+        model: SEARCH_SERVICE_ID.to_string(),
+        provider: format!("search:{}", provider.name()),
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usdc: total_atomic as f64 / 1_000_000.0,
+        // A voucher draw has no on-chain settlement signature.
+        tx_signature: None,
+        request_id,
+        session_id: None,
+        tenant: None,
+        tenant_enforced: false,
+        estimated_cost_usdc: None,
+        vendor: None,
+    };
+    state.usage.log_spend(spend_entry);
+    let receipt_header_path = receipts::record_receipt(state.db_pool.as_ref(), receipt_record);
+
+    let mut response = (StatusCode::OK, Json(json!(results))).into_response();
+    receipts::insert_receipt_header(&mut response, &receipt_header_path);
+    Ok(response)
+}
+
+/// Map a `verify_voucher` rejection to a fail-closed `GatewayError`.
+///
+/// Surfaces the authoritative `last_cumulative` ONLY for AUTHENTICATED
+/// rejections — those that occur AFTER `verify_voucher` has verified the
+/// ed25519 signature — so a desynced SDK (whose vouchers now `DeltaMismatch` /
+/// `NonMonotonicCumulative`) can recompute its next cumulative and resync (R9).
+/// A pre-authentication rejection (`InvalidSignature` / `ChannelMismatch`, both
+/// checked before/at the signature gate) surfaces nothing: an unauthenticated
+/// caller must never learn a channel's balance. §3.12.
+fn map_voucher_rejection(
+    err: solvela_x402::channel::ChannelVoucherError,
+    last_cumulative: u64,
+) -> GatewayError {
+    use solvela_x402::channel::ChannelVoucherError as E;
+    match err {
+        // Pre-auth (voucher rules 1 & 2): reject WITHOUT the ledger figure.
+        E::ChannelMismatch | E::InvalidSignature => {
+            GatewayError::InvalidPayment("channel voucher rejected".to_string())
+        }
+        // Authenticated, but a BODY mismatch — not a cumulative desync. Telling
+        // the SDK to "resync last_cumulative" here would send it into a confused
+        // retry loop; point it at the real cause instead, with NO ledger figure.
+        E::RequestDigestMismatch => GatewayError::InvalidPayment(
+            "voucher request_digest does not match this request; re-sign for the body you are \
+             sending"
+                .to_string(),
+        ),
+        // Post-auth CUMULATIVE rejections (rules 4–7): the caller proved control
+        // of the session key AND the mismatch is about the cumulative, so
+        // surfacing its OWN channel's authoritative last_cumulative is a resync
+        // aid (R9), not a third-party leak.
+        E::Expired { .. }
+        | E::NonMonotonicCumulative { .. }
+        | E::DeltaMismatch { .. }
+        | E::BelowSettled { .. }
+        | E::OverDraw { .. } => GatewayError::InvalidPayment(format!(
+            "channel voucher rejected; resync from authoritative last_cumulative={last_cumulative}"
+        )),
     }
 }
 

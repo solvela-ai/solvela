@@ -44,6 +44,10 @@ pub(crate) fn extract_payment_info(header: &str) -> (String, Option<String>) {
             let tx_sig = match &payload.payload {
                 solvela_x402::types::PayloadData::Direct(p) => Some(p.transaction.clone()),
                 solvela_x402::types::PayloadData::Escrow(p) => Some(p.deposit_tx.clone()),
+                // Attribution-only: a channel voucher has no on-chain tx
+                // signature. `None` is the fail-closed value (never reached on a
+                // rejected request — the chat route rejects `channel` upstream).
+                solvela_x402::types::PayloadData::Channel(_) => None,
             };
             (wallet, tx_sig)
         }
