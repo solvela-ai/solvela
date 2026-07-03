@@ -17,12 +17,14 @@
 //!
 //! - [`close`] — cooperative close. Requires an ed25519 `session_key` signature
 //!   over the canonical close message (a leaked `channel_id` alone must not
-//!   force a close). Computes `refundable = deposited -
-//!   last_voucher_cumulative` (checked) — the unspent principal the agent never
-//!   drew, NOT `deposited - settled` (which lags and would over-refund). Marks
-//!   the channel `closing` with `refund_status: "pending"`. v0 is custodial and
-//!   does NOT disburse here: the on-chain refund-send is a later slice. The
-//!   response must not imply the refund completed.
+//!   force a close). Acquires the per-channel draw lock, then in ONE
+//!   transaction flips the channel `closing`, computes `refundable =
+//!   deposited - realized` (checked; the synchronous per-draw actual-cost
+//!   counter — NOT `settled`, which lags and would over-refund, and NOT
+//!   `last`, which would strand the quote-vs-actual gap), and FREEZES the
+//!   refund reservation. The background worker in
+//!   [`crate::channel_refunds`] disburses USDC from the frozen tuple;
+//!   re-POSTing the idempotent close polls the refund status.
 //!
 //! **DB is REQUIRED** (CLAUDE.md #12) and the scheme ships **DISABLED by
 //! default** (`[channel] enabled = false`): when channels are disabled OR no
@@ -77,52 +79,21 @@ pub fn credit_deposit(verified_amount: Option<u64>) -> Result<u64, ChannelOpenEr
     }
 }
 
-/// Why a channel could not be closed.
-#[derive(Debug, thiserror::Error)]
-pub enum ChannelCloseError {
-    /// `last_voucher_cumulative > deposited` — a corrupt ledger row (the
-    /// `last <= deposited` CHECK should make this unreachable). Refuse rather than
-    /// wrap the checked subtraction into a huge refund.
-    #[error("last_voucher_cumulative {last_cumulative} exceeds deposited {deposited} (corrupt ledger row)")]
-    LastCumulativeExceedsDeposited {
-        deposited: u64,
-        last_cumulative: u64,
-    },
-}
+// NOTE: `compute_refundable` moved to `crate::channel_refunds` (PR-A) and now
+// computes `deposited - realized` against the synchronous `realized` counter —
+// the disbursement-grade formula (never `- settled` = A1 over-refund, never
+// `- last` = #600 strand). The close handler below delegates the whole
+// flip→read→reserve to [`crate::channel_refunds::close_channel_and_reserve_refund`].
 
-/// Cooperative-close refundable = `deposited - last_voucher_cumulative`, checked.
-///
-/// The refundable amount is what the agent **never drew/authorized** — bounded by
-/// `last_voucher_cumulative` (the highest cumulative the agent has signed), NOT by
-/// `settled`. In v0 a draw advances `last_voucher_cumulative` while `settled` lags
-/// (invariant `settled <= last_voucher_cumulative <= deposited`, scope §2), so
-/// refunding `deposited - settled` would hand back value the agent has already
-/// authorized for service it received — over-refund / money loss. The gap
-/// `last_voucher_cumulative - settled` is what the gateway separately settles to
-/// itself; that is the future settler slice, not this cooperative close.
-///
-/// Never returns more than `deposited - last_voucher_cumulative`; an underflow
-/// (`last > deposited`) is a corrupt-state hard error, never a wrapped amount.
-///
-/// ponytail: UNCHANGED in Pass B and correct for `/v1/search`, where
-/// `quote == actual == realized == last`, so `deposited - last` IS already
-/// `deposited - realized`. The DEFERRED refund-disbursement slice MUST move
-/// this to `deposited - realized` with a NEW *synchronous* `realized` counter —
-/// NEVER `deposited - settled` (re-opens the A1 over-refund money-loss;
-/// `settled` lags at ~0 in v0) and NEVER ship a USDC disbursement on
-/// `deposited - last` (strands the quote-vs-realized gap = #600). See channel
-/// scope §0.2 / HALT 2. This close still moves NO money in v0 (it only records
-/// the obligation), so the formula is a displayed figure, not a disbursement.
-pub fn compute_refundable(
-    deposited_atomic: u64,
-    last_voucher_cumulative_atomic: u64,
-) -> Result<u64, ChannelCloseError> {
-    deposited_atomic
-        .checked_sub(last_voucher_cumulative_atomic)
-        .ok_or(ChannelCloseError::LastCumulativeExceedsDeposited {
-            deposited: deposited_atomic,
-            last_cumulative: last_voucher_cumulative_atomic,
-        })
+/// Per-channel deposit cap (config `channel.max_deposit_atomic`): `true` when
+/// the on-chain-verified deposit is acceptable. `None` = uncapped. Checked
+/// AFTER verification but BEFORE the funding broadcast, so a rejected deposit
+/// moves no money.
+pub fn deposit_within_cap(verified_amount: u64, cap: Option<u64>) -> bool {
+    match cap {
+        Some(cap) => verified_amount <= cap,
+        None => true,
+    }
 }
 
 /// Why a close request could not be authorized. Distinguishes a malformed client
@@ -460,6 +431,22 @@ pub async fn open(
         }
     };
 
+    // Per-channel deposit cap (config, PR-A) — checked BEFORE the funding
+    // broadcast so a rejected deposit moves no money. The cap value is public
+    // policy, safe to state.
+    if !deposit_within_cap(deposited_atomic, state.config.channel.max_deposit_atomic) {
+        tracing::warn!(
+            deposited_atomic,
+            cap = ?state.config.channel.max_deposit_atomic,
+            "channel open: deposit exceeds the per-channel cap"
+        );
+        return GatewayError::BadRequest(format!(
+            "deposit exceeds the per-channel maximum of {} atomic USDC",
+            state.config.channel.max_deposit_atomic.unwrap_or(0)
+        ))
+        .into_response();
+    }
+
     // 2. Settle (broadcast + confirm) the funding transfer so the money lands
     //    before we credit. A re-presented funding tx fails here (Solana dedup) →
     //    no channel created. Don't create a channel for funds that didn't land.
@@ -554,35 +541,49 @@ pub struct CloseChannelResponse {
     pub channel_id: String,
     pub deposited_atomic: u64,
     pub settled_atomic: u64,
-    /// `deposited - last_voucher_cumulative` — the unspent principal the agent
-    /// never drew, owed back to the agent.
+    /// `deposited - realized` — what the agent never consumed, owed back. The
+    /// amount is FROZEN into the `channel_refunds` reservation inside the same
+    /// transaction that flips the channel `closing`.
     pub refundable_atomic: u64,
-    /// Lifecycle status: `closing` (never `closed`) — the refund is pending.
+    /// Lifecycle status: `closing` (refund pending/in flight) or `closed`
+    /// (refund confirmed).
     pub status: String,
-    /// Refund-disbursement status. Always `pending` in v0: marking a channel
-    /// `closing` records the refund obligation but does NOT move USDC — the
-    /// custodial refund-send is a later slice. The response must not imply the
-    /// refund has settled.
+    /// The refund reservation's status: `reserved` | `in_flight` |
+    /// `confirmed` | `held`. Re-POSTing the (idempotent) signed close is the
+    /// documented refund-status polling surface.
     pub refund_status: String,
+    /// The refund's on-chain transaction signature, once broadcast — so the
+    /// agent can verify the refund on-chain. `None` until the worker's claim
+    /// persisted one.
+    pub tx_signature: Option<String>,
 }
 
 /// POST /v1/channel/close
 ///
-/// Cooperative close. Verifies a `session_key` signature over the canonical close
-/// message, computes `refundable = deposited - last_voucher_cumulative` (the
-/// unspent principal the agent never drew, never more), and transitions an open
-/// channel to `closing` (refund pending). Idempotent on an already-closing/closed
-/// channel.
+/// Cooperative close. Verifies a `session_key` signature over the canonical
+/// close message, acquires the per-channel DRAW lock (close serializes against
+/// in-flight draws — the anti-grief half of invariant 11; the one-transaction
+/// flip→read→reserve below remains the correctness guarantee even across a
+/// lock-expiry window), then in ONE transaction flips the channel `closing`,
+/// computes `refundable = deposited - realized`, and FREEZES the refund
+/// reservation `(amount, destination_wallet, mint)` — see
+/// [`crate::channel_refunds::close_channel_and_reserve_refund`]. The
+/// background refund worker disburses from the frozen tuple; re-POSTing the
+/// idempotent close is the refund-status polling surface.
 ///
 /// Status codes:
-/// - 200 with the refundable amount + `refund_status: "pending"`.
+/// - 200 with the frozen refundable amount + the reservation's status (and its
+///   `tx_signature` once broadcast).
 /// - 400 when the `signature` is not base64-encoded 64 bytes.
 /// - 401 when the signature does not match the channel's `session_key`.
-/// - 404 `{"error":"channel not available"}` when channels are disabled or no DB
-///   is configured, or `{"error":"channel not found"}` for an unknown channel id.
+/// - 404 `{"error":"channel not available"}` when channels are disabled or no
+///   DB is configured, or `{"error":"channel not found"}` for an unknown id.
 /// - 429 when the per-IP rate limit is exceeded.
-/// - 500 (fail-closed) on a corrupt ledger row (`last_voucher_cumulative >
-///   deposited`) or corrupt stored key material.
+/// - 500 (fail-closed) on a corrupt ledger row (`realized > deposited`) or
+///   corrupt stored key material.
+/// - 503 when Redis is absent/unreachable (the draw lock cannot serialize —
+///   fail closed, never proceed lock-free) or a draw is in flight on this
+///   channel (`Retry-After` set).
 pub async fn close(
     State(state): State<Arc<AppState>>,
     peer_addr: PeerAddr,
@@ -608,6 +609,15 @@ pub async fn close(
 
     let Some(pool) = state.db_pool.clone() else {
         return channel_not_available();
+    };
+
+    // Close now serializes against draws via the per-channel Redis lock, so
+    // Redis is REQUIRED here: absent/unreachable → 503 fail-closed, never a
+    // lock-free close (a mid-serve draw could otherwise race the freeze on a
+    // multi-instance deployment even though the transaction stays correct —
+    // the lock is the liveness/anti-grief half).
+    let Some(cache) = state.cache.as_ref() else {
+        return service_unavailable("channel close requires the payment lock service");
     };
 
     let row = match channels::load_channel(&pool, &req.channel_id).await {
@@ -646,53 +656,77 @@ pub async fn close(
         };
     }
 
-    // refundable = deposited - last_voucher_cumulative, checked. Bounded by what
-    // the agent never drew/authorized — NOT by `settled` (which lags). A corrupt
-    // row (last > deposited) fails closed rather than wrapping into a huge refund.
-    let refundable_atomic = match compute_refundable(
-        row.deposited_atomic,
-        row.last_voucher_cumulative_atomic,
-    ) {
-        Ok(r) => r,
+    // Acquire the per-channel DRAW lock: a draw in flight blocks the close
+    // (503 + Retry-After) — the deliberately-triggerable "draw an expensive
+    // call, close mid-serve, collect the serve AND the full refund" grief loop.
+    match cache.acquire_channel_draw_lock(&req.channel_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            let mut resp = GatewayError::ServiceUnavailable(
+                "a draw is in flight on this channel; retry the close shortly".to_string(),
+            )
+            .into_response();
+            resp.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("5"),
+            );
+            return resp;
+        }
         Err(e) => {
-            tracing::error!(error = %e, channel_id = %req.channel_id, "channel close: corrupt ledger row");
-            return internal_error("channel ledger state is inconsistent");
+            tracing::warn!(error = %e, "channel close: lock acquisition failed (Redis)");
+            return service_unavailable(
+                "payment service is temporarily degraded; please retry shortly",
+            );
         }
-    };
+    }
 
-    // Mark an open channel `closing` (refund pending). Already-closing/closed
-    // channels are returned as-is (idempotent). v0: the on-chain custodial
-    // disbursement of `refundable_atomic` to the agent happens out of band.
-    let status = if row.status == ChannelStatus::Open.as_str() {
-        if let Err(e) = channels::set_status(&pool, &req.channel_id, ChannelStatus::Closing).await {
-            tracing::error!(error = %e, "channel close: failed to set closing status");
-            return internal_error("could not mark the channel closing");
+    // Lock HELD: flip → read → reserve in ONE transaction, then release on
+    // every path (bounded, like the draw — the TTL is only the crash backstop).
+    let outcome =
+        crate::channel_refunds::close_channel_and_reserve_refund(&pool, &req.channel_id).await;
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        cache.release_channel_draw_lock(&req.channel_id),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!(
+            channel_id = %req.channel_id,
+            "channel close lock release timed out — lock will expire via TTL"
+        );
+    }
+
+    match outcome {
+        Ok(o) => {
+            let response = CloseChannelResponse {
+                channel_id: req.channel_id,
+                deposited_atomic: o.deposited_atomic,
+                settled_atomic: o.settled_atomic,
+                refundable_atomic: o.refundable_atomic,
+                status: o.channel_status,
+                refund_status: o.refund_status,
+                tx_signature: o.tx_signature,
+            };
+            (StatusCode::OK, Json(json!(response))).into_response()
         }
-        ChannelStatus::Closing.as_str().to_string()
-    } else {
-        row.status
-    };
-
-    let response = CloseChannelResponse {
-        channel_id: req.channel_id,
-        deposited_atomic: row.deposited_atomic,
-        settled_atomic: row.settled_atomic,
-        refundable_atomic,
-        status,
-        // v0 never disburses on close — the refund is recorded, not sent. Be
-        // honest: the response must not imply the money has moved.
-        refund_status: REFUND_STATUS_PENDING.to_string(),
-    };
-    (StatusCode::OK, Json(json!(response))).into_response()
+        Err(crate::channel_refunds::ChannelRefundError::Repo(
+            channels::ChannelRepoError::ChannelNotFound,
+        )) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "channel not found" })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, channel_id = %req.channel_id, "channel close failed");
+            internal_error("channel ledger state is inconsistent")
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// `refund_status` value returned by [`close`]. v0 never disburses on close, so
-/// the refund is always pending — see [`CloseChannelResponse::refund_status`].
-const REFUND_STATUS_PENDING: &str = "pending";
 
 /// A fresh base58 32-byte channel id. v0 generates 32 random bytes (two v4
 /// UUIDs) so the id (a) unifies with the end-state Channel-PDA base58 and (b)
@@ -778,56 +812,18 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn refundable_over_refund_regression_uses_last_cumulative_not_settled() {
-        // THE bug this fix closes: agent deposits 50_000, draws 12_600
-        // (last_voucher_cumulative = 12_600) but NOTHING is settled yet
-        // (settled = 0). Refundable MUST be 50_000 - 12_600 = 37_400 — the amount
-        // never drawn — NOT the full 50_000 (which would be free service plus the
-        // money back). `compute_refundable` is keyed on last_voucher_cumulative,
-        // so passing 12_600 yields 37_400 regardless of `settled`.
-        assert_eq!(compute_refundable(50_000, 12_600).unwrap(), 37_400);
-        assert_ne!(
-            compute_refundable(50_000, 12_600).unwrap(),
-            50_000,
-            "must NOT refund the full deposit when the agent has drawn against it"
-        );
-    }
+    // NOTE: the `compute_refundable` money-math tests (incl. the A1/#600
+    // regression, now pinned on `deposited - realized`) moved with the
+    // function to `crate::channel_refunds`.
 
     #[test]
-    fn refundable_is_deposited_minus_last_cumulative() {
-        // Nothing drawn → full deposit refundable.
-        assert_eq!(compute_refundable(50_000, 0).unwrap(), 50_000);
-        // Fully drawn → zero refundable, never negative.
-        assert_eq!(compute_refundable(50_000, 50_000).unwrap(), 0);
-    }
-
-    #[test]
-    fn refundable_never_exceeds_deposited_minus_last_cumulative() {
-        // Exhaustive small sweep: the result is always exactly
-        // deposited - last_voucher_cumulative and never more (no path can
-        // over-refund).
-        for deposited in 0u64..200 {
-            for last_cumulative in 0u64..=deposited {
-                assert_eq!(
-                    compute_refundable(deposited, last_cumulative).unwrap(),
-                    deposited - last_cumulative
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn refundable_fails_closed_when_last_cumulative_exceeds_deposited() {
-        // A corrupt row (last > deposited) must NOT wrap into a huge refund.
-        assert!(matches!(
-            compute_refundable(100, 101),
-            Err(ChannelCloseError::LastCumulativeExceedsDeposited {
-                deposited: 100,
-                last_cumulative: 101
-            })
-        ));
-        assert!(compute_refundable(0, u64::MAX).is_err());
+    fn deposit_cap_accepts_at_or_below_and_rejects_above() {
+        // Uncapped: everything passes.
+        assert!(deposit_within_cap(u64::MAX, None));
+        // Capped: boundary is inclusive; above fails closed.
+        assert!(deposit_within_cap(50_000, Some(50_000)));
+        assert!(!deposit_within_cap(50_001, Some(50_000)));
+        assert!(deposit_within_cap(0, Some(0)));
     }
 
     #[test]
@@ -929,25 +925,41 @@ mod tests {
     // -- A4: honest close response (no false "done") ------------------------
 
     #[test]
-    fn close_response_marks_refund_pending_and_status_closing() {
+    fn close_response_carries_reservation_status_and_signature() {
+        // Pre-broadcast: the response must not imply the money moved.
         let resp = CloseChannelResponse {
             channel_id: "c".to_string(),
             deposited_atomic: 50_000,
             settled_atomic: 0,
-            refundable_atomic: 37_400,
+            refundable_atomic: 46_220,
             status: ChannelStatus::Closing.as_str().to_string(),
-            refund_status: REFUND_STATUS_PENDING.to_string(),
+            refund_status: "reserved".to_string(),
+            tx_signature: None,
         };
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(
-            v["refund_status"], "pending",
-            "v0 must never claim refunded"
+            v["refund_status"], "reserved",
+            "must not claim refunded before the worker confirms"
         );
-        assert_eq!(
-            v["status"], "closing",
-            "status must be closing, never closed"
-        );
-        assert_eq!(v["refundable_atomic"], 37_400);
+        assert_eq!(v["status"], "closing");
+        assert_eq!(v["refundable_atomic"], 46_220);
+        assert_eq!(v["tx_signature"], serde_json::Value::Null);
+
+        // Post-confirmation poll: the signature is surfaced for on-chain
+        // verification by the agent.
+        let done = CloseChannelResponse {
+            channel_id: "c".to_string(),
+            deposited_atomic: 50_000,
+            settled_atomic: 0,
+            refundable_atomic: 46_220,
+            status: ChannelStatus::Closed.as_str().to_string(),
+            refund_status: "confirmed".to_string(),
+            tx_signature: Some("5sig".to_string()),
+        };
+        let v = serde_json::to_value(&done).unwrap();
+        assert_eq!(v["refund_status"], "confirmed");
+        assert_eq!(v["status"], "closed");
+        assert_eq!(v["tx_signature"], "5sig");
     }
 
     // -- request_digest: byte-exact golden vector --------------------------

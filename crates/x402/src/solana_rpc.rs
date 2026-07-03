@@ -292,12 +292,28 @@ pub async fn get_latest_blockhash(
     rpc_url: &str,
     commitment: &str,
 ) -> Result<[u8; 32], Error> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getLatestBlockhash",
-        "params": [{"commitment": commitment}],
-    });
+    let (blockhash, _last_valid_block_height) =
+        get_latest_blockhash_and_height(client, rpc_url, commitment).await?;
+    Ok(blockhash)
+}
+
+/// Fetch a recent blockhash AND its `lastValidBlockHeight` via
+/// `getLatestBlockhash` (same call as [`get_latest_blockhash`], which discards
+/// the height).
+///
+/// `lastValidBlockHeight` is the LAST block height at which the returned
+/// blockhash is still accepted — the producer for a conclusive-death check on
+/// a broadcast transaction: once `getBlockHeight` (same `confirmed`
+/// commitment) exceeds it AND a history-searching [`get_signature_status`]
+/// finds no trace of the signature, the transaction can never land and it is
+/// safe to re-sign. Fails closed on a missing/unparseable field — never a
+/// silent zero height (which would declare every transaction instantly dead).
+pub async fn get_latest_blockhash_and_height(
+    client: &Client,
+    rpc_url: &str,
+    commitment: &str,
+) -> Result<([u8; 32], u64), Error> {
+    let body = latest_blockhash_request_body(commitment);
 
     let response = client
         .post(rpc_url)
@@ -315,9 +331,30 @@ pub async fn get_latest_blockhash(
         return Err(Error::Rpc(error.to_string()));
     }
 
-    let blockhash_b58 = result
-        .get("result")
-        .and_then(|r| r.get("value"))
+    parse_latest_blockhash_response(&result)
+}
+
+/// `getLatestBlockhash` request body. Extracted so the wire shape is
+/// unit-assertable (round-2 review: an RPC param in the wrong position is the
+/// silent class that already bit `poll_for_confirmation`).
+pub(crate) fn latest_blockhash_request_body(commitment: &str) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getLatestBlockhash",
+        "params": [{"commitment": commitment}],
+    })
+}
+
+/// Parse a `getLatestBlockhash` response into (blockhash, lastValidBlockHeight),
+/// fail-closed on any missing/malformed field (never a silent zero hash or
+/// zero height).
+pub(crate) fn parse_latest_blockhash_response(
+    result: &serde_json::Value,
+) -> Result<([u8; 32], u64), Error> {
+    let value = result.get("result").and_then(|r| r.get("value"));
+
+    let blockhash_b58 = value
         .and_then(|v| v.get("blockhash"))
         .and_then(|b| b.as_str())
         .ok_or_else(|| {
@@ -330,7 +367,166 @@ pub async fn get_latest_blockhash(
     let arr: [u8; 32] = bytes
         .try_into()
         .map_err(|v: Vec<u8>| Error::Rpc(format!("blockhash must be 32 bytes, got {}", v.len())))?;
-    Ok(arr)
+
+    let last_valid_block_height = value
+        .and_then(|v| v.get("lastValidBlockHeight"))
+        .and_then(|h| h.as_u64())
+        .ok_or_else(|| {
+            Error::Rpc("getLatestBlockhash did not return a lastValidBlockHeight".to_string())
+        })?;
+
+    Ok((arr, last_valid_block_height))
+}
+
+/// Fetch the current block height via `getBlockHeight` at `confirmed`
+/// commitment — the reader half of the conclusive-death check (compare against
+/// a transaction's `lastValidBlockHeight` from
+/// [`get_latest_blockhash_and_height`]).
+///
+/// Fails closed on a missing/malformed result — never returns a silent 0
+/// (which would read every blockhash as still-alive) and never a silent MAX
+/// (which would read every transaction as dead).
+pub async fn get_block_height(client: &Client, rpc_url: &str) -> Result<u64, Error> {
+    let body = block_height_request_body();
+
+    let response = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    let result: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    if let Some(error) = result.get("error") {
+        return Err(Error::Rpc(error.to_string()));
+    }
+
+    result
+        .get("result")
+        .and_then(|r| r.as_u64())
+        .ok_or_else(|| Error::Rpc("getBlockHeight did not return a u64 result".to_string()))
+}
+
+/// `getBlockHeight` request body (`confirmed` commitment — must match the
+/// commitment of [`latest_blockhash_request_body`]'s producer for the
+/// death-check comparison to be meaningful). Extracted for wire-shape tests.
+pub(crate) fn block_height_request_body() -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getBlockHeight",
+        "params": [{"commitment": "confirmed"}],
+    })
+}
+
+/// A single transaction's status as reported by `getSignatureStatuses`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureStatus {
+    /// The on-chain execution error, if the transaction landed AND failed.
+    /// Stringified so callers can route it through
+    /// [`classify_settlement_error`] without re-exposing raw RPC structures.
+    pub err: Option<String>,
+    /// `processed` / `confirmed` / `finalized` (or `None` on very old RPC
+    /// responses).
+    pub confirmation_status: Option<String>,
+}
+
+/// One-shot `getSignatureStatuses` lookup for a single signature.
+///
+/// Returns `Ok(None)` when the RPC has no record of the signature.
+///
+/// `search_transaction_history` selects which store the RPC consults:
+/// - `false` — the recent-status cache ONLY (~150 slots / a few minutes).
+///   Cheap; fine for a fresh-confirmation loop like [`poll_for_confirmation`].
+/// - `true` — the full ledger history. **REQUIRED for any conclusive-death or
+///   crash/restart-recovery check before re-signing a payment**: a transaction
+///   that landed longer ago than the recent-cache window reads as `None` under
+///   the default form, and treating that as "dead" re-signs an
+///   already-landed transfer — a double-send of real funds.
+pub async fn get_signature_status(
+    client: &Client,
+    rpc_url: &str,
+    signature_b58: &str,
+    search_transaction_history: bool,
+) -> Result<Option<SignatureStatus>, Error> {
+    let body = signature_status_request_body(signature_b58, search_transaction_history);
+
+    let response = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    let result: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    if let Some(error) = result.get("error") {
+        return Err(Error::Rpc(error.to_string()));
+    }
+
+    parse_signature_status_response(&result)
+}
+
+/// `getSignatureStatuses` request body. Extracted so the HALT-4-critical wire
+/// shape is unit-pinned: `searchTransactionHistory` MUST ride the config
+/// object in params[1] — the bare `[[sig]]` form silently consults only the
+/// ~150-slot recent cache, the exact double-refund class that already bit
+/// `poll_for_confirmation`.
+pub(crate) fn signature_status_request_body(
+    signature_b58: &str,
+    search_transaction_history: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getSignatureStatuses",
+        "params": [
+            [signature_b58],
+            {"searchTransactionHistory": search_transaction_history},
+        ],
+    })
+}
+
+/// Parse a `getSignatureStatuses` response for a single signature.
+/// `Ok(None)` = the RPC has no record; a missing status ARRAY (malformed
+/// response) fails closed rather than reading as not-found.
+pub(crate) fn parse_signature_status_response(
+    result: &serde_json::Value,
+) -> Result<Option<SignatureStatus>, Error> {
+    let status = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .ok_or_else(|| {
+            Error::Rpc("getSignatureStatuses did not return a status array".to_string())
+        })?
+        .clone();
+
+    if status.is_null() {
+        return Ok(None);
+    }
+
+    let err = match status.get("err") {
+        Some(e) if !e.is_null() => Some(e.to_string()),
+        _ => None,
+    };
+    let confirmation_status = status
+        .get("confirmationStatus")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+
+    Ok(Some(SignatureStatus {
+        err,
+        confirmation_status,
+    }))
 }
 
 /// Fetch a wallet's native SOL balance (in lamports) via `getBalance`.
@@ -624,6 +820,111 @@ mod tests {
             classify_settlement_error(raw),
             SettlementFailureKind::Timeout
         );
+    }
+
+    // -- refund RPC wire shapes (round-2 review item 2) ----------------------
+
+    /// HALT-4 pin: `searchTransactionHistory` rides the params[1] config
+    /// object with the exact camelCase key. The bare `[[sig]]` form (recent
+    /// cache only) is the double-refund class that already bit
+    /// `poll_for_confirmation` — this test breaks if anyone regresses to it.
+    #[test]
+    fn signature_status_body_pins_search_transaction_history_position() {
+        for flag in [true, false] {
+            let body = signature_status_request_body("5sig", flag);
+            assert_eq!(body["method"], "getSignatureStatuses");
+            assert_eq!(body["params"][0], serde_json::json!(["5sig"]));
+            assert_eq!(
+                body["params"][1]["searchTransactionHistory"],
+                serde_json::json!(flag),
+                "searchTransactionHistory must be the params[1] config key"
+            );
+        }
+    }
+
+    #[test]
+    fn block_height_body_uses_confirmed_commitment() {
+        let body = block_height_request_body();
+        assert_eq!(body["method"], "getBlockHeight");
+        assert_eq!(body["params"][0]["commitment"], "confirmed");
+    }
+
+    #[test]
+    fn latest_blockhash_body_carries_commitment() {
+        let body = latest_blockhash_request_body("confirmed");
+        assert_eq!(body["method"], "getLatestBlockhash");
+        assert_eq!(body["params"][0]["commitment"], "confirmed");
+    }
+
+    #[test]
+    fn parse_signature_status_realistic_shapes() {
+        // Not found: the RPC returns a literal null entry.
+        let not_found = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"context": {"slot": 100}, "value": [null]},
+        });
+        assert_eq!(parse_signature_status_response(&not_found).unwrap(), None);
+
+        // Landed and confirmed, no error.
+        let confirmed = serde_json::json!({
+            "result": {"value": [{
+                "slot": 98, "confirmations": 10, "err": null,
+                "confirmationStatus": "confirmed",
+            }]},
+        });
+        assert_eq!(
+            parse_signature_status_response(&confirmed).unwrap(),
+            Some(SignatureStatus {
+                err: None,
+                confirmation_status: Some("confirmed".to_string()),
+            })
+        );
+
+        // Landed WITH an on-chain execution error — err must surface (a
+        // consumer that drops it would confirm a refund that moved no USDC).
+        let failed = serde_json::json!({
+            "result": {"value": [{
+                "slot": 98, "confirmations": null,
+                "err": {"InstructionError": [1, {"Custom": 1}]},
+                "confirmationStatus": "finalized",
+            }]},
+        });
+        let parsed = parse_signature_status_response(&failed).unwrap().unwrap();
+        assert!(parsed.err.as_deref().unwrap().contains("InstructionError"));
+        assert_eq!(parsed.confirmation_status.as_deref(), Some("finalized"));
+
+        // A MALFORMED response (no value array) fails closed — it must never
+        // read as "not found" (which would authorize a re-sign).
+        let malformed = serde_json::json!({"result": {}});
+        assert!(parse_signature_status_response(&malformed).is_err());
+    }
+
+    #[test]
+    fn parse_latest_blockhash_fails_closed_without_height() {
+        let blockhash_b58 = bs58::encode([7u8; 32]).into_string();
+        let ok = serde_json::json!({
+            "result": {"value": {
+                "blockhash": blockhash_b58,
+                "lastValidBlockHeight": 12345,
+            }},
+        });
+        assert_eq!(
+            parse_latest_blockhash_response(&ok).unwrap(),
+            ([7u8; 32], 12_345)
+        );
+
+        // Missing lastValidBlockHeight → Err, never a silent 0 (which would
+        // declare every transaction instantly dead → premature re-sign).
+        let no_height = serde_json::json!({
+            "result": {"value": {"blockhash": bs58::encode([7u8; 32]).into_string()}},
+        });
+        assert!(parse_latest_blockhash_response(&no_height).is_err());
+
+        // Non-base58 / wrong-length blockhash → Err, never a zero hash.
+        let bad_hash = serde_json::json!({
+            "result": {"value": {"blockhash": "!!!", "lastValidBlockHeight": 1}},
+        });
+        assert!(parse_latest_blockhash_response(&bad_hash).is_err());
     }
 
     #[test]

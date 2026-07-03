@@ -859,6 +859,9 @@ async fn channel_draw_locked(
             channel_id,
             cumulative_atomic: voucher.cumulative_atomic,
             call_cost_atomic: billed,
+            // Search is flat-priced: quote == actual, so the realized advance
+            // IS the billed delta (the chat draw passes min(actual, billed)).
+            realized_advance_atomic: billed,
             expiry_slot: voucher.expiry_slot,
             nonce: voucher.nonce,
             request_digest: &voucher.request_digest,
@@ -971,14 +974,19 @@ fn map_voucher_rejection(
         // Post-auth CUMULATIVE rejections (rules 4–7): the caller proved control
         // of the session key AND the mismatch is about the cumulative, so
         // surfacing its OWN channel's authoritative last_cumulative is a resync
-        // aid (R9), not a third-party leak.
+        // aid (R9), not a third-party leak. The figure rides BOTH the prose
+        // message (unchanged) and the structured `last_cumulative` body field
+        // (§4b) — SDK trackers consume ONLY the structured field.
         E::Expired { .. }
         | E::NonMonotonicCumulative { .. }
         | E::DeltaMismatch { .. }
         | E::BelowSettled { .. }
-        | E::OverDraw { .. } => GatewayError::InvalidPayment(format!(
-            "channel voucher rejected; resync from authoritative last_cumulative={last_cumulative}"
-        )),
+        | E::OverDraw { .. } => GatewayError::InvalidPaymentWithResync {
+            message: format!(
+                "channel voucher rejected; resync from authoritative last_cumulative={last_cumulative}"
+            ),
+            last_cumulative,
+        },
     }
 }
 
@@ -1004,5 +1012,102 @@ mod tests {
     fn search_request_rejects_missing_query() {
         let err = serde_json::from_str::<SearchRequest>(r#"{"max_results":5}"#);
         assert!(err.is_err(), "missing query must fail to deserialize");
+    }
+
+    // -- pre-auth no-leak (round-1 review item 16) ---------------------------
+
+    /// Pins `verify_voucher`'s check ORDER: a voucher that is BOTH
+    /// wrong-signature AND expired must reject as `InvalidSignature` — the
+    /// pre-auth arm that surfaces NO ledger figure. If expiry were checked
+    /// first, an unauthenticated caller could receive a resync body carrying
+    /// the channel's authoritative last_cumulative.
+    #[test]
+    fn verify_voucher_rejects_bad_signature_before_expiry() {
+        use ed25519_dalek::SigningKey;
+        let session = SigningKey::from_bytes(&[5u8; 32]);
+        let state = solvela_x402::channel::ChannelState {
+            channel_id: [1u8; 32],
+            deposited_atomic: 50_000,
+            settled_atomic: 0,
+            last_cumulative_atomic: 0,
+            session_key: session.verifying_key().to_bytes(),
+            expected_request_digest: [2u8; 32],
+        };
+        let voucher = solvela_x402::channel::Voucher {
+            channel_id: [1u8; 32],
+            cumulative_atomic: 10_500,
+            expiry_slot: 0, // long expired
+            nonce: 1,
+            request_digest: [2u8; 32],
+            signature: [0x99u8; 64], // garbage — never signed
+        };
+        let err = solvela_x402::channel::verify_voucher(&state, &voucher, 10_500, 1_000_000)
+            .expect_err("must reject");
+        assert!(
+            matches!(
+                err,
+                solvela_x402::channel::ChannelVoucherError::InvalidSignature
+            ),
+            "signature must be checked BEFORE expiry (got {err:?})"
+        );
+    }
+
+    /// Pins `map_voucher_rejection`'s arm assignment: pre-auth rejections NEVER
+    /// produce the structured resync body (no ledger figure for an
+    /// unauthenticated caller); post-auth cumulative rejections ALWAYS do,
+    /// carrying the authoritative figure.
+    #[test]
+    fn map_voucher_rejection_resync_only_on_post_auth_arms() {
+        use solvela_x402::channel::ChannelVoucherError as E;
+        let last = 12_600u64;
+
+        let pre_auth = [
+            E::ChannelMismatch,
+            E::InvalidSignature,
+            E::RequestDigestMismatch,
+        ];
+        for err in pre_auth {
+            match map_voucher_rejection(err, last) {
+                GatewayError::InvalidPayment(msg) => {
+                    assert!(
+                        !msg.contains(&last.to_string()),
+                        "pre-auth message must not leak the ledger figure: {msg}"
+                    );
+                }
+                other => panic!("pre-auth arm must map to plain InvalidPayment, got {other:?}"),
+            }
+        }
+
+        let post_auth = [
+            E::Expired {
+                expiry_slot: 1,
+                current_slot: 100,
+                buffer: 0,
+            },
+            E::NonMonotonicCumulative {
+                cumulative: 1,
+                last_cumulative: last,
+            },
+            E::DeltaMismatch {
+                expected_billed: 10_500,
+                actual_delta: 1,
+            },
+            E::BelowSettled {
+                cumulative: 1,
+                settled: 2,
+            },
+            E::OverDraw {
+                cumulative: 99_999,
+                deposited: 50_000,
+            },
+        ];
+        for err in post_auth {
+            match map_voucher_rejection(err, last) {
+                GatewayError::InvalidPaymentWithResync {
+                    last_cumulative, ..
+                } => assert_eq!(last_cumulative, last),
+                other => panic!("post-auth arm must map to the resync body, got {other:?}"),
+            }
+        }
     }
 }

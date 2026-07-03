@@ -18466,6 +18466,14 @@ price_per_request_usdc = 0.01
                 .await
                 .ok()?;
         channels_exists?; // NULL → channel schema absent → skip cleanly
+                          // Migration 017 (realized counter + channel_refunds) is now load-bearing
+                          // for every draw/close in this module — same skip rule on an older DB.
+        let refunds_exists: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.channel_refunds')::text")
+                .fetch_one(&pool)
+                .await
+                .ok()?;
+        refunds_exists?;
         let client = redis::Client::open(redis_url()).ok()?;
         // Prove Redis actually answers before we rely on it for the draw lock.
         let cache = ResponseCache::new(&redis_url(), CacheConfig::default()).ok()?;
@@ -19731,5 +19739,159 @@ price_per_request_usdc = 0.01
             .bind(&agent)
             .execute(&pool)
             .await;
+    }
+
+    // -- close route 503 paths (round-1 review item 17) ----------------------
+
+    /// A `/v1/channel/close` app with channels ENABLED, a DB pool PRESENT
+    /// (lazy — never actually connected before the gate under test), and NO
+    /// Redis: close must fail CLOSED with 503, never proceed lock-free.
+    fn close_app_without_redis() -> axum::Router {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(CHANNEL_SEARCH_SERVICES_TOML).unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        config.channel.enabled = true;
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
+            search_provider: Some(Arc::new(StubProvider)),
+            facilitator,
+            usage: gateway::usage::UsageTracker::noop(),
+            cache: None, // the gate under test
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            // Present but LAZY: the Redis gate must fire before any DB query.
+            db_pool: Some(
+                sqlx::PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+                    .expect("lazy pool"),
+            ),
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        build_router(state, RateLimiter::new(RateLimitConfig::default()))
+    }
+
+    fn close_request(channel_id_b58: &str, signature_b64: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/channel/close")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "channel_id": channel_id_b58,
+                    "signature": signature_b64,
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
+    /// Addendum item 2: with channels enabled and a DB configured but Redis
+    /// ABSENT, close fails closed (503) — it never proceeds lock-free against
+    /// a possible in-flight draw. Runs on a bare checkout (no DB/Redis needed).
+    #[tokio::test]
+    async fn close_fails_closed_503_without_redis() {
+        let app = close_app_without_redis();
+        let resp = app
+            .oneshot(close_request(
+                &bs58::encode([7u8; 32]).into_string(),
+                "AA==",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Redis-absent close must 503 fail-closed, never lock-free"
+        );
+    }
+
+    /// A close racing an in-flight draw is refused with 503 + Retry-After (the
+    /// anti-grief half of invariant 11); once the lock is free the SAME signed
+    /// close succeeds and reports the frozen reservation.
+    #[tokio::test]
+    async fn close_rejects_503_retry_after_while_draw_lock_held() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping close_rejects_503_retry_after_while_draw_lock_held: dev stack unavailable"
+            );
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+        let cid_b58 = bs58::encode(cid).into_string();
+
+        // Hold the per-channel draw lock out-of-band (an in-flight draw).
+        let lock_cache = ResponseCache::new(&redis_url(), CacheConfig::default()).unwrap();
+        assert!(lock_cache
+            .acquire_channel_draw_lock(&cid_b58)
+            .await
+            .expect("redis reachable"));
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        let close_msg = solvela_x402::channel::build_close_message(&cid);
+        let sig_b64 =
+            base64::engine::general_purpose::STANDARD.encode(key.sign(&close_msg).to_bytes());
+
+        let resp = app
+            .clone()
+            .oneshot(close_request(&cid_b58, &sig_b64))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("5"),
+            "the lock-held 503 must carry Retry-After"
+        );
+
+        // Release the draw lock → the SAME close now freezes the reservation.
+        lock_cache.release_channel_draw_lock(&cid_b58).await;
+        let resp = app
+            .oneshot(close_request(&cid_b58, &sig_b64))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(status, StatusCode::OK, "post-release close: {json}");
+        assert_eq!(json["status"], "closing");
+        assert_eq!(json["refund_status"], "reserved");
+        assert_eq!(json["refundable_atomic"], 1_000_000);
     }
 }

@@ -62,6 +62,23 @@ pub enum GatewayError {
     #[error("invalid payment: {0}")]
     InvalidPayment(String),
 
+    /// A channel-voucher rejection carrying the channel's authoritative
+    /// `last_cumulative` as a STRUCTURED field (plan §4b): the body is the
+    /// standard `invalid_payment` envelope PLUS `"last_cumulative"` as an
+    /// atomic-amount STRING, so SDK trackers resync from machine-readable data
+    /// and never scrape the prose message. Post-authentication rejections ONLY
+    /// — pre-auth arms (`InvalidSignature`/`ChannelMismatch`) must keep using
+    /// [`GatewayError::InvalidPayment`] with no ledger figure (an
+    /// unauthenticated caller must never learn a channel's balance).
+    ///
+    /// The wire shape is pinned by `tests/fixtures/channel_resync_error.json`
+    /// (shared with the signer-core parity test — cross-repo contract).
+    #[error("invalid payment: {message}")]
+    InvalidPaymentWithResync {
+        message: String,
+        last_cumulative: u64,
+    },
+
     #[error("payment settlement failed: {0}")]
     SettlementFailed(String),
 
@@ -141,6 +158,24 @@ impl IntoResponse for GatewayError {
             return response;
         }
 
+        // InvalidPaymentWithResync emits the invalid_payment envelope PLUS the
+        // structured `last_cumulative` resync field (atomic string — §4b), so
+        // it bypasses the plain (status, error_type, message) machinery.
+        if let GatewayError::InvalidPaymentWithResync {
+            message,
+            last_cumulative,
+        } = &self
+        {
+            let body = json!({
+                "error": {
+                    "type": "invalid_payment",
+                    "message": message,
+                    "last_cumulative": last_cumulative.to_string(),
+                }
+            });
+            return (StatusCode::PAYMENT_REQUIRED, axum::Json(body)).into_response();
+        }
+
         let (status, error_type, message) = match &self {
             GatewayError::ModelNotFound(msg) => {
                 (StatusCode::NOT_FOUND, "model_not_found", msg.clone())
@@ -200,11 +235,14 @@ impl IntoResponse for GatewayError {
                     "Internal server error".to_string(),
                 )
             }
-            // Handled by the `if let` short-circuit above. The arm exists
+            // Handled by the `if let` short-circuits above. The arms exist
             // purely so the inner match stays exhaustive without an `_`
             // wildcard that would silently swallow any future variant.
             GatewayError::PaymentChallenge(_) => {
                 unreachable!("PaymentChallenge is handled by the early return above")
+            }
+            GatewayError::InvalidPaymentWithResync { .. } => {
+                unreachable!("InvalidPaymentWithResync is handled by the early return above")
             }
         };
 
@@ -313,6 +351,32 @@ mod tests {
         let (status, json) = error_response(GatewayError::PaymentRequired).await;
         assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
         assert_eq!(json["error"]["type"], "payment_required");
+    }
+
+    /// §4b response-shape pin: the structured resync body carries
+    /// `last_cumulative` as an atomic STRING alongside the standard
+    /// invalid_payment envelope, byte-compatible with the shared fixture the
+    /// signer-core parity test consumes (cross-repo contract — never let the
+    /// SDK scrape the prose).
+    #[tokio::test]
+    async fn channel_resync_error_matches_shared_fixture() {
+        let (status, json) = error_response(GatewayError::InvalidPaymentWithResync {
+            message: "channel voucher rejected; resync from authoritative last_cumulative=12600"
+                .to_string(),
+            last_cumulative: 12_600,
+        })
+        .await;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/channel_resync_error.json"))
+                .expect("fixture parses");
+        assert_eq!(
+            json, fixture,
+            "structured resync body drifted from the shared SDK fixture"
+        );
+        // The load-bearing field, asserted explicitly: a STRING atomic amount.
+        assert_eq!(json["error"]["last_cumulative"], "12600");
     }
 
     #[tokio::test]

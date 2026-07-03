@@ -942,6 +942,48 @@ async fn main() -> anyhow::Result<()> {
         warn!("escrow configured but no database — claim processor disabled");
     }
 
+    // ── Channel refund worker (owed-money drain, background task) ────────────
+    //
+    // Gated on DB-pool presence ONLY — deliberately NOT on `channel.enabled`
+    // (the flag gates NEW deposits/draws/closes; already-frozen refund
+    // obligations must keep draining, and the stuck-refund alert must keep
+    // firing, through incident flag-flips and rollback windows). Signs with the
+    // fee-payer pool under the payer==payee guard (the key must belong to
+    // `recipient_wallet`); with no keys configured the worker still runs the
+    // age alert and retains every reservation.
+    if let Some(ref pool) = state.db_pool {
+        // The refund worker signs ONLY with a key matching recipient_wallet
+        // (FIX 6); with multiple pool keys, `next()`'s rotation lands on the
+        // wrong key some sweeps and the refund waits for round-robin luck.
+        if state.fee_payer_pool.as_ref().is_some_and(|p| p.len() > 1) {
+            warn!(
+                "fee-payer pool holds multiple keys — channel refunds sign only with the \
+                 recipient_wallet key, so drains may be delayed by rotation"
+            );
+        }
+        // Do NOT widen this constructor to accept AppConfig/ChannelConfig —
+        // flag-independence is by construction (the worker CANNOT consult
+        // channel.enabled), and the flag-off-drain test pins that.
+        let worker = gateway::channel_refunds::RefundWorker::new(
+            pool.clone(),
+            Arc::new(gateway::channel_refunds::SolanaRefundRpc::new(
+                state.http_client.clone(),
+                app_config.solana.rpc_url.clone(),
+            )),
+            state.fee_payer_pool.clone(),
+            app_config.solana.recipient_wallet.clone(),
+            app_config.channel.refund_daily_cap_atomic,
+        );
+        let _handle = gateway::channel_refunds::start_refund_worker(
+            worker,
+            std::time::Duration::from_secs(10),
+            shutdown_rx.clone(),
+        );
+        info!("channel refund worker started");
+    } else {
+        info!("no database — channel refund worker disabled (no ledger to drain)");
+    }
+
     // ── Balance monitor (fire-and-forget background task) ─────────────────────
     //
     // Polls SOL + USDC for the recipient wallet, every fee-payer pool key,
