@@ -7,6 +7,7 @@ pub mod a2a;
 pub mod audit;
 pub mod balance_monitor;
 pub mod cache;
+pub mod channel_refunds;
 pub mod channels;
 pub mod config;
 pub mod error;
