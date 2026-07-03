@@ -54,9 +54,9 @@ use solvela_x402::escrow::claim_queue::{backoff_duration, MAX_CLAIM_ATTEMPTS};
 use solvela_x402::fee_payer::FeePayerPool;
 use solvela_x402::solana_rpc::SignatureStatus;
 use solvela_x402::traits::Error as X402Error;
-use solvela_x402::usdc_transfer::{sign_usdc_transfer_checked, SignedUsdcTransfer};
+use solvela_x402::usdc_transfer::SignedUsdcTransfer;
 
-use crate::channels::{atomic_to_i64, i64_to_atomic, ChannelRepoError};
+use crate::channels::{atomic_to_i64, i64_to_atomic, ChannelRepoError, ChannelStatus};
 
 // ---------------------------------------------------------------------------
 // Errors + pure money math
@@ -210,16 +210,18 @@ pub async fn close_channel_and_reserve_refund(
     // ledger values the refund freezes against.
     let flipped: Option<(i64, i64, i64, String, String)> = sqlx::query_as(
         "UPDATE channels
-            SET status = 'closing', updated_at = NOW()
-          WHERE channel_id = $1 AND status = 'open'
+            SET status = $1, updated_at = NOW()
+          WHERE channel_id = $2 AND status = $3
       RETURNING deposited_atomic, settled_atomic, realized_atomic, agent_wallet, mint",
     )
+    .bind(ChannelStatus::Closing.as_str())
     .bind(channel_id)
+    .bind(ChannelStatus::Open.as_str())
     .fetch_optional(&mut *tx)
     .await?;
 
     let (deposited, settled, realized, wallet, mint, channel_status) = match flipped {
-        Some((d, s, r, w, m)) => (d, s, r, w, m, "closing".to_string()),
+        Some((d, s, r, w, m)) => (d, s, r, w, m, ChannelStatus::Closing.as_str().to_string()),
         None => {
             // Not open: already closing/closed (idempotent re-close), or
             // missing. `realized` is frozen post-flip (the draw persist
@@ -250,13 +252,14 @@ pub async fn close_channel_and_reserve_refund(
     sqlx::query(
         "INSERT INTO channel_refunds
            (channel_id, amount_atomic, destination_wallet, mint, status)
-         VALUES ($1, $2, $3, $4, 'reserved')
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (channel_id) DO NOTHING",
     )
     .bind(channel_id)
     .bind(atomic_to_i64(refundable_atomic).map_err(ChannelRefundError::Repo)?)
     .bind(&wallet)
     .bind(&mint)
+    .bind(RefundStatus::Reserved.as_str())
     .execute(&mut *tx)
     .await?;
 
@@ -319,6 +322,7 @@ async fn fetch_refunds(pool: &PgPool, status: RefundStatus) -> Result<Vec<Refund
             let amount_atomic = match i64_to_atomic(r.1) {
                 Ok(a) => a,
                 Err(e) => {
+                    metrics::counter!("solvela_channel_refund_corrupt_row_total").increment(1);
                     error!(channel_id = %r.0, error = %e, "corrupt refund amount — row skipped");
                     return None;
                 }
@@ -326,6 +330,7 @@ async fn fetch_refunds(pool: &PgPool, status: RefundStatus) -> Result<Vec<Refund
             let last_valid_block_height = match r.7.map(i64_to_atomic).transpose() {
                 Ok(h) => h,
                 Err(e) => {
+                    metrics::counter!("solvela_channel_refund_corrupt_row_total").increment(1);
                     error!(channel_id = %r.0, error = %e, "corrupt refund block height — row skipped");
                     return None;
                 }
@@ -355,8 +360,25 @@ pub enum ClaimOutcome {
     /// A peer instance won the CAS — discard the locally signed bytes.
     Lost,
     /// The global daily cap would be exceeded — no flip; the obligation stays
-    /// `reserved` (alerted, retried once headroom returns).
-    CapHeld,
+    /// `reserved` (alerted, retried once headroom returns). NOT the `held`
+    /// status: nothing transitions.
+    CapExceeded,
+}
+
+/// The full claim payload — named fields so a call site can never transpose
+/// the adjacent `u64`s (`last_valid_block_height` vs `amount_atomic`: a
+/// swapped positional call compiles and persists a wrong amount).
+#[derive(Debug)]
+pub struct RefundClaim<'a> {
+    pub channel_id: &'a str,
+    /// The exact wire bytes to persist (and later broadcast verbatim).
+    pub signed_tx: &'a [u8],
+    /// Base58 transaction signature of `signed_tx`.
+    pub tx_signature: &'a str,
+    pub last_valid_block_height: u64,
+    pub amount_atomic: u64,
+    /// Global trailing-24h disbursement ceiling; `None` = uncapped.
+    pub daily_cap_atomic: Option<u64>,
 }
 
 /// The §5.C.2b single-winner claim: ONE short transaction —
@@ -367,12 +389,7 @@ pub enum ClaimOutcome {
 /// happens only AFTER this commits, and only ever with these persisted bytes.
 pub async fn claim_refund_for_broadcast(
     pool: &PgPool,
-    channel_id: &str,
-    signed_tx: &[u8],
-    tx_signature: &str,
-    last_valid_block_height: u64,
-    amount_atomic: u64,
-    daily_cap_atomic: Option<u64>,
+    claim: &RefundClaim<'_>,
 ) -> Result<ClaimOutcome, ChannelRefundError> {
     let mut tx = pool.begin().await?;
 
@@ -382,36 +399,46 @@ pub async fn claim_refund_for_broadcast(
         .execute(&mut *tx)
         .await?;
 
-    if let Some(cap) = daily_cap_atomic {
+    if let Some(cap) = claim.daily_cap_atomic {
+        // `held` rows are excluded: every held path (deterministic rejection,
+        // landed-with-error, retry exhaustion) means no USDC left the wallet,
+        // so counting them would only throttle legitimate refunds. Runbook
+        // note: operator re-arm (held -> reserved) does NOT clear
+        // first_broadcast_at — a re-armed row re-enters this window at its
+        // ORIGINAL broadcast anchor once it leaves `held` again.
         let broadcast_24h: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(amount_atomic), 0)::BIGINT
                FROM channel_refunds
-              WHERE first_broadcast_at > NOW() - INTERVAL '24 hours'",
+              WHERE first_broadcast_at > NOW() - INTERVAL '24 hours'
+                AND status <> $1",
         )
+        .bind(RefundStatus::Held.as_str())
         .fetch_one(&mut *tx)
         .await?;
         let already = i64_to_atomic(broadcast_24h).map_err(ChannelRefundError::Repo)?;
-        if already.saturating_add(amount_atomic) > cap {
+        if already.saturating_add(claim.amount_atomic) > cap {
             tx.rollback().await?;
-            return Ok(ClaimOutcome::CapHeld);
+            return Ok(ClaimOutcome::CapExceeded);
         }
     }
 
     let res = sqlx::query(
         "UPDATE channel_refunds
-            SET status = 'in_flight',
-                signed_tx = $1,
-                tx_signature = $2,
-                last_valid_block_height = $3,
+            SET status = $1,
+                signed_tx = $2,
+                tx_signature = $3,
+                last_valid_block_height = $4,
                 attempts = attempts + 1,
                 first_broadcast_at = COALESCE(first_broadcast_at, NOW()),
                 updated_at = NOW()
-          WHERE channel_id = $4 AND status = 'reserved'",
+          WHERE channel_id = $5 AND status = $6",
     )
-    .bind(signed_tx)
-    .bind(tx_signature)
-    .bind(atomic_to_i64(last_valid_block_height).map_err(ChannelRefundError::Repo)?)
-    .bind(channel_id)
+    .bind(RefundStatus::InFlight.as_str())
+    .bind(claim.signed_tx)
+    .bind(claim.tx_signature)
+    .bind(atomic_to_i64(claim.last_valid_block_height).map_err(ChannelRefundError::Repo)?)
+    .bind(claim.channel_id)
+    .bind(RefundStatus::Reserved.as_str())
     .execute(&mut *tx)
     .await?;
 
@@ -437,9 +464,10 @@ pub async fn confirm_refund_and_close_channel(
     let mut tx = pool.begin().await?;
     let res = sqlx::query(
         "UPDATE channel_refunds
-            SET status = 'confirmed', updated_at = NOW()
-          WHERE channel_id = $1 AND status = $2",
+            SET status = $1, updated_at = NOW()
+          WHERE channel_id = $2 AND status = $3",
     )
+    .bind(RefundStatus::Confirmed.as_str())
     .bind(channel_id)
     .bind(from.as_str())
     .execute(&mut *tx)
@@ -452,10 +480,12 @@ pub async fn confirm_refund_and_close_channel(
     // matches 0 rows, which is fine — the refund confirmation is the money
     // fact; the channel status is bookkeeping riding the same transaction.
     sqlx::query(
-        "UPDATE channels SET status = 'closed', updated_at = NOW()
-          WHERE channel_id = $1 AND status = 'closing'",
+        "UPDATE channels SET status = $1, updated_at = NOW()
+          WHERE channel_id = $2 AND status = $3",
     )
+    .bind(ChannelStatus::Closed.as_str())
     .bind(channel_id)
+    .bind(ChannelStatus::Closing.as_str())
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -481,12 +511,13 @@ pub async fn resign_refund(
                 last_valid_block_height = $3,
                 attempts = attempts + 1,
                 updated_at = NOW()
-          WHERE channel_id = $4 AND status = 'in_flight' AND tx_signature = $5",
+          WHERE channel_id = $4 AND status = $5 AND tx_signature = $6",
     )
     .bind(new_signed_tx)
     .bind(new_tx_signature)
     .bind(atomic_to_i64(new_last_valid_block_height).map_err(ChannelRefundError::Repo)?)
     .bind(channel_id)
+    .bind(RefundStatus::InFlight.as_str())
     .bind(old_tx_signature)
     .execute(pool)
     .await?;
@@ -495,6 +526,11 @@ pub async fn resign_refund(
 
 /// Move a reservation to `held` (alert-and-hold; operator re-arm only).
 /// Status-predicated CAS; returns `false` when the row already moved on.
+///
+/// Runbook: re-arm is `UPDATE channel_refunds SET status = 'reserved' WHERE
+/// channel_id = … AND status = 'held'` after fixing the cause. Re-arm keeps
+/// `first_broadcast_at` (the daily-cap anchor) — see the cap note in
+/// [`claim_refund_for_broadcast`].
 pub async fn hold_refund(
     pool: &PgPool,
     channel_id: &str,
@@ -502,9 +538,10 @@ pub async fn hold_refund(
 ) -> Result<bool, ChannelRefundError> {
     let res = sqlx::query(
         "UPDATE channel_refunds
-            SET status = 'held', updated_at = NOW()
-          WHERE channel_id = $1 AND status = $2",
+            SET status = $1, updated_at = NOW()
+          WHERE channel_id = $2 AND status = $3",
     )
+    .bind(RefundStatus::Held.as_str())
     .bind(channel_id)
     .bind(from.as_str())
     .execute(pool)
@@ -518,8 +555,26 @@ async fn oldest_pending_age_secs(pool: &PgPool) -> Result<Option<i64>, sqlx::Err
     sqlx::query_scalar(
         "SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::BIGINT
            FROM channel_refunds
-          WHERE status IN ('reserved', 'in_flight')",
+          WHERE status IN ($1, $2)",
     )
+    .bind(RefundStatus::Reserved.as_str())
+    .bind(RefundStatus::InFlight.as_str())
+    .fetch_one(pool)
+    .await
+}
+
+/// `held` visibility: (count, age-of-oldest-held-entry seconds). A held row is
+/// operator-owed money — it must keep signaling every sweep until re-armed,
+/// not just at the one-shot entry alert (age keyed on `updated_at`, which the
+/// hold CAS set on entry).
+async fn held_stats(pool: &PgPool) -> Result<(i64, Option<i64>), sqlx::Error> {
+    sqlx::query_as(
+        "SELECT COUNT(*),
+                EXTRACT(EPOCH FROM (NOW() - MIN(updated_at)))::BIGINT
+           FROM channel_refunds
+          WHERE status = $1",
+    )
+    .bind(RefundStatus::Held.as_str())
     .fetch_one(pool)
     .await
 }
@@ -643,6 +698,9 @@ impl RefundWorker {
     /// One sweep: gauge/alert, then drain `reserved` and `in_flight` rows that
     /// are due per the claim-queue backoff cadence.
     pub async fn sweep(&self) {
+        // Every Err arm below ALSO bumps the sweep-error counter: a Prometheus
+        // gauge holds its last value, so a silently-failing sweep would read
+        // as all-clear forever without a rising error series next to it.
         match oldest_pending_age_secs(&self.pool).await {
             Ok(age) => {
                 let secs = age.unwrap_or(0).max(0);
@@ -655,7 +713,33 @@ impl RefundWorker {
                     );
                 }
             }
-            Err(e) => warn!(error = %e, "refund worker: pending-age read failed"),
+            Err(e) => {
+                metrics::counter!("solvela_channel_refund_sweep_error_total").increment(1);
+                warn!(error = %e, "refund worker: pending-age read failed");
+            }
+        }
+
+        // Continuous `held` visibility (never one-shot): a held row is owed
+        // money awaiting operator action — it keeps signaling every sweep,
+        // through gauges + the same age-threshold error alert, until re-armed.
+        match held_stats(&self.pool).await {
+            Ok((count, oldest)) => {
+                metrics::gauge!("solvela_channel_refund_held_count").set(count as f64);
+                let secs = oldest.unwrap_or(0).max(0);
+                metrics::gauge!("solvela_channel_refund_held_oldest_seconds").set(secs as f64);
+                if secs > STUCK_REFUND_ALERT_SECS {
+                    error!(
+                        held_count = count,
+                        held_oldest_secs = secs,
+                        "channel refund HELD past the alert threshold — operator re-arm \
+                         required (owed money is not moving)"
+                    );
+                }
+            }
+            Err(e) => {
+                metrics::counter!("solvela_channel_refund_sweep_error_total").increment(1);
+                warn!(error = %e, "refund worker: held stats read failed");
+            }
         }
 
         match fetch_refunds(&self.pool, RefundStatus::Reserved).await {
@@ -666,7 +750,10 @@ impl RefundWorker {
                     }
                 }
             }
-            Err(e) => warn!(error = %e, "refund worker: reserved scan failed"),
+            Err(e) => {
+                metrics::counter!("solvela_channel_refund_sweep_error_total").increment(1);
+                warn!(error = %e, "refund worker: reserved scan failed");
+            }
         }
 
         match fetch_refunds(&self.pool, RefundStatus::InFlight).await {
@@ -677,7 +764,10 @@ impl RefundWorker {
                     }
                 }
             }
-            Err(e) => warn!(error = %e, "refund worker: in_flight scan failed"),
+            Err(e) => {
+                metrics::counter!("solvela_channel_refund_sweep_error_total").increment(1);
+                warn!(error = %e, "refund worker: in_flight scan failed");
+            }
         }
     }
 
@@ -707,23 +797,9 @@ impl RefundWorker {
         };
 
         // FIX 6 payer==payee: the refund source is the recipient wallet; never
-        // sign with a key that is not that wallet.
-        let signer_pubkey = match solvela_x402::solana::keypair_pubkey(wallet.keypair_bytes()) {
-            Ok(pk) => pk,
-            Err(e) => {
-                error!(channel_id = %row.channel_id, error = %e, "refund worker: invalid fee-payer keypair");
-                return None;
-            }
-        };
-        let recipient = match solvela_x402::escrow::pda::decode_bs58_pubkey(&self.recipient_wallet)
-        {
-            Ok(r) => r,
-            Err(_) => {
-                error!("refund worker: recipient_wallet is not a valid base58 pubkey");
-                return None;
-            }
-        };
-        if signer_pubkey != recipient {
+        // sign with a key that is not that wallet. Both sides are base58
+        // strings (the wallet derives its pubkey from the validated keypair).
+        if wallet.pubkey_b58 != self.recipient_wallet {
             error!(
                 channel_id = %row.channel_id,
                 "refund worker: fee_payer_key does not belong to recipient_wallet — refusing to \
@@ -765,14 +841,10 @@ impl RefundWorker {
             }
         };
 
-        match sign_usdc_transfer_checked(
-            &recipient,
-            &destination,
-            &mint,
-            row.amount_atomic,
-            &blockhash,
-            wallet.keypair_bytes(),
-        ) {
+        // Typed signing surface: the raw keypair never crosses the crate
+        // boundary; the owner is always the wallet's own pubkey.
+        match wallet.sign_usdc_transfer_checked(&destination, &mint, row.amount_atomic, &blockhash)
+        {
             Ok(signed) => Some((signed, last_valid_block_height)),
             Err(e) => {
                 error!(channel_id = %row.channel_id, error = %e, "refund worker: signing failed");
@@ -860,12 +932,14 @@ impl RefundWorker {
         // Single-winner claim (the ONLY broadcast gate).
         match claim_refund_for_broadcast(
             &self.pool,
-            &row.channel_id,
-            &signed.wire_bytes,
-            &signed.signature_b58,
-            last_valid_block_height,
-            row.amount_atomic,
-            self.daily_cap_atomic,
+            &RefundClaim {
+                channel_id: &row.channel_id,
+                signed_tx: &signed.wire_bytes,
+                tx_signature: &signed.signature_b58,
+                last_valid_block_height,
+                amount_atomic: row.amount_atomic,
+                daily_cap_atomic: self.daily_cap_atomic,
+            },
         )
         .await
         {
@@ -875,8 +949,8 @@ impl RefundWorker {
                 metrics::counter!("solvela_channel_refund_claim_lost_total").increment(1);
                 return;
             }
-            Ok(ClaimOutcome::CapHeld) => {
-                metrics::counter!("solvela_channel_refund_daily_cap_held_total").increment(1);
+            Ok(ClaimOutcome::CapExceeded) => {
+                metrics::counter!("solvela_channel_refund_daily_cap_exceeded_total").increment(1);
                 error!(
                     channel_id = %row.channel_id,
                     amount = row.amount_atomic,
@@ -1235,6 +1309,22 @@ mod tests {
         }
     }
 
+    /// A test claim with no cap.
+    fn test_claim<'a>(
+        channel_id: &'a str,
+        signed_tx: &'a [u8],
+        tx_signature: &'a str,
+    ) -> RefundClaim<'a> {
+        RefundClaim {
+            channel_id,
+            signed_tx,
+            tx_signature,
+            last_valid_block_height: 1_000,
+            amount_atomic: 46_220,
+            daily_cap_atomic: None,
+        }
+    }
+
     /// Draw the plan's pinned shape: last = 12_600, realized = 3_780.
     async fn draw_pinned_shape(pool: &PgPool, cid: &str) {
         persist_voucher_and_advance(
@@ -1442,24 +1532,14 @@ mod tests {
         let a = tokio::spawn(async move {
             claim_refund_for_broadcast(
                 &pool_a,
-                &cid_a,
-                b"worker-a-bytes",
-                "sig-worker-a",
-                1_000,
-                46_220,
-                None,
+                &test_claim(&cid_a, b"worker-a-bytes", "sig-worker-a"),
             )
             .await
         });
         let b = tokio::spawn(async move {
             claim_refund_for_broadcast(
                 &pool_b,
-                &cid_b,
-                b"worker-b-bytes",
-                "sig-worker-b",
-                1_000,
-                46_220,
-                None,
+                &test_claim(&cid_b, b"worker-b-bytes", "sig-worker-b"),
             )
             .await
         });
@@ -1510,36 +1590,26 @@ mod tests {
         draw_pinned_shape(&pool, &cid).await;
         close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
 
-        // Cap below the amount → CapHeld, no flip, no payload persisted.
-        let outcome = claim_refund_for_broadcast(
-            &pool,
-            &cid,
-            b"bytes",
-            "sig-cap",
-            1_000,
-            46_220,
-            Some(10_000),
-        )
-        .await
-        .unwrap();
-        assert_eq!(outcome, ClaimOutcome::CapHeld);
+        let claim_with_cap = |cap: Option<u64>| RefundClaim {
+            daily_cap_atomic: cap,
+            ..test_claim(&cid, b"bytes", "sig-cap")
+        };
+
+        // One atomic unit of headroom short → CapExceeded (no flip, no payload).
+        let outcome = claim_refund_for_broadcast(&pool, &claim_with_cap(Some(46_219)))
+            .await
+            .unwrap();
+        assert_eq!(outcome, ClaimOutcome::CapExceeded);
         let row = load_refund_row(&pool, &cid).await.unwrap();
         assert_eq!(row.status, "reserved", "obligation retained, never dropped");
         assert_eq!(row.tx_signature, None);
         assert_eq!(row.attempts, 0);
 
-        // Cap with headroom → the same reservation drains.
-        let outcome = claim_refund_for_broadcast(
-            &pool,
-            &cid,
-            b"bytes",
-            "sig-cap",
-            1_000,
-            46_220,
-            Some(1_000_000),
-        )
-        .await
-        .unwrap();
+        // Exactly at the cap → allowed (the check holds only when sum + amount
+        // EXCEEDS the cap).
+        let outcome = claim_refund_for_broadcast(&pool, &claim_with_cap(Some(46_220)))
+            .await
+            .unwrap();
         assert_eq!(outcome, ClaimOutcome::Won);
     }
 
@@ -1553,7 +1623,7 @@ mod tests {
         draw_pinned_shape(&pool, &cid).await;
         close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
         assert_eq!(
-            claim_refund_for_broadcast(&pool, &cid, b"v1", "sig-v1", 1_000, 46_220, None)
+            claim_refund_for_broadcast(&pool, &test_claim(&cid, b"v1", "sig-v1"))
                 .await
                 .unwrap(),
             ClaimOutcome::Won
@@ -1587,7 +1657,7 @@ mod tests {
         draw_pinned_shape(&pool, &cid).await;
         close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
         assert_eq!(
-            claim_refund_for_broadcast(&pool, &cid, b"v1", "sig-c", 1_000, 46_220, None)
+            claim_refund_for_broadcast(&pool, &test_claim(&cid, b"v1", "sig-c"))
                 .await
                 .unwrap(),
             ClaimOutcome::Won
@@ -1615,9 +1685,15 @@ mod tests {
 
     struct MockRpc {
         balance: u64,
-        block_height: u64,
+        /// Mutable so a test can advance the chain past `last_valid_block_height`
+        /// (the conclusive-death trigger). Defaults to 500 (< the 1_000 the
+        /// blockhash mock hands out — blockhash alive).
+        block_height: std::sync::Mutex<u64>,
         /// What `signature_status(_, true)` reports. `None` inner = not found.
         status: std::sync::Mutex<Option<SignatureStatus>>,
+        /// When `Some(text)`, `send_transaction` fails with that error text
+        /// (drives the broadcast-classification arms).
+        send_error: std::sync::Mutex<Option<String>>,
         sends: std::sync::Mutex<Vec<String>>,
     }
 
@@ -1625,8 +1701,9 @@ mod tests {
         fn new(balance: u64) -> Self {
             Self {
                 balance,
-                block_height: 500,
+                block_height: std::sync::Mutex::new(500),
                 status: std::sync::Mutex::new(None),
+                send_error: std::sync::Mutex::new(None),
                 sends: std::sync::Mutex::new(Vec::new()),
             }
         }
@@ -1641,7 +1718,7 @@ mod tests {
             Ok(([7u8; 32], 1_000))
         }
         async fn block_height(&self) -> Result<u64, X402Error> {
-            Ok(self.block_height)
+            Ok(*self.block_height.lock().unwrap())
         }
         async fn signature_status(
             &self,
@@ -1655,6 +1732,9 @@ mod tests {
             Ok(self.status.lock().unwrap().clone())
         }
         async fn send_transaction(&self, base64_tx: &str) -> Result<String, X402Error> {
+            if let Some(err) = self.send_error.lock().unwrap().clone() {
+                return Err(X402Error::Rpc(err));
+            }
             self.sends.lock().unwrap().push(base64_tx.to_string());
             Ok("mock-broadcast-sig".to_string())
         }
@@ -1796,5 +1876,362 @@ mod tests {
         assert_eq!(row.status, "reserved");
         assert_eq!(row.attempts, 0);
         assert!(rpc.sends.lock().unwrap().is_empty(), "nothing broadcast");
+    }
+
+    // -- worker decision paths: death / rebroadcast / confirm (review item 11) --
+
+    /// Seed an in_flight row via the real claim CAS (bytes "old-bytes",
+    /// signature "sig-old", last_valid_block_height 1_000) so the in_flight
+    /// handler's decision inputs are exactly production-shaped.
+    async fn seed_in_flight(pool: &PgPool, cid: &str) {
+        assert_eq!(
+            claim_refund_for_broadcast(
+                pool,
+                &RefundClaim {
+                    channel_id: cid,
+                    signed_tx: b"old-bytes",
+                    tx_signature: "sig-old",
+                    last_valid_block_height: 1_000,
+                    amount_atomic: 46_220,
+                    daily_cap_atomic: None,
+                },
+            )
+            .await
+            .unwrap(),
+            ClaimOutcome::Won
+        );
+    }
+
+    /// Conclusive death (history-negative AND block height past
+    /// last_valid_block_height) → the worker re-signs through the
+    /// signature-predicated CAS and broadcasts the NEW bytes.
+    #[tokio::test]
+    async fn worker_resigns_after_conclusive_death() {
+        let Some(pool) = isolated_db("death_resign").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        seed_in_flight(&pool, &cid).await;
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.block_height.lock().unwrap() = 2_000; // past last_valid (1_000)
+        let worker = test_worker(pool.clone(), rpc.clone());
+
+        // attempts = 1 after the claim → backoff 2s before the row is due.
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "in_flight");
+        assert_eq!(row.attempts, 2, "claim + one re-sign");
+        let new_sig = row.tx_signature.clone().expect("re-signed signature");
+        assert_ne!(new_sig, "sig-old", "the dead signature must be superseded");
+        let new_bytes = row.signed_tx.clone().expect("re-signed bytes");
+        assert_ne!(new_bytes.as_slice(), b"old-bytes".as_slice());
+        let sends = rpc.sends.lock().unwrap().clone();
+        assert_eq!(sends.len(), 1, "exactly one broadcast of the NEW bytes");
+        assert_eq!(
+            sends[0],
+            base64::engine::general_purpose::STANDARD.encode(&new_bytes),
+            "the broadcast bytes ARE the re-signed persisted bytes"
+        );
+    }
+
+    /// History-negative but the blockhash is still alive → the worker
+    /// rebroadcasts the SAME persisted bytes (never re-signs).
+    #[tokio::test]
+    async fn worker_rebroadcasts_same_bytes_while_blockhash_alive() {
+        let Some(pool) = isolated_db("rebroadcast").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        seed_in_flight(&pool, &cid).await;
+
+        let rpc = Arc::new(MockRpc::new(1_000_000)); // block_height 500 < 1_000
+        let worker = test_worker(pool.clone(), rpc.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "in_flight");
+        assert_eq!(row.attempts, 1, "no re-sign while the blockhash lives");
+        assert_eq!(row.tx_signature.as_deref(), Some("sig-old"));
+        let sends = rpc.sends.lock().unwrap().clone();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(
+            sends[0],
+            base64::engine::general_purpose::STANDARD.encode(b"old-bytes"),
+            "rebroadcast must reuse the persisted bytes verbatim"
+        );
+    }
+
+    /// The history search finds the transaction confirmed → confirm CAS +
+    /// channel closed, no further broadcast.
+    #[tokio::test]
+    async fn worker_confirms_in_flight_from_history_search() {
+        let Some(pool) = isolated_db("confirm_path").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        seed_in_flight(&pool, &cid).await;
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.status.lock().unwrap() = Some(SignatureStatus {
+            err: None,
+            confirmation_status: Some("confirmed".to_string()),
+        });
+        let worker = test_worker(pool.clone(), rpc.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "confirmed");
+        let ch = channels::load_channel(&pool, &cid).await.unwrap().unwrap();
+        assert_eq!(ch.status, "closed");
+        assert!(rpc.sends.lock().unwrap().is_empty(), "no broadcast needed");
+    }
+
+    /// A corrupt FROZEN tuple (unfixable by retry) → held with the entry alert,
+    /// never a silent every-sweep retry loop (review item 12).
+    #[tokio::test]
+    async fn worker_holds_reservation_with_corrupt_frozen_tuple() {
+        let Some(pool) = isolated_db("corrupt_tuple").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        sqlx::query("UPDATE channel_refunds SET destination_wallet = $1 WHERE channel_id = $2")
+            .bind("not base58 0OIl")
+            .bind(&cid)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        let worker = test_worker(pool.clone(), rpc.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "held", "corrupt frozen tuple is conclusive");
+        assert!(rpc.sends.lock().unwrap().is_empty(), "nothing broadcast");
+    }
+
+    // -- broadcast classification (review item 13) ---------------------------
+
+    /// A deterministic program rejection on broadcast → these bytes can never
+    /// land → held (conclusive execution failure).
+    #[tokio::test]
+    async fn worker_holds_on_deterministic_broadcast_rejection() {
+        let Some(pool) = isolated_db("broadcast_reject").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.send_error.lock().unwrap() = Some(
+            r#"{"code":-32002,"message":"Transaction simulation failed: Error processing Instruction 1: custom program error: 0x1"}"#
+                .to_string(),
+        );
+        let worker = test_worker(pool.clone(), rpc.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "held");
+    }
+
+    /// A transient broadcast failure (transport / expired blockhash) → the row
+    /// stays in_flight; the recovery path retries safely next sweep.
+    #[tokio::test]
+    async fn worker_retains_in_flight_on_transient_broadcast_failure() {
+        let Some(pool) = isolated_db("broadcast_transient").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.send_error.lock().unwrap() = Some("blockhash not found".to_string());
+        let worker = test_worker(pool.clone(), rpc.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "in_flight", "transient failure never abandons");
+        assert_eq!(row.attempts, 1);
+    }
+
+    /// An "already processed" broadcast response means the transfer LANDED (a
+    /// prior crashed broadcast) — treated as success (no hold); the next
+    /// sweep's history search confirms it.
+    #[tokio::test]
+    async fn worker_treats_already_processed_broadcast_as_landed() {
+        let Some(pool) = isolated_db("broadcast_already").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.send_error.lock().unwrap() =
+            Some("Transaction has already been processed".to_string());
+        let worker = test_worker(pool.clone(), rpc.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(
+            row.status, "in_flight",
+            "landed, awaiting the confirm sweep"
+        );
+
+        // The confirm sweep lands it.
+        *rpc.send_error.lock().unwrap() = None;
+        *rpc.status.lock().unwrap() = Some(SignatureStatus {
+            err: None,
+            confirmation_status: Some("finalized".to_string()),
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        worker.sweep().await;
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "confirmed");
+    }
+
+    /// Deterministic close-overtakes-draw interleaving (review item 15): the
+    /// close's flip commits while a draw's persist is BLOCKED on the row lock —
+    /// the draw must lose (AdvanceNotApplied), record NOTHING, and the frozen
+    /// refund must be the full pre-draw amount. Complements the stochastic
+    /// race test above.
+    #[tokio::test]
+    async fn close_overtakes_blocked_draw_which_records_nothing() {
+        let Some(pool) = db().await else { return };
+        let cid = fresh_channel_id();
+        let deposited = 50_000u64;
+        create_channel(&pool, &new_channel(&cid, deposited))
+            .await
+            .unwrap();
+
+        // Take the channels row lock exactly as close's flip does, and HOLD it.
+        let mut close_tx = pool.begin().await.unwrap();
+        let flipped = sqlx::query(
+            "UPDATE channels SET status = 'closing', updated_at = NOW()
+              WHERE channel_id = $1 AND status = 'open'",
+        )
+        .bind(&cid)
+        .execute(&mut *close_tx)
+        .await
+        .unwrap();
+        assert_eq!(flipped.rows_affected(), 1);
+
+        // The draw's persist now BLOCKS on the row lock.
+        let draw_pool = pool.clone();
+        let draw_cid = cid.clone();
+        let draw = tokio::spawn(async move {
+            persist_voucher_and_advance(
+                &draw_pool,
+                &VoucherRecord {
+                    channel_id: &draw_cid,
+                    cumulative_atomic: 12_600,
+                    call_cost_atomic: 12_600,
+                    realized_advance_atomic: 3_780,
+                    expiry_slot: 1_000_750,
+                    nonce: 1,
+                    request_digest: &[0x22; 32],
+                    signature: &[0x33; 64],
+                },
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !draw.is_finished(),
+            "the draw must be blocked on the close's row lock"
+        );
+
+        // The flip commits first — the draw re-evaluates and MUST lose.
+        close_tx.commit().await.unwrap();
+        let draw_result = draw.await.unwrap();
+        assert!(matches!(
+            draw_result,
+            Err(ChannelRepoError::AdvanceNotApplied)
+        ));
+
+        // Nothing recorded; the (idempotent) reservation freezes the FULL deposit.
+        let ch = channels::load_channel(&pool, &cid).await.unwrap().unwrap();
+        assert_eq!(ch.realized_atomic, 0);
+        assert_eq!(ch.last_voucher_cumulative_atomic, 0);
+        let outcome = close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        assert_eq!(outcome.refundable_atomic, deposited);
+    }
+
+    /// Review item 18: a raw disaster-recovery RE-APPLY of migration 017 must
+    /// not corrupt a legitimate post-017 `realized = 0, last > 0` row (the
+    /// fully-discounted chat-draw shape) — the backfill is guarded on
+    /// column-CREATION, not on a value predicate.
+    #[tokio::test]
+    async fn migration_017_reapply_does_not_corrupt_realized_zero_rows() {
+        let Some(pool) = isolated_db("migration_reapply").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        // A legitimate post-017 shape: last advanced, realized still 0
+        // (CHECK chain holds: 0 <= 0 <= 5_000 <= 50_000).
+        sqlx::query(
+            "UPDATE channels SET last_voucher_cumulative_atomic = 5000 WHERE channel_id = $1",
+        )
+        .bind(&cid)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            include_str!("../../../migrations/017_channel_realized_and_refunds.sql").to_string(),
+        ))
+        .execute(&pool)
+        .await
+        .expect("raw re-apply must succeed");
+
+        let ch = channels::load_channel(&pool, &cid).await.unwrap().unwrap();
+        assert_eq!(
+            ch.realized_atomic, 0,
+            "re-applied backfill must NOT inflate a legitimate realized=0 row"
+        );
+        assert_eq!(ch.last_voucher_cumulative_atomic, 5_000);
     }
 }

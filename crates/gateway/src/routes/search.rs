@@ -1013,4 +1013,101 @@ mod tests {
         let err = serde_json::from_str::<SearchRequest>(r#"{"max_results":5}"#);
         assert!(err.is_err(), "missing query must fail to deserialize");
     }
+
+    // -- pre-auth no-leak (round-1 review item 16) ---------------------------
+
+    /// Pins `verify_voucher`'s check ORDER: a voucher that is BOTH
+    /// wrong-signature AND expired must reject as `InvalidSignature` — the
+    /// pre-auth arm that surfaces NO ledger figure. If expiry were checked
+    /// first, an unauthenticated caller could receive a resync body carrying
+    /// the channel's authoritative last_cumulative.
+    #[test]
+    fn verify_voucher_rejects_bad_signature_before_expiry() {
+        use ed25519_dalek::SigningKey;
+        let session = SigningKey::from_bytes(&[5u8; 32]);
+        let state = solvela_x402::channel::ChannelState {
+            channel_id: [1u8; 32],
+            deposited_atomic: 50_000,
+            settled_atomic: 0,
+            last_cumulative_atomic: 0,
+            session_key: session.verifying_key().to_bytes(),
+            expected_request_digest: [2u8; 32],
+        };
+        let voucher = solvela_x402::channel::Voucher {
+            channel_id: [1u8; 32],
+            cumulative_atomic: 10_500,
+            expiry_slot: 0, // long expired
+            nonce: 1,
+            request_digest: [2u8; 32],
+            signature: [0x99u8; 64], // garbage — never signed
+        };
+        let err = solvela_x402::channel::verify_voucher(&state, &voucher, 10_500, 1_000_000)
+            .expect_err("must reject");
+        assert!(
+            matches!(
+                err,
+                solvela_x402::channel::ChannelVoucherError::InvalidSignature
+            ),
+            "signature must be checked BEFORE expiry (got {err:?})"
+        );
+    }
+
+    /// Pins `map_voucher_rejection`'s arm assignment: pre-auth rejections NEVER
+    /// produce the structured resync body (no ledger figure for an
+    /// unauthenticated caller); post-auth cumulative rejections ALWAYS do,
+    /// carrying the authoritative figure.
+    #[test]
+    fn map_voucher_rejection_resync_only_on_post_auth_arms() {
+        use solvela_x402::channel::ChannelVoucherError as E;
+        let last = 12_600u64;
+
+        let pre_auth = [
+            E::ChannelMismatch,
+            E::InvalidSignature,
+            E::RequestDigestMismatch,
+        ];
+        for err in pre_auth {
+            match map_voucher_rejection(err, last) {
+                GatewayError::InvalidPayment(msg) => {
+                    assert!(
+                        !msg.contains(&last.to_string()),
+                        "pre-auth message must not leak the ledger figure: {msg}"
+                    );
+                }
+                other => panic!("pre-auth arm must map to plain InvalidPayment, got {other:?}"),
+            }
+        }
+
+        let post_auth = [
+            E::Expired {
+                expiry_slot: 1,
+                current_slot: 100,
+                buffer: 0,
+            },
+            E::NonMonotonicCumulative {
+                cumulative: 1,
+                last_cumulative: last,
+            },
+            E::DeltaMismatch {
+                expected_billed: 10_500,
+                actual_delta: 1,
+            },
+            E::BelowSettled {
+                cumulative: 1,
+                settled: 2,
+            },
+            E::OverDraw {
+                cumulative: 99_999,
+                deposited: 50_000,
+            },
+        ];
+        for err in post_auth {
+            match map_voucher_rejection(err, last) {
+                GatewayError::InvalidPaymentWithResync {
+                    last_cumulative, ..
+                } => assert_eq!(last_cumulative, last),
+                other => panic!("post-auth arm must map to the resync body, got {other:?}"),
+            }
+        }
+    }
 }

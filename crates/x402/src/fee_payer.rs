@@ -46,10 +46,38 @@ impl FeePayerWallet {
 
     /// Return a reference to the raw 64-byte keypair.
     ///
-    /// **Only for trusted signing code** (e.g. escrow claimer) that needs raw
-    /// bytes to build transactions.  Do not use for logging or serialisation.
-    pub fn keypair_bytes(&self) -> &[u8; 64] {
+    /// **Only for trusted same-crate signing code** (e.g. escrow claimer) that
+    /// needs raw bytes to build transactions. Crate-private so raw key
+    /// material can never escape across the crate boundary — external callers
+    /// sign through a typed method like [`Self::sign_usdc_transfer_checked`].
+    pub(crate) fn keypair_bytes(&self) -> &[u8; 64] {
         &self.keypair
+    }
+
+    /// Sign a USDC `CreateIdempotent + TransferChecked` transfer FROM this
+    /// wallet (it is the fee payer, token authority, and ATA-create funder) —
+    /// see [`crate::usdc_transfer`]. The typed signing surface for the
+    /// gateway's channel-refund worker: raw keypair bytes never leave this
+    /// crate, and the message owner is always this wallet's own pubkey (a
+    /// caller cannot point the builder at a key it does not hold).
+    pub fn sign_usdc_transfer_checked(
+        &self,
+        destination_wallet: &[u8; 32],
+        mint: &[u8; 32],
+        amount: u64,
+        recent_blockhash: &[u8; 32],
+    ) -> Result<crate::usdc_transfer::SignedUsdcTransfer, crate::usdc_transfer::UsdcTransferError>
+    {
+        let owner = crate::solana::keypair_pubkey(&self.keypair)
+            .map_err(|e| crate::usdc_transfer::UsdcTransferError::InvalidKeypair(e.to_string()))?;
+        crate::usdc_transfer::sign_usdc_transfer_checked(
+            &owner,
+            destination_wallet,
+            mint,
+            amount,
+            recent_blockhash,
+            &self.keypair,
+        )
     }
 }
 
@@ -325,6 +353,38 @@ mod tests {
         keypair_bytes[..32].copy_from_slice(&signing_key.to_bytes());
         keypair_bytes[32..].copy_from_slice(signing_key.verifying_key().as_bytes());
         bs58::encode(&keypair_bytes).into_string()
+    }
+
+    /// The typed signing surface delegates to the canonical builder: the
+    /// wallet method's output is byte-identical to the crate-private free
+    /// signer for the same inputs, and its owner is always the wallet's own
+    /// pubkey (no caller-supplied owner to mismatch).
+    #[test]
+    fn wallet_sign_usdc_transfer_checked_matches_free_signer() {
+        let pool = FeePayerPool::from_keys(&[test_keypair_b58_from_seed(9)]).unwrap();
+        let wallet = pool.next().unwrap();
+        let destination = [0x22u8; 32];
+        let mint = [0x33u8; 32];
+        let blockhash = [7u8; 32];
+
+        let via_wallet = wallet
+            .sign_usdc_transfer_checked(&destination, &mint, 46_220, &blockhash)
+            .expect("wallet method signs");
+
+        let owner = crate::solana::keypair_pubkey(wallet.keypair_bytes()).unwrap();
+        let via_free = crate::usdc_transfer::sign_usdc_transfer_checked(
+            &owner,
+            &destination,
+            &mint,
+            46_220,
+            &blockhash,
+            wallet.keypair_bytes(),
+        )
+        .expect("free signer signs");
+
+        assert_eq!(via_wallet.wire_bytes, via_free.wire_bytes);
+        assert_eq!(via_wallet.signature_b58, via_free.signature_b58);
+        assert_eq!(via_wallet.base64_tx, via_free.base64_tx);
     }
 
     /// Generate N distinct valid keypairs with seeds 1..=N.

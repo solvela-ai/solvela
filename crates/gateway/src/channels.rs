@@ -396,11 +396,12 @@ pub async fn persist_voucher_and_advance(
                 updated_at = NOW()
           WHERE channel_id = $3
             AND last_voucher_cumulative_atomic < $1
-            AND status = 'open'",
+            AND status = $4",
     )
     .bind(cumulative)
     .bind(realized_advance)
     .bind(v.channel_id)
+    .bind(ChannelStatus::Open.as_str())
     .execute(&mut *tx)
     .await?;
 

@@ -14,17 +14,27 @@
 --
 -- All amounts are atomic USDC (BIGINT, integer math — solvela-fintech §1).
 
-ALTER TABLE channels
-    ADD COLUMN IF NOT EXISTS realized_atomic BIGINT NOT NULL DEFAULT 0
-        CHECK (realized_atomic >= 0);
-
--- Backfill BEFORE the ordering constraints: every pre-017 draw is a /v1/search
--- draw, where quote == actual, so the realized total IS the voucher total
--- (`realized := last`). Idempotent: already-backfilled rows (realized > 0) are
--- untouched, and a fresh/undrawn channel sets 0 := 0 (a no-op).
-UPDATE channels
-   SET realized_atomic = last_voucher_cumulative_atomic
- WHERE realized_atomic = 0;
+-- Column add + backfill in ONE guarded block: the backfill runs ONLY when the
+-- column is being created, i.e. only against pre-017 rows — every one a
+-- /v1/search draw, where quote == actual, so the realized total IS the voucher
+-- total (`realized := last`). Guarding on column-existence (not on a value
+-- predicate like `realized = 0`) makes a raw disaster-recovery re-apply
+-- semantically safe: post-017 a channel can legitimately sit at
+-- realized = 0 with last > 0 (a fully-discounted chat draw), and a re-run
+-- value-predicate backfill would silently inflate its obligation.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'channels' AND column_name = 'realized_atomic'
+    ) THEN
+        ALTER TABLE channels
+            ADD COLUMN realized_atomic BIGINT NOT NULL DEFAULT 0
+                CHECK (realized_atomic >= 0);
+        UPDATE channels
+           SET realized_atomic = last_voucher_cumulative_atomic;
+    END IF;
+END $$;
 
 -- CHECK chain, guarded (`ADD CONSTRAINT IF NOT EXISTS` is not Postgres SQL).
 -- Combined with 015's `settled <= last <= deposited` this yields the full

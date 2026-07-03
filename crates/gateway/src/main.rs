@@ -952,6 +952,9 @@ async fn main() -> anyhow::Result<()> {
     // `recipient_wallet`); with no keys configured the worker still runs the
     // age alert and retains every reservation.
     if let Some(ref pool) = state.db_pool {
+        // Do NOT widen this constructor to accept AppConfig/ChannelConfig —
+        // flag-independence is by construction (the worker CANNOT consult
+        // channel.enabled), and the flag-off-drain test pins that.
         let worker = gateway::channel_refunds::RefundWorker::new(
             pool.clone(),
             Arc::new(gateway::channel_refunds::SolanaRefundRpc::new(

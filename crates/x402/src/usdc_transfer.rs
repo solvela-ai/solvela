@@ -96,7 +96,7 @@ pub struct SignedUsdcTransfer {
 /// - instruction 2 — `TransferChecked` (program index 6): accounts
 ///   `[1, 4, 2, 0]` (source, mint, destination, authority), data
 ///   `[12] ++ u64_le(amount) ++ [6]`.
-pub fn build_usdc_transfer_checked_message(
+pub(crate) fn build_usdc_transfer_checked_message(
     owner: &[u8; 32],
     destination_wallet: &[u8; 32],
     mint: &[u8; 32],
@@ -172,7 +172,7 @@ pub fn build_usdc_transfer_checked_message(
 /// against `owner` so a tampered or mismatched key is rejected rather than
 /// signing over the wrong fee payer (the [`crate::solana::sign_system_transfer`]
 /// guard, and the module-level payer==payee rule the gateway layers on top).
-pub fn sign_usdc_transfer_checked(
+pub(crate) fn sign_usdc_transfer_checked(
     owner: &[u8; 32],
     destination_wallet: &[u8; 32],
     mint: &[u8; 32],
