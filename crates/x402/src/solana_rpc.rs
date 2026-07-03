@@ -292,6 +292,27 @@ pub async fn get_latest_blockhash(
     rpc_url: &str,
     commitment: &str,
 ) -> Result<[u8; 32], Error> {
+    let (blockhash, _last_valid_block_height) =
+        get_latest_blockhash_and_height(client, rpc_url, commitment).await?;
+    Ok(blockhash)
+}
+
+/// Fetch a recent blockhash AND its `lastValidBlockHeight` via
+/// `getLatestBlockhash` (same call as [`get_latest_blockhash`], which discards
+/// the height).
+///
+/// `lastValidBlockHeight` is the LAST block height at which the returned
+/// blockhash is still accepted — the producer for a conclusive-death check on
+/// a broadcast transaction: once `getBlockHeight` (same `confirmed`
+/// commitment) exceeds it AND a history-searching [`get_signature_status`]
+/// finds no trace of the signature, the transaction can never land and it is
+/// safe to re-sign. Fails closed on a missing/unparseable field — never a
+/// silent zero height (which would declare every transaction instantly dead).
+pub async fn get_latest_blockhash_and_height(
+    client: &Client,
+    rpc_url: &str,
+    commitment: &str,
+) -> Result<([u8; 32], u64), Error> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -315,9 +336,9 @@ pub async fn get_latest_blockhash(
         return Err(Error::Rpc(error.to_string()));
     }
 
-    let blockhash_b58 = result
-        .get("result")
-        .and_then(|r| r.get("value"))
+    let value = result.get("result").and_then(|r| r.get("value"));
+
+    let blockhash_b58 = value
         .and_then(|v| v.get("blockhash"))
         .and_then(|b| b.as_str())
         .ok_or_else(|| {
@@ -330,7 +351,138 @@ pub async fn get_latest_blockhash(
     let arr: [u8; 32] = bytes
         .try_into()
         .map_err(|v: Vec<u8>| Error::Rpc(format!("blockhash must be 32 bytes, got {}", v.len())))?;
-    Ok(arr)
+
+    let last_valid_block_height = value
+        .and_then(|v| v.get("lastValidBlockHeight"))
+        .and_then(|h| h.as_u64())
+        .ok_or_else(|| {
+            Error::Rpc("getLatestBlockhash did not return a lastValidBlockHeight".to_string())
+        })?;
+
+    Ok((arr, last_valid_block_height))
+}
+
+/// Fetch the current block height via `getBlockHeight` at `confirmed`
+/// commitment — the reader half of the conclusive-death check (compare against
+/// a transaction's `lastValidBlockHeight` from
+/// [`get_latest_blockhash_and_height`]).
+///
+/// Fails closed on a missing/malformed result — never returns a silent 0
+/// (which would read every blockhash as still-alive) and never a silent MAX
+/// (which would read every transaction as dead).
+pub async fn get_block_height(client: &Client, rpc_url: &str) -> Result<u64, Error> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getBlockHeight",
+        "params": [{"commitment": "confirmed"}],
+    });
+
+    let response = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    let result: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    if let Some(error) = result.get("error") {
+        return Err(Error::Rpc(error.to_string()));
+    }
+
+    result
+        .get("result")
+        .and_then(|r| r.as_u64())
+        .ok_or_else(|| Error::Rpc("getBlockHeight did not return a u64 result".to_string()))
+}
+
+/// A single transaction's status as reported by `getSignatureStatuses`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureStatus {
+    /// The on-chain execution error, if the transaction landed AND failed.
+    /// Stringified so callers can route it through
+    /// [`classify_settlement_error`] without re-exposing raw RPC structures.
+    pub err: Option<String>,
+    /// `processed` / `confirmed` / `finalized` (or `None` on very old RPC
+    /// responses).
+    pub confirmation_status: Option<String>,
+}
+
+/// One-shot `getSignatureStatuses` lookup for a single signature.
+///
+/// Returns `Ok(None)` when the RPC has no record of the signature.
+///
+/// `search_transaction_history` selects which store the RPC consults:
+/// - `false` — the recent-status cache ONLY (~150 slots / a few minutes).
+///   Cheap; fine for a fresh-confirmation loop like [`poll_for_confirmation`].
+/// - `true` — the full ledger history. **REQUIRED for any conclusive-death or
+///   crash/restart-recovery check before re-signing a payment**: a transaction
+///   that landed longer ago than the recent-cache window reads as `None` under
+///   the default form, and treating that as "dead" re-signs an
+///   already-landed transfer — a double-send of real funds.
+pub async fn get_signature_status(
+    client: &Client,
+    rpc_url: &str,
+    signature_b58: &str,
+    search_transaction_history: bool,
+) -> Result<Option<SignatureStatus>, Error> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getSignatureStatuses",
+        "params": [
+            [signature_b58],
+            {"searchTransactionHistory": search_transaction_history},
+        ],
+    });
+
+    let response = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    let result: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| Error::Rpc(e.to_string()))?;
+
+    if let Some(error) = result.get("error") {
+        return Err(Error::Rpc(error.to_string()));
+    }
+
+    let status = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .ok_or_else(|| {
+            Error::Rpc("getSignatureStatuses did not return a status array".to_string())
+        })?
+        .clone();
+
+    if status.is_null() {
+        return Ok(None);
+    }
+
+    let err = match status.get("err") {
+        Some(e) if !e.is_null() => Some(e.to_string()),
+        _ => None,
+    };
+    let confirmation_status = status
+        .get("confirmationStatus")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
+
+    Ok(Some(SignatureStatus {
+        err,
+        confirmation_status,
+    }))
 }
 
 /// Fetch a wallet's native SOL balance (in lamports) via `getBalance`.
