@@ -1344,12 +1344,46 @@ mod tests {
         .expect("draw persists");
     }
 
+    /// Direct single-row SELECT — deliberately NOT the production
+    /// `fetch_refunds` sweep query: that one is LIMIT-32 paged, and on the
+    /// persistent dev Postgres the accumulated rows of prior runs push a fresh
+    /// reservation past the page, flaking the `.expect()`s here.
     async fn load_refund_row(pool: &PgPool, cid: &str) -> Option<RefundRow> {
-        let mut reserved = fetch_refunds(pool, RefundStatus::Reserved).await.unwrap();
-        reserved.extend(fetch_refunds(pool, RefundStatus::InFlight).await.unwrap());
-        reserved.extend(fetch_refunds(pool, RefundStatus::Confirmed).await.unwrap());
-        reserved.extend(fetch_refunds(pool, RefundStatus::Held).await.unwrap());
-        reserved.into_iter().find(|r| r.channel_id == cid)
+        #[allow(clippy::type_complexity)]
+        let row: Option<(
+            String,
+            i64,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<Vec<u8>>,
+            Option<i64>,
+            i32,
+            i64,
+        )> = sqlx::query_as(
+            "SELECT channel_id, amount_atomic, destination_wallet, mint, status,
+                    tx_signature, signed_tx, last_valid_block_height, attempts,
+                    EXTRACT(EPOCH FROM (NOW() - updated_at))::BIGINT AS age_secs
+               FROM channel_refunds
+              WHERE channel_id = $1",
+        )
+        .bind(cid)
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        row.map(|r| RefundRow {
+            channel_id: r.0,
+            amount_atomic: u64::try_from(r.1).unwrap(),
+            destination_wallet: r.2,
+            mint: r.3,
+            status: r.4,
+            tx_signature: r.5,
+            signed_tx: r.6,
+            last_valid_block_height: r.7.map(|h| u64::try_from(h).unwrap()),
+            attempts: r.8,
+            age_secs: r.9,
+        })
     }
 
     #[tokio::test]
@@ -2233,5 +2267,215 @@ mod tests {
             "re-applied backfill must NOT inflate a legitimate realized=0 row"
         );
         assert_eq!(ch.last_voucher_cumulative_atomic, 5_000);
+    }
+
+    // -- round-2 mutation-proven gaps -----------------------------------------
+
+    /// FIX-6 payer==payee guard (review item 1 — deleting the guard left every
+    /// prior test green): a worker whose recipient_wallet does NOT match the
+    /// fee-payer key's pubkey must refuse to sign — the row stays reserved and
+    /// nothing is ever broadcast.
+    #[tokio::test]
+    async fn worker_refuses_to_sign_when_payer_is_not_recipient() {
+        let Some(pool) = isolated_db("fix6_mismatch").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+
+        // Key from seed [1u8;32], recipient = a DIFFERENT key's pubkey.
+        use ed25519_dalek::SigningKey;
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let mut keypair = [0u8; 64];
+        keypair[..32].copy_from_slice(&signing_key.to_bytes());
+        keypair[32..].copy_from_slice(signing_key.verifying_key().as_bytes());
+        let fee_pool =
+            solvela_x402::fee_payer::FeePayerPool::from_keys(
+                &[bs58::encode(keypair).into_string()],
+            )
+            .unwrap();
+        let other = SigningKey::from_bytes(&[2u8; 32]);
+        let wrong_recipient = bs58::encode(other.verifying_key().to_bytes()).into_string();
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        let worker = RefundWorker::new(
+            pool.clone(),
+            rpc.clone(),
+            Some(Arc::new(fee_pool)),
+            wrong_recipient,
+            None,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "reserved", "guard must refuse, never abandon");
+        assert_eq!(row.tx_signature, None, "no bytes may be persisted");
+        assert!(rpc.sends.lock().unwrap().is_empty(), "nothing broadcast");
+    }
+
+    /// Landed-but-FAILED execution (review item 3): err present even alongside
+    /// confirmationStatus "confirmed" → held, NEVER confirmed — a bug here
+    /// closes the channel while no USDC moved.
+    #[tokio::test]
+    async fn worker_holds_landed_with_error_never_confirms() {
+        let Some(pool) = isolated_db("landed_error").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        seed_in_flight(&pool, &cid).await;
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.status.lock().unwrap() = Some(SignatureStatus {
+            err: Some(r#"{"InstructionError":[1,{"Custom":1}]}"#.to_string()),
+            confirmation_status: Some("confirmed".to_string()),
+        });
+        let worker = test_worker(pool.clone(), rpc.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(
+            row.status, "held",
+            "landed-with-error is conclusive failure"
+        );
+        let ch = channels::load_channel(&pool, &cid).await.unwrap().unwrap();
+        assert_ne!(
+            ch.status, "closed",
+            "the channel must NOT close on a failed refund"
+        );
+    }
+
+    /// Retry exhaustion (review item 4): at MAX_CLAIM_ATTEMPTS a conclusively
+    /// dead in_flight row goes to held instead of re-signing forever.
+    #[tokio::test]
+    async fn worker_holds_in_flight_at_max_attempts() {
+        let Some(pool) = isolated_db("exhaustion").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        seed_in_flight(&pool, &cid).await;
+        sqlx::query("UPDATE channel_refunds SET attempts = $1 WHERE channel_id = $2")
+            .bind(MAX_CLAIM_ATTEMPTS)
+            .bind(&cid)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.block_height.lock().unwrap() = 2_000; // conclusively dead
+        let worker = test_worker(pool.clone(), rpc.clone());
+        // attempts = MAX → backoff is capped at 300s; make the row due by
+        // backdating its last touch instead of sleeping.
+        sqlx::query(
+            "UPDATE channel_refunds SET updated_at = NOW() - INTERVAL '10 minutes'
+              WHERE channel_id = $1",
+        )
+        .bind(&cid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "held");
+        assert_eq!(row.attempts, MAX_CLAIM_ATTEMPTS, "no further re-sign");
+        assert!(rpc.sends.lock().unwrap().is_empty(), "nothing broadcast");
+    }
+
+    /// Daily-cap held-exclusion (review item 5 — the `AND status <> 'held'`
+    /// predicate survived mutation): a held row with a huge frozen amount and
+    /// a recent broadcast anchor must NOT throttle a fresh legitimate claim.
+    #[tokio::test]
+    async fn daily_cap_excludes_held_rows_from_the_window() {
+        let Some(pool) = isolated_db("cap_held_exclusion").await else {
+            return;
+        };
+        // Channel A: a held reservation with a large amount inside the 24h
+        // window (no USDC ever left the wallet on any held path).
+        let cid_held = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid_held, 50_000))
+            .await
+            .unwrap();
+        close_channel_and_reserve_refund(&pool, &cid_held)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE channel_refunds
+                SET status = 'held', amount_atomic = 1000000, first_broadcast_at = NOW()
+              WHERE channel_id = $1",
+        )
+        .bind(&cid_held)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Channel B: a fresh reservation whose claim would be blocked if the
+        // held row counted (1_000_000 + 46_220 > 50_000).
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+
+        let outcome = claim_refund_for_broadcast(
+            &pool,
+            &RefundClaim {
+                daily_cap_atomic: Some(50_000),
+                ..test_claim(&cid, b"bytes", "sig-held-excl")
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ClaimOutcome::Won,
+            "a held row's phantom amount must not consume cap headroom"
+        );
+    }
+
+    /// No signing key configured (review item 6): the worker retains the
+    /// obligation (never abandons, never panics) — the age alert is the signal.
+    #[tokio::test]
+    async fn worker_without_fee_payer_pool_retains_reservation() {
+        let Some(pool) = isolated_db("no_signer").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        let worker = RefundWorker::new(
+            pool.clone(),
+            rpc.clone(),
+            None, // no signing capability
+            agent_wallet(),
+            None,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "reserved");
+        assert!(rpc.sends.lock().unwrap().is_empty(), "nothing broadcast");
     }
 }

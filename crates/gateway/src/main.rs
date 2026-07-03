@@ -952,6 +952,15 @@ async fn main() -> anyhow::Result<()> {
     // `recipient_wallet`); with no keys configured the worker still runs the
     // age alert and retains every reservation.
     if let Some(ref pool) = state.db_pool {
+        // The refund worker signs ONLY with a key matching recipient_wallet
+        // (FIX 6); with multiple pool keys, `next()`'s rotation lands on the
+        // wrong key some sweeps and the refund waits for round-robin luck.
+        if state.fee_payer_pool.as_ref().is_some_and(|p| p.len() > 1) {
+            warn!(
+                "fee-payer pool holds multiple keys — channel refunds sign only with the \
+                 recipient_wallet key, so drains may be delayed by rotation"
+            );
+        }
         // Do NOT widen this constructor to accept AppConfig/ChannelConfig —
         // flag-independence is by construction (the worker CANNOT consult
         // channel.enabled), and the flag-off-drain test pins that.
