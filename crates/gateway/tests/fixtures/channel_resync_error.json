@@ -1,0 +1,7 @@
+{
+  "error": {
+    "type": "invalid_payment",
+    "message": "channel voucher rejected; resync from authoritative last_cumulative=12600",
+    "last_cumulative": "12600"
+  }
+}

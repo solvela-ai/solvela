@@ -86,22 +86,25 @@ pub enum ChannelRepoError {
     /// The targeted channel row does not exist.
     #[error("channel not found")]
     ChannelNotFound,
-    /// The voucher advance did not apply: the channel is missing or the
+    /// The voucher advance did not apply: the channel is missing, no longer
+    /// `open` (a cooperative close won the race — invariant 11a), or the
     /// presented cumulative is not strictly greater than the stored one. The
     /// voucher insert in the same transaction was rolled back.
-    #[error("voucher advance not applied (channel missing or cumulative did not increase)")]
+    #[error(
+        "voucher advance not applied (channel missing, not open, or cumulative did not increase)"
+    )]
     AdvanceNotApplied,
 }
 
 /// Convert a `u64` atomic value to the `i64` BIGINT stored form. Fail-closed on
 /// overflow (`> i64::MAX`) — never truncate a money amount.
-fn atomic_to_i64(v: u64) -> Result<i64, ChannelRepoError> {
+pub(crate) fn atomic_to_i64(v: u64) -> Result<i64, ChannelRepoError> {
     i64::try_from(v).map_err(|_| ChannelRepoError::ValueTooLargeForBigint(v))
 }
 
 /// Convert a stored `i64` BIGINT atomic value to `u64`. Fail-closed on a
 /// negative (corrupt) value rather than wrapping it into a huge `u64`.
-fn i64_to_atomic(v: i64) -> Result<u64, ChannelRepoError> {
+pub(crate) fn i64_to_atomic(v: i64) -> Result<u64, ChannelRepoError> {
     u64::try_from(v).map_err(|_| ChannelRepoError::NegativeStoredAmount(v))
 }
 
@@ -140,6 +143,10 @@ pub struct ChannelRow {
     pub mint: String,
     pub deposited_atomic: u64,
     pub settled_atomic: u64,
+    /// Σ(per-call ACTUAL fee-inclusive costs) — the agent's true obligation.
+    /// Advanced ONLY inside [`persist_voucher_and_advance`]'s transaction
+    /// (migration 017; invariant `settled <= realized <= last <= deposited`).
+    pub realized_atomic: u64,
     pub last_voucher_cumulative_atomic: u64,
     pub expiry_slot: Option<u64>,
     pub status: String,
@@ -155,6 +162,12 @@ pub struct VoucherRecord<'a> {
     pub cumulative_atomic: u64,
     /// This call's cost = `cumulative - prev_cumulative`.
     pub call_cost_atomic: u64,
+    /// This call's ACTUAL fee-inclusive cost, added to `channels.realized_atomic`
+    /// in the same transaction as the advance. On `/v1/search` quote == actual,
+    /// so this equals `call_cost_atomic`; the chat draw (PR-B) passes
+    /// `min(actual, billed)` (the clamp keeps `realized <= last`, which the DB
+    /// CHECK chain enforces — a violating advance rolls the whole draw back).
+    pub realized_advance_atomic: u64,
     pub expiry_slot: u64,
     pub nonce: u64,
     /// SHA-256 of the canonical request body.
@@ -210,6 +223,7 @@ struct ChannelDbRow {
     mint: String,
     deposited_atomic: i64,
     settled_atomic: i64,
+    realized_atomic: i64,
     last_voucher_cumulative_atomic: i64,
     expiry_slot: Option<i64>,
     status: String,
@@ -223,8 +237,8 @@ pub async fn load_channel(
 ) -> Result<Option<ChannelRow>, ChannelRepoError> {
     let row: Option<ChannelDbRow> = sqlx::query_as(
         "SELECT channel_id, agent_wallet, session_key, provider, mint,
-                deposited_atomic, settled_atomic, last_voucher_cumulative_atomic,
-                expiry_slot, status, funding_tx_sig
+                deposited_atomic, settled_atomic, realized_atomic,
+                last_voucher_cumulative_atomic, expiry_slot, status, funding_tx_sig
            FROM channels
           WHERE channel_id = $1",
     )
@@ -244,6 +258,7 @@ pub async fn load_channel(
         mint: r.mint,
         deposited_atomic: i64_to_atomic(r.deposited_atomic)?,
         settled_atomic: i64_to_atomic(r.settled_atomic)?,
+        realized_atomic: i64_to_atomic(r.realized_atomic)?,
         last_voucher_cumulative_atomic: i64_to_atomic(r.last_voucher_cumulative_atomic)?,
         expiry_slot: r.expiry_slot.map(i64_to_atomic).transpose()?,
         status: r.status,
@@ -315,13 +330,17 @@ pub async fn load_open_channel_state(
 }
 
 /// Persist a draw voucher AND advance `channels.last_voucher_cumulative_atomic`
-/// in **one transaction** (channel scope §2 / RFC §5 T6).
+/// plus `channels.realized_atomic` in **one transaction** (channel scope §2 /
+/// RFC §5 T6). Riding the same transaction means `realized` can never move on
+/// a non-charge — the positive-receipt ⟺ last-advanced ⟺ agent-debited
+/// invariant extends to the realized obligation for free.
 ///
 /// The voucher insert and the channel advance commit together or not at all: a
 /// crash can never accept a draw it cannot later prove, and a corrupt advance
 /// can never leave an orphan voucher. The advance is guarded monotonic at the DB
-/// layer (`WHERE last_voucher_cumulative_atomic < $cumulative`); if it does not
-/// apply (channel missing, or cumulative not strictly greater), the whole
+/// layer (`WHERE last_voucher_cumulative_atomic < $cumulative`) and gated on
+/// `status = 'open'` (invariant 11a — a close that already froze the refund
+/// amount wins over an in-flight draw); if it does not apply, the whole
 /// transaction — including the voucher insert — is rolled back and
 /// [`ChannelRepoError::AdvanceNotApplied`] is returned.
 ///
@@ -334,6 +353,7 @@ pub async fn persist_voucher_and_advance(
 ) -> Result<(), ChannelRepoError> {
     let cumulative = atomic_to_i64(v.cumulative_atomic)?;
     let call_cost = atomic_to_i64(v.call_cost_atomic)?;
+    let realized_advance = atomic_to_i64(v.realized_advance_atomic)?;
     let expiry = atomic_to_i64(v.expiry_slot)?;
     let nonce = atomic_to_i64(v.nonce)?;
 
@@ -357,14 +377,29 @@ pub async fn persist_voucher_and_advance(
     .execute(&mut *tx)
     .await?;
 
-    // Advance the channel's authoritative cumulative — strictly increasing only.
-    // The DB CHECK `last <= deposited` additionally rejects an over-draw advance.
+    // Advance the channel's authoritative cumulative — strictly increasing only
+    // — and the synchronous `realized` obligation in the SAME statement. The DB
+    // CHECK chain (`realized <= last <= deposited`) additionally rejects an
+    // over-draw or over-realize advance.
+    //
+    // `AND status = 'open'` (invariant 11a): a draw racing a cooperative close
+    // must NOT advance after the refund amount froze. Postgres row-lock
+    // ordering against the close's `UPDATE ... SET status = 'closing'` gives
+    // exactly two outcomes — the draw commits first (the close's RETURNING
+    // reads the post-draw `realized`) or the close wins (this UPDATE matches 0
+    // rows, the whole draw rolls back and records nothing — the accepted
+    // bounded non-charge arm).
     let advanced = sqlx::query(
         "UPDATE channels
-            SET last_voucher_cumulative_atomic = $1, updated_at = NOW()
-          WHERE channel_id = $2 AND last_voucher_cumulative_atomic < $1",
+            SET last_voucher_cumulative_atomic = $1,
+                realized_atomic = realized_atomic + $2,
+                updated_at = NOW()
+          WHERE channel_id = $3
+            AND last_voucher_cumulative_atomic < $1
+            AND status = 'open'",
     )
     .bind(cumulative)
+    .bind(realized_advance)
     .bind(v.channel_id)
     .execute(&mut *tx)
     .await?;
@@ -567,6 +602,7 @@ mod tests {
                 channel_id: &cid,
                 cumulative_atomic: 10_500,
                 call_cost_atomic: 10_500,
+                realized_advance_atomic: 10_500,
                 expiry_slot: 1_000_750,
                 nonce: 1,
                 request_digest: &[0x22; 32],
@@ -578,6 +614,129 @@ mod tests {
 
         let row = load_channel(&pool, &cid).await.unwrap().unwrap();
         assert_eq!(row.last_voucher_cumulative_atomic, 10_500);
+        // The synchronous realized obligation advanced in the SAME transaction.
+        assert_eq!(row.realized_atomic, 10_500);
+    }
+
+    #[tokio::test]
+    async fn persist_voucher_advances_realized_by_actual_not_delta() {
+        // Chat-shaped draw (PR-B): actual (3_780) < quote/delta (12_600).
+        // `last` advances by the signed delta; `realized` by the actual only.
+        let Some(pool) = db().await else { return };
+        let cid = fresh_channel_id();
+        create_channel(
+            &pool,
+            &new_channel(&cid, 50_000, &format!("sig-realized-{cid}")),
+        )
+        .await
+        .unwrap();
+
+        persist_voucher_and_advance(
+            &pool,
+            &VoucherRecord {
+                channel_id: &cid,
+                cumulative_atomic: 12_600,
+                call_cost_atomic: 12_600,
+                realized_advance_atomic: 3_780,
+                expiry_slot: 1_000_750,
+                nonce: 1,
+                request_digest: &[0x22; 32],
+                signature: &[0x33; 64],
+            },
+        )
+        .await
+        .expect("draw advances");
+
+        let row = load_channel(&pool, &cid).await.unwrap().unwrap();
+        assert_eq!(row.last_voucher_cumulative_atomic, 12_600);
+        assert_eq!(row.realized_atomic, 3_780);
+        // The 017 CHECK chain holds: settled <= realized <= last <= deposited.
+        assert!(row.settled_atomic <= row.realized_atomic);
+        assert!(row.realized_atomic <= row.last_voucher_cumulative_atomic);
+    }
+
+    #[tokio::test]
+    async fn persist_voucher_rejects_realized_advance_above_delta() {
+        // A realized advance that would push `realized` past `last` violates
+        // the 017 CHECK — the DB rejects it and the whole draw (voucher insert
+        // included) rolls back. PR-B's `min(actual, billed)` clamp exists so a
+        // served draw can never deterministically fail here (HALT 11).
+        let Some(pool) = db().await else { return };
+        let cid = fresh_channel_id();
+        create_channel(
+            &pool,
+            &new_channel(&cid, 50_000, &format!("sig-clamp-{cid}")),
+        )
+        .await
+        .unwrap();
+
+        let err = persist_voucher_and_advance(
+            &pool,
+            &VoucherRecord {
+                channel_id: &cid,
+                cumulative_atomic: 10_000,
+                call_cost_atomic: 10_000,
+                realized_advance_atomic: 10_001, // > delta ⇒ realized > last
+                expiry_slot: 1_000_750,
+                nonce: 1,
+                request_digest: &[0x22; 32],
+                signature: &[0x33; 64],
+            },
+        )
+        .await
+        .expect_err("an over-realize advance must fail at the CHECK chain");
+        assert!(matches!(err, ChannelRepoError::Db(_)));
+
+        let row = load_channel(&pool, &cid).await.unwrap().unwrap();
+        assert_eq!(row.last_voucher_cumulative_atomic, 0, "nothing advanced");
+        assert_eq!(row.realized_atomic, 0, "nothing realized");
+    }
+
+    #[tokio::test]
+    async fn persist_voucher_rejects_when_channel_not_open() {
+        // Invariant 11a: once a close flipped the channel to `closing`, an
+        // in-flight draw's persist must match 0 rows and roll back — a frozen
+        // refund amount can never be invalidated by a later advance.
+        let Some(pool) = db().await else { return };
+        let cid = fresh_channel_id();
+        create_channel(
+            &pool,
+            &new_channel(&cid, 50_000, &format!("sig-open-{cid}")),
+        )
+        .await
+        .unwrap();
+        set_status(&pool, &cid, ChannelStatus::Closing)
+            .await
+            .unwrap();
+
+        let err = persist_voucher_and_advance(
+            &pool,
+            &VoucherRecord {
+                channel_id: &cid,
+                cumulative_atomic: 5_000,
+                call_cost_atomic: 5_000,
+                realized_advance_atomic: 5_000,
+                expiry_slot: 1_000_750,
+                nonce: 1,
+                request_digest: &[0x22; 32],
+                signature: &[0x33; 64],
+            },
+        )
+        .await
+        .expect_err("a draw against a closing channel must not persist");
+        assert!(matches!(err, ChannelRepoError::AdvanceNotApplied));
+
+        // Neither counter moved, and the voucher insert rolled back.
+        let row = load_channel(&pool, &cid).await.unwrap().unwrap();
+        assert_eq!(row.last_voucher_cumulative_atomic, 0);
+        assert_eq!(row.realized_atomic, 0);
+        let voucher_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM channel_vouchers WHERE channel_id = $1")
+                .bind(&cid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(voucher_count, 0);
     }
 
     #[tokio::test]
@@ -598,6 +757,7 @@ mod tests {
                 channel_id: &cid,
                 cumulative_atomic: 2_000,
                 call_cost_atomic: 2_000,
+                realized_advance_atomic: 2_000,
                 expiry_slot: 1_000_750,
                 nonce: 1,
                 request_digest: &[0x22; 32],
@@ -615,6 +775,7 @@ mod tests {
                 channel_id: &cid,
                 cumulative_atomic: 1_000,
                 call_cost_atomic: 1_000,
+                realized_advance_atomic: 1_000,
                 expiry_slot: 1_000_750,
                 nonce: 2,
                 request_digest: &[0x44; 32],

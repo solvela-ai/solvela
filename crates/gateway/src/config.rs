@@ -39,8 +39,27 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ChannelConfig {
     /// Master switch. Default `false` (channels unavailable).
+    ///
+    /// NOTE: this flag gates NEW deposits/draws/closes ONLY. The channel
+    /// refund worker (`channel_refunds`) is deliberately NOT gated on it —
+    /// already-frozen refund obligations keep draining (and the stuck-refund
+    /// alert keeps firing) through incident flag-flips and rollback windows.
     #[serde(default)]
     pub enabled: bool,
+    /// Per-channel deposit ceiling in atomic micro-USDC
+    /// (`SOLVELA_CHANNEL__MAX_DEPOSIT_ATOMIC`). Checked fail-closed at open,
+    /// AFTER on-chain verification but BEFORE the funding broadcast (a
+    /// rejected deposit moves no money). `None` = uncapped.
+    #[serde(default)]
+    pub max_deposit_atomic: Option<u64>,
+    /// Global trailing-24h refund-disbursement ceiling in atomic micro-USDC
+    /// (`SOLVELA_CHANNEL__REFUND_DAILY_CAP_ATOMIC`). Enforced INSIDE the
+    /// refund worker's advisory-locked claim transaction (a read-then-act cap
+    /// outside it would be a cross-instance TOCTOU); an exceeding claim holds
+    /// in `reserved` with an alert and drains when the window frees headroom.
+    /// `None` = uncapped.
+    #[serde(default)]
+    pub refund_daily_cap_atomic: Option<u64>,
 }
 
 /// Gas-drip faucet configuration (`[faucet]`).
@@ -825,6 +844,27 @@ enabled = true
 "#;
         let config: AppConfig = toml::from_str(toml).expect("valid config TOML");
         assert!(config.channel.enabled, "[channel] enabled must parse");
+        // The caps default to None (uncapped) unless configured.
+        assert_eq!(config.channel.max_deposit_atomic, None);
+        assert_eq!(config.channel.refund_daily_cap_atomic, None);
+    }
+
+    #[test]
+    fn channel_parses_caps_from_toml() {
+        let toml = r#"
+[server]
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+recipient_wallet = ""
+[providers]
+[channel]
+enabled = true
+max_deposit_atomic = 100000000
+refund_daily_cap_atomic = 500000000
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("valid config TOML");
+        assert_eq!(config.channel.max_deposit_atomic, Some(100_000_000));
+        assert_eq!(config.channel.refund_daily_cap_atomic, Some(500_000_000));
     }
 
     // -------------------------------------------------------------------------

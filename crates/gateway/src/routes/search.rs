@@ -859,6 +859,9 @@ async fn channel_draw_locked(
             channel_id,
             cumulative_atomic: voucher.cumulative_atomic,
             call_cost_atomic: billed,
+            // Search is flat-priced: quote == actual, so the realized advance
+            // IS the billed delta (the chat draw passes min(actual, billed)).
+            realized_advance_atomic: billed,
             expiry_slot: voucher.expiry_slot,
             nonce: voucher.nonce,
             request_digest: &voucher.request_digest,
@@ -971,14 +974,19 @@ fn map_voucher_rejection(
         // Post-auth CUMULATIVE rejections (rules 4–7): the caller proved control
         // of the session key AND the mismatch is about the cumulative, so
         // surfacing its OWN channel's authoritative last_cumulative is a resync
-        // aid (R9), not a third-party leak.
+        // aid (R9), not a third-party leak. The figure rides BOTH the prose
+        // message (unchanged) and the structured `last_cumulative` body field
+        // (§4b) — SDK trackers consume ONLY the structured field.
         E::Expired { .. }
         | E::NonMonotonicCumulative { .. }
         | E::DeltaMismatch { .. }
         | E::BelowSettled { .. }
-        | E::OverDraw { .. } => GatewayError::InvalidPayment(format!(
-            "channel voucher rejected; resync from authoritative last_cumulative={last_cumulative}"
-        )),
+        | E::OverDraw { .. } => GatewayError::InvalidPaymentWithResync {
+            message: format!(
+                "channel voucher rejected; resync from authoritative last_cumulative={last_cumulative}"
+            ),
+            last_cumulative,
+        },
     }
 }
 
