@@ -231,18 +231,23 @@ async fn main() -> anyhow::Result<()> {
     // When escrow is configured, the `POST /v1/escrow/deposit-tx` builder
     // base58-decodes `recipient_wallet` (the deposit's provider account) on EVERY
     // request — an empty/malformed value would let the gateway boot "healthy" and
-    // then 500 every deposit-tx build. Validate ONCE here, same fail-fatal spirit
-    // as the USDC mint and the migration rule (arch rule #15): never serve traffic
-    // against a broken money-path config. Gated on escrow being configured so a
-    // no-escrow / stub deploy (which never decodes recipient_wallet) is unaffected.
+    // then 500 every deposit-tx build. The channel plane also compares/decodes it
+    // on every open (the refund-collision guard) and the refund worker refuses to
+    // sign against a mismatched value — an invalid recipient there means every
+    // open guard and refund silently degrades. Validate ONCE here, same
+    // fail-fatal spirit as the USDC mint and the migration rule (arch rule #15):
+    // never serve traffic against a broken money-path config. Gated on escrow OR
+    // channels being configured so a no-escrow / stub deploy (which never decodes
+    // recipient_wallet) is unaffected.
     if app_config
         .solana
         .escrow_program_id
         .as_deref()
         .is_some_and(|id| !id.is_empty())
+        || app_config.channel.enabled
     {
         validate_recipient_wallet(&app_config.solana.recipient_wallet).map_err(|e| {
-            error!(error = %e, "FATAL: escrow is configured but recipient_wallet is not a valid Solana pubkey");
+            error!(error = %e, "FATAL: escrow and/or the channel plane is configured but recipient_wallet is not a valid Solana pubkey");
             anyhow::anyhow!(
                 "invalid recipient wallet configuration (SOLVELA_SOLANA__RECIPIENT_WALLET / \
                  [solana].recipient_wallet): {e}"

@@ -24,7 +24,34 @@
 //!   stored `last_valid_block_height` AND a **history-searching**
 //!   `getSignatureStatuses` finds nothing — the recent-cache default form
 //!   would double-refund a landed transfer), via a CAS predicated on the
-//!   superseded `tx_signature`;
+//!   superseded `tx_signature` — AND only when the dying signature was
+//!   accepted by at least one `sendTransaction` during its life
+//!   (`broadcast_accepted_at`, migration 018; cleared on claim/re-sign). A
+//!   signature that expired with ZERO acceptances was rejected pre-chain by
+//!   every send, so its re-signed twin fails identically (e.g. a
+//!   self-transfer's deterministic `AccountLoadedTwice`, observed by the
+//!   prod-v420 mainnet rollout smoke, 2026-07-03) — it escalates to `held` after
+//!   ONE blockhash expiry with an accurate never-accepted reason, instead of
+//!   burning up to `MAX_CLAIM_ATTEMPTS` doomed re-signs (~10 min of
+//!   nonce/fee-payer churn) before the exhaustion arm held it with a
+//!   misleading reason;
+//! - every `in_flight`-sourced hold is a CAS predicated on the `tx_signature`
+//!   the hold decision was computed from ([`HoldGuard`]) — a status-only hold
+//!   would let a stale snapshot flip a row a peer instance just legitimately
+//!   re-signed, orphaning that peer's LIVE transaction in `held` (which is
+//!   never re-scanned) and turning the operator re-arm into a double refund;
+//! - [`confirm_refund_and_close_channel`] deliberately stays status-predicated
+//!   only: reaching its variant of the stale-snapshot race requires the
+//!   already-acknowledged RPC-honesty residual (a `getSignatureStatuses` that
+//!   lies about a landed transfer), and a signature predicate there would only
+//!   change bookkeeping AFTER the USDC already moved;
+//! - residual (documented, accepted): a send accepted on-chain in the same
+//!   instant a peer's never-accepted hold wins can leave a LANDED refund in
+//!   `held` under a "never accepted" reason — the late
+//!   [`mark_broadcast_accepted`] write no-ops against the held row. Money is
+//!   safe (the transfer landed; the held alert fires); the runbook's
+//!   mandatory on-chain check surfaces it — see the landed branch in
+//!   [`hold_refund`]'s runbook;
 //! - there is deliberately NO blind timer reclaim of stale `in_flight` rows
 //!   (a timer alone re-signs a slow-but-landed tx = double refund) and NO
 //!   terminal-abandon state: exhaustion/conclusive failures go to `held`
@@ -129,7 +156,11 @@ pub enum RefundStatus {
     /// `closed` in the same transaction.
     Confirmed,
     /// Conclusive failure or retry exhaustion — alert-and-hold, operator
-    /// re-arm only.
+    /// re-arm only. Reached via: a corrupt frozen tuple (unfixable by retry),
+    /// a deterministic program rejection at broadcast, a landed-with-error
+    /// execution, retry exhaustion at `MAX_CLAIM_ATTEMPTS`, an `in_flight`
+    /// row missing its claim payload, or (fix α) conclusive blockhash death
+    /// of a signature that was NEVER accepted by any `sendTransaction`.
     Held,
 }
 
@@ -159,6 +190,12 @@ pub struct RefundRow {
     pub signed_tx: Option<Vec<u8>>,
     pub last_valid_block_height: Option<u64>,
     pub attempts: i32,
+    /// Whether the CURRENT `tx_signature` was ever accepted by a
+    /// `sendTransaction` call (`broadcast_accepted_at IS NOT NULL`, migration
+    /// 018). Cleared by the claim/re-sign CAS (new signature = new life).
+    /// Conclusive death with `false` ⇒ every send errored for the signature's
+    /// whole blockhash lifetime ⇒ hold, never re-sign (fix α).
+    pub broadcast_accepted: bool,
     /// Seconds since the row was last touched (`NOW() - updated_at`) — the
     /// worker's retry-backoff input.
     pub age_secs: i64,
@@ -300,10 +337,12 @@ async fn fetch_refunds(pool: &PgPool, status: RefundStatus) -> Result<Vec<Refund
         Option<Vec<u8>>,
         Option<i64>,
         i32,
+        bool,
         i64,
     )> = sqlx::query_as(
         "SELECT channel_id, amount_atomic, destination_wallet, mint, status,
                 tx_signature, signed_tx, last_valid_block_height, attempts,
+                (broadcast_accepted_at IS NOT NULL) AS broadcast_accepted,
                 EXTRACT(EPOCH FROM (NOW() - updated_at))::BIGINT AS age_secs
            FROM channel_refunds
           WHERE status = $1
@@ -345,7 +384,8 @@ async fn fetch_refunds(pool: &PgPool, status: RefundStatus) -> Result<Vec<Refund
                 signed_tx: r.6,
                 last_valid_block_height,
                 attempts: r.8,
-                age_secs: r.9,
+                broadcast_accepted: r.9,
+                age_secs: r.10,
             })
         })
         .collect())
@@ -422,6 +462,10 @@ pub async fn claim_refund_for_broadcast(
         }
     }
 
+    // `broadcast_accepted_at = NULL`: a new signature is a new acceptance life
+    // (fix α) — this also scrubs a stale marker left from a pre-re-arm
+    // signature, so a re-armed never-landable refund re-holds instead of
+    // resurrecting the re-sign loop.
     let res = sqlx::query(
         "UPDATE channel_refunds
             SET status = $1,
@@ -430,6 +474,7 @@ pub async fn claim_refund_for_broadcast(
                 last_valid_block_height = $4,
                 attempts = attempts + 1,
                 first_broadcast_at = COALESCE(first_broadcast_at, NOW()),
+                broadcast_accepted_at = NULL,
                 updated_at = NOW()
           WHERE channel_id = $5 AND status = $6",
     )
@@ -504,12 +549,15 @@ pub async fn resign_refund(
     new_tx_signature: &str,
     new_last_valid_block_height: u64,
 ) -> Result<bool, ChannelRefundError> {
+    // `broadcast_accepted_at = NULL`: the superseding signature starts a fresh
+    // acceptance life (fix α).
     let res = sqlx::query(
         "UPDATE channel_refunds
             SET signed_tx = $1,
                 tx_signature = $2,
                 last_valid_block_height = $3,
                 attempts = attempts + 1,
+                broadcast_accepted_at = NULL,
                 updated_at = NOW()
           WHERE channel_id = $4 AND status = $5 AND tx_signature = $6",
     )
@@ -524,29 +572,140 @@ pub async fn resign_refund(
     Ok(res.rows_affected() == 1)
 }
 
+/// The CAS predicate for a hold — which snapshot facts the hold decision was
+/// computed from. The DB re-checks them atomically so a stale snapshot can
+/// never hold a row a peer instance advanced in the meantime (the
+/// double-refund race: a status-only hold flips a row that was just
+/// legitimately re-signed to a fresh LIVE signature, orphans it in `held`,
+/// and the operator re-arm then double-refunds).
+#[derive(Debug, Clone, Copy)]
+pub enum HoldGuard<'a> {
+    /// A `reserved`-sourced hold (corrupt frozen tuple found while signing
+    /// fresh). Status-only is sufficient: the only way a peer advances a
+    /// `reserved` row is the claim CAS, which flips the status away from
+    /// `reserved` — the status predicate already catches it.
+    FromReserved,
+    /// An `in_flight`-sourced hold: the row must still carry the exact
+    /// signature the hold decision was computed from. `None` = the snapshot
+    /// had no signature (corrupt partial row) — predicated `tx_signature IS
+    /// NULL` via `IS NOT DISTINCT FROM`.
+    FromInFlight { expected_signature: Option<&'a str> },
+    /// The fix-α never-accepted hold: signature match AND
+    /// `broadcast_accepted_at IS NULL` — the DB atomically refuses the hold
+    /// if a send got accepted (the marker was set) or the signature rotated
+    /// mid-decision.
+    FromInFlightNeverAccepted { expected_signature: &'a str },
+}
+
+impl HoldGuard<'_> {
+    /// The status the guarded CAS transitions FROM (for logging).
+    fn source_status(self) -> RefundStatus {
+        match self {
+            HoldGuard::FromReserved => RefundStatus::Reserved,
+            HoldGuard::FromInFlight { .. } | HoldGuard::FromInFlightNeverAccepted { .. } => {
+                RefundStatus::InFlight
+            }
+        }
+    }
+}
+
 /// Move a reservation to `held` (alert-and-hold; operator re-arm only).
-/// Status-predicated CAS; returns `false` when the row already moved on.
+/// Guarded CAS ([`HoldGuard`]); returns `false` when the row already moved on
+/// (a peer advanced it — NOT an error; the next sweep re-evaluates from fresh
+/// state).
 ///
-/// Runbook: re-arm is `UPDATE channel_refunds SET status = 'reserved' WHERE
-/// channel_id = … AND status = 'held'` after fixing the cause. Re-arm keeps
-/// `first_broadcast_at` (the daily-cap anchor) — see the cap note in
+/// Runbook: a re-arm MUST be preceded by an on-chain check — a
+/// history-searching `getSignatureStatuses` of the row's recorded
+/// `tx_signature` — to prove the held transaction never landed; only then
+/// `UPDATE channel_refunds SET status = 'reserved' WHERE channel_id = … AND
+/// status = 'held'` after fixing the cause. If the check instead shows the
+/// recorded transaction LANDED (a send accepted in the same instant the hold
+/// won — see the module-docs residual), set the row back to `in_flight`
+/// UNCHANGED (keep `tx_signature`/`signed_tx`): the next sweep's history check
+/// runs the real confirm path and closes the channel. NEVER re-arm a landed
+/// row to `reserved` — that re-signs a fresh transfer = double refund. Re-arm
+/// keeps `first_broadcast_at` (the daily-cap anchor) — see the cap note in
 /// [`claim_refund_for_broadcast`].
 pub async fn hold_refund(
     pool: &PgPool,
     channel_id: &str,
-    from: RefundStatus,
+    guard: HoldGuard<'_>,
 ) -> Result<bool, ChannelRefundError> {
-    let res = sqlx::query(
+    let res = match guard {
+        HoldGuard::FromReserved => {
+            sqlx::query(
+                "UPDATE channel_refunds
+                    SET status = $1, updated_at = NOW()
+                  WHERE channel_id = $2 AND status = $3",
+            )
+            .bind(RefundStatus::Held.as_str())
+            .bind(channel_id)
+            .bind(RefundStatus::Reserved.as_str())
+            .execute(pool)
+            .await?
+        }
+        HoldGuard::FromInFlight { expected_signature } => {
+            // `IS NOT DISTINCT FROM` = NULL-safe equality: a `None` snapshot
+            // (corrupt partial row) predicates `tx_signature IS NULL`.
+            sqlx::query(
+                "UPDATE channel_refunds
+                    SET status = $1, updated_at = NOW()
+                  WHERE channel_id = $2 AND status = $3
+                    AND tx_signature IS NOT DISTINCT FROM $4",
+            )
+            .bind(RefundStatus::Held.as_str())
+            .bind(channel_id)
+            .bind(RefundStatus::InFlight.as_str())
+            .bind(expected_signature)
+            .execute(pool)
+            .await?
+        }
+        HoldGuard::FromInFlightNeverAccepted { expected_signature } => {
+            sqlx::query(
+                "UPDATE channel_refunds
+                    SET status = $1, updated_at = NOW()
+                  WHERE channel_id = $2 AND status = $3
+                    AND tx_signature = $4
+                    AND broadcast_accepted_at IS NULL",
+            )
+            .bind(RefundStatus::Held.as_str())
+            .bind(channel_id)
+            .bind(RefundStatus::InFlight.as_str())
+            .bind(expected_signature)
+            .execute(pool)
+            .await?
+        }
+    };
+    Ok(res.rows_affected() == 1)
+}
+
+/// Durably record that `sendTransaction` accepted the CURRENT signature
+/// (migration 018; set once per signature life — the claim/re-sign CAS clear
+/// it). This is the fix-α discriminator: a signature reaching conclusive death
+/// (blockhash expired + history-negative) with NO acceptance ever recorded was
+/// rejected pre-chain by every send, so a re-signed twin of the same frozen
+/// tuple fails identically — the worker holds instead of re-signing.
+///
+/// Signature-predicated so a peer's concurrent re-sign can never be marked by
+/// a stale caller; deliberately does NOT touch `updated_at` (the backoff
+/// clock) — this is a metadata fact, not a state transition.
+async fn mark_broadcast_accepted(
+    pool: &PgPool,
+    channel_id: &str,
+    tx_signature: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
         "UPDATE channel_refunds
-            SET status = $1, updated_at = NOW()
-          WHERE channel_id = $2 AND status = $3",
+            SET broadcast_accepted_at = NOW()
+          WHERE channel_id = $1 AND status = $2 AND tx_signature = $3
+            AND broadcast_accepted_at IS NULL",
     )
-    .bind(RefundStatus::Held.as_str())
     .bind(channel_id)
-    .bind(from.as_str())
+    .bind(RefundStatus::InFlight.as_str())
+    .bind(tx_signature)
     .execute(pool)
     .await?;
-    Ok(res.rows_affected() == 1)
+    Ok(())
 }
 
 /// Age (seconds) of the oldest not-yet-confirmed refund, for the stuck-refund
@@ -775,11 +934,11 @@ impl RefundWorker {
     /// any row lock / DB transaction. Returns the signed transfer and its
     /// `last_valid_block_height`, or `None` (logged) when signing is not
     /// currently possible (row retained for retry; a CORRUPT frozen tuple —
-    /// unfixable by retry — is held from `from` with the entry alert).
+    /// unfixable by retry — is held under `hold_guard` with the entry alert).
     async fn sign_fresh(
         &self,
         row: &RefundRow,
-        from: RefundStatus,
+        hold_guard: HoldGuard<'_>,
     ) -> Option<(SignedUsdcTransfer, u64)> {
         let Some(pool) = self.fee_payer_pool.as_ref() else {
             warn!(
@@ -816,7 +975,7 @@ impl RefundWorker {
             Ok(d) => d,
             Err(_) => {
                 error!(channel_id = %row.channel_id, "refund worker: corrupt frozen destination_wallet");
-                self.hold_with_alert(&row.channel_id, from).await;
+                self.hold_with_alert(&row.channel_id, hold_guard).await;
                 return None;
             }
         };
@@ -824,7 +983,7 @@ impl RefundWorker {
             Ok(m) => m,
             Err(_) => {
                 error!(channel_id = %row.channel_id, "refund worker: corrupt frozen mint");
-                self.hold_with_alert(&row.channel_id, from).await;
+                self.hold_with_alert(&row.channel_id, hold_guard).await;
                 return None;
             }
         };
@@ -853,18 +1012,27 @@ impl RefundWorker {
         }
     }
 
-    /// Move a row to `held` with the entry alert (log + counter).
-    async fn hold_with_alert(&self, channel_id: &str, from: RefundStatus) {
-        match hold_refund(&self.pool, channel_id, from).await {
+    /// Move a row to `held` with the entry alert (log + counter). A 0-row CAS
+    /// is NOT an error: a peer instance advanced the row after our snapshot
+    /// (re-sign / claim / confirm) — the next sweep re-evaluates fresh state.
+    async fn hold_with_alert(&self, channel_id: &str, guard: HoldGuard<'_>) {
+        match hold_refund(&self.pool, channel_id, guard).await {
             Ok(true) => {
                 metrics::counter!("solvela_channel_refund_held_total").increment(1);
                 error!(
                     channel_id,
-                    "channel refund HELD — operator action required (runbook: fix the cause, \
-                     re-arm the row to 'reserved')"
+                    "channel refund HELD — operator action required (runbook: history-search \
+                     the recorded tx_signature on-chain, fix the cause, then re-arm the row \
+                     to 'reserved')"
                 );
             }
-            Ok(false) => {}
+            Ok(false) => {
+                warn!(
+                    channel_id,
+                    from = guard.source_status().as_str(),
+                    "refund hold lost race — peer advanced the row; re-evaluating next sweep"
+                );
+            }
             Err(e) => warn!(channel_id, error = %e, "refund worker: hold CAS failed"),
         }
     }
@@ -924,7 +1092,7 @@ impl RefundWorker {
         }
 
         let Some((signed, last_valid_block_height)) =
-            self.sign_fresh(row, RefundStatus::Reserved).await
+            self.sign_fresh(row, HoldGuard::FromReserved).await
         else {
             return;
         };
@@ -965,41 +1133,95 @@ impl RefundWorker {
             }
         }
 
-        self.broadcast(&row.channel_id, &signed.base64_tx).await;
+        // A freshly claimed signature has, by definition, never been accepted.
+        self.broadcast(&row.channel_id, &signed, false).await;
     }
 
     /// Broadcast persisted bytes; classify deterministic rejections to `held`.
-    async fn broadcast(&self, channel_id: &str, base64_tx: &str) {
-        match self.rpc.send_transaction(base64_tx).await {
+    ///
+    /// Takes the bundled [`SignedUsdcTransfer`] — signature and base64 bytes
+    /// travel as ONE value, so a future call site can never transpose two
+    /// independent `&str`s and silently mark the wrong signature accepted
+    /// (the same incident class, reintroduced by refactor). An accepted send
+    /// durably marks `tx.signature_b58` ([`mark_broadcast_accepted`], the
+    /// fix-α never-accepted discriminator). `ever_accepted` is the row's
+    /// marker BEFORE this send, so the transient WARN tells operators whether
+    /// the retry loop is an accepted-tx retry or a hold-on-expiry candidate.
+    async fn broadcast(&self, channel_id: &str, tx: &SignedUsdcTransfer, ever_accepted: bool) {
+        match self.rpc.send_transaction(&tx.base64_tx).await {
             Ok(_sig) => {
                 metrics::counter!("solvela_channel_refund_broadcast_total").increment(1);
+                self.mark_accepted(channel_id, &tx.signature_b58).await;
             }
             Err(e) => {
                 if solvela_x402::solana_rpc::is_already_processed_error(&e) {
-                    // Landed already (a prior crashed broadcast) — the next
-                    // sweep's history-searching check confirms it.
+                    // Landed already (a prior crashed broadcast) — the ledger
+                    // has accepted these bytes; the next sweep's
+                    // history-searching check confirms it.
+                    self.mark_accepted(channel_id, &tx.signature_b58).await;
                     return;
                 }
                 let raw = e.to_string();
                 match solvela_x402::solana_rpc::classify_settlement_error(&raw) {
                     solvela_x402::types::SettlementFailureKind::Rejected { program_error_code } => {
                         // Deterministic program rejection: these bytes can
-                        // never land — conclusive execution failure.
+                        // never land — conclusive execution failure. The hold
+                        // is predicated on OUR signature: a peer re-signing
+                        // mid-flight wins and we re-evaluate next sweep.
                         error!(
                             channel_id,
                             ?program_error_code,
                             "refund broadcast rejected by the program — holding"
                         );
-                        self.hold_with_alert(channel_id, RefundStatus::InFlight)
-                            .await;
+                        self.hold_with_alert(
+                            channel_id,
+                            HoldGuard::FromInFlight {
+                                expected_signature: Some(&tx.signature_b58),
+                            },
+                        )
+                        .await;
                     }
                     _ => {
-                        // Transient (transport / blockhash) — the in_flight
-                        // recovery path rebroadcasts or re-signs safely.
-                        warn!(channel_id, error = %raw, "refund broadcast failed transiently");
+                        // Transient-classified failure. Two operator-distinct
+                        // shapes (fix α, mainnet-smoke incident 2026-07-03):
+                        if ever_accepted {
+                            // The signature already reached the ledger once —
+                            // a genuine transient; retries/re-signs continue.
+                            warn!(
+                                channel_id,
+                                error = %raw,
+                                "refund broadcast failed transiently (signature previously \
+                                 accepted — will retry)"
+                            );
+                        } else {
+                            // Zero acceptances so far — if this persists for
+                            // the signature's whole blockhash lifetime, the
+                            // in_flight death check holds instead of
+                            // re-signing.
+                            warn!(
+                                channel_id,
+                                error = %raw,
+                                "refund broadcast failed transiently (signature never accepted \
+                                 — held on blockhash expiry unless a send is accepted)"
+                            );
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /// Best-effort durable acceptance marker. A lost write can only
+    /// false-HOLD a later conclusive death (safe direction: money retained +
+    /// alert + operator re-arm) — it can never resurrect the re-sign loop.
+    async fn mark_accepted(&self, channel_id: &str, tx_signature: &str) {
+        if let Err(e) = mark_broadcast_accepted(&self.pool, channel_id, tx_signature).await {
+            metrics::counter!("solvela_channel_refund_mark_accepted_failed_total").increment(1);
+            warn!(
+                channel_id,
+                error = %e,
+                "refund worker: broadcast-accepted marker write failed"
+            );
         }
     }
 
@@ -1014,10 +1236,16 @@ impl RefundWorker {
             row.last_valid_block_height,
         ) else {
             // The claim CAS persists all three in one statement; a partial row
-            // is corruption, not a retry case.
+            // is corruption, not a retry case. Predicated on the snapshot's
+            // signature (possibly NULL — `IS NOT DISTINCT FROM`).
             error!(channel_id = %row.channel_id, "refund worker: in_flight row missing claim payload");
-            self.hold_with_alert(&row.channel_id, RefundStatus::InFlight)
-                .await;
+            self.hold_with_alert(
+                &row.channel_id,
+                HoldGuard::FromInFlight {
+                    expected_signature: row.tx_signature.as_deref(),
+                },
+            )
+            .await;
             return;
         };
 
@@ -1034,8 +1262,13 @@ impl RefundWorker {
                         ?kind,
                         "refund landed with an on-chain error — holding"
                     );
-                    self.hold_with_alert(&row.channel_id, RefundStatus::InFlight)
-                        .await;
+                    self.hold_with_alert(
+                        &row.channel_id,
+                        HoldGuard::FromInFlight {
+                            expected_signature: Some(tx_signature),
+                        },
+                    )
+                    .await;
                     return;
                 }
                 match status.confirmation_status.as_deref() {
@@ -1081,23 +1314,70 @@ impl RefundWorker {
                 if current_height <= last_valid_block_height {
                     // Still alive — rebroadcast the SAME persisted bytes
                     // (byte-identical ⇒ same signature ⇒ ledger dedupe holds).
+                    // Reassemble the persisted parts into the bundled signed
+                    // transfer once, at the destructure site, so signature and
+                    // bytes cannot be transposed downstream.
                     use base64::Engine;
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(signed_tx);
-                    self.broadcast(&row.channel_id, &b64).await;
+                    let persisted = SignedUsdcTransfer {
+                        base64_tx: base64::engine::general_purpose::STANDARD.encode(signed_tx),
+                        signature_b58: tx_signature.to_string(),
+                        wire_bytes: signed_tx.to_vec(),
+                    };
+                    self.broadcast(&row.channel_id, &persisted, row.broadcast_accepted)
+                        .await;
                     return;
                 }
                 // Conclusively dead: history-negative AND blockhash expired.
+                if !row.broadcast_accepted {
+                    // The signature was NEVER accepted by any `sendTransaction`
+                    // during its entire blockhash lifetime — every send errored
+                    // pre-chain, so a re-signed twin of the same frozen tuple
+                    // fails identically (e.g. the AccountLoadedTwice
+                    // self-transfer refund, mainnet-smoke incident 2026-07-03).
+                    // Escalate to held (entry alert + held gauges; operator
+                    // re-arm) instead of burning the remaining attempts on
+                    // doomed re-signs. The hold CAS additionally re-checks the
+                    // marker (`broadcast_accepted_at IS NULL`) so a send
+                    // accepted between our snapshot and this hold atomically
+                    // defeats it.
+                    error!(
+                        channel_id = %row.channel_id,
+                        attempts = row.attempts,
+                        "refund worker: signature expired without a single accepted \
+                         broadcast — re-signing cannot help; holding"
+                    );
+                    self.hold_with_alert(
+                        &row.channel_id,
+                        HoldGuard::FromInFlightNeverAccepted {
+                            expected_signature: tx_signature,
+                        },
+                    )
+                    .await;
+                    return;
+                }
                 if row.attempts >= MAX_CLAIM_ATTEMPTS {
                     error!(
                         channel_id = %row.channel_id,
                         attempts = row.attempts,
                         "refund worker: retry attempts exhausted — holding"
                     );
-                    self.hold_with_alert(&row.channel_id, RefundStatus::InFlight)
-                        .await;
+                    self.hold_with_alert(
+                        &row.channel_id,
+                        HoldGuard::FromInFlight {
+                            expected_signature: Some(tx_signature),
+                        },
+                    )
+                    .await;
                     return;
                 }
-                let Some((signed, new_height)) = self.sign_fresh(row, RefundStatus::InFlight).await
+                let Some((signed, new_height)) = self
+                    .sign_fresh(
+                        row,
+                        HoldGuard::FromInFlight {
+                            expected_signature: Some(tx_signature),
+                        },
+                    )
+                    .await
                 else {
                     return;
                 };
@@ -1111,7 +1391,10 @@ impl RefundWorker {
                 )
                 .await
                 {
-                    Ok(true) => self.broadcast(&row.channel_id, &signed.base64_tx).await,
+                    Ok(true) => {
+                        // A re-signed signature starts a fresh acceptance life.
+                        self.broadcast(&row.channel_id, &signed, false).await
+                    }
                     Ok(false) => {
                         // A peer concluded death first and re-signed — its
                         // bytes are authoritative; ours are discarded.
@@ -1260,6 +1543,17 @@ mod tests {
     /// THIS test's worker and poison its broadcast-count assertions).
     /// Assumes a query-string-free DATABASE_URL (the dev-harness form).
     async fn isolated_db(name: &str) -> Option<PgPool> {
+        let pool = isolated_db_unmigrated(name).await?;
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("migrations must apply");
+        Some(pool)
+    }
+
+    /// [`isolated_db`] without the migrations — for tests that need to stage
+    /// a HISTORICAL schema (e.g. pre-018) before applying a migration by hand.
+    async fn isolated_db_unmigrated(name: &str) -> Option<PgPool> {
         let url = std::env::var("DATABASE_URL").ok()?;
         let admin = PgPool::connect(&url).await.ok()?;
         let db = format!("solvela_isolated_{name}");
@@ -1276,10 +1570,6 @@ mod tests {
             .expect("create isolated test db");
         let (base, _) = url.rsplit_once('/')?;
         let pool = PgPool::connect(&format!("{base}/{db}")).await.ok()?;
-        sqlx::migrate!("../../migrations")
-            .run(&pool)
-            .await
-            .expect("migrations must apply");
         Some(pool)
     }
 
@@ -1360,10 +1650,12 @@ mod tests {
             Option<Vec<u8>>,
             Option<i64>,
             i32,
+            bool,
             i64,
         )> = sqlx::query_as(
             "SELECT channel_id, amount_atomic, destination_wallet, mint, status,
                     tx_signature, signed_tx, last_valid_block_height, attempts,
+                    (broadcast_accepted_at IS NOT NULL) AS broadcast_accepted,
                     EXTRACT(EPOCH FROM (NOW() - updated_at))::BIGINT AS age_secs
                FROM channel_refunds
               WHERE channel_id = $1",
@@ -1382,7 +1674,8 @@ mod tests {
             signed_tx: r.6,
             last_valid_block_height: r.7.map(|h| u64::try_from(h).unwrap()),
             attempts: r.8,
-            age_secs: r.9,
+            broadcast_accepted: r.9,
+            age_secs: r.10,
         })
     }
 
@@ -1723,6 +2016,10 @@ mod tests {
         /// (the conclusive-death trigger). Defaults to 500 (< the 1_000 the
         /// blockhash mock hands out — blockhash alive).
         block_height: std::sync::Mutex<u64>,
+        /// Mutable so a re-sign after conclusive death gets a FRESH blockhash
+        /// (as on a real chain) — otherwise the re-signed twin is byte-identical
+        /// to the dead transaction. Defaults to `[7u8; 32]`.
+        blockhash: std::sync::Mutex<[u8; 32]>,
         /// What `signature_status(_, true)` reports. `None` inner = not found.
         status: std::sync::Mutex<Option<SignatureStatus>>,
         /// When `Some(text)`, `send_transaction` fails with that error text
@@ -1736,6 +2033,7 @@ mod tests {
             Self {
                 balance,
                 block_height: std::sync::Mutex::new(500),
+                blockhash: std::sync::Mutex::new([7u8; 32]),
                 status: std::sync::Mutex::new(None),
                 send_error: std::sync::Mutex::new(None),
                 sends: std::sync::Mutex::new(Vec::new()),
@@ -1749,7 +2047,7 @@ mod tests {
             Ok(self.balance)
         }
         async fn latest_blockhash_and_height(&self) -> Result<([u8; 32], u64), X402Error> {
-            Ok(([7u8; 32], 1_000))
+            Ok((*self.blockhash.lock().unwrap(), 1_000))
         }
         async fn block_height(&self) -> Result<u64, X402Error> {
             Ok(*self.block_height.lock().unwrap())
@@ -1824,6 +2122,10 @@ mod tests {
             sends[0],
             base64::engine::general_purpose::STANDARD.encode(&persisted),
             "the broadcast bytes ARE the persisted bytes"
+        );
+        assert!(
+            row.broadcast_accepted,
+            "an accepted send must durably mark the signature (fix-α discriminator)"
         );
 
         // The chain confirms; sweep 2 (after the attempts=1 backoff of 2s)
@@ -1937,8 +2239,15 @@ mod tests {
     }
 
     /// Conclusive death (history-negative AND block height past
-    /// last_valid_block_height) → the worker re-signs through the
-    /// signature-predicated CAS and broadcasts the NEW bytes.
+    /// last_valid_block_height) of a signature that WAS accepted by a
+    /// `sendTransaction` at least once (a genuine fee/congestion drop — the
+    /// fix-α discriminator's "keep re-signing" side) → the worker re-signs
+    /// through the signature-predicated CAS and broadcasts the NEW bytes.
+    ///
+    /// The "was accepted" precondition is driven through the REAL path
+    /// (sweep 1's send succeeds → the production `mark_broadcast_accepted`
+    /// write sets the marker), not the fixture — per
+    /// `feedback_test_through_real_paths`.
     #[tokio::test]
     async fn worker_resigns_after_conclusive_death() {
         let Some(pool) = isolated_db("death_resign").await else {
@@ -1950,29 +2259,51 @@ mod tests {
             .unwrap();
         draw_pinned_shape(&pool, &cid).await;
         close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
-        seed_in_flight(&pool, &cid).await;
 
         let rpc = Arc::new(MockRpc::new(1_000_000));
-        *rpc.block_height.lock().unwrap() = 2_000; // past last_valid (1_000)
         let worker = test_worker(pool.clone(), rpc.clone());
 
-        // attempts = 1 after the claim → backoff 2s before the row is due.
-        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        // Sweep 1: claim + an ACCEPTED broadcast — the real marker write.
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        worker.sweep().await;
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "in_flight");
+        assert_eq!(row.attempts, 1);
+        assert!(
+            row.broadcast_accepted,
+            "the accepted send must set the marker via the production write"
+        );
+        let old_sig = row.tx_signature.clone().expect("claimed signature");
+        let old_bytes = row.signed_tx.clone().expect("claimed bytes");
+
+        // The signature then dies conclusively; the chain hands out a FRESH
+        // blockhash, so the re-signed transaction differs from the dead one.
+        *rpc.block_height.lock().unwrap() = 2_000; // past last_valid (1_000)
+        *rpc.blockhash.lock().unwrap() = [8u8; 32];
+        backdate(&pool, &cid).await;
         worker.sweep().await;
 
         let row = load_refund_row(&pool, &cid).await.unwrap();
         assert_eq!(row.status, "in_flight");
         assert_eq!(row.attempts, 2, "claim + one re-sign");
         let new_sig = row.tx_signature.clone().expect("re-signed signature");
-        assert_ne!(new_sig, "sig-old", "the dead signature must be superseded");
+        assert_ne!(new_sig, old_sig, "the dead signature must be superseded");
         let new_bytes = row.signed_tx.clone().expect("re-signed bytes");
-        assert_ne!(new_bytes.as_slice(), b"old-bytes".as_slice());
+        assert_ne!(new_bytes, old_bytes);
         let sends = rpc.sends.lock().unwrap().clone();
-        assert_eq!(sends.len(), 1, "exactly one broadcast of the NEW bytes");
         assert_eq!(
-            sends[0],
+            sends.len(),
+            2,
+            "first broadcast + one broadcast of the NEW bytes"
+        );
+        assert_eq!(
+            sends[1],
             base64::engine::general_purpose::STANDARD.encode(&new_bytes),
             "the broadcast bytes ARE the re-signed persisted bytes"
+        );
+        assert!(
+            row.broadcast_accepted,
+            "the re-sign CAS clears the marker; the accepted re-broadcast re-sets it"
         );
     }
 
@@ -2122,6 +2453,10 @@ mod tests {
         let row = load_refund_row(&pool, &cid).await.unwrap();
         assert_eq!(row.status, "in_flight", "transient failure never abandons");
         assert_eq!(row.attempts, 1);
+        assert!(
+            !row.broadcast_accepted,
+            "a failed send must NOT mark the signature accepted"
+        );
     }
 
     /// An "already processed" broadcast response means the transfer LANDED (a
@@ -2150,6 +2485,10 @@ mod tests {
         assert_eq!(
             row.status, "in_flight",
             "landed, awaiting the confirm sweep"
+        );
+        assert!(
+            row.broadcast_accepted,
+            "'already processed' means the ledger accepted these bytes — mark it"
         );
 
         // The confirm sweep lands it.
@@ -2369,6 +2708,10 @@ mod tests {
         draw_pinned_shape(&pool, &cid).await;
         close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
         seed_in_flight(&pool, &cid).await;
+        // Accepted-then-died shape, so this pins the EXHAUSTION hold arm
+        // specifically (a never-accepted row would hold earlier, on the fix-α
+        // discriminator, regardless of attempts).
+        mark_accepted_fixture(&pool, &cid).await;
         sqlx::query("UPDATE channel_refunds SET attempts = $1 WHERE channel_id = $2")
             .bind(MAX_CLAIM_ATTEMPTS)
             .bind(&cid)
@@ -2476,6 +2819,391 @@ mod tests {
 
         let row = load_refund_row(&pool, &cid).await.unwrap();
         assert_eq!(row.status, "reserved");
+        assert!(rpc.sends.lock().unwrap().is_empty(), "nothing broadcast");
+    }
+
+    // -- fix α: never-accepted death → held, never a doomed re-sign loop ------
+    // (incident observed 2026-07-03 by the mainnet rollout smoke against prod
+    // v420: a SYNTHETIC refund row seeded into prod's channel_refunds — the
+    // pool-gated worker runs even with the channel plane disabled; the
+    // synthetic rows were deleted after the smoke, so no stuck row remains.
+    // A self-transfer refund's fixed account table duplicates the ATA →
+    // deterministic AccountLoadedTwice at simulation, classified transient →
+    // up to MAX_CLAIM_ATTEMPTS doomed re-signs (~10 min of nonce/fee-payer
+    // churn) before the exhaustion arm held it with a misleading reason and
+    // no never-accepted signal.)
+
+    /// The verbatim send-rejection from the 2026-07-03 mainnet-smoke incident
+    /// (classified TRANSIENT by
+    /// `classify_settlement_error` — that is the bug's precondition).
+    const ACCOUNT_LOADED_TWICE_ERR: &str = r#"{"code":-32002,"message":"Transaction simulation failed: Account loaded twice","data":{"err":"AccountLoadedTwice"}}"#;
+
+    /// Make the row due immediately (skip the attempts-backoff wait).
+    async fn backdate(pool: &PgPool, cid: &str) {
+        sqlx::query(
+            "UPDATE channel_refunds SET updated_at = NOW() - INTERVAL '10 minutes'
+              WHERE channel_id = $1",
+        )
+        .bind(cid)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Fixture: mark the row's CURRENT signature as accepted — used by
+    /// `worker_holds_in_flight_at_max_attempts`, where it is load-bearing for
+    /// ARM SELECTION (an accepted shape at attempts=MAX pins the exhaustion
+    /// arm; driving MAX real sweeps would test backoff, not the arm), and by
+    /// `migration_018_reapply_preserves_broadcast_accepted_marker` (which only
+    /// needs a set marker to observe re-apply preservation). The
+    /// production write path (successful / already-processed send →
+    /// `mark_broadcast_accepted`) is pinned in
+    /// `worker_drains_reservation_independent_of_channel_flag`,
+    /// `worker_treats_already_processed_broadcast_as_landed`, and
+    /// `worker_resigns_after_conclusive_death`.
+    async fn mark_accepted_fixture(pool: &PgPool, cid: &str) {
+        sqlx::query(
+            "UPDATE channel_refunds SET broadcast_accepted_at = NOW() WHERE channel_id = $1",
+        )
+        .bind(cid)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A refund whose transaction can never land (every send rejected
+    /// pre-chain, transient classification) must escalate to `held` at
+    /// conclusive death — NOT re-sign — and a re-arm without fixing the cause
+    /// must re-hold, never resume the doomed re-sign loop.
+    #[tokio::test]
+    async fn worker_holds_never_accepted_refund_after_expiry() {
+        let Some(pool) = isolated_db("never_accepted").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.send_error.lock().unwrap() = Some(ACCOUNT_LOADED_TWICE_ERR.to_string());
+        let worker = test_worker(pool.clone(), rpc.clone());
+
+        // The incident class is "status machine moved but the alert surface
+        // didn't" — pin that the hold fires the held counter, not just the
+        // status flip. The recorder is process-wide and the counter is
+        // unlabeled, so sibling hold tests running in parallel may ALSO
+        // increment it; `after > before` is the strongest interference-safe
+        // assertion (our own increment is always included in `after`).
+        let metrics_handle = crate::cache::test_metrics::install_test_recorder();
+
+        // Sweep 1: claim wins; the send is rejected pre-chain.
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        worker.sweep().await;
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "in_flight");
+        assert_eq!(row.attempts, 1);
+        assert!(!row.broadcast_accepted, "no send was ever accepted");
+        let dead_sig = row.tx_signature.clone().expect("claimed signature");
+
+        // Blockhash expires with ZERO acceptances → held, not a re-sign.
+        let held_before = crate::cache::test_metrics::counter_value(
+            &metrics_handle,
+            "solvela_channel_refund_held_total",
+        );
+        *rpc.block_height.lock().unwrap() = 2_000; // past last_valid (1_000)
+        backdate(&pool, &cid).await;
+        worker.sweep().await;
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(
+            row.status, "held",
+            "never-accepted conclusive death must hold, never re-sign"
+        );
+        let held_after = crate::cache::test_metrics::counter_value(
+            &metrics_handle,
+            "solvela_channel_refund_held_total",
+        );
+        assert!(
+            held_after > held_before,
+            "the hold must fire the held entry counter (alert surface), got {held_before} -> {held_after}"
+        );
+        assert_eq!(row.attempts, 1, "no re-sign of never-landable logic");
+        assert_eq!(row.tx_signature.as_deref(), Some(dead_sig.as_str()));
+        assert!(rpc.sends.lock().unwrap().is_empty(), "nothing was accepted");
+
+        // Operator re-arm WITHOUT fixing the cause: the claim CAS clears the
+        // stale marker (new signature = new acceptance life), so the loop
+        // re-holds at the next expiry instead of resuming the doomed loop.
+        sqlx::query("UPDATE channel_refunds SET status = $1 WHERE channel_id = $2 AND status = $3")
+            .bind(RefundStatus::Reserved.as_str())
+            .bind(&cid)
+            .bind(RefundStatus::Held.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+        backdate(&pool, &cid).await;
+        worker.sweep().await; // fresh claim + the same pre-chain rejection
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "in_flight");
+        assert_eq!(row.attempts, 2);
+        assert!(
+            !row.broadcast_accepted,
+            "claim CAS must clear a stale pre-re-arm marker"
+        );
+        backdate(&pool, &cid).await;
+        worker.sweep().await; // conclusive death again
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "held", "re-armed unfixable refund re-holds");
+        assert_eq!(row.attempts, 2);
+    }
+
+    /// Migration 018 re-apply safety: `ADD COLUMN IF NOT EXISTS` must be a
+    /// no-op on a live schema — a raw disaster-recovery re-apply cannot fail
+    /// and cannot clobber an existing acceptance marker.
+    #[tokio::test]
+    async fn migration_018_reapply_preserves_broadcast_accepted_marker() {
+        let Some(pool) = isolated_db("migration_018_reapply").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        seed_in_flight(&pool, &cid).await;
+        mark_accepted_fixture(&pool, &cid).await;
+
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            include_str!("../../../migrations/018_channel_refund_broadcast_accepted.sql")
+                .to_string(),
+        ))
+        .execute(&pool)
+        .await
+        .expect("raw re-apply must succeed");
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert!(row.broadcast_accepted, "re-apply must not clear the marker");
+    }
+
+    // -- hold-CAS signature predicate: the stale-snapshot double-refund race --
+    // (2 Fly machines: instance A snapshots a row, spends slow RPC round-trips
+    // deciding "hold", while instance B legitimately re-signs the row to a
+    // fresh LIVE signature. A status-only hold CAS would still match, flip the
+    // row to held — never re-scanned — and the re-arm runbook would then
+    // double-refund the landed S2.)
+
+    /// Instance A's in_flight-sourced hold, computed from a snapshot whose
+    /// signature a peer has since superseded, must LOSE the CAS: the row
+    /// stays `in_flight` with the peer's live signature.
+    #[tokio::test]
+    async fn hold_from_in_flight_noops_when_peer_resigned_the_row() {
+        let Some(pool) = db().await else { return };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        seed_in_flight(&pool, &cid).await;
+
+        // Peer B re-signs through the REAL re-sign CAS: fresh live signature.
+        assert!(
+            resign_refund(&pool, &cid, "sig-old", b"peer-bytes", "sig-peer", 2_000)
+                .await
+                .unwrap()
+        );
+
+        // Instance A holds from its STALE snapshot ("sig-old") — must no-op.
+        let held = hold_refund(
+            &pool,
+            &cid,
+            HoldGuard::FromInFlight {
+                expected_signature: Some("sig-old"),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!held, "a stale-snapshot hold must lose the CAS");
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(
+            row.status, "in_flight",
+            "the peer's live transaction must not be orphaned in held"
+        );
+        assert_eq!(row.tx_signature.as_deref(), Some("sig-peer"));
+
+        // A hold computed from the CURRENT signature still works (the
+        // legitimate hold is not over-blocked).
+        assert!(hold_refund(
+            &pool,
+            &cid,
+            HoldGuard::FromInFlight {
+                expected_signature: Some("sig-peer"),
+            },
+        )
+        .await
+        .unwrap());
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "held");
+    }
+
+    /// The fix-α never-accepted hold must be atomically defeated by the DB
+    /// when the acceptance marker was set (a send WAS accepted) between the
+    /// snapshot and the hold — and must still fire when the marker is NULL.
+    #[tokio::test]
+    async fn never_accepted_hold_noops_when_marker_was_set_mid_decision() {
+        let Some(pool) = db().await else { return };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        seed_in_flight(&pool, &cid).await;
+
+        // A peer's send is accepted AFTER our never-accepted snapshot — the
+        // REAL production marker write.
+        mark_broadcast_accepted(&pool, &cid, "sig-old")
+            .await
+            .unwrap();
+
+        let held = hold_refund(
+            &pool,
+            &cid,
+            HoldGuard::FromInFlightNeverAccepted {
+                expected_signature: "sig-old",
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !held,
+            "an accepted signature must defeat the never-accepted hold"
+        );
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "in_flight", "the row keeps retrying/re-signing");
+
+        // A re-sign starts a fresh acceptance life (marker cleared by the
+        // REAL re-sign CAS) — the never-accepted hold then fires.
+        assert!(
+            resign_refund(&pool, &cid, "sig-old", b"v2", "sig-v2", 2_000)
+                .await
+                .unwrap()
+        );
+        assert!(hold_refund(
+            &pool,
+            &cid,
+            HoldGuard::FromInFlightNeverAccepted {
+                expected_signature: "sig-v2",
+            },
+        )
+        .await
+        .unwrap());
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(row.status, "held");
+    }
+
+    // -- migration 018: true pre-018 backfill semantics ------------------------
+
+    /// Migrations 001–017 in file order — the exact schema a deployment ran
+    /// BEFORE 018 shipped. Kept as an explicit list (not `sqlx::migrate!`,
+    /// which cannot stop partway).
+    const PRE_018_MIGRATIONS: &[&str] = &[
+        include_str!("../../../migrations/001_initial_schema.sql"),
+        include_str!("../../../migrations/002_escrow_claim_queue.sql"),
+        include_str!("../../../migrations/003_phase_g_request_session_ids.sql"),
+        include_str!("../../../migrations/004_claim_queue_next_retry_at.sql"),
+        include_str!("../../../migrations/005_organizations.sql"),
+        include_str!("../../../migrations/006_audit_logs.sql"),
+        include_str!("../../../migrations/007_hourly_spend_limits.sql"),
+        include_str!("../../../migrations/008_escrow_claim_queue_updated_at.sql"),
+        include_str!("../../../migrations/009_audit_actor_admin.sql"),
+        include_str!("../../../migrations/010_spend_tenant.sql"),
+        include_str!("../../../migrations/011_tenant_budgets.sql"),
+        include_str!("../../../migrations/012_vendor_settlement_receivable.sql"),
+        include_str!("../../../migrations/013_receipts.sql"),
+        include_str!("../../../migrations/014_gas_drips.sql"),
+        include_str!("../../../migrations/015_channels.sql"),
+        include_str!("../../../migrations/016_channels_funding_tx_unique.sql"),
+        include_str!("../../../migrations/017_channel_realized_and_refunds.sql"),
+    ];
+
+    /// The migration's documented semantics, end-to-end from a TRUE pre-018
+    /// database: an in_flight row claimed BEFORE 018 existed gets a NULL
+    /// marker from the backfill, and its conclusive death after the upgrade
+    /// HOLDS (safe: alert + operator re-arm) rather than resuming a
+    /// potentially unlandable re-sign loop.
+    #[tokio::test]
+    async fn migration_018_null_backfill_holds_pre_018_in_flight_row_on_death() {
+        let Some(pool) = isolated_db_unmigrated("pre_018_backfill").await else {
+            return;
+        };
+        for sql in PRE_018_MIGRATIONS {
+            sqlx::raw_sql(sqlx::AssertSqlSafe((*sql).to_string()))
+                .execute(&pool)
+                .await
+                .expect("pre-018 migration applies");
+        }
+
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        // The CURRENT claim CAS writes `broadcast_accepted_at = NULL` and so
+        // cannot run against a pre-018 schema — seed the claim with the exact
+        // pre-018 UPDATE shape the old code produced (acceptable HERE only:
+        // the point is simulating a database claimed before 018 existed).
+        let res = sqlx::query(
+            "UPDATE channel_refunds
+                SET status = 'in_flight',
+                    signed_tx = $1,
+                    tx_signature = $2,
+                    last_valid_block_height = $3,
+                    attempts = attempts + 1,
+                    first_broadcast_at = COALESCE(first_broadcast_at, NOW()),
+                    updated_at = NOW()
+              WHERE channel_id = $4 AND status = 'reserved'",
+        )
+        .bind(b"pre018-bytes".as_slice())
+        .bind("sig-pre018")
+        .bind(1_000i64)
+        .bind(&cid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(res.rows_affected(), 1, "pre-018 claim seed must apply");
+
+        // Upgrade: apply 018. The existing row's marker must be NULL.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(
+            include_str!("../../../migrations/018_channel_refund_broadcast_accepted.sql")
+                .to_string(),
+        ))
+        .execute(&pool)
+        .await
+        .expect("018 applies on a pre-018 schema");
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert!(
+            !row.broadcast_accepted,
+            "the 018 backfill must leave a pre-existing row's marker NULL"
+        );
+
+        // Conclusive death after the upgrade → held (never a re-sign loop).
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.block_height.lock().unwrap() = 2_000; // past last_valid (1_000)
+        let worker = test_worker(pool.clone(), rpc.clone());
+        backdate(&pool, &cid).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(
+            row.status, "held",
+            "a backfilled-NULL pre-018 row must hold at conclusive death"
+        );
+        assert_eq!(row.attempts, 1, "no re-sign of the pre-018 row");
         assert!(rpc.sends.lock().unwrap().is_empty(), "nothing broadcast");
     }
 }

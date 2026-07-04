@@ -320,7 +320,10 @@ pub struct OpenChannelResponse {
 ///
 /// Status codes:
 /// - 200 with the opened channel state.
-/// - 400 on a malformed `agent_wallet` / `session_key` / `funding_tx`.
+/// - 400 on a malformed `agent_wallet` / `session_key` / `funding_tx`, or when
+///   `agent_wallet` collides with any fixed entry of the close-refund transfer
+///   account table — recipient wallet (an unsendable self-transfer), USDC
+///   mint, or a constant program id (see the guard below).
 /// - 402 when the funding transfer fails on-chain verification (wrong
 ///   recipient/mint, insufficient, or it would not confirm).
 /// - 404 `{"error":"channel not available"}` when no DB is configured.
@@ -367,6 +370,27 @@ pub async fn open(
         return GatewayError::BadRequest(
             "agent_wallet must be a base58-encoded 32-byte pubkey".to_string(),
         )
+        .into_response();
+    }
+    // Refund-unsendability guard (mainnet-smoke incident 2026-07-03): the
+    // close refund is a USDC transfer recipient_wallet → agent_wallet over a
+    // FIXED (golden-vector-pinned) account table; an agent_wallet equal to
+    // ANY other fixed entry — recipient wallet, USDC mint, or one of the
+    // constant program ids — makes every refund broadcast die pre-chain with
+    // a deterministic `AccountLoadedTwice` → a permanently `held` refund.
+    // Reject before any RPC or money movement. The shared check
+    // (`channels::refund_account_collision`) also runs inside
+    // `create_channel`, so the invariant travels with the repo fn.
+    if let Some(role) = crate::channels::refund_account_collision(
+        &req.agent_wallet,
+        &state.config.solana.recipient_wallet,
+        &state.config.solana.usdc_mint,
+    ) {
+        return GatewayError::BadRequest(format!(
+            "agent_wallet must not be the {role} — the channel's close refund would \
+             load that account twice in the fixed transfer account table and could \
+             never land"
+        ))
         .into_response();
     }
     let session_key = req

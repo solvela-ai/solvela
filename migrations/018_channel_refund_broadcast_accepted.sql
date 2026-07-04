@@ -1,0 +1,37 @@
+-- Refund-worker never-accepted discriminator (fix α; incident observed
+-- 2026-07-03 by the mainnet rollout smoke against prod v420, via a synthetic
+-- refund row seeded into prod's channel_refunds — the pool-gated worker runs
+-- even with the channel plane disabled; the synthetic rows were deleted after
+-- the smoke, so no stuck prod row remains): a refund
+-- transaction rejected pre-chain by EVERY sendTransaction call (e.g. a
+-- self-transfer refund whose source ATA == destination ATA duplicates a pubkey
+-- in the fixed, golden-vector-pinned usdc_transfer account table → a
+-- deterministic AccountLoadedTwice simulation failure) was classified
+-- transient and re-signed after each blockhash expiry — up to
+-- MAX_CLAIM_ATTEMPTS doomed re-signs (~10 min of nonce/fee-payer churn) before
+-- the pre-existing exhaustion arm held it with a misleading "retry attempts
+-- exhausted" reason and no never-accepted signal.
+--
+-- `broadcast_accepted_at` records the FIRST time sendTransaction accepted the
+-- CURRENT `tx_signature`. Set once per signature life by the worker (also on an
+-- "already processed" send response — the ledger has the bytes); CLEARED by the
+-- claim CAS and the re-sign CAS (a new signature is a new life, and a stale
+-- marker surviving an operator re-arm would resurrect the loop). At conclusive
+-- death (blockhash expired AND history-searching getSignatureStatuses negative)
+-- the worker re-signs ONLY when the marker is set: a NULL marker means every
+-- send errored during the signature's entire blockhash lifetime, so a re-signed
+-- twin of the same frozen tuple fails identically → escalate to `held` after
+-- ONE blockhash expiry with an accurate never-accepted reason (entry alert +
+-- held gauges; operator re-arm only), never re-sign.
+--
+-- NULL backfill is deliberate and protects ANY pre-018 deployment generically:
+-- a pre-018 in_flight row that conclusively dies after this migration holds
+-- (safe: alert + operator re-arm) rather than resuming a potentially
+-- unlandable re-sign loop. Backfilling "accepted" would mark every such row
+-- landable and restart its loop.
+--
+-- NOTE `first_broadcast_at` is NOT this marker: it is set at claim CAS time,
+-- BEFORE the first send (it anchors the trailing-24h daily-cap window), so it
+-- says nothing about acceptance. Its semantics are unchanged.
+ALTER TABLE channel_refunds
+    ADD COLUMN IF NOT EXISTS broadcast_accepted_at TIMESTAMPTZ;

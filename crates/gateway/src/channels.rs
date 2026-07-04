@@ -86,6 +86,12 @@ pub enum ChannelRepoError {
     /// The targeted channel row does not exist.
     #[error("channel not found")]
     ChannelNotFound,
+    /// The agent wallet collides with a fixed entry of the close-refund
+    /// transfer's account table ([`refund_account_collision`]) — the eventual
+    /// refund could never land (`AccountLoadedTwice`). Checked at the open
+    /// route (pre-RPC 400) AND here, so the invariant travels with the repo fn.
+    #[error("agent_wallet collides with the {0} in the refund transfer account table")]
+    RefundWouldCollide(&'static str),
     /// The voucher advance did not apply: the channel is missing, no longer
     /// `open` (a cooperative close won the race — invariant 11a), or the
     /// presented cumulative is not strictly greater than the stored one. The
@@ -176,6 +182,55 @@ pub struct VoucherRecord<'a> {
     pub signature: &'a [u8; 64],
 }
 
+/// The refund-unsendability guard (mainnet-smoke incident 2026-07-03): the
+/// channel's close refund is a `usdc_transfer` from `recipient_wallet` to
+/// `agent_wallet`, built over a FIXED, golden-vector-pinned 8-account table
+/// (`owner, source_ata, destination_ata, destination_wallet, mint,
+/// system_program, token_program, ata_program`). Solana loads each account
+/// exactly once, so an `agent_wallet` equal to ANY other fixed entry makes
+/// EVERY refund broadcast die pre-chain with a deterministic
+/// `AccountLoadedTwice` — a permanently `held` refund.
+///
+/// Returns the colliding role name, or `None` when the wallet is safe.
+/// Wallet-vs-wallet/mint cases compare base58 strings (canonical for 32-byte
+/// values — exact when both sides are valid); the constant program ids are
+/// compared on decoded bytes against the canonical
+/// [`solvela_x402::solana_types`] constants (no hardcoded base58 strings).
+/// A non-decodable `agent_wallet` returns `None` — the callers' own pubkey
+/// validation rejects it.
+///
+/// The theoretical remaining collisions — `agent_wallet` equal to one of the
+/// two derived ATA addresses — are not constructible without an ATA
+/// derivation collision and are deliberately out of scope.
+pub fn refund_account_collision(
+    agent_wallet: &str,
+    recipient_wallet: &str,
+    mint: &str,
+) -> Option<&'static str> {
+    use solvela_x402::solana_types::{Pubkey, ASSOCIATED_TOKEN_PROGRAM_ID};
+
+    if agent_wallet == recipient_wallet {
+        return Some("gateway recipient wallet (an unsendable self-transfer refund)");
+    }
+    if agent_wallet == mint {
+        return Some("USDC mint");
+    }
+    let Ok(bytes) = solvela_x402::escrow::pda::decode_bs58_pubkey(agent_wallet) else {
+        return None;
+    };
+    let pk = Pubkey(bytes);
+    if pk == Pubkey::SYSTEM_PROGRAM {
+        return Some("system program");
+    }
+    if pk == Pubkey::TOKEN_PROGRAM_ID {
+        return Some("SPL token program");
+    }
+    if pk == ASSOCIATED_TOKEN_PROGRAM_ID {
+        return Some("associated token account program");
+    }
+    None
+}
+
 /// Insert a new channel row from an on-chain-verified funding deposit.
 ///
 /// Uses `ON CONFLICT (funding_tx_sig) DO NOTHING` against the unique index
@@ -183,7 +238,15 @@ pub struct VoucherRecord<'a> {
 /// inserted and we return [`ChannelRepoError::FundingAlreadyUsed`] rather than
 /// crediting the deposit twice. The DB CHECK constraints additionally reject any
 /// row that violates `settled <= last <= deposited`.
+///
+/// Also re-checks [`refund_account_collision`] (`agent_wallet` vs the row's
+/// `provider` = recipient wallet, its `mint`, and the fixed program ids) so
+/// the unsendable-refund invariant travels with the repo fn, not just the
+/// `/v1/channel/open` route (which checks it earlier, pre-RPC).
 pub async fn create_channel(pool: &PgPool, ch: &NewChannel) -> Result<(), ChannelRepoError> {
+    if let Some(role) = refund_account_collision(&ch.agent_wallet, &ch.provider, &ch.mint) {
+        return Err(ChannelRepoError::RefundWouldCollide(role));
+    }
     let deposited = atomic_to_i64(ch.deposited_atomic)?;
     let expiry = ch.expiry_slot.map(atomic_to_i64).transpose()?;
 
@@ -870,5 +933,78 @@ mod tests {
             .decode(solvela_x402::channel::GOLDEN_VECTOR_B64)
             .expect("golden vector decodes");
         assert_eq!(decoded.len(), 114);
+    }
+
+    // -- refund account-table collision guard (no DB) ------------------------
+
+    const A_RECIPIENT: &str = "9noXzpXnkyEcKF3AeXqUHTdR59V5uvrRBUo9bwsHaByz";
+    const A_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+    #[test]
+    fn refund_account_collision_flags_every_fixed_table_entry() {
+        // Recipient (self-transfer) + mint: string comparison.
+        assert!(refund_account_collision(A_RECIPIENT, A_RECIPIENT, A_MINT)
+            .is_some_and(|r| r.contains("self-transfer")));
+        assert!(refund_account_collision(A_MINT, A_RECIPIENT, A_MINT)
+            .is_some_and(|r| r.contains("mint")));
+        // Constant program ids: byte comparison against the canonical
+        // solana_types constants (these base58 forms pin them).
+        assert!(
+            refund_account_collision("11111111111111111111111111111111", A_RECIPIENT, A_MINT)
+                .is_some_and(|r| r.contains("system program"))
+        );
+        assert!(refund_account_collision(
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            A_RECIPIENT,
+            A_MINT
+        )
+        .is_some_and(|r| r.contains("SPL token program")));
+        assert!(refund_account_collision(
+            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+            A_RECIPIENT,
+            A_MINT
+        )
+        .is_some_and(|r| r.contains("associated token account")));
+    }
+
+    #[test]
+    fn refund_account_collision_passes_a_distinct_wallet() {
+        // A distinct valid wallet is safe; a non-decodable one is left to the
+        // callers' own pubkey validation (None here, never a false collision).
+        assert_eq!(
+            refund_account_collision(
+                "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+                A_RECIPIENT,
+                A_MINT
+            ),
+            None
+        );
+        assert_eq!(
+            refund_account_collision("not base58 0OIl", A_RECIPIENT, A_MINT),
+            None
+        );
+    }
+
+    /// The invariant travels with the repo fn: `create_channel` itself
+    /// refuses a colliding agent wallet (defense-in-depth behind the route
+    /// guard), using its OWN row params — provider (= recipient) and mint.
+    #[tokio::test]
+    async fn create_channel_rejects_colliding_agent_wallet() {
+        let Some(pool) = db().await else { return };
+        let ch = NewChannel {
+            channel_id: "collision-test-channel".to_string(),
+            // agent == provider: the self-transfer shape.
+            agent_wallet: A_RECIPIENT.to_string(),
+            session_key: A_RECIPIENT.to_string(),
+            provider: A_RECIPIENT.to_string(),
+            mint: A_MINT.to_string(),
+            deposited_atomic: 50_000,
+            expiry_slot: None,
+            funding_tx_sig: Some("sig-collision-test".to_string()),
+        };
+        assert!(matches!(
+            create_channel(&pool, &ch).await,
+            Err(ChannelRepoError::RefundWouldCollide(_))
+        ));
     }
 }
