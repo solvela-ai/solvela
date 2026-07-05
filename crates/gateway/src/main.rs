@@ -161,6 +161,84 @@ async fn main() -> anyhow::Result<()> {
             app_config.faucet.source_key = Some(val);
         }
     }
+    // v0 spend-down channel config (SOLVELA_CHANNEL__*). Unlike the faucet
+    // knobs above, a malformed value here is FATAL, not warn-and-continue:
+    // the two caps are MONEY CEILINGS whose default is `None` = UNCAPPED, so
+    // silently ignoring a typo'd cap would remove the ceiling entirely (arch
+    // rule #15 spirit — never serve traffic against a broken money-path
+    // config). Empty/whitespace values are ignored (keep the configured/
+    // default), matching the SOLVELA_SOLANA__USDC_MINT pattern above. Applied
+    // BEFORE the recipient-wallet validation below so an env-enabled channel
+    // still gets that fail-fast check.
+    if let Ok(val) = env_with_fallback("SOLVELA_CHANNEL__ENABLED", "RCR_CHANNEL__ENABLED")
+        .or_else(|_| env_with_fallback("SOLVELA_CHANNEL_ENABLED", "RCR_CHANNEL_ENABLED"))
+    {
+        if val.trim().is_empty() {
+            warn!(
+                "SOLVELA_CHANNEL__ENABLED is set but empty — ignoring the \
+                 override and keeping the configured/default channel flag"
+            );
+        } else {
+            app_config.channel.enabled = parse_channel_enabled(&val).map_err(|e| {
+                error!(error = %e, "FATAL: invalid channel flag override");
+                anyhow::anyhow!(
+                    "invalid channel flag (SOLVELA_CHANNEL__ENABLED / [channel].enabled): {e}"
+                )
+            })?;
+        }
+    }
+    if let Ok(val) = env_with_fallback(
+        "SOLVELA_CHANNEL__MAX_DEPOSIT_ATOMIC",
+        "RCR_CHANNEL__MAX_DEPOSIT_ATOMIC",
+    )
+    .or_else(|_| {
+        env_with_fallback(
+            "SOLVELA_CHANNEL_MAX_DEPOSIT_ATOMIC",
+            "RCR_CHANNEL_MAX_DEPOSIT_ATOMIC",
+        )
+    }) {
+        if val.trim().is_empty() {
+            warn!(
+                "SOLVELA_CHANNEL__MAX_DEPOSIT_ATOMIC is set but empty — ignoring \
+                 the override and keeping the configured/default deposit cap"
+            );
+        } else {
+            app_config.channel.max_deposit_atomic = Some(parse_atomic_cap(&val).map_err(|e| {
+                error!(error = %e, "FATAL: invalid channel deposit cap — a malformed cap must never silently fall back to uncapped");
+                anyhow::anyhow!(
+                    "invalid channel deposit cap (SOLVELA_CHANNEL__MAX_DEPOSIT_ATOMIC / \
+                     [channel].max_deposit_atomic): {e}"
+                )
+            })?);
+        }
+    }
+    if let Ok(val) = env_with_fallback(
+        "SOLVELA_CHANNEL__REFUND_DAILY_CAP_ATOMIC",
+        "RCR_CHANNEL__REFUND_DAILY_CAP_ATOMIC",
+    )
+    .or_else(|_| {
+        env_with_fallback(
+            "SOLVELA_CHANNEL_REFUND_DAILY_CAP_ATOMIC",
+            "RCR_CHANNEL_REFUND_DAILY_CAP_ATOMIC",
+        )
+    }) {
+        if val.trim().is_empty() {
+            warn!(
+                "SOLVELA_CHANNEL__REFUND_DAILY_CAP_ATOMIC is set but empty — ignoring \
+                 the override and keeping the configured/default refund cap"
+            );
+        } else {
+            app_config.channel.refund_daily_cap_atomic =
+                Some(parse_atomic_cap(&val).map_err(|e| {
+                    error!(error = %e, "FATAL: invalid channel refund daily cap — a malformed cap must never silently fall back to uncapped");
+                    anyhow::anyhow!(
+                        "invalid channel refund daily cap \
+                         (SOLVELA_CHANNEL__REFUND_DAILY_CAP_ATOMIC / \
+                         [channel].refund_daily_cap_atomic): {e}"
+                    )
+                })?);
+        }
+    }
     // Server config overrides
     if let Ok(val) = env_with_fallback("SOLVELA_HOST", "RCR_HOST") {
         app_config.server.host = val;
@@ -1301,6 +1379,40 @@ fn validate_recipient_wallet(wallet: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parse the `SOLVELA_CHANNEL__ENABLED` flag value.
+///
+/// Accepts exactly "true"/"1" and "false"/"0" (case-insensitive, surrounding
+/// whitespace trimmed). Anything else is an `Err` the caller treats as FATAL —
+/// a typo'd flag must fail startup rather than silently picking a default
+/// (deliberately stricter than the faucet's lenient `matches!` flag: the
+/// channel flag gates real USDC deposits). Empty/whitespace-only values are
+/// the caller's ignore-override case; if one reaches here it still fails
+/// closed. Pure startup-time seam, mirroring [`validate_usdc_mint`].
+fn parse_channel_enabled(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        other => Err(format!(
+            "expected \"true\"/\"1\" or \"false\"/\"0\" (case-insensitive), got {other:?}"
+        )),
+    }
+}
+
+/// Parse an atomic micro-USDC cap value (`SOLVELA_CHANNEL__*_ATOMIC`).
+///
+/// MONEY CEILING: these caps default to `None` = UNCAPPED, so a malformed
+/// value that was warn-and-ignored would silently remove the ceiling
+/// entirely. Any value that is not a plain non-negative integer (`u64`) —
+/// garbage, negative, decimal, overflow — is an `Err` the caller treats as
+/// FATAL. `0` is valid (a fully closed spigot); the cap-enforcement logic
+/// treats it literally.
+fn parse_atomic_cap(raw: &str) -> Result<u64, String> {
+    let trimmed = raw.trim();
+    trimmed.parse::<u64>().map_err(|e| {
+        format!("expected a non-negative integer atomic micro-USDC amount, got {trimmed:?}: {e}")
+    })
+}
+
 /// Generate a random 32-byte secret using two UUIDv4 values.
 ///
 /// UUIDv4 provides 122 bits of randomness per call (backed by the OS CSPRNG),
@@ -1545,6 +1657,87 @@ mod tests {
             assert!(
                 validate_recipient_wallet(bad).is_err(),
                 "malformed recipient_wallet {bad:?} must fail startup validation"
+            );
+        }
+    }
+
+    /// The channel flag accepts exactly "true"/"1"/"false"/"0",
+    /// case-insensitive, with surrounding whitespace trimmed.
+    #[test]
+    fn parse_channel_enabled_accepts_true_false_forms() {
+        for (raw, expected) in [
+            ("true", true),
+            ("TRUE", true),
+            ("True", true),
+            ("1", true),
+            (" true ", true),
+            ("\t1\n", true),
+            ("false", false),
+            ("FALSE", false),
+            ("False", false),
+            ("0", false),
+            (" false ", false),
+            (" 0 ", false),
+        ] {
+            assert_eq!(
+                parse_channel_enabled(raw),
+                Ok(expected),
+                "{raw:?} must parse as {expected}"
+            );
+        }
+    }
+
+    /// A typo'd flag must FAIL STARTUP, never silently pick a default — this
+    /// is deliberately stricter than the faucet's lenient `matches!` flag
+    /// (which treats "yes" as true and anything else as false). Empty/
+    /// whitespace is the caller's ignore-override case, but if it ever reaches
+    /// the parser it must still fail closed.
+    #[test]
+    fn parse_channel_enabled_rejects_everything_else() {
+        for bad in [
+            "yes", "no", "on", "off", "enabled", "2", "-1", "truee", "t", "f", "tru e", "", "   ",
+        ] {
+            assert!(
+                parse_channel_enabled(bad).is_err(),
+                "{bad:?} must be rejected, not defaulted"
+            );
+        }
+    }
+
+    /// Cap values are plain non-negative integers (atomic micro-USDC).
+    /// `0` is a VALID cap (a fully closed spigot), not an ignore/default.
+    #[test]
+    fn parse_atomic_cap_accepts_valid_integers() {
+        assert_eq!(parse_atomic_cap("0"), Ok(0));
+        assert_eq!(parse_atomic_cap("100000000"), Ok(100_000_000)); // 100 USDC
+        assert_eq!(parse_atomic_cap(" 42 "), Ok(42));
+        assert_eq!(parse_atomic_cap(&u64::MAX.to_string()), Ok(u64::MAX));
+        // std `u64::from_str` accepts an explicit '+' sign — unambiguous,
+        // pinned here so a parser swap that changes this is visible.
+        assert_eq!(parse_atomic_cap("+123"), Ok(123));
+    }
+
+    /// MONEY CEILING: any of these silently ignored would leave the cap at
+    /// `None` = UNLIMITED deposit/disbursement. Every malformed shape must be
+    /// an `Err` the caller treats as fatal — never warn-and-continue.
+    #[test]
+    fn parse_atomic_cap_rejects_malformed_values_fail_closed() {
+        for bad in [
+            "",                     // empty (caller ignores first, but fail closed here too)
+            "   ",                  // whitespace-only
+            "-1",                   // negative
+            "1.5",                  // decimal
+            "1_000_000",            // digit separator
+            "1e6",                  // scientific notation
+            "abc",                  // garbage
+            "18446744073709551616", // u64::MAX + 1 (overflow)
+            "0x10",                 // hex
+            "100 000",              // inner whitespace
+            "100000000.0",          // trailing decimal
+        ] {
+            assert!(
+                parse_atomic_cap(bad).is_err(),
+                "{bad:?} must be rejected fail-closed, not defaulted to uncapped"
             );
         }
     }
