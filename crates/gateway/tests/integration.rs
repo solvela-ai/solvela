@@ -18399,6 +18399,276 @@ mod channel_route_tests {
 }
 
 // ===========================================================================
+// Fix β — POST /v1/channel/open self-transfer guard (mainnet-smoke incident
+// 2026-07-03)
+//
+// A channel whose `agent_wallet` equals the gateway recipient wallet has an
+// unsendable close refund: the refund transfer's source ATA == destination ATA
+// duplicates a pubkey in the fixed (golden-vector-pinned) usdc_transfer
+// account table → deterministic `AccountLoadedTwice` on every broadcast → a
+// permanently held refund. The open route must reject it with a clear 400.
+//
+// Through the REAL route (`build_router` + `oneshot`, CLAUDE.md #10), backed by
+// the live dev Postgres (open is DB-gated: with no pool the handler 404s before
+// the guard). SKIPS cleanly when the dev stack is unreachable.
+// ===========================================================================
+mod channel_open_guard_tests {
+    use super::*;
+
+    const GUARD_DB_URL: &str = "postgres://solvela:solvela_dev_password@127.0.0.1:5432/solvela";
+
+    fn db_url() -> String {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| GUARD_DB_URL.to_string())
+    }
+
+    /// Live dev Postgres with the channel schema, or `None` to SKIP (the draw
+    /// tests' rule: never fail a bare checkout; no `sqlx::migrate!` here).
+    async fn channel_pool() -> Option<sqlx::PgPool> {
+        let pool = sqlx::PgPool::connect(&db_url()).await.ok()?;
+        let channels_exists: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.channels')::text")
+                .fetch_one(&pool)
+                .await
+                .ok()?;
+        channels_exists?;
+        Some(pool)
+    }
+
+    /// A fresh VALID base58 32-byte wallet, unique per call (the dev DB
+    /// persists across runs; a fixed value would leak state between runs).
+    /// Deliberately NOT `TEST_RECIPIENT_WALLET`: that constant contains 'l'
+    /// (outside the base58 alphabet), so the equality guard could never be
+    /// reached through it — the agent_wallet decode check would 400 first and
+    /// the reject test would pass vacuously against the wrong branch.
+    fn fresh_wallet() -> String {
+        bs58::encode(uuid::Uuid::new_v4().as_bytes().repeat(2)).into_string()
+    }
+
+    /// `exact` verifier: verify passes with a fixed on-chain amount (2625);
+    /// settle succeeds with a UNIQUE tx signature per call — the dev DB
+    /// persists across runs and `funding_tx_sig` is unique (migration 016), so
+    /// a fixed mock signature would 409 the second run.
+    struct UniqueSettleVerifier;
+
+    #[async_trait::async_trait]
+    impl PaymentVerifier for UniqueSettleVerifier {
+        fn network(&self) -> &str {
+            SOLANA_NETWORK
+        }
+        fn scheme(&self) -> &str {
+            "exact"
+        }
+        async fn verify_payment(
+            &self,
+            _payload: &PaymentPayload,
+        ) -> Result<VerificationResult, X402Error> {
+            Ok(VerificationResult {
+                valid: true,
+                reason: None,
+                verified_amount: Some(2625),
+            })
+        }
+        async fn settle_payment(
+            &self,
+            _payload: &PaymentPayload,
+        ) -> Result<SettlementResult, X402Error> {
+            Ok(SettlementResult {
+                success: true,
+                tx_signature: Some(format!("sig-open-guard-{}", uuid::Uuid::new_v4())),
+                network: SOLANA_NETWORK.to_string(),
+                error: None,
+                verified_amount: None,
+                failure_kind: None,
+            })
+        }
+    }
+
+    /// A channels-ENABLED app with a live DB pool and a parameterized gateway
+    /// recipient wallet (the value the guard compares against).
+    fn open_guard_app(pool: sqlx::PgPool, recipient_wallet: &str) -> axum::Router {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML)
+            .unwrap()
+            .with_gateway_recipient(TEST_RECIPIENT_WALLET)
+            .unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![Arc::new(UniqueSettleVerifier)]);
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = recipient_wallet.to_string();
+        config.channel.enabled = true;
+
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
+            search_provider: None,
+            facilitator,
+            usage: gateway::usage::UsageTracker::noop(),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: Some(pool),
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        build_router(state, RateLimiter::new(RateLimitConfig::default()))
+    }
+
+    async fn post_open(app: axum::Router, agent_wallet: &str) -> axum::response::Response {
+        let body = serde_json::json!({
+            "agent_wallet": agent_wallet,
+            "funding_tx": "AQID",
+        });
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/channel/open")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Shared reject assertion: opening with `agent_wallet` against a gateway
+    /// whose recipient is `recipient` must 400, name the colliding role, and
+    /// create no channel row. The colliding constants are FIXED values on a
+    /// persistent dev DB, so "no row created" is asserted as a before/after
+    /// count delta, not an absolute zero.
+    async fn assert_open_rejects_collision(recipient: &str, agent_wallet: &str, role_substr: &str) {
+        let Some(pool) = channel_pool().await else {
+            return;
+        };
+        let count_for = |wallet: String| {
+            let pool = pool.clone();
+            async move {
+                let n: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE agent_wallet = $1")
+                        .bind(wallet)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                n
+            }
+        };
+        let before = count_for(agent_wallet.to_string()).await;
+        let app = open_guard_app(pool.clone(), recipient);
+
+        let resp = post_open(app, agent_wallet).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "agent_wallet {agent_wallet} collides with the {role_substr} and must be \
+             rejected at open (its refund could never land)"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // GatewayError envelope: { "error": { "message": ..., "type": ... } }.
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains(role_substr),
+            "the 400 must name the colliding role ({role_substr}), got: {v}"
+        );
+
+        // Rejected BEFORE any money movement: this request created no row.
+        let after = count_for(agent_wallet.to_string()).await;
+        assert_eq!(
+            after, before,
+            "no channel may be opened for a colliding agent_wallet"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_rejects_agent_wallet_equal_to_recipient() {
+        let recipient = fresh_wallet();
+        assert_open_rejects_collision(&recipient, &recipient, "self-transfer").await;
+    }
+
+    #[tokio::test]
+    async fn open_rejects_agent_wallet_equal_to_usdc_mint() {
+        // The exact value the guard compares: the configured mint
+        // (AppConfig::default() = the mainnet USDC mint the test app runs with).
+        let mint = AppConfig::default().solana.usdc_mint;
+        assert_open_rejects_collision(&fresh_wallet(), &mint, "mint").await;
+    }
+
+    #[tokio::test]
+    async fn open_rejects_agent_wallet_equal_to_system_program() {
+        assert_open_rejects_collision(
+            &fresh_wallet(),
+            "11111111111111111111111111111111",
+            "system program",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn open_rejects_agent_wallet_equal_to_token_and_ata_programs() {
+        assert_open_rejects_collision(
+            &fresh_wallet(),
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "SPL token program",
+        )
+        .await;
+        assert_open_rejects_collision(
+            &fresh_wallet(),
+            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+            "associated token account",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn open_accepts_distinct_agent_wallet() {
+        let Some(pool) = channel_pool().await else {
+            return;
+        };
+        let app = open_guard_app(pool.clone(), &fresh_wallet());
+        // A distinct, valid agent wallet — the guard must not over-block.
+        let agent = fresh_wallet();
+
+        let resp = post_open(app, &agent).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a distinct agent_wallet must still open a channel"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["deposited_atomic"], 2625,
+            "credited deposit is the on-chain-verified amount"
+        );
+        assert_eq!(v["status"], "open");
+    }
+}
+
+// ===========================================================================
 // v0 spend-down channel DRAW (Pass B) — `/v1/search` channel-voucher fork
 //
 // Exercised END-TO-END through the REAL route (`build_router` + `oneshot`), per
