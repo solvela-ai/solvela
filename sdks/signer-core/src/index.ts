@@ -43,3 +43,20 @@ export { parse402 } from './parse-402.js';
 export { filterAccepts } from './scheme-filter.js';
 export { isStubHeader, isStubTransaction } from './stub-guard.js';
 export { sanitizeGatewayError, redactBase58, redactHex } from './redact.js';
+export {
+  buildVoucherMessage,
+  signVoucher,
+  buildCloseMessage,
+  buildChannelPaymentHeader,
+  channelVoucherPayloadJson,
+  parseResyncCumulative,
+  ChannelTracker,
+  ChannelDrawError,
+  CHANNEL_VOUCHER_GOLDEN_VECTOR_B64,
+  CHANNEL_CLOSE_GOLDEN_VECTOR_B64,
+  CHANNEL_VOUCHER_PAYLOAD_GOLDEN_JSON,
+  type ChannelPaymentHeaderParams,
+  type ChannelTrackerOptions,
+  type ChannelDrawParams,
+  type DrawResponse,
+} from './channel.js';
