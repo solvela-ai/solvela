@@ -195,6 +195,8 @@ All configuration is via environment variables:
 
 Set `SOLVELA_ESCROW_MODE=enabled` to expose the `deposit_escrow` tool. This is intended for agent-driven workloads where the agent pre-funds an escrow PDA and the gateway claims only what was actually used.
 
+> ⚠️ **Enabling escrow mode authorizes any connected MCP host to spend real funds.** Once `SOLVELA_ESCROW_MODE=enabled` and a wallet key is configured, every MCP host connected to this server (Claude Code, automated agents, CI) can call `deposit_escrow` and broadcast real USDC transactions on Solana mainnet up to the per-call cap (`SOLVELA_MAX_ESCROW_DEPOSIT`, default $5) and session cap (`SOLVELA_MAX_ESCROW_SESSION`, default $20) — with **no further human confirmation from this server**. Any human-in-the-loop gate is the host's responsibility (e.g. tool-approval prompts). An autonomous agent can legitimately spend the entire session cap before any human reviews it. Only enable this mode with a wallet whose full session-cap loss is acceptable.
+
 **Do not enable escrow mode for interactive chat sessions** — the per-session deposit cap is a safeguard, not a substitute for careful budget management.
 
 When escrow mode is enabled, the server logs the effective caps at startup:
