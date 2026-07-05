@@ -60,6 +60,59 @@ pub struct ChannelConfig {
     /// `None` = uncapped.
     #[serde(default)]
     pub refund_daily_cap_atomic: Option<u64>,
+    /// Hard ceiling (seconds) on the provider serve a chat channel draw may run
+    /// while holding the per-channel draw lock
+    /// (`SOLVELA_CHANNEL__DRAW_SERVE_TIMEOUT_SECS`). A draw that exceeds it is a
+    /// total non-charge (nothing persisted, lock released) — the guard that
+    /// stops a slow/unbounded serve from outliving the 900s lock TTL and
+    /// reopening the close-mid-serve grief loop. `None` → the
+    /// [`DEFAULT_DRAW_SERVE_TIMEOUT_SECS`] default (650s: above the 600s
+    /// native-relay ceiling, well below the 900s TTL). Exposed so the timeout
+    /// arm is exercisable end-to-end in tests.
+    #[serde(default)]
+    pub draw_serve_timeout_secs: Option<u64>,
+}
+
+/// Default chat channel-draw serve timeout (seconds) when
+/// [`ChannelConfig::draw_serve_timeout_secs`] is unset. 650s sits above the
+/// 600s native-relay deadline (`providers/anthropic.rs`) and comfortably below
+/// the 900s draw-lock TTL (`cache::CHANNEL_DRAW_LOCK_TTL_SECS`).
+pub const DEFAULT_DRAW_SERVE_TIMEOUT_SECS: u64 = 650;
+
+impl ChannelConfig {
+    /// The effective chat channel-draw serve timeout in seconds — the
+    /// configured override or [`DEFAULT_DRAW_SERVE_TIMEOUT_SECS`].
+    pub fn draw_serve_timeout_secs(&self) -> u64 {
+        self.draw_serve_timeout_secs
+            .unwrap_or(DEFAULT_DRAW_SERVE_TIMEOUT_SECS)
+    }
+
+    /// Fail-closed startup validation of the channel's money-safety bounds.
+    ///
+    /// The draw-serve timeout MUST stay STRICTLY below the per-channel draw-lock
+    /// TTL ([`crate::cache::CHANNEL_DRAW_LOCK_TTL_SECS`], 900s). A serve allowed
+    /// to run to (or past) the TTL reopens the close-expires-mid-serve window the
+    /// draw-lock closes: the lock could expire under an in-flight serve and a
+    /// successor draw be admitted on the SAME stale snapshot. A misconfigured
+    /// money-safety bound must REFUSE TO BOOT, not silently run degraded —
+    /// mirroring the #668 fail-closed money-cap parsing precedent. No-op when
+    /// channels are disabled (no draw runs, so the bound is inert).
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let timeout = self.draw_serve_timeout_secs();
+        if timeout >= crate::cache::CHANNEL_DRAW_LOCK_TTL_SECS {
+            return Err(format!(
+                "channel.draw_serve_timeout_secs ({timeout}) must be strictly below the \
+                 per-channel draw-lock TTL ({ttl}s): a serve that outlives the lock reopens the \
+                 close-expires-mid-serve window a successor draw could be admitted into. Lower \
+                 draw_serve_timeout_secs below {ttl}.",
+                ttl = crate::cache::CHANNEL_DRAW_LOCK_TTL_SECS
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Gas-drip faucet configuration (`[faucet]`).
@@ -865,6 +918,82 @@ refund_daily_cap_atomic = 500000000
         let config: AppConfig = toml::from_str(toml).expect("valid config TOML");
         assert_eq!(config.channel.max_deposit_atomic, Some(100_000_000));
         assert_eq!(config.channel.refund_daily_cap_atomic, Some(500_000_000));
+    }
+
+    #[test]
+    fn channel_draw_serve_timeout_defaults_and_overrides() {
+        // Unset → the 650s default (above the 600s native-relay ceiling).
+        assert_eq!(ChannelConfig::default().draw_serve_timeout_secs(), 650);
+        assert_eq!(
+            ChannelConfig::default().draw_serve_timeout_secs(),
+            DEFAULT_DRAW_SERVE_TIMEOUT_SECS
+        );
+        // Configured override wins (tests use a tiny value to reach the arm).
+        let toml = r#"
+[server]
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+recipient_wallet = ""
+[providers]
+[channel]
+enabled = true
+draw_serve_timeout_secs = 1
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("valid config TOML");
+        assert_eq!(config.channel.draw_serve_timeout_secs, Some(1));
+        assert_eq!(config.channel.draw_serve_timeout_secs(), 1);
+    }
+
+    #[test]
+    fn channel_validate_rejects_serve_timeout_at_or_above_lock_ttl() {
+        let ttl = crate::cache::CHANNEL_DRAW_LOCK_TTL_SECS;
+
+        // Disabled channel: any value is inert (no draw runs) → Ok, never a
+        // boot-blocking error for a config that can't move money.
+        let cfg = ChannelConfig {
+            enabled: false,
+            draw_serve_timeout_secs: Some(ttl + 10_000),
+            ..Default::default()
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "disabled channel: the timeout bound is inert (no draw runs)"
+        );
+
+        // Enabled + timeout == TTL → reject (the serve could run up to the exact
+        // TTL and reopen the mid-serve window).
+        let cfg = ChannelConfig {
+            enabled: true,
+            draw_serve_timeout_secs: Some(ttl),
+            ..Default::default()
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "timeout == lock TTL must fail closed at boot"
+        );
+
+        // Enabled + timeout > TTL → reject.
+        let cfg = ChannelConfig {
+            enabled: true,
+            draw_serve_timeout_secs: Some(ttl + 1),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("draw_serve_timeout_secs") && err.contains(&ttl.to_string()),
+            "the reject message must name the knob and the TTL bound: {err}"
+        );
+
+        // Enabled + the 650s default (unset) is safely below the 900s TTL → Ok.
+        let cfg = ChannelConfig {
+            enabled: true,
+            draw_serve_timeout_secs: None,
+            ..Default::default()
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "the {DEFAULT_DRAW_SERVE_TIMEOUT_SECS}s default must boot cleanly below the {ttl}s TTL"
+        );
     }
 
     // -------------------------------------------------------------------------

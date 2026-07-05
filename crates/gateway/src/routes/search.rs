@@ -47,11 +47,13 @@ use solvela_x402::types::{
     X402_VERSION,
 };
 
+use crate::cache::ResponseCache;
 use crate::error::GatewayError;
 use crate::middleware::x402::decode_payment_header;
 use crate::payment_util::extract_payer_wallet;
 use crate::providers::search::{SearchProvider, SearchQuery};
 use crate::receipts;
+use crate::routes::channel::map_voucher_rejection;
 use crate::routes::service_payment::{compute_service_cost, ServiceCost};
 use crate::usage::SpendLogEntry;
 use crate::AppState;
@@ -707,12 +709,13 @@ async fn channel_draw(
     // The channel id (base58) is BOTH the lock key and the ledger load key.
     let channel_id = voucher_payload.channel_id.as_str();
 
-    // Per-channel lock (Redis SET NX EX, channel-distinct prefix). Fail closed
-    // if Redis errors (no in-memory fallback — it cannot serialise across
-    // instances); reject if a concurrent draw holds it. §3.9 / HALT 4.
-    match cache.acquire_channel_draw_lock(channel_id).await {
-        Ok(true) => {}
-        Ok(false) => {
+    // Per-channel lock (Redis SET NX EX, channel-distinct prefix, per-draw
+    // token — Decision G). Fail closed if Redis errors (no in-memory fallback —
+    // it cannot serialise across instances); reject if a concurrent draw holds
+    // it. §3.9 / HALT 4.
+    let lock_token = match cache.acquire_channel_draw_lock(channel_id).await {
+        Ok(Some(token)) => token,
+        Ok(None) => {
             return Err(GatewayError::ServiceUnavailable(
                 "a draw is already in progress on this channel; please retry shortly".to_string(),
             ));
@@ -723,10 +726,10 @@ async fn channel_draw(
                 "payment service is temporarily degraded; please retry shortly".to_string(),
             ));
         }
-    }
+    };
 
     // Lock HELD. Run the draw and RELEASE on ALL paths (success AND every
-    // failure) — the 120s TTL is only the crash backstop, never the steady-state
+    // failure) — the TTL is only the crash backstop, never the steady-state
     // release (releasing at once lets the next sequential draw proceed
     // immediately). This is the OPPOSITE of the A2A hold-on-success. §8.5.
     let outcome = channel_draw_locked(
@@ -740,22 +743,24 @@ async fn channel_draw(
         &voucher,
         channel_id,
         pool,
+        cache,
+        &lock_token,
     )
     .await;
     // Release synchronously (NOT detached — a spawned release would race the
     // next sequential draw). But the Redis client has NO per-command timeout, so
     // a hung Redis must not stall the already-earned response: bound the release
-    // and fall back to the 120s TTL crash-backstop on timeout.
+    // and fall back to the TTL crash-backstop on timeout.
     if tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        cache.release_channel_draw_lock(channel_id),
+        cache.release_channel_draw_lock(channel_id, &lock_token),
     )
     .await
     .is_err()
     {
         warn!(
             channel_id,
-            "channel draw lock release timed out — lock will expire via TTL (120s)"
+            "channel draw lock release timed out — lock will expire via TTL"
         );
     }
     outcome
@@ -779,6 +784,8 @@ async fn channel_draw_locked(
     voucher: &solvela_x402::channel::Voucher,
     channel_id: &str,
     pool: &sqlx::PgPool,
+    cache: &ResponseCache,
+    lock_token: &str,
 ) -> Result<Response, GatewayError> {
     // Load the drawable open channel + its DB-sourced `agent_wallet`. A
     // closed/closing/unknown channel is not drawable → 404.
@@ -850,6 +857,45 @@ async fn channel_draw_locked(
                 .into_response());
         }
     };
+
+    // FIX 3 back-port (R2-5 — symmetric with the chat draw): re-confirm we STILL
+    // hold the draw lock before persisting. If the TTL expired mid-serve a
+    // successor draw could have been admitted on the SAME stale snapshot; the DB
+    // CAS (`WHERE last < $new AND status = 'open'`) already stops the double
+    // DEBIT, but the loser would still run to completion and DELIVER for free
+    // (and, unlike a genuine close race, its CAS would SUCCEED here — the channel
+    // is still open with `last` unadvanced — recording a spurious charge). On a
+    // confirmed loss, abort the persist and deliver the earned results recording
+    // NOTHING, with the shared `reason="lock_lost"` label. A Redis error here is
+    // inconclusive → proceed (the DB CAS remains the money backstop; a transient
+    // blip must not force a free serve). Search's smaller serve window (~30s
+    // provider timeout vs the 900s TTL) makes this rare, but the two draws must
+    // not diverge on hardening.
+    match cache.channel_draw_lock_held(channel_id, lock_token).await {
+        Ok(true) => {}
+        Ok(false) => {
+            counter!(
+                "solvela_channel_draw_persist_failed_total",
+                "reason" => "lock_lost"
+            )
+            .increment(1);
+            warn!(
+                channel_id,
+                cumulative_atomic = voucher.cumulative_atomic,
+                "channel draw: draw lock no longer ours before persist (TTL expired mid-serve) — \
+                 aborting persist, bounded one-call non-charge (deposit intact)"
+            );
+            return Ok((StatusCode::OK, Json(json!(results))).into_response());
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                channel_id,
+                "channel draw: could not re-check draw-lock ownership before persist; \
+                 proceeding (DB CAS is the money backstop)"
+            );
+        }
+    }
 
     // POST-serve persist (deliver-then-record, #486-safe): advancing `last` IS
     // the debit, so the spend/receipt below are contingent on it committing.
@@ -944,51 +990,9 @@ async fn channel_draw_locked(
     Ok(response)
 }
 
-/// Map a `verify_voucher` rejection to a fail-closed `GatewayError`.
-///
-/// Surfaces the authoritative `last_cumulative` ONLY for AUTHENTICATED
-/// rejections — those that occur AFTER `verify_voucher` has verified the
-/// ed25519 signature — so a desynced SDK (whose vouchers now `DeltaMismatch` /
-/// `NonMonotonicCumulative`) can recompute its next cumulative and resync (R9).
-/// A pre-authentication rejection (`InvalidSignature` / `ChannelMismatch`, both
-/// checked before/at the signature gate) surfaces nothing: an unauthenticated
-/// caller must never learn a channel's balance. §3.12.
-fn map_voucher_rejection(
-    err: solvela_x402::channel::ChannelVoucherError,
-    last_cumulative: u64,
-) -> GatewayError {
-    use solvela_x402::channel::ChannelVoucherError as E;
-    match err {
-        // Pre-auth (voucher rules 1 & 2): reject WITHOUT the ledger figure.
-        E::ChannelMismatch | E::InvalidSignature => {
-            GatewayError::InvalidPayment("channel voucher rejected".to_string())
-        }
-        // Authenticated, but a BODY mismatch — not a cumulative desync. Telling
-        // the SDK to "resync last_cumulative" here would send it into a confused
-        // retry loop; point it at the real cause instead, with NO ledger figure.
-        E::RequestDigestMismatch => GatewayError::InvalidPayment(
-            "voucher request_digest does not match this request; re-sign for the body you are \
-             sending"
-                .to_string(),
-        ),
-        // Post-auth CUMULATIVE rejections (rules 4–7): the caller proved control
-        // of the session key AND the mismatch is about the cumulative, so
-        // surfacing its OWN channel's authoritative last_cumulative is a resync
-        // aid (R9), not a third-party leak. The figure rides BOTH the prose
-        // message (unchanged) and the structured `last_cumulative` body field
-        // (§4b) — SDK trackers consume ONLY the structured field.
-        E::Expired { .. }
-        | E::NonMonotonicCumulative { .. }
-        | E::DeltaMismatch { .. }
-        | E::BelowSettled { .. }
-        | E::OverDraw { .. } => GatewayError::InvalidPaymentWithResync {
-            message: format!(
-                "channel voucher rejected; resync from authoritative last_cumulative={last_cumulative}"
-            ),
-            last_cumulative,
-        },
-    }
-}
+// `map_voucher_rejection` moved to `crate::routes::channel` (PR-B): the chat
+// draw fork shares the exact same fail-closed mapping, so it lives with the
+// other cross-endpoint channel helpers (imported at the top of this file).
 
 #[cfg(test)]
 mod tests {

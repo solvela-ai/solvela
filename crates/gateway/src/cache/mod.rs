@@ -75,10 +75,25 @@ const CHANNEL_DRAW_LOCK_PREFIX: &str = "solvela:channel:draw_lock:";
 /// Unlike the A2A settle lock (held-on-success to block re-settle), the channel
 /// draw lock is RELEASED immediately after every draw (success AND failure —
 /// see [`ResponseCache::release_channel_draw_lock`]), so the TTL is never the
-/// steady-state release: it only bounds a holder that crashed mid-draw. 120s
-/// matches the standard-tx replay window; the next sequential draw on the same
-/// channel proceeds at once on the explicit release, never waiting out this TTL.
-pub const CHANNEL_DRAW_LOCK_TTL_SECS: u64 = 120;
+/// steady-state release: it only bounds a holder that crashed mid-draw.
+///
+/// 900s (Decision G, channel chat-draw plan): the lock must outlive the
+/// SLOWEST legitimate serve it protects. Chat draws hold it across the whole
+/// provider call — up to the 600s native-relay deadline
+/// (`providers/anthropic.rs`) or ~90s × retries + backoff on the buffered
+/// path — so the search-era 120s would expire mid-draw and admit a concurrent
+/// draw (the release would then cross-delete without the token guard below).
+/// 600s + margin = 900s. Residual: a crashed holder leaves the channel
+/// undrawable for up to 15 min (rare, bounded, metered via the lock-lost
+/// counter); the DB CAS + `UNIQUE(channel_id, cumulative)` remain the money
+/// backstop either way.
+pub const CHANNEL_DRAW_LOCK_TTL_SECS: u64 = 900;
+
+/// Lua compare-and-delete for the channel draw lock release (Decision G):
+/// delete the key ONLY if it still holds this draw's token. Executed atomically
+/// by Redis, so an expired-then-reacquired lock is never cross-deleted by the
+/// original (slow) holder — the failure mode the plain `DEL` release had.
+const CHANNEL_DRAW_LOCK_RELEASE_SCRIPT: &str = r#"if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end"#;
 
 /// Redis key prefix for the cross-instance aggregate free-tier RPM counter.
 /// The full key is `free_tier:global_rpm:<epoch_minute>` (see
@@ -360,32 +375,40 @@ impl ResponseCache {
 
     /// Atomically acquire the v0 spend-down channel per-DRAW lock.
     ///
-    /// Uses `SET key 1 NX EX <ttl>` — the same atomic, cross-instance
+    /// Uses `SET key <token> NX EX <ttl>` — the same atomic, cross-instance
     /// compare-and-swap idiom as [`Self::acquire_settle_lock`] /
     /// [`Self::check_and_record_tx`], keyed under the channel-distinct
-    /// [`CHANNEL_DRAW_LOCK_PREFIX`]. Returns:
-    /// - `Ok(true)`  — lock newly acquired (this caller is the sole drawer),
-    /// - `Ok(false)` — a concurrent draw on the same channel holds it (caller
+    /// [`CHANNEL_DRAW_LOCK_PREFIX`]. The value is a per-draw random token
+    /// (Decision G): the matching [`Self::release_channel_draw_lock`] deletes
+    /// the key ONLY while it still holds this token, so a slow holder whose
+    /// lock expired can never cross-delete a successor's lock. Returns:
+    /// - `Ok(Some(token))` — lock newly acquired (this caller is the sole
+    ///   drawer); pass `token` back to the release,
+    /// - `Ok(None)` — a concurrent draw on the same channel holds it (caller
     ///   MUST reject without serving — the double-spend guard),
-    /// - `Err(_)`    — Redis was unreachable or the command failed.
+    /// - `Err(_)` — Redis was unreachable or the command failed.
     ///
     /// On `Err` the caller MUST fail closed (refuse the draw): there is
     /// deliberately **no in-memory fallback** — an in-memory lock cannot
     /// serialise across gateway instances, which is exactly the multi-instance
     /// race this lock prevents. Channels require Redis for the draw.
-    pub async fn acquire_channel_draw_lock(&self, channel_id: &str) -> Result<bool, CacheError> {
+    pub async fn acquire_channel_draw_lock(
+        &self,
+        channel_id: &str,
+    ) -> Result<Option<String>, CacheError> {
         let key = format!("{CHANNEL_DRAW_LOCK_PREFIX}{channel_id}");
+        let token = uuid::Uuid::new_v4().to_string();
         let mut conn = self
             .client
             .get_multiplexed_async_connection()
             .await
             .map_err(|e| CacheError::Operation(e.to_string()))?;
 
-        // SET key 1 NX EX <ttl> — sets (and returns Some) only if the key does
-        // NOT already exist. `None` means a concurrent draw holds it.
+        // SET key <token> NX EX <ttl> — sets (and returns Some) only if the key
+        // does NOT already exist. `None` means a concurrent draw holds it.
         let result: Option<String> = redis::cmd("SET")
             .arg(&key)
-            .arg("1")
+            .arg(&token)
             .arg("NX")
             .arg("EX")
             .arg(CHANNEL_DRAW_LOCK_TTL_SECS)
@@ -393,34 +416,105 @@ impl ResponseCache {
             .await
             .map_err(|e| CacheError::Operation(e.to_string()))?;
 
-        Ok(result.is_some())
+        Ok(result.map(|_| token))
     }
 
-    /// Release the v0 spend-down channel per-draw lock.
+    /// Release the v0 spend-down channel per-draw lock — token-guarded
+    /// (Decision G).
     ///
-    /// Best-effort `DEL`. **Called on BOTH the happy path AND every failure**
-    /// (the OPPOSITE of the A2A settle lock, which holds on success to block
-    /// re-settle): a channel needs the next sequential draw to proceed at once,
-    /// so the lock is released the moment a draw finishes, and the
-    /// [`CHANNEL_DRAW_LOCK_TTL_SECS`] TTL is only the crash backstop. A failed
-    /// `DEL` degrades to TTL-based release, so the error is logged/metered, not
-    /// propagated (a lost release only delays the next draw up to the TTL).
-    pub async fn release_channel_draw_lock(&self, channel_id: &str) {
-        // ponytail: unconditional DEL, no per-holder token guard — a crashed
-        // holder's TTL-expired lock re-acquired by a second drawer could be
-        // DEL'd by the first if it un-hangs, but the DB `UNIQUE(channel_id,
-        // cumulative)` is the double-spend backstop and the loss is bounded.
-        // Add a value-token CAS (release only if we still own it) together with
-        // the same upgrade to `release_settle_lock`, not piecemeal here.
+    /// Best-effort Lua compare-and-delete ([`CHANNEL_DRAW_LOCK_RELEASE_SCRIPT`]):
+    /// the key is deleted ONLY while it still holds this draw's `token`.
+    /// **Called on BOTH the happy path AND every failure** (the OPPOSITE of the
+    /// A2A settle lock, which holds on success to block re-settle): a channel
+    /// needs the next sequential draw to proceed at once, so the lock is
+    /// released the moment a draw finishes, and the
+    /// [`CHANNEL_DRAW_LOCK_TTL_SECS`] TTL is only the crash backstop.
+    ///
+    /// A compare MISS (the value is no longer our token) means the TTL expired
+    /// mid-draw — a successor may have been admitted concurrently. That is the
+    /// §6(d) residual: metered via `solvela_channel_draw_lock_lost_total`
+    /// (expected ≈ 0; the DB CAS + `UNIQUE(channel_id, cumulative)` are the
+    /// money backstop). A Redis error degrades to TTL-based release
+    /// (logged/metered, never propagated — a lost release only delays the next
+    /// draw up to the TTL).
+    pub async fn release_channel_draw_lock(&self, channel_id: &str, token: &str) {
         let key = format!("{CHANNEL_DRAW_LOCK_PREFIX}{channel_id}");
-        if let Err(e) = self.del_raw(&key).await {
-            metrics::counter!("solvela_channel_draw_lock_release_failed_total").increment(1);
-            warn!(
-                channel_id,
-                error = %e,
-                "channel draw lock release failed — lock will expire via TTL"
-            );
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(e) => {
+                metrics::counter!("solvela_channel_draw_lock_release_failed_total").increment(1);
+                warn!(
+                    channel_id,
+                    error = %e,
+                    "channel draw lock release failed — lock will expire via TTL"
+                );
+                return;
+            }
+        };
+        let result: Result<i64, redis::RedisError> = redis::cmd("EVAL")
+            .arg(CHANNEL_DRAW_LOCK_RELEASE_SCRIPT)
+            .arg(1)
+            .arg(&key)
+            .arg(token)
+            .query_async(&mut conn)
+            .await;
+        match result {
+            // 1 = deleted (we still owned it) — the steady-state release.
+            Ok(1) => {}
+            // 0 = the key expired (and possibly belongs to a successor now):
+            // the lock was LOST mid-draw. Never delete someone else's lock;
+            // surface the expiry so operators see mid-draw TTL losses.
+            Ok(_) => {
+                metrics::counter!("solvela_channel_draw_lock_lost_total").increment(1);
+                warn!(
+                    channel_id,
+                    "channel draw lock was no longer ours at release — TTL expired mid-draw \
+                     (a concurrent draw may have been admitted; DB CAS is the money backstop)"
+                );
+            }
+            Err(e) => {
+                metrics::counter!("solvela_channel_draw_lock_release_failed_total").increment(1);
+                warn!(
+                    channel_id,
+                    error = %e,
+                    "channel draw lock release failed — lock will expire via TTL"
+                );
+            }
         }
+    }
+
+    /// Check whether this draw still HOLDS the per-channel draw lock — the
+    /// belt-and-suspenders pre-persist ownership recheck (chat channel draw,
+    /// FIX 3).
+    ///
+    /// `GET`s the lock key and compares it to `token`. The DB CAS
+    /// (`WHERE last < $new AND status = 'open'`) already stops a double-DEBIT
+    /// when the lock is lost mid-draw (TTL expiry), but a second serve can still
+    /// run to completion and DELIVER for free; calling this immediately before
+    /// `persist_voucher_and_advance` lets the caller abort a serve whose lock
+    /// was already reassigned. Returns:
+    /// - `Ok(true)`  — the key still holds THIS draw's token (still ours),
+    /// - `Ok(false)` — the key expired / holds a successor's token (lock lost),
+    /// - `Err(_)`    — Redis was unreachable (the caller proceeds: the DB CAS
+    ///   remains the money backstop, so a transient Redis blip must not force a
+    ///   free serve).
+    pub async fn channel_draw_lock_held(
+        &self,
+        channel_id: &str,
+        token: &str,
+    ) -> Result<bool, CacheError> {
+        let key = format!("{CHANNEL_DRAW_LOCK_PREFIX}{channel_id}");
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))?;
+        let current: Option<String> = redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| CacheError::Operation(e.to_string()))?;
+        Ok(current.as_deref() == Some(token))
     }
 
     /// Increment the global free-tier fixed-window counter for `epoch_minute`

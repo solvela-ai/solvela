@@ -19244,13 +19244,16 @@ price_per_request_usdc = 0.01
             .await
             .expect("no panic — the Channel arm returns a fail-closed error, never unreachable!");
         // A JSON error response (any 4xx) proves the arm did not panic/drop the
-        // connection. The specific arm returns InvalidPayment → 402.
+        // connection. Post-PR-B the chat CHANNEL FORK's mismatch arm fires
+        // first (scheme "exact" + channel payload) → InvalidPayment → 402 with
+        // the fork's fail-closed message; the tx_raw Channel arm remains
+        // unreachable defense-in-depth behind it.
         assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
         let (_, json) = status_and_json(resp).await;
         assert!(json["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("channel scheme is not accepted"));
+            .contains("payment payload is a channel voucher but the scheme is not 'channel'"));
     }
 
     // -- money path: DB + Redis (skip when the dev stack is down) -----------
@@ -19751,6 +19754,90 @@ price_per_request_usdc = 0.01
         assert_eq!(channel_last_cumulative(&pool, cid).await, BILLED_ATOMIC);
     }
 
+    /// R2-5 (FIX-3 back-port to the SHIPPED search draw): if the draw lock is
+    /// lost mid-serve (its token reassigned), the pre-persist ownership recheck
+    /// ABORTS the persist — delivering the earned results but recording NOTHING.
+    /// Without the recheck the DB CAS would SUCCEED here (channel still open,
+    /// `last` unadvanced) and record a spurious charge, so this pins the
+    /// symmetric hardening the chat draw already has.
+    #[tokio::test]
+    async fn search_channel_draw_lock_lost_before_persist_records_nothing() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping search_channel_draw_lock_lost_before_persist_records_nothing: dev stack unavailable");
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        // A 1.5s serve gives a window to reassign the lock token mid-draw.
+        let (app, _state) = enabled_channel_app(
+            Arc::new(DelayProvider {
+                delay: std::time::Duration::from_millis(1_500),
+            }),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis.clone(),
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        let lock_key = format!(
+            "solvela:channel:draw_lock:{}",
+            bs58::encode(cid).into_string()
+        );
+
+        let draw_app = app.clone();
+        let draw =
+            tokio::spawn(async move { draw_app.oneshot(search_request(&header)).await.unwrap() });
+
+        // Mid-serve: reassign the lock token (a TTL-expiry + successor-acquire
+        // analogue) so the pre-persist recheck sees a DIFFERENT token.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        {
+            let mut conn = redis
+                .get_multiplexed_async_connection()
+                .await
+                .expect("redis conn");
+            let _: () = redis::cmd("SET")
+                .arg(&lock_key)
+                .arg("successor-token")
+                .query_async(&mut conn)
+                .await
+                .expect("overwrite lock token");
+        }
+
+        let resp = draw.await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the earned results are still delivered (bounded non-charge)"
+        );
+        // A lock-lost draw records nothing: `last` does not advance, no voucher
+        // row — the DB CAS alone would have recorded a spurious charge here.
+        assert_eq!(
+            channel_last_cumulative(&pool, cid).await,
+            0,
+            "a lock-lost draw must NOT advance last"
+        );
+        assert_eq!(
+            voucher_row_count(&pool, cid).await,
+            0,
+            "no voucher row on a lock-lost draw"
+        );
+    }
+
     /// Attribution (Round-1 review): a happy-path draw's spend row is keyed on
     /// the DB `agent_wallet`, NEVER the extraction sentinel `"unknown"`.
     #[tokio::test]
@@ -20119,10 +20206,11 @@ price_per_request_usdc = 0.01
 
         // Hold the per-channel draw lock out-of-band (an in-flight draw).
         let lock_cache = ResponseCache::new(&redis_url(), CacheConfig::default()).unwrap();
-        assert!(lock_cache
+        let lock_token = lock_cache
             .acquire_channel_draw_lock(&cid_b58)
             .await
-            .expect("redis reachable"));
+            .expect("redis reachable")
+            .expect("lock newly acquired");
 
         let (app, _state) = enabled_channel_app(
             Arc::new(StubProvider),
@@ -20153,7 +20241,9 @@ price_per_request_usdc = 0.01
         );
 
         // Release the draw lock → the SAME close now freezes the reservation.
-        lock_cache.release_channel_draw_lock(&cid_b58).await;
+        lock_cache
+            .release_channel_draw_lock(&cid_b58, &lock_token)
+            .await;
         let resp = app
             .oneshot(close_request(&cid_b58, &sig_b64))
             .await
@@ -20163,5 +20253,2244 @@ price_per_request_usdc = 0.01
         assert_eq!(json["status"], "closing");
         assert_eq!(json["refund_status"], "reserved");
         assert_eq!(json["refundable_atomic"], 1_000_000);
+    }
+}
+
+// ===========================================================================
+// v0 spend-down channel CHAT draw (PR-B) — `/v1/chat/completions` +
+// `/v1/messages` channel-voucher fork
+//
+// Exercised END-TO-END through the REAL routes (`build_router` + `oneshot`),
+// per CLAUDE.md #10 and feedback_test_through_real_paths. The pure/no-DB tests
+// (disabled-gate 404, scheme/payload mismatch rejects) always run; the
+// money-path tests need the local dev stack (Postgres + Redis) and SKIP
+// cleanly when it is unreachable — they add zero new sanctioned failures.
+//
+// Money invariants pinned here (channel plan §§3–6, Decision A/E/G):
+//   - sign-the-quote: `last` advances by exactly the 402 quote (`billed`);
+//   - synchronous `realized`: `realized_atomic` is already advanced when the
+//     response returns (read immediately, no polling);
+//   - quote-vs-actual gap: realized advances by the ACTUAL capped cost,
+//     clamped to `min(actual, billed)` (§6b) — never above the signed quote;
+//   - streaming (`EstimateFallback`): realized == billed (no actual exists);
+//   - cumulative monotonicity: replaying a persisted voucher is rejected with
+//     the STRUCTURED `last_cumulative` resync field;
+//   - record-nothing-on-non-charge: provider failure and the close-race loser
+//     arm (invariant 11) leave last/realized/vouchers/spend at zero;
+//   - HALT 3/5: a chat channel draw never reaches `verify_and_settle`.
+// ===========================================================================
+mod chat_channel_draw_tests {
+    use super::*;
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use gateway::cache::{CacheConfig, ResponseCache};
+    use std::time::Instant;
+
+    /// Static body for the pure (no-Redis) gate/mismatch tests only.
+    const CHAT_BODY: &str =
+        r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":"channel chat draw"}]}"#;
+
+    /// UNIQUE chat body per DB-backed test (RAW bytes — the voucher digest
+    /// binds to these). Uniqueness matters: the exact-response cache is
+    /// WALLET-AGNOSTIC and Redis-backed here, so two tests sharing one body
+    /// would serve each other's cached responses (a cache hit still draws,
+    /// with the CACHED usage — cross-contaminating every ledger assertion).
+    fn unique_chat_body(stream: bool) -> String {
+        let stream_field = if stream { r#""stream":true,"# } else { "" };
+        format!(
+            r#"{{"model":"openai/gpt-4o",{stream_field}"messages":[{{"role":"user","content":"channel chat draw {}"}}]}}"#,
+            uuid::Uuid::new_v4()
+        )
+    }
+
+    /// UNIQUE `/v1/messages` body (native Anthropic shape). `max_tokens` is
+    /// set high enough that the 402 quote (which prices the full completion
+    /// ceiling) exceeds the fixture's folded actual — so the happy path pins
+    /// the UNCLAMPED realized value (the clamp has its own dedicated test).
+    fn unique_messages_body() -> String {
+        format!(
+            r#"{{"model":"anthropic/claude-sonnet-4-6","max_tokens":1024,"messages":[{{"role":"user","content":"channel messages draw {}"}}]}}"#,
+            uuid::Uuid::new_v4()
+        )
+    }
+
+    /// Deposited principal for seeded channels — far above any test quote.
+    const DEPOSITED_ATOMIC: u64 = 100_000_000;
+    /// Seeded slot; voucher expiry sits well beyond the 50-slot buffer.
+    const SEED_SLOT: u64 = 1_000_000;
+    const VOUCHER_EXPIRY_SLOT: u64 = 1_000_750;
+
+    const CHANNEL_DB_URL: &str = "postgres://solvela:solvela_dev_password@127.0.0.1:5432/solvela";
+    const CHANNEL_REDIS_URL: &str = "redis://127.0.0.1:6379";
+
+    fn db_url() -> String {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| CHANNEL_DB_URL.to_string())
+    }
+    fn redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| CHANNEL_REDIS_URL.to_string())
+    }
+
+    /// Acquire the live dev stack (Postgres + Redis) or `None` to SKIP.
+    /// Mirrors `channel_draw_tests::stack` (same schema-presence gates).
+    async fn stack() -> Option<(sqlx::PgPool, redis::Client)> {
+        let pool = sqlx::PgPool::connect(&db_url()).await.ok()?;
+        let channels_exists: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.channels')::text")
+                .fetch_one(&pool)
+                .await
+                .ok()?;
+        channels_exists?;
+        let refunds_exists: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.channel_refunds')::text")
+                .fetch_one(&pool)
+                .await
+                .ok()?;
+        refunds_exists?;
+        let client = redis::Client::open(redis_url()).ok()?;
+        let cache = ResponseCache::new(&redis_url(), CacheConfig::default()).ok()?;
+        if !cache.ping().await {
+            return None;
+        }
+        Some((pool, client))
+    }
+
+    /// A provider that sleeps then reports fixed usage — widens the serve
+    /// window so a close can be raced against an in-flight draw (invariant 11).
+    struct SlowFixedUsageProvider {
+        name: String,
+        delay: std::time::Duration,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    }
+
+    #[async_trait]
+    impl LLMProvider for SlowFixedUsageProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn supported_models(&self) -> Vec<ModelRegistration> {
+            vec![]
+        }
+        async fn chat_completion(
+            &self,
+            req: solvela_protocol::ChatRequest,
+        ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+            tokio::time::sleep(self.delay).await;
+            let mut resp = MockProvider::mock_response(&req.model);
+            resp.usage = Some(Usage {
+                prompt_tokens: self.prompt_tokens,
+                completion_tokens: self.completion_tokens,
+                total_tokens: self.prompt_tokens + self.completion_tokens,
+            });
+            Ok(resp)
+        }
+        async fn chat_completion_stream(
+            &self,
+            _req: solvela_protocol::ChatRequest,
+        ) -> Result<ChatStream, Box<dyn std::error::Error + Send + Sync>> {
+            Err("SlowFixedUsageProvider does not stream".into())
+        }
+    }
+
+    fn slow_fixed_usage_registry(
+        delay: std::time::Duration,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    ) -> ProviderRegistry {
+        let mut providers: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+        for name in ["openai", "anthropic", "deepseek", "google"] {
+            providers.insert(
+                name.to_string(),
+                Arc::new(SlowFixedUsageProvider {
+                    name: name.to_string(),
+                    delay,
+                    prompt_tokens,
+                    completion_tokens,
+                }) as Arc<dyn LLMProvider>,
+            );
+        }
+        ProviderRegistry::from_providers(providers)
+    }
+
+    /// A fully-wired chat app with channels ENABLED, backed by the live dev
+    /// Postgres + Redis, a caller-supplied provider registry, and (optionally)
+    /// a native Anthropic relay for the `/v1/messages` native fork.
+    async fn enabled_chat_channel_app(
+        providers: ProviderRegistry,
+        verifier: Arc<dyn PaymentVerifier>,
+        native_anthropic: Option<Arc<gateway::providers::anthropic::AnthropicProvider>>,
+        pool: sqlx::PgPool,
+        redis_client: redis::Client,
+    ) -> (axum::Router, Arc<AppState>) {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+        let facilitator = solvela_x402::facilitator::Facilitator::new(vec![verifier]);
+        let cache = ResponseCache::new(&redis_url(), CacheConfig::default()).unwrap();
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        config.channel.enabled = true;
+
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers,
+            native_anthropic,
+            search_provider: None,
+            facilitator,
+            usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client)),
+            cache: Some(cache),
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: Some(pool),
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        // Prime the RPC-free slot cache so `fetch_cached_slot` never touches the
+        // network (Pass-B HALT 6 — the draw must use the cached slot).
+        *state.slot_cache.lock().await = Some((SEED_SLOT, Instant::now()));
+        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()));
+        (app, state)
+    }
+
+    fn rand32() -> [u8; 32] {
+        let mut b = [0u8; 32];
+        b[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        b[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        b
+    }
+
+    fn fresh_key() -> SigningKey {
+        SigningKey::from_bytes(&rand32())
+    }
+
+    /// Seed an OPEN channel ledger row directly (same rationale as
+    /// `channel_draw_tests::create_channel`: the draw path only needs an OPEN
+    /// row; seeding keeps these tests independent of the open-route deposit
+    /// verification).
+    async fn create_channel(
+        pool: &sqlx::PgPool,
+        channel_id: [u8; 32],
+        agent_wallet: &str,
+        session_key: [u8; 32],
+        deposited: u64,
+    ) {
+        sqlx::query(
+            "INSERT INTO channels
+               (channel_id, agent_wallet, session_key, provider, mint,
+                deposited_atomic, settled_atomic, last_voucher_cumulative_atomic,
+                expiry_slot, status, funding_tx_sig)
+             VALUES ($1, $2, $3, $4, $5, $6, 0, 0, $7, 'open', $8)",
+        )
+        .bind(bs58::encode(channel_id).into_string())
+        .bind(agent_wallet)
+        .bind(bs58::encode(session_key).into_string())
+        .bind(TEST_RECIPIENT_WALLET)
+        .bind(USDC_MINT)
+        .bind(i64::try_from(deposited).unwrap())
+        .bind(VOUCHER_EXPIRY_SLOT as i64)
+        .bind(format!("sig-{}", uuid::Uuid::new_v4()))
+        .execute(pool)
+        .await
+        .expect("insert channel row");
+    }
+
+    /// Build a signed channel-voucher `PAYMENT-SIGNATURE` header for a CHAT
+    /// endpoint. `accepted.amount` carries the per-call QUOTE (the SDK
+    /// contract); the digest binds the voucher to the exact `body` bytes.
+    #[allow(clippy::too_many_arguments)]
+    fn chat_voucher_header(
+        signing_key: &SigningKey,
+        channel_id: [u8; 32],
+        cumulative_atomic: u64,
+        quote_atomic: u64,
+        nonce: u64,
+        body: &[u8],
+        resource_url: &str,
+    ) -> String {
+        let digest = gateway::routes::channel::request_digest(body);
+        let msg = solvela_x402::channel::build_voucher_message(
+            &channel_id,
+            cumulative_atomic,
+            VOUCHER_EXPIRY_SLOT,
+            nonce,
+            &digest,
+        );
+        let signature = signing_key.sign(&msg).to_bytes();
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: resource_url.to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "channel".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: quote_atomic.to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Channel(solvela_x402::types::ChannelVoucherPayload {
+                channel_id: bs58::encode(channel_id).into_string(),
+                cumulative_atomic,
+                expiry_slot: VOUCHER_EXPIRY_SLOT,
+                nonce,
+                request_digest: base64::engine::general_purpose::STANDARD.encode(digest),
+                signature: base64::engine::general_purpose::STANDARD.encode(signature),
+            }),
+        };
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap())
+    }
+
+    fn chat_request(uri: &str, body: &str, header: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(h) = header {
+            builder = builder.header("payment-signature", h);
+        }
+        builder.body(Body::from(body.to_owned())).unwrap()
+    }
+
+    async fn status_and_json(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    /// Fetch the 402 quote for `body` on `uri` through the REAL route — the
+    /// sidecar flow: the fee-inclusive quote is the `exact` entry's `amount`
+    /// (the channel is header-invoked; `accepts[]` never carries it — §4).
+    async fn quote_atomic(app: &axum::Router, uri: &str, body: &str) -> u64 {
+        let resp = app
+            .clone()
+            .oneshot(chat_request(uri, body, None))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED, "expected 402: {json}");
+        // Invariant 12 tripwire (also pinned by x402_challenge_smoke_tests):
+        // only strict-parser-known schemes may appear in accepts[].
+        for accept in json["accepts"].as_array().expect("accepts array") {
+            let scheme = accept["scheme"].as_str().unwrap_or("");
+            assert!(
+                scheme == "exact" || scheme == "escrow",
+                "402 accepts[] leaked a scheme deployed SDK parsers reject: {scheme}"
+            );
+        }
+        assert_eq!(json["accepts"][0]["scheme"], "exact");
+        json["accepts"][0]["amount"]
+            .as_str()
+            .expect("amount string")
+            .parse()
+            .expect("atomic amount")
+    }
+
+    async fn channel_row(
+        pool: &sqlx::PgPool,
+        channel_id: [u8; 32],
+    ) -> gateway::channels::ChannelRow {
+        gateway::channels::load_channel(pool, &bs58::encode(channel_id).into_string())
+            .await
+            .unwrap()
+            .expect("channel row")
+    }
+
+    async fn voucher_row_count(pool: &sqlx::PgPool, channel_id: [u8; 32]) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM channel_vouchers WHERE channel_id = $1")
+            .bind(bs58::encode(channel_id).into_string())
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn spend_row_count(pool: &sqlx::PgPool, wallet: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM spend_logs WHERE wallet_address = $1")
+            .bind(wallet)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Poll (fire-and-forget write) until one spend row exists; return its
+    /// billed cost in atomic USDC.
+    async fn wait_for_spend_row_atomic(pool: &sqlx::PgPool, wallet: &str) -> u64 {
+        for _ in 0..50 {
+            // `cost_usdc` is NUMERIC — read it as atomic i64 in SQL (never
+            // decode NUMERIC into f64).
+            let row: Option<(i64,)> = sqlx::query_as(
+                "SELECT ROUND(cost_usdc * 1000000)::BIGINT FROM spend_logs \
+                 WHERE wallet_address = $1",
+            )
+            .bind(wallet)
+            .fetch_optional(pool)
+            .await
+            .unwrap();
+            if let Some((atomic,)) = row {
+                return u64::try_from(atomic).expect("non-negative spend");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("spend row for {wallet} never appeared");
+    }
+
+    // -- pure / no-DB: always run ------------------------------------------
+
+    /// A channel voucher on chat with the channel scheme DISABLED → 404
+    /// (the scheme is simply not offered), never a serve, never a panic.
+    #[tokio::test]
+    async fn chat_channel_draw_404_when_disabled() {
+        let app = test_app_channels_disabled();
+        let key = fresh_key();
+        let cid = rand32();
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            10_500,
+            10_500,
+            1,
+            CHAT_BODY.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .oneshot(chat_request(
+                "/v1/chat/completions",
+                CHAT_BODY,
+                Some(&header),
+            ))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "disabled gate: {json}");
+    }
+
+    /// No-silent-fallback: `scheme="channel"` with a Direct payload on chat is
+    /// a fail-closed reject — never serviced as an exact transfer.
+    #[tokio::test]
+    async fn chat_channel_scheme_with_direct_payload_rejected() {
+        let app = test_app();
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "channel".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: TEST_PAYMENT_AMOUNT.to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Direct(SolanaPayload {
+                transaction: base64::engine::general_purpose::STANDARD.encode(b"mock_tx"),
+            }),
+        };
+        let header =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap());
+        let resp = app
+            .oneshot(chat_request(
+                "/v1/chat/completions",
+                CHAT_BODY,
+                Some(&header),
+            ))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::PAYMENT_REQUIRED,
+            "mismatch reject: {json}"
+        );
+        assert_eq!(json["error"]["type"], "invalid_payment");
+    }
+
+    /// The mirror image: a channel-voucher PAYLOAD under scheme "exact" is
+    /// rejected fail-closed (never routed to the exact machinery).
+    #[tokio::test]
+    async fn chat_channel_payload_with_exact_scheme_rejected() {
+        let app = test_app();
+        let key = fresh_key();
+        let cid = rand32();
+        // Build a channel header, then rewrite the scheme to "exact".
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            10_500,
+            10_500,
+            1,
+            CHAT_BODY.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&header)
+            .unwrap();
+        let mut v: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+        v["accepted"]["scheme"] = serde_json::json!("exact");
+        let header =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&v).unwrap());
+        let resp = app
+            .oneshot(chat_request(
+                "/v1/chat/completions",
+                CHAT_BODY,
+                Some(&header),
+            ))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::PAYMENT_REQUIRED,
+            "mismatch reject: {json}"
+        );
+        assert_eq!(json["error"]["type"], "invalid_payment");
+        // T6: pin the FORK-SPECIFIC message so this test proves the
+        // `(_, PayloadData::Channel)` arm fired — not just a generic
+        // invalid_payment (which the direct-payload test above already covers).
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("payment payload is a channel voucher but the scheme is not 'channel'"),
+            "must reject via the channel-payload/wrong-scheme fork arm: {json}"
+        );
+    }
+
+    /// Read a single Prometheus counter value from the shared global test
+    /// recorder. Returns 0.0 when the line is absent (never incremented) — so a
+    /// deleted `counter!` increment makes the asserting test fail (the metric
+    /// line simply never appears). `needle` is the full `name{labels}` prefix.
+    fn metric_counter(render: &str, needle: &str) -> f64 {
+        render
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .find(|l| l.contains(needle))
+            .and_then(|l| l.split_whitespace().last())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0)
+    }
+
+    // -- money path: DB + Redis (skip when the dev stack is down) -----------
+
+    /// Happy path (non-streaming, quote > actual): the draw serves, `last`
+    /// advances by exactly the 402 quote, and `realized` advances by exactly
+    /// the ACTUAL capped fee-inclusive cost — SYNCHRONOUSLY (read immediately
+    /// after the response, no polling). The quote−actual gap stays in `last`
+    /// (headroom locked until close), never in `realized`.
+    #[tokio::test]
+    async fn chat_draw_happy_path_realized_is_actual_and_synchronous() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping chat_draw_happy_path_realized_is_actual_and_synchronous: dev stack unavailable");
+            return;
+        };
+        // 1000 prompt + 1000 completion on gpt-4o ($2.50/$10.00 per M):
+        //   input  = 1000 × 2.50 / 1M = 2_500 atomic
+        //   output = 1000 × 10.0 / 1M = 10_000 atomic
+        //   provider = 12_500; ×105/100 = 13_125 (exact, no rounding).
+        let (app, _state) = enabled_chat_channel_app(
+            fixed_usage_provider_registry(1000, 1000),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis,
+        )
+        .await;
+        const EXPECTED_ACTUAL_ATOMIC: u64 = 13_125;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        assert!(
+            quote > EXPECTED_ACTUAL_ATOMIC,
+            "test premise: quote ({quote}) must exceed the actual ({EXPECTED_ACTUAL_ATOMIC})"
+        );
+
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(status, StatusCode::OK, "draw must serve: {json}");
+
+        // SYNCHRONOUS read — Decision A: the realized advance rides the draw's
+        // persist transaction, so it must already be visible here.
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(
+            row.last_voucher_cumulative_atomic, quote,
+            "last must advance by exactly the signed quote"
+        );
+        assert_eq!(
+            row.realized_atomic, EXPECTED_ACTUAL_ATOMIC,
+            "realized must advance by exactly the actual capped cost"
+        );
+        assert!(
+            row.realized_atomic < row.last_voucher_cumulative_atomic,
+            "the quote−actual gap stays locked in last (headroom), not realized"
+        );
+        assert_eq!(voucher_row_count(&pool, cid).await, 1);
+
+        // Spend ledger records the REALIZED amount (real spend), not the quote.
+        let billed = wait_for_spend_row_atomic(&pool, &agent).await;
+        assert_eq!(billed, EXPECTED_ACTUAL_ATOMIC);
+    }
+
+    /// Streaming (`EstimateFallback`): no actual ever exists, so realized ==
+    /// billed == the signed quote (refund delta 0 for the call) — Decision A's
+    /// decisive case.
+    #[tokio::test]
+    async fn chat_draw_streaming_realizes_the_full_quote() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping chat_draw_streaming_realizes_the_full_quote: dev stack unavailable"
+            );
+            return;
+        };
+        let (app, _state) = enabled_chat_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis,
+        )
+        .await;
+
+        let body = unique_chat_body(true);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "streaming draw must serve");
+        // Drain the SSE body so the response completes.
+        let _ = resp.into_body().collect().await.unwrap();
+
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, quote);
+        assert_eq!(
+            row.realized_atomic, quote,
+            "streaming has no actual — realized must equal the billed quote (EstimateFallback)"
+        );
+        let billed = wait_for_spend_row_atomic(&pool, &agent).await;
+        assert_eq!(billed, quote);
+    }
+
+    /// §6(b) clamp: provider-reported usage whose capped actual EXCEEDS the
+    /// quote must advance `realized` by exactly `billed` (the signed quote is
+    /// the authorization ceiling) — and the persist must still succeed (the
+    /// CHECK chain `realized ≤ last` holds; a deterministic persist failure
+    /// after a serve would be the free-replay class, HALT 11).
+    #[tokio::test]
+    async fn chat_draw_inflated_usage_clamps_realized_to_billed() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping chat_draw_inflated_usage_clamps_realized_to_billed: dev stack unavailable");
+            return;
+        };
+        // 100k prompt tokens (within gpt-4o's 128k context, so the cap keeps
+        // them) dwarf the request-side prompt estimate → capped actual > quote.
+        let (app, _state) = enabled_chat_channel_app(
+            fixed_usage_provider_registry(100_000, 8_192),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis,
+        )
+        .await;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "inflated-usage draw must still serve: {json}"
+        );
+
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, quote);
+        assert_eq!(
+            row.realized_atomic, quote,
+            "capped actual above the quote must clamp realized to exactly billed"
+        );
+        let billed = wait_for_spend_row_atomic(&pool, &agent).await;
+        assert_eq!(billed, quote, "ledger records the clamped (billed) amount");
+    }
+
+    /// Cumulative monotonicity: replaying the already-persisted voucher is
+    /// rejected with the STRUCTURED `last_cumulative` resync field (§4b), and
+    /// the ledger does not move again.
+    #[tokio::test]
+    async fn chat_draw_replay_rejected_with_structured_resync() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping chat_draw_replay_rejected_with_structured_resync: dev stack unavailable"
+            );
+            return;
+        };
+        let (app, _state) = enabled_chat_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis,
+        )
+        .await;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Replay the SAME voucher: cumulative == last → post-auth rejection
+        // carrying the authoritative last_cumulative as a STRING field.
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::PAYMENT_REQUIRED,
+            "replay reject: {json}"
+        );
+        assert_eq!(json["error"]["type"], "invalid_payment");
+        assert_eq!(
+            json["error"]["last_cumulative"],
+            quote.to_string(),
+            "resync field must carry the authoritative last_cumulative: {json}"
+        );
+
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(
+            row.last_voucher_cumulative_atomic, quote,
+            "no double advance"
+        );
+        assert_eq!(
+            voucher_row_count(&pool, cid).await,
+            1,
+            "no second voucher row"
+        );
+    }
+
+    /// Record-nothing-on-non-charge: a provider failure after a verified
+    /// voucher is a TOTAL non-charge — last/realized unchanged, no voucher row,
+    /// no spend row, and a retryable error status.
+    #[tokio::test]
+    async fn chat_draw_provider_failure_is_total_non_charge() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping chat_draw_provider_failure_is_total_non_charge: dev stack unavailable"
+            );
+            return;
+        };
+        let (app, _state) = enabled_chat_channel_app(
+            failing_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis,
+        )
+        .await;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "provider failure must be a retryable 503: {json}"
+        );
+
+        // Grace period for any (wrongly) spawned fire-and-forget writes.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(
+            row.last_voucher_cumulative_atomic, 0,
+            "no debit on non-charge"
+        );
+        assert_eq!(
+            row.realized_atomic, 0,
+            "realized never moves on a non-charge"
+        );
+        assert_eq!(voucher_row_count(&pool, cid).await, 0);
+        assert_eq!(
+            spend_row_count(&pool, &agent).await,
+            0,
+            "no spend row on non-charge"
+        );
+    }
+
+    /// Invariant 11 loser arm (close-vs-draw TOCTOU) through the real route:
+    /// a draw whose persist runs AFTER the channel left `open` must DELIVER the
+    /// response but record NOTHING (bounded one-call gateway loss).
+    ///
+    /// The status flip is a direct SQL write BY DESIGN: the cooperative close
+    /// route takes the per-channel draw lock (it would 503 while this draw is
+    /// in flight), so the only real-world interleaving that reaches this arm is
+    /// the crash/TTL-expiry window — which cannot be produced through the close
+    /// route in-test without waiting out the full lock TTL. The flip simulates
+    /// exactly that window; everything else (serve, persist, ledger reads) runs
+    /// through the real path.
+    #[tokio::test]
+    async fn chat_draw_close_race_loser_delivers_but_records_nothing() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping chat_draw_close_race_loser_delivers_but_records_nothing: dev stack unavailable");
+            return;
+        };
+        let (app, _state) = enabled_chat_channel_app(
+            slow_fixed_usage_registry(std::time::Duration::from_millis(1_500), 1000, 1000),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis,
+        )
+        .await;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let draw_app = app.clone();
+        let draw = tokio::spawn(async move {
+            draw_app
+                .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+                .await
+                .unwrap()
+        });
+
+        // Mid-serve (provider sleeps 1.5s): freeze the channel out from under
+        // the draw — the crash-window close.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        sqlx::query("UPDATE channels SET status = 'closing' WHERE channel_id = $1")
+            .bind(bs58::encode(cid).into_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let resp = draw.await.unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the loser arm still DELIVERS the already-earned response: {json}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(
+            row.last_voucher_cumulative_atomic, 0,
+            "persist lost the race: no advance"
+        );
+        assert_eq!(row.realized_atomic, 0, "realized frozen at the close value");
+        assert_eq!(
+            voucher_row_count(&pool, cid).await,
+            0,
+            "voucher insert rolled back"
+        );
+        assert_eq!(
+            spend_row_count(&pool, &agent).await,
+            0,
+            "no spend for a non-charge"
+        );
+
+        // T5 / FIX 2: the loser arm must be observable under the `reason="race"`
+        // label — distinct from a genuine DB fault (`db_error`), so a DB outage
+        // (which free-serves EVERY draw) can never hide behind routine closes.
+        assert!(
+            metric_counter(
+                &test_prometheus_handle().render(),
+                "solvela_channel_draw_persist_failed_total{reason=\"race\"}"
+            ) >= 1.0,
+            "the invariant-11 close-race loser must increment persist_failed_total{{reason=race}}"
+        );
+    }
+
+    /// HALT 3/5: a chat channel draw must NEVER reach `verify_and_settle` (the
+    /// exact/escrow settlement machinery). Uses the settle-recording verifier:
+    /// an exact-paid request WOULD flip the flag; a served channel draw must
+    /// leave it false.
+    #[tokio::test]
+    async fn chat_draw_never_reaches_settlement_machinery() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping chat_draw_never_reaches_settlement_machinery: dev stack unavailable"
+            );
+            return;
+        };
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (app, _state) = enabled_chat_channel_app(
+            mock_provider_registry(),
+            Arc::new(SettleRecordingVerifier {
+                settled: Arc::clone(&settled),
+            }),
+            None,
+            pool.clone(),
+            redis,
+        )
+        .await;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            !settled.load(std::sync::atomic::Ordering::SeqCst),
+            "a channel draw must never reach the exact/escrow settle path (HALT 3/5)"
+        );
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(
+            row.last_voucher_cumulative_atomic, quote,
+            "the draw DID debit"
+        );
+    }
+
+    /// #499 (Decision E): a `require_tenant = TRUE` wallet — sourced from the
+    /// DB `agent_wallet`, never the voucher — is rejected 403 BEFORE any serve,
+    /// with zero ledger movement. The deposit is the budget; `check_budget`
+    /// never runs on a channel draw.
+    #[tokio::test]
+    async fn chat_draw_rejects_require_tenant_wallet() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping chat_draw_rejects_require_tenant_wallet: dev stack unavailable");
+            return;
+        };
+        let (app, _state) = enabled_chat_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis.clone(),
+        )
+        .await;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        // Unique wallet per run → unique `budget_config:{wallet}` Redis key.
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        // Provision the DB-sourced agent_wallet as require_tenant = TRUE via
+        // the tracker's own Redis config key — the same seeding mechanism as
+        // the search/proxy #499 tests (the exact source the gate reads).
+        let cache_key = format!("budget_config:{agent}");
+        let cached = serde_json::to_string(&gateway::usage::BudgetConfig {
+            hourly: None,
+            daily: Some(100.0),
+            monthly: None,
+            require_tenant: true,
+        })
+        .unwrap();
+        {
+            let mut conn = redis
+                .get_multiplexed_async_connection()
+                .await
+                .expect("redis conn");
+            let _: () = redis::cmd("SET")
+                .arg(&cache_key)
+                .arg(&cached)
+                .arg("EX")
+                .arg(60)
+                .query_async(&mut conn)
+                .await
+                .expect("seed budget_config cache");
+        }
+
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "#499 reject: {json}");
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, 0);
+        assert_eq!(row.realized_atomic, 0);
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+    }
+
+    /// `/v1/messages` (native Anthropic passthrough) accepts a channel voucher
+    /// post-PR-B: the draw serves the RAW fixture bytes, `last` advances by the
+    /// quote, and `realized` advances by the folded-cache-token ACTUAL — and a
+    /// desynced voucher's rejection carries the STRUCTURED resync field through
+    /// `translate_error` (punch-list item 8).
+    #[tokio::test]
+    async fn messages_native_channel_draw_and_structured_resync() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping messages_native_channel_draw_and_structured_resync: dev stack unavailable");
+            return;
+        };
+        let base_url = spawn_mock_anthropic_server(NATIVE_ANTHROPIC_FIXTURE);
+        let (app, _state) = enabled_chat_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            Some(native_relay_pointed_at(&base_url)),
+            pool.clone(),
+            redis,
+        )
+        .await;
+
+        let body = unique_messages_body();
+        let quote = quote_atomic(&app, "/v1/messages", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let header =
+            chat_voucher_header(&key, cid, quote, quote, 1, body.as_bytes(), "/v1/messages");
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/messages", &body, Some(&header)))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let resp_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(status, StatusCode::OK, "native draw must serve");
+        assert_eq!(
+            resp_bytes.as_ref(),
+            NATIVE_ANTHROPIC_FIXTURE.as_bytes(),
+            "native relay bytes must survive the channel draw untouched"
+        );
+
+        // Fixture usage folds via the shared `AnthropicUsage::to_billed_usage`
+        // (#614–616): billed prompt = input + cache_creation + cache_read =
+        // 40 + 200 + 1800 = 2_040; output = 25. claude-sonnet at $3/$15 per M:
+        // input 2_040×3 = 6_120 atomic; output 25×15 = 375; provider 6_495;
+        // ×105/100 = 6_819 (floor of 6819.75). The body's max_tokens (1024)
+        // makes the quote (~16k atomic) exceed this, so the value below is the
+        // UNCLAMPED actual — the clamp path is pinned separately.
+        const EXPECTED_NATIVE_ACTUAL_ATOMIC: u64 = 6_819;
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, quote);
+        assert_eq!(
+            row.realized_atomic, EXPECTED_NATIVE_ACTUAL_ATOMIC,
+            "realized must be the folded-cache-token actual"
+        );
+
+        // Desync: a second voucher built against a stale last (cumulative =
+        // quote again) → post-auth rejection; `/v1/messages`' translate_error
+        // must pass the STRUCTURED resync body through verbatim (item 8).
+        let stale =
+            chat_voucher_header(&key, cid, quote, quote, 2, body.as_bytes(), "/v1/messages");
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/messages", &body, Some(&stale)))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::PAYMENT_REQUIRED,
+            "desync reject: {json}"
+        );
+        assert_eq!(
+            json["error"]["last_cumulative"],
+            quote.to_string(),
+            "structured resync field must survive the /v1/messages error translation: {json}"
+        );
+    }
+
+    /// Registry price change between quote and retry (plan §10): the stale
+    /// quote's voucher fails CLOSED pre-serve — never a silent mis-bill.
+    #[tokio::test]
+    async fn chat_draw_stale_quote_after_price_change_fails_closed() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping chat_draw_stale_quote_after_price_change_fails_closed: dev stack unavailable");
+            return;
+        };
+        let (app, _state) = enabled_chat_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis,
+        )
+        .await;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        // Simulate a stale (pre-price-change) quote: the voucher signs and
+        // advertises a WRONG amount for the current registry price.
+        let stale_quote = quote + 777;
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            stale_quote,
+            stale_quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::PAYMENT_REQUIRED,
+            "stale-quote draw must fail closed pre-serve, got {status}: {json}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(
+            row.last_voucher_cumulative_atomic, 0,
+            "no debit on a stale quote"
+        );
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+    }
+
+    /// T1 (concurrent double-draw through the REAL /v1/chat/completions route):
+    /// N simultaneous draws of the SAME base-snapshot voucher against ONE
+    /// channel → EXACTLY ONE serves + advances; the rest are lock-rejected
+    /// (503) and record NOTHING. Exercises the NEW chat lock call site + RAII
+    /// guard (mirrors the search `concurrent_same_voucher_draws_serve_exactly_once`).
+    #[tokio::test]
+    async fn chat_concurrent_same_voucher_draws_serve_exactly_once() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping chat_concurrent_same_voucher_draws_serve_exactly_once: dev stack unavailable");
+            return;
+        };
+        // A 500ms serve widens the window so the losers genuinely contend for
+        // the per-channel lock while the winner holds it.
+        let (app, _state) = enabled_chat_channel_app(
+            slow_fixed_usage_registry(std::time::Duration::from_millis(500), 1000, 1000),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis,
+        )
+        .await;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let app = app.clone();
+            let body = body.clone();
+            let header = header.clone();
+            handles.push(tokio::spawn(async move {
+                app.oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+                    .await
+                    .unwrap()
+                    .status()
+            }));
+        }
+        let mut ok = 0;
+        for h in handles {
+            if h.await.unwrap() == StatusCode::OK {
+                ok += 1;
+            }
+        }
+        assert_eq!(ok, 1, "exactly one concurrent chat draw may serve");
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            voucher_row_count(&pool, cid).await,
+            1,
+            "exactly one voucher may be recorded (no double-spend)"
+        );
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(
+            row.last_voucher_cumulative_atomic, quote,
+            "last advanced exactly once, by the quote"
+        );
+        assert_eq!(
+            spend_row_count(&pool, &agent).await,
+            1,
+            "one spend row only"
+        );
+    }
+
+    /// T2 (token-guarded lock release, Redis-only): releasing with a WRONG token
+    /// must NOT delete the real holder's lock (Lua compare-and-delete returns 0)
+    /// and must increment `solvela_channel_draw_lock_lost_total`. Pins the
+    /// cross-delete guard behind Decision G.
+    #[tokio::test]
+    async fn channel_draw_lock_wrong_token_release_preserves_and_counts_lost() {
+        let cache = match ResponseCache::new(&redis_url(), CacheConfig::default()) {
+            Ok(c) if c.ping().await => c,
+            _ => {
+                eprintln!("skipping channel_draw_lock_wrong_token_release_preserves_and_counts_lost: redis unavailable");
+                return;
+            }
+        };
+        // Install the global recorder BEFORE the release so the counter records.
+        let handle = test_prometheus_handle();
+        let cid = bs58::encode(rand32()).into_string();
+
+        let real_token = cache
+            .acquire_channel_draw_lock(&cid)
+            .await
+            .expect("redis reachable")
+            .expect("lock newly acquired");
+        assert!(
+            cache
+                .channel_draw_lock_held(&cid, &real_token)
+                .await
+                .unwrap(),
+            "the real holder must own the lock"
+        );
+        // A concurrent draw cannot acquire it.
+        assert!(cache
+            .acquire_channel_draw_lock(&cid)
+            .await
+            .unwrap()
+            .is_none());
+
+        let before = metric_counter(&handle.render(), "solvela_channel_draw_lock_lost_total");
+        // Release with a token that is NOT ours → the real lock SURVIVES.
+        cache
+            .release_channel_draw_lock(&cid, "definitely-not-the-real-token")
+            .await;
+        assert!(
+            cache
+                .channel_draw_lock_held(&cid, &real_token)
+                .await
+                .unwrap(),
+            "a wrong-token release must NOT cross-delete the real holder's lock"
+        );
+        let after = metric_counter(&handle.render(), "solvela_channel_draw_lock_lost_total");
+        assert!(
+            after >= before + 1.0,
+            "a wrong-token release must increment lock_lost (before={before}, after={after})"
+        );
+
+        // The real holder's token DOES release it (Lua returns 1).
+        cache.release_channel_draw_lock(&cid, &real_token).await;
+        assert!(
+            !cache
+                .channel_draw_lock_held(&cid, &real_token)
+                .await
+                .unwrap(),
+            "the owning token releases the lock"
+        );
+    }
+
+    /// T3 (request-digest binding, FIX-3-adjacent): the SAME signed voucher
+    /// presented with DIFFERENT body bytes (a parse-identical whitespace variant
+    /// → same quote, DIFFERENT SHA-256) is rejected `RequestDigestMismatch` with
+    /// ZERO ledger movement. Proves the `WireDialect::raw_body()` digest wiring
+    /// binds the voucher to the exact bytes served.
+    #[tokio::test]
+    async fn chat_draw_request_digest_mismatch_rejected_no_ledger_movement() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping chat_draw_request_digest_mismatch_rejected_no_ledger_movement: dev stack unavailable");
+            return;
+        };
+        let (app, _state) = enabled_chat_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis,
+        )
+        .await;
+
+        let body_a = unique_chat_body(false);
+        // Parse-identical variant (a space after the opening brace): JSON ignores
+        // it, so the quote is identical, but the raw bytes (and thus the digest)
+        // differ — isolating the digest check from the amount check.
+        let body_b = body_a.replacen('{', "{ ", 1);
+        assert_ne!(body_a, body_b);
+
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body_a).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        // Voucher digest binds to body_a; we then serve body_b.
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body_a.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body_b, Some(&header)))
+            .await
+            .unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::PAYMENT_REQUIRED,
+            "a body-mismatched voucher must be rejected pre-serve: {json}"
+        );
+        assert_eq!(json["error"]["type"], "invalid_payment");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("request_digest does not match"),
+            "must reject on the digest mismatch, not a resync/amount path: {json}"
+        );
+        // A digest mismatch is a body error, NOT a cumulative desync — no resync
+        // figure is leaked.
+        assert!(
+            json["error"]["last_cumulative"].is_null(),
+            "digest mismatch must not surface a ledger figure: {json}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, 0, "no debit");
+        assert_eq!(row.realized_atomic, 0, "no realize");
+        assert_eq!(voucher_row_count(&pool, cid).await, 0);
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+    }
+
+    /// T4 (receipt fee split): read the `receipts` row for a channel draw and
+    /// assert the canonical integer split reconciles exactly —
+    /// `provider_cost = floor(realized × 100 / 105)`,
+    /// `platform_fee = realized − provider_cost`, and the three atomics sum to
+    /// `realized`. Uses a fixture whose realized (9_187) does NOT divide evenly
+    /// by 105, so a rounding/off-by-one regression is caught.
+    #[tokio::test]
+    async fn chat_draw_receipt_fee_split_reconciles() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping chat_draw_receipt_fee_split_reconciles: dev stack unavailable");
+            return;
+        };
+        // 700 prompt + 700 completion on gpt-4o ($2.50/$10.00 per M):
+        //   input 700×2.5 = 1_750; output 700×10 = 7_000; provider = 8_750;
+        //   ×105/100 = 9_187 (floor of 9_187.5) = realized.
+        //   receipt: provider = floor(9_187×100/105) = 8_749; fee = 438; sum 9_187.
+        let (app, _state) = enabled_chat_channel_app(
+            fixed_usage_provider_registry(700, 700),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis,
+        )
+        .await;
+        const REALIZED: u64 = 9_187;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        assert!(
+            quote > REALIZED,
+            "premise: quote ({quote}) must exceed the actual ({REALIZED})"
+        );
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "draw must serve");
+
+        let (provider_cost, platform_fee, amount_paid, total) =
+            wait_for_receipt_split(&pool, &agent).await;
+        let expected_provider = (REALIZED as u128 * 100 / 105) as u64;
+        assert_eq!(
+            provider_cost, expected_provider,
+            "provider_cost must be floor(realized×100/105)"
+        );
+        assert_eq!(
+            platform_fee,
+            REALIZED - expected_provider,
+            "platform_fee = realized − provider_cost"
+        );
+        assert_eq!(
+            provider_cost + platform_fee,
+            REALIZED,
+            "the split must reconcile to realized (no lost/created atomic)"
+        );
+        assert_eq!(
+            amount_paid, REALIZED,
+            "amount_paid mirrors the realized spend"
+        );
+        assert_eq!(total, REALIZED, "total == realized");
+    }
+
+    /// FIX 1b (serve timeout): a serve that outruns the configured draw-lock
+    /// serve timeout is a TOTAL non-charge (nothing persisted, `serve_timeout`
+    /// counter increments) AND the lock is RELEASED (the guard runs on the
+    /// timeout return) — proven by the lock key being gone afterward.
+    #[tokio::test]
+    async fn chat_draw_serve_timeout_is_non_charge_and_releases_lock() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping chat_draw_serve_timeout_is_non_charge_and_releases_lock: dev stack unavailable");
+            return;
+        };
+        let handle = test_prometheus_handle();
+        // Serve sleeps 3s; the config timeout is 1s → the timeout arm fires.
+        let (app, _state) = timeout_chat_channel_app(
+            slow_fixed_usage_registry(std::time::Duration::from_secs(3), 1000, 1000),
+            pool.clone(),
+            redis.clone(),
+            1,
+        )
+        .await;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let before = metric_counter(&handle.render(), "solvela_channel_draw_serve_timeout_total");
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a timed-out serve must be a retryable 503 non-charge"
+        );
+
+        let after = metric_counter(&handle.render(), "solvela_channel_draw_serve_timeout_total");
+        assert!(
+            after >= before + 1.0,
+            "the serve-timeout branch must increment its counter (before={before}, after={after})"
+        );
+
+        // Total non-charge.
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, 0, "no debit on timeout");
+        assert_eq!(row.realized_atomic, 0);
+        assert_eq!(voucher_row_count(&pool, cid).await, 0);
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+
+        // The RAII guard released the lock despite the timeout return — the key
+        // is gone, so the next draw is NOT stuck for the 900s TTL.
+        let mut conn = redis
+            .get_multiplexed_async_connection()
+            .await
+            .expect("redis conn");
+        let held: Option<String> = redis::cmd("GET")
+            .arg(format!(
+                "solvela:channel:draw_lock:{}",
+                bs58::encode(cid).into_string()
+            ))
+            .query_async(&mut conn)
+            .await
+            .expect("redis get");
+        assert!(
+            held.is_none(),
+            "the draw lock must be released after a timeout"
+        );
+    }
+
+    /// FIX 3 (lock-loss before persist): if the draw lock is lost mid-serve (its
+    /// token reassigned), the pre-persist ownership recheck ABORTS the persist —
+    /// delivering the earned response but recording NOTHING under a distinct
+    /// `reason="lock_lost"` label (closing the lock-loss double-SERVE window the
+    /// DB CAS alone leaves open).
+    #[tokio::test]
+    async fn chat_draw_lock_lost_before_persist_aborts_and_records_nothing() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping chat_draw_lock_lost_before_persist_aborts_and_records_nothing: dev stack unavailable");
+            return;
+        };
+        let handle = test_prometheus_handle();
+        // A 1.5s serve gives us a window to overwrite the lock key mid-draw.
+        let (app, _state) = enabled_chat_channel_app(
+            slow_fixed_usage_registry(std::time::Duration::from_millis(1_500), 1000, 1000),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis.clone(),
+        )
+        .await;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let before = metric_counter(
+            &handle.render(),
+            "solvela_channel_draw_persist_failed_total{reason=\"lock_lost\"}",
+        );
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let draw_app = app.clone();
+        let draw = tokio::spawn(async move {
+            draw_app
+                .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+                .await
+                .unwrap()
+        });
+
+        // Mid-serve: reassign the lock token (simulating a TTL expiry + successor
+        // acquire) so the pre-persist recheck sees a DIFFERENT token.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        {
+            let mut conn = redis
+                .get_multiplexed_async_connection()
+                .await
+                .expect("redis conn");
+            let _: () = redis::cmd("SET")
+                .arg(format!(
+                    "solvela:channel:draw_lock:{}",
+                    bs58::encode(cid).into_string()
+                ))
+                .arg("successor-token")
+                .query_async(&mut conn)
+                .await
+                .expect("overwrite lock token");
+        }
+
+        let resp = draw.await.unwrap();
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the earned response is still delivered (bounded non-charge): {json}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(
+            row.last_voucher_cumulative_atomic, 0,
+            "lock-lost draw must NOT advance last"
+        );
+        assert_eq!(row.realized_atomic, 0, "no realize on a lock-lost draw");
+        assert_eq!(voucher_row_count(&pool, cid).await, 0);
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+
+        let after = metric_counter(
+            &handle.render(),
+            "solvela_channel_draw_persist_failed_total{reason=\"lock_lost\"}",
+        );
+        assert!(
+            after >= before + 1.0,
+            "the lock-lost abort must increment persist_failed_total{{reason=lock_lost}} (before={before}, after={after})"
+        );
+    }
+
+    /// R2-2: the `ChannelDrawLockGuard` Drop path. A draw whose handler future is
+    /// ABORTED mid-serve (the client-disconnect / stop-generation analogue —
+    /// cancellation never reaches the awaited `release()`) must STILL release the
+    /// per-channel lock via Drop's detached, token-guarded release, and must move
+    /// NO ledger state (the persist never ran). This is the empirical proof the
+    /// guard does its whole job on cancellation — and the foundation R2-1 relies
+    /// on (a release that can't confirm leaves `released = false` so THIS same
+    /// detached retry fires).
+    #[tokio::test]
+    async fn chat_draw_abort_mid_serve_releases_lock_and_records_nothing() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping chat_draw_abort_mid_serve_releases_lock_and_records_nothing: dev stack unavailable");
+            return;
+        };
+        // A 5s serve gives an ample window to abort mid-serve, well under the
+        // 650s default draw-serve timeout (so the timeout arm never fires).
+        let (app, _state) = enabled_chat_channel_app(
+            slow_fixed_usage_registry(std::time::Duration::from_secs(5), 1000, 1000),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            pool.clone(),
+            redis.clone(),
+        )
+        .await;
+
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let lock_key = format!(
+            "solvela:channel:draw_lock:{}",
+            bs58::encode(cid).into_string()
+        );
+
+        let draw_app = app.clone();
+        let draw = tokio::spawn(async move {
+            draw_app
+                .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+                .await
+        });
+
+        // Let the draw acquire the lock and enter the (sleeping) serve, then
+        // CONFIRM the lock is genuinely held — so a gone-key afterward proves Drop
+        // released it, not that it was never taken.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        {
+            let mut conn = redis
+                .get_multiplexed_async_connection()
+                .await
+                .expect("redis conn");
+            let held: Option<String> = redis::cmd("GET")
+                .arg(&lock_key)
+                .query_async(&mut conn)
+                .await
+                .expect("redis get");
+            assert!(
+                held.is_some(),
+                "the draw must hold the lock mid-serve before we abort"
+            );
+        }
+
+        // Abort the in-flight handler future mid-serve: the guard is dropped and
+        // Drop spawns the detached token-guarded release.
+        draw.abort();
+        assert!(
+            draw.await.unwrap_err().is_cancelled(),
+            "the handler future must have been aborted mid-serve"
+        );
+
+        // The detached release runs independently of the aborted task — poll a
+        // bounded interval for the key to disappear rather than a fixed sleep.
+        let mut released = false;
+        for _ in 0..40 {
+            let mut conn = redis
+                .get_multiplexed_async_connection()
+                .await
+                .expect("redis conn");
+            let held: Option<String> = redis::cmd("GET")
+                .arg(&lock_key)
+                .query_async(&mut conn)
+                .await
+                .expect("redis get");
+            if held.is_none() {
+                released = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            released,
+            "Drop's detached release must free the lock after an abort (else the next \
+             draw stalls for the 900s TTL)"
+        );
+
+        // No ledger movement: the serve was aborted before the persist site.
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(
+            row.last_voucher_cumulative_atomic, 0,
+            "an aborted draw must not advance last"
+        );
+        assert_eq!(row.realized_atomic, 0, "no realize on an aborted draw");
+        assert_eq!(voucher_row_count(&pool, cid).await, 0);
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+    }
+
+    /// R2-3 (FIX-4 fail-closed boundary): a channel draw whose only cached Solana
+    /// slot is STALER than `CHANNEL_SLOT_MAX_STALENESS` (60s) during an RPC
+    /// outage must FAIL CLOSED (503) and record NOTHING — it must never measure
+    /// the voucher expiry against an arbitrarily-old slot. The healthy fresh-slot
+    /// path is covered green by the happy-path tests above (which seed
+    /// `Instant::now()`).
+    #[tokio::test]
+    async fn chat_draw_stale_slot_fails_closed_and_records_nothing() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping chat_draw_stale_slot_fails_closed_and_records_nothing: dev stack unavailable");
+            return;
+        };
+        let (app, state) = fail_closed_slot_chat_app(pool.clone(), redis.clone()).await;
+        // Overwrite the seed with a slot fetched 120s ago (> the 60s bound). The
+        // draw's stale-triggered RPC refresh hits a closed local port and fails
+        // fast, so this stale `(slot, fetched_at)` is returned with its age
+        // preserved and then filtered out → `None` → fail-closed 503.
+        let stale = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(120))
+            .expect("monotonic clock has run for >120s");
+        *state.slot_cache.lock().await = Some((SEED_SLOT, stale));
+
+        let body = unique_chat_body(false);
+        // The 402 quote path never touches the slot cache, so the same
+        // stale-slot app quotes cleanly; the header binds the true per-call quote.
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let resp = app
+            .clone()
+            .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a draw with only a >60s-stale slot must fail closed, never serve on it"
+        );
+
+        // Records nothing: no serve, no debit, no ledger movement.
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(
+            row.last_voucher_cumulative_atomic, 0,
+            "no debit on a stale-slot refusal"
+        );
+        assert_eq!(row.realized_atomic, 0);
+        assert_eq!(voucher_row_count(&pool, cid).await, 0);
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+    }
+
+    /// Poll (fire-and-forget receipt write) until a receipt row exists for
+    /// `wallet`; return `(provider_cost, platform_fee, amount_paid, total)`.
+    async fn wait_for_receipt_split(pool: &sqlx::PgPool, wallet: &str) -> (u64, u64, u64, u64) {
+        for _ in 0..50 {
+            let row: Option<(i64, i64, i64, i64)> = sqlx::query_as(
+                "SELECT provider_cost_atomic, platform_fee_atomic, amount_paid_atomic, total_atomic \
+                 FROM receipts WHERE payer_wallet = $1",
+            )
+            .bind(wallet)
+            .fetch_optional(pool)
+            .await
+            .unwrap();
+            if let Some((provider, fee, paid, total)) = row {
+                return (
+                    u64::try_from(provider).unwrap(),
+                    u64::try_from(fee).unwrap(),
+                    u64::try_from(paid).unwrap(),
+                    u64::try_from(total).unwrap(),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("receipt row for {wallet} never appeared");
+    }
+
+    /// Like [`enabled_chat_channel_app`] but with a caller-set draw-serve
+    /// timeout (seconds) so the FIX-1b timeout arm is reachable in-test without
+    /// a 650s sleep.
+    async fn timeout_chat_channel_app(
+        providers: ProviderRegistry,
+        pool: sqlx::PgPool,
+        redis_client: redis::Client,
+        draw_serve_timeout_secs: u64,
+    ) -> (axum::Router, Arc<AppState>) {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![
+                Arc::new(AlwaysPassVerifier) as Arc<dyn PaymentVerifier>
+            ]);
+        let cache = ResponseCache::new(&redis_url(), CacheConfig::default()).unwrap();
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        config.channel.enabled = true;
+        config.channel.draw_serve_timeout_secs = Some(draw_serve_timeout_secs);
+
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers,
+            native_anthropic: None,
+            search_provider: None,
+            facilitator,
+            usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client)),
+            cache: Some(cache),
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: Some(pool),
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        *state.slot_cache.lock().await = Some((SEED_SLOT, Instant::now()));
+        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()));
+        (app, state)
+    }
+
+    /// A chat app with channels ENABLED but an UNREACHABLE Solana RPC (a closed
+    /// local port), so a stale-triggered slot refresh fails FAST (connection
+    /// refused) rather than hitting the network — letting the FIX-4 fail-closed
+    /// staleness boundary be exercised deterministically. Deliberately does NOT
+    /// seed a fresh slot; the caller seeds the (stale) age it wants to test.
+    // ponytail: a bespoke builder rather than a param on `enabled_chat_channel_app`
+    // (config is immutable behind the `Arc<AppState>`, and threading an rpc_url
+    // through every caller would be pure churn for one test).
+    async fn fail_closed_slot_chat_app(
+        pool: sqlx::PgPool,
+        redis_client: redis::Client,
+    ) -> (axum::Router, Arc<AppState>) {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![
+                Arc::new(AlwaysPassVerifier) as Arc<dyn PaymentVerifier>
+            ]);
+        let cache = ResponseCache::new(&redis_url(), CacheConfig::default()).unwrap();
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        // Closed local port → the stale-triggered refresh fails fast, preserving
+        // the stale cached age so the 60s bound can filter it out.
+        config.solana.rpc_url = "http://127.0.0.1:1".to_string();
+        config.channel.enabled = true;
+
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: fixed_usage_provider_registry(1000, 1000),
+            native_anthropic: None,
+            search_provider: None,
+            facilitator,
+            usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client)),
+            cache: Some(cache),
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: Some(pool),
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()));
+        (app, state)
+    }
+}
+
+// ===========================================================================
+// Cross-SDK 402-parse smoke (PR-B, invariant 12 / HALT 12 tripwire)
+//
+// Every deployed strict SDK parser (TS `parseScheme`, Go `parseScheme`,
+// Python `_KNOWN_SCHEMES`) rejects the ENTIRE 402 when any accepts[] entry
+// carries an unknown scheme — the memorialized cross-repo wire-drift failure
+// mode. These tests pin (a) that the LIVE chat/messages 402 bodies advertise
+// ONLY strict-parser-known schemes even with channels ENABLED, and (b) that
+// the live body stays byte-shape-identical to the shared fixture the three
+// SDK test suites parse (`tests/fixtures/chat_402_challenge.json` — the
+// model-ID-cascade precedent).
+// ===========================================================================
+mod x402_challenge_smoke_tests {
+    use super::*;
+
+    async fn live_402_body(uri: &str, body: &'static str) -> serde_json::Value {
+        // test_app() has channel.enabled = true — deliberately: this pins that
+        // even an ENABLED channel never leaks a `channel` accepts[] entry.
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    const SMOKE_CHAT_BODY: &str =
+        r#"{"model":"openai/gpt-4o","messages":[{"role":"user","content":"402 smoke fixture"}]}"#;
+
+    /// Invariant 12: no scheme value outside {exact, escrow} may EVER appear
+    /// in a 402 accepts[] — on chat OR messages — until the §4 tolerance gates
+    /// pass. The channel stays header-invoked.
+    #[tokio::test]
+    async fn live_402_accepts_only_sdk_known_schemes() {
+        for uri in ["/v1/chat/completions", "/v1/messages"] {
+            let json = live_402_body(uri, SMOKE_CHAT_BODY).await;
+            let accepts = json["accepts"].as_array().expect("accepts array");
+            assert!(!accepts.is_empty());
+            for accept in accepts {
+                let scheme = accept["scheme"].as_str().unwrap_or("<non-string>");
+                assert!(
+                    scheme == "exact" || scheme == "escrow",
+                    "{uri} 402 advertises scheme '{scheme}' — deployed TS/Go/Python \
+                     parsers reject the ENTIRE 402 on an unknown scheme (HALT 12)"
+                );
+            }
+        }
+    }
+
+    /// The live chat 402 body must stay byte-shape-identical to the shared
+    /// cross-SDK fixture (parsed by the TS/Go/Python SDK test suites). A
+    /// mismatch means the wire shape moved — update the fixture AND re-run all
+    /// three SDK suites in the same change, never one side alone.
+    #[tokio::test]
+    async fn live_402_body_matches_cross_sdk_fixture() {
+        let live = live_402_body("/v1/chat/completions", SMOKE_CHAT_BODY).await;
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/chat_402_challenge.json"))
+                .expect("fixture parses");
+        assert_eq!(
+            live, fixture,
+            "live 402 body diverged from tests/fixtures/chat_402_challenge.json — \
+             update the fixture and re-run the TS/Go/Python SDK 402-parse smokes together"
+        );
     }
 }

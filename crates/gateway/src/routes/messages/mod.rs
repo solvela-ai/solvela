@@ -502,9 +502,14 @@ async fn translate_error(err: GatewayError) -> Response {
     match err {
         // x402 challenge body — emit verbatim (identical to the chat route's
         // 402). This carries the canonical PAYMENT-REQUIRED header too.
+        // `InvalidPaymentWithResync` (the channel voucher rejection, PR-B)
+        // must ALSO pass through verbatim: reshaping it into the Anthropic
+        // envelope would drop the structured `last_cumulative` field SDK
+        // trackers resync from (channel plan §4b / addendum item 8).
         GatewayError::PaymentChallenge(_)
         | GatewayError::PaymentRequired
-        | GatewayError::InvalidPayment(_) => err.into_response(),
+        | GatewayError::InvalidPayment(_)
+        | GatewayError::InvalidPaymentWithResync { .. } => err.into_response(),
 
         // Everything else → Anthropic error envelope. Reuse the chat route's
         // GatewayError::into_response to get the canonical status code, then
@@ -706,5 +711,28 @@ mod tests {
         // x402/OpenAI envelope, NOT the Anthropic top-level type:"error".
         assert!(v["type"].is_null(), "must not be the Anthropic envelope");
         assert_eq!(v["error"]["type"], "invalid_payment");
+    }
+
+    /// A channel-voucher rejection (`InvalidPaymentWithResync`) passes through
+    /// VERBATIM — the Anthropic reshape would drop the structured
+    /// `last_cumulative` field SDK trackers resync from (channel plan §4b,
+    /// addendum item 8).
+    #[tokio::test]
+    async fn invalid_payment_with_resync_keeps_structured_field() {
+        let resp = translate_error(GatewayError::InvalidPaymentWithResync {
+            message: "channel voucher rejected; resync from authoritative last_cumulative=12600"
+                .to_string(),
+            last_cumulative: 12_600,
+        })
+        .await;
+        assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["type"].is_null(), "must not be the Anthropic envelope");
+        assert_eq!(v["error"]["type"], "invalid_payment");
+        assert_eq!(
+            v["error"]["last_cumulative"], "12600",
+            "the structured resync field must survive the /v1/messages error translation"
+        );
     }
 }

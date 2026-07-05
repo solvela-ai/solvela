@@ -694,6 +694,14 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = app_config.cache.semantic.validate() {
         anyhow::bail!("invalid [cache.semantic] configuration: {e}");
     }
+    // Channel money-safety bound: the draw-serve timeout must stay below the
+    // draw-lock TTL, else a slow serve outlives the lock and reopens the
+    // close-expires-mid-serve window (FIX-1b/FIX-3). Fail-closed at boot rather
+    // than run degraded — the #668 fail-closed money-cap precedent. No-op when
+    // channels are disabled.
+    if let Err(e) = app_config.channel.validate() {
+        anyhow::bail!("invalid [channel] configuration: {e}");
+    }
     let semantic_cache = build_semantic_cache(&app_config, redis_url.as_str()).await;
 
     // Initialize provider health tracker
