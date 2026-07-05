@@ -1114,6 +1114,13 @@ fn record_a2a_settlement(
     // unknown scheme onto a financial record). The verifier already accepted
     // this scheme; an unparseable string here means a record we cannot label
     // truthfully — skip rather than mislabel.
+    //
+    // PR-B note (deliberate, not a cascade surprise): `from_accepted_str` now
+    // also parses "channel", but a channel voucher can never reach this record
+    // site on A2A — the offer match restricts submissions to the stored quote's
+    // exact/escrow entries, and `PayloadData::Channel` is rejected fail-closed
+    // before verification (see the replay block above). If either guard ever
+    // regressed, this records a truthful "channel" label rather than skipping.
     let scheme = match PaymentScheme::from_accepted_str(&payload.accepted.scheme) {
         Ok(s) => s,
         Err(e) => {

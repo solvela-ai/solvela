@@ -1,11 +1,13 @@
 //! POST /v1/chat/completions — OpenAI-compatible chat endpoint.
 //!
 //! Submodules:
+//! - [`channel_draw`] — v0 spend-down channel voucher draw fork (PR-B)
 //! - [`cost`] — USDC computation and token estimation
 //! - [`payment`] — Payment extraction, validation, escrow claims
 //! - [`provider`] — Shared provider call pipeline (cache, fallback, SSE)
 //! - [`response`] — Debug headers, session tokens, response construction
 
+mod channel_draw;
 pub(crate) mod cost;
 pub(crate) mod payment;
 mod provider;
@@ -84,12 +86,16 @@ const MAX_TOKENS_LIMIT: u32 = 128_000;
 /// (reachable only via an eco/auto routing alias) falls through to the existing
 /// reshape branch — never a silent default-route either way.
 pub(crate) enum WireDialect {
-    /// `/v1/chat/completions` — always OpenAI-shaped in and out.
-    OpenAi,
+    /// `/v1/chat/completions` — always OpenAI-shaped in and out. Carries the
+    /// ORIGINAL raw request bytes (PR-B): a channel voucher's `request_digest`
+    /// binds to the EXACT bytes the client sent — never a re-serialization,
+    /// which could differ byte-wise and fail-close every draw.
+    OpenAi { original_body: axum::body::Bytes },
     /// `/v1/messages` — the inbound request is Anthropic Messages JSON. Carries
     /// the ORIGINAL validated request bytes (relayed VERBATIM on the native
-    /// path) plus the inbound version/beta headers (forwarded verbatim upstream;
-    /// the inbound Solvela bearer is NEVER forwarded).
+    /// path; also the channel-voucher digest source) plus the inbound
+    /// version/beta headers (forwarded verbatim upstream; the inbound Solvela
+    /// bearer is NEVER forwarded).
     AnthropicMessages {
         original_body: axum::body::Bytes,
         anthropic_version: Option<String>,
@@ -103,7 +109,7 @@ impl WireDialect {
     /// caller additionally gates on `model_info.provider == "anthropic"`.
     fn anthropic_native_source(&self) -> Option<(&axum::body::Bytes, Option<&str>, Option<&str>)> {
         match self {
-            WireDialect::OpenAi => None,
+            WireDialect::OpenAi { .. } => None,
             WireDialect::AnthropicMessages {
                 original_body,
                 anthropic_version,
@@ -113,6 +119,15 @@ impl WireDialect {
                 anthropic_version.as_deref(),
                 anthropic_beta.as_deref(),
             )),
+        }
+    }
+
+    /// The RAW inbound request bytes — the channel-voucher `request_digest`
+    /// preimage (SHA-256 of exactly what the client sent, both dialects).
+    fn raw_body(&self) -> &axum::body::Bytes {
+        match self {
+            WireDialect::OpenAi { original_body }
+            | WireDialect::AnthropicMessages { original_body, .. } => original_body,
         }
     }
 }
@@ -191,7 +206,11 @@ pub async fn chat_completions(
         headers,
         req,
         "/v1/chat/completions",
-        WireDialect::OpenAi,
+        // The raw bytes ride the dialect so the channel draw fork can digest
+        // EXACTLY what the client sent (`Bytes` clone is a refcount bump).
+        WireDialect::OpenAi {
+            original_body: body,
+        },
     )
     .await
 }
@@ -882,6 +901,69 @@ pub(crate) async fn chat_completions_inner(
                 ));
             }
 
+            // --- v0 spend-down channel DRAW fork (PR-B) ----------------------
+            //
+            // Inserted after the resource/method/network/asset/pay_to
+            // validation above (which applies to a channel voucher too) and
+            // BEFORE the exact/escrow-only machinery below (C1 client-amount
+            // floor, M6 variant check, tx-replay cache, budget reservation,
+            // verify/settle) — mirroring the shipped `/v1/search` fork. It
+            // forks iff the scheme is "channel" AND the payload is a channel
+            // voucher; ANY channel-ish mismatch is a fail-closed reject — no
+            // silent fallback to an exact transfer (solvela-x402 §4). The fork
+            // never touches `verify_and_settle`, the tx-replay cache,
+            // `check_budget` (Decision E — the deposit IS the budget), or
+            // `fire_escrow_claim` (plan HALT 3/5). Model resolution + prompt
+            // guard already ran above (fail before locking — the #574 order).
+            match (payload.accepted.scheme.as_str(), &payload.payload) {
+                ("channel", solvela_x402::types::PayloadData::Channel(voucher_payload)) => {
+                    // `billed` = the single fee-inclusive estimate computed
+                    // once above (the same figure quoted as the 402 `exact`
+                    // entry's amount — the sidecar's quote source, §4). The
+                    // checked-string parse cannot fail after
+                    // `usdc_atomic_amount_checked` succeeded; fail closed
+                    // anyway (never a silent 0-quote draw).
+                    let billed_atomic: u64 = atomic_amount.parse().map_err(|_| {
+                        GatewayError::Internal(
+                            "failed to parse the channel draw quote as u64".to_string(),
+                        )
+                    })?;
+                    return channel_draw::channel_draw(channel_draw::ChannelDrawContext {
+                        state: &state,
+                        headers: &headers,
+                        req: &req,
+                        model_info,
+                        dialect: &dialect,
+                        billed_atomic,
+                        accepted_amount: &payload.accepted.amount,
+                        voucher_payload,
+                        session_id: &session_id,
+                        request_id: &request_id,
+                        tenant: &tenant,
+                        debug_enabled,
+                        request_start,
+                        routing_tier: &routing_tier,
+                        routing_score,
+                        routing_profile: &routing_profile,
+                    })
+                    .await;
+                }
+                ("channel", _) => {
+                    return Err(GatewayError::InvalidPayment(
+                        "scheme is 'channel' but the payload is not a channel voucher".to_string(),
+                    ));
+                }
+                (_, solvela_x402::types::PayloadData::Channel(_)) => {
+                    return Err(GatewayError::InvalidPayment(
+                        "payment payload is a channel voucher but the scheme is not 'channel'"
+                            .to_string(),
+                    ));
+                }
+                // Not a channel request — fall through to the exact/escrow
+                // machinery below.
+                _ => {}
+            }
+
             // --- C1: Recompute expected cost and validate client amount ---
             let expected_cost = state
                 .model_registry
@@ -969,13 +1051,14 @@ pub(crate) async fn chat_completions_inner(
             let tx_raw = match &payload.payload {
                 solvela_x402::types::PayloadData::Direct(p) => &p.transaction,
                 solvela_x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
-                // Fail-closed: the chat endpoint never accepts a channel voucher
-                // (the `channel` scheme is rejected at `from_accepted_str` above;
-                // this arm is only reachable via a `scheme`/payload mismatch such
-                // as `scheme="exact"` + a channel payload). Reject, never panic.
+                // Fail-closed defense-in-depth (PR-B): every channel voucher
+                // forks out (or is rejected) at the channel fork above, so
+                // this arm is unreachable — but a voucher must NEVER enter the
+                // tx-replay cache (it has no on-chain tx; plan HALT 5).
+                // Reject, never panic.
                 solvela_x402::types::PayloadData::Channel(_) => {
                     return Err(GatewayError::InvalidPayment(
-                        "channel scheme is not accepted on this endpoint".to_string(),
+                        "channel voucher is not accepted on the exact/escrow path".to_string(),
                     ));
                 }
             };
@@ -1254,6 +1337,24 @@ pub(crate) async fn chat_completions_inner(
                         }
                     }
                 } // end PaymentScheme::Escrow arm
+                // Fail-closed defense-in-depth: the channel fork above returns
+                // (or rejects) every request whose scheme string is "channel"
+                // BEFORE `from_accepted_str` runs, so this arm is unreachable
+                // today — but a channel draw must NEVER flow into the
+                // exact/escrow settlement machinery (plan HALT 3/5), so if a
+                // future reorder ever exposes it, reject rather than settle.
+                // The budget reservation committed above is released (nothing
+                // was settled).
+                PaymentScheme::Channel => {
+                    warn!(
+                        "channel-scheme payment reached the exact/escrow settlement match — \
+                         rejecting fail-closed (the draw fork should have handled it)"
+                    );
+                    state.usage.release_reservation(&budget_reservation).await;
+                    return Err(GatewayError::InvalidPayment(
+                        "channel vouchers are not settled on this path".to_string(),
+                    ));
+                }
             } // end match payment_scheme
         }
         None => {
@@ -1795,6 +1896,14 @@ pub(crate) async fn chat_completions_inner(
                 PaymentScheme::Exact => {
                     "No provider could serve your request right now and your payment was \
                      NOT charged. Please retry shortly."
+                }
+                // Unreachable today: a channel draw forks out before the
+                // provider dispatch above and handles its own provider-failure
+                // arm (record-nothing non-charge). Kept exhaustive + truthful
+                // (a channel draw that failed here took no charge either).
+                PaymentScheme::Channel => {
+                    "No provider could serve your request right now and your channel was \
+                     NOT drawn. Please retry shortly."
                 }
                 PaymentScheme::Escrow => {
                     // An escrow deposit DID settle on-chain (pre-call) but no claim

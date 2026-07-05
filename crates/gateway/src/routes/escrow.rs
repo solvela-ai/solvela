@@ -84,6 +84,36 @@ pub async fn escrow_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
 /// source `current_slot` for `verify_voucher`'s expiry check RPC-free on the
 /// hot path (no per-call `getSlot`), fail-closed to a 503 on `None`.
 pub(crate) async fn fetch_cached_slot(state: &AppState) -> Option<u64> {
+    read_cached_slot_with_age(state).await.map(|(slot, _)| slot)
+}
+
+/// Like [`fetch_cached_slot`] but FAIL-CLOSED past a staleness bound.
+///
+/// On an RPC outage the shared cache returns the last value INDEFINITELY (only
+/// `None` when nothing was ever cached). That is fine for the discovery
+/// endpoint, but a money-path caller — the channel-draw voucher expiry check,
+/// which measures `expiry_slot - current_slot` — must NOT accept an arbitrarily
+/// old slot: a stale (lower) `current_slot` inflates the expiry buffer and can
+/// let a genuinely-expired voucher pass (`solvela_x402::channel::verify_voucher`
+/// rule 4). So reject (→ `None`, which the draw turns into a fail-closed 503)
+/// once the cached value is older than `max_staleness`. A fresh RPC fetch or a
+/// `< SLOT_CACHE_TTL` cache hit is always fresh enough.
+pub(crate) async fn fetch_cached_slot_bounded(
+    state: &AppState,
+    max_staleness: Duration,
+) -> Option<u64> {
+    read_cached_slot_with_age(state)
+        .await
+        .filter(|(_, fetched_at)| fetched_at.elapsed() <= max_staleness)
+        .map(|(slot, _)| slot)
+}
+
+/// Shared cache read backing [`fetch_cached_slot`] and
+/// [`fetch_cached_slot_bounded`]: returns the current slot together with WHEN
+/// it was fetched (`Instant`), so a caller can bound the staleness. On an RPC
+/// failure the last cached `(slot, fetched_at)` is returned unchanged (age
+/// preserved); `None` only when nothing has ever been cached.
+async fn read_cached_slot_with_age(state: &AppState) -> Option<(u64, Instant)> {
     let cache = &state.slot_cache;
 
     // 1. Acquire lock, read cached value, release immediately
@@ -92,10 +122,10 @@ pub(crate) async fn fetch_cached_slot(state: &AppState) -> Option<u64> {
         *guard
     };
 
-    // 2. Return cached value if within TTL
+    // 2. Return cached value if within TTL (its original fetch time carries the age)
     if let Some((slot, fetched_at)) = cached {
         if fetched_at.elapsed() < SLOT_CACHE_TTL {
-            return Some(slot);
+            return Some((slot, fetched_at));
         }
     }
 
@@ -103,14 +133,16 @@ pub(crate) async fn fetch_cached_slot(state: &AppState) -> Option<u64> {
     match fetch_slot_from_rpc(&state.http_client, &state.config.solana.rpc_url).await {
         Ok(slot) => {
             // 4. Acquire lock again to write new value
+            let now = Instant::now();
             let mut guard = cache.lock().await;
-            *guard = Some((slot, Instant::now()));
-            Some(slot)
+            *guard = Some((slot, now));
+            Some((slot, now))
         }
         Err(e) => {
             tracing::warn!(error = %e, "failed to fetch Solana slot for escrow config");
-            // Return stale value if available, otherwise None
-            cached.map(|(slot, _)| slot)
+            // Return the stale (slot, fetched_at) if available — the age is
+            // preserved so `fetch_cached_slot_bounded` can fail closed on it.
+            cached
         }
     }
 }

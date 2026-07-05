@@ -271,6 +271,55 @@ pub fn voucher_from_payload(
     })
 }
 
+/// Map a `verify_voucher` rejection to a fail-closed `GatewayError`.
+///
+/// Shared by BOTH channel-drawing endpoints (`/v1/search` and the chat draw
+/// fork on `/v1/chat/completions` + `/v1/messages`) so the rejection contract
+/// cannot drift between them. Surfaces the authoritative `last_cumulative`
+/// ONLY for AUTHENTICATED rejections — those that occur AFTER `verify_voucher`
+/// has verified the ed25519 signature — so a desynced SDK (whose vouchers now
+/// `DeltaMismatch` / `NonMonotonicCumulative`) can recompute its next
+/// cumulative and resync (R9). A pre-authentication rejection
+/// (`InvalidSignature` / `ChannelMismatch`, both checked before/at the
+/// signature gate) surfaces nothing: an unauthenticated caller must never
+/// learn a channel's balance. §3.12.
+pub(crate) fn map_voucher_rejection(
+    err: solvela_x402::channel::ChannelVoucherError,
+    last_cumulative: u64,
+) -> GatewayError {
+    use solvela_x402::channel::ChannelVoucherError as E;
+    match err {
+        // Pre-auth (voucher rules 1 & 2): reject WITHOUT the ledger figure.
+        E::ChannelMismatch | E::InvalidSignature => {
+            GatewayError::InvalidPayment("channel voucher rejected".to_string())
+        }
+        // Authenticated, but a BODY mismatch — not a cumulative desync. Telling
+        // the SDK to "resync last_cumulative" here would send it into a confused
+        // retry loop; point it at the real cause instead, with NO ledger figure.
+        E::RequestDigestMismatch => GatewayError::InvalidPayment(
+            "voucher request_digest does not match this request; re-sign for the body you are \
+             sending"
+                .to_string(),
+        ),
+        // Post-auth CUMULATIVE rejections (rules 4–7): the caller proved control
+        // of the session key AND the mismatch is about the cumulative, so
+        // surfacing its OWN channel's authoritative last_cumulative is a resync
+        // aid (R9), not a third-party leak. The figure rides BOTH the prose
+        // message (unchanged) and the structured `last_cumulative` body field
+        // (§4b) — SDK trackers consume ONLY the structured field.
+        E::Expired { .. }
+        | E::NonMonotonicCumulative { .. }
+        | E::DeltaMismatch { .. }
+        | E::BelowSettled { .. }
+        | E::OverDraw { .. } => GatewayError::InvalidPaymentWithResync {
+            message: format!(
+                "channel voucher rejected; resync from authoritative last_cumulative={last_cumulative}"
+            ),
+            last_cumulative,
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // POST /v1/channel/open
 // ---------------------------------------------------------------------------
@@ -683,9 +732,9 @@ pub async fn close(
     // Acquire the per-channel DRAW lock: a draw in flight blocks the close
     // (503 + Retry-After) — the deliberately-triggerable "draw an expensive
     // call, close mid-serve, collect the serve AND the full refund" grief loop.
-    match cache.acquire_channel_draw_lock(&req.channel_id).await {
-        Ok(true) => {}
-        Ok(false) => {
+    let lock_token = match cache.acquire_channel_draw_lock(&req.channel_id).await {
+        Ok(Some(token)) => token,
+        Ok(None) => {
             let mut resp = GatewayError::ServiceUnavailable(
                 "a draw is in flight on this channel; retry the close shortly".to_string(),
             )
@@ -702,7 +751,7 @@ pub async fn close(
                 "payment service is temporarily degraded; please retry shortly",
             );
         }
-    }
+    };
 
     // Lock HELD: flip → read → reserve in ONE transaction, then release on
     // every path (bounded, like the draw — the TTL is only the crash backstop).
@@ -710,7 +759,7 @@ pub async fn close(
         crate::channel_refunds::close_channel_and_reserve_refund(&pool, &req.channel_id).await;
     if tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        cache.release_channel_draw_lock(&req.channel_id),
+        cache.release_channel_draw_lock(&req.channel_id, &lock_token),
     )
     .await
     .is_err()

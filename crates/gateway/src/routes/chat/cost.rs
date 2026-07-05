@@ -20,6 +20,13 @@ use solvela_protocol::{ChatRequest, ModelRegistration, Usage};
 pub(crate) enum PaymentScheme {
     Exact,
     Escrow,
+    /// v0 spend-down channel voucher draw (PR-B). Header-invoked ONLY — this
+    /// value must NEVER appear in a 402 `accepts[]` entry (invariant 12 /
+    /// HALT 12: every deployed strict SDK parser rejects the whole 402 on an
+    /// unknown scheme). The chat draw fork returns before the exact/escrow
+    /// settlement machinery, so every downstream financial branch's `Channel`
+    /// arm is fail-closed defense-in-depth, never a live route.
+    Channel,
 }
 
 impl PaymentScheme {
@@ -30,6 +37,7 @@ impl PaymentScheme {
         match s {
             "exact" => Ok(Self::Exact),
             "escrow" => Ok(Self::Escrow),
+            "channel" => Ok(Self::Channel),
             other => Err(format!("unknown payment scheme: {other}")),
         }
     }
@@ -41,6 +49,7 @@ impl PaymentScheme {
         match self {
             Self::Exact => "exact",
             Self::Escrow => "escrow",
+            Self::Channel => "channel",
         }
     }
 }
@@ -626,22 +635,24 @@ pub(crate) fn apply_hit_price(full_atomic: u64, hit_price_percent: u8) -> u64 {
     ((full_atomic as u128) * pct / 100) as u64
 }
 
-/// The semantic discount that is actually *realised* on-chain for a payment
-/// scheme.
+/// The semantic discount that is actually *realised* for a payment scheme.
 ///
-/// The discount is only collectable on the **escrow** scheme, where the gateway
-/// claims the reduced amount and refunds the remainder. On the direct-transfer
-/// **exact** scheme the agent already settled the full amount up front with no
-/// refund path, so no discount applies — both the escrow claim and the spend
-/// ledger must use the full price there. Returns `None` (→ full price) for any
-/// non-escrow scheme. Logging the discounted price on `exact` would under-count
+/// The discount is collectable on the **escrow** scheme (the gateway claims the
+/// reduced amount and refunds the remainder) and on the **channel** scheme
+/// (operator-approved, chat-draw plan §4/§7: the discount lands on the
+/// synchronous `realized` counter — the voucher's signed cumulative is
+/// UNTOUCHED, and the un-realized remainder returns in the close refund
+/// `deposited − realized`). On the direct-transfer **exact** scheme the agent
+/// already settled the full amount up front with no refund path, so no
+/// discount applies — both the escrow claim and the spend ledger must use the
+/// full price there. Logging the discounted price on `exact` would under-count
 /// the wallet's real spend, since the agent was charged in full.
 pub(crate) fn scheme_realized_discount(
     scheme: PaymentScheme,
     cost_outcome: Option<SemanticDiscount>,
 ) -> Option<SemanticDiscount> {
     match scheme {
-        PaymentScheme::Escrow => cost_outcome,
+        PaymentScheme::Escrow | PaymentScheme::Channel => cost_outcome,
         PaymentScheme::Exact => None,
     }
 }
@@ -2043,14 +2054,21 @@ supports_streaming = false
     }
 
     #[test]
-    fn scheme_realized_discount_applies_only_to_escrow() {
-        // The discount is realised (claim less + refund) only on the escrow
-        // scheme. On exact the agent paid full on-chain with no refund, so the
-        // discount must not reach the claim or the spend ledger.
+    fn scheme_realized_discount_applies_only_to_refundable_schemes() {
+        // The discount is realised only where an un-charged remainder can
+        // actually return to the agent: escrow (claim less + refund) and
+        // channel (smaller synchronous `realized` advance → larger close
+        // refund). On exact the agent paid full on-chain with no refund, so
+        // the discount must not reach the claim or the spend ledger.
         let d = SemanticDiscount::new(1000, 30);
         assert_eq!(
             scheme_realized_discount(PaymentScheme::Escrow, Some(d)),
             Some(d)
+        );
+        assert_eq!(
+            scheme_realized_discount(PaymentScheme::Channel, Some(d)),
+            Some(d),
+            "channel realises the discount on the realized counter (plan §4)"
         );
         assert_eq!(
             scheme_realized_discount(PaymentScheme::Exact, Some(d)),
@@ -2059,6 +2077,7 @@ supports_streaming = false
         );
         assert_eq!(scheme_realized_discount(PaymentScheme::Exact, None), None);
         assert_eq!(scheme_realized_discount(PaymentScheme::Escrow, None), None);
+        assert_eq!(scheme_realized_discount(PaymentScheme::Channel, None), None);
     }
 
     #[test]
@@ -2071,6 +2090,10 @@ supports_streaming = false
             PaymentScheme::from_accepted_str("escrow"),
             Ok(PaymentScheme::Escrow)
         );
+        assert_eq!(
+            PaymentScheme::from_accepted_str("channel"),
+            Ok(PaymentScheme::Channel)
+        );
         // Unknown schemes MUST NOT default-route — silent coercion would let a
         // future scheme flow through the financial branches under the wrong
         // invariant. The boundary parser is the single gate.
@@ -2078,6 +2101,8 @@ supports_streaming = false
         assert!(PaymentScheme::from_accepted_str("Escrow").is_err());
         assert!(PaymentScheme::from_accepted_str("escrow ").is_err());
         assert!(PaymentScheme::from_accepted_str("escr0w").is_err());
+        assert!(PaymentScheme::from_accepted_str("Channel").is_err());
+        assert!(PaymentScheme::from_accepted_str("channel ").is_err());
     }
 
     #[test]
@@ -2085,7 +2110,11 @@ supports_streaming = false
         // The receipt records `as_accepted_str`; it must stay the exact
         // inverse of the boundary parser so a recorded scheme is always a
         // valid wire scheme.
-        for scheme in [PaymentScheme::Exact, PaymentScheme::Escrow] {
+        for scheme in [
+            PaymentScheme::Exact,
+            PaymentScheme::Escrow,
+            PaymentScheme::Channel,
+        ] {
             assert_eq!(
                 PaymentScheme::from_accepted_str(scheme.as_accepted_str()),
                 Ok(scheme)
