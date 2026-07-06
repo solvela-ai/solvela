@@ -67,6 +67,11 @@ _DOC_ONLY_ALLOWLIST: frozenset[str] = frozenset({
     "OPENSSL_NO_PKG_CONFIG",
     "OPENSSL_LIB_DIR",
     "OPENSSL_INCLUDE_DIR",
+    # Claude Code's own config vars — the @solvela/dropin sidecar README
+    # instructs users to set these for the Claude Code CLI (the external
+    # reader); Solvela source never reads them.
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
 })
 
 
