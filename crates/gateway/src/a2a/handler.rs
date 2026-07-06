@@ -12,7 +12,7 @@ use axum::http::HeaderMap;
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
-use solvela_protocol::{ChatMessage, ChatRequest, Role, SettlementFailureKind};
+use solvela_protocol::{ChatMessage, ChatRequest, ModelRegistration, Role, SettlementFailureKind};
 use solvela_router::profiles::{self, Profile};
 use solvela_router::scorer;
 
@@ -410,6 +410,8 @@ async fn handle_payment_submitted(
     let model = record.model.clone().unwrap_or_else(|| "auto".to_string());
     let resolved_model = resolve_model(&model, &record.original_message, state)?;
 
+    // Cloned to an OWNED registration: the settle section below runs on a
+    // spawned (`'static`) task and cannot borrow from the registry.
     let model_info = state
         .model_registry
         .get(&resolved_model)
@@ -417,7 +419,8 @@ async fn handle_payment_submitted(
             code: ERR_MODEL_NOT_FOUND,
             message: format!("Model not found: {resolved_model}"),
             data: None,
-        })?;
+        })?
+        .clone();
 
     // Re-apply the max_tokens cap that was used to compute the quoted cost in
     // step 2 (handle_new_request). New records store the `completion_token_ceiling`
@@ -475,6 +478,86 @@ async fn handle_payment_submitted(
         }
         crate::middleware::prompt_guard::GuardResult::Clean => {}
     }
+
+    // ── Disconnect shield (A2A v0.3 conformance plan, invariant 2b) ─────────
+    //
+    // Everything from settlement-lock acquisition through the final Task
+    // response runs in `settle_paid_task`, on a spawned task whose JoinHandle
+    // we await. PREMISE (cited): hyper stops polling and DROPS the in-flight
+    // response future when the HTTP client disconnects — work that must
+    // survive a disconnect belongs in `tokio::spawn` (maintainer guidance in
+    // tokio-rs/axum discussions #1094 "Detect connection closed inside POST
+    // handler" and #2811 "How to handle client side cancel the request?";
+    // axum 0.8 / hyper 1.x as used here). Without the shield, a disconnect
+    // between `verify_and_settle` and the state save strands funds settled
+    // with the task still input-required, the pre-settle replay marker
+    // blocking a same-tx resubmit, and no ledger row.
+    //
+    // The money-free pre-checks ABOVE (tenant gate, model resolve, registry
+    // lookup, max_tokens cap, prompt guard) deliberately stay OUTSIDE the
+    // shield, in their #566-pinned order — they must keep rejecting with no
+    // lock acquired, no spawn, and no settlement (pinned by
+    // `pre_payment_checks_run_outside_shield_in_unchanged_order`).
+    let shielded = tokio::spawn(settle_paid_task(
+        Arc::clone(state),
+        task_id.to_string(),
+        record,
+        payload,
+        resolved_model,
+        model_info,
+        messages,
+        enforced_max_tokens,
+    ));
+    match shielded.await {
+        Ok(result) => result,
+        Err(e) => {
+            // JoinError: the shielded section panicked (or was aborted). The
+            // client gets a clean internal error — never a hung response and
+            // never the panic payload (GHSA-cgqx-mg48-949v posture). Funds may
+            // or may not have moved; the persisted task state and the settle
+            // lock reflect exactly how far the section got, so direct the
+            // agent at the task status rather than a blind retry.
+            tracing::error!(
+                task_id,
+                error = %e,
+                "A2A shielded settlement section failed to join (panic/abort)"
+            );
+            Err(JsonRpcErrorData {
+                code: ERR_INTERNAL,
+                message: "Internal error while finalizing payment; check the \
+                          task status before retrying."
+                    .to_string(),
+                data: None,
+            })
+        }
+    }
+}
+
+/// The PAID critical section of `handle_payment_submitted`: settlement-lock
+/// acquisition → replay / offer validation / `verify_and_settle` → provider
+/// call → state save + ledger + receipt → Task response construction.
+///
+/// Runs inside a `tokio::spawn` awaited by the caller (the disconnect shield —
+/// see the call-site comment for the cited premise): every parameter is OWNED
+/// so the future is `'static` and completes even when the handler future is
+/// dropped on client disconnect. Do NOT move the money-free pre-checks
+/// (tenant / model resolve / registry / max_tokens / prompt guard) into this
+/// function — they are pinned OUTSIDE the shield.
+#[allow(clippy::too_many_arguments)]
+async fn settle_paid_task(
+    state: Arc<AppState>,
+    task_id: String,
+    record: TaskRecord,
+    payload: solvela_x402::types::PaymentPayload,
+    resolved_model: String,
+    model_info: ModelRegistration,
+    messages: Vec<ChatMessage>,
+    enforced_max_tokens: u32,
+) -> Result<Value, JsonRpcErrorData> {
+    // Shadow the owned params as borrows so the body below reads identically
+    // to its pre-shield form (`state: &Arc<AppState>`, `task_id: &str`).
+    let state = &state;
+    let task_id = task_id.as_str();
 
     // Concurrent-settlement lock (issue #566).
     //
@@ -1865,6 +1948,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "What is Solana?".to_string(),
                 }],
