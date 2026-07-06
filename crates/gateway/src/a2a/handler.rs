@@ -1314,6 +1314,19 @@ async fn settle_paid_task(
         estimated_input_tokens,
         &tx_signature,
     );
+    // Round-1 review fix (parity with the Failed arm above): a `None` here
+    // means the ledger/receipt write was skipped (corrupt stored
+    // quote/breakdown/scheme — each counted on
+    // `solvela_a2a_settlement_record_skipped_total`) — a settled-but-
+    // unledgered task, escalated as `error!` so it is distinguishable in logs
+    // from a clean success.
+    if receipt_path.is_none() {
+        tracing::error!(
+            task_id,
+            "success-path: ledger/receipt write was skipped \
+             (settled-but-unledgered; see solvela_a2a_settlement_record_skipped_total)"
+        );
+    }
 
     // Update task state (`Working→Completed`) — AFTER the ledger row above
     // (issue #680; see the ORDER note on the ledger block).
@@ -1529,8 +1542,22 @@ fn project_task(record: &TaskRecord) -> Task {
                 None,
             )
         }
-        TaskState::Working | TaskState::Canceled => (None, None),
-        TaskState::Completed => {
+        TaskState::Canceled => (None, None),
+        // A genuinely in-flight settlement: no D6 refs exist yet (they are
+        // written only AFTER settlement finishes) — status only.
+        TaskState::Working if record.tx_signature.is_none() && record.receipt_path.is_none() => {
+            (None, None)
+        }
+        // `Completed` — or the stuck-Working-post-settle compound case
+        // (round-1 review fix): the D6 refs are written ONLY after settlement
+        // finishes, never mid-flight, so a `Working` record CARRYING refs
+        // means settle succeeded, the terminal state write failed (D10), and
+        // `persist_terminal_refs` landed the output/evidence on the
+        // still-Working record. Project them — a client that lost the in-band
+        // response must not see "working, no data" until TTL while its paid
+        // output sits on the record. `status.state` still reports the honest
+        // stored state (`working`).
+        TaskState::Completed | TaskState::Working => {
             let mut meta = serde_json::Map::new();
             meta.insert(
                 x402_meta::STATUS_KEY.to_string(),
@@ -1548,8 +1575,8 @@ fn project_task(record: &TaskRecord) -> Task {
             // Legacy/failed-save records may lack the artifact text (D6 save
             // is best-effort on the success arm); the status stays truthful.
             let text = record.artifact_text.clone().unwrap_or_else(|| {
-                "Task completed; the delivered output is no longer available \
-                 on this record."
+                "Task settled; the delivered output is not available on this \
+                 record."
                     .to_string()
             });
             (Some(agent_message(text, Some(meta))), artifacts)
@@ -1753,6 +1780,13 @@ async fn cancel_under_lock(
     // arm into Canceled). A failed write releases the lock and returns the
     // retryable internal error — the task is unchanged, cancel is retryable
     // (plan §5).
+    //
+    // Named ceiling (ambiguous ack, mirroring the settle side's Working-marker
+    // write): if the Redis SET applied but the ack errored, the record may
+    // already read `Canceled` while we release the lock and report retryable —
+    // the retried cancel then fast-fails "already canceled" (the correct
+    // outcome), and the payment leg's under-lock re-check still rejects on
+    // `Canceled` even with the lock released.
     if let Err(e) = task_store::update_task_state(state, task_id, TaskState::Canceled).await {
         metrics::counter!("solvela_a2a_cancel_total", "outcome" => "error").increment(1);
         warn!(
@@ -4798,7 +4832,7 @@ supports_vision = false
         );
         assert!(task["artifacts"].is_null());
 
-        // Working / Canceled → status only.
+        // Working (no refs = genuinely in flight) / Canceled → status only.
         for s in [TaskState::Working, TaskState::Canceled] {
             let rec = base(s);
             task_store::save_task(&state, &rec).await.expect("save");
@@ -4809,6 +4843,25 @@ supports_vision = false
             );
             assert!(task["artifacts"].is_null());
         }
+
+        // Stuck-Working POST-settle (round-1 review fix): a Working record
+        // CARRYING D6 refs means settle succeeded but the terminal state
+        // write failed (D10) — the client's recovery data must be projected,
+        // with the state still honestly reported as `working`.
+        let mut rec = base(TaskState::Working);
+        rec.artifact_text = Some("the stuck paid answer".to_string());
+        rec.tx_signature = Some("sig-stuck".to_string());
+        rec.receipt_path = Some("/v1/receipts/stuck".to_string());
+        task_store::save_task(&state, &rec).await.expect("save");
+        let task = get(rec.id.clone()).await;
+        assert_eq!(task["status"]["state"], "working", "state stays honest");
+        assert_eq!(
+            task["artifacts"][0]["parts"][0]["text"], "the stuck paid answer",
+            "stuck-Working-post-settle must project the paid output"
+        );
+        let receipts = &task["status"]["message"]["metadata"]["x402.payment.receipts"];
+        assert_eq!(receipts["tx_signature"], "sig-stuck");
+        assert_eq!(receipts["receipt"], "/v1/receipts/stuck");
 
         // Completed → D6 artifact + receipts.
         let mut rec = base(TaskState::Completed);

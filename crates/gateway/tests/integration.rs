@@ -14852,6 +14852,41 @@ async fn dropped_and_state_write_failed_settlement_still_ledgers_and_stays_recov
         after.tx_signature.is_some(),
         "the settlement signature must be persisted (D6) despite the failed state write"
     );
+
+    // "Stays recoverable" pinned from the CLIENT's perspective (round-1
+    // review): the disconnected client polls tasks/get through the real route
+    // and must receive its payment evidence — not just have it sitting in the
+    // store.
+    let got = a2a_call_envelope(
+        &app,
+        &serde_json::json!({
+            "jsonrpc": "2.0", "method": "tasks/get", "id": "m1-recover",
+            "params": {"id": task_id}
+        }),
+    )
+    .await;
+    assert!(
+        got["error"].is_null(),
+        "tasks/get after the crash-window compound must succeed: {got}"
+    );
+    let recovered = &got["result"];
+    assert_eq!(
+        recovered["status"]["state"], "failed",
+        "the sabotaged state stands"
+    );
+    let receipts = &recovered["status"]["message"]["metadata"]["x402.payment.receipts"];
+    assert!(
+        receipts["tx_signature"].is_string(),
+        "the client-facing tasks/get response must carry the settlement \
+         signature: {recovered}"
+    );
+    assert!(
+        receipts["receipt"]
+            .as_str()
+            .is_some_and(|p| p.starts_with("/v1/receipts/")),
+        "the client-facing tasks/get response must carry the durable receipt \
+         path: {recovered}"
+    );
 }
 
 /// 2a-5: a panic INSIDE the shielded critical section surfaces as a
