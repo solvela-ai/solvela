@@ -1225,27 +1225,22 @@ async fn settle_paid_task(
         }
     };
 
-    // Update task state (`Working→Completed`).
-    if let Err(e) = task_store::update_task_state(state, task_id, TaskState::Completed).await {
-        // Round-1 review fix (counter symmetry with the Failed-arm write
-        // failure): a failed Completed write leaves the settled task stuck in
-        // `Working` — the D10 condition — so it counts on the stuck counter,
-        // not just a log line.
-        metrics::counter!("solvela_a2a_task_stuck_working_total").increment(1);
-        tracing::error!(error = %e, task_id, "failed to update task state after payment settlement");
-    }
-
-    info!(
-        task_id,
-        model = %resolved_model,
-        was_fallback = result.was_fallback,
-        "A2A payment verified → completed"
-    );
-
     // Ledger + durable receipt (#561). A paid A2A request settles real USDC;
     // it must produce the same audit evidence as the chat path — a `spend_logs`
     // row (visible to stats / budgets / tenant attribution) and a retrievable
     // receipt. Both writes are fire-and-forget; neither blocks the response.
+    //
+    // ORDER (issue #680, sanctioned reorder): the ledger row is written BEFORE
+    // the `Working→Completed` state write, mirroring the post-settle
+    // provider-failure arm above (its `record_a2a_settlement` call already
+    // precedes its `Failed` write). With the old state-first order, a crash
+    // between the two left funds settled with NO ledger row and NO signal: the
+    // task read as a perfectly normal `Completed`, invisible to both the
+    // stuck-Working counters and chain-vs-ledger reconciliation. Ledger-first,
+    // the same crash leaves the ledger row present and the task in `Working` —
+    // fail-safe stuck (D10), counted on the next attempt, reconcilable. Only
+    // the state write moved relative to the ledger; replay / offer validation /
+    // `verify_and_settle` are untouched.
     //
     // The amount RECORDED is what the agent actually paid on this path: the
     // gateway-quoted total stored on the task at creation
@@ -1267,6 +1262,24 @@ async fn settle_paid_task(
         result.data.usage.as_ref(),
         estimated_input_tokens,
         &tx_signature,
+    );
+
+    // Update task state (`Working→Completed`) — AFTER the ledger row above
+    // (issue #680; see the ORDER note on the ledger block).
+    if let Err(e) = task_store::update_task_state(state, task_id, TaskState::Completed).await {
+        // Round-1 review fix (counter symmetry with the Failed-arm write
+        // failure): a failed Completed write leaves the settled task stuck in
+        // `Working` — the D10 condition — so it counts on the stuck counter,
+        // not just a log line.
+        metrics::counter!("solvela_a2a_task_stuck_working_total").increment(1);
+        tracing::error!(error = %e, task_id, "failed to update task state after payment settlement");
+    }
+
+    info!(
+        task_id,
+        model = %resolved_model,
+        was_fallback = result.was_fallback,
+        "A2A payment verified → completed"
     );
 
     // D6 (Completed arm): persist the delivered artifact text + settlement

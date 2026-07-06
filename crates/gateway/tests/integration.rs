@@ -14709,6 +14709,111 @@ async fn request_future_dropped_mid_settle_still_completes_and_ledgers() {
     );
 }
 
+/// M1 (issue #680): the success arm writes the LEDGER row BEFORE the
+/// `Completed` state — a crash between the two must leave the ledger row
+/// present and the task recoverable, never a normal-looking `Completed` with
+/// no ledger row (which was invisible to both the stuck-Working counters and
+/// chain-vs-ledger reconciliation).
+///
+/// Extends the 2a-4 drop-mid-settle harness: the request future is dropped
+/// mid-settle AND the `Completed` state write is sabotaged (the record is
+/// flipped to `Failed` while settlement is in flight, making
+/// `Working→Completed` an invalid transition) — the worst-case residue of a
+/// crash in the ledger→state window. The ledger row must exist regardless:
+/// the ledger write must never depend on the state write landing. (A literal
+/// process kill between two adjacent statements has no injectable seam in
+/// this harness; the ORDER itself is additionally pinned by the handler's
+/// #680 comment block.)
+#[tokio::test]
+async fn dropped_and_state_write_failed_settlement_still_ledgers_and_stays_recoverable() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let settle_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let verifier = Arc::new(SettleCountingDelayVerifier {
+        settle_count: Arc::clone(&settle_count),
+        // Wide enough that the 100ms drop + the sabotage below both land
+        // firmly INSIDE the settlement window.
+        delay: std::time::Duration::from_millis(600),
+    });
+    let Some((app, state)) = a2a_app_with_verifier_and_db(pool, verifier) else {
+        return;
+    };
+    let db = state.db_pool.clone().expect("test is DB-backed");
+    let handle = test_prometheus_handle();
+
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let pay = a2a_payment_submitted_body(&task_id, &offer);
+
+    // Drop the request future mid-settle (the 2a-4 crash simulation)…
+    let dropped = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        a2a_call_envelope(&app, &pay),
+    )
+    .await;
+    assert!(
+        dropped.is_err(),
+        "the request future must be dropped mid-settle for this test to exercise the window"
+    );
+
+    // …then, still inside the settle window (the verifier sleeps 600ms),
+    // sabotage the coming `Working→Completed` write by flipping the record to
+    // `Failed` (from which that transition is invalid).
+    let mut record = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must exist");
+    assert_eq!(
+        record.state,
+        gateway::a2a::types::TaskState::Working,
+        "the sabotage must land while settlement is in flight (Working marker persisted)"
+    );
+    let stuck_before = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    record.state = gateway::a2a::types::TaskState::Failed;
+    gateway::a2a::task_store::save_task(&state, &record)
+        .await
+        .expect("save sabotaged record");
+
+    // THE #680 pin: the ledger row exists even though the Completed state
+    // write never landed — the ledger write runs first and does not depend on
+    // the state write.
+    let rows = spend_rows_for_task(&db, &task_id, 1).await;
+    assert_eq!(
+        rows, 1,
+        "the settled payment must be ledgered exactly once regardless of the \
+         state write (got {rows})"
+    );
+    assert_eq!(
+        settle_count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "settlement must have run exactly once"
+    );
+
+    // The task is left RECOVERABLE, never a normal-looking Completed: the
+    // sabotaged state stands, and the failed Completed write is observable on
+    // the stuck-Working counter (`>` not an exact delta: the Prometheus family
+    // is process-global under parallel tests — same caveat as the #566 tests).
+    let after = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must still exist");
+    assert_eq!(
+        after.state,
+        gateway::a2a::types::TaskState::Failed,
+        "the failed Completed write must not silently override the record"
+    );
+    let stuck_after = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    assert!(
+        stuck_after > stuck_before,
+        "the failed Completed write must be counted (before={stuck_before}, after={stuck_after})"
+    );
+    // D6: the payment evidence was still persisted onto the record.
+    assert!(
+        after.tx_signature.is_some(),
+        "the settlement signature must be persisted (D6) despite the failed state write"
+    );
+}
+
 /// 2a-5: a panic INSIDE the shielded critical section surfaces as a
 /// `JoinError` on the awaited handle and maps to a clean `-32603` JSON-RPC
 /// error — never a hung response, and never the panic payload
