@@ -8,6 +8,10 @@
 #   the previous `main` commit. This catches a renamed/removed/typo'd entry
 #   (which would otherwise make the auto-approver wait forever for a check
 #   that never reports).
+# - PR-only checks (listed in `PR_ONLY` below) never run on push SHAs, so they
+#   are asserted against the head of the PR that produced the previous `main`
+#   commit instead. A direct push to `main` (no associated PR) skips only the
+#   PR-only names, with a notice.
 # - It does NOT detect the opposite drift (branch protection gains a required
 #   check not in `REQUIRED`). That direction is safe anyway: branch protection
 #   enforces required checks at MERGE time regardless of the bot's approval, so
@@ -25,6 +29,7 @@ on:
 permissions:
   checks: read
   contents: read
+  pull-requests: read
 
 jobs:
   assert-sync:
@@ -36,6 +41,11 @@ jobs:
           script: |
             const fs = require('fs');
             const { owner, repo } = context.repo;
+
+            // Checks that only run on pull_request events and therefore can
+            // never appear on a push-to-main SHA. KEEP IN SYNC with the `on:`
+            // triggers of the corresponding workflows.
+            const PR_ONLY = new Set(['Verify DCO sign-off on every commit']);
 
             // Parse the REQUIRED list straight out of auto-approve.yml so there
             // is a single source of truth (no second copy to drift).
@@ -55,7 +65,7 @@ jobs:
             // a fully-built commit, so no race with in-flight runs.
             const before = context.payload.before;
             if (!before || /^0+$/.test(before)) {
-              core.notice('No prior commit (new branch / force-push); skipping.');
+              core.notice('No prior commit (new branch / force-push / dispatch); skipping.');
               return;
             }
 
@@ -63,13 +73,34 @@ jobs:
               { owner, repo, ref: before, per_page: 100 });
             const ran = new Set(runs.map(r => r.name));
 
-            const missing = required.filter(n => !ran.has(n));
+            const missing = required.filter(n => !PR_ONLY.has(n) && !ran.has(n));
+
+            // PR-only names: assert against the head SHA of the PR whose merge
+            // produced `before` (that is where pull_request checks reported).
+            const prOnlyNames = required.filter(n => PR_ONLY.has(n));
+            if (prOnlyNames.length) {
+              const prs = (await github.rest.repos.listPullRequestsAssociatedWithCommit(
+                { owner, repo, commit_sha: before })).data;
+              const merged = prs.find(p => p.merge_commit_sha === before) ?? prs[0];
+              if (!merged) {
+                core.notice(`No PR associated with ${before.slice(0, 7)} (direct push); `
+                  + `skipping PR-only checks: ${prOnlyNames.join(', ')}`);
+              } else {
+                const prRuns = await github.paginate(github.rest.checks.listForRef,
+                  { owner, repo, ref: merged.head.sha, per_page: 100 });
+                const prRan = new Set(prRuns.map(r => r.name));
+                missing.push(...prOnlyNames.filter(n => !prRan.has(n)));
+              }
+            }
+
             if (missing.length) {
               core.setFailed(
-                `auto-approve.yml REQUIRED lists check(s) that did not run on ${before.slice(0, 7)}: `
+                `auto-approve.yml REQUIRED lists check(s) that did not run on ${before.slice(0, 7)}`
+                + ` (PR-only checks asserted on the merged PR head): `
                 + `${missing.map(n => `"${n}"`).join(', ')}. `
                 + 'A required check was renamed/removed — update the REQUIRED list in '
                 + '.github/workflows/auto-approve.yml (and branch protection) to match.');
               return;
             }
-            core.notice(`OK — all ${required.length} REQUIRED checks ran on ${before.slice(0, 7)}.`);
+            core.notice(`OK — all ${required.length} REQUIRED checks ran on ${before.slice(0, 7)} `
+              + '(PR-only checks verified on the merged PR head).');
