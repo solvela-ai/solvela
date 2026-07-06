@@ -1865,6 +1865,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "What is Solana?".to_string(),
                 }],
