@@ -355,6 +355,18 @@ async fn handle_payment_submitted(
     // guard is the under-lock state re-check in `settle_paid_task`, which
     // re-loads the record after lock acquisition.
     if record.state != TaskState::InputRequired {
+        // D10 (round-2 review fix): a task at rest in `Working` after a bare
+        // process crash is rejected HERE, pre-lock — the under-lock counter
+        // sites in `settle_paid_task` are never reached — so without this
+        // increment the operator's reconciliation trigger stayed at zero for
+        // exactly the crash it was designed to catch. Over-counts are
+        // accepted for an alert-only signal (any non-zero → investigate):
+        // repeated retries against one stuck task inflate the count, and a
+        // duplicate submission racing a genuinely in-flight settle lands here
+        // too — same posture as the documented JoinError over-count.
+        if record.state == TaskState::Working {
+            metrics::counter!("solvela_a2a_task_stuck_working_total").increment(1);
+        }
         return Err(reject_for_task_state(task_id, record.state));
     }
 
@@ -1659,6 +1671,13 @@ pub async fn handle_tasks_cancel(
         })?;
     if record.state != TaskState::InputRequired {
         metrics::counter!("solvela_a2a_cancel_total", "outcome" => "not_cancelable").increment(1);
+        // D10 (round-2 review fix): mirror the payment intake — a crash-stuck
+        // `Working` task is rejected at this pre-lock site, so it must feed
+        // the stuck-Working reconciliation counter here too (over-counts
+        // accepted; alert-only signal).
+        if record.state == TaskState::Working {
+            metrics::counter!("solvela_a2a_task_stuck_working_total").increment(1);
+        }
         return Err(not_cancelable_for_state(task_id, record.state));
     }
 

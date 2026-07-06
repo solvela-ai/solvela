@@ -23984,3 +23984,86 @@ async fn a2a_error_and_offer_wire_fixture_pin() {
     assert_eq!(code_of("internal_error"), -32603);
     assert_eq!(code_of("provider_error"), -32008);
 }
+
+/// Round-2 review fix (D10): a task at rest in `Working` after a bare process
+/// crash (no live lock) is rejected by the PRE-lock intake fast-fails — both
+/// the payment leg's and cancel's — which previously never fed
+/// `solvela_a2a_task_stuck_working_total`, leaving the operator's designated
+/// reconciliation trigger at zero for exactly the crash it was designed to
+/// catch. Both intake sites must increment it. `>` not an exact delta: the
+/// Prometheus family is process-global under parallel tests (same caveat as
+/// `channel_payload_after_working_marker_reverts_and_releases`).
+#[tokio::test]
+async fn stuck_working_at_rest_increments_counter_at_both_intakes() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let settle_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let verifier = Arc::new(SettleCountingDelayVerifier {
+        settle_count: Arc::clone(&settle_count),
+        delay: std::time::Duration::from_millis(0),
+    });
+    let Some((app, state)) = a2a_app_with_verifier_and_db(pool, verifier) else {
+        return;
+    };
+    let handle = test_prometheus_handle();
+
+    // The bare-crash residue: record at rest in `Working`, lock NOT held.
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let mut record = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must exist");
+    record.state = gateway::a2a::types::TaskState::Working;
+    gateway::a2a::task_store::save_task(&state, &record)
+        .await
+        .expect("save stuck-Working record");
+
+    // Payment intake fast-fail: rejected AND counted.
+    let before = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(-32007),
+        "payment against a stuck-Working task must fast-fail at intake: {env}"
+    );
+    assert!(
+        env["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already in progress"),
+        "the rejection must be the intake fast-fail's in-progress message: {env}"
+    );
+    let after_payment = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    assert!(
+        after_payment > before,
+        "the payment intake fast-fail must feed the stuck-Working counter \
+         (before={before}, after={after_payment})"
+    );
+
+    // Cancel intake fast-fail: rejected AND counted.
+    let env2 = a2a_call_envelope(
+        &app,
+        &serde_json::json!({"jsonrpc": "2.0", "method": "tasks/cancel", "id": 1,
+            "params": {"id": task_id}}),
+    )
+    .await;
+    assert_eq!(
+        env2["error"]["code"].as_i64(),
+        Some(-32002),
+        "cancel of a stuck-Working task must fast-fail at intake: {env2}"
+    );
+    let after_cancel = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    assert!(
+        after_cancel > after_payment,
+        "the cancel intake fast-fail must feed the stuck-Working counter \
+         (before={after_payment}, after={after_cancel})"
+    );
+
+    // Neither intake rejection reached settlement.
+    assert_eq!(
+        settle_count.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "intake fast-fails must never reach settlement"
+    );
+}
