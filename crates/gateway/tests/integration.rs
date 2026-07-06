@@ -323,6 +323,59 @@ impl PaymentVerifier for PanickingSettleVerifier {
     }
 }
 
+/// An `exact`-scheme verifier for DETERMINISTIC mid-settle interleaving
+/// (conformance plan test 2a-3): `settle_payment` counts the call, signals
+/// `reached`, then WAITS for `release` before returning `success: false`.
+/// `tokio::sync::Notify::notify_one` stores a permit when no waiter is
+/// registered, so the signal/wait handshake is race-free — the test can mutate
+/// task state while settlement is provably in flight, with no sleep-based
+/// timing.
+struct GatedFailingVerifier {
+    reached: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    settle_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl PaymentVerifier for GatedFailingVerifier {
+    fn network(&self) -> &str {
+        SOLANA_NETWORK
+    }
+
+    fn scheme(&self) -> &str {
+        "exact"
+    }
+
+    async fn verify_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<VerificationResult, X402Error> {
+        Ok(VerificationResult {
+            valid: true,
+            reason: None,
+            verified_amount: Some(2625),
+        })
+    }
+
+    async fn settle_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<SettlementResult, X402Error> {
+        self.settle_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.reached.notify_one();
+        self.release.notified().await;
+        Ok(SettlementResult {
+            success: false,
+            tx_signature: Some("MockGatedFailedTxSig".to_string()),
+            network: SOLANA_NETWORK.to_string(),
+            error: Some("simulated gated settlement failure".to_string()),
+            verified_amount: None,
+            failure_kind: Some(solvela_protocol::SettlementFailureKind::Timeout),
+        })
+    }
+}
+
 /// A mock verifier for the escrow scheme.
 struct AlwaysPassEscrowVerifier;
 
@@ -13602,6 +13655,19 @@ fn a2a_app_with_redis_db_and_providers(
     pool: Option<sqlx::PgPool>,
     providers: ProviderRegistry,
 ) -> Option<(axum::Router, Arc<AppState>)> {
+    a2a_app_with_providers_and_bypass(pool, providers, false)
+}
+
+/// As [`a2a_app_with_redis_db_and_providers`] but with a caller-controlled
+/// `dev_bypass_payment`, so the dev-bypass settlement branch — which skips
+/// replay/verify but MUST hold the same lock + `Working`-marker discipline as
+/// the real-settle branch — can be driven through the real `/a2a` route
+/// (conformance plan test 2a-8).
+fn a2a_app_with_providers_and_bypass(
+    pool: Option<sqlx::PgPool>,
+    providers: ProviderRegistry,
+    dev_bypass_payment: bool,
+) -> Option<(axum::Router, Arc<AppState>)> {
     use gateway::cache::{CacheConfig, ResponseCache};
 
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
@@ -13654,7 +13720,7 @@ fn a2a_app_with_redis_db_and_providers(
         api_key_hmac_secret: None,
         auth_provider: None,
         prometheus_handle: Some(test_prometheus_handle()),
-        dev_bypass_payment: false,
+        dev_bypass_payment,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
@@ -14621,6 +14687,26 @@ async fn request_future_dropped_mid_settle_still_completes_and_ledgers() {
         gateway::a2a::types::TaskState::Completed,
         "the shielded section must finish the state save after the drop"
     );
+    // D6: the disconnected client's recovery data was persisted — the paid
+    // output and the payment evidence survive the dropped response.
+    assert!(
+        record
+            .artifact_text
+            .as_deref()
+            .is_some_and(|t| !t.is_empty()),
+        "the shielded section must persist the delivered artifact text (D6)"
+    );
+    assert!(
+        record.tx_signature.is_some(),
+        "the shielded section must persist the settlement signature (D6)"
+    );
+    assert!(
+        record
+            .receipt_path
+            .as_deref()
+            .is_some_and(|p| p.starts_with("/v1/receipts/")),
+        "the shielded section must persist the durable receipt path (D6)"
+    );
 }
 
 /// 2a-5: a panic INSIDE the shielded critical section surfaces as a
@@ -14755,6 +14841,411 @@ async fn pre_payment_checks_run_outside_shield_in_unchanged_order() {
         settle_count.load(std::sync::atomic::Ordering::SeqCst),
         0,
         "pre-check rejections must never reach settlement"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A2A settle-race hardening (conformance plan Slice 2a: under-lock re-check,
+// Working marker, revert-then-release, D6 terminal-arm persistence)
+//
+// Self-skip without Redis/Postgres. These extend the #566 concurrency pattern:
+// real `/a2a` route, counting/gated verifiers, durable Postgres assertions.
+// ---------------------------------------------------------------------------
+
+/// 2a-1: a task already in a TERMINAL state (Completed / Failed) with a FREE
+/// settle lock — the state a task rests in once its settle-lock TTL expired —
+/// must reject a fresh, otherwise-valid payment BEFORE settlement, with the
+/// task state unchanged.
+///
+/// This is the regression pin for the previously-documented handler money gap
+/// ("no terminal-state check at payment-submitted intake"): pre-fix, the
+/// payment passes its per-tx replay check + offer validation and settles a
+/// SECOND time (settle count 1 in this fixture). Fails red without the fix.
+#[tokio::test]
+async fn payment_against_terminal_task_rejects_before_settle() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let settle_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let verifier = Arc::new(SettleCountingDelayVerifier {
+        settle_count: Arc::clone(&settle_count),
+        delay: std::time::Duration::from_millis(0),
+    });
+    let Some((app, state)) = a2a_app_with_verifier_and_db(pool, verifier) else {
+        return;
+    };
+
+    for terminal in [
+        gateway::a2a::types::TaskState::Completed,
+        gateway::a2a::types::TaskState::Failed,
+    ] {
+        let (task_id, offer) = a2a_new_request(&app).await;
+
+        // Decide the task directly (terminal state, lock never held → FREE),
+        // simulating the at-rest state after a decided task's lock TTL expired.
+        let mut record = gateway::a2a::task_store::load_task(&state, &task_id)
+            .await
+            .expect("Redis is up in this test")
+            .expect("task record must exist");
+        record.state = terminal;
+        gateway::a2a::task_store::save_task(&state, &record)
+            .await
+            .expect("save terminal record");
+
+        let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
+        assert_eq!(
+            env["error"]["code"].as_i64(),
+            Some(-32001),
+            "payment against a {terminal:?} task must be rejected: {env}"
+        );
+        assert!(
+            env["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("terminal state"),
+            "rejection must name the terminal state: {env}"
+        );
+        assert_eq!(
+            settle_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a payment against a {terminal:?} task must NEVER reach settlement"
+        );
+        let after = gateway::a2a::task_store::load_task(&state, &task_id)
+            .await
+            .expect("Redis is up in this test")
+            .expect("task record must still exist");
+        assert_eq!(
+            after.state, terminal,
+            "the rejection must leave the task state unchanged"
+        );
+    }
+}
+
+/// 2a-2: a pre-settle settlement FAILURE (verifier returns `success=false`)
+/// reverts the `Working` marker back to `InputRequired` and releases the lock,
+/// so a corrected retry succeeds. Without the revert, the failed attempt
+/// leaves the task stuck in `Working` and the retry fast-fails at intake as
+/// "already in progress" instead of completing.
+#[tokio::test]
+async fn settle_failure_reverts_working_to_input_required() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+
+    // App 1: settlement FAILS (success=false) after verification passes.
+    let fail_verifier = Arc::new(SettleFailsExactVerifier {
+        settled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let Some((app, state)) = a2a_app_with_verifier_and_db(pool.clone(), fail_verifier) else {
+        return;
+    };
+
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(-32001),
+        "failed settlement must reject with ERR_PAYMENT_FAILED: {env}"
+    );
+    assert!(
+        !env["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already in progress"),
+        "the submission must fail at settlement, not at the lock/marker: {env}"
+    );
+
+    // THE revert pin: the failed attempt must leave the record payable again.
+    let record = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must exist");
+    assert_eq!(
+        record.state,
+        gateway::a2a::types::TaskState::InputRequired,
+        "a pre-settle failure must revert Working back to InputRequired"
+    );
+
+    // App 2 over the SAME Redis: a corrected retry settles and completes —
+    // proving both the state revert AND the lock release.
+    let Some((app2, _state2)) = a2a_app_with_verifier_and_db(pool, Arc::new(AlwaysPassVerifier))
+    else {
+        return;
+    };
+    let env2 = a2a_call_envelope(&app2, &a2a_payment_submitted_body(&task_id, &offer)).await;
+    assert!(
+        env2["error"].is_null(),
+        "a corrected retry after the revert must not be rejected: {env2}"
+    );
+    assert_eq!(
+        env2["result"]["status"]["state"], "completed",
+        "a corrected retry after the revert must complete: {env2}"
+    );
+}
+
+/// 2a-3: a FAILED `Working→InputRequired` revert still RELEASES the lock
+/// (uniform release semantics — the round-2 lock-disposition pin), increments
+/// the stuck-`Working` counter (D10-a), and leaves the task fail-safe stuck:
+/// a subsequent payment fast-fails without reaching settlement.
+///
+/// Deterministic construction (no sleeps): a gated verifier signals when
+/// settlement is in flight; the test then flips the record to a state from
+/// which the revert's `Working→InputRequired` transition is INVALID
+/// (`Completed`), releases the verifier, and observes the failure epilogue.
+#[tokio::test]
+async fn failed_revert_releases_lock_and_leaves_stuck_working() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let settle_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let verifier = Arc::new(GatedFailingVerifier {
+        reached: Arc::clone(&reached),
+        release: Arc::clone(&release),
+        settle_calls: Arc::clone(&settle_calls),
+    });
+    let Some((app, state)) = a2a_app_with_verifier_and_db(pool, verifier) else {
+        return;
+    };
+    let handle = test_prometheus_handle();
+
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let pay = a2a_payment_submitted_body(&task_id, &offer);
+
+    // Drive the payment on its own task; wait until settlement is provably in
+    // flight (the verifier signalled `reached` and is now parked on `release`).
+    let app_call = app.clone();
+    let call = tokio::spawn(async move { a2a_call_envelope(&app_call, &pay).await });
+    reached.notified().await;
+
+    // Mid-settle, the record must carry the persisted `Working` marker.
+    let mut record = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must exist");
+    assert_eq!(
+        record.state,
+        gateway::a2a::types::TaskState::Working,
+        "the Working settle-marker must be persisted before verify_and_settle"
+    );
+
+    // Sabotage the coming revert: flip the record to Completed, from which
+    // `Working→InputRequired` (what the revert writes) is an invalid
+    // transition — `update_task_state` will fail exactly at the revert.
+    record.state = gateway::a2a::types::TaskState::Completed;
+    gateway::a2a::task_store::save_task(&state, &record)
+        .await
+        .expect("save sabotaged record");
+
+    let stuck_before = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    release.notify_one();
+    let env = call.await.expect("payment call task must not panic");
+
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(-32001),
+        "the gated settlement failure must reject with ERR_PAYMENT_FAILED: {env}"
+    );
+
+    // The failed revert is observable on the stuck-Working counter (D10-a).
+    // `>` not an exact delta: the Prometheus family is process-global and
+    // other parallel tests may also increment it (same caveat as the #566
+    // concurrent-reject counter assertion).
+    let stuck_after = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    assert!(
+        stuck_after > stuck_before,
+        "a failed Working revert must increment solvela_a2a_task_stuck_working_total \
+         (before={stuck_before}, after={stuck_after})"
+    );
+
+    // The lock is STILL released after the failed revert (uniform release
+    // semantics): we can acquire it ourselves.
+    let cache = state.cache.as_ref().expect("redis-backed test");
+    assert!(
+        cache
+            .acquire_settle_lock(&task_id, 5)
+            .await
+            .expect("lock probe"),
+        "a failed revert must still release the settle lock"
+    );
+    cache.release_settle_lock(&task_id).await;
+
+    // Fail-safe stuck: put the record in `Working` (the real-world residue of
+    // a failed revert) and prove a fresh payment fast-fails without reaching
+    // settlement — never a double charge, at worst under-delivery until the
+    // task TTL reaps it.
+    record.state = gateway::a2a::types::TaskState::Working;
+    gateway::a2a::task_store::save_task(&state, &record)
+        .await
+        .expect("save stuck-Working record");
+    let env2 = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
+    assert_eq!(
+        env2["error"]["code"].as_i64(),
+        Some(-32001),
+        "a payment against a stuck-Working task must fast-fail: {env2}"
+    );
+    assert!(
+        env2["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already in progress"),
+        "the stuck-Working rejection must read as settlement-in-progress: {env2}"
+    );
+    assert_eq!(
+        settle_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the stuck-Working fast-fail must never reach settlement again"
+    );
+}
+
+/// 2a-8: the dev-bypass settlement path ALSO persists the `Working` marker —
+/// pinning the plan's placement decision that the single marker write sits
+/// BEFORE the dev-bypass fork, covering both branches.
+///
+/// The persisted record is the pin: with the tightened transition table
+/// (`InputRequired→Completed` removed), the ONLY route to a persisted
+/// `Completed` runs through `Working`. If the marker write were moved inside
+/// the non-bypass branch, the dev-bypass completion's `update_task_state`
+/// would fail its transition check (a log-only failure) and this record would
+/// still read `input-required` here.
+#[tokio::test]
+async fn working_marker_written_on_dev_bypass_path() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let Some((app, state)) =
+        a2a_app_with_providers_and_bypass(Some(pool), mock_provider_registry(), true)
+    else {
+        return;
+    };
+
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
+    assert!(
+        env["error"].is_null(),
+        "dev-bypass flow must complete: {env}"
+    );
+    assert_eq!(
+        env["result"]["status"]["state"], "completed",
+        "dev-bypass flow must return a completed Task: {env}"
+    );
+
+    let record = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must exist");
+    assert_eq!(
+        record.state,
+        gateway::a2a::types::TaskState::Completed,
+        "the PERSISTED state must be Completed — reachable only via the \
+         Working marker once the direct InputRequired→Completed arm is gone"
+    );
+    // The dev-bypass completion also persists its D6 refs (the bypass and
+    // real-settle branches share the terminal-arm code).
+    assert_eq!(
+        record.tx_signature.as_deref(),
+        Some("dev_bypass"),
+        "dev-bypass completion must persist its settlement ref"
+    );
+}
+
+/// 2a-7 (D6 write-side pin): both terminal arms persist their recovery data
+/// onto the `TaskRecord` — the Completed arm stores the delivered artifact
+/// text plus `tx_signature`/`receipt_path`; the Failed arm (provider failed
+/// AFTER settlement) stores the refs with NO artifact text. This is what a
+/// future `tasks/get` serves a client that lost the `message/send` response.
+#[tokio::test]
+async fn completed_and_failed_saves_persist_artifact_and_receipt_refs() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+
+    // — Completed arm: mock providers deliver, AlwaysPassVerifier settles. —
+    let Some((app, state)) = a2a_app_with_redis_and_db(pool.clone()) else {
+        return;
+    };
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
+    assert_eq!(
+        env["result"]["status"]["state"], "completed",
+        "success leg must complete: {env}"
+    );
+    let wire_artifact_text = env["result"]["artifacts"][0]["parts"][0]["text"]
+        .as_str()
+        .expect("completed Task carries the artifact text")
+        .to_string();
+
+    let record = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must exist");
+    assert_eq!(record.state, gateway::a2a::types::TaskState::Completed);
+    assert_eq!(
+        record.artifact_text.as_deref(),
+        Some(wire_artifact_text.as_str()),
+        "the persisted artifact text must equal the delivered response"
+    );
+    assert!(
+        record
+            .artifact_text
+            .as_deref()
+            .is_some_and(|t| !t.is_empty()),
+        "the persisted artifact text must be non-empty"
+    );
+    assert_eq!(
+        record.tx_signature.as_deref(),
+        Some("MockSettledTxSig123"),
+        "the persisted tx_signature must be the settlement signature"
+    );
+    assert!(
+        record
+            .receipt_path
+            .as_deref()
+            .is_some_and(|p| p.starts_with("/v1/receipts/")),
+        "the persisted receipt_path must be the public receipt route, got: {:?}",
+        record.receipt_path
+    );
+
+    // — Failed arm: AlwaysPassVerifier settles, then every provider fails. —
+    let Some((app_fail, state_fail)) =
+        a2a_app_with_redis_db_and_providers(Some(pool), failing_provider_registry())
+    else {
+        return;
+    };
+    let (task_id_fail, offer_fail) = a2a_new_request(&app_fail).await;
+    let env_fail = a2a_call_envelope(
+        &app_fail,
+        &a2a_payment_submitted_body(&task_id_fail, &offer_fail),
+    )
+    .await;
+    assert_eq!(
+        env_fail["error"]["code"].as_i64(),
+        Some(-32002),
+        "failed leg must return ERR_PROVIDER_ERROR: {env_fail}"
+    );
+
+    let record_fail = gateway::a2a::task_store::load_task(&state_fail, &task_id_fail)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must exist");
+    assert_eq!(record_fail.state, gateway::a2a::types::TaskState::Failed);
+    assert_eq!(
+        record_fail.artifact_text, None,
+        "no artifact text exists on the Failed arm — the provider never delivered"
+    );
+    assert_eq!(
+        record_fail.tx_signature.as_deref(),
+        Some("MockSettledTxSig123"),
+        "the Failed arm must persist the settlement signature (payment evidence)"
+    );
+    assert!(
+        record_fail
+            .receipt_path
+            .as_deref()
+            .is_some_and(|p| p.starts_with("/v1/receipts/")),
+        "the Failed arm must persist the durable receipt path, got: {:?}",
+        record_fail.receipt_path
     );
 }
 
@@ -14974,22 +15465,27 @@ async fn a2a_provider_failure_after_settle_writes_ledger_and_holds_lock() {
         "no provider usage on a failed call → output_tokens 0"
     );
 
-    // A retry for the SAME task must NOT be able to re-settle: the lock is HELD.
-    // A fresh submission is rejected as "already in progress" (the funds moved;
-    // re-settling already-moved funds is exactly what the held lock prevents).
+    // A retry for the SAME task must NOT be able to re-settle. Since Slice 2a
+    // the rejection stack is layered: the intake fast-fail sees the persisted
+    // `Failed` state and rejects with the friendly terminal-state message
+    // BEFORE the (still-held) lock is even consulted; the held lock and the
+    // under-lock re-check remain behind it for the interleaved cases. The
+    // assertion flip from "already in progress" to "terminal state" is the
+    // designed consequence of the intake fast-fail (conformance plan §5
+    // step 1) — the money outcome (no re-settle) is unchanged.
     let pay_retry = a2a_payment_submitted_body(&task_id, &offer);
     let env_retry = a2a_call_envelope(&app, &pay_retry).await;
     assert_eq!(
         env_retry["error"]["code"].as_i64(),
         Some(-32001),
-        "retry after a post-settle provider failure must be rejected (lock held): {env_retry}"
+        "retry after a post-settle provider failure must be rejected: {env_retry}"
     );
     assert!(
         env_retry["error"]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("already in progress"),
-        "retry must be blocked by the HELD settlement lock, not re-settle: {env_retry}"
+            .contains("terminal state"),
+        "retry must be rejected on the persisted terminal state, not re-settle: {env_retry}"
     );
 }
 

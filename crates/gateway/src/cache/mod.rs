@@ -53,12 +53,22 @@ const A2A_SETTLE_LOCK_PREFIX: &str = "solvela:a2a:settle_lock:";
 
 /// TTL (seconds) for the A2A settlement lock (issue #566).
 ///
-/// A single settlement is seconds (on-chain confirm + provider call). 120s
-/// comfortably outlives the worst-case attempt and matches the standard-tx
-/// replay-key window (so a crashed-mid-settlement task's lock and its replay
-/// key expire together). It is well under the 600s A2A task TTL, so a task
-/// whose holder crashed AFTER acquiring but BEFORE settling re-opens for one
-/// legitimate retry inside the task's own lifetime rather than being stranded.
+/// This TTL does NOT provably bound a settlement attempt: the provider leg
+/// held inside the lock window runs a 90s per-request timeout × transient
+/// retries × the cross-provider fallback chain (`providers/mod.rs`), which can
+/// exceed 120s — mid-settlement lock expiry is a real state, not a
+/// theoretical one. The persisted `Working` marker (written under the lock
+/// BEFORE any funds move, `a2a/handler.rs`), not this TTL, is what bounds
+/// mid-settlement exposure: a competing payment (or future cancel) re-checks
+/// task state under its own lock and rejects on `Working` even after this
+/// lock has expired. The TTL's job is narrower: it bounds how long a holder
+/// that crashed BEFORE writing the `Working` marker blocks the task (well
+/// under the 600s task TTL, so that task re-opens for a legitimate retry
+/// inside its own lifetime; a crash AFTER the marker leaves the task
+/// fail-safe stuck in `Working` until the task TTL — never re-payable, never
+/// double-charged, counted on `solvela_a2a_task_stuck_working_total`), and it
+/// matches the standard-tx replay-key window so a crashed-mid-settlement
+/// task's lock and replay key expire together.
 pub const A2A_SETTLE_LOCK_TTL_SECS: u64 = 120;
 
 /// Redis key prefix for the v0 spend-down channel per-DRAW lock.
