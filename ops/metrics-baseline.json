@@ -1,0 +1,19 @@
+{
+  "_comment": "Acknowledged counter baselines for scripts/metrics_alert_check.py. After investigating a tripped alert, bump the counter here to the observed value in a PR — the bump IS the auditable acknowledgement. Counters absent from this file default to 0.",
+  "solvela_a2a_task_stuck_working_total": 0,
+  "solvela_a2a_task_state_update_failed_after_settle_total": 0,
+  "solvela_a2a_settle_lock_release_failed_total": 0,
+  "solvela_a2a_provider_failed_after_settle_total": 0,
+  "solvela_a2a_settlement_record_skipped_total": 0,
+  "solvela_spend_log_skipped_total": 0,
+  "solvela_receipt_write_failures_total": 0,
+  "solvela_receipt_skipped_total": 0,
+  "solvela_vendor_receivable_write_failures_total": 0,
+  "solvela_channel_refund_sweep_error_total": 0,
+  "solvela_channel_refund_mark_accepted_failed_total": 0,
+  "solvela_channel_refund_claim_lost_total": 0,
+  "solvela_channel_refund_corrupt_row_total": 0,
+  "solvela_channel_refund_balance_insufficient_total": 0,
+  "solvela_channel_refund_daily_cap_exceeded_total": 0,
+  "solvela_channel_draw_lock_lost_total": 0
+}
