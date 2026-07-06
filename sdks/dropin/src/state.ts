@@ -49,8 +49,16 @@ export async function saveState(statePath: string, state: DropinState): Promise<
   }
   if (process.platform !== 'win32') {
     // Belt-and-braces: writeFile's mode can be widened by the umask on some
-    // platforms; re-assert on the final path.
-    await fs.chmod(statePath, 0o600).catch(() => {});
+    // platforms; re-assert on the final path. This file carries the session
+    // seed, so a failed tighten is worth a loud warning (never fatal — the
+    // write itself already happened at mode 0600).
+    await fs.chmod(statePath, 0o600).catch((err: unknown) => {
+      console.error(
+        `[solvela-dropin] warning: could not re-assert 0600 on ${statePath}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
   }
 }
 

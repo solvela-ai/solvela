@@ -79,14 +79,25 @@ interface Recorded {
 const openServers: Server[] = [];
 after(async () => {
   await Promise.all(
-    openServers.map((s) => new Promise<void>((resolve) => s.close(() => resolve()))),
+    openServers.map(
+      (s) =>
+        new Promise<void>((resolve) => {
+          s.closeAllConnections(); // a hung/red stream must never wedge the run
+          s.close(() => resolve());
+        }),
+    ),
   );
 });
 
-async function startFake(
-  onChannelOpen?: (body: unknown, res: ServerResponse) => void,
-  onChannelClose?: (body: unknown, res: ServerResponse) => void,
-): Promise<{ url: string; requests: Recorded[] }> {
+interface FakeOptions {
+  usdcMint?: string;
+  providerWallet?: string;
+  onChannelOpen?: (body: unknown, res: ServerResponse) => void;
+  onChannelClose?: (body: unknown, res: ServerResponse) => void;
+}
+
+async function startFake(opts: FakeOptions = {}): Promise<{ url: string; requests: Recorded[] }> {
+  const { onChannelOpen, onChannelClose } = opts;
   const requests: Recorded[] = [];
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
@@ -101,8 +112,8 @@ async function startFake(
           escrow_program_id: '9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU',
           current_slot: 1_000_000,
           network: SOLANA_NETWORK,
-          usdc_mint: USDC_MINT,
-          provider_wallet: PROVIDER_WALLET,
+          usdc_mint: opts.usdcMint ?? USDC_MINT,
+          provider_wallet: opts.providerWallet ?? PROVIDER_WALLET,
         }),
       );
       return;
@@ -162,8 +173,10 @@ async function writeWalletFile(dir: string): Promise<{ walletPath: string; keypa
 
 describe('open command', () => {
   it('refuses without confirmation — nothing signed, nothing POSTed, no state file', async () => {
-    const fake = await startFake((_body, res) => {
-      res.writeHead(200).end('{}');
+    const fake = await startFake({
+      onChannelOpen: (_body, res) => {
+        res.writeHead(200).end('{}');
+      },
     });
     const dir = await tmpDir();
     const { walletPath } = await writeWalletFile(dir);
@@ -191,22 +204,24 @@ describe('open command', () => {
 
   it('opens the channel: 0600 state file, env vars printed, session seed NEVER in output', async () => {
     let openBody: Record<string, unknown> | null = null;
-    const fake = await startFake((body, res) => {
-      openBody = body as Record<string, unknown>;
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          channel_id: CHANNEL_ID_B58,
-          agent_wallet: (body as Record<string, unknown>).agent_wallet,
-          session_key: (body as Record<string, unknown>).session_key,
-          deposited_atomic: 5_000_000,
-          settled_atomic: 0,
-          last_cumulative_atomic: 0,
-          status: 'open',
-          funding_tx_sig: 'FAKE_SIG',
-          network: SOLANA_NETWORK,
-        }),
-      );
+    const fake = await startFake({
+      onChannelOpen: (body, res) => {
+        openBody = body as Record<string, unknown>;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            channel_id: CHANNEL_ID_B58,
+            agent_wallet: (body as Record<string, unknown>).agent_wallet,
+            session_key: (body as Record<string, unknown>).session_key,
+            deposited_atomic: 5_000_000,
+            settled_atomic: 0,
+            last_cumulative_atomic: 0,
+            status: 'open',
+            funding_tx_sig: 'FAKE_SIG',
+            network: SOLANA_NETWORK,
+          }),
+        );
+      },
     });
     const dir = await tmpDir();
     const { walletPath, keypair } = await writeWalletFile(dir);
@@ -241,6 +256,14 @@ describe('open command', () => {
     const tx = VersionedTransaction.deserialize(new Uint8Array(Buffer.from(String(ob.funding_tx), 'base64')));
     assert.equal(tx.message.staticAccountKeys[0].toBase58(), keypair.publicKey.toBase58());
     assert.equal(tx.signatures.length, 1);
+    // BLOCKER regression (round-1 review): the signature must CRYPTOGRAPHICALLY
+    // verify against the real wallet key. `Keypair.fromSecretKey` ALIASES its
+    // input, so zeroing the loaded buffer before signing produced a structurally
+    // valid tx signed by an all-zero key — structure checks alone let that ship.
+    assert.ok(
+      ed25519.verify(tx.signatures[0], tx.message.serialize(), keypair.publicKey.toBytes()),
+      'funding tx signature must verify against the REAL wallet pubkey',
+    );
 
     // State file: 0600, complete, matches the gateway response.
     const stat = await fs.stat(statePath);
@@ -264,6 +287,109 @@ describe('open command', () => {
     assert.match(out, /5(\.0+)? USDC/);
     assert.ok(out.includes(PROVIDER_WALLET));
   });
+
+  // HIGH-2 (round-1 review): the gateway-reported mint/recipient are the
+  // attacker-controlled surface of a phished --gateway. The mint is pinned to
+  // canonical mainnet USDC unless --expected-mint overrides; --expected-recipient
+  // pins the recipient when given. --yes NEVER bypasses these checks.
+  const DEVNET_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
+
+  it('rejects a non-canonical gateway mint even with --yes — nothing signed', async () => {
+    const fake = await startFake({
+      usdcMint: DEVNET_MINT,
+      onChannelOpen: (_body, res) => res.writeHead(200).end('{}'),
+    });
+    const dir = await tmpDir();
+    const { walletPath } = await writeWalletFile(dir);
+    const statePath = path.join(dir, 'dropin.json');
+
+    await assert.rejects(
+      openChannel({
+        gateway: fake.url,
+        amount: '5',
+        walletPath,
+        rpcUrl: fake.url,
+        yes: true, // must NOT bypass the mint pin
+        port: 8484,
+        statePath,
+        log: () => {},
+      }),
+      /mint/i,
+    );
+
+    assert.ok(!fake.requests.some((r) => r.url === '/'), 'no blockhash fetch — nothing was signed');
+    assert.ok(!fake.requests.some((r) => r.url === '/v1/channel/open'), 'no open POST');
+    await assert.rejects(fs.access(statePath), 'state file must not exist');
+  });
+
+  it('accepts a non-canonical mint when --expected-mint pins it explicitly', async () => {
+    const fake = await startFake({
+      usdcMint: DEVNET_MINT,
+      onChannelOpen: (body, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            channel_id: CHANNEL_ID_B58,
+            agent_wallet: (body as Record<string, unknown>).agent_wallet,
+            session_key: (body as Record<string, unknown>).session_key,
+            deposited_atomic: 5_000_000,
+            settled_atomic: 0,
+            last_cumulative_atomic: 0,
+            status: 'open',
+            funding_tx_sig: 'FAKE_SIG',
+            network: SOLANA_NETWORK,
+          }),
+        );
+      },
+    });
+    const dir = await tmpDir();
+    const { walletPath } = await writeWalletFile(dir);
+    const statePath = path.join(dir, 'dropin.json');
+
+    await openChannel({
+      gateway: fake.url,
+      amount: '5',
+      walletPath,
+      rpcUrl: fake.url,
+      yes: true,
+      expectedMint: DEVNET_MINT,
+      port: 8484,
+      statePath,
+      log: () => {},
+    });
+
+    assert.ok(fake.requests.some((r) => r.url === '/v1/channel/open'), 'open proceeded under the explicit pin');
+    const state = await loadState(statePath);
+    assert.equal(state.channel_id, CHANNEL_ID_B58);
+  });
+
+  it('rejects an --expected-recipient mismatch even with --yes — nothing signed', async () => {
+    const fake = await startFake({
+      onChannelOpen: (_body, res) => res.writeHead(200).end('{}'),
+    });
+    const dir = await tmpDir();
+    const { walletPath } = await writeWalletFile(dir);
+    const statePath = path.join(dir, 'dropin.json');
+
+    await assert.rejects(
+      openChannel({
+        gateway: fake.url,
+        amount: '5',
+        walletPath,
+        rpcUrl: fake.url,
+        yes: true, // must NOT bypass the recipient pin
+        expectedRecipient: bs58.encode(new Uint8Array(32).fill(3)), // ≠ PROVIDER_WALLET
+        port: 8484,
+        statePath,
+        log: () => {},
+      }),
+      /recipient/i,
+    );
+
+    assert.ok(!fake.requests.some((r) => r.url === '/'), 'no blockhash fetch — nothing was signed');
+    assert.ok(!fake.requests.some((r) => r.url === '/v1/channel/open'), 'no open POST');
+    await assert.rejects(fs.access(statePath), 'state file must not exist');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -273,20 +399,22 @@ describe('open command', () => {
 describe('close command', () => {
   it('signs buildCloseMessage with the session key and POSTs the exact close shape', async () => {
     let closeBody: Record<string, unknown> | null = null;
-    const fake = await startFake(undefined, (body, res) => {
-      closeBody = body as Record<string, unknown>;
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          channel_id: CHANNEL_ID_B58,
-          deposited_atomic: 5_000_000,
-          settled_atomic: 0,
-          refundable_atomic: 4_989_500,
-          status: 'closing',
-          refund_status: 'reserved',
-          tx_signature: null,
-        }),
-      );
+    const fake = await startFake({
+      onChannelClose: (body, res) => {
+        closeBody = body as Record<string, unknown>;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            channel_id: CHANNEL_ID_B58,
+            deposited_atomic: 5_000_000,
+            settled_atomic: 0,
+            refundable_atomic: 4_989_500,
+            status: 'closing',
+            refund_status: 'reserved',
+            tx_signature: null,
+          }),
+        );
+      },
     });
     const dir = await tmpDir();
     const statePath = path.join(dir, 'dropin.json');

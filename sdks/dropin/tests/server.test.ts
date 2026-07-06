@@ -107,7 +107,13 @@ type FakeHandler = (
 const openServers: Server[] = [];
 after(async () => {
   await Promise.all(
-    openServers.map((s) => new Promise<void>((resolve) => s.close(() => resolve()))),
+    openServers.map(
+      (s) =>
+        new Promise<void>((resolve) => {
+          s.closeAllConnections(); // a hung/red stream must never wedge the run
+          s.close(() => resolve());
+        }),
+    ),
   );
 });
 
@@ -133,7 +139,11 @@ async function startFakeGateway(handler: FakeHandler): Promise<FakeGateway> {
     url: `http://127.0.0.1:${port}`,
     requests,
     server,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
   };
 }
 
@@ -156,7 +166,11 @@ async function startSidecar(
   const port = (server.address() as AddressInfo).port;
   return {
     url: `http://127.0.0.1:${port}`,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
   };
 }
 
@@ -698,6 +712,124 @@ describe('PAYMENT-SIGNATURE golden shape', () => {
 
     // Only the unpaid forward — nothing was signed against a non-exact quote.
     assert.equal(messagesPosts(gw).length, 1);
+
+    await sc.close();
+    await gw.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. Lifecycle + relay fidelity (round-1 review findings)
+// ---------------------------------------------------------------------------
+
+describe('lifecycle + relay fidelity', () => {
+  it('client abort mid-SSE aborts the upstream read (gateway observes the close)', async () => {
+    let upstreamClosed!: () => void;
+    const gone = new Promise<void>((resolve) => {
+      upstreamClosed = resolve;
+    });
+    const gw = await startFakeGateway(
+      standardHandler((_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write('event: ping\ndata: {}\n\n');
+        res.on('close', upstreamClosed);
+        // Never end — a full-rate stream the client walks away from.
+      }),
+    );
+    const sc = await startSidecar(gw.url);
+
+    const ac = new AbortController();
+    const resp = await fetch(`${sc.url}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${LOCAL_TOKEN}`, 'content-type': 'application/json' },
+      body: '{"model":"m","stream":true,"messages":[]}',
+      signal: ac.signal,
+    });
+    assert.equal(resp.status, 200);
+    const reader = (resp.body as ReadableStream<Uint8Array>).getReader();
+    await reader.read(); // first chunk arrived — the stream is live
+    ac.abort();
+
+    await Promise.race([
+      gone,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('upstream kept streaming after client abort')), 3000),
+      ),
+    ]);
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('upstream body error mid-SSE terminates the client abnormally, not as a clean end', async () => {
+    const gw = await startFakeGateway(
+      standardHandler((_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write('event: ping\ndata: {}\n\n');
+        setTimeout(() => res.destroy(), 20); // upstream dies mid-stream
+      }),
+    );
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(`${sc.url}/v1/messages`, '{"model":"m","stream":true,"messages":[]}');
+    assert.equal(resp.status, 200);
+    await assert.rejects(
+      (async () => {
+        for await (const _ of resp.body as unknown as AsyncIterable<Uint8Array>) {
+          void _;
+        }
+      })(),
+      undefined,
+      'a truncated upstream must NOT read as a clean stream end to the client',
+    );
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('a paid-retry fetch that rejects outright fails closed with a 502', async () => {
+    const gw = await startFakeGateway((req, res, raw) => {
+      if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(escrowConfigBody());
+        return;
+      }
+      if (req.method === 'POST' && req.url.startsWith('/v1/messages')) {
+        if (!req.headers['payment-signature']) {
+          res.writeHead(402, { 'content-type': 'application/json' });
+          res.end(challengeBody());
+          return;
+        }
+        raw.socket.destroy(); // the retry never gets a response — fetch rejects
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(`${sc.url}/v1/messages`, '{"model":"m","messages":[]}');
+    assert.equal(resp.status, 502);
+    const err = (await resp.json()) as { type: string; error: { type: string } };
+    assert.equal(err.type, 'error');
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('relays duplicate set-cookie headers without collapsing them', async () => {
+    const gw = await startFakeGateway(
+      standardHandler((_req, res) => {
+        res.setHeader('set-cookie', ['a=1; Path=/', 'b=2; Path=/']);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"id":"msg_c"}');
+      }),
+    );
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(`${sc.url}/v1/messages`, '{"model":"m","messages":[]}');
+    assert.equal(resp.status, 200);
+    await resp.text();
+    assert.deepEqual(resp.headers.getSetCookie(), ['a=1; Path=/', 'b=2; Path=/']);
 
     await sc.close();
     await gw.close();

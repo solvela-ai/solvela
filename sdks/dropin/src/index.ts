@@ -22,12 +22,18 @@ const DEFAULT_PORT = 8484;
 const USAGE = `solvela-dropin — Claude Code drop-in signing sidecar
 
 Usage:
-  solvela-dropin open --gateway <url> --amount <usdc> --wallet <keypair.json> [--rpc-url <url>] [--port <n>] [--yes]
+  solvela-dropin open --gateway <url> --amount <usdc> --wallet <keypair.json>
+                      [--rpc-url <url>] [--port <n>] [--yes]
+                      [--expected-mint <b58>] [--expected-recipient <b58>]
   solvela-dropin serve [--port <n>]
   solvela-dropin close
 
 open   Fund + open a spend-down channel, write ~/.solvela/dropin.json, and
        print the two env vars (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN).
+       The gateway-reported USDC mint must match canonical mainnet USDC
+       unless --expected-mint pins another (e.g. devnet); --expected-recipient
+       pins the deposit recipient. Mismatches are hard rejects that --yes
+       does NOT bypass.
 serve  Run the sidecar on 127.0.0.1 (default port ${DEFAULT_PORT}).
 close  Cooperatively close the channel; the unspent balance is refunded to
        the funding wallet. Re-run to poll the refund status.
@@ -55,6 +61,10 @@ async function serve(args: string[]): Promise<void> {
   const signSeed = bs58.decode(state.session_seed_b58);
 
   const persisted: DropinState = { ...state, port };
+  // Rate-limit the persist-failure warning: log once when writes start
+  // failing, again only after a write succeeds (a broken disk must not spam
+  // one line per draw).
+  let persistFailureLogged = false;
   const server = createSidecarServer({
     gatewayUrl: state.gateway_url,
     localToken: state.local_token,
@@ -65,7 +75,20 @@ async function serve(args: string[]): Promise<void> {
       // Best-effort optimization: the gateway's ledger is ground truth and the
       // tracker resyncs from it, so a lost write costs one round-trip, never money.
       persisted.last_cumulative = last.toString();
-      void saveState(statePath, persisted).catch(() => {});
+      void saveState(statePath, persisted).then(
+        () => {
+          persistFailureLogged = false;
+        },
+        (err: unknown) => {
+          if (persistFailureLogged) return;
+          persistFailureLogged = true;
+          console.error(
+            `[solvela-dropin] could not persist last_cumulative to ${statePath}: ${
+              err instanceof Error ? err.message : String(err)
+            } — harmless for funds (the gateway ledger is ground truth); suppressing repeats until a write succeeds`,
+          );
+        },
+      );
     },
   });
 
@@ -87,6 +110,8 @@ async function open(args: string[]): Promise<void> {
       amount: { type: 'string' },
       wallet: { type: 'string' },
       'rpc-url': { type: 'string' },
+      'expected-mint': { type: 'string' },
+      'expected-recipient': { type: 'string' },
       port: { type: 'string' },
       state: { type: 'string' },
       yes: { type: 'boolean', default: false },
@@ -104,6 +129,8 @@ async function open(args: string[]): Promise<void> {
     amount: values.amount,
     walletPath: values.wallet,
     rpcUrl: values['rpc-url'],
+    expectedMint: values['expected-mint'],
+    expectedRecipient: values['expected-recipient'],
     yes: values.yes ?? false,
     port,
     statePath: values.state,

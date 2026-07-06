@@ -44,9 +44,14 @@ export async function closeChannel(opts: CloseOptions = {}): Promise<void> {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ channel_id: state.channel_id, signature: signatureB64 }),
+      // Short deadline is safe here: close is idempotent gateway-side, so a
+      // timed-out close is simply re-run (that is also the polling surface).
+      signal: AbortSignal.timeout(10_000),
     });
   } catch {
-    throw new Error(`could not reach ${state.gateway_url}/v1/channel/close`);
+    throw new Error(
+      `could not reach ${state.gateway_url}/v1/channel/close — the close is idempotent; simply re-run it`,
+    );
   }
   const text = await resp.text();
   if (!resp.ok) {

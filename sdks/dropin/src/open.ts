@@ -42,6 +42,19 @@ import { saveState, defaultStatePath } from './state.js';
 const USDC_DECIMALS = 6;
 const U64_MAX = 0xffffffffffffffffn;
 
+/** Canonical mainnet USDC mint — the same client-side pin signer-core's
+ * sign.ts carries. The gateway-reported mint must match this (or an explicit
+ * `--expected-mint`) before anything is signed. */
+const USDC_MINT_MAINNET = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+
+/** Deadline for the config fetch (fast metadata read). */
+const CONFIG_TIMEOUT_MS = 10_000;
+/** Deadline for POST /v1/channel/open. Deliberately LONG: the gateway
+ * broadcasts + confirms the funding transfer on-chain before responding, and
+ * abandoning the request after the broadcast would lose the channel_id for a
+ * deposit that still lands. */
+const OPEN_TIMEOUT_MS = 120_000;
+
 /**
  * Parse a human-entered USDC decimal into atomic units (6 decimals) with
  * INTEGER math only — no float ever touches the amount (solvela-fintech §1).
@@ -114,11 +127,16 @@ export async function loadKeypair(walletPath: string): Promise<Keypair> {
   }
   try {
     // fromSecretKey validates the seed→pubkey relationship (rejects tampering).
-    return Keypair.fromSecretKey(secret);
+    // BLOCKER regression guard (round-1 review): fromSecretKey ALIASES its
+    // input array — it does NOT copy. Hand it a defensive copy so zeroing OUR
+    // buffer below cannot wipe the live key the funding tx is later signed
+    // with (a zeroed key still "signs" without throwing; the signature just
+    // fails verification on-chain).
+    return Keypair.fromSecretKey(new Uint8Array(secret));
   } catch {
     throw new Error(`wallet file ${walletPath} does not contain a valid ed25519 secret key`);
   } finally {
-    // Best-effort: Keypair copied the bytes; wipe OUR buffer.
+    // Best-effort: wipe the decoded buffer; the Keypair's copy stays live.
     secret.fill(0);
   }
 }
@@ -137,7 +155,9 @@ function generateSessionKey(): { seed: Uint8Array; pubkeyB58: string } {
 async function fetchEscrowConfig(gateway: string): Promise<{ usdcMint: string; providerWallet: string }> {
   let resp: Response;
   try {
-    resp = await fetch(`${gateway}/v1/escrow/config`);
+    resp = await fetch(`${gateway}/v1/escrow/config`, {
+      signal: AbortSignal.timeout(CONFIG_TIMEOUT_MS),
+    });
   } catch {
     throw new Error(`could not reach ${gateway}/v1/escrow/config — is the gateway URL correct?`);
   }
@@ -172,6 +192,19 @@ export interface OpenOptions {
   log?: (line: string) => void;
   /** Confirmation hook (default: interactive terminal prompt). */
   confirm?: (summary: string) => Promise<boolean>;
+  /**
+   * Pin for the gateway-reported USDC mint. Defaults to the canonical
+   * MAINNET mint — pass explicitly for devnet etc. A mismatch is a HARD
+   * reject that `--yes` never bypasses.
+   */
+  expectedMint?: string;
+  /**
+   * Optional pin for the gateway-reported recipient wallet. When set, a
+   * mismatch is a HARD reject that `--yes` never bypasses. Without it the
+   * recipient is trusted from the gateway config (state that risk to the
+   * user in the confirmation).
+   */
+  expectedRecipient?: string;
 }
 
 export async function openChannel(opts: OpenOptions): Promise<void> {
@@ -183,12 +216,37 @@ export async function openChannel(opts: OpenOptions): Promise<void> {
   const wallet = await loadKeypair(opts.walletPath);
   const { usdcMint, providerWallet } = await fetchEscrowConfig(gateway);
 
+  // Independent anchors BEFORE anything is signed (round-1 HIGH): the config
+  // response is only as trustworthy as --gateway — a phished/MITM'd gateway
+  // controls both the mint and the recipient. The mint is pinned to canonical
+  // mainnet USDC unless --expected-mint overrides; the recipient is pinned
+  // only when --expected-recipient is given. These are HARD failures that
+  // --yes never bypasses (--yes only skips the interactive prompt AFTER all
+  // checks pass).
+  const expectedMint = opts.expectedMint ?? USDC_MINT_MAINNET;
+  if (usdcMint !== expectedMint) {
+    throw new Error(
+      `gateway reported USDC mint ${usdcMint} but ${
+        opts.expectedMint !== undefined ? '--expected-mint pins' : 'the canonical mainnet USDC mint is'
+      } ${expectedMint}; refusing to sign (pass --expected-mint to pin a non-mainnet mint deliberately)`,
+    );
+  }
+  if (opts.expectedRecipient !== undefined && providerWallet !== opts.expectedRecipient) {
+    throw new Error(
+      `gateway reported recipient ${providerWallet} but --expected-recipient pins ${opts.expectedRecipient}; refusing to sign`,
+    );
+  }
+
   // Verify-what-you-sign, BEFORE any signature exists.
+  const recipientProvenance =
+    opts.expectedRecipient !== undefined
+      ? '(matches --expected-recipient)'
+      : '(gateway-reported — pass --expected-recipient to verify it independently)';
   const summary =
     `About to sign a USDC funding transfer:\n` +
     `  amount:    ${opts.amount} USDC (${atomic} atomic)\n` +
     `  from:      ${wallet.publicKey.toBase58()}\n` +
-    `  recipient: ${providerWallet}\n` +
+    `  recipient: ${providerWallet} ${recipientProvenance}\n` +
     `  mint:      ${usdcMint}\n` +
     `  gateway:   ${gateway}\n` +
     `This deposit funds a spend-down channel; the unspent balance is refundable via \`solvela-dropin close\`.`;
@@ -221,9 +279,16 @@ export async function openChannel(opts: OpenOptions): Promise<void> {
         session_key: session.pubkeyB58,
         funding_tx: fundingTx,
       }),
+      // Long deadline: the gateway confirms the funding on-chain before
+      // replying; abandoning early would lose the channel_id for a deposit
+      // that may still land.
+      signal: AbortSignal.timeout(OPEN_TIMEOUT_MS),
     });
   } catch {
-    throw new Error(`could not reach ${gateway}/v1/channel/open`);
+    throw new Error(
+      `could not reach ${gateway}/v1/channel/open (or it did not respond within ${OPEN_TIMEOUT_MS / 1000}s). ` +
+        'NOTE: the funding transfer may still have been broadcast — check your wallet before retrying.',
+    );
   }
   const respText = await resp.text();
   if (!resp.ok) {

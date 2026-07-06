@@ -34,6 +34,14 @@ npx solvela-dropin serve
 Solvela `wallet.json` (`{"private_key": "<base58>"}`, as written by the MCP
 server / `solvela wallet init`).
 
+**Verify what you sign.** The deposit recipient and mint are discovered from
+the gateway's `/v1/escrow/config` — which is only as trustworthy as the
+`--gateway` URL you typed. The mint is pinned to canonical mainnet USDC and a
+mismatch is a hard reject (`--expected-mint` pins a non-mainnet mint
+deliberately, e.g. devnet). Pass `--expected-recipient <b58>` to also pin the
+recipient independently. `--yes` only skips the interactive prompt — it never
+bypasses a mint/recipient mismatch.
+
 When you're done, close the channel — the unspent balance is refunded
 on-chain to the funding wallet:
 
