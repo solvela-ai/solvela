@@ -15099,6 +15099,112 @@ async fn failed_revert_releases_lock_and_leaves_stuck_working() {
     );
 }
 
+/// Round-1 review HIGH fix (grief-lock vector): the channel-payload rejection
+/// fires AFTER the Working-marker write + lock acquisition (it lives inside
+/// the replay block's tx extraction), and the payload SHAPE is
+/// client-controlled — pre-fix, anyone holding a task_id could stick a
+/// legitimate InputRequired task in `Working` with the lock held (up to the
+/// 600s task TTL) with ZERO funds moving, just by submitting a channel-shaped
+/// payload. The arm must route through the same revert-then-release epilogue
+/// as the other pre-settle failure arms.
+#[tokio::test]
+async fn channel_payload_after_working_marker_reverts_and_releases() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let Some((app, state)) = a2a_app_with_redis_and_db(pool) else {
+        return;
+    };
+    let handle = test_prometheus_handle();
+
+    let (task_id, offer) = a2a_new_request(&app).await;
+
+    // Channel-shaped payload (the CHANNEL_VOUCHER_PAYLOAD_GOLDEN_JSON field
+    // set), echoing the exact offer in `accepted` so the rejection provably
+    // comes from the payload arm, not offer validation (which runs later).
+    let pay_channel = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "message/send",
+        "id": "a2a-channel-grief",
+        "params": {
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "pay"}],
+                "metadata": {
+                    "x402.payment.status": "payment-submitted",
+                    "x402.payment.payload": {
+                        "x402_version": 2,
+                        "resource": {"url": "/v1/chat/completions", "method": "POST"},
+                        "accepted": {
+                            "scheme": offer["scheme"],
+                            "network": offer["network"],
+                            "amount": offer["amount"],
+                            "asset": offer["asset"],
+                            "pay_to": offer["pay_to"],
+                            "max_timeout_seconds": offer["max_timeout_seconds"],
+                        },
+                        "payload": {
+                            "channel_id": "cid",
+                            "cumulative_atomic": 12600,
+                            "expiry_slot": 1000750,
+                            "nonce": 42,
+                            "request_digest": "ZA==",
+                            "signature": "c2ln"
+                        }
+                    }
+                }
+            },
+            "taskId": task_id
+        }
+    });
+
+    let stuck_before = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    let env = a2a_call_envelope(&app, &pay_channel).await;
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(-32001),
+        "channel payload must be rejected fail-closed: {env}"
+    );
+    assert!(
+        env["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("channel"),
+        "rejection must be the channel-scheme error: {env}"
+    );
+
+    // Clean revert: the task is payable again. This ALSO proves the path did
+    // not take the failed-revert branch (the only stuck-counter incrementer
+    // in this flow) — the counter equality below is corroboration, with the
+    // usual process-global caveat (other parallel tests may increment it).
+    let record = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must exist");
+    assert_eq!(
+        record.state,
+        gateway::a2a::types::TaskState::InputRequired,
+        "channel rejection must revert the Working marker (grief-lock vector)"
+    );
+    let stuck_after = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    assert_eq!(
+        stuck_after, stuck_before,
+        "a clean channel rejection must not count as stuck-Working"
+    );
+
+    // Lock released: a follow-up VALID exact payment on the SAME task settles
+    // and completes.
+    let env2 = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
+    assert!(
+        env2["error"].is_null(),
+        "a valid payment after the channel rejection must not be rejected: {env2}"
+    );
+    assert_eq!(
+        env2["result"]["status"]["state"], "completed",
+        "a valid payment after the channel rejection must complete: {env2}"
+    );
+}
+
 /// 2a-8: the dev-bypass settlement path ALSO persists the `Working` marker —
 /// pinning the plan's placement decision that the single marker write sits
 /// BEFORE the dev-bypass fork, covering both branches.

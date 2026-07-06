@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::http::HeaderMap;
 use serde_json::{json, Value};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
 
 use solvela_protocol::{ChatMessage, ChatRequest, ModelRegistration, Role, SettlementFailureKind};
 use solvela_router::profiles::{self, Profile};
@@ -335,7 +335,7 @@ async fn handle_payment_submitted(
     // guard is the under-lock state re-check in `settle_paid_task`, which
     // re-loads the record after lock acquisition.
     if record.state != TaskState::InputRequired {
-        return Err(reject_for_task_state(record.state));
+        return Err(reject_for_task_state(task_id, record.state));
     }
 
     // Extract payment metadata from message
@@ -514,16 +514,21 @@ async fn handle_payment_submitted(
     // shield, in their #566-pinned order — they must keep rejecting with no
     // lock acquired, no spawn, and no settlement (pinned by
     // `pre_payment_checks_run_outside_shield_in_unchanged_order`).
-    let shielded = tokio::spawn(settle_paid_task(
-        Arc::clone(state),
-        task_id.to_string(),
-        record,
-        payload,
-        resolved_model,
-        model_info,
-        messages,
-        enforced_max_tokens,
-    ));
+    // `.instrument(Span::current())`: the spawned task otherwise loses the
+    // per-request tracing span (request-id correlation) — round-1 review fix.
+    let shielded = tokio::spawn(
+        settle_paid_task(
+            Arc::clone(state),
+            task_id.to_string(),
+            record,
+            payload,
+            resolved_model,
+            model_info,
+            messages,
+            enforced_max_tokens,
+        )
+        .instrument(tracing::Span::current()),
+    );
     match shielded.await {
         Ok(result) => result,
         Err(e) => {
@@ -531,8 +536,16 @@ async fn handle_payment_submitted(
             // client gets a clean internal error — never a hung response and
             // never the panic payload (GHSA-cgqx-mg48-949v posture). Funds may
             // or may not have moved; the persisted task state and the settle
-            // lock reflect exactly how far the section got, so direct the
-            // agent at the task status rather than a blind retry.
+            // lock reflect exactly how far the section got.
+            //
+            // Round-1 review fix: a panic in the shield realistically fires
+            // AFTER the Working write (the only panic-prone work — verify,
+            // settle, provider — runs post-marker), so the task is left
+            // stuck-Working: the D10 condition. Count it. (A panic in the few
+            // marker-free instructions before the write would over-count by
+            // one — accepted: the counter is a reconciliation signal, not a
+            // ledger.)
+            metrics::counter!("solvela_a2a_task_stuck_working_total").increment(1);
             tracing::error!(
                 task_id,
                 error = %e,
@@ -540,9 +553,11 @@ async fn handle_payment_submitted(
             );
             Err(JsonRpcErrorData {
                 code: ERR_INTERNAL,
-                message: "Internal error while finalizing payment; check the \
-                          task status before retrying."
-                    .to_string(),
+                message: format!(
+                    "Internal error while finalizing payment for task {task_id}; \
+                     do not resubmit a new payment — contact support with this \
+                     task ID if you do not receive your result."
+                ),
                 data: None,
             })
         }
@@ -559,6 +574,8 @@ async fn handle_payment_submitted(
 /// dropped on client disconnect. Do NOT move the money-free pre-checks
 /// (tenant / model resolve / registry / max_tokens / prompt guard) into this
 /// function — they are pinned OUTSIDE the shield.
+// too_many_arguments: every argument is an owned copy of pre-check output the
+// `'static` spawn cannot borrow; a params struct would be one-use ceremony.
 #[allow(clippy::too_many_arguments)]
 async fn settle_paid_task(
     state: Arc<AppState>,
@@ -629,9 +646,10 @@ async fn settle_paid_task(
                 );
                 return Err(JsonRpcErrorData {
                     code: ERR_PAYMENT_FAILED,
-                    message: "A settlement for this task is already in progress; \
-                              wait and check the task status before retrying."
-                        .to_string(),
+                    message: format!(
+                        "A settlement for task {task_id} is already in progress; \
+                         do not resubmit a new payment for this task."
+                    ),
                     data: None,
                 });
             }
@@ -700,10 +718,10 @@ async fn settle_paid_task(
     //
     // SCOPE (Slice 2a): this macro serves the failure sites BEFORE the
     // `Working` marker is written (the under-lock re-check and the marker
-    // write itself). The four pre-settle failure arms AFTER the marker
-    // (replay, offer mismatch, verifier error, settle success=false) route
-    // through `revert_working_and_release` instead, which reverts the marker
-    // and then performs this same release.
+    // write itself). The five pre-settle failure arms AFTER the marker
+    // (channel-payload rejection, replay, offer mismatch, verifier error,
+    // settle success=false) route through `revert_working_and_release`
+    // instead, which reverts the marker and then performs this same release.
     macro_rules! release_lock_on_failure {
         () => {
             if let Some(cache) = &state.cache {
@@ -758,7 +776,7 @@ async fn settle_paid_task(
                 "A2A payment rejected at under-lock state re-check (no settlement)"
             );
             release_lock_on_failure!();
-            return Err(reject_for_task_state(current.state));
+            return Err(reject_for_task_state(task_id, current.state));
         }
         Ok(None) => {
             // The task TTL'd out (or its corrupt record was purged) in the
@@ -798,6 +816,11 @@ async fn settle_paid_task(
     // record into its string error (task_store.rs) — classify before mapping
     // the code, so a genuine miss stays TASK_NOT_FOUND and infra failures
     // stay the retryable ERR_INTERNAL (#532).
+    //
+    // Named ceiling (ambiguous ack): if the Redis SET applied but the ack
+    // errored, we release the lock and reject while the record may already
+    // read `Working` — it self-heals at task TTL and is counted only when the
+    // next attempt rejects on it (the stuck-Working counter).
     if let Err(e) = task_store::update_task_state(state, task_id, TaskState::Working).await {
         warn!(
             task_id,
@@ -836,7 +859,16 @@ async fn settle_paid_task(
             // Fail-closed: A2A is a protocol adapter (CLAUDE.md #14) with no
             // channel-voucher path — reject a channel payload, never panic. This
             // is the site that compile-forces the A2A channel decision.
+            //
+            // Round-1 review fix (grief-lock vector): this arm sits AFTER the
+            // Working write + lock acquisition, and the payload SHAPE is
+            // client-controlled — returning without the shared epilogue let
+            // anyone holding a task_id stick a payable task in `Working` with
+            // the lock held (up to the task TTL) with ZERO funds moving. It is
+            // the FIFTH pre-settle failure arm and routes through the same
+            // revert-then-release as the other four.
             solvela_x402::types::PayloadData::Channel(_) => {
+                revert_working_and_release(state, task_id).await;
                 return Err(JsonRpcErrorData {
                     code: ERR_PAYMENT_FAILED,
                     message: "channel scheme is not accepted on this endpoint".to_string(),
@@ -1115,9 +1147,13 @@ async fn settle_paid_task(
                 // lock TTL expired), `Working` is fail-safe: the intake
                 // fast-fail and the under-lock re-check both reject further
                 // payments until the task TTL reaps the record — never
-                // double-charged. Count it so the stuck case is alertable.
+                // double-charged. Count it so the stuck case is alertable —
+                // on BOTH counters: the after-settle write-failure counter it
+                // always carried, and (round-1 review, symmetry with the
+                // Completed-write failure) the D10 stuck-Working counter.
                 metrics::counter!("solvela_a2a_task_state_update_failed_after_settle_total")
                     .increment(1);
+                metrics::counter!("solvela_a2a_task_stuck_working_total").increment(1);
                 tracing::error!(
                     error = %state_err,
                     task_id,
@@ -1158,10 +1194,11 @@ async fn settle_paid_task(
             // interpolate `{e}`.
             return Err(JsonRpcErrorData {
                 code: ERR_PROVIDER_ERROR,
-                message: "Provider unavailable after settlement. Your payment was \
-                          collected and recorded; retrieve your task status or \
-                          contact support with the task ID."
-                    .to_string(),
+                message: format!(
+                    "Provider unavailable after settlement. Your payment was \
+                     collected and recorded; do not resubmit a new payment — \
+                     contact support with task ID {task_id}."
+                ),
                 data: None,
             });
         }
@@ -1190,6 +1227,11 @@ async fn settle_paid_task(
 
     // Update task state (`Working→Completed`).
     if let Err(e) = task_store::update_task_state(state, task_id, TaskState::Completed).await {
+        // Round-1 review fix (counter symmetry with the Failed-arm write
+        // failure): a failed Completed write leaves the settled task stuck in
+        // `Working` — the D10 condition — so it counts on the stuck counter,
+        // not just a log line.
+        metrics::counter!("solvela_a2a_task_stuck_working_total").increment(1);
         tracing::error!(error = %e, task_id, "failed to update task state after payment settlement");
     }
 
@@ -1329,15 +1371,32 @@ fn now_timestamp() -> String {
 /// `Working` (a settlement is in flight — possibly with an expired lock) or a
 /// terminal `Completed`/`Failed`. Shared by the CONVENIENCE intake fast-fail
 /// and the AUTHORITATIVE under-lock re-check so both sites reject with
-/// identical, friendly errors.
-fn reject_for_task_state(state: TaskState) -> JsonRpcErrorData {
+/// identical, friendly errors. Wording is actionable TODAY (round-1 review):
+/// no `tasks/get` exists until Slice 2b, so the messages carry the task id
+/// for a support path instead of pointing at a method that isn't routed yet;
+/// 2b restores the task-status pointer.
+///
+/// Arms are EXPLICIT (no wildcard) so Slice 2b's `Canceled` variant forces a
+/// compile-time wording decision here rather than silently inheriting the
+/// terminal-state text.
+fn reject_for_task_state(task_id: &str, state: TaskState) -> JsonRpcErrorData {
     let message = match state {
-        TaskState::Working => "A settlement for this task is already in progress; \
-                               wait and check the task status before retrying."
-            .to_string(),
-        _ => "This task has already reached a terminal state and cannot accept \
-              another payment; check the task status."
-            .to_string(),
+        TaskState::Working => format!(
+            "A settlement for task {task_id} is already in progress; do not \
+             resubmit a new payment for this task."
+        ),
+        TaskState::Completed | TaskState::Failed => format!(
+            "Task {task_id} has already reached a terminal state and cannot \
+             accept another payment; do not resubmit — contact support with \
+             this task ID if you did not receive your result."
+        ),
+        // Unreachable from both call sites (each proceeds on InputRequired
+        // and only rejects otherwise), but handled honestly rather than
+        // panicking: an InputRequired task IS payable.
+        TaskState::InputRequired => format!(
+            "Task {task_id} is awaiting payment; resubmit the payment for \
+             this task."
+        ),
     };
     JsonRpcErrorData {
         code: ERR_PAYMENT_FAILED,
@@ -1348,11 +1407,11 @@ fn reject_for_task_state(state: TaskState) -> JsonRpcErrorData {
 
 /// Shared PRE-settle failure epilogue (conformance plan §5 step 7): revert the
 /// `Working` settle marker back to `InputRequired`, then release the settle
-/// lock. The four pre-settle failure arms — replay rejection, offer mismatch,
-/// verifier error, settlement `success=false` — all route through this ONE
-/// code site. Only call it AFTER lock acquisition and the `Working` write
-/// (the same discipline as `release_lock_on_failure!`); no funds have moved
-/// on any of these arms.
+/// lock. The five pre-settle failure arms — channel-payload rejection, replay
+/// rejection, offer mismatch, verifier error, settlement `success=false` —
+/// all route through this ONE code site. Only call it AFTER lock acquisition
+/// and the `Working` write (the same discipline as
+/// `release_lock_on_failure!`); no funds have moved on any of these arms.
 ///
 /// A FAILED revert still releases the lock (uniform release semantics — the
 /// round-2 lock-disposition pin). This is safe: every subsequent payment (and
@@ -3659,6 +3718,27 @@ supports_vision = false
         if let Some(cache) = &state.cache {
             let _ = cache.del_raw(&format!("a2a_task:{task_id}")).await;
         }
+    }
+
+    /// Round-1 review pin (string-prefix contract): the Working-marker write
+    /// failure in `settle_paid_task` classifies not-found via
+    /// `e.starts_with("task not found")` against task_store's literal error
+    /// string. Pin the literal here so a task_store wording change fails
+    /// loudly instead of silently re-mapping a genuine miss to ERR_INTERNAL.
+    /// (Typed-error refactor deferred by the operator.) Lives in the handler's
+    /// Redis-backed test section because task_store's own test module has no
+    /// AppState/Redis harness; requires local Redis like its neighbors.
+    #[tokio::test]
+    async fn update_task_state_missing_task_error_starts_with_pinned_prefix() {
+        let state = test_state_with_redis();
+        let err = task_store::update_task_state(&state, &new_task_id(), TaskState::Working)
+            .await
+            .expect_err("a never-saved task id must error");
+        assert!(
+            err.starts_with("task not found"),
+            "the handler's starts_with(\"task not found\") classification \
+             depends on this exact prefix; got: {err}"
+        );
     }
 
     /// The AUTHORITATIVE under-lock state re-check (conformance plan §5 step
