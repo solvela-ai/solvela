@@ -1,7 +1,9 @@
 //! A2A JSON-RPC 2.0 dispatcher.
 //!
-//! Parses the JSON-RPC envelope, routes `message/send` to the handler,
-//! and echoes the `X-A2A-Extensions` header for extension activation.
+//! Parses the JSON-RPC envelope, routes the A2A v0.3 methods (`message/send`,
+//! `tasks/get`, `tasks/cancel`, the four unsupported
+//! `tasks/pushNotificationConfig/*` stubs) to the handler, and echoes the
+//! `X-A2A-Extensions` header for extension activation.
 
 use std::sync::Arc;
 
@@ -9,6 +11,7 @@ use crate::a2a::types::{
     JsonRpcError, JsonRpcErrorData, JsonRpcRequest, JsonRpcResponse, A2A_EXTENSIONS_HEADER,
     X402_EXTENSION_URI,
 };
+use crate::middleware::rate_limit::{connect_info_client_id, rate_limited_response, PeerAddr};
 use crate::AppState;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue};
@@ -19,9 +22,28 @@ use axum::Json;
 const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
 
+/// `-32003 PushNotificationNotSupportedError` (A2A v0.3 §8.2) for the four
+/// `tasks/pushNotificationConfig/*` methods: the card declares
+/// `pushNotifications: false`, and the spec mandates THIS code for them —
+/// NOT the generic `-32601`. No parsing beyond the envelope, no state
+/// contact.
+fn push_not_supported() -> JsonRpcErrorData {
+    JsonRpcErrorData {
+        code: crate::a2a::handler::ERR_PUSH_NOT_SUPPORTED,
+        message: "Push notifications are not supported by this agent \
+                  (AgentCard capabilities.pushNotifications is false)"
+            .to_string(),
+        data: None,
+    }
+}
+
 /// `POST /a2a` — A2A JSON-RPC 2.0 endpoint.
 pub async fn a2a_endpoint(
     State(state): State<Arc<AppState>>,
+    // Infallible peer-address extractor (same as the receipts route): `None`
+    // when `ConnectInfo` is absent, degrading to the stricter "unknown"
+    // rate-limit bucket rather than 500-ing.
+    peer_addr: PeerAddr,
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Response {
@@ -43,9 +65,38 @@ pub async fn a2a_endpoint(
         .into_response();
     }
 
-    // Route by method
+    // `tasks/get` anti-enumeration limiter, enforced BEFORE dispatch at the
+    // cheapest point (mirrors `GET /v1/receipts/{id}`): the unguessable task
+    // id is a bearer capability and every lookup is a Redis read, so the
+    // method gets a dedicated per-IP cap stricter than the generic outer
+    // limiter. Keyed on the TCP peer IP, never a client-supplied header
+    // (GHSA-6ggq-cvwx-4f67). The HTTP-level 429 (with Retry-After) is
+    // transport-legal for JSON-RPC-over-HTTP — the generic outer limiter
+    // already answers 429 on this route.
+    if request.method == "tasks/get" {
+        let client_id = connect_info_client_id(peer_addr.0);
+        if state
+            .a2a_tasks_rate_limiter
+            .check(&client_id)
+            .await
+            .is_err()
+        {
+            metrics::counter!("solvela_a2a_tasks_get_rate_limited_total").increment(1);
+            tracing::warn!(client_id = %client_id, "A2A tasks/get rate limit exceeded");
+            return rate_limited_response(state.a2a_tasks_rate_limiter.config());
+        }
+    }
+
+    // Route by method (A2A v0.3 §7; the push-notification methods are FOUR
+    // explicit arms so a spec rename shows up here, not in a glob).
     let result = match request.method.as_str() {
         "message/send" => crate::a2a::handler::handle_message_send(state, &headers, &request).await,
+        "tasks/get" => crate::a2a::handler::handle_tasks_get(&state, &request).await,
+        "tasks/cancel" => crate::a2a::handler::handle_tasks_cancel(&state, &request).await,
+        "tasks/pushNotificationConfig/set" => Err(push_not_supported()),
+        "tasks/pushNotificationConfig/get" => Err(push_not_supported()),
+        "tasks/pushNotificationConfig/list" => Err(push_not_supported()),
+        "tasks/pushNotificationConfig/delete" => Err(push_not_supported()),
         _ => Err(JsonRpcErrorData {
             code: METHOD_NOT_FOUND,
             message: format!("Method not found: {}", request.method),
@@ -137,6 +188,9 @@ supports_vision = false
             ),
             receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::receipts_default(),
+            ),
+            a2a_tasks_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::a2a_tasks_default(),
             ),
             faucet_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::faucet_default(),
@@ -303,6 +357,70 @@ supports_vision = false
                 .expect("valid UTF-8 header"), // safe: X402_EXTENSION_URI is valid UTF-8
             X402_EXTENSION_URI
         );
+    }
+
+    async fn call_method(app: &axum::Router, method: &str) -> serde_json::Value {
+        let resp = app
+            .clone()
+            .oneshot(
+                http::Request::builder()
+                    .method("POST")
+                    .uri("/a2a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "jsonrpc": "2.0",
+                            "method": method,
+                            "id": "1",
+                            "params": {"id": "a2a_deadbeef"}
+                        })
+                        .to_string(),
+                    ))
+                    .expect("valid request"), // safe: known-good test data
+            )
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096)
+            .await
+            .expect("read body");
+        serde_json::from_slice(&body).expect("valid JSON")
+    }
+
+    /// All four `tasks/pushNotificationConfig/*` methods return exactly
+    /// `-32003 PushNotificationNotSupportedError` (A2A v0.3 §8.2 — the card
+    /// declares `pushNotifications: false`; the spec mandates this code, NOT
+    /// the generic `-32601`).
+    #[tokio::test]
+    async fn push_notification_methods_return_not_supported() {
+        let app = test_app();
+        for method in [
+            "tasks/pushNotificationConfig/set",
+            "tasks/pushNotificationConfig/get",
+            "tasks/pushNotificationConfig/list",
+            "tasks/pushNotificationConfig/delete",
+        ] {
+            let json = call_method(&app, method).await;
+            assert_eq!(
+                json["error"]["code"], -32003,
+                "{method} must return PushNotificationNotSupportedError, got: {json}"
+            );
+        }
+    }
+
+    /// `tasks/get` and `tasks/cancel` are ROUTED (never `-32601`). With this
+    /// fixture's `cache: None` both fail closed at the task store with
+    /// `-32603` — the retry signal, never a spurious not-found (invariant 6).
+    #[tokio::test]
+    async fn tasks_get_and_cancel_route_and_fail_closed_without_redis() {
+        let app = test_app();
+        for method in ["tasks/get", "tasks/cancel"] {
+            let json = call_method(&app, method).await;
+            assert_eq!(
+                json["error"]["code"], -32603,
+                "{method} without Redis must fail closed with -32603, got: {json}"
+            );
+        }
     }
 
     #[tokio::test]

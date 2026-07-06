@@ -95,6 +95,9 @@ fn router_with_pool(pool: PgPool) -> Router {
         receipts_rate_limiter: gateway::middleware::rate_limit::RateLimiter::new(
             gateway::middleware::rate_limit::RateLimitConfig::receipts_default(),
         ),
+        a2a_tasks_rate_limiter: gateway::middleware::rate_limit::RateLimiter::new(
+            gateway::middleware::rate_limit::RateLimitConfig::a2a_tasks_default(),
+        ),
         faucet_rate_limiter: gateway::middleware::rate_limit::RateLimiter::new(
             gateway::middleware::rate_limit::RateLimitConfig::faucet_default(),
         ),

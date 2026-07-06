@@ -978,6 +978,7 @@ async fn main() -> anyhow::Result<()> {
         // so the cap only needs to bound scan/enumeration throughput; tune
         // `RateLimitConfig::receipts_default` in code if that ever changes.
         receipts_rate_limiter: RateLimiter::new(RateLimitConfig::receipts_default()),
+        a2a_tasks_rate_limiter: RateLimiter::new(RateLimitConfig::a2a_tasks_default()),
         // Public faucet POST: fixed stricter per-IP cap (3/24h). Like the
         // receipts limiter above, deliberately NOT env-tunable — the per-wallet
         // DB key already stops per-wallet repeats, so this cap only needs to

@@ -110,6 +110,25 @@ impl RateLimitConfig {
         }
     }
 
+    /// Default per-IP rate-limit budget for the A2A `tasks/get` method.
+    ///
+    /// `tasks/get` pairs the same bearer-capability model as the receipts
+    /// route (an unguessable 128-bit task id IS the credential) with a Redis
+    /// lookup per call, so it takes the same anti-enumeration posture as
+    /// [`receipts_default`](Self::receipts_default): 20 per 60s window per
+    /// client IP — generous for an agent polling its own task within the
+    /// 600s task TTL, hostile to id scanners — with the stricter `unknown`
+    /// bucket when no `ConnectInfo` is present. Enforced in `a2a_endpoint`
+    /// BEFORE dispatch (conformance plan §5 "limiter parity"). Like the other
+    /// in-handler caps this is deliberately NOT env-tunable.
+    pub fn a2a_tasks_default() -> Self {
+        Self {
+            max_requests: 20,
+            window: Duration::from_secs(60),
+            unknown_max_requests: 5,
+        }
+    }
+
     /// Default per-IP rate-limit budget for the public, unauthenticated
     /// `POST /v1/escrow/deposit-tx` unsigned-deposit-tx builder route.
     ///
