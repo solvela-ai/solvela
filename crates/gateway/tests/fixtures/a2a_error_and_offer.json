@@ -1,0 +1,39 @@
+{
+  "error_codes": {
+    "invalid_request": -32600,
+    "method_not_found": -32601,
+    "invalid_params": -32602,
+    "internal_error": -32603,
+    "task_not_found": -32001,
+    "task_not_cancelable": -32002,
+    "push_notification_not_supported": -32003,
+    "payment_failed": -32007,
+    "provider_error": -32008,
+    "model_not_found": -32009
+  },
+  "input_required_payment_required": {
+    "accepts": [
+      {
+        "amount": "86037",
+        "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "max_timeout_seconds": 300,
+        "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        "pay_to": "GatewayRecipientWallet111111111111111111111111",
+        "scheme": "exact"
+      }
+    ],
+    "cost_breakdown": {
+      "currency": "USDC",
+      "fee_percent": 5,
+      "platform_fee": "0.004097",
+      "provider_cost": "0.081940",
+      "total": "0.086037"
+    },
+    "error": "Payment required",
+    "resource": {
+      "method": "POST",
+      "url": "/v1/chat/completions"
+    },
+    "x402_version": 2
+  }
+}

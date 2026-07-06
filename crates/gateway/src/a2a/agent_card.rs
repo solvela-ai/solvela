@@ -193,6 +193,9 @@ supports_vision = false
             receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::receipts_default(),
             ),
+            a2a_tasks_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::a2a_tasks_default(),
+            ),
             faucet_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::faucet_default(),
             ),
@@ -352,6 +355,95 @@ supports_vision = false
             "POSTing message/send to the advertised AgentCard url path must not 404 — \
              that 404 is the exact conformance failure this test guards against"
         );
+    }
+
+    /// 2b-7 (extends the #598 advertised-URL pattern above): every A2A v0.3
+    /// method the gateway serves is driven through the URL the card
+    /// advertises. `message/send`, `tasks/get`, and `tasks/cancel` must be
+    /// ROUTED (never `-32601 Method not found` — with this fixture's
+    /// `cache: None` the task methods fail closed at the store with `-32603`,
+    /// which proves routing), and ALL FOUR `tasks/pushNotificationConfig/*`
+    /// methods must return exactly `-32003 PushNotificationNotSupportedError`
+    /// (spec-mandated when the card declares `pushNotifications: false`).
+    #[tokio::test]
+    async fn test_advertised_url_serves_all_v03_methods() {
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/agent-card.json",
+                axum::routing::get(super::agent_card),
+            )
+            .route(
+                "/a2a",
+                axum::routing::post(crate::a2a::jsonrpc::a2a_endpoint),
+            )
+            .with_state(make_state());
+
+        let json = get_card(app.clone(), "/.well-known/agent-card.json").await;
+        let advertised = json["url"].as_str().expect("url is a string");
+        let path = advertised
+            .strip_prefix("http://0.0.0.0:8402")
+            .expect("dev fallback url should be host:port-prefixed")
+            .to_string();
+
+        let call = |method: &'static str| {
+            let app = app.clone();
+            let path = path.clone();
+            async move {
+                let resp = app
+                    .oneshot(
+                        http::Request::builder()
+                            .method("POST")
+                            .uri(&path)
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "method": method,
+                                    "id": "conformance-2b7",
+                                    "params": {"id": "a2a_deadbeef"}
+                                })
+                                .to_string(),
+                            ))
+                            .expect("valid request"),
+                    )
+                    .await
+                    .expect("request should succeed");
+                assert_eq!(
+                    resp.status(),
+                    http::StatusCode::OK,
+                    "{method} through the advertised URL must reach the JSON-RPC handler"
+                );
+                let body = axum::body::to_bytes(resp.into_body(), 65_536)
+                    .await
+                    .expect("read body");
+                let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+                json["error"]["code"].as_i64()
+            }
+        };
+
+        // The three servable methods route (non--32601).
+        for method in ["message/send", "tasks/get", "tasks/cancel"] {
+            let code = call(method).await;
+            assert_ne!(
+                code,
+                Some(-32601),
+                "{method} must be routed at the advertised URL, not method-not-found"
+            );
+        }
+        // The four push methods return exactly the spec code.
+        for method in [
+            "tasks/pushNotificationConfig/set",
+            "tasks/pushNotificationConfig/get",
+            "tasks/pushNotificationConfig/list",
+            "tasks/pushNotificationConfig/delete",
+        ] {
+            let code = call(method).await;
+            assert_eq!(
+                code,
+                Some(-32003),
+                "{method} must return PushNotificationNotSupportedError (-32003)"
+            );
+        }
     }
 
     /// The card carries every field a strict A2A v0.3 schema validator requires.

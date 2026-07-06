@@ -135,6 +135,23 @@ pub struct MessageSendParams {
     pub task_id: Option<String>,
 }
 
+/// Parameters for `tasks/get` (A2A v0.3 `TaskQueryParams`).
+///
+/// The spec's optional `historyLength` field is ACCEPTED AND IGNORED via
+/// serde's default unknown-field tolerance (deliberately not declared): the
+/// gateway keeps no per-task message history, so there is nothing to
+/// truncate — pinned by `task_query_params_accepts_and_ignores_history_length`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskQueryParams {
+    pub id: String,
+}
+
+/// Parameters for `tasks/cancel` (A2A v0.3 `TaskIdParams`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskIdParams {
+    pub id: String,
+}
+
 // ── A2A task types ───────────────────────────────────────────────────────
 
 /// Task state in the A2A lifecycle.
@@ -145,6 +162,11 @@ pub enum TaskState {
     Working,
     Completed,
     Failed,
+    /// Canceled via `tasks/cancel` (A2A v0.3; wire value `"canceled"`).
+    /// Terminal. Only reachable from `InputRequired` — `Working` means a
+    /// settlement is IN FLIGHT, and canceling it would race funds
+    /// (conformance plan D4-a).
+    Canceled,
 }
 
 impl TaskState {
@@ -157,12 +179,15 @@ impl TaskState {
     /// machine itself now enforces marker discipline: a path that skips the
     /// marker cannot reach a terminal state. `Working→InputRequired` is the
     /// pre-settle failure REVERT (verify error, settle `success=false`,
-    /// replay, offer mismatch — no funds moved). `Completed`/`Failed` are
-    /// terminal: no outbound arms.
+    /// replay, offer mismatch — no funds moved).
+    /// `InputRequired→Canceled` is `tasks/cancel` (D4-a); `Working→Canceled`
+    /// is deliberately ABSENT (settlement in flight — canceling would race
+    /// funds). `Completed`/`Failed`/`Canceled` are terminal: no outbound arms.
     pub fn can_transition_to(self, next: TaskState) -> bool {
         matches!(
             (self, next),
             (TaskState::InputRequired, TaskState::Working)
+                | (TaskState::InputRequired, TaskState::Canceled)
                 | (TaskState::Working, TaskState::InputRequired)
                 | (TaskState::Working, TaskState::Completed)
                 | (TaskState::Working, TaskState::Failed)
@@ -428,6 +453,8 @@ mod tests {
     #[test]
     fn task_state_can_transition_to_valid() {
         assert!(TaskState::InputRequired.can_transition_to(TaskState::Working));
+        // Slice 2b (D4-a): tasks/cancel — the only arm into Canceled.
+        assert!(TaskState::InputRequired.can_transition_to(TaskState::Canceled));
         // LOCKSTEP FLIP (conformance plan Slice 2a): Working→InputRequired is
         // the pre-settle failure REVERT arm — previously pinned invalid below.
         assert!(TaskState::Working.can_transition_to(TaskState::InputRequired));
@@ -450,6 +477,33 @@ mod tests {
         // machine itself rejects a marker-bypassing terminal write.
         assert!(!TaskState::InputRequired.can_transition_to(TaskState::Completed));
         assert!(!TaskState::InputRequired.can_transition_to(TaskState::Failed));
+        // Slice 2b (D4-a): `Working→Canceled` is DELIBERATELY absent —
+        // `Working` means settlement in flight; canceling it would race
+        // funds. Canceled is terminal: no outbound arms.
+        assert!(!TaskState::Working.can_transition_to(TaskState::Canceled));
+        assert!(!TaskState::Completed.can_transition_to(TaskState::Canceled));
+        assert!(!TaskState::Failed.can_transition_to(TaskState::Canceled));
+        assert!(!TaskState::Canceled.can_transition_to(TaskState::InputRequired));
+        assert!(!TaskState::Canceled.can_transition_to(TaskState::Working));
+        assert!(!TaskState::Canceled.can_transition_to(TaskState::Completed));
+        assert!(!TaskState::Canceled.can_transition_to(TaskState::Failed));
+        assert!(!TaskState::Canceled.can_transition_to(TaskState::Canceled));
+    }
+
+    /// Params for the Slice-2b methods: `tasks/get` accepts (and ignores) the
+    /// spec's optional `historyLength`; `tasks/cancel` takes the bare id.
+    #[test]
+    fn task_query_params_accepts_and_ignores_history_length() {
+        let with_history: TaskQueryParams =
+            serde_json::from_str(r#"{"id": "a2a_abc", "historyLength": 5}"#)
+                .expect("historyLength must be accepted (and ignored)");
+        assert_eq!(with_history.id, "a2a_abc");
+        let bare: TaskQueryParams =
+            serde_json::from_str(r#"{"id": "a2a_abc"}"#).expect("bare id must deserialize");
+        assert_eq!(bare.id, "a2a_abc");
+        let cancel: TaskIdParams =
+            serde_json::from_str(r#"{"id": "a2a_abc"}"#).expect("TaskIdParams must deserialize");
+        assert_eq!(cancel.id, "a2a_abc");
     }
 
     #[test]
@@ -469,6 +523,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(TaskState::Failed).unwrap(), // safe: infallible for enum
             "failed"
+        );
+        // A2A v0.3 spelling: "canceled" (one l), never "cancelled".
+        assert_eq!(
+            serde_json::to_value(TaskState::Canceled).unwrap(), // safe: infallible for enum
+            "canceled"
         );
     }
 }

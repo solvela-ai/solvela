@@ -340,6 +340,9 @@ supports_vision = false
             receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::receipts_default(),
             ),
+            a2a_tasks_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::a2a_tasks_default(),
+            ),
             faucet_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::faucet_default(),
             ),

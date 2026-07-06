@@ -230,6 +230,8 @@ mod tests {
     #[test]
     fn task_state_valid_transitions() {
         assert!(TaskState::InputRequired.can_transition_to(TaskState::Working));
+        // Slice 2b (D4-a): tasks/cancel — the only arm into Canceled.
+        assert!(TaskState::InputRequired.can_transition_to(TaskState::Canceled));
         assert!(TaskState::Working.can_transition_to(TaskState::Completed));
         assert!(TaskState::Working.can_transition_to(TaskState::Failed));
         // LOCKSTEP FLIP (conformance plan Slice 2a): Working→InputRequired is
@@ -251,9 +253,15 @@ mod tests {
         // is only reachable through the `Working` settle-marker.
         assert!(!TaskState::InputRequired.can_transition_to(TaskState::Completed));
         assert!(!TaskState::InputRequired.can_transition_to(TaskState::Failed));
+        // Slice 2b (D4-a): Working→Canceled is DELIBERATELY absent (settlement
+        // in flight); Canceled is terminal — no outbound arms.
+        assert!(!TaskState::Working.can_transition_to(TaskState::Canceled));
+        assert!(!TaskState::Canceled.can_transition_to(TaskState::InputRequired));
+        assert!(!TaskState::Canceled.can_transition_to(TaskState::Working));
         // Self-transitions are invalid
         assert!(!TaskState::InputRequired.can_transition_to(TaskState::InputRequired));
         assert!(!TaskState::Completed.can_transition_to(TaskState::Completed));
+        assert!(!TaskState::Canceled.can_transition_to(TaskState::Canceled));
     }
 
     #[test]

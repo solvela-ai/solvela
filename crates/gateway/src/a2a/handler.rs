@@ -28,12 +28,32 @@ use crate::usage::SpendLogEntry;
 use crate::AppState;
 
 /// A2A-specific JSON-RPC error codes.
+///
+/// Renumbered per the A2A conformance plan D3(a): A2A v0.3 §8.2 assigns
+/// `-32001` TaskNotFoundError, `-32002` TaskNotCancelableError, and `-32003`
+/// PushNotificationNotSupportedError (spec range `-32001..-32006`) — the
+/// legacy numbers collided with all three, so an a2a-SDK client reading our
+/// old `-32001` (payment failed) interpreted "task not found". The
+/// implementation-specific codes live in `-32007..-32099`, clear of the spec
+/// range. The public table is `dashboard/content/docs/concepts/a2a.mdx` and
+/// the wire pin is `tests/fixtures/a2a_error_and_offer.json` — update both in
+/// lockstep with any change here.
 const ERR_INVALID_PARAMS: i32 = -32602;
 const ERR_INTERNAL: i32 = -32603;
-const ERR_TASK_NOT_FOUND: i32 = -32000;
-const ERR_PAYMENT_FAILED: i32 = -32001;
-const ERR_PROVIDER_ERROR: i32 = -32002;
-const ERR_MODEL_NOT_FOUND: i32 = -32003;
+/// A2A v0.3 §8.2 `TaskNotFoundError`.
+const ERR_TASK_NOT_FOUND: i32 = -32001;
+/// A2A v0.3 §8.2 `TaskNotCancelableError`.
+const ERR_TASK_NOT_CANCELABLE: i32 = -32002;
+/// A2A v0.3 §8.2 `PushNotificationNotSupportedError` — the spec-mandated code
+/// for the four `tasks/pushNotificationConfig/*` methods when the card
+/// declares `pushNotifications: false` (NOT `-32601`). Used by the dispatcher.
+pub(crate) const ERR_PUSH_NOT_SUPPORTED: i32 = -32003;
+/// Implementation-specific: payment verification/settlement failure.
+const ERR_PAYMENT_FAILED: i32 = -32007;
+/// Implementation-specific: LLM provider failure.
+const ERR_PROVIDER_ERROR: i32 = -32008;
+/// Implementation-specific: unknown model id/alias/profile.
+const ERR_MODEL_NOT_FOUND: i32 = -32009;
 
 /// Handle `message/send` JSON-RPC method.
 pub async fn handle_message_send(
@@ -335,6 +355,18 @@ async fn handle_payment_submitted(
     // guard is the under-lock state re-check in `settle_paid_task`, which
     // re-loads the record after lock acquisition.
     if record.state != TaskState::InputRequired {
+        // D10 (round-2 review fix): a task at rest in `Working` after a bare
+        // process crash is rejected HERE, pre-lock — the under-lock counter
+        // sites in `settle_paid_task` are never reached — so without this
+        // increment the operator's reconciliation trigger stayed at zero for
+        // exactly the crash it was designed to catch. Over-counts are
+        // accepted for an alert-only signal (any non-zero → investigate):
+        // repeated retries against one stuck task inflate the count, and a
+        // duplicate submission racing a genuinely in-flight settle lands here
+        // too — same posture as the documented JoinError over-count.
+        if record.state == TaskState::Working {
+            metrics::counter!("solvela_a2a_task_stuck_working_total").increment(1);
+        }
         return Err(reject_for_task_state(task_id, record.state));
     }
 
@@ -555,8 +587,9 @@ async fn handle_payment_submitted(
                 code: ERR_INTERNAL,
                 message: format!(
                     "Internal error while finalizing payment for task {task_id}; \
-                     do not resubmit a new payment — contact support with this \
-                     task ID if you do not receive your result."
+                     do not resubmit a new payment — check the task's final \
+                     state with tasks/get, and contact support with this task \
+                     ID if you do not receive your result."
                 ),
                 data: None,
             })
@@ -628,6 +661,29 @@ async fn settle_paid_task(
         {
             Ok(true) => {}
             Ok(false) => {
+                // Once `tasks/cancel` HOLDS the lock on success (Slice 2b), a
+                // held lock can mean the task was ALREADY CANCELED, not only a
+                // genuine concurrent settlement. Money-free re-load for the
+                // ERROR MESSAGE and counter reason ONLY — the fail-closed lock
+                // decision is unchanged either way, and a re-load `Err`/`None`
+                // falls through to the existing concurrent message (plan §5
+                // step 4).
+                if matches!(
+                    task_store::load_task(state, task_id).await,
+                    Ok(Some(r)) if r.state == TaskState::Canceled
+                ) {
+                    metrics::counter!(
+                        "solvela_a2a_concurrent_settlement_rejected_total",
+                        "reason" => "canceled"
+                    )
+                    .increment(1);
+                    warn!(
+                        task_id,
+                        "A2A payment rejected: task was canceled (settle lock \
+                         held by tasks/cancel)"
+                    );
+                    return Err(reject_for_task_state(task_id, TaskState::Canceled));
+                }
                 // F4 (#566): a genuine concurrent settlement holds the lock. This
                 // is the only case that stays on the "concurrent" counter; the
                 // infra-degradation cases (lock-store error, no-Redis) moved to
@@ -648,7 +704,8 @@ async fn settle_paid_task(
                     code: ERR_PAYMENT_FAILED,
                     message: format!(
                         "A settlement for task {task_id} is already in progress; \
-                         do not resubmit a new payment for this task."
+                         do not resubmit a new payment for this task — poll \
+                         tasks/get for the outcome."
                     ),
                     data: None,
                 });
@@ -753,6 +810,11 @@ async fn settle_paid_task(
                 TaskState::Working => "working",
                 TaskState::Completed => "completed",
                 TaskState::Failed => "failed",
+                // The settle-into-Canceled interleave (a cancel decided the
+                // task in the intake→lock window) — the second belt behind
+                // cancel's held lock. Pinned by
+                // `payment_against_canceled_task_rejects_under_lock`.
+                TaskState::Canceled => "canceled",
             };
             // The direct detection channel for an attempted double-settle /
             // settle-into-decided-task — the exact attack class this re-check
@@ -1196,8 +1258,9 @@ async fn settle_paid_task(
                 code: ERR_PROVIDER_ERROR,
                 message: format!(
                     "Provider unavailable after settlement. Your payment was \
-                     collected and recorded; do not resubmit a new payment — \
-                     contact support with task ID {task_id}."
+                     collected and recorded — retrieve the payment evidence \
+                     with tasks/get; do not resubmit a new payment. Contact \
+                     support with task ID {task_id} if needed."
                 ),
                 data: None,
             });
@@ -1225,27 +1288,22 @@ async fn settle_paid_task(
         }
     };
 
-    // Update task state (`Working→Completed`).
-    if let Err(e) = task_store::update_task_state(state, task_id, TaskState::Completed).await {
-        // Round-1 review fix (counter symmetry with the Failed-arm write
-        // failure): a failed Completed write leaves the settled task stuck in
-        // `Working` — the D10 condition — so it counts on the stuck counter,
-        // not just a log line.
-        metrics::counter!("solvela_a2a_task_stuck_working_total").increment(1);
-        tracing::error!(error = %e, task_id, "failed to update task state after payment settlement");
-    }
-
-    info!(
-        task_id,
-        model = %resolved_model,
-        was_fallback = result.was_fallback,
-        "A2A payment verified → completed"
-    );
-
     // Ledger + durable receipt (#561). A paid A2A request settles real USDC;
     // it must produce the same audit evidence as the chat path — a `spend_logs`
     // row (visible to stats / budgets / tenant attribution) and a retrievable
     // receipt. Both writes are fire-and-forget; neither blocks the response.
+    //
+    // ORDER (issue #680, sanctioned reorder): the ledger row is written BEFORE
+    // the `Working→Completed` state write, mirroring the post-settle
+    // provider-failure arm above (its `record_a2a_settlement` call already
+    // precedes its `Failed` write). With the old state-first order, a crash
+    // between the two left funds settled with NO ledger row and NO signal: the
+    // task read as a perfectly normal `Completed`, invisible to both the
+    // stuck-Working counters and chain-vs-ledger reconciliation. Ledger-first,
+    // the same crash leaves the ledger row present and the task in `Working` —
+    // fail-safe stuck (D10), counted on the next attempt, reconcilable. Only
+    // the state write moved relative to the ledger; replay / offer validation /
+    // `verify_and_settle` are untouched.
     //
     // The amount RECORDED is what the agent actually paid on this path: the
     // gateway-quoted total stored on the task at creation
@@ -1267,6 +1325,37 @@ async fn settle_paid_task(
         result.data.usage.as_ref(),
         estimated_input_tokens,
         &tx_signature,
+    );
+    // Round-1 review fix (parity with the Failed arm above): a `None` here
+    // means the ledger/receipt write was skipped (corrupt stored
+    // quote/breakdown/scheme — each counted on
+    // `solvela_a2a_settlement_record_skipped_total`) — a settled-but-
+    // unledgered task, escalated as `error!` so it is distinguishable in logs
+    // from a clean success.
+    if receipt_path.is_none() {
+        tracing::error!(
+            task_id,
+            "success-path: ledger/receipt write was skipped \
+             (settled-but-unledgered; see solvela_a2a_settlement_record_skipped_total)"
+        );
+    }
+
+    // Update task state (`Working→Completed`) — AFTER the ledger row above
+    // (issue #680; see the ORDER note on the ledger block).
+    if let Err(e) = task_store::update_task_state(state, task_id, TaskState::Completed).await {
+        // Round-1 review fix (counter symmetry with the Failed-arm write
+        // failure): a failed Completed write leaves the settled task stuck in
+        // `Working` — the D10 condition — so it counts on the stuck counter,
+        // not just a log line.
+        metrics::counter!("solvela_a2a_task_stuck_working_total").increment(1);
+        tracing::error!(error = %e, task_id, "failed to update task state after payment settlement");
+    }
+
+    info!(
+        task_id,
+        model = %resolved_model,
+        was_fallback = result.was_fallback,
+        "A2A payment verified → completed"
     );
 
     // D6 (Completed arm): persist the delivered artifact text + settlement
@@ -1355,6 +1444,434 @@ async fn settle_paid_task(
     })
 }
 
+// ── tasks/get ───────────────────────────────────────────────────────────
+
+/// Handle `tasks/get` (A2A v0.3 §7.3) — read-only task retrieval with
+/// per-state projections.
+///
+/// MONEY-FREE by construction: no lock, no settlement contact, one Redis
+/// read. Store error mapping matches the paid path (#532): `Err` →
+/// `ERR_INTERNAL` (retry signal — never a spurious not-found when Redis is
+/// down), `Ok(None)` → `ERR_TASK_NOT_FOUND` (genuinely expired / never
+/// existed; records live `TASK_TTL` = 600s from last save, refreshed at
+/// completion). Rate-limited per client IP in the dispatcher BEFORE reaching
+/// here (same posture as `GET /v1/receipts/{id}`: the unguessable task id is
+/// a bearer capability, so the limiter is anti-enumeration).
+pub async fn handle_tasks_get(
+    state: &Arc<AppState>,
+    request: &JsonRpcRequest,
+) -> Result<Value, JsonRpcErrorData> {
+    let params: TaskQueryParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| JsonRpcErrorData {
+            code: ERR_INVALID_PARAMS,
+            message: format!("Invalid params: {e}"),
+            data: None,
+        })?;
+
+    let record = task_store::load_task(state, &params.id)
+        .await
+        .map_err(|e| JsonRpcErrorData {
+            code: ERR_INTERNAL,
+            message: format!("Task store error: {e}"),
+            data: None,
+        })?
+        .ok_or_else(|| JsonRpcErrorData {
+            code: ERR_TASK_NOT_FOUND,
+            message: format!("Task not found or expired: {}", params.id),
+            data: None,
+        })?;
+
+    let task = project_task(&record);
+    serde_json::to_value(&task).map_err(|e| JsonRpcErrorData {
+        code: ERR_INTERNAL,
+        message: format!("Failed to serialize task: {e}"),
+        data: None,
+    })
+}
+
+/// Project a stored `TaskRecord` to the wire `Task`, per state (conformance
+/// plan §5 "tasks/get"):
+///
+/// - `InputRequired` → status + the STORED `x402.payment.required` snapshot
+///   (byte-identical — it is what `validate_submitted_against_offer` later
+///   byte-compares against): a client that lost the quote can still pay.
+/// - `Working` → status only (settlement in flight).
+/// - `Completed` → artifacts (the D6-persisted delivered text) + receipt
+///   metadata: a client that lost the paid response (e.g. the disconnect the
+///   shield survives) recovers its PAID output here.
+/// - `Failed` → status + receipt refs (`tx_signature` / receipt path) — the
+///   post-settle failure arm's error text directs the client HERE, so a
+///   paying agent whose provider call failed post-settle can prove what it
+///   paid.
+/// - `Canceled` → status only (no funds moved; nothing to recover).
+///
+/// `TaskStatus.timestamp` is omitted: the store does not persist when the
+/// state was set, and inventing a read-time value would be untruthful (the
+/// field is optional in v0.3).
+fn project_task(record: &TaskRecord) -> Task {
+    let agent_message = |text: String, metadata: Option<serde_json::Map<String, Value>>| Message {
+        role: MessageRole::Agent,
+        parts: vec![Part::Text { text }],
+        message_id: new_wire_id(),
+        kind: MessageKind::Message,
+        task_id: Some(record.id.clone()),
+        context_id: Some(record.context_id.clone()),
+        metadata,
+    };
+
+    // Receipts object shared by the Completed/Failed projections — the same
+    // keys the paid response's `x402.payment.receipts` carries.
+    let receipts_obj = || -> Option<Value> {
+        if record.tx_signature.is_none() && record.receipt_path.is_none() {
+            return None;
+        }
+        let mut obj = serde_json::Map::new();
+        if let Some(sig) = &record.tx_signature {
+            obj.insert("tx_signature".to_string(), json!(sig));
+        }
+        if let Some(path) = &record.receipt_path {
+            obj.insert("receipt".to_string(), json!(path));
+        }
+        Some(Value::Object(obj))
+    };
+
+    let (message, artifacts) = match record.state {
+        TaskState::InputRequired => {
+            let mut meta = serde_json::Map::new();
+            meta.insert(
+                x402_meta::STATUS_KEY.to_string(),
+                json!(x402_meta::PAYMENT_REQUIRED),
+            );
+            meta.insert(
+                x402_meta::REQUIRED_KEY.to_string(),
+                record.payment_required.clone(),
+            );
+            (
+                Some(agent_message(
+                    "Payment required to process this request.".to_string(),
+                    Some(meta),
+                )),
+                None,
+            )
+        }
+        TaskState::Canceled => (None, None),
+        // A genuinely in-flight settlement: no D6 refs exist yet (they are
+        // written only AFTER settlement finishes) — status only.
+        TaskState::Working if record.tx_signature.is_none() && record.receipt_path.is_none() => {
+            (None, None)
+        }
+        // `Completed` — or the stuck-Working-post-settle compound case
+        // (round-1 review fix): the D6 refs are written ONLY after settlement
+        // finishes, never mid-flight, so a `Working` record CARRYING refs
+        // means settle succeeded, the terminal state write failed (D10), and
+        // `persist_terminal_refs` landed the output/evidence on the
+        // still-Working record. Project them — a client that lost the in-band
+        // response must not see "working, no data" until TTL while its paid
+        // output sits on the record. `status.state` still reports the honest
+        // stored state (`working`).
+        TaskState::Completed | TaskState::Working => {
+            let mut meta = serde_json::Map::new();
+            meta.insert(
+                x402_meta::STATUS_KEY.to_string(),
+                json!(x402_meta::PAYMENT_COMPLETED),
+            );
+            if let Some(receipts) = receipts_obj() {
+                meta.insert(x402_meta::RECEIPTS_KEY.to_string(), receipts);
+            }
+            let artifacts = record.artifact_text.as_ref().map(|text| {
+                vec![Artifact {
+                    artifact_id: new_wire_id(),
+                    parts: vec![Part::Text { text: text.clone() }],
+                }]
+            });
+            // Legacy/failed-save records may lack the artifact text (D6 save
+            // is best-effort on the success arm); the status stays truthful.
+            let text = record.artifact_text.clone().unwrap_or_else(|| {
+                "Task settled; the delivered output is not available on this \
+                 record."
+                    .to_string()
+            });
+            (Some(agent_message(text, Some(meta))), artifacts)
+        }
+        TaskState::Failed => {
+            let mut meta = serde_json::Map::new();
+            meta.insert(
+                x402_meta::STATUS_KEY.to_string(),
+                json!(x402_meta::PAYMENT_FAILED),
+            );
+            if let Some(receipts) = receipts_obj() {
+                meta.insert(x402_meta::RECEIPTS_KEY.to_string(), receipts);
+            }
+            (
+                Some(agent_message(
+                    "Provider call failed after settlement; the payment was \
+                     collected and recorded (see receipts). Do not resubmit a \
+                     new payment — contact support with this task ID."
+                        .to_string(),
+                    Some(meta),
+                )),
+                None,
+            )
+        }
+    };
+
+    Task {
+        id: record.id.clone(),
+        context_id: record.context_id.clone(),
+        kind: TaskKind::Task,
+        status: TaskStatus {
+            state: record.state,
+            message,
+            timestamp: None,
+        },
+        artifacts,
+    }
+}
+
+// ── tasks/cancel ────────────────────────────────────────────────────────
+
+/// Handle `tasks/cancel` (A2A v0.3 §7.4), D4-a: FULL cancel from
+/// `InputRequired` ONLY — `Working` means a settlement is in flight
+/// (canceling it would race funds) and `Completed`/`Failed`/`Canceled` are
+/// terminal. MONEY-FREE: cancel never touches settlement; it serializes
+/// against the payment leg through the SAME per-task settle lock.
+pub async fn handle_tasks_cancel(
+    state: &Arc<AppState>,
+    request: &JsonRpcRequest,
+) -> Result<Value, JsonRpcErrorData> {
+    let params: TaskIdParams =
+        serde_json::from_value(request.params.clone()).map_err(|e| JsonRpcErrorData {
+            code: ERR_INVALID_PARAMS,
+            message: format!("Invalid params: {e}"),
+            data: None,
+        })?;
+    let task_id = params.id.as_str();
+
+    // Money-free intake fast-fail (same #532 error mapping as the paid leg).
+    // NOT the correctness site — the under-lock re-check in
+    // `cancel_under_lock` is authoritative; this gives terminal/in-flight
+    // tasks a friendly rejection without a lock round-trip.
+    let record = task_store::load_task(state, task_id)
+        .await
+        .map_err(|e| {
+            metrics::counter!("solvela_a2a_cancel_total", "outcome" => "error").increment(1);
+            JsonRpcErrorData {
+                code: ERR_INTERNAL,
+                message: format!("Task store error: {e}"),
+                data: None,
+            }
+        })?
+        .ok_or_else(|| {
+            metrics::counter!("solvela_a2a_cancel_total", "outcome" => "not_found").increment(1);
+            JsonRpcErrorData {
+                code: ERR_TASK_NOT_FOUND,
+                message: format!("Task not found or expired: {task_id}"),
+                data: None,
+            }
+        })?;
+    if record.state != TaskState::InputRequired {
+        metrics::counter!("solvela_a2a_cancel_total", "outcome" => "not_cancelable").increment(1);
+        // D10 (round-2 review fix): mirror the payment intake — a crash-stuck
+        // `Working` task is rejected at this pre-lock site, so it must feed
+        // the stuck-Working reconciliation counter here too (over-counts
+        // accepted; alert-only signal).
+        if record.state == TaskState::Working {
+            metrics::counter!("solvela_a2a_task_stuck_working_total").increment(1);
+        }
+        return Err(not_cancelable_for_state(task_id, record.state));
+    }
+
+    cancel_under_lock(state, task_id).await
+}
+
+/// The under-lock section of `tasks/cancel`: acquire the settle lock,
+/// re-check the state UNDER it (the exact mirror of the payment leg's
+/// authoritative re-check), write `Canceled`, and HOLD the lock.
+///
+/// LOCK DISPOSITION (plan §5 "tasks/cancel", D9 rationale): on a successful
+/// cancel the lock is HELD — NEVER released. `release_settle_lock` is a
+/// token-less unconditional DEL: releasing here would let a payment leg that
+/// passed its intake check BEFORE the cancel immediately reacquire the lock
+/// and settle into the Canceled task (the settle-into-Canceled race).
+/// `Canceled` is terminal, so no legitimate settle ever follows; the held
+/// lock self-expires via TTL, and even after expiry the payment leg's
+/// under-lock re-check sees `Canceled` and rejects — belt and braces, both
+/// pinned. The lock IS released on every failure branch below (the task was
+/// not decided; a retry must not be stranded).
+async fn cancel_under_lock(
+    state: &Arc<AppState>,
+    task_id: &str,
+) -> Result<Value, JsonRpcErrorData> {
+    // The A2A task store requires Redis (`load_task` above already errored
+    // without it), so an absent cache here means the invariant broke —
+    // fail closed, never proceed lock-less (mirrors the settle side).
+    let Some(cache) = &state.cache else {
+        metrics::counter!("solvela_a2a_cancel_total", "outcome" => "error").increment(1);
+        warn!(
+            task_id,
+            "A2A cancel requested with no Redis cache configured — failing closed"
+        );
+        return Err(JsonRpcErrorData {
+            code: ERR_INTERNAL,
+            message: "Cancel is temporarily unavailable; please retry shortly.".to_string(),
+            data: None,
+        });
+    };
+
+    match cache
+        .acquire_settle_lock(task_id, crate::cache::A2A_SETTLE_LOCK_TTL_SECS)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            // A held lock can mean a settlement in progress OR a task already
+            // canceled by a concurrent cancel (which holds the lock).
+            // Money-free re-load for the MESSAGE disambiguation only; the
+            // fail-closed rejection stands either way.
+            let already_canceled = matches!(
+                task_store::load_task(state, task_id).await,
+                Ok(Some(r)) if r.state == TaskState::Canceled
+            );
+            metrics::counter!("solvela_a2a_cancel_total", "outcome" => "lock_held").increment(1);
+            let message = if already_canceled {
+                format!("Task {task_id} was already canceled.")
+            } else {
+                format!(
+                    "A settlement for task {task_id} is in progress; the task \
+                     can no longer be canceled."
+                )
+            };
+            return Err(JsonRpcErrorData {
+                code: ERR_TASK_NOT_CANCELABLE,
+                message,
+                data: None,
+            });
+        }
+        Err(e) => {
+            metrics::counter!("solvela_a2a_cancel_total", "outcome" => "error").increment(1);
+            warn!(
+                task_id,
+                error = %e,
+                "A2A cancel lock store unavailable — failing closed"
+            );
+            return Err(JsonRpcErrorData {
+                code: ERR_INTERNAL,
+                message: "Cancel is temporarily unavailable; please retry shortly.".to_string(),
+                data: None,
+            });
+        }
+    }
+
+    // AUTHORITATIVE under-lock re-check (TOCTOU guard, mirroring the payment
+    // leg's step-5 re-check): a payment leg can have decided the task between
+    // the intake fast-fail and this lock. Pinned failure branches (plan §5):
+    // state changed → RELEASE + -32002; `Ok(None)` → release + -32001;
+    // `Err` → release + -32603.
+    let record = match task_store::load_task(state, task_id).await {
+        Ok(Some(r)) if r.state == TaskState::InputRequired => r,
+        Ok(Some(r)) => {
+            metrics::counter!("solvela_a2a_cancel_total", "outcome" => "not_cancelable")
+                .increment(1);
+            cache.release_settle_lock(task_id).await;
+            return Err(not_cancelable_for_state(task_id, r.state));
+        }
+        Ok(None) => {
+            metrics::counter!("solvela_a2a_cancel_total", "outcome" => "not_found").increment(1);
+            cache.release_settle_lock(task_id).await;
+            return Err(JsonRpcErrorData {
+                code: ERR_TASK_NOT_FOUND,
+                message: format!("Task not found or expired: {task_id}"),
+                data: None,
+            });
+        }
+        Err(e) => {
+            metrics::counter!("solvela_a2a_cancel_total", "outcome" => "error").increment(1);
+            cache.release_settle_lock(task_id).await;
+            return Err(JsonRpcErrorData {
+                code: ERR_INTERNAL,
+                message: format!("Task store error: {e}"),
+                data: None,
+            });
+        }
+    };
+
+    // Write the terminal Canceled state (`InputRequired→Canceled`, the only
+    // arm into Canceled). A failed write releases the lock and returns the
+    // retryable internal error — the task is unchanged, cancel is retryable
+    // (plan §5).
+    //
+    // Named ceiling (ambiguous ack, mirroring the settle side's Working-marker
+    // write): if the Redis SET applied but the ack errored, the record may
+    // already read `Canceled` while we release the lock and report retryable —
+    // the retried cancel then fast-fails "already canceled" (the correct
+    // outcome), and the payment leg's under-lock re-check still rejects on
+    // `Canceled` even with the lock released.
+    if let Err(e) = task_store::update_task_state(state, task_id, TaskState::Canceled).await {
+        metrics::counter!("solvela_a2a_cancel_total", "outcome" => "error").increment(1);
+        warn!(
+            task_id,
+            error = %e,
+            "A2A cancel failed to persist Canceled — releasing lock (retryable)"
+        );
+        cache.release_settle_lock(task_id).await;
+        return Err(JsonRpcErrorData {
+            code: ERR_INTERNAL,
+            message: "Cancel could not be persisted; please retry.".to_string(),
+            data: None,
+        });
+    }
+
+    // Success: HOLD the lock (see the function doc — releasing would reopen
+    // the settle-into-Canceled race). It self-expires via TTL.
+    metrics::counter!("solvela_a2a_cancel_total", "outcome" => "canceled").increment(1);
+    info!(task_id, "A2A task canceled (lock held; terminal)");
+
+    let task = Task {
+        id: task_id.to_string(),
+        context_id: record.context_id.clone(),
+        kind: TaskKind::Task,
+        status: TaskStatus {
+            state: TaskState::Canceled,
+            message: None,
+            timestamp: Some(now_timestamp()),
+        },
+        artifacts: None,
+    };
+    serde_json::to_value(&task).map_err(|e| JsonRpcErrorData {
+        code: ERR_INTERNAL,
+        message: format!("Failed to serialize task: {e}"),
+        data: None,
+    })
+}
+
+/// `-32002 TaskNotCancelableError` with per-state honest wording. Arms are
+/// EXPLICIT (no wildcard) — a future state variant forces a wording decision
+/// here, like `reject_for_task_state` on the payment side.
+fn not_cancelable_for_state(task_id: &str, state: TaskState) -> JsonRpcErrorData {
+    let message = match state {
+        TaskState::Working => format!(
+            "A settlement for task {task_id} is in progress; the task can no \
+             longer be canceled."
+        ),
+        TaskState::Completed | TaskState::Failed => format!(
+            "Task {task_id} has already reached a terminal state and cannot \
+             be canceled; retrieve its result with tasks/get."
+        ),
+        TaskState::Canceled => format!("Task {task_id} was already canceled."),
+        // Unreachable from both call sites (each proceeds on InputRequired
+        // and only rejects otherwise), handled honestly: an InputRequired
+        // task IS cancelable.
+        TaskState::InputRequired => {
+            format!("Task {task_id} is awaiting payment and can be canceled; retry the cancel.")
+        }
+    };
+    JsonRpcErrorData {
+        code: ERR_TASK_NOT_CANCELABLE,
+        message,
+        data: None,
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Mint a v0.3 wire id (UUID v4) for `messageId` / `artifactId`.
@@ -1368,27 +1885,35 @@ fn now_timestamp() -> String {
 }
 
 /// Money-free rejection for a payment against a task that is not payable:
-/// `Working` (a settlement is in flight — possibly with an expired lock) or a
-/// terminal `Completed`/`Failed`. Shared by the CONVENIENCE intake fast-fail
-/// and the AUTHORITATIVE under-lock re-check so both sites reject with
-/// identical, friendly errors. Wording is actionable TODAY (round-1 review):
-/// no `tasks/get` exists until Slice 2b, so the messages carry the task id
-/// for a support path instead of pointing at a method that isn't routed yet;
-/// 2b restores the task-status pointer.
+/// `Working` (a settlement is in flight — possibly with an expired lock), a
+/// terminal `Completed`/`Failed`, or `Canceled`. Shared by the CONVENIENCE
+/// intake fast-fail and the AUTHORITATIVE under-lock re-check so both sites
+/// reject with identical, friendly errors. The messages direct the client to
+/// `tasks/get` (routed since Slice 2b) for the task's state/result.
 ///
-/// Arms are EXPLICIT (no wildcard) so Slice 2b's `Canceled` variant forces a
+/// Arms are EXPLICIT (no wildcard) so any future state variant forces a
 /// compile-time wording decision here rather than silently inheriting the
 /// terminal-state text.
 fn reject_for_task_state(task_id: &str, state: TaskState) -> JsonRpcErrorData {
     let message = match state {
         TaskState::Working => format!(
             "A settlement for task {task_id} is already in progress; do not \
-             resubmit a new payment for this task."
+             resubmit a new payment for this task — poll tasks/get for the \
+             outcome."
         ),
         TaskState::Completed | TaskState::Failed => format!(
             "Task {task_id} has already reached a terminal state and cannot \
-             accept another payment; do not resubmit — contact support with \
-             this task ID if you did not receive your result."
+             accept another payment; retrieve its result with tasks/get — do \
+             not resubmit. Contact support with this task ID if you did not \
+             receive your result."
+        ),
+        // Slice 2b: a canceled task is terminal and never accepts a payment.
+        // No funds moved on the cancel path, so unlike Completed/Failed there
+        // is no result to recover — the agent should start over with a fresh
+        // quote. Checkable via tasks/get (state reads "canceled").
+        TaskState::Canceled => format!(
+            "Task {task_id} was canceled and cannot accept a payment; request \
+             a new quote with message/send (verify with tasks/get)."
         ),
         // Unreachable from both call sites (each proceeds on InputRequired
         // and only rejects otherwise), but handled honestly rather than
@@ -1899,6 +2424,9 @@ supports_vision = false
             ),
             receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::receipts_default(),
+            ),
+            a2a_tasks_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::a2a_tasks_default(),
             ),
             faucet_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::faucet_default(),
@@ -2439,6 +2967,9 @@ supports_vision = false
             receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::receipts_default(),
             ),
+            a2a_tasks_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::a2a_tasks_default(),
+            ),
             faucet_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::faucet_default(),
             ),
@@ -2511,6 +3042,9 @@ supports_vision = false
             ),
             receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::receipts_default(),
+            ),
+            a2a_tasks_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::a2a_tasks_default(),
             ),
             faucet_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::faucet_default(),
@@ -3115,6 +3649,9 @@ supports_vision = false
             ),
             receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::receipts_default(),
+            ),
+            a2a_tasks_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::a2a_tasks_default(),
             ),
             faucet_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::faucet_default(),
@@ -3889,6 +4426,501 @@ supports_vision = false
         cache.release_settle_lock(&ghost_id).await;
     }
 
+    /// Minimal Redis-backed record in the given state (Slice-2b test helper).
+    async fn save_record_in_state(state: &Arc<AppState>, task_state: TaskState) -> Option<String> {
+        let task_id = new_task_id();
+        let record = TaskRecord {
+            id: task_id.clone(),
+            state: task_state,
+            original_message: "hello".to_string(),
+            payment_required: json!({"x402_version": 2, "accepts": []}),
+            model: Some("test-model".to_string()),
+            max_tokens: Some(100),
+            context_id: task_store::new_context_id(),
+            artifact_text: None,
+            tx_signature: None,
+            receipt_path: None,
+            created_at: chrono::Utc::now(),
+        };
+        if task_store::save_task(state, &record).await.is_err() {
+            eprintln!("skipping Slice-2b test: Redis unavailable");
+            return None;
+        }
+        Some(task_id)
+    }
+
+    fn rpc_request(method: &str, task_id: &str) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            id: json!(1),
+            params: json!({ "id": task_id }),
+        }
+    }
+
+    /// 2b-1 `payment_against_canceled_task_rejects_under_lock` (the round-1
+    /// BLOCKER interleave, pinned): a cancel decides the task BETWEEN the
+    /// payment leg's intake check and its lock acquisition. Driven directly at
+    /// `settle_paid_task` with a stale `InputRequired` record snapshot while
+    /// the STORE says `Canceled` — exactly the memory state of the race (the
+    /// intake fast-fail passed against the stale snapshot). The under-lock
+    /// re-check must reject money-free, release the lock, and leave the state
+    /// unchanged; `verify_and_settle` is never reached (the empty test
+    /// facilitator would produce the "verification failed" message if it
+    /// were).
+    ///
+    /// Also drives the SECOND belt: with the store `Canceled` and the lock
+    /// HELD (what a real cancel leaves behind — cancel holds, never DELs),
+    /// the payment leg's `Ok(false)` arm must disambiguate to the canceled
+    /// message, not the concurrent-settlement one.
+    #[tokio::test]
+    async fn payment_against_canceled_task_rejects_under_lock() {
+        let state = test_state_with_redis();
+        let cache = state.cache.as_ref().expect("redis-backed test state");
+        let model_info = state
+            .model_registry
+            .get("test-model")
+            .expect("test model registered") // safe: registered in test_state_with_redis
+            .clone();
+        let make_payload = || -> solvela_x402::types::PaymentPayload {
+            serde_json::from_value(json!({
+                "x402_version": solvela_x402::types::X402_VERSION,
+                "resource": {"url": "/v1/chat/completions", "method": "POST"},
+                "accepted": {
+                    "scheme": "exact",
+                    "network": solvela_x402::types::SOLANA_NETWORK,
+                    "amount": "1000",
+                    "asset": solvela_x402::types::USDC_MINT,
+                    "pay_to": "11111111111111111111111111111111",
+                    "max_timeout_seconds": solvela_x402::types::MAX_TIMEOUT_SECONDS,
+                },
+                "payload": {
+                    "transaction": format!("test_tx_{}", uuid::Uuid::new_v4().simple())
+                }
+            }))
+            .expect("valid test payload") // safe: known-good test data
+        };
+        let messages = vec![ChatMessage {
+            role: Role::User,
+            content: "hello".to_string().into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+
+        // The payment leg's STALE snapshot: InputRequired (it passed intake).
+        let Some(task_id) = save_record_in_state(&state, TaskState::Canceled).await else {
+            return;
+        };
+        let stale_record = TaskRecord {
+            id: task_id.clone(),
+            state: TaskState::InputRequired,
+            original_message: "hello".to_string(),
+            payment_required: json!({"x402_version": 2, "accepts": []}),
+            model: Some("test-model".to_string()),
+            max_tokens: Some(100),
+            context_id: task_store::new_context_id(),
+            artifact_text: None,
+            tx_signature: None,
+            receipt_path: None,
+            created_at: chrono::Utc::now(),
+        };
+
+        // Belt 2 (lock free — the post-TTL case): the under-lock re-check
+        // sees Canceled and rejects.
+        let err = settle_paid_task(
+            Arc::clone(&state),
+            task_id.clone(),
+            stale_record.clone(),
+            make_payload(),
+            "test-model".to_string(),
+            model_info.clone(),
+            messages.clone(),
+            100,
+        )
+        .await
+        .expect_err("payment against a canceled task must be rejected");
+        assert_eq!(err.code, ERR_PAYMENT_FAILED);
+        assert!(
+            err.message.contains("canceled"),
+            "the rejection must name the cancellation, got: {}",
+            err.message
+        );
+        // Money-free rejection released the lock; state unchanged.
+        assert!(
+            cache
+                .acquire_settle_lock(&task_id, 5)
+                .await
+                .expect("lock probe"),
+            "the canceled-task rejection must release the settle lock"
+        );
+        // Belt 1 (lock HELD — what a real cancel leaves): the Ok(false)
+        // disambiguation reports the cancellation, not a concurrent settle.
+        // (The probe acquisition above IS the held lock for this leg.)
+        let err2 = settle_paid_task(
+            Arc::clone(&state),
+            task_id.clone(),
+            stale_record,
+            make_payload(),
+            "test-model".to_string(),
+            model_info,
+            messages,
+            100,
+        )
+        .await
+        .expect_err("payment while the cancel holds the lock must be rejected");
+        assert_eq!(err2.code, ERR_PAYMENT_FAILED);
+        assert!(
+            err2.message.contains("canceled") && !err2.message.contains("already in progress"),
+            "the lock-held rejection must disambiguate to the canceled message, got: {}",
+            err2.message
+        );
+        cache.release_settle_lock(&task_id).await;
+        let after = task_store::load_task(&state, &task_id)
+            .await
+            .expect("redis up")
+            .expect("record present");
+        assert_eq!(
+            after.state,
+            TaskState::Canceled,
+            "no leg may move the state"
+        );
+    }
+
+    /// 2b-2: cancel of a task in any terminal state → `-32002`
+    /// TaskNotCancelableError, state untouched.
+    #[tokio::test]
+    async fn cancel_of_terminal_task_returns_not_cancelable() {
+        let state = test_state_with_redis();
+        for terminal in [TaskState::Completed, TaskState::Failed, TaskState::Canceled] {
+            let Some(task_id) = save_record_in_state(&state, terminal).await else {
+                return;
+            };
+            let err = handle_tasks_cancel(&state, &rpc_request("tasks/cancel", &task_id))
+                .await
+                .expect_err("terminal task must not be cancelable");
+            assert_eq!(
+                err.code, ERR_TASK_NOT_CANCELABLE,
+                "cancel of a {terminal:?} task must be -32002, got: {}",
+                err.message
+            );
+            let after = task_store::load_task(&state, &task_id)
+                .await
+                .expect("redis up")
+                .expect("record present");
+            assert_eq!(
+                after.state, terminal,
+                "cancel rejection must not move state"
+            );
+        }
+    }
+
+    /// 2b-3: cancel during an in-flight settlement (`Working` marker
+    /// persisted) → `-32002`, whether the settle lock is still held or has
+    /// TTL-expired — the MARKER, not the lock, is what makes the in-flight
+    /// settlement visible (D9-a).
+    #[tokio::test]
+    async fn cancel_during_inflight_settlement_rejected() {
+        let state = test_state_with_redis();
+        let cache = state.cache.as_ref().expect("redis-backed test state");
+
+        // Lock EXPIRED (free) — the record alone must protect the settlement.
+        let Some(task_id) = save_record_in_state(&state, TaskState::Working).await else {
+            return;
+        };
+        let err = handle_tasks_cancel(&state, &rpc_request("tasks/cancel", &task_id))
+            .await
+            .expect_err("cancel of an in-flight settlement must be rejected");
+        assert_eq!(err.code, ERR_TASK_NOT_CANCELABLE);
+        assert!(
+            err.message.contains("in progress"),
+            "the rejection must name the in-flight settlement, got: {}",
+            err.message
+        );
+
+        // Lock HELD (the common in-flight case) — same rejection.
+        assert!(
+            cache
+                .acquire_settle_lock(&task_id, 30)
+                .await
+                .expect("lock probe"),
+            "test setup: lock must be acquirable"
+        );
+        let err2 = handle_tasks_cancel(&state, &rpc_request("tasks/cancel", &task_id))
+            .await
+            .expect_err("cancel while the settle lock is held must be rejected");
+        assert_eq!(err2.code, ERR_TASK_NOT_CANCELABLE);
+        cache.release_settle_lock(&task_id).await;
+        let after = task_store::load_task(&state, &task_id)
+            .await
+            .expect("redis up")
+            .expect("record present");
+        assert_eq!(
+            after.state,
+            TaskState::Working,
+            "cancel must not move Working"
+        );
+    }
+
+    /// 2b-4: cancel's under-lock re-check failure branches (pinned, plan §5):
+    /// state changed between the intake fast-fail and the lock → RELEASE the
+    /// lock + `-32002`; record vanished (`Ok(None)`) → release + `-32001`.
+    /// Driven directly at `cancel_under_lock` (bypassing the fast-fail, which
+    /// cannot be raced deterministically through the route) — the same
+    /// pattern as the payment side's re-check pin. The `Err` re-load branch
+    /// is not injectable with a live Redis (it mirrors the payment side's
+    /// reviewed release+`-32603` arm).
+    #[tokio::test]
+    async fn cancel_under_lock_recheck_failure_releases_and_rejects() {
+        let state = test_state_with_redis();
+        let cache = state.cache.as_ref().expect("redis-backed test state");
+
+        // Branch 1: state changed to Working after the (bypassed) fast-fail.
+        let Some(task_id) = save_record_in_state(&state, TaskState::Working).await else {
+            return;
+        };
+        let err = cancel_under_lock(&state, &task_id)
+            .await
+            .expect_err("re-check must reject a task that left InputRequired");
+        assert_eq!(err.code, ERR_TASK_NOT_CANCELABLE);
+        assert!(
+            cache
+                .acquire_settle_lock(&task_id, 5)
+                .await
+                .expect("lock probe"),
+            "the re-check rejection must RELEASE the lock"
+        );
+        cache.release_settle_lock(&task_id).await;
+        let after = task_store::load_task(&state, &task_id)
+            .await
+            .expect("redis up")
+            .expect("record present");
+        assert_eq!(
+            after.state,
+            TaskState::Working,
+            "rejection must not move state"
+        );
+
+        // Branch 2: record vanished in the fast-fail→lock window (Ok(None)).
+        let ghost_id = new_task_id();
+        let err2 = cancel_under_lock(&state, &ghost_id)
+            .await
+            .expect_err("re-check must reject a vanished task");
+        assert_eq!(err2.code, ERR_TASK_NOT_FOUND);
+        assert!(
+            cache
+                .acquire_settle_lock(&ghost_id, 5)
+                .await
+                .expect("lock probe"),
+            "the Ok(None) rejection must RELEASE the lock"
+        );
+        cache.release_settle_lock(&ghost_id).await;
+    }
+
+    /// Happy cancel (D4-a): an `InputRequired` task cancels, the response Task
+    /// reads `canceled`, the store agrees, and the settle lock is HELD — never
+    /// released (a token-less DEL here would let a pre-cancel payment leg
+    /// immediately reacquire and settle into the Canceled task).
+    #[tokio::test]
+    async fn cancel_of_input_required_task_cancels_and_holds_lock() {
+        let state = test_state_with_redis();
+        let cache = state.cache.as_ref().expect("redis-backed test state");
+        let Some(task_id) = save_record_in_state(&state, TaskState::InputRequired).await else {
+            return;
+        };
+
+        let result = handle_tasks_cancel(&state, &rpc_request("tasks/cancel", &task_id))
+            .await
+            .expect("cancel of an InputRequired task must succeed");
+        assert_eq!(result["status"]["state"], "canceled");
+        assert_eq!(result["id"], json!(task_id));
+        assert_eq!(result["kind"], "task");
+        assert!(
+            result["contextId"].as_str().is_some_and(|c| !c.is_empty()),
+            "canceled Task must carry its contextId"
+        );
+
+        let after = task_store::load_task(&state, &task_id)
+            .await
+            .expect("redis up")
+            .expect("record present");
+        assert_eq!(after.state, TaskState::Canceled);
+
+        // THE lock-disposition pin: the lock is HELD after a successful
+        // cancel — an acquisition attempt must fail.
+        assert!(
+            !cache
+                .acquire_settle_lock(&task_id, 5)
+                .await
+                .expect("lock probe"),
+            "a successful cancel must HOLD the settle lock (never DEL)"
+        );
+
+        // Idempotence-adjacent: canceling again is -32002 "already canceled"
+        // (fast-fail on the terminal state).
+        let err = handle_tasks_cancel(&state, &rpc_request("tasks/cancel", &task_id))
+            .await
+            .expect_err("second cancel must be rejected");
+        assert_eq!(err.code, ERR_TASK_NOT_CANCELABLE);
+        assert!(
+            err.message.contains("already canceled"),
+            "second cancel must say already canceled, got: {}",
+            err.message
+        );
+    }
+
+    /// 2b-6 `tasks_get_error_mapping` (invariant 6): a genuinely absent id
+    /// with Redis PRESENT → `-32001` TaskNotFound; with NO Redis → `-32603`
+    /// (retry signal — never a spurious not-found when the store is down).
+    #[tokio::test]
+    async fn tasks_get_error_mapping() {
+        // Redis present, unknown id → -32001.
+        let state = test_state_with_redis();
+        if state.cache.is_none() {
+            eprintln!("skipping tasks_get_error_mapping: Redis unavailable");
+            return;
+        }
+        let err = handle_tasks_get(&state, &rpc_request("tasks/get", &new_task_id()))
+            .await
+            .expect_err("unknown task id must be rejected");
+        assert_eq!(err.code, ERR_TASK_NOT_FOUND);
+
+        // No Redis → -32603 (fail closed, #532 semantics).
+        let no_redis = test_state();
+        let err2 = handle_tasks_get(&no_redis, &rpc_request("tasks/get", "a2a_whatever"))
+            .await
+            .expect_err("no-Redis tasks/get must fail closed");
+        assert_eq!(
+            err2.code, ERR_INTERNAL,
+            "no-Redis must be -32603, not -32001"
+        );
+    }
+
+    /// tasks/get per-state projections (plan §5): InputRequired re-serves the
+    /// STORED `x402.payment.required` snapshot byte-identically (a client
+    /// that lost the quote can re-pay); Working/Canceled are status-only;
+    /// Completed carries the D6 artifact + receipts; Failed carries receipt
+    /// refs and NO artifacts.
+    #[tokio::test]
+    async fn tasks_get_projects_each_state() {
+        let state = test_state_with_redis();
+        if state.cache.is_none() {
+            eprintln!("skipping projections test: Redis unavailable");
+            return;
+        }
+
+        let stored_quote = json!({
+            "x402_version": 2,
+            "accepts": [{"scheme": "exact", "amount": "1000"}],
+            "cost_breakdown": {"total": "0.001000"}
+        });
+        let base = |task_state: TaskState| TaskRecord {
+            id: new_task_id(),
+            state: task_state,
+            original_message: "hello".to_string(),
+            payment_required: stored_quote.clone(),
+            model: Some("test-model".to_string()),
+            max_tokens: Some(100),
+            context_id: task_store::new_context_id(),
+            artifact_text: None,
+            tx_signature: None,
+            receipt_path: None,
+            created_at: chrono::Utc::now(),
+        };
+        let get = |id: String| {
+            let state = Arc::clone(&state);
+            async move {
+                handle_tasks_get(&state, &rpc_request("tasks/get", &id))
+                    .await
+                    .expect("tasks/get must succeed for a stored record")
+            }
+        };
+
+        // InputRequired → the stored quote, byte-identical.
+        let rec = base(TaskState::InputRequired);
+        task_store::save_task(&state, &rec).await.expect("save");
+        let task = get(rec.id.clone()).await;
+        assert_eq!(task["status"]["state"], "input-required");
+        assert_eq!(
+            task["status"]["message"]["metadata"]["x402.payment.required"], stored_quote,
+            "InputRequired projection must re-serve the STORED quote snapshot byte-identically"
+        );
+        assert_eq!(
+            task["status"]["message"]["metadata"]["x402.payment.status"],
+            "payment-required"
+        );
+        assert!(task["artifacts"].is_null());
+
+        // Working (no refs = genuinely in flight) / Canceled → status only.
+        for s in [TaskState::Working, TaskState::Canceled] {
+            let rec = base(s);
+            task_store::save_task(&state, &rec).await.expect("save");
+            let task = get(rec.id.clone()).await;
+            assert!(
+                task["status"]["message"].is_null(),
+                "{s:?} projection is status-only"
+            );
+            assert!(task["artifacts"].is_null());
+        }
+
+        // Stuck-Working POST-settle (round-1 review fix): a Working record
+        // CARRYING D6 refs means settle succeeded but the terminal state
+        // write failed (D10) — the client's recovery data must be projected,
+        // with the state still honestly reported as `working`.
+        let mut rec = base(TaskState::Working);
+        rec.artifact_text = Some("the stuck paid answer".to_string());
+        rec.tx_signature = Some("sig-stuck".to_string());
+        rec.receipt_path = Some("/v1/receipts/stuck".to_string());
+        task_store::save_task(&state, &rec).await.expect("save");
+        let task = get(rec.id.clone()).await;
+        assert_eq!(task["status"]["state"], "working", "state stays honest");
+        assert_eq!(
+            task["artifacts"][0]["parts"][0]["text"], "the stuck paid answer",
+            "stuck-Working-post-settle must project the paid output"
+        );
+        let receipts = &task["status"]["message"]["metadata"]["x402.payment.receipts"];
+        assert_eq!(receipts["tx_signature"], "sig-stuck");
+        assert_eq!(receipts["receipt"], "/v1/receipts/stuck");
+
+        // Completed → D6 artifact + receipts.
+        let mut rec = base(TaskState::Completed);
+        rec.artifact_text = Some("the paid answer".to_string());
+        rec.tx_signature = Some("sig123".to_string());
+        rec.receipt_path = Some("/v1/receipts/abc".to_string());
+        task_store::save_task(&state, &rec).await.expect("save");
+        let task = get(rec.id.clone()).await;
+        assert_eq!(task["status"]["state"], "completed");
+        assert_eq!(
+            task["artifacts"][0]["parts"][0]["text"], "the paid answer",
+            "Completed projection must recover the paid output (D6)"
+        );
+        let receipts = &task["status"]["message"]["metadata"]["x402.payment.receipts"];
+        assert_eq!(receipts["tx_signature"], "sig123");
+        assert_eq!(receipts["receipt"], "/v1/receipts/abc");
+        assert_eq!(
+            task["status"]["message"]["metadata"]["x402.payment.status"],
+            "payment-completed"
+        );
+
+        // Failed → receipt refs, no artifacts.
+        let mut rec = base(TaskState::Failed);
+        rec.tx_signature = Some("sig456".to_string());
+        rec.receipt_path = Some("/v1/receipts/def".to_string());
+        task_store::save_task(&state, &rec).await.expect("save");
+        let task = get(rec.id.clone()).await;
+        assert_eq!(task["status"]["state"], "failed");
+        assert!(task["artifacts"].is_null(), "Failed delivers no artifact");
+        let receipts = &task["status"]["message"]["metadata"]["x402.payment.receipts"];
+        assert_eq!(
+            receipts["tx_signature"], "sig456",
+            "Failed projection must carry the payment evidence (D6)"
+        );
+        assert_eq!(
+            task["status"]["message"]["metadata"]["x402.payment.status"],
+            "payment-failed"
+        );
+    }
+
     /// Regression (#532): with no Redis configured, `load_task` must return
     /// `Err` (an infrastructure failure), NOT `Ok(None)` — which the handler
     /// maps to ERR_TASK_NOT_FOUND ("task not found or expired"). An agent that
@@ -3960,6 +4992,9 @@ supports_vision = false
             ),
             receipts_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::receipts_default(),
+            ),
+            a2a_tasks_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
+                crate::middleware::rate_limit::RateLimitConfig::a2a_tasks_default(),
             ),
             faucet_rate_limiter: crate::middleware::rate_limit::RateLimiter::new(
                 crate::middleware::rate_limit::RateLimitConfig::faucet_default(),

@@ -170,6 +170,18 @@ pub struct AppState {
     /// (GHSA-6ggq-cvwx-4f67); absent `ConnectInfo` falls back to the shared
     /// stricter "unknown" bucket.
     pub receipts_rate_limiter: RateLimiter,
+    /// Per-client (IP) rate limiter for the A2A `tasks/get` method
+    /// (`POST /a2a`), enforced in the dispatcher before the method routes.
+    ///
+    /// Same in-handler pattern as
+    /// [`receipts_rate_limiter`](Self::receipts_rate_limiter): a `tasks/get`
+    /// is a Redis lookup gated only by an unguessable task-id capability, so
+    /// this cap bounds id enumeration/scanning per peer IP, STRICTER than the
+    /// generic outer limiter ([`RateLimitConfig::a2a_tasks_default`]). Keyed
+    /// on the TCP peer IP, never a client-supplied header
+    /// (GHSA-6ggq-cvwx-4f67); absent `ConnectInfo` falls back to the shared
+    /// stricter "unknown" bucket.
+    pub a2a_tasks_rate_limiter: RateLimiter,
     /// Per-client (IP) rate limiter for the public, unauthenticated
     /// `POST /v1/faucet/gas` gas-drip route (security review finding F6).
     ///

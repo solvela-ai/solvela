@@ -606,6 +606,17 @@ fn generous_receipts_limiter() -> RateLimiter {
     })
 }
 
+/// A2A tasks/get limiter for test apps: effectively unlimited so tests that
+/// exercise `tasks/get` (or just construct an `AppState`) from the `oneshot`
+/// "unknown" bucket are never tripped by the production per-IP cap.
+fn generous_a2a_tasks_limiter() -> RateLimiter {
+    RateLimiter::new(RateLimitConfig {
+        max_requests: 10_000,
+        window: std::time::Duration::from_secs(60),
+        unknown_max_requests: 10_000,
+    })
+}
+
 /// Faucet-POST limiter for test apps: effectively unlimited so unrelated tests
 /// that exercise `POST /v1/faucet/gas` (or just construct an `AppState`) are
 /// never tripped by the production per-IP cap. The strict cap itself is
@@ -698,6 +709,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -758,6 +770,7 @@ fn test_app_channels_disabled() -> axum::Router {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -814,6 +827,7 @@ fn test_app_with_usdc_mint_and_providers(mint: &str, providers: ProviderRegistry
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -1427,6 +1441,7 @@ fn test_app_dev_bypass_capturing_native_relay(
         dev_bypass_payment: true,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -1495,6 +1510,7 @@ supports_vision = true
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -1598,6 +1614,7 @@ fn test_app_with_provider_registry_and_exact_verifier_native(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -1658,6 +1675,7 @@ fn test_app_with_models_and_providers(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -1861,6 +1879,7 @@ fn app_with_semantic_cache(sem: Arc<gateway::cache::semantic::SemanticCache>) ->
         dev_bypass_payment: true,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -2179,6 +2198,7 @@ fn app_with_semantic_cache_and_escrow(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -2262,6 +2282,7 @@ fn app_with_semantic_cache_escrow_and_db_pool(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -2929,6 +2950,7 @@ fn test_app_with_provider_registry_and_escrow_verifier(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -3019,6 +3041,7 @@ fn test_app_with_escrow_and_usdc_mint(mint: &str) -> axum::Router {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -3494,6 +3517,7 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -6025,6 +6049,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -8065,6 +8090,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -8237,6 +8263,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -8479,6 +8506,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -9017,6 +9045,7 @@ async fn test_proxy_require_tenant_wallet_rejected_before_settlement() {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -10543,6 +10572,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -10811,7 +10841,9 @@ async fn test_a2a_invalid_jsonrpc_version() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["code"], -32700);
+    // A parsed envelope with a wrong `jsonrpc` value is an INVALID REQUEST
+    // (-32600), not a parse error (JSON-RPC 2.0 §5.1; conformance plan 2b).
+    assert_eq!(json["error"]["code"], -32600);
 }
 
 #[tokio::test]
@@ -11204,6 +11236,7 @@ fn test_app_with_free_limit(free_max: u32) -> axum::Router {
         // accidentally tripped by the global cap; the aggregate-cap tests build
         // their own app via `test_app_with_global_cap`.
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -11572,6 +11605,7 @@ async fn dev_bypass_still_works() {
         // Aggregate cap also set to 0 — if the dev-bypass branch were ever
         // (incorrectly) routed through the free gates, this PAID model would 429.
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(0),
@@ -11651,6 +11685,7 @@ fn test_app_with_global_cap(global_cap: u32) -> axum::Router {
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(free_cfg),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(global_cap),
@@ -11784,6 +11819,7 @@ async fn free_per_ip_and_global_cap_are_independent() {
         free_rate_limiter: RateLimiter::new(free_cfg),
         // Global cap deliberately LOOSER than the per-IP limit.
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(100),
@@ -12677,6 +12713,7 @@ fn test_app_with_db_pool(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -13325,6 +13362,7 @@ fn test_app_with_receipts_limit(max: u32) -> axum::Router {
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         receipts_rate_limiter: RateLimiter::new(receipts_cfg),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
     });
@@ -13723,6 +13761,7 @@ fn a2a_app_with_providers_and_bypass(
         dev_bypass_payment,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -14310,6 +14349,7 @@ fn a2a_app_with_verifier_and_db(
         dev_bypass_payment: false,
         free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
         receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
         faucet_rate_limiter: generous_faucet_limiter(),
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -14474,8 +14514,8 @@ async fn a2a_concurrent_settlements_same_task_settle_exactly_once() {
     let loser = rejected[0];
     assert_eq!(
         loser["error"]["code"].as_i64(),
-        Some(-32001),
-        "loser must be ERR_PAYMENT_FAILED (-32001): {loser}"
+        Some(-32007),
+        "loser must be ERR_PAYMENT_FAILED (-32007): {loser}"
     );
     assert!(
         loser["error"]["message"]
@@ -14545,7 +14585,7 @@ async fn a2a_retry_after_failed_settlement_succeeds_lock_released() {
     let env1 = a2a_call_envelope(&app, &pay1).await;
     assert_eq!(
         env1["error"]["code"].as_i64(),
-        Some(-32001),
+        Some(-32007),
         "first submission must fail with ERR_PAYMENT_FAILED (settlement failed): {env1}"
     );
     assert!(
@@ -14709,6 +14749,146 @@ async fn request_future_dropped_mid_settle_still_completes_and_ledgers() {
     );
 }
 
+/// M1 (issue #680): the success arm writes the LEDGER row BEFORE the
+/// `Completed` state — a crash between the two must leave the ledger row
+/// present and the task recoverable, never a normal-looking `Completed` with
+/// no ledger row (which was invisible to both the stuck-Working counters and
+/// chain-vs-ledger reconciliation).
+///
+/// Extends the 2a-4 drop-mid-settle harness: the request future is dropped
+/// mid-settle AND the `Completed` state write is sabotaged (the record is
+/// flipped to `Failed` while settlement is in flight, making
+/// `Working→Completed` an invalid transition) — the worst-case residue of a
+/// crash in the ledger→state window. The ledger row must exist regardless:
+/// the ledger write must never depend on the state write landing. (A literal
+/// process kill between two adjacent statements has no injectable seam in
+/// this harness; the ORDER itself is additionally pinned by the handler's
+/// #680 comment block.)
+#[tokio::test]
+async fn dropped_and_state_write_failed_settlement_still_ledgers_and_stays_recoverable() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let settle_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let verifier = Arc::new(SettleCountingDelayVerifier {
+        settle_count: Arc::clone(&settle_count),
+        // Wide enough that the 100ms drop + the sabotage below both land
+        // firmly INSIDE the settlement window.
+        delay: std::time::Duration::from_millis(600),
+    });
+    let Some((app, state)) = a2a_app_with_verifier_and_db(pool, verifier) else {
+        return;
+    };
+    let db = state.db_pool.clone().expect("test is DB-backed");
+    let handle = test_prometheus_handle();
+
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let pay = a2a_payment_submitted_body(&task_id, &offer);
+
+    // Drop the request future mid-settle (the 2a-4 crash simulation)…
+    let dropped = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        a2a_call_envelope(&app, &pay),
+    )
+    .await;
+    assert!(
+        dropped.is_err(),
+        "the request future must be dropped mid-settle for this test to exercise the window"
+    );
+
+    // …then, still inside the settle window (the verifier sleeps 600ms),
+    // sabotage the coming `Working→Completed` write by flipping the record to
+    // `Failed` (from which that transition is invalid).
+    let mut record = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must exist");
+    assert_eq!(
+        record.state,
+        gateway::a2a::types::TaskState::Working,
+        "the sabotage must land while settlement is in flight (Working marker persisted)"
+    );
+    let stuck_before = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    record.state = gateway::a2a::types::TaskState::Failed;
+    gateway::a2a::task_store::save_task(&state, &record)
+        .await
+        .expect("save sabotaged record");
+
+    // THE #680 pin: the ledger row exists even though the Completed state
+    // write never landed — the ledger write runs first and does not depend on
+    // the state write.
+    let rows = spend_rows_for_task(&db, &task_id, 1).await;
+    assert_eq!(
+        rows, 1,
+        "the settled payment must be ledgered exactly once regardless of the \
+         state write (got {rows})"
+    );
+    assert_eq!(
+        settle_count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "settlement must have run exactly once"
+    );
+
+    // The task is left RECOVERABLE, never a normal-looking Completed: the
+    // sabotaged state stands, and the failed Completed write is observable on
+    // the stuck-Working counter (`>` not an exact delta: the Prometheus family
+    // is process-global under parallel tests — same caveat as the #566 tests).
+    let after = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must still exist");
+    assert_eq!(
+        after.state,
+        gateway::a2a::types::TaskState::Failed,
+        "the failed Completed write must not silently override the record"
+    );
+    let stuck_after = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    assert!(
+        stuck_after > stuck_before,
+        "the failed Completed write must be counted (before={stuck_before}, after={stuck_after})"
+    );
+    // D6: the payment evidence was still persisted onto the record.
+    assert!(
+        after.tx_signature.is_some(),
+        "the settlement signature must be persisted (D6) despite the failed state write"
+    );
+
+    // "Stays recoverable" pinned from the CLIENT's perspective (round-1
+    // review): the disconnected client polls tasks/get through the real route
+    // and must receive its payment evidence — not just have it sitting in the
+    // store.
+    let got = a2a_call_envelope(
+        &app,
+        &serde_json::json!({
+            "jsonrpc": "2.0", "method": "tasks/get", "id": "m1-recover",
+            "params": {"id": task_id}
+        }),
+    )
+    .await;
+    assert!(
+        got["error"].is_null(),
+        "tasks/get after the crash-window compound must succeed: {got}"
+    );
+    let recovered = &got["result"];
+    assert_eq!(
+        recovered["status"]["state"], "failed",
+        "the sabotaged state stands"
+    );
+    let receipts = &recovered["status"]["message"]["metadata"]["x402.payment.receipts"];
+    assert!(
+        receipts["tx_signature"].is_string(),
+        "the client-facing tasks/get response must carry the settlement \
+         signature: {recovered}"
+    );
+    assert!(
+        receipts["receipt"]
+            .as_str()
+            .is_some_and(|p| p.starts_with("/v1/receipts/")),
+        "the client-facing tasks/get response must carry the durable receipt \
+         path: {recovered}"
+    );
+}
+
 /// 2a-5: a panic INSIDE the shielded critical section surfaces as a
 /// `JoinError` on the awaited handle and maps to a clean `-32603` JSON-RPC
 /// error — never a hung response, and never the panic payload
@@ -14749,7 +14929,7 @@ async fn spawn_shield_join_error_maps_to_internal_error() {
 /// pre-checks inside the spawn or reorder them.
 ///
 /// Order observable: a task whose stored model is corrupt AND whose content is
-/// guard-blocked rejects MODEL-first (-32003) — model resolve precedes the
+/// guard-blocked rejects MODEL-first (-32009) — model resolve precedes the
 /// guard. Outside-the-lock observable: after both rejections the settle lock
 /// is still free (we can acquire it ourselves) and settlement was never
 /// reached. (The tenant gate's position is pinned separately by the #499
@@ -14803,7 +14983,7 @@ async fn pre_payment_checks_run_outside_shield_in_unchanged_order() {
     let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
     assert_eq!(
         env["error"]["code"].as_i64(),
-        Some(-32003),
+        Some(-32009),
         "model resolve must reject FIRST (pre-checks in unchanged order): {env}"
     );
 
@@ -14895,7 +15075,7 @@ async fn payment_against_terminal_task_rejects_before_settle() {
         let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
         assert_eq!(
             env["error"]["code"].as_i64(),
-            Some(-32001),
+            Some(-32007),
             "payment against a {terminal:?} task must be rejected: {env}"
         );
         assert!(
@@ -14944,7 +15124,7 @@ async fn settle_failure_reverts_working_to_input_required() {
     let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
     assert_eq!(
         env["error"]["code"].as_i64(),
-        Some(-32001),
+        Some(-32007),
         "failed settlement must reject with ERR_PAYMENT_FAILED: {env}"
     );
     assert!(
@@ -15044,7 +15224,7 @@ async fn failed_revert_releases_lock_and_leaves_stuck_working() {
 
     assert_eq!(
         env["error"]["code"].as_i64(),
-        Some(-32001),
+        Some(-32007),
         "the gated settlement failure must reject with ERR_PAYMENT_FAILED: {env}"
     );
 
@@ -15082,7 +15262,7 @@ async fn failed_revert_releases_lock_and_leaves_stuck_working() {
     let env2 = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
     assert_eq!(
         env2["error"]["code"].as_i64(),
-        Some(-32001),
+        Some(-32007),
         "a payment against a stuck-Working task must fast-fail: {env2}"
     );
     assert!(
@@ -15162,7 +15342,7 @@ async fn channel_payload_after_working_marker_reverts_and_releases() {
     let env = a2a_call_envelope(&app, &pay_channel).await;
     assert_eq!(
         env["error"]["code"].as_i64(),
-        Some(-32001),
+        Some(-32007),
         "channel payload must be rejected fail-closed: {env}"
     );
     assert!(
@@ -15327,7 +15507,7 @@ async fn completed_and_failed_saves_persist_artifact_and_receipt_refs() {
     .await;
     assert_eq!(
         env_fail["error"]["code"].as_i64(),
-        Some(-32002),
+        Some(-32008),
         "failed leg must return ERR_PROVIDER_ERROR: {env_fail}"
     );
 
@@ -15501,7 +15681,7 @@ async fn a2a_provider_failure_after_settle_writes_ledger_and_holds_lock() {
     // The caller gets the provider error (terminal for this submission).
     assert_eq!(
         env["error"]["code"].as_i64(),
-        Some(-32002),
+        Some(-32008),
         "post-settle provider failure must return ERR_PROVIDER_ERROR: {env}"
     );
     // GHSA-cgqx-mg48-949v (HIGH): the client-facing message must NOT echo the
@@ -15583,7 +15763,7 @@ async fn a2a_provider_failure_after_settle_writes_ledger_and_holds_lock() {
     let env_retry = a2a_call_envelope(&app, &pay_retry).await;
     assert_eq!(
         env_retry["error"]["code"].as_i64(),
-        Some(-32001),
+        Some(-32007),
         "retry after a post-settle provider failure must be rejected: {env_retry}"
     );
     assert!(
@@ -15754,6 +15934,7 @@ mod faucet_route_tests {
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -15940,6 +16121,7 @@ mod faucet_route_tests {
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter,
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -16475,6 +16657,7 @@ mod escrow_deposit_tx_tests {
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -16827,6 +17010,7 @@ mod escrow_deposit_tx_tests {
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: limiter,
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -17024,6 +17208,7 @@ price_per_request_usdc = 0.01
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -17358,6 +17543,7 @@ price_per_request_usdc = 0.01
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -17511,6 +17697,7 @@ price_per_request_usdc = 0.01
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -19545,6 +19732,7 @@ mod channel_open_guard_tests {
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -19890,6 +20078,7 @@ price_per_request_usdc = 0.01
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -19949,6 +20138,7 @@ price_per_request_usdc = 0.01
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -21162,6 +21352,7 @@ price_per_request_usdc = 0.01
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -21478,6 +21669,7 @@ mod chat_channel_draw_tests {
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -23363,6 +23555,7 @@ mod chat_channel_draw_tests {
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -23428,6 +23621,7 @@ mod chat_channel_draw_tests {
             dev_bypass_payment: false,
             free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
             receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
             faucet_rate_limiter: generous_faucet_limiter(),
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
@@ -23511,4 +23705,365 @@ mod x402_challenge_smoke_tests {
              update the fixture and re-run the TS/Go/Python SDK 402-parse smokes together"
         );
     }
+}
+
+// ===========================================================================
+// Slice 2b — new A2A wire surface (tasks/get recovery + wire fixture pin)
+// ===========================================================================
+
+/// 2b-5 `tasks_get_recovers_paid_output_and_failed_receipts` (the D6
+/// read-side pin — the entire justification for D6): a client that lost the
+/// `message/send` response recovers its PAID output via `tasks/get`
+/// (Completed → artifacts + receipts), and a paying agent whose provider call
+/// failed AFTER settlement recovers its payment evidence (Failed → receipt
+/// refs, no artifacts). Both sides drive the REAL `/a2a` route end-to-end
+/// (real verification/settlement; the Failed side uses the failing-provider
+/// registry). Self-skips without Redis/Postgres.
+#[tokio::test]
+async fn tasks_get_recovers_paid_output_and_failed_receipts() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+
+    // ── Completed side: full paid flow, then recover via tasks/get. ──
+    let Some((app, _state)) =
+        a2a_app_with_redis_db_and_providers(Some(pool.clone()), mock_provider_registry())
+    else {
+        return;
+    };
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
+    assert!(env["error"].is_null(), "paid flow must complete: {env}");
+
+    let got = a2a_call_envelope(
+        &app,
+        &serde_json::json!({
+            "jsonrpc": "2.0", "method": "tasks/get", "id": "g1",
+            "params": {"id": task_id}
+        }),
+    )
+    .await;
+    assert!(
+        got["error"].is_null(),
+        "tasks/get on a completed task must succeed: {got}"
+    );
+    let task = &got["result"];
+    assert_eq!(task["status"]["state"], "completed");
+    let recovered = task["artifacts"][0]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        !recovered.is_empty(),
+        "tasks/get must recover the PAID output (D6): {task}"
+    );
+    assert_eq!(
+        recovered,
+        env["result"]["artifacts"][0]["parts"][0]["text"]
+            .as_str()
+            .unwrap_or_default(),
+        "the recovered artifact must equal the in-band paid response"
+    );
+    let receipts = &task["status"]["message"]["metadata"]["x402.payment.receipts"];
+    assert!(
+        receipts["tx_signature"].is_string(),
+        "completed tasks/get must carry the settlement signature: {task}"
+    );
+    assert!(
+        receipts["receipt"]
+            .as_str()
+            .is_some_and(|p| p.starts_with("/v1/receipts/")),
+        "completed tasks/get must carry the durable receipt path: {task}"
+    );
+
+    // ── Failed side: post-settle provider failure, then recover evidence. ──
+    let Some((app_fail, _state_fail)) =
+        a2a_app_with_redis_db_and_providers(Some(pool), failing_provider_registry())
+    else {
+        return;
+    };
+    let (task_id_f, offer_f) = a2a_new_request(&app_fail).await;
+    let env_f =
+        a2a_call_envelope(&app_fail, &a2a_payment_submitted_body(&task_id_f, &offer_f)).await;
+    assert_eq!(
+        env_f["error"]["code"].as_i64(),
+        Some(-32008),
+        "the failed leg must be the post-settle provider error: {env_f}"
+    );
+
+    let got_f = a2a_call_envelope(
+        &app_fail,
+        &serde_json::json!({
+            "jsonrpc": "2.0", "method": "tasks/get", "id": "g2",
+            "params": {"id": task_id_f}
+        }),
+    )
+    .await;
+    let task_f = &got_f["result"];
+    assert_eq!(task_f["status"]["state"], "failed");
+    assert!(
+        task_f["artifacts"].is_null(),
+        "a failed task delivers no artifact: {task_f}"
+    );
+    let receipts_f = &task_f["status"]["message"]["metadata"]["x402.payment.receipts"];
+    assert!(
+        receipts_f["tx_signature"].is_string(),
+        "Failed-arm tasks/get must carry the payment evidence (D6): {task_f}"
+    );
+}
+
+/// 2b-9 `a2a_error_and_offer_wire_fixture_pin` — the A2A analogue of the #669
+/// `chat_402_challenge.json` cross-SDK pin. The fixture
+/// (`tests/fixtures/a2a_error_and_offer.json`) pins (a) the FULL renumbered
+/// D3 error-code table and (b) the `input-required` `x402.payment.required`
+/// metadata byte-shape for a fixed request — including that `accepts[]`
+/// carries ONLY strict-parser-known schemes (exact/escrow; never silently
+/// growing "channel"). Every live-drivable code is driven through the real
+/// route and asserted against the fixture entry, so fixture and code cannot
+/// drift silently. Self-skips without Redis/Postgres.
+#[tokio::test]
+async fn a2a_error_and_offer_wire_fixture_pin() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/a2a_error_and_offer.json"))
+            .expect("fixture parses");
+    let codes = &fixture["error_codes"];
+    let code_of = |name: &str| -> i64 {
+        codes[name]
+            .as_i64()
+            .unwrap_or_else(|| panic!("fixture error_codes.{name} missing"))
+    };
+
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let Some((app, state)) =
+        a2a_app_with_redis_db_and_providers(Some(pool), mock_provider_registry())
+    else {
+        return;
+    };
+
+    // ── (b) The input-required offer, byte-shape-pinned for a FIXED request. ──
+    let new_result = a2a_call(
+        &app,
+        &serde_json::json!({
+            "jsonrpc": "2.0", "method": "message/send", "id": "fix-1",
+            "params": {"message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "Wire fixture pin: what is Solana?"}],
+                "metadata": {"model": "openai/gpt-4o"}
+            }}
+        }),
+    )
+    .await;
+    let live_pr = &new_result["status"]["message"]["metadata"]["x402.payment.required"];
+    // Invariant 12 / HALT-12 tripwire: no scheme outside {exact, escrow} may
+    // EVER appear — deployed SDK strict parsers reject the ENTIRE offer on an
+    // unknown scheme.
+    for accept in live_pr["accepts"].as_array().expect("accepts array") {
+        let scheme = accept["scheme"].as_str().unwrap_or("<non-string>");
+        assert!(
+            scheme == "exact" || scheme == "escrow",
+            "A2A offer advertises scheme '{scheme}' — SDK strict parsers reject it"
+        );
+    }
+    assert_eq!(
+        live_pr, &fixture["input_required_payment_required"],
+        "live A2A x402.payment.required diverged from the fixture — update the \
+         fixture AND re-check the SDK strict-parser suites in the same change"
+    );
+    let task_id = new_result["id"].as_str().expect("task id").to_string();
+    let offer = live_pr["accepts"][0].clone();
+
+    // ── (a) The error table, live-driven where drivable. ──
+    // invalid_request: wrong jsonrpc version.
+    let env = a2a_call_envelope(
+        &app,
+        &serde_json::json!({"jsonrpc": "1.0", "method": "message/send", "id": 1, "params": {}}),
+    )
+    .await;
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(code_of("invalid_request"))
+    );
+
+    // method_not_found: unrouted method.
+    let env = a2a_call_envelope(
+        &app,
+        &serde_json::json!({"jsonrpc": "2.0", "method": "no/such", "id": 1, "params": {}}),
+    )
+    .await;
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(code_of("method_not_found"))
+    );
+
+    // invalid_params: message/send with no text part.
+    let env = a2a_call_envelope(
+        &app,
+        &serde_json::json!({"jsonrpc": "2.0", "method": "message/send", "id": 1,
+            "params": {"message": {"role": "user", "parts": []}}}),
+    )
+    .await;
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(code_of("invalid_params"))
+    );
+
+    // task_not_found: tasks/get on an unknown id.
+    let env = a2a_call_envelope(
+        &app,
+        &serde_json::json!({"jsonrpc": "2.0", "method": "tasks/get", "id": 1,
+            "params": {"id": "a2a_00000000000000000000000000000000"}}),
+    )
+    .await;
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(code_of("task_not_found"))
+    );
+
+    // push_notification_not_supported: any push method.
+    let env = a2a_call_envelope(
+        &app,
+        &serde_json::json!({"jsonrpc": "2.0", "method": "tasks/pushNotificationConfig/set",
+            "id": 1, "params": {}}),
+    )
+    .await;
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(code_of("push_notification_not_supported"))
+    );
+
+    // payment_failed: an underpaying submission (accepted.amount below the
+    // quote) rejects at offer validation — money-free, before any settle.
+    let mut underpay = a2a_payment_submitted_body(&task_id, &offer);
+    underpay["params"]["message"]["metadata"]["x402.payment.payload"]["accepted"]["amount"] =
+        serde_json::json!("1");
+    let env = a2a_call_envelope(&app, &underpay).await;
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(code_of("payment_failed"))
+    );
+
+    // model_not_found: corrupt the stored model, then submit (the money-free
+    // model pre-check rejects before the lock — same seam as the 2a-6 pin).
+    let mut record = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must exist");
+    record.model = Some("definitely-not-a-real-model-xyz".to_string());
+    gateway::a2a::task_store::save_task(&state, &record)
+        .await
+        .expect("save corrupt-model record");
+    let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(code_of("model_not_found"))
+    );
+
+    // task_not_cancelable: cancel of an in-flight (Working) task.
+    record.model = Some("openai/gpt-4o".to_string());
+    record.state = gateway::a2a::types::TaskState::Working;
+    gateway::a2a::task_store::save_task(&state, &record)
+        .await
+        .expect("save Working record");
+    let env = a2a_call_envelope(
+        &app,
+        &serde_json::json!({"jsonrpc": "2.0", "method": "tasks/cancel", "id": 1,
+            "params": {"id": task_id}}),
+    )
+    .await;
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(code_of("task_not_cancelable"))
+    );
+
+    // internal_error and provider_error are pinned LIVE elsewhere
+    // (`test_message_send_without_redis_returns_error` asserts -32603 with no
+    // Redis; the post-settle provider-failure tests assert -32008): here the
+    // fixture entries are checked for the documented values so the table
+    // cannot drift silently.
+    assert_eq!(code_of("internal_error"), -32603);
+    assert_eq!(code_of("provider_error"), -32008);
+}
+
+/// Round-2 review fix (D10): a task at rest in `Working` after a bare process
+/// crash (no live lock) is rejected by the PRE-lock intake fast-fails — both
+/// the payment leg's and cancel's — which previously never fed
+/// `solvela_a2a_task_stuck_working_total`, leaving the operator's designated
+/// reconciliation trigger at zero for exactly the crash it was designed to
+/// catch. Both intake sites must increment it. `>` not an exact delta: the
+/// Prometheus family is process-global under parallel tests (same caveat as
+/// `channel_payload_after_working_marker_reverts_and_releases`).
+#[tokio::test]
+async fn stuck_working_at_rest_increments_counter_at_both_intakes() {
+    let Some(pool) = try_receipts_db_pool().await else {
+        return;
+    };
+    let settle_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let verifier = Arc::new(SettleCountingDelayVerifier {
+        settle_count: Arc::clone(&settle_count),
+        delay: std::time::Duration::from_millis(0),
+    });
+    let Some((app, state)) = a2a_app_with_verifier_and_db(pool, verifier) else {
+        return;
+    };
+    let handle = test_prometheus_handle();
+
+    // The bare-crash residue: record at rest in `Working`, lock NOT held.
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let mut record = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("Redis is up in this test")
+        .expect("task record must exist");
+    record.state = gateway::a2a::types::TaskState::Working;
+    gateway::a2a::task_store::save_task(&state, &record)
+        .await
+        .expect("save stuck-Working record");
+
+    // Payment intake fast-fail: rejected AND counted.
+    let before = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
+    assert_eq!(
+        env["error"]["code"].as_i64(),
+        Some(-32007),
+        "payment against a stuck-Working task must fast-fail at intake: {env}"
+    );
+    assert!(
+        env["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already in progress"),
+        "the rejection must be the intake fast-fail's in-progress message: {env}"
+    );
+    let after_payment = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    assert!(
+        after_payment > before,
+        "the payment intake fast-fail must feed the stuck-Working counter \
+         (before={before}, after={after_payment})"
+    );
+
+    // Cancel intake fast-fail: rejected AND counted.
+    let env2 = a2a_call_envelope(
+        &app,
+        &serde_json::json!({"jsonrpc": "2.0", "method": "tasks/cancel", "id": 1,
+            "params": {"id": task_id}}),
+    )
+    .await;
+    assert_eq!(
+        env2["error"]["code"].as_i64(),
+        Some(-32002),
+        "cancel of a stuck-Working task must fast-fail at intake: {env2}"
+    );
+    let after_cancel = prom_counter_total(&handle, "solvela_a2a_task_stuck_working_total");
+    assert!(
+        after_cancel > after_payment,
+        "the cancel intake fast-fail must feed the stuck-Working counter \
+         (before={after_payment}, after={after_cancel})"
+    );
+
+    // Neither intake rejection reached settlement.
+    assert_eq!(
+        settle_count.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "intake fast-fails must never reach settlement"
+    );
 }
