@@ -1,0 +1,400 @@
+name: sdk-dropin publish
+
+# Tag-triggered npm publish for @solvela/dropin (sdks/dropin/).
+#
+# @solvela/dropin is the Claude Code drop-in signing sidecar: it signs a
+# spend-down-channel voucher per request and relays the gateway's native
+# response. It signs and broadcasts real USDC-SPL transactions on Solana
+# mainnet, so every payment-sdk-publisher guardrail applies. It is LAYER 2
+# of the dropin publish set: it depends on @solvela/signer-core (LAYER 1)
+# via `"@solvela/signer-core": "file:../signer-core"` in the repo.
+# signer-core MUST already be published and visible on npm before this
+# workflow publishes dropin. See sdk-signer-core-publish.yml (LAYER 1) and
+# docs/runbooks/mcp-npm-publish.md for the shared firing sequence.
+#
+# This workflow is a close mirror of sdk-mcp-publish.yml (the proven
+# LAYER-2 precedent for the same signer-core dep). The two things that make
+# it more than a copy of sdk-signer-core-publish.yml are identical to mcp:
+#   1. DEP-ORDER GATE: before publishing, poll npm until
+#      @solvela/signer-core@<repo version> is resolvable, so the dropin
+#      tarball never references a dep that isn't on the registry yet.
+#   2. file:->registry SWAP: the repo keeps `file:../signer-core` for local
+#      dev; this job rewrites it, on the checked-out copy ONLY, to a
+#      `^<version>` registry range so the PUBLISHED tarball carries a real
+#      npm dep — never `file:`. The swap is never committed.
+#
+# WHERE dropin DIFFERS FROM mcp (called out so a maintainer can trust the
+# deviations):
+#   - dropin is a CLI (bin `solvela-dropin` -> dist/index.js), not an MCP
+#     stdio server. The post-publish smoke runs `npx -y @solvela/dropin
+#     help` and asserts the usage banner, instead of an MCP `initialize`
+#     round-trip. `help` needs no wallet/RPC and exits 0, but still loads
+#     index.js whose static ESM imports pull in @solvela/signer-core — so
+#     it proves the registry dep resolved from a clean install.
+#   - dropin carries prebuild/pretest hooks (node ../signer-core/scripts/
+#     ensure-built.mjs) that bootstrap signer-core's dist for local dev.
+#     CI still builds signer-core explicitly (with --ignore-scripts, the
+#     money-path choice) exactly as mcp does; the hook then short-circuits
+#     because dist already exists. Explicit build kept to match the proven
+#     precedent and to control the install flags.
+#   - dropin was never `private`, so the mcp `private:true` guard here is
+#     generic defense-in-depth (no #646-style history), not a gate on a
+#     specific prior PR.
+#
+# Authoring provenance (tool versions cited so a future maintainer can tell
+# correct-at-the-time guidance from speculation):
+#   - Verified locally 2026-07-06 against Node 22.22.0 + npm 10.9.4 in the
+#     feat/dropin-publish worktree, at origin/main HEAD (eccbf453):
+#     signer-core `npm ci` + `npm run build`; dropin `npm ci` +
+#     `npm run build` + `npm test` (29 tests pass); the jq swap
+#     (file:../signer-core -> ^0.2.0); `npm publish --dry-run --access
+#     public` -> tarball = dist/ + README.md + package.json + LICENSE only
+#     (22 files, 29.3 kB; no src/tests/state/secrets; bin dist/index.js
+#     present with its `#!/usr/bin/env node` shebang; packed package.json
+#     has no `private` and the swapped `^0.2.0` dep). signer-core@0.2.0 was
+#     published (this workflow's LAYER 1) and confirmed live with
+#     provenance attestations before this file was authored.
+#   - Mirrors the npm-family publish workflows (sdk-signer-core-publish.yml,
+#     sdk-mcp-publish.yml, sdk-typescript-publish.yml) for auth/provenance/
+#     SHA-verify and the multi-job verify/test/publish shape. Actions at
+#     floating @v6 to match that family; SHA-pinning is a future hardening.
+#
+# PROVENANCE PRECONDITION (read before the first tag):
+#   `npm publish --provenance` REQUIRES a `repository` field in
+#   package.json matching (case-sensitive) the building repo, and
+#   `npm publish --dry-run` does NOT validate it — the failure only
+#   surfaces on the REAL publish. The verify job enforces it up front and
+#   fails closed. Source: https://docs.npmjs.com/generating-provenance-statements
+#   As of 2026-07-06 sdks/dropin/package.json already carries the field
+#   (directory: sdks/dropin), so this is a re-check, not a blocker.
+
+on:
+  push:
+    tags:
+      - 'sdks/dropin/v*'
+
+# Never cancel a publish mid-run; a cancelled publish can leave the
+# registry in a partial state.
+concurrency:
+  group: sdk-dropin-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least privilege at the root; the publish job escalates to id-token:write
+# per-job (required for npm provenance OIDC).
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: sdks/dropin
+
+jobs:
+  # --------------------------------------------------------------------
+  # Guardrail job: tag-vs-manifest, not-private, provenance repository
+  # precondition, and already-published. Runs first; halts in seconds on
+  # any failure, before the test suite or any publish step.
+  # --------------------------------------------------------------------
+  verify:
+    name: Verify tag, version, provenance precondition
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history so tag is reachable)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Verify tag matches package.json, repo + version preconditions
+        run: |
+          set -euo pipefail
+
+          # Tag format: sdks/dropin/v0.1.0  ->  TAG_VERSION=0.1.0
+          TAG_NAME="${GITHUB_REF_NAME}"
+          TAG_VERSION="${TAG_NAME#sdks/dropin/v}"
+          if [ "$TAG_VERSION" = "$TAG_NAME" ]; then
+            echo "ERROR: tag '$TAG_NAME' does not match 'sdks/dropin/v<version>'"
+            exit 1
+          fi
+
+          MANIFEST_VERSION=$(jq -r '.version' package.json)
+          PKG_NAME=$(jq -r '.name' package.json)
+          echo "Package:          $PKG_NAME"
+          echo "Tag version:      $TAG_VERSION"
+          echo "Manifest version: $MANIFEST_VERSION"
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "ERROR: tag version ($TAG_VERSION) != package.json version ($MANIFEST_VERSION)"
+            echo "Bump sdks/dropin/package.json or retag at the correct commit."
+            exit 1
+          fi
+
+          # Generic defense-in-depth: refuse to publish a package marked
+          # private. dropin has never carried this field (unlike mcp, which
+          # dropped it in #646); this catches an accidental re-introduction.
+          if [ "$(jq -r '.private // false' package.json)" = "true" ]; then
+            echo "ERROR: sdks/dropin/package.json has \"private\": true."
+            echo "Refusing to publish a package marked private."
+            exit 1
+          fi
+
+          # Provenance precondition (see header). dry-run does NOT catch this.
+          REPO_URL=$(jq -r '.repository.url // .repository // empty' package.json)
+          echo "repository: ${REPO_URL:-<missing>}"
+          case "$REPO_URL" in
+            *github.com/solvela-ai/solvela*) : ;;
+            *)
+              echo "ERROR: package.json has no 'repository' field matching"
+              echo "github.com/solvela-ai/solvela. npm provenance requires it."
+              echo "Add it to sdks/dropin/package.json, e.g.:"
+              echo '  "repository": { "type": "git",'
+              echo '    "url": "git+https://github.com/solvela-ai/solvela.git",'
+              echo '    "directory": "sdks/dropin" }'
+              exit 1
+              ;;
+          esac
+
+          # Stop-and-ask guard: never re-publish an existing version.
+          # `npm view <pkg>@<ver> version` prints the version if published,
+          # is empty for a missing version, and 404s (non-zero) for a
+          # never-published package — all three handled here.
+          PUBLISHED=$(npm view "${PKG_NAME}@${TAG_VERSION}" version 2>/dev/null || true)
+          if [ -n "$PUBLISHED" ]; then
+            echo "ERROR: ${PKG_NAME}@${TAG_VERSION} is already published on npm."
+            echo "Halting — bump the version or pick a new tag."
+            exit 1
+          fi
+          echo "OK: ${PKG_NAME}@${TAG_VERSION} is not yet published — clear to release."
+
+  # --------------------------------------------------------------------
+  # Re-run the SDK's test suite at the tagged commit. Mirrors mcp.yml /
+  # sdk-mcp-publish.yml: Node 22 (its `node --test *.ts` runner needs
+  # strip-types via tsx), and signer-core's dist/ is built first because
+  # npm does NOT auto-build a `file:` dep. Tests run against the LOCAL
+  # file: signer-core (the swap happens only in the publish job).
+  # --------------------------------------------------------------------
+  test:
+    name: Test (Node 22)
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sdks/dropin/package-lock.json
+
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci && npm run build
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  # --------------------------------------------------------------------
+  # Publish to npm with provenance. Depends on [verify, test]. Dep-order
+  # gate + file:->registry swap live here. Order matters:
+  #   build signer-core dist -> npm ci -> build dropin -> swap -> dry-run
+  #   -> poll signer-core live -> live publish -> SHA verify -> npx smoke.
+  # --------------------------------------------------------------------
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: [verify, test]
+    environment: npm-publish
+    permissions:
+      id-token: write   # MANDATORY for npm provenance OIDC; do not remove.
+      contents: read
+    steps:
+      - name: Checkout (full history so tag is reachable)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sdks/dropin/package-lock.json
+          # Registry URL required for NODE_AUTH_TOKEN injection by setup-node.
+          registry-url: 'https://registry.npmjs.org'
+
+      # signer-core's dist/ must exist for dropin's `npm ci` + build +
+      # dry-run while the dep is still `file:` (npm does not auto-build a
+      # file: dep). --ignore-scripts is the money-path choice. dropin's own
+      # prebuild/pretest ensure-built hook then no-ops (dist already exists).
+      - name: "Build signer-core dist/ (file: dep — npm doesn't auto-build)"
+        working-directory: sdks/signer-core
+        run: npm ci --ignore-scripts && npm run build
+
+      - name: Install dependencies (ignore-scripts)
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      # CI-only swap: rewrite the signer-core dep from file:../signer-core
+      # to the just-published `^<version>` so the PUBLISHED tarball carries
+      # a registry dep, never `file:`. Done on the checked-out copy only;
+      # never committed. <version> is read from the repo's signer-core
+      # manifest (its tag was published first, so this is the live version).
+      - name: "Swap file: dep -> published registry range"
+        run: |
+          set -euo pipefail
+          SIGNER_VERSION=$(jq -r '.version' ../signer-core/package.json)
+          if [ -z "$SIGNER_VERSION" ] || [ "$SIGNER_VERSION" = "null" ]; then
+            echo "ERROR: could not read @solvela/signer-core version from ../signer-core/package.json"
+            exit 1
+          fi
+          jq --arg v "^$SIGNER_VERSION" \
+            '.dependencies["@solvela/signer-core"] = $v' package.json > package.json.tmp
+          mv package.json.tmp package.json
+          echo "Rewrote @solvela/signer-core: file:../signer-core -> ^$SIGNER_VERSION"
+          echo "  published dependency line:"
+          jq '.dependencies["@solvela/signer-core"]' package.json
+
+      # Charter-mandated dry-run BEFORE live publish, AFTER the swap so the
+      # tarball reflects exactly what ships (dist/ + README.md + the
+      # registry dep). Does not resolve the dep from the registry.
+      - name: Dry-run publish (verify post-swap tarball)
+        run: npm publish --dry-run --access public
+
+      # Dep-order gate: do NOT publish dropin until its signer-core
+      # dependency is actually resolvable on npm. Polls ~5 min (30 x 10s),
+      # matching the propagation loops in the other workflows. Absorbs
+      # index-propagation lag if signer-core was tagged just before; fails
+      # closed rather than shipping a broken dep if it was never published.
+      - name: Wait for @solvela/signer-core to be resolvable on npm
+        run: |
+          set -euo pipefail
+          SIGNER_VERSION=$(jq -r '.version' ../signer-core/package.json)
+          echo "Requiring @solvela/signer-core@${SIGNER_VERSION} on the registry"
+          for i in $(seq 1 30); do
+            if npm view "@solvela/signer-core@${SIGNER_VERSION}" version >/dev/null 2>&1; then
+              echo "Attempt $i/30: @solvela/signer-core@${SIGNER_VERSION} is resolvable."
+              exit 0
+            fi
+            echo "Attempt $i/30: not resolvable yet; sleeping 10s"
+            sleep 10
+          done
+          echo "ERROR: @solvela/signer-core@${SIGNER_VERSION} is not on npm after ~5 minutes."
+          echo "Publish sdks/signer-core (tag sdks/signer-core/v${SIGNER_VERSION}) first."
+          exit 1
+
+      # --access public on both paths: a scoped package's first publish
+      # defaults to restricted, and provenance requires a public package.
+      - name: Publish (provenance)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG_NAME="${{ github.ref_name }}"
+          if [[ "$TAG_NAME" =~ -rc\.[0-9]+$ ]]; then
+            echo "RC tag detected — publishing with --tag rc"
+            npm publish --tag rc --access public --provenance
+          else
+            echo "Release tag detected — publishing with --tag latest"
+            npm publish --access public --provenance
+          fi
+
+      # Post-publish: poll until visible, then SHA-256 compare the registry
+      # tarball against a locally-packed one. The local pack reproduces the
+      # POST-SWAP tarball (the swap persists in this job's working copy), so
+      # this confirms the published bytes carry the registry dep.
+      # (npm pack runs prepack/prepare only — NOT prepublishOnly — so it
+      # packs the dist/ the publish step already built; no rebuild here.)
+      - name: Verify published tarball SHA matches local build
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(jq -r '.version' package.json)
+          PKG_NAME=$(jq -r '.name' package.json)
+          echo "Verifying $PKG_NAME@$PKG_VERSION"
+
+          LOCAL_TARBALL=$(npm pack --dry-run --json 2>/dev/null | \
+            python3 -c "import sys,json; print(json.load(sys.stdin)[0]['filename'])")
+          npm pack 2>/dev/null
+          LOCAL_SHA=$(shasum -a 256 "$LOCAL_TARBALL" | awk '{print $1}')
+          echo "Local tarball SHA256: $LOCAL_SHA"
+
+          TARBALL_URL=""
+          for i in $(seq 1 30); do
+            TARBALL_URL=$(npm view "${PKG_NAME}@${PKG_VERSION}" dist.tarball 2>/dev/null || true)
+            if [ -n "$TARBALL_URL" ]; then
+              break
+            fi
+            echo "Attempt $i/30: ${PKG_NAME}@${PKG_VERSION} not visible yet; sleeping 10s"
+            sleep 10
+          done
+          if [ -z "$TARBALL_URL" ]; then
+            echo "ERROR: ${PKG_NAME}@${PKG_VERSION} not visible on the registry after ~5 minutes"
+            exit 1
+          fi
+          echo "Registry tarball URL: $TARBALL_URL"
+          curl -fsSL "$TARBALL_URL" -o registry.tgz
+          REGISTRY_SHA=$(shasum -a 256 registry.tgz | awk '{print $1}')
+          echo "Registry tarball SHA256: $REGISTRY_SHA"
+
+          if [ "$LOCAL_SHA" = "$REGISTRY_SHA" ]; then
+            echo "SHA match confirmed — tarball integrity verified."
+          else
+            echo "ERROR: SHA mismatch! Local=$LOCAL_SHA Registry=$REGISTRY_SHA"
+            exit 1
+          fi
+
+      # End-to-end smoke: prove `npx -y @solvela/dropin help` resolves from a
+      # clean install (which pulls @solvela/signer-core from the registry —
+      # the real test that the dep-order publish worked) and that the bin
+      # launches. `help` prints the usage banner and exits 0 with no
+      # wallet/RPC; but index.js statically imports server.js/open.js/
+      # close.js, which import @solvela/signer-core, so a missing registry
+      # dep would fail the import before `help` could print.
+      - name: Smoke test npx resolution (help banner)
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(jq -r '.version' package.json)
+          PKG="@solvela/dropin@${PKG_VERSION}"
+
+          # Read path can lag the publish; poll until npx can resolve it.
+          for i in $(seq 1 30); do
+            if npm view "$PKG" version >/dev/null 2>&1; then break; fi
+            echo "Attempt $i/30: $PKG not resolvable yet; sleeping 10s"
+            sleep 10
+          done
+
+          # The package metadata (npm view, above) can be visible while the
+          # tarball + its bin entry are still propagating on npm's CDN, so a
+          # fresh `npx -y` transiently fails with "solvela-dropin: not
+          # found" (observed on the @solvela/mcp-server@0.1.0 publish,
+          # 2026-06-29; the identical npx worked minutes later — false-fail,
+          # not a package defect). Retry with backoff before declaring
+          # failure. ~10 x 15s ≈ 2.5 min covers the observed publish->CDN lag.
+          for i in $(seq 1 10); do
+            set +e
+            OUT=$(timeout 120 npx -y "$PKG" help 2>smoke.err)
+            set -e
+            if echo "$OUT" | grep -q 'Claude Code drop-in signing sidecar'; then
+              echo "Attempt $i/10: npx smoke OK — $PKG resolved, installed signer-core from the registry, and printed the usage banner."
+              exit 0
+            fi
+            echo "Attempt $i/10: $PKG not launchable yet (publish->CDN lag); clearing npx cache and sleeping 15s"
+            # Drop any cached negative resolution so the next attempt re-fetches.
+            npm cache clean --force >/dev/null 2>&1 || true
+            CACHE_DIR=$(npm config get cache 2>/dev/null || true)
+            [ -n "$CACHE_DIR" ] && rm -rf "${CACHE_DIR}/_npx" 2>/dev/null || true
+            sleep 15
+          done
+
+          echo "ERROR: npx smoke failed for $PKG after 10 attempts (~2.5 min of publish->CDN propagation wait)"
+          echo "--- stdout ---"; echo "$OUT"
+          echo "--- stderr ---"; cat smoke.err
+          exit 1
