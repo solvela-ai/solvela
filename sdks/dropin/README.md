@@ -1,0 +1,96 @@
+# @solvela/dropin
+
+Claude Code drop-in signing sidecar. A tiny localhost process Claude Code
+points at via `ANTHROPIC_BASE_URL`; it holds a **delegated channel
+session-key**, signs a [spend-down-channel](../../crates/gateway/src/routes/channel.rs)
+voucher for each request, and relays the Solvela gateway's native Anthropic
+response — SSE bytes verbatim, so thinking-block signatures survive.
+
+Claude Code can't sign anything per-request (it sends one static
+`ANTHROPIC_AUTH_TOKEN`). The sidecar is the bridge: the per-request client
+signature **is** the spend cap, the key never leaves your machine, and nobody
+else ever controls the funds.
+
+## Setup
+
+```bash
+# 1. Fund + open a channel (one-time; prompts before signing — verify the
+#    amount and recipient it prints).
+npx solvela-dropin open \
+  --gateway https://api.solvela.ai \
+  --amount 5 \
+  --wallet ~/.config/solana/id.json \
+  --rpc-url https://api.mainnet-beta.solana.com
+
+# 2. Paste the two env vars it prints into your Claude Code environment:
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8484
+export ANTHROPIC_AUTH_TOKEN=<printed local token>
+
+# 3. Run the sidecar:
+npx solvela-dropin serve
+```
+
+`--wallet` accepts a standard Solana `id.json` (64-byte JSON array) or a
+Solvela `wallet.json` (`{"private_key": "<base58>"}`, as written by the MCP
+server / `solvela wallet init`).
+
+**Verify what you sign.** The deposit recipient and mint are discovered from
+the gateway's `/v1/escrow/config` — which is only as trustworthy as the
+`--gateway` URL you typed. The mint is pinned to canonical mainnet USDC and a
+mismatch is a hard reject (`--expected-mint` pins a non-mainnet mint
+deliberately, e.g. devnet). Pass `--expected-recipient <b58>` to also pin the
+recipient independently. `--yes` only skips the interactive prompt — it never
+bypasses a mint/recipient mismatch.
+
+When you're done, close the channel — the unspent balance is refunded
+on-chain to the funding wallet:
+
+```bash
+npx solvela-dropin close    # re-run to poll the refund status
+```
+
+## How a request is paid
+
+1. Claude Code POSTs `/v1/messages` to the sidecar with the local token.
+2. The sidecar forwards it to the gateway unpaid; the gateway answers with an
+   x402 `402` quote (the fee-inclusive estimate for **this** request).
+3. The sidecar signs a cumulative voucher for exactly that quote (it never
+   computes fees or invents amounts — it signs what the gateway quotes,
+   fail-closed) and retries with the **byte-identical** body plus a
+   `PAYMENT-SIGNATURE` header. The voucher's digest binds it to those bytes.
+4. The gateway verifies the voucher off-chain (no per-call on-chain
+   transaction), serves, and advances the channel ledger. The response is
+   relayed to Claude Code untouched.
+
+`POST /v1/messages/count_tokens` is free and forwarded verbatim — never
+signed, never charged.
+
+## Limitations
+
+- **Draws are strictly serial per channel.** Each voucher signs
+  `last + quote`, so concurrent requests (e.g. parallel subagents) queue
+  behind a single-flight gate — expect added latency under parallel load, not
+  failures. One channel per sidecar instance.
+- **`expiry_slot` is sourced from the gateway** (`GET /v1/escrow/config`,
+  cached ~30s) and fails closed: if the current Solana slot is unavailable,
+  the sidecar refuses to sign rather than guess.
+
+## Local-only, by design
+
+The sidecar binds **127.0.0.1 only**, and a hosted sidecar is deliberately
+unsupported: a server signing vouchers on users' behalf would hold effective
+control over user funds — exactly the custodial problem the per-request
+client signature exists to remove. Do not put this behind a reverse proxy.
+
+The local token (`ANTHROPIC_AUTH_TOKEN`) only authenticates Claude Code to
+the sidecar so a stray local process can't drive your channel; it is
+**never** forwarded upstream and is not a gateway credential.
+
+## State
+
+`~/.solvela/dropin.json` (mode 0600) holds the gateway URL, channel id, the
+session-key seed, and the local token. It controls the channel — keep it
+private, and delete it after `close` confirms the refund. The stored
+`last_cumulative` is a best-effort optimization: the gateway's ledger is
+ground truth and the sidecar resyncs from its structured `402` responses, so
+a stale value costs one extra round-trip, never money.
