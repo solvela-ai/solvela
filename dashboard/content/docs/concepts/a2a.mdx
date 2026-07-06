@@ -13,25 +13,40 @@ Two routes:
 | Route | Purpose |
 |-------|---------|
 | `GET /.well-known/agent-card.json` | AgentCard discovery — advertises AP2 + x402 extensions |
-| `POST /a2a` | JSON-RPC 2.0 endpoint — `message/send` is the only method |
+| `POST /a2a` | JSON-RPC 2.0 endpoint (methods below) |
+
+All A2A v0.3 mandatory methods are served on `POST /a2a`:
+
+| Method | Purpose |
+|--------|---------|
+| `message/send` | Get a payment quote (no `taskId`) or submit a payment (`taskId` present) |
+| `tasks/get` | Retrieve a task's current state — including the stored quote, the paid output, or payment evidence (see [Retrieving tasks](#retrieving-tasks-with-tasksget)) |
+| `tasks/cancel` | Cancel an unpaid task (see [Canceling tasks](#canceling-tasks-with-taskscancel)) |
+| `tasks/pushNotificationConfig/set` / `get` / `list` / `delete` | Always `-32003 PushNotificationNotSupportedError` — the card declares `pushNotifications: false` |
+
+`message/stream` and `tasks/resubscribe` are not routed (`-32601`); the card truthfully advertises `streaming: false` (streaming is optional in v0.3).
 
 A2A is **text-only today**. Messages carrying image `data` parts (`contentType` starting with `image/`) are rejected with an invalid-params error before any paid work happens.
 
 <Note>
-  The A2A task store lives in Redis. If Redis is not configured, new `message/send` requests fail with an internal error (`-32603`) rather than issuing a task ID a client could pay against but never redeem. Task records expire after 10 minutes.
+  The A2A task store lives in Redis. If Redis is not configured, new `message/send` requests fail with an internal error (`-32603`) rather than issuing a task ID a client could pay against but never redeem. Task records expire **10 minutes after their last state change** — the TTL refreshes when a task completes, so a finished task stays retrievable via `tasks/get` for roughly 10 minutes after completion. After expiry, any method referencing the task returns `-32001` (task not found).
 </Note>
 
 ## AgentCard discovery
 
-Agents discover Solvela by fetching `GET /.well-known/agent-card.json`. The card advertises the AP2 extension (merchant role) and the x402 extension (Solana USDC-SPL settlement). The legacy `/.well-known/agent.json` path remains available as an alias for backward compatibility. A representative trimmed response:
+Agents discover Solvela by fetching `GET /.well-known/agent-card.json`. The card advertises the AP2 extension (merchant role) and the x402 extension (Solana USDC-SPL settlement). The legacy `/.well-known/agent.json` path remains available as an alias for backward compatibility. A representative trimmed response (`version` tracks the gateway release and changes over time; `url` reflects the deployment):
 
 ```json
 {
   "name": "Solvela",
   "description": "Solana-native AI agent payment gateway — pay for LLM API calls with USDC-SPL via x402",
-  "version": "0.1.0",
+  "url": "https://api.solvela.ai/a2a",
+  "version": "<gateway release version>",
+  "provider": { "organization": "Solvela", "url": "https://solvela.ai" },
+  "protocolVersion": "0.3.0",
+  "preferredTransport": "JSONRPC",
   "capabilities": {
-    "streaming": true,
+    "streaming": false,
     "pushNotifications": false,
     "extensions": [
       {
@@ -56,9 +71,10 @@ Agents discover Solvela by fetching `GET /.well-known/agent-card.json`. The card
     {
       "id": "chat-completion",
       "name": "Chat Completion",
-      "description": "Proxy AI chat completions to multiple LLM providers (OpenAI, Anthropic, Google, xAI, DeepSeek)",
-      "inputModes": ["text"],
-      "outputModes": ["text"]
+      "description": "Proxy AI chat completions to 25 paid models across 5 providers (OpenAI, Anthropic, Google, xAI, DeepSeek), settled per request in USDC-SPL via x402",
+      "tags": ["llm", "chat", "completions", "ai", "x402"],
+      "inputModes": ["text/plain"],
+      "outputModes": ["text/plain"]
     }
   ]
 }
@@ -96,7 +112,7 @@ The payment flow is two `message/send` calls against the same task.
     }
     ```
 
-    The gateway resolves the model, estimates cost (output capped at 1,000 tokens for the quote), stores a task record, and returns a Task in `input-required` state. The `x402.payment.required` metadata value is the same `PaymentRequired` object the REST route returns in a 402 body:
+    The gateway resolves the model, estimates cost (quoting against the model's full completion-token ceiling — the same cap later applied to the provider call, so the quote and the settlement match by construction), stores a task record, and returns a Task in `input-required` state. The `x402.payment.required` metadata value is the same `PaymentRequired` object the REST route returns in a 402 body:
 
     ```json title="Response"
     {
@@ -230,35 +246,58 @@ All x402 state rides in message `metadata` under namespaced keys:
 | `x402.payment.status` | both | One of `payment-required`, `payment-submitted`, `payment-completed`, `payment-failed` |
 | `x402.payment.required` | gateway → agent | The `PaymentRequired` object (same shape as the REST 402 body) |
 | `x402.payment.payload` | agent → gateway | The `PaymentPayload` object (same shape as the REST `payment-signature` header, unencoded) |
-| `x402.payment.receipts` | gateway → agent | `{ "tx_signature": "..." }` settlement receipt |
+| `x402.payment.receipts` | gateway → agent | `{ "tx_signature": "...", "receipt": "/v1/receipts/<uuid>" }` settlement receipt (the `receipt` path is present when a durable receipt was written) |
 
 ## Task state machine
 
-Task states serialize in kebab-case: `input-required`, `working`, `completed`, `failed`. Valid transitions as implemented:
+Task states serialize in kebab-case: `input-required`, `working`, `completed`, `failed`, `canceled`. Valid transitions as implemented:
 
 | From | To |
 |------|----|
-| `input-required` | `working`, `completed`, `failed` |
-| `working` | `completed`, `failed` |
+| `input-required` | `working`, `canceled` |
+| `working` | `input-required`, `completed`, `failed` |
 | `completed` | — (terminal) |
 | `failed` | — (terminal) |
+| `canceled` | — (terminal) |
 
-The synchronous flow today goes `input-required` → `completed` directly; `working` is reserved for future async processing. Task records (state, original message, the quoted `PaymentRequired` snapshot, the model and `max_tokens` cap) live in Redis with a 10-minute TTL — paying after expiry yields a task-not-found error.
+`working` is the persisted settlement-in-progress marker: it is written under the per-task settlement lock before any funds move, and reverts to `input-required` if the settlement fails before funds move (so a corrected payment can be retried). Every paid path passes through `working` before reaching a terminal state; a `working` task accepts neither another payment nor a cancel. Task records (state, original message, the quoted `PaymentRequired` snapshot, the model and `max_tokens` cap, and — on terminal states — the delivered output and receipt references) live in Redis with a 10-minute TTL from the last state change; paying after expiry yields a task-not-found error.
+
+## Retrieving tasks with tasks/get
+
+`tasks/get` takes `{ "id": "<taskId>" }` (the optional `historyLength` is accepted and ignored — the gateway keeps no message history) and returns the Task projected by state:
+
+| State | Response carries |
+|-------|------------------|
+| `input-required` | The stored `x402.payment.required` quote — a client that lost the quote can still construct and submit payment |
+| `working` | Status only (a settlement is in flight) |
+| `completed` | The delivered output as an artifact, plus `x402.payment.receipts` — a client that lost the paid response (e.g. a dropped connection) recovers its paid output here |
+| `failed` | `x402.payment.receipts` payment evidence (the payment was collected before the provider failure; no artifact exists) |
+| `canceled` | Status only |
+
+Retrieval works for roughly 10 minutes after the task's last state change (the Redis TTL refreshes at completion). The task ID is a bearer capability — anyone holding it can read the task within that window — so `tasks/get` is rate-limited per client IP, like `GET /v1/receipts/{id}`.
+
+## Canceling tasks with tasks/cancel
+
+`tasks/cancel` takes `{ "id": "<taskId>" }` and cancels a task **only while it is `input-required`** (the natural "agent declines the quote" path — no funds have moved). It serializes against the payment leg through the same per-task settlement lock, re-checks the state under the lock, and returns the updated Task with `status.state: "canceled"`. Any other state — a settlement in flight (`working`), a lock held by an in-progress payment, or a terminal state — returns `-32002 TaskNotCancelableError`. Canceled is terminal: a later payment against a canceled task is rejected before any settlement. Unpaid tasks also simply expire at the 10-minute TTL, so cancellation is a courtesy, not a requirement.
 
 ## Error codes
 
-JSON-RPC errors are returned with HTTP 200 and an `error` object:
+JSON-RPC errors are returned with HTTP 200 and an `error` object. Task-adjacent codes follow A2A v0.3 §8.2 (`-32001`…`-32003`); Solvela-specific codes live in the implementation range (`-32007`…):
 
 | Code | Meaning |
 |------|---------|
-| `-32700` | Invalid JSON-RPC version (must be `"2.0"`) |
-| `-32601` | Method not found (only `message/send` is supported) |
+| `-32600` | Invalid request — well-formed JSON whose `jsonrpc` field is not `"2.0"` |
+| `-32601` | Method not found (see the method table above; includes the unrouted `message/stream` / `tasks/resubscribe`) |
 | `-32602` | Invalid params (missing text part, image parts, malformed payment metadata) |
-| `-32603` | Internal error (e.g. task store unavailable — no Redis) |
-| `-32000` | Task not found or expired |
-| `-32001` | Payment failed (replay detected, offer mismatch, verification or settlement failure) |
-| `-32002` | Provider error |
-| `-32003` | Model not found |
+| `-32603` | Internal error (e.g. task store unavailable — no Redis; retry) |
+| `-32001` | Task not found or expired (`TaskNotFoundError`) |
+| `-32002` | Task not cancelable (`TaskNotCancelableError` — settlement in flight or terminal state) |
+| `-32003` | Push notifications not supported (`PushNotificationNotSupportedError`) |
+| `-32007` | Payment failed (replay detected, offer mismatch, verification or settlement failure) |
+| `-32008` | Provider error |
+| `-32009` | Model not found |
+
+Transport edge cases: a malformed request body — invalid JSON, or a missing `id` field — is rejected by the HTTP layer with a 4xx status and **no JSON-RPC error envelope**. JSON-RPC batch requests are not supported. `tasks/get` may additionally answer HTTP `429` (with `Retry-After`) when the per-IP rate limit is exceeded.
 
 ## Same x402 verification as the REST path
 
@@ -268,7 +307,7 @@ A2A adds no payment logic of its own. On the payment-submitted path the gateway 
 - **Offer validation** — the submitted `accepted` must match an offer from the original quote on `(scheme, network, asset, pay_to)`, and the submitted amount (compared as integers) must be at least the quoted amount. This prevents a client from having the verifier check the on-chain transfer against a self-supplied lower amount.
 - **Settlement** — verification and settlement go through the same facilitator as the REST path. Deterministic on-chain rejections are reported as not-retryable (with the numeric program error code); transient submission or timeout failures are reported as retryable.
 - **Prompt guard** — the same injection/jailbreak/PII checks as the chat route run after payment is verified (never on the unpaid quote path, so anonymous callers cannot force the scans for free).
-- **Output cap** — the provider is called with the same `max_tokens` cap (1,000) that priced the quote, so actual output cannot exceed what the agent paid for.
+- **Output cap** — the provider is called with the same `max_tokens` cap that priced the quote (the model's completion-token ceiling, stored on the task at quote time), so actual output cannot exceed what the agent paid for.
 
 One A2A-specific restriction: wallets provisioned with per-tenant budgeting (`require_tenant`) are rejected on the A2A path with a payment-failed error before any settlement — those wallets must use `POST /v1/chat/completions`, where per-tenant budget enforcement runs.
 

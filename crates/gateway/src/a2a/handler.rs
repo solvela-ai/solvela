@@ -575,8 +575,9 @@ async fn handle_payment_submitted(
                 code: ERR_INTERNAL,
                 message: format!(
                     "Internal error while finalizing payment for task {task_id}; \
-                     do not resubmit a new payment — contact support with this \
-                     task ID if you do not receive your result."
+                     do not resubmit a new payment — check the task's final \
+                     state with tasks/get, and contact support with this task \
+                     ID if you do not receive your result."
                 ),
                 data: None,
             })
@@ -691,7 +692,8 @@ async fn settle_paid_task(
                     code: ERR_PAYMENT_FAILED,
                     message: format!(
                         "A settlement for task {task_id} is already in progress; \
-                         do not resubmit a new payment for this task."
+                         do not resubmit a new payment for this task — poll \
+                         tasks/get for the outcome."
                     ),
                     data: None,
                 });
@@ -1244,8 +1246,9 @@ async fn settle_paid_task(
                 code: ERR_PROVIDER_ERROR,
                 message: format!(
                     "Provider unavailable after settlement. Your payment was \
-                     collected and recorded; do not resubmit a new payment — \
-                     contact support with task ID {task_id}."
+                     collected and recorded — retrieve the payment evidence \
+                     with tasks/get; do not resubmit a new payment. Contact \
+                     support with task ID {task_id} if needed."
                 ),
                 data: None,
             });
@@ -1829,27 +1832,27 @@ fn now_timestamp() -> String {
 }
 
 /// Money-free rejection for a payment against a task that is not payable:
-/// `Working` (a settlement is in flight — possibly with an expired lock) or a
-/// terminal `Completed`/`Failed`. Shared by the CONVENIENCE intake fast-fail
-/// and the AUTHORITATIVE under-lock re-check so both sites reject with
-/// identical, friendly errors. Wording is actionable TODAY (round-1 review):
-/// no `tasks/get` exists until Slice 2b, so the messages carry the task id
-/// for a support path instead of pointing at a method that isn't routed yet;
-/// 2b restores the task-status pointer.
+/// `Working` (a settlement is in flight — possibly with an expired lock), a
+/// terminal `Completed`/`Failed`, or `Canceled`. Shared by the CONVENIENCE
+/// intake fast-fail and the AUTHORITATIVE under-lock re-check so both sites
+/// reject with identical, friendly errors. The messages direct the client to
+/// `tasks/get` (routed since Slice 2b) for the task's state/result.
 ///
-/// Arms are EXPLICIT (no wildcard) so Slice 2b's `Canceled` variant forces a
+/// Arms are EXPLICIT (no wildcard) so any future state variant forces a
 /// compile-time wording decision here rather than silently inheriting the
 /// terminal-state text.
 fn reject_for_task_state(task_id: &str, state: TaskState) -> JsonRpcErrorData {
     let message = match state {
         TaskState::Working => format!(
             "A settlement for task {task_id} is already in progress; do not \
-             resubmit a new payment for this task."
+             resubmit a new payment for this task — poll tasks/get for the \
+             outcome."
         ),
         TaskState::Completed | TaskState::Failed => format!(
             "Task {task_id} has already reached a terminal state and cannot \
-             accept another payment; do not resubmit — contact support with \
-             this task ID if you did not receive your result."
+             accept another payment; retrieve its result with tasks/get — do \
+             not resubmit. Contact support with this task ID if you did not \
+             receive your result."
         ),
         // Slice 2b: a canceled task is terminal and never accepts a payment.
         // No funds moved on the cancel path, so unlike Completed/Failed there
