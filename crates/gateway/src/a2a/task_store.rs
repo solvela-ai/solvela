@@ -35,12 +35,38 @@ pub struct TaskRecord {
     /// silently uncapped.
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// A2A v0.3 `contextId` for this task, minted (UUID v4) at task creation
+    /// and carried by every wire `Task` for the task's lifetime. LEGACY records
+    /// persisted before this field existed (bounded by the 600s task-TTL
+    /// migration window) deserialize as `""` and are repaired in `load_task`,
+    /// which DERIVES a deterministic UUID v5 from the task id — every load
+    /// (handler response, `update_task_state` re-save, a future `tasks/get`)
+    /// agrees on the same value with zero extra Redis writes, and no wire
+    /// response may ever carry `contextId: ""`, which would fail the exact
+    /// v0.3 strictness this field exists to satisfy.
+    #[serde(default)]
+    pub context_id: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Create a new task ID.
 pub fn new_task_id() -> String {
     format!("a2a_{}", Uuid::new_v4().simple())
+}
+
+/// Mint a new A2A v0.3 `contextId` (UUID v4) — genuine task creation only.
+pub fn new_context_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+/// Deterministic contextId for LEGACY task records (persisted before
+/// `context_id` existed): UUID v5 of the task id, so every load — across
+/// requests, restarts, and gateway instances — derives the SAME value without
+/// persisting a repair. A random mint here would let the client-visible
+/// contextId and the Redis-persisted one (via `update_task_state`'s internal
+/// re-load) diverge within a single paid request.
+fn derive_legacy_context_id(task_id: &str) -> String {
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, task_id.as_bytes()).to_string()
 }
 
 /// Save a task record to Redis. Returns `Err` if Redis is absent or the write fails.
@@ -87,8 +113,18 @@ pub async fn load_task(state: &Arc<AppState>, task_id: &str) -> Result<Option<Ta
     let key = format!("a2a_task:{task_id}");
 
     match cache.get_raw(&key).await {
-        Ok(Some(json)) => match serde_json::from_str(&json) {
-            Ok(record) => Ok(Some(record)),
+        Ok(Some(json)) => match serde_json::from_str::<TaskRecord>(&json) {
+            Ok(mut record) => {
+                if record.context_id.is_empty() {
+                    // Mint-on-read (A2A v0.3 conformance, Slice 3): a legacy
+                    // record (field missing → serde default ""; or a stored
+                    // empty string) must never surface `contextId: ""` on the
+                    // wire. DERIVED from the task id, not random, so every
+                    // load agrees by construction — no extra Redis write.
+                    record.context_id = derive_legacy_context_id(&record.id);
+                }
+                Ok(Some(record))
+            }
             Err(e) => {
                 tracing::warn!(task_id, error = %e, "A2A task store: corrupt record, deleting");
                 // Don't swallow the purge failure: if the delete fails the corrupt
@@ -190,6 +226,7 @@ mod tests {
             payment_required: serde_json::json!({"x402_version": 2}),
             model: Some("auto".to_string()),
             max_tokens: Some(1000),
+            context_id: new_context_id(),
             created_at: chrono::Utc::now(),
         };
 
@@ -212,6 +249,7 @@ mod tests {
             payment_required: serde_json::json!({}),
             model: None,
             max_tokens: None,
+            context_id: new_context_id(),
             created_at: chrono::Utc::now(),
         };
 
@@ -242,5 +280,51 @@ mod tests {
             serde_json::from_str(&legacy).expect("legacy record must deserialize");
         assert_eq!(deserialized.max_tokens, None);
         assert_eq!(deserialized.model, Some("auto".to_string()));
+    }
+
+    /// Slice 3 regression (A2A v0.3 shape strictness): records persisted
+    /// BEFORE `context_id` existed must still deserialize (leniency); they
+    /// come out as `""` and are repaired at the single `load_task` site via
+    /// `derive_legacy_context_id`, so no wire Task built from a legacy record
+    /// can ever carry `contextId: ""` — the exact strict-parse failure this
+    /// field fixes.
+    #[test]
+    fn test_task_record_legacy_payload_without_context_id_deserializes() {
+        let legacy = serde_json::json!({
+            "id": "a2a_legacy",
+            "state": "input-required",
+            "original_message": "hi",
+            "payment_required": {"x402_version": 2},
+            "model": "auto",
+            "created_at": "2026-05-09T00:00:00Z"
+        })
+        .to_string();
+
+        let deserialized: TaskRecord =
+            serde_json::from_str(&legacy).expect("legacy record must deserialize");
+        assert_eq!(
+            deserialized.context_id, "",
+            "legacy record deserializes empty; load_task derives the repair"
+        );
+    }
+
+    /// The legacy repair must be DETERMINISTIC (UUID v5 of the task id):
+    /// every load of the same legacy record — handler response,
+    /// `update_task_state`'s internal re-load, a future `tasks/get` — must
+    /// agree on the same contextId with no persisted repair. A random mint
+    /// here diverged client-visible vs Redis-persisted values within one
+    /// paid request (round-2 reviewer finding).
+    #[test]
+    fn test_derive_legacy_context_id_deterministic_and_task_scoped() {
+        let a1 = derive_legacy_context_id("a2a_legacy_a");
+        let a2 = derive_legacy_context_id("a2a_legacy_a");
+        let b = derive_legacy_context_id("a2a_legacy_b");
+        assert!(!a1.is_empty(), "derived contextId must be non-empty");
+        assert_eq!(a1, a2, "same task id must derive the same contextId");
+        assert_ne!(a1, b, "different task ids must derive different contextIds");
+        assert!(
+            Uuid::parse_str(&a1).is_ok(),
+            "derived contextId must be a valid UUID"
+        );
     }
 }

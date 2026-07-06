@@ -86,11 +86,41 @@ pub enum Part {
     },
 }
 
+/// Constant `"message"` discriminator required on every Message by A2A v0.3
+/// (a2aproject/A2A tag v0.3.0, `specification/json/a2a.json`). A single-variant
+/// enum so the wire value is enforced by construction, never a free string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MessageKind {
+    #[default]
+    #[serde(rename = "message")]
+    Message,
+}
+
 /// An A2A message (user or agent).
+///
+/// The v0.3 identity fields (`messageId`, `kind`) are REQUIRED on the wire for
+/// agent-authored messages; they carry `serde(default)` so inbound client
+/// messages that omit them still deserialize (the gateway never re-serializes
+/// an inbound message, so the empty default never reaches the wire).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: MessageRole,
     pub parts: Vec<Part>,
+    /// Unique message id (UUID v4), minted at construction for agent messages
+    /// (A2A v0.3 REQUIRED). Defaults to `""` only for inbound messages.
+    #[serde(rename = "messageId", default)]
+    pub message_id: String,
+    /// Constant `"message"` discriminator (A2A v0.3 REQUIRED).
+    #[serde(default)]
+    pub kind: MessageKind,
+    /// Task this message belongs to (optional in v0.3; set on agent messages
+    /// where the task id is in scope).
+    #[serde(rename = "taskId", default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Context this message belongs to (optional in v0.3; set on agent
+    /// messages where the task's contextId is in scope).
+    #[serde(rename = "contextId", default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Map<String, Value>>,
 }
@@ -137,18 +167,40 @@ pub struct TaskStatus {
     pub state: TaskState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<Message>,
+    /// ISO-8601 (RFC 3339) UTC time this status was set (A2A v0.3, optional).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
 }
 
 /// An artifact produced by a completed task.
 #[derive(Debug, Clone, Serialize)]
 pub struct Artifact {
+    /// Unique artifact id (UUID v4), minted at construction (A2A v0.3 REQUIRED).
+    #[serde(rename = "artifactId")]
+    pub artifact_id: String,
     pub parts: Vec<Part>,
+}
+
+/// Constant `"task"` discriminator required on every Task by A2A v0.3.
+/// Single-variant enum: the wire value is enforced by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum TaskKind {
+    #[default]
+    #[serde(rename = "task")]
+    Task,
 }
 
 /// A2A task — the core unit of work.
 #[derive(Debug, Clone, Serialize)]
 pub struct Task {
     pub id: String,
+    /// Server-generated context id grouping related interactions (A2A v0.3
+    /// REQUIRED). Minted at task creation, persisted on `TaskRecord`, and
+    /// carried by every Task response for the task's lifetime.
+    #[serde(rename = "contextId")]
+    pub context_id: String,
+    /// Constant `"task"` discriminator (A2A v0.3 REQUIRED).
+    pub kind: TaskKind,
     pub status: TaskStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<Vec<Artifact>>,
@@ -225,9 +277,12 @@ mod tests {
     fn test_task_serialization_input_required() {
         let task = Task {
             id: "task-123".to_string(),
+            context_id: "ctx-123".to_string(),
+            kind: TaskKind::Task,
             status: TaskStatus {
                 state: TaskState::InputRequired,
                 message: None,
+                timestamp: None,
             },
             artifacts: None,
         };
@@ -235,6 +290,50 @@ mod tests {
         assert_eq!(json["id"], "task-123");
         assert_eq!(json["status"]["state"], "input-required");
         assert!(json["artifacts"].is_null());
+        // A2A v0.3 identity fields: camelCase names, constant kind.
+        assert_eq!(json["contextId"], "ctx-123");
+        assert!(json.get("context_id").is_none(), "wire name is contextId");
+        assert_eq!(json["kind"], "task");
+        // Optional timestamp is skipped when None, never serialized as null.
+        assert!(json.get("timestamp").is_none());
+    }
+
+    /// Inbound leniency: clients written against the pre-v0.3 shape omit
+    /// `messageId`/`kind`/`taskId`/`contextId` — those messages must keep
+    /// deserializing (additive-only contract).
+    #[test]
+    fn message_inbound_without_v03_identity_fields_deserializes() {
+        let msg: Message =
+            serde_json::from_str(r#"{"role":"user","parts":[{"kind":"text","text":"hi"}]}"#)
+                .expect("legacy inbound message must deserialize");
+        assert_eq!(msg.message_id, "");
+        assert_eq!(msg.kind, MessageKind::Message);
+        assert!(msg.task_id.is_none());
+        assert!(msg.context_id.is_none());
+    }
+
+    /// Agent-message wire shape: `messageId`/`kind` serialize camelCase with
+    /// the constant `"message"` kind; `taskId`/`contextId` are skipped when
+    /// absent (never `null`).
+    #[test]
+    fn agent_message_serializes_v03_identity_fields() {
+        let msg = Message {
+            role: MessageRole::Agent,
+            parts: vec![Part::Text {
+                text: "ok".to_string(),
+            }],
+            message_id: "msg-1".to_string(),
+            kind: MessageKind::Message,
+            task_id: Some("task-1".to_string()),
+            context_id: None,
+            metadata: None,
+        };
+        let json = serde_json::to_value(&msg).unwrap(); // safe: infallible for known struct
+        assert_eq!(json["messageId"], "msg-1");
+        assert_eq!(json["kind"], "message");
+        assert_eq!(json["taskId"], "task-1");
+        assert!(json.get("contextId").is_none(), "None contextId is skipped");
+        assert!(json.get("message_id").is_none(), "wire name is messageId");
     }
 
     #[test]
