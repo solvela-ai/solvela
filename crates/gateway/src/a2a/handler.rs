@@ -28,12 +28,26 @@ use crate::usage::SpendLogEntry;
 use crate::AppState;
 
 /// A2A-specific JSON-RPC error codes.
+///
+/// Renumbered per the A2A conformance plan D3(a): A2A v0.3 §8.2 assigns
+/// `-32001` TaskNotFoundError, `-32002` TaskNotCancelableError, and `-32003`
+/// PushNotificationNotSupportedError (spec range `-32001..-32006`) — the
+/// legacy numbers collided with all three, so an a2a-SDK client reading our
+/// old `-32001` (payment failed) interpreted "task not found". The
+/// implementation-specific codes live in `-32007..-32099`, clear of the spec
+/// range. The public table is `dashboard/content/docs/concepts/a2a.mdx` and
+/// the wire pin is `tests/fixtures/a2a_error_and_offer.json` — update both in
+/// lockstep with any change here.
 const ERR_INVALID_PARAMS: i32 = -32602;
 const ERR_INTERNAL: i32 = -32603;
-const ERR_TASK_NOT_FOUND: i32 = -32000;
-const ERR_PAYMENT_FAILED: i32 = -32001;
-const ERR_PROVIDER_ERROR: i32 = -32002;
-const ERR_MODEL_NOT_FOUND: i32 = -32003;
+/// A2A v0.3 §8.2 `TaskNotFoundError`.
+const ERR_TASK_NOT_FOUND: i32 = -32001;
+/// Implementation-specific: payment verification/settlement failure.
+const ERR_PAYMENT_FAILED: i32 = -32007;
+/// Implementation-specific: LLM provider failure.
+const ERR_PROVIDER_ERROR: i32 = -32008;
+/// Implementation-specific: unknown model id/alias/profile.
+const ERR_MODEL_NOT_FOUND: i32 = -32009;
 
 /// Handle `message/send` JSON-RPC method.
 pub async fn handle_message_send(

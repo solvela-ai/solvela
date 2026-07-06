@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 /// JSON-RPC 2.0 standard error codes.
-const PARSE_ERROR: i32 = -32700;
+const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
 
 /// `POST /a2a` — A2A JSON-RPC 2.0 endpoint.
@@ -25,12 +25,17 @@ pub async fn a2a_endpoint(
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Response {
-    // Validate JSON-RPC version
+    // Validate JSON-RPC version. A well-formed body with a wrong `jsonrpc`
+    // value is an INVALID REQUEST (-32600), not a parse error: the JSON parsed
+    // fine (JSON-RPC 2.0 §5.1; A2A conformance plan Slice 2b). A genuinely
+    // malformed body / missing `id` never reaches here — it dies in the axum
+    // `Json` extractor as an HTTP 4xx with no JSON-RPC envelope (documented
+    // behavior; see dashboard/content/docs/concepts/a2a.mdx).
     if request.jsonrpc != "2.0" {
         return Json(JsonRpcError::new(
             request.id.clone(),
             JsonRpcErrorData {
-                code: PARSE_ERROR,
+                code: INVALID_REQUEST,
                 message: "Invalid JSON-RPC version".to_string(),
                 data: None,
             },
@@ -149,8 +154,12 @@ supports_vision = false
             .with_state(state)
     }
 
+    /// 2b-8 (conformance plan): a well-formed envelope whose `jsonrpc` field
+    /// is not `"2.0"` is an INVALID REQUEST (`-32600`), not a parse error
+    /// (`-32700`) — the body parsed fine; it is the request object that is
+    /// invalid (JSON-RPC 2.0 §5.1).
     #[tokio::test]
-    async fn test_invalid_jsonrpc_version() {
+    async fn wrong_jsonrpc_version_returns_invalid_request() {
         let app = test_app();
         let resp = app
             .oneshot(
@@ -177,7 +186,7 @@ supports_vision = false
             .await
             .expect("read body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
-        assert_eq!(json["error"]["code"], PARSE_ERROR);
+        assert_eq!(json["error"]["code"], INVALID_REQUEST);
     }
 
     #[tokio::test]

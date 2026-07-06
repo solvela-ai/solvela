@@ -10811,7 +10811,9 @@ async fn test_a2a_invalid_jsonrpc_version() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["error"]["code"], -32700);
+    // A parsed envelope with a wrong `jsonrpc` value is an INVALID REQUEST
+    // (-32600), not a parse error (JSON-RPC 2.0 §5.1; conformance plan 2b).
+    assert_eq!(json["error"]["code"], -32600);
 }
 
 #[tokio::test]
@@ -14474,8 +14476,8 @@ async fn a2a_concurrent_settlements_same_task_settle_exactly_once() {
     let loser = rejected[0];
     assert_eq!(
         loser["error"]["code"].as_i64(),
-        Some(-32001),
-        "loser must be ERR_PAYMENT_FAILED (-32001): {loser}"
+        Some(-32007),
+        "loser must be ERR_PAYMENT_FAILED (-32007): {loser}"
     );
     assert!(
         loser["error"]["message"]
@@ -14545,7 +14547,7 @@ async fn a2a_retry_after_failed_settlement_succeeds_lock_released() {
     let env1 = a2a_call_envelope(&app, &pay1).await;
     assert_eq!(
         env1["error"]["code"].as_i64(),
-        Some(-32001),
+        Some(-32007),
         "first submission must fail with ERR_PAYMENT_FAILED (settlement failed): {env1}"
     );
     assert!(
@@ -14854,7 +14856,7 @@ async fn spawn_shield_join_error_maps_to_internal_error() {
 /// pre-checks inside the spawn or reorder them.
 ///
 /// Order observable: a task whose stored model is corrupt AND whose content is
-/// guard-blocked rejects MODEL-first (-32003) — model resolve precedes the
+/// guard-blocked rejects MODEL-first (-32009) — model resolve precedes the
 /// guard. Outside-the-lock observable: after both rejections the settle lock
 /// is still free (we can acquire it ourselves) and settlement was never
 /// reached. (The tenant gate's position is pinned separately by the #499
@@ -14908,7 +14910,7 @@ async fn pre_payment_checks_run_outside_shield_in_unchanged_order() {
     let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
     assert_eq!(
         env["error"]["code"].as_i64(),
-        Some(-32003),
+        Some(-32009),
         "model resolve must reject FIRST (pre-checks in unchanged order): {env}"
     );
 
@@ -15000,7 +15002,7 @@ async fn payment_against_terminal_task_rejects_before_settle() {
         let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
         assert_eq!(
             env["error"]["code"].as_i64(),
-            Some(-32001),
+            Some(-32007),
             "payment against a {terminal:?} task must be rejected: {env}"
         );
         assert!(
@@ -15049,7 +15051,7 @@ async fn settle_failure_reverts_working_to_input_required() {
     let env = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
     assert_eq!(
         env["error"]["code"].as_i64(),
-        Some(-32001),
+        Some(-32007),
         "failed settlement must reject with ERR_PAYMENT_FAILED: {env}"
     );
     assert!(
@@ -15149,7 +15151,7 @@ async fn failed_revert_releases_lock_and_leaves_stuck_working() {
 
     assert_eq!(
         env["error"]["code"].as_i64(),
-        Some(-32001),
+        Some(-32007),
         "the gated settlement failure must reject with ERR_PAYMENT_FAILED: {env}"
     );
 
@@ -15187,7 +15189,7 @@ async fn failed_revert_releases_lock_and_leaves_stuck_working() {
     let env2 = a2a_call_envelope(&app, &a2a_payment_submitted_body(&task_id, &offer)).await;
     assert_eq!(
         env2["error"]["code"].as_i64(),
-        Some(-32001),
+        Some(-32007),
         "a payment against a stuck-Working task must fast-fail: {env2}"
     );
     assert!(
@@ -15267,7 +15269,7 @@ async fn channel_payload_after_working_marker_reverts_and_releases() {
     let env = a2a_call_envelope(&app, &pay_channel).await;
     assert_eq!(
         env["error"]["code"].as_i64(),
-        Some(-32001),
+        Some(-32007),
         "channel payload must be rejected fail-closed: {env}"
     );
     assert!(
@@ -15432,7 +15434,7 @@ async fn completed_and_failed_saves_persist_artifact_and_receipt_refs() {
     .await;
     assert_eq!(
         env_fail["error"]["code"].as_i64(),
-        Some(-32002),
+        Some(-32008),
         "failed leg must return ERR_PROVIDER_ERROR: {env_fail}"
     );
 
@@ -15606,7 +15608,7 @@ async fn a2a_provider_failure_after_settle_writes_ledger_and_holds_lock() {
     // The caller gets the provider error (terminal for this submission).
     assert_eq!(
         env["error"]["code"].as_i64(),
-        Some(-32002),
+        Some(-32008),
         "post-settle provider failure must return ERR_PROVIDER_ERROR: {env}"
     );
     // GHSA-cgqx-mg48-949v (HIGH): the client-facing message must NOT echo the
@@ -15688,7 +15690,7 @@ async fn a2a_provider_failure_after_settle_writes_ledger_and_holds_lock() {
     let env_retry = a2a_call_envelope(&app, &pay_retry).await;
     assert_eq!(
         env_retry["error"]["code"].as_i64(),
-        Some(-32001),
+        Some(-32007),
         "retry after a post-settle provider failure must be rejected: {env_retry}"
     );
     assert!(
