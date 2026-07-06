@@ -17,7 +17,7 @@ import * as path from 'node:path';
 export interface DropinState {
   gateway_url: string;
   port: number;
-  /** base58 32-byte channel id. */
+  /** base58 32-byte channel id. Empty ONLY while `pending_open` is set. */
   channel_id: string;
   /** base58 32-byte ed25519 session seed. SECRET — never log or print. */
   session_seed_b58: string;
@@ -25,6 +25,31 @@ export interface DropinState {
   local_token: string;
   /** Best-effort last accepted cumulative (atomic string). Gateway is truth. */
   last_cumulative: string;
+  /**
+   * Set by `open` BEFORE the gateway is asked to fund anything, cleared once
+   * the channel_id is recorded. Makes the session seed — the ONLY credential
+   * that can ever close the channel — durable even if the process dies right
+   * after the gateway credits the deposit. `serve`/`close` refuse a file
+   * still carrying this marker (see [`assertNotPending`]).
+   */
+  pending_open?: true;
+}
+
+/**
+ * Refuse to operate on a half-open state file. Accurate for both branches:
+ * if the open POST never happened (or failed), no channel exists and re-running
+ * `open` is safe; if it succeeded but the finalize write failed, the `open`
+ * command printed the channel_id paper trail and the file can be completed by
+ * hand.
+ */
+export function assertNotPending(state: DropinState, statePath: string): void {
+  if (state.pending_open) {
+    throw new Error(
+      `state file ${statePath} was left mid-open (an \`open\` run never completed; no channel_id recorded). ` +
+        'If that open printed a channel_id before failing, add it to this file as "channel_id" and remove ' +
+        '"pending_open"; otherwise no channel was funded and it is safe to re-run `solvela-dropin open`.',
+    );
+  }
 }
 
 export function defaultStatePath(): string {
@@ -100,12 +125,17 @@ export async function loadState(statePath: string): Promise<DropinState> {
   if (!/^\d+$/.test(lastCumulative)) {
     throw new Error(`state file ${statePath} has a non-integer 'last_cumulative' field`);
   }
-  return {
+  const pendingOpen = obj['pending_open'] === true;
+  const state: DropinState = {
     gateway_url: requireString('gateway_url'),
     port,
-    channel_id: requireString('channel_id'),
+    // channel_id is required UNLESS this is a pending pre-write (the seed is
+    // durable but the gateway has not assigned a channel yet).
+    channel_id: pendingOpen ? String(obj['channel_id'] ?? '') : requireString('channel_id'),
     session_seed_b58: requireString('session_seed_b58'),
     local_token: requireString('local_token'),
     last_cumulative: lastCumulative,
   };
+  if (pendingOpen) state.pending_open = true;
+  return state;
 }

@@ -13,7 +13,7 @@ import bs58 from 'bs58';
 
 import { buildCloseMessage, signVoucher, sanitizeGatewayError } from '@solvela/signer-core';
 
-import { loadState, defaultStatePath } from './state.js';
+import { assertNotPending, loadState, defaultStatePath } from './state.js';
 
 export interface CloseOptions {
   statePath?: string;
@@ -24,6 +24,7 @@ export async function closeChannel(opts: CloseOptions = {}): Promise<void> {
   const log = opts.log ?? ((line: string) => console.log(line));
   const statePath = opts.statePath ?? defaultStatePath();
   const state = await loadState(statePath);
+  assertNotPending(state, statePath);
 
   const channelId = bs58.decode(state.channel_id);
   if (channelId.length !== 32) {

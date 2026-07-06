@@ -182,10 +182,30 @@ function allowlistedHeaders(req: IncomingMessage): Record<string, string> {
   return out;
 }
 
+/** Map an HTTP status to the Anthropic wire error type Claude Code expects. */
+function anthropicErrorType(status: number): string {
+  switch (status) {
+    case 401:
+      return 'authentication_error';
+    case 400:
+    case 413:
+      return 'invalid_request_error';
+    case 404:
+      return 'not_found_error';
+    case 429:
+      return 'rate_limit_error';
+    case 503:
+    case 529:
+      return 'overloaded_error';
+    default:
+      return 'api_error';
+  }
+}
+
 /** Anthropic-envelope error, so Claude Code renders sidecar failures cleanly. */
 function jsonError(res: ServerResponse, status: number, message: string): void {
   res.writeHead(status, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message } }));
+  res.end(JSON.stringify({ type: 'error', error: { type: anthropicErrorType(status), message } }));
 }
 
 async function readBody(req: IncomingMessage) {

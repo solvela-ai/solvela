@@ -816,6 +816,35 @@ describe('lifecycle + relay fidelity', () => {
     await gw.close();
   });
 
+  it('maps sidecar error statuses to Anthropic error types (401/503)', async () => {
+    // One slot-null fake serves both assertions: unauthenticated -> 401
+    // authentication_error; authenticated draw with no slot -> 503
+    // overloaded_error.
+    const gw = await startFakeGateway((req, res) => {
+      if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(escrowConfigBody(null));
+        return;
+      }
+      res.writeHead(402, { 'content-type': 'application/json' });
+      res.end(challengeBody());
+    });
+    const sc = await startSidecar(gw.url);
+
+    const unauth = await fetch(`${sc.url}/v1/messages`, { method: 'POST', body: '{}' });
+    assert.equal(unauth.status, 401);
+    const unauthBody = (await unauth.json()) as { error: { type: string } };
+    assert.equal(unauthBody.error.type, 'authentication_error');
+
+    const noSlot = await authedPost(`${sc.url}/v1/messages`, '{"model":"m","messages":[]}');
+    assert.equal(noSlot.status, 503);
+    const noSlotBody = (await noSlot.json()) as { error: { type: string } };
+    assert.equal(noSlotBody.error.type, 'overloaded_error');
+
+    await sc.close();
+    await gw.close();
+  });
+
   it('relays duplicate set-cookie headers without collapsing them', async () => {
     const gw = await startFakeGateway(
       standardHandler((_req, res) => {

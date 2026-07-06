@@ -9,12 +9,15 @@
 
 import { after, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AddressInfo } from 'node:net';
+import { promisify } from 'node:util';
 
 import bs58 from 'bs58';
 import { Keypair, VersionedTransaction } from '@solana/web3.js';
@@ -389,6 +392,163 @@ describe('open command', () => {
     assert.ok(!fake.requests.some((r) => r.url === '/'), 'no blockhash fetch — nothing was signed');
     assert.ok(!fake.requests.some((r) => r.url === '/v1/channel/open'), 'no open POST');
     await assert.rejects(fs.access(statePath), 'state file must not exist');
+  });
+
+  // HIGH (round-2 review): the session seed is the ONLY credential that can
+  // ever close the channel — it must be durable on disk BEFORE the gateway
+  // funds anything, and a post-open persist failure must still leave a paper
+  // trail (channel_id + funding sig) pointing at the already-safe seed.
+  it('persists the session seed to disk BEFORE the open POST (pending marker)', async () => {
+    const dir = await tmpDir();
+    const { walletPath } = await writeWalletFile(dir);
+    const statePath = path.join(dir, 'dropin.json');
+
+    let pendingAtOpen: Record<string, unknown> | null = null;
+    const fake = await startFake({
+      onChannelOpen: (body, res) => {
+        // Observed AT the moment the gateway is asked to move money: the seed
+        // must already be on disk, marked pending (no channel_id yet).
+        pendingAtOpen = JSON.parse(readFileSync(statePath, 'utf-8'));
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            channel_id: CHANNEL_ID_B58,
+            agent_wallet: (body as Record<string, unknown>).agent_wallet,
+            session_key: (body as Record<string, unknown>).session_key,
+            deposited_atomic: 5_000_000,
+            settled_atomic: 0,
+            last_cumulative_atomic: 0,
+            status: 'open',
+            funding_tx_sig: 'FAKE_SIG',
+            network: SOLANA_NETWORK,
+          }),
+        );
+      },
+    });
+
+    await openChannel({
+      gateway: fake.url,
+      amount: '5',
+      walletPath,
+      rpcUrl: fake.url,
+      yes: true,
+      port: 8484,
+      statePath,
+      log: () => {},
+    });
+
+    assert.ok(pendingAtOpen, 'the fake gateway inspected the state file during the open POST');
+    const p = pendingAtOpen as unknown as Record<string, unknown>;
+    assert.equal(p['pending_open'], true, 'pre-write carries the pending marker');
+    assert.equal(typeof p['session_seed_b58'], 'string');
+    assert.ok((p['session_seed_b58'] as string).length > 0, 'seed already durable pre-open');
+    assert.ok(!p['channel_id'], 'no channel_id before the gateway responds');
+
+    // Finalized after the 200: channel_id set, pending marker gone.
+    const state = await loadState(statePath);
+    assert.equal(state.channel_id, CHANNEL_ID_B58);
+    assert.equal(state.pending_open, undefined);
+  });
+
+  it('post-open persist failure still prints channel_id + funding sig (seed already safe)', async () => {
+    const dir = await tmpDir();
+    const { walletPath } = await writeWalletFile(dir);
+    const statePath = path.join(dir, 'dropin.json');
+
+    const fake = await startFake({
+      onChannelOpen: async (body, res) => {
+        // Break the state directory AFTER the pending pre-write, so the
+        // post-open finalize write fails.
+        await fs.chmod(dir, 0o500);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            channel_id: CHANNEL_ID_B58,
+            agent_wallet: (body as Record<string, unknown>).agent_wallet,
+            session_key: (body as Record<string, unknown>).session_key,
+            deposited_atomic: 5_000_000,
+            settled_atomic: 0,
+            last_cumulative_atomic: 0,
+            status: 'open',
+            funding_tx_sig: 'FAKE_SIG',
+            network: SOLANA_NETWORK,
+          }),
+        );
+      },
+    });
+    const lines: string[] = [];
+
+    try {
+      await assert.rejects(
+        openChannel({
+          gateway: fake.url,
+          amount: '5',
+          walletPath,
+          rpcUrl: fake.url,
+          yes: true,
+          port: 8484,
+          statePath,
+          log: (l) => lines.push(l),
+        }),
+      );
+    } finally {
+      await fs.chmod(dir, 0o700); // restore so cleanup works
+    }
+
+    // Paper trail: the non-secret identifiers were printed despite the failure.
+    const out = lines.join('\n');
+    assert.ok(out.includes(CHANNEL_ID_B58), 'channel_id printed on persist failure');
+    assert.ok(out.includes('FAKE_SIG'), 'funding tx sig printed on persist failure');
+    assert.match(out, /seed.*(safe|already)/i, 'tells the user the seed is already on disk');
+
+    // The pending pre-write (with the seed) survived on disk.
+    const pending = JSON.parse(await fs.readFile(statePath, 'utf-8')) as Record<string, unknown>;
+    assert.equal(pending['pending_open'], true);
+    assert.ok((pending['session_seed_b58'] as string).length > 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pending-marker refusal (serve + close must not run on a half-open file)
+// ---------------------------------------------------------------------------
+
+describe('pending-open state refusal', () => {
+  async function writePendingState(dir: string): Promise<string> {
+    const statePath = path.join(dir, 'dropin.json');
+    await saveState(statePath, {
+      gateway_url: 'http://127.0.0.1:1',
+      port: 8484,
+      channel_id: '',
+      pending_open: true,
+      session_seed_b58: bs58.encode(SESSION_SEED),
+      local_token: 'tok',
+      last_cumulative: '0',
+    });
+    return statePath;
+  }
+
+  it('close refuses a pending state file with a clear message', async () => {
+    const statePath = await writePendingState(await tmpDir());
+    await assert.rejects(closeChannel({ statePath, log: () => {} }), /never completed|mid-open/i);
+  });
+
+  it('serve refuses a pending state file with a clear message', async () => {
+    const statePath = await writePendingState(await tmpDir());
+    const pkgRoot = path.resolve(new URL('..', import.meta.url).pathname);
+    // Run the REAL CLI entry (serve is not exported) — must exit non-zero
+    // without binding a port.
+    await assert.rejects(
+      promisify(execFile)(
+        process.execPath,
+        ['--import', 'tsx/esm', 'src/index.ts', 'serve', '--state', statePath],
+        { cwd: pkgRoot, timeout: 30_000 },
+      ),
+      (err: unknown) => {
+        const stderr = String((err as { stderr?: string }).stderr ?? '');
+        assert.match(stderr, /never completed|mid-open/i);
+        return true;
+      },
+    );
   });
 });
 

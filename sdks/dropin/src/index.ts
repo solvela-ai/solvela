@@ -15,7 +15,7 @@ import bs58 from 'bs58';
 import { createSidecarServer } from './server.js';
 import { openChannel } from './open.js';
 import { closeChannel } from './close.js';
-import { loadState, saveState, defaultStatePath, type DropinState } from './state.js';
+import { assertNotPending, loadState, saveState, defaultStatePath, type DropinState } from './state.js';
 
 const DEFAULT_PORT = 8484;
 
@@ -49,6 +49,7 @@ async function serve(args: string[]): Promise<void> {
   });
   const statePath = values.state ?? defaultStatePath();
   const state = await loadState(statePath);
+  assertNotPending(state, statePath);
   const port = values.port !== undefined ? Number(values.port) : state.port;
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     throw new Error(`invalid --port: ${values.port}`);

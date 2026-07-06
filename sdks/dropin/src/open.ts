@@ -265,9 +265,25 @@ export async function openChannel(opts: OpenOptions): Promise<void> {
     );
   }
 
-  const fundingTx = await buildFundingTx(new Connection(rpcUrl, 'confirmed'), wallet, providerWallet, usdcMint, atomic);
   const session = generateSessionKey();
   const localToken = randomBytes(32).toString('base64url');
+
+  // Durability (round-2 HIGH): the session seed is the ONLY credential that
+  // can ever close the channel. Make it durable on disk (0600, atomic,
+  // `pending_open` marker) BEFORE anything is signed or the gateway is asked
+  // to move money — a seed that lived only in memory would strand the deposit
+  // permanently if the process died after the gateway credited it.
+  await saveState(statePath, {
+    gateway_url: gateway,
+    port: opts.port,
+    channel_id: '',
+    session_seed_b58: bs58.encode(session.seed),
+    local_token: localToken,
+    last_cumulative: '0',
+    pending_open: true,
+  });
+
+  const fundingTx = await buildFundingTx(new Connection(rpcUrl, 'confirmed'), wallet, providerWallet, usdcMint, atomic);
 
   let resp: Response;
   try {
@@ -300,14 +316,32 @@ export async function openChannel(opts: OpenOptions): Promise<void> {
     throw new Error('gateway open response carried no channel_id');
   }
 
-  await saveState(statePath, {
-    gateway_url: gateway,
-    port: opts.port,
-    channel_id: channelId,
-    session_seed_b58: bs58.encode(session.seed),
-    local_token: localToken,
-    last_cumulative: '0',
-  });
+  try {
+    // Finalize: record the channel_id and clear the pending marker.
+    await saveState(statePath, {
+      gateway_url: gateway,
+      port: opts.port,
+      channel_id: channelId,
+      session_seed_b58: bs58.encode(session.seed),
+      local_token: localToken,
+      last_cumulative: '0',
+    });
+  } catch (err) {
+    // The channel IS open and funded; leave a non-secret paper trail so the
+    // user can finish by hand. The seed is already safe on disk from the
+    // pending pre-write above.
+    log(`WARNING: the channel was OPENED but finalizing ${statePath} failed: ${err instanceof Error ? err.message : String(err)}`);
+    log(`  channel_id:     ${channelId}`);
+    log(`  funding_tx_sig: ${opened['funding_tx_sig'] ?? '(none)'}`);
+    log(
+      `  Your session seed is ALREADY safe on disk (written before the open). To finish manually, edit ` +
+        `${statePath}: set "channel_id" to the value above and remove "pending_open".`,
+    );
+    session.seed.fill(0);
+    throw new Error(
+      `channel ${channelId} opened but the state file could not be finalized — see the recovery note above`,
+    );
+  }
   session.seed.fill(0); // state file owns it now
 
   log('');
