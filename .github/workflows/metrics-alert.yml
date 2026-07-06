@@ -1,0 +1,34 @@
+# Money-safety metrics alerting — the "someone gets told" half of the
+# gateway's Prometheus counters.
+#
+# Every 15 minutes, scrape prod /metrics (Bearer SOLVELA_ADMIN_TOKEN) and
+# fail the run if any PAGE-tier signal trips: settled-but-unledgered
+# counters, stuck-Working settlements, channel refund-worker degradation,
+# fee-payer balance floors. A failed scheduled run triggers GitHub's
+# workflow-failure email to the workflow author — that email is the pager.
+#
+# Acknowledging an incident = bumping ops/metrics-baseline.json in a PR
+# (counters are monotonic; the baseline records what has been investigated).
+#
+# Secret: SOLVELA_ADMIN_TOKEN (same admin token the gateway checks on
+# /metrics — scoped note: it grants the other admin surfaces too; accepted
+# for a solo-operator repo whose Actions secrets already hold FLY_API_TOKEN).
+name: Metrics alert
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Scrape /metrics and evaluate money-safety rules
+        env:
+          SOLVELA_ADMIN_TOKEN: ${{ secrets.SOLVELA_ADMIN_TOKEN }}
+        run: python3 scripts/metrics_alert_check.py
