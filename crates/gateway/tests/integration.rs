@@ -10547,7 +10547,9 @@ async fn test_a2a_agent_card_returns_capabilities() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
     assert_eq!(json["name"], "Solvela");
-    assert_eq!(json["version"], "0.1.0");
+    // Version tracks the crate release (env!, not a hardcoded literal that
+    // drifts — the card shipped "0.1.0" against a 0.2.0 workspace once).
+    assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
     let extensions = json["capabilities"]["extensions"].as_array().unwrap();
     assert!(extensions.len() >= 2, "should have AP2 + x402 extensions");
 }

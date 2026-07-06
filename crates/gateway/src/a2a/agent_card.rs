@@ -52,7 +52,17 @@ pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "name": "Solvela",
         "description": "Solana-native AI agent payment gateway — pay for LLM API calls with USDC-SPL via x402",
         "url": url,
-        "version": "0.1.0",
+        // Track the crate release — a hardcoded literal here drifted from the
+        // workspace version once already (advertised 0.1.0 against 0.2.0).
+        "version": env!("CARGO_PKG_VERSION"),
+        // AgentProvider requires BOTH fields when present (A2A v0.3).
+        "provider": {
+            "organization": "Solvela",
+            "url": "https://solvela.ai"
+        },
+        "documentationUrl": "https://solvela.ai/docs",
+        // Verified live at Slice-1 build time (D8): HTTP 200, image/png.
+        "iconUrl": "https://solvela.ai/logo.png",
         // A2A v0.3 required descriptors: protocol version, the transport the
         // `url` speaks (our /a2a endpoint is JSON-RPC 2.0), and the default I/O
         // media types. Required for a card to pass a strict v0.3 schema validator.
@@ -61,7 +71,11 @@ pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "defaultInputModes": ["text/plain"],
         "defaultOutputModes": ["text/plain"],
         "capabilities": {
-            "streaming": true,
+            // Truthful advertise-vs-serve (#598 class): no `message/stream` or
+            // `tasks/resubscribe` route exists. Streaming is MAY in v0.3, so
+            // `false` is a fully conformant end state; flip only when BOTH
+            // gated methods actually route (v0.3 §11.1.3).
+            "streaming": false,
             "pushNotifications": false,
             "extensions": [
                 {
@@ -88,9 +102,18 @@ pub async fn agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse
             {
                 "id": "chat-completion",
                 "name": "Chat Completion",
-                "description": "Proxy AI chat completions to multiple LLM providers (OpenAI, Anthropic, Google, xAI, DeepSeek)",
+                // Paid surface only (D11-a): the A2A path has no zero-cost
+                // branch, so the free NVIDIA tier is deliberately NOT
+                // mentioned anywhere on this card — free-tier models are
+                // served via POST /v1/chat/completions.
+                "description": "Proxy AI chat completions to 25 paid models across 5 providers (OpenAI, Anthropic, Google, xAI, DeepSeek), settled per request in USDC-SPL via x402",
                 // `tags` is required on every AgentSkill in A2A v0.3.
                 "tags": ["llm", "chat", "completions", "ai", "x402"],
+                "examples": [
+                    "Summarize this article into three bullet points",
+                    "Write a Python function that validates an ISO-8601 timestamp",
+                    "Explain the CAP theorem and its practical tradeoffs"
+                ],
                 "inputModes": ["text/plain"],
                 "outputModes": ["text/plain"]
             }
@@ -373,7 +396,59 @@ supports_vision = false
         let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
 
         assert_eq!(json["name"], "Solvela");
-        assert_eq!(json["version"], "0.1.0");
+        // The card version must track the crate release, never a hardcoded
+        // literal (the "0.1.0" literal had already drifted from the 0.2.0
+        // workspace version).
+        assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    /// Slice 1 (card truth): the card is truthful about what it serves and
+    /// carries the v0.3 discovery fields. `streaming` must be `false` until
+    /// BOTH `message/stream` and `tasks/resubscribe` actually route (A2A v0.3
+    /// §11.1.3 — advertising otherwise is the #598 advertise-vs-serve class),
+    /// and the skill copy advertises the PAID surface only: the A2A path has
+    /// no zero-cost branch, so the NVIDIA free tier must not be invited here
+    /// (decision D11-a).
+    #[tokio::test]
+    async fn test_agent_card_truthful_discovery_fields() {
+        let json = get_card(test_app(), "/.well-known/agent-card.json").await;
+
+        // AgentProvider requires BOTH fields when present.
+        assert_eq!(json["provider"]["organization"], "Solvela");
+        assert_eq!(json["provider"]["url"], "https://solvela.ai");
+        assert_eq!(json["documentationUrl"], "https://solvela.ai/docs");
+        assert_eq!(json["iconUrl"], "https://solvela.ai/logo.png");
+        assert_eq!(
+            json["capabilities"]["streaming"], false,
+            "no message/stream or tasks/resubscribe route exists — the card must not advertise streaming"
+        );
+
+        let skill = &json["skills"][0];
+        let desc = skill["description"]
+            .as_str()
+            .expect("skill.description is a string");
+        assert!(
+            desc.contains("25 paid models across 5 providers"),
+            "skill description must carry the paid-only docs-truth-sweep framing, got: {desc}"
+        );
+        let examples = skill["examples"]
+            .as_array()
+            .expect("skill.examples is an array");
+        assert!(
+            !examples.is_empty()
+                && examples
+                    .iter()
+                    .all(|e| e.as_str().is_some_and(|s| !s.is_empty())),
+            "skill.examples must be non-empty plain strings"
+        );
+
+        // D11-a: the free tier is not offered on the A2A surface, so it must
+        // not be mentioned ANYWHERE on the card.
+        let card_text = json.to_string().to_lowercase();
+        assert!(
+            !card_text.contains("nvidia") && !card_text.contains("free tier"),
+            "the free NVIDIA tier must not be advertised on the A2A card (D11-a)"
+        );
     }
 
     #[tokio::test]
