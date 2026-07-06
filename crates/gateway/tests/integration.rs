@@ -13552,14 +13552,18 @@ async fn receipts_vendor_co_nullability_check_rejects_partial_vendor_insert() {
 /// fire. Returns `None` (self-skip) when local Redis is unavailable. The
 /// `db_pool` is the caller-supplied dedicated receipts test DB.
 fn a2a_app_with_redis_and_db(pool: sqlx::PgPool) -> Option<(axum::Router, Arc<AppState>)> {
-    a2a_app_with_redis_db_and_providers(pool, mock_provider_registry())
+    a2a_app_with_redis_db_and_providers(Some(pool), mock_provider_registry())
 }
 
 /// As [`a2a_app_with_redis_and_db`], but with a caller-supplied provider
 /// registry — used to exercise the provider-omits-usage attribution fallback in
 /// `record_a2a_settlement` through the real `/a2a` route.
+///
+/// `pool: None` builds a Redis-only app (no spend-log/receipt persistence) —
+/// used by shape-strictness tests that need the real `/a2a` route but no
+/// Postgres, so they run wherever Redis alone is available.
 fn a2a_app_with_redis_db_and_providers(
-    pool: sqlx::PgPool,
+    pool: Option<sqlx::PgPool>,
     providers: ProviderRegistry,
 ) -> Option<(axum::Router, Arc<AppState>)> {
     use gateway::cache::{CacheConfig, ResponseCache};
@@ -13594,14 +13598,14 @@ fn a2a_app_with_redis_db_and_providers(
         native_anthropic: None,
         search_provider: None,
         facilitator,
-        usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
+        usage: gateway::usage::UsageTracker::new(pool.clone(), None),
         cache: Some(cache),
         semantic_cache: None,
         provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
         escrow_claimer: None,
         fee_payer_pool: None,
         nonce_pool: None,
-        db_pool: Some(pool),
+        db_pool: pool,
         faucet: None,
         session_secret: b"test-secret".to_vec(),
         http_client: reqwest::Client::new(),
@@ -13713,6 +13717,164 @@ fn a2a_payment_submitted_body(task_id: &str, offer: &serde_json::Value) -> serde
     })
 }
 
+/// A2A v0.3 response-shape strictness (conformance plan Slice 3, defect 7).
+///
+/// The vanilla `a2a-sdk` pydantic models REQUIRE `Task.contextId`,
+/// `Task.kind`, `Message.messageId`, `Message.kind`, and
+/// `Artifact.artifactId`; a strict-parse probe of prod fails today with
+/// `contextId: Field required` + `status.message.messageId: Field required`.
+/// This drives BOTH legs of the payment flow through the real `/a2a` route
+/// and asserts every returned Task carries the v0.3 identity fields —
+/// camelCase-named, non-empty — with the SAME contextId across the task's
+/// lifecycle, plus the mint-on-read leg: a legacy `TaskRecord` whose stored
+/// `context_id` is empty (pre-Slice-3 record inside the 600s TTL migration
+/// window) must still yield a non-empty wire `contextId`, never `""`, and
+/// the repair must be DETERMINISTIC — the wire value equals what a second
+/// independent `load_task` yields (UUID v5 of the task id), so the
+/// client-visible and Redis-persisted contextIds can never diverge.
+#[tokio::test]
+async fn task_serialization_carries_v03_required_fields() {
+    let Some((app, state)) = a2a_app_with_redis_db_and_providers(None, mock_provider_registry())
+    else {
+        return;
+    };
+
+    // — Leg 1: new request → input-required Task carries the v0.3 fields —
+    let (task_id, offer) = a2a_new_request(&app).await;
+    let new_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "message/send",
+        "id": "a2a-shape-new",
+        "params": {
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "What is Solana?"}],
+                "metadata": {"model": "openai/gpt-4o"}
+            }
+        }
+    });
+    let input_required = a2a_call(&app, &new_body).await;
+    let shape_task_id = input_required["id"].as_str().expect("task id").to_string();
+    assert_eq!(input_required["kind"], "task", "Task.kind must be \"task\"");
+    let context_id = input_required["contextId"]
+        .as_str()
+        .expect("Task.contextId must be a string")
+        .to_string();
+    assert!(!context_id.is_empty(), "Task.contextId must be non-empty");
+    assert!(
+        input_required.get("context_id").is_none(),
+        "contextId must be camelCase on the wire, not snake_case"
+    );
+    let status_msg = &input_required["status"]["message"];
+    assert_eq!(
+        status_msg["kind"], "message",
+        "Message.kind must be \"message\""
+    );
+    assert!(
+        !status_msg["messageId"]
+            .as_str()
+            .expect("messageId")
+            .is_empty(),
+        "Message.messageId must be non-empty"
+    );
+    assert_eq!(
+        status_msg["taskId"],
+        serde_json::json!(shape_task_id),
+        "agent message taskId must reference its task"
+    );
+    assert_eq!(
+        status_msg["contextId"],
+        serde_json::json!(context_id),
+        "agent message contextId must match the task's contextId"
+    );
+    assert!(
+        !input_required["status"]["timestamp"]
+            .as_str()
+            .expect("TaskStatus.timestamp")
+            .is_empty(),
+        "TaskStatus.timestamp must be populated (chrono is available)"
+    );
+
+    // — Leg 2: paid leg → completed Task carries the SAME contextId + artifactId —
+    let shape_offer = input_required["status"]["message"]["metadata"]["x402.payment.required"]
+        ["accepts"][0]
+        .clone();
+    let pay_body = a2a_payment_submitted_body(&shape_task_id, &shape_offer);
+    let completed = a2a_call(&app, &pay_body).await;
+    assert_eq!(completed["status"]["state"], "completed");
+    assert_eq!(completed["kind"], "task");
+    assert_eq!(
+        completed["contextId"],
+        serde_json::json!(context_id),
+        "completed Task must carry the same contextId minted at task creation"
+    );
+    let completed_msg = &completed["status"]["message"];
+    assert_eq!(completed_msg["kind"], "message");
+    assert!(!completed_msg["messageId"]
+        .as_str()
+        .expect("messageId")
+        .is_empty());
+    assert_eq!(completed_msg["taskId"], serde_json::json!(shape_task_id));
+    assert_eq!(completed_msg["contextId"], serde_json::json!(context_id));
+    assert!(
+        !completed["artifacts"][0]["artifactId"]
+            .as_str()
+            .expect("Artifact.artifactId")
+            .is_empty(),
+        "Artifact.artifactId must be non-empty"
+    );
+    assert!(!completed["status"]["timestamp"]
+        .as_str()
+        .expect("TaskStatus.timestamp")
+        .is_empty());
+
+    // — Leg 3: mint-on-read — a legacy record with an EMPTY stored context_id
+    // (migration window) must never surface `contextId: ""` on the wire, and
+    // the repair must be deterministic across loads.
+    let cache = state.cache.as_ref().expect("fixture has Redis");
+    let key = format!("a2a_task:{task_id}");
+    let raw = cache
+        .get_raw(&key)
+        .await
+        .expect("read task record")
+        .expect("task record present");
+    let mut record: serde_json::Value = serde_json::from_str(&raw).expect("record JSON");
+    record["context_id"] = serde_json::json!("");
+    cache
+        .set_raw(
+            &key,
+            &record.to_string(),
+            std::time::Duration::from_secs(600),
+        )
+        .await
+        .expect("seed legacy record");
+
+    let pay_legacy = a2a_payment_submitted_body(&task_id, &offer);
+    let legacy_completed = a2a_call(&app, &pay_legacy).await;
+    assert_eq!(legacy_completed["status"]["state"], "completed");
+    let minted = legacy_completed["contextId"]
+        .as_str()
+        .expect("Task.contextId must be a string on the mint-on-read path");
+    assert!(
+        !minted.is_empty(),
+        "mint-on-read: legacy record with empty context_id must never \
+         serialize `contextId: \"\"` on the wire"
+    );
+    // Stability pin (round-2 reviewer finding): the wire contextId must EQUAL
+    // what an independent `load_task` yields. The legacy repair is DERIVED
+    // (UUID v5 of the task id), not randomly minted per load — a random mint
+    // let the client-visible contextId and the Redis-persisted one (written by
+    // `update_task_state`'s internal re-load) diverge within one paid request.
+    let reloaded = gateway::a2a::task_store::load_task(&state, &task_id)
+        .await
+        .expect("load_task must succeed with Redis present")
+        .expect("record must still be present within TTL");
+    assert_eq!(
+        minted, reloaded.context_id,
+        "mint-on-read must be deterministic: wire contextId == independently loaded contextId"
+    );
+}
+
 /// A settled paid A2A request MUST write exactly one spend ledger row (#561).
 /// Asserted against the durable Postgres `spend_logs` row (parallel-safe).
 /// Deleting the `log_spend` call in `record_a2a_settlement` makes this fail
@@ -13776,7 +13938,7 @@ async fn a2a_paid_request_without_provider_usage_records_input_estimate() {
         return;
     };
     let Some((app, state)) =
-        a2a_app_with_redis_db_and_providers(pool, usageless_provider_registry())
+        a2a_app_with_redis_db_and_providers(Some(pool), usageless_provider_registry())
     else {
         return;
     };
@@ -14476,7 +14638,8 @@ async fn a2a_provider_failure_after_settle_writes_ledger_and_holds_lock() {
         return;
     };
     // AlwaysPassVerifier settles; failing providers exhaust the fallback chain.
-    let Some((app, state)) = a2a_app_with_redis_db_and_providers(pool, failing_provider_registry())
+    let Some((app, state)) =
+        a2a_app_with_redis_db_and_providers(Some(pool), failing_provider_registry())
     else {
         return;
     };

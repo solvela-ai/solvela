@@ -224,6 +224,9 @@ async fn handle_new_request(
     // mint changes are rare operator events, and the failure is a denial (no
     // mis-charge). Revisit if offers ever become long-lived.
     let task_id = new_task_id();
+    // A2A v0.3 contextId: minted once at task creation, persisted on the
+    // record, and carried by every Task response for this task's lifetime.
+    let context_id = task_store::new_context_id();
     let record = TaskRecord {
         id: task_id.clone(),
         state: TaskState::InputRequired,
@@ -231,6 +234,7 @@ async fn handle_new_request(
         payment_required: payment_required_json.clone(),
         model: Some(resolved_model.clone()),
         max_tokens: Some(max_tokens),
+        context_id: context_id.clone(),
         created_at: chrono::Utc::now(),
     };
 
@@ -247,7 +251,9 @@ async fn handle_new_request(
 
     // Build A2A Task response
     let task = Task {
-        id: task_id,
+        id: task_id.clone(),
+        context_id: context_id.clone(),
+        kind: TaskKind::Task,
         status: TaskStatus {
             state: TaskState::InputRequired,
             message: Some(Message {
@@ -255,6 +261,10 @@ async fn handle_new_request(
                 parts: vec![Part::Text {
                     text: "Payment required to process this request.".to_string(),
                 }],
+                message_id: new_wire_id(),
+                kind: MessageKind::Message,
+                task_id: Some(task_id),
+                context_id: Some(context_id),
                 metadata: Some({
                     let mut meta = serde_json::Map::new();
                     meta.insert(
@@ -265,6 +275,7 @@ async fn handle_new_request(
                     meta
                 }),
             }),
+            timestamp: Some(now_timestamp()),
         },
         artifacts: None,
     };
@@ -993,6 +1004,12 @@ async fn handle_payment_submitted(
 
     let task = Task {
         id: task_id.to_string(),
+        // Same contextId for the task's lifetime: creation-minted for new
+        // records; for LEGACY records `load_task` DERIVES a deterministic
+        // UUID v5 from the task id, so this response and every other load
+        // (state re-save, a future tasks/get) agree. Never empty.
+        context_id: record.context_id.clone(),
+        kind: TaskKind::Task,
         status: TaskStatus {
             state: TaskState::Completed,
             message: Some(Message {
@@ -1000,10 +1017,16 @@ async fn handle_payment_submitted(
                 parts: vec![Part::Text {
                     text: response_text.clone(),
                 }],
+                message_id: new_wire_id(),
+                kind: MessageKind::Message,
+                task_id: Some(task_id.to_string()),
+                context_id: Some(record.context_id.clone()),
                 metadata: Some(receipt_meta),
             }),
+            timestamp: Some(now_timestamp()),
         },
         artifacts: Some(vec![Artifact {
+            artifact_id: new_wire_id(),
             parts: vec![Part::Text {
                 text: response_text,
             }],
@@ -1018,6 +1041,16 @@ async fn handle_payment_submitted(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Mint a v0.3 wire id (UUID v4) for `messageId` / `artifactId`.
+fn new_wire_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// RFC 3339 / ISO-8601 UTC timestamp for `TaskStatus.timestamp` (A2A v0.3).
+fn now_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
 
 /// Record the ledger row and durable receipt for a settled A2A payment (#561),
 /// returning the public receipt path (`/v1/receipts/{uuid}`) to surface in the
@@ -1621,6 +1654,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![
                     Part::Text {
                         text: "What is in this image?".to_string(),
@@ -1683,6 +1720,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "What is Solana?".to_string(),
                 }],
@@ -1711,6 +1752,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "What is Solana?".to_string(),
                 }],
@@ -1741,6 +1786,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Data {
                     content_type: "image/png".to_string(),
                     data: json!("base64"),
@@ -1765,6 +1814,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "Hello".to_string(),
                 }],
@@ -1849,6 +1902,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![
                     Part::Text {
                         text: "pay".to_string(),
@@ -2084,6 +2141,10 @@ supports_vision = false
         MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: text.to_string(),
                 }],
@@ -2111,6 +2172,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "pay".to_string(),
                 }],
@@ -2272,6 +2337,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "pay".to_string(),
                 }],
@@ -2299,6 +2368,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "pay".to_string(),
                 }],
@@ -2330,6 +2403,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "pay".to_string(),
                 }],
@@ -2363,6 +2440,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "pay".to_string(),
                 }],
@@ -2412,6 +2493,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "pay".to_string(),
                 }],
@@ -2486,6 +2571,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "pay".to_string(),
                 }],
@@ -2557,6 +2646,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "pay".to_string(),
                 }],
@@ -2737,6 +2830,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "pay".to_string(),
                 }],
@@ -2813,6 +2910,10 @@ supports_vision = false
             MessageSendParams {
                 message: Message {
                     role: MessageRole::User,
+                    message_id: String::new(),
+                    kind: MessageKind::Message,
+                    task_id: None,
+                    context_id: None,
                     parts: vec![Part::Text {
                         text: "pay".to_string(),
                     }],
@@ -3032,6 +3133,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "pay".to_string(),
                 }],
@@ -3090,6 +3195,10 @@ supports_vision = false
         let params = MessageSendParams {
             message: Message {
                 role: MessageRole::User,
+                message_id: String::new(),
+                kind: MessageKind::Message,
+                task_id: None,
+                context_id: None,
                 parts: vec![Part::Text {
                     text: "pay".to_string(),
                 }],
@@ -3144,6 +3253,7 @@ supports_vision = false
             payment_required: json!({"x402_version": 2, "accepts": []}),
             model: Some("definitely-not-a-real-model-xyz".to_string()),
             max_tokens: Some(1000),
+            context_id: task_store::new_context_id(),
             created_at: chrono::Utc::now(),
         };
         if task_store::save_task(&state, &record).await.is_err() {
@@ -3175,6 +3285,10 @@ supports_vision = false
             MessageSendParams {
                 message: Message {
                     role: MessageRole::User,
+                    message_id: String::new(),
+                    kind: MessageKind::Message,
+                    task_id: None,
+                    context_id: None,
                     parts: vec![Part::Text {
                         text: "pay".to_string(),
                     }],
