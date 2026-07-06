@@ -149,12 +149,21 @@ pub enum TaskState {
 
 impl TaskState {
     /// Check if transitioning from `self` to `next` is valid.
+    ///
+    /// `Working` is the persisted settle-in-progress marker (conformance plan
+    /// D9-a): every paid path writes it under the settlement lock BEFORE any
+    /// funds move. The direct `InputRequired→Completed/Failed` arms were
+    /// REMOVED in the same change that added the marker write — the state
+    /// machine itself now enforces marker discipline: a path that skips the
+    /// marker cannot reach a terminal state. `Working→InputRequired` is the
+    /// pre-settle failure REVERT (verify error, settle `success=false`,
+    /// replay, offer mismatch — no funds moved). `Completed`/`Failed` are
+    /// terminal: no outbound arms.
     pub fn can_transition_to(self, next: TaskState) -> bool {
         matches!(
             (self, next),
             (TaskState::InputRequired, TaskState::Working)
-                | (TaskState::InputRequired, TaskState::Completed)
-                | (TaskState::InputRequired, TaskState::Failed)
+                | (TaskState::Working, TaskState::InputRequired)
                 | (TaskState::Working, TaskState::Completed)
                 | (TaskState::Working, TaskState::Failed)
         )
@@ -419,8 +428,9 @@ mod tests {
     #[test]
     fn task_state_can_transition_to_valid() {
         assert!(TaskState::InputRequired.can_transition_to(TaskState::Working));
-        assert!(TaskState::InputRequired.can_transition_to(TaskState::Completed));
-        assert!(TaskState::InputRequired.can_transition_to(TaskState::Failed));
+        // LOCKSTEP FLIP (conformance plan Slice 2a): Working→InputRequired is
+        // the pre-settle failure REVERT arm — previously pinned invalid below.
+        assert!(TaskState::Working.can_transition_to(TaskState::InputRequired));
         assert!(TaskState::Working.can_transition_to(TaskState::Completed));
         assert!(TaskState::Working.can_transition_to(TaskState::Failed));
     }
@@ -433,8 +443,13 @@ mod tests {
         assert!(!TaskState::Failed.can_transition_to(TaskState::InputRequired));
         assert!(!TaskState::Failed.can_transition_to(TaskState::Working));
         assert!(!TaskState::Failed.can_transition_to(TaskState::Completed));
-        assert!(!TaskState::Working.can_transition_to(TaskState::InputRequired));
         assert!(!TaskState::InputRequired.can_transition_to(TaskState::InputRequired));
+        // LOCKSTEP FLIP (conformance plan Slice 2a): the direct
+        // InputRequired→Completed/Failed arms are REMOVED — every paid path
+        // must pass through the `Working` settle-marker first, so the state
+        // machine itself rejects a marker-bypassing terminal write.
+        assert!(!TaskState::InputRequired.can_transition_to(TaskState::Completed));
+        assert!(!TaskState::InputRequired.can_transition_to(TaskState::Failed));
     }
 
     #[test]

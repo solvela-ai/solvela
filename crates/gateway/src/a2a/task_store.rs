@@ -1,7 +1,12 @@
 //! Redis-backed task state for A2A payment flows.
 //!
 //! Each A2A payment flow creates a task that tracks the lifecycle:
-//! input-required → completed/failed (Working state reserved for future async processing).
+//! input-required → working → completed/failed. `Working` is the persisted
+//! settle-in-progress marker (conformance plan D9-a): written under the
+//! settlement lock BEFORE any funds move, reverted to `input-required` on
+//! pre-settle failure — it is what makes an in-flight settlement visible to
+//! competing payment (and future cancel) legs even after the 120s settle-lock
+//! TTL expires mid-provider-call.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,6 +51,22 @@ pub struct TaskRecord {
     /// v0.3 strictness this field exists to satisfy.
     #[serde(default)]
     pub context_id: String,
+    /// D6 (conformance plan): the final delivered artifact text, persisted at
+    /// completion so a client that lost the `message/send` response (e.g. a
+    /// disconnect) can recover its PAID output from the task within the TTL.
+    /// `None` until terminal, and stays `None` on the failed arm (the provider
+    /// never delivered). `serde(default)` keeps legacy records deserializing.
+    #[serde(default)]
+    pub artifact_text: Option<String>,
+    /// D6: settlement transaction signature reference, persisted on BOTH
+    /// terminal arms (Completed and Failed) — on the failed arm this is the
+    /// paying agent's evidence of what it paid.
+    #[serde(default)]
+    pub tx_signature: Option<String>,
+    /// D6: durable receipt path (`/v1/receipts/{uuid}`) reference, persisted
+    /// on both terminal arms when a retrievable receipt was written.
+    #[serde(default)]
+    pub receipt_path: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -172,6 +193,35 @@ pub async fn update_task_state(
     save_task(state, &updated).await
 }
 
+/// Persist the terminal-arm delivery/receipt references onto an existing
+/// record (D6, conformance plan): the Completed arm stores the artifact text
+/// plus the settlement refs; the Failed arm stores the refs only (no artifact
+/// was delivered). Load-modify-save with NO state transition — callers write
+/// the state separately through `update_task_state`'s transition check.
+///
+/// Money-free: the values persisted here are already-computed references (the
+/// ledger row and receipt were written by `record_a2a_settlement` before this
+/// runs); this write changes no amount and fires no settlement.
+pub async fn persist_terminal_refs(
+    state: &Arc<AppState>,
+    task_id: &str,
+    artifact_text: Option<String>,
+    tx_signature: Option<String>,
+    receipt_path: Option<String>,
+) -> Result<(), String> {
+    let record = load_task(state, task_id)
+        .await?
+        .ok_or_else(|| format!("task not found: {task_id}"))?;
+
+    let updated = TaskRecord {
+        artifact_text,
+        tx_signature,
+        receipt_path,
+        ..record
+    };
+    save_task(state, &updated).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,10 +230,11 @@ mod tests {
     #[test]
     fn task_state_valid_transitions() {
         assert!(TaskState::InputRequired.can_transition_to(TaskState::Working));
-        assert!(TaskState::InputRequired.can_transition_to(TaskState::Completed));
-        assert!(TaskState::InputRequired.can_transition_to(TaskState::Failed));
         assert!(TaskState::Working.can_transition_to(TaskState::Completed));
         assert!(TaskState::Working.can_transition_to(TaskState::Failed));
+        // LOCKSTEP FLIP (conformance plan Slice 2a): Working→InputRequired is
+        // the pre-settle failure REVERT arm — previously pinned invalid below.
+        assert!(TaskState::Working.can_transition_to(TaskState::InputRequired));
     }
 
     #[test]
@@ -195,8 +246,11 @@ mod tests {
         assert!(!TaskState::Failed.can_transition_to(TaskState::InputRequired));
         assert!(!TaskState::Failed.can_transition_to(TaskState::Working));
         assert!(!TaskState::Failed.can_transition_to(TaskState::Completed));
-        // Cannot go backwards
-        assert!(!TaskState::Working.can_transition_to(TaskState::InputRequired));
+        // LOCKSTEP FLIP (conformance plan Slice 2a): the direct
+        // InputRequired→Completed/Failed arms are REMOVED — a terminal state
+        // is only reachable through the `Working` settle-marker.
+        assert!(!TaskState::InputRequired.can_transition_to(TaskState::Completed));
+        assert!(!TaskState::InputRequired.can_transition_to(TaskState::Failed));
         // Self-transitions are invalid
         assert!(!TaskState::InputRequired.can_transition_to(TaskState::InputRequired));
         assert!(!TaskState::Completed.can_transition_to(TaskState::Completed));
@@ -227,6 +281,9 @@ mod tests {
             model: Some("auto".to_string()),
             max_tokens: Some(1000),
             context_id: new_context_id(),
+            artifact_text: None,
+            tx_signature: None,
+            receipt_path: None,
             created_at: chrono::Utc::now(),
         };
 
@@ -250,6 +307,9 @@ mod tests {
             model: None,
             max_tokens: None,
             context_id: new_context_id(),
+            artifact_text: None,
+            tx_signature: None,
+            receipt_path: None,
             created_at: chrono::Utc::now(),
         };
 
@@ -280,6 +340,12 @@ mod tests {
             serde_json::from_str(&legacy).expect("legacy record must deserialize");
         assert_eq!(deserialized.max_tokens, None);
         assert_eq!(deserialized.model, Some("auto".to_string()));
+        // D6 fields are additive with serde(default): legacy records (and
+        // records written by pre-2a code during a deploy window) deserialize
+        // with the refs absent rather than failing.
+        assert_eq!(deserialized.artifact_text, None);
+        assert_eq!(deserialized.tx_signature, None);
+        assert_eq!(deserialized.receipt_path, None);
     }
 
     /// Slice 3 regression (A2A v0.3 shape strictness): records persisted
