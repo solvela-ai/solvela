@@ -14,7 +14,7 @@ A2A (Agent-to-Agent) protocol adapter. Translates A2A JSON-RPC `message/send` ca
 | `agent_card.rs` | Builds the `AgentCard` returned at `GET /.well-known/agent-card.json` (A2A v0.3 canonical path; `/.well-known/agent.json` is a backward-compat alias). Includes AP2 + x402 extensions; `url` from `SOLVELA_PUBLIC_URL` |
 | `jsonrpc.rs` | JSON-RPC 2.0 request/response envelope + error mapping |
 | `handler.rs` | Main `message/send` handler — cost calc → 402 / payment verify → LLM proxy → Task response |
-| `task_store.rs` | In-memory task store keyed by task id — tracks state transitions across request chains |
+| `task_store.rs` | Redis-backed task store keyed by task id (TASK_TTL 600s) — tracks state transitions across request chains; fail-closed without Redis (#532) |
 
 ## Subdirectories
 _(none)_
@@ -28,7 +28,7 @@ _(none)_
   3. Agent signs SPL USDC transfer → sends `message/send` with `taskId` + `x402.payment.payload` metadata.
   4. Gateway verifies payment (reuses the facilitator), proxies to LLM, returns Task in `completed` state with artifacts + receipt.
 - Do **not** add new payment schemes here — reuse the gateway's x402 middleware and facilitator.
-- Do **not** persist tasks in PostgreSQL unless the gateway lifecycle already does so — today the store is in-memory.
+- Do **not** persist tasks in PostgreSQL unless the gateway lifecycle already does so — the store is Redis-backed (TASK_TTL 600s) and fail-closed without Redis (#532): no Redis means no payment tasks are issued.
 
 ### Testing Requirements
 ```bash

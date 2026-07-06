@@ -21,7 +21,8 @@ use crate::a2a::types::*;
 use crate::providers::fallback::chat_with_model_fallback;
 use crate::receipts;
 use crate::routes::chat::cost::{
-    completion_token_ceiling, estimate_input_tokens, usdc_atomic_amount_checked, PaymentScheme,
+    completion_token_ceiling, estimate_input_tokens, is_free_estimate, usdc_atomic_amount_checked,
+    PaymentScheme,
 };
 use crate::usage::SpendLogEntry;
 use crate::AppState;
@@ -136,6 +137,28 @@ async fn handle_new_request(
         message: format!("Failed to compute USDC amount: {e}"),
         data: None,
     })?;
+
+    // D11(a) fail-closed $0-quote guard: the chat route's free-tier bypass
+    // (`is_free_estimate` → `free_rate_limiter` + `free_global_cap`,
+    // `routes/chat/mod.rs`) has NO A2A counterpart, yet free-tier model hints
+    // resolve to $0/$0 models here too. Without this rejection the handler
+    // would quote atomic "0" and demand payment — an untraced settlement
+    // branch (a zero-amount settle either fails opaquely or bypasses the
+    // free-tier caps that protect the shared upstream quota). Reject at
+    // intake, BEFORE the TaskRecord is persisted or a PaymentRequired offer
+    // is built; free-tier models stay on the REST surface. Money-free: paid
+    // quotes are untouched.
+    if is_free_estimate(&atomic_amount) {
+        return Err(JsonRpcErrorData {
+            code: ERR_INVALID_PARAMS,
+            message: format!(
+                "Model '{resolved_model}' resolves to a $0 quote; the free tier is not \
+                 offered on the A2A surface. Use POST /v1/chat/completions for \
+                 free-tier models."
+            ),
+            data: None,
+        });
+    }
 
     // Build PaymentRequired (same structure as chat route). Quote the
     // CONFIGURED mint — the one the verifier enforces — never the compile-time
@@ -1408,10 +1431,8 @@ mod tests {
     use solvela_x402::facilitator::Facilitator;
 
     fn test_state() -> Arc<AppState> {
-        Arc::new(AppState {
-            config: AppConfig::default(),
-            model_registry: ModelRegistry::from_toml(
-                r#"
+        test_state_with_models(
+            r#"
 [models.test-model]
 provider = "test"
 model_id = "test-model"
@@ -1423,8 +1444,16 @@ supports_streaming = false
 supports_tools = false
 supports_vision = false
                 "#,
-            )
-            .expect("valid test model TOML"), // safe: known-good test data
+        )
+    }
+
+    /// Like [`test_state`] but with a caller-supplied model-registry TOML, so
+    /// tests can register models with non-default pricing (e.g. a $0/$0
+    /// free-tier model for the D11 zero-quote guard).
+    fn test_state_with_models(models_toml: &str) -> Arc<AppState> {
+        Arc::new(AppState {
+            config: AppConfig::default(),
+            model_registry: ModelRegistry::from_toml(models_toml).expect("valid test model TOML"), // safe: known-good test data
             service_registry: RwLock::new(ServiceRegistry::empty()),
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
@@ -1754,6 +1783,58 @@ supports_vision = false
             result.unwrap_err().code, // safe: just asserted is_err
             ERR_MODEL_NOT_FOUND,
             "error code should be model not found"
+        );
+    }
+
+    /// D11(a) $0-quote guard: the chat route's free-tier bypass has NO A2A
+    /// counterpart, so a model that resolves to a $0/$0 quote must be rejected
+    /// fail-closed at intake — pointing the caller at the REST free path —
+    /// BEFORE any TaskRecord is persisted. This state has `cache: None`, so if
+    /// the guard ran after the persist attempt, `save_task` would fail first
+    /// with ERR_INTERNAL; asserting ERR_INVALID_PARAMS therefore also proves
+    /// no TaskRecord write was attempted.
+    #[tokio::test]
+    async fn test_a2a_rejects_zero_total_quote_free_tier_model() {
+        let state = test_state_with_models(
+            r#"
+[models.free-model]
+provider = "nvidia"
+model_id = "free-model"
+display_name = "Free"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 4096
+supports_streaming = false
+supports_tools = false
+supports_vision = false
+                "#,
+        );
+        let params = MessageSendParams {
+            message: Message {
+                role: MessageRole::User,
+                parts: vec![Part::Text {
+                    text: "What is Solana?".to_string(),
+                }],
+                metadata: Some({
+                    let mut m = serde_json::Map::new();
+                    m.insert("model".to_string(), json!("free-model"));
+                    m
+                }),
+            },
+            task_id: None,
+        };
+
+        let result = handle_new_request(&state, &params).await;
+        let err = result.expect_err("a $0-total quote must be rejected on the A2A surface");
+        assert_eq!(
+            err.code, ERR_INVALID_PARAMS,
+            "zero-quote rejection must be invalid-params (NOT ERR_INTERNAL — \
+             that would mean the persist ran before the guard)"
+        );
+        assert!(
+            err.message.contains("/v1/chat/completions"),
+            "error must point the caller at the REST free-tier path, got: {}",
+            err.message
         );
     }
 
