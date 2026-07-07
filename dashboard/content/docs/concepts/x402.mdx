@@ -94,7 +94,7 @@ The trailing `error` field is a plain string banner, not the OpenAI error object
 | `resource.url` | The endpoint path that requires payment. |
 | `resource.method` | Always `POST` for chat completions. |
 | `accepts` | Array of accepted payment methods. The agent picks one. |
-| `accepts[].scheme` | `"exact"` (direct transfer) or `"escrow"` (on-chain escrow). |
+| `accepts[].scheme` | `"exact"` (direct transfer) or `"escrow"` (on-chain escrow). The [spend-down channel](/docs/concepts/spend-down-channel) is deliberately **not** listed in `accepts[]` — channel-aware clients invoke it directly via the payment header, so the 402 wire is unchanged for SDKs that don't know the scheme. |
 | `accepts[].network` | Solana mainnet: `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`. |
 | `accepts[].amount` | Cost in atomic USDC units (6 decimals). `2625` = `$0.002625`. |
 | `accepts[].asset` | USDC-SPL mint: `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`. |
