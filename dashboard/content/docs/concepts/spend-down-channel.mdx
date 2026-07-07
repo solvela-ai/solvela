@@ -1,0 +1,65 @@
+---
+title: Spend-Down Channel
+description: Fund once on-chain, pay per request with signed vouchers — no per-call Solana transactions
+---
+
+
+The spend-down channel lets an agent make many paid requests from a single on-chain USDC deposit. Instead of building a fresh Solana transaction for every call, the client attaches a signed **voucher** to each request. Vouchers are verified off-chain — per-request on-chain cost drops to zero — while custody never transfers: the gateway can only ever settle amounts the client has explicitly signed.
+
+Channel vouchers are accepted on `/v1/chat/completions`, `/v1/messages`, and `/v1/search`.
+
+**Who uses it today:** [`@solvela/dropin`](/docs/sdks/claude-code) (the Claude Code sidecar) and [`@solvela/signer-core`](https://www.npmjs.com/package/@solvela/signer-core) (TypeScript signing primitives — `ChannelTracker`).
+
+## Channel vs exact vs escrow
+
+| | Exact (direct) | [Escrow](/docs/concepts/escrow) | Channel |
+|-|----------------|--------|---------|
+| On-chain transactions | 1 per request | 2 per request (deposit + claim) | 2 per channel lifetime (open + close) |
+| Payment proof | Signed USDC transfer | Deposit to PDA vault | Signed cumulative voucher |
+| Spend cap | The transfer amount | The deposit | Every voucher — each signature caps total spend |
+| Per-request latency | Solana confirmation | Solana confirmation | None (off-chain verification) |
+| Best for | One-off calls | Trustless single requests | Many requests from one deposit |
+
+## How it works
+
+<Steps>
+  <Step>
+    **Open and fund the channel**
+
+    The client POSTs `/v1/channel/open` with its wallet address, a **session key** (the ed25519 key that will sign vouchers), and a signed USDC funding transfer. The gateway broadcasts and verifies the deposit on-chain, then opens the channel ledger. Each funding transaction can open exactly one channel — replays are rejected.
+  </Step>
+  <Step>
+    **Get a quote**
+
+    The client sends a request without payment. The gateway answers with a standard [x402 `402` response](/docs/concepts/x402) whose amount is the fee-inclusive estimate for **this** request.
+  </Step>
+  <Step>
+    **Sign the quote**
+
+    The client signs a voucher for `previous cumulative + quoted amount`. The voucher is a domain-separated message (`solvela-channel-voucher-v1`) binding the channel ID, the new cumulative total, the SHA-256 digest of the exact request bytes, and an expiry slot — signed by the session key.
+  </Step>
+  <Step>
+    **Retry with the voucher**
+
+    The client resends the **byte-identical** request with the voucher in the `payment-signature` header. The gateway verifies the signature, the digest binding, the expiry, that the cumulative increase equals the quoted amount, that it is strictly monotonic, and that it never exceeds the deposit — then serves the request and advances the channel ledger. No on-chain transaction happens.
+  </Step>
+  <Step>
+    **Close and get refunded**
+
+    When done, the client signs a close message with the session key and POSTs `/v1/channel/close`. The unspent balance (deposit minus settled) is refunded on-chain to the funding wallet.
+  </Step>
+</Steps>
+
+## The voucher is the spend cap
+
+The channel is non-custodial by construction: the gateway can never settle more than the highest cumulative amount the client has signed, and never more than the deposit. There is no "drawdown authority" — every increment requires a fresh client signature over that exact request. The session key can be a **delegated** key generated for the channel, so the funding wallet's private key never enters the agent runtime.
+
+## Not advertised in the 402
+
+The `accepts[]` array in a `402` response lists only `exact` and `escrow`. The channel is **invoked by the client, not offered by the gateway** — channel-aware clients attach the voucher header directly after reading the quote. This keeps existing SDKs that don't know the scheme fully compatible: the 402 wire is unchanged whether or not the channel is enabled.
+
+## Limits
+
+- **Draws are strictly serial per channel.** Each voucher signs `last + quote`, so concurrent requests must queue — a channel is a sequence, not a pool.
+- **Deposits and refunds are capped.** The hosted gateway enforces an operator-configured per-channel maximum deposit and a daily refund cap; an over-cap open is rejected with an explicit error before any funds move.
+- **Vouchers expire.** Each voucher carries a Solana slot bound; clients source the current slot from `GET /v1/escrow/config` and re-sign rather than reuse stale vouchers.

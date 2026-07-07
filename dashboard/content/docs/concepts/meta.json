@@ -1,4 +1,4 @@
 {
   "title": "Concepts",
-  "pages": ["architecture", "x402", "a2a", "smart-router", "free-tier", "response-cache", "escrow", "pricing", "request-flow", "payment-flow", "payment-pre-auth", "eip712-usdc-domain"]
+  "pages": ["architecture", "x402", "a2a", "smart-router", "free-tier", "response-cache", "escrow", "spend-down-channel", "pricing", "request-flow", "payment-flow", "payment-pre-auth", "eip712-usdc-domain"]
 }

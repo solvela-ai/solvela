@@ -4,7 +4,7 @@ Shared x402 protocol primitives for the Solvela ecosystem — payment signing, 4
 
 ## Status
 
-**Internal package — not published to npm**. Used by `sdks/mcp/`, `sdks/openclaw-provider/`, and `sdks/ai-sdk-provider/` via a `file:../signer-core` workspace dependency (the `^0.1.0` semver range in some manifests is forward-looking; today it resolves locally). If you need to sign x402 payments from your own application, depend on [`@solvela/sdk`](../typescript) instead — it bundles a `KeypairSigner` built on these primitives.
+**Published to npm as [`@solvela/signer-core`](https://www.npmjs.com/package/@solvela/signer-core)** (0.2.0, 2026-07-06). Inside the monorepo it is consumed by `sdks/mcp/`, `sdks/openclaw-provider/`, `sdks/ai-sdk-provider/`, and `sdks/dropin/` via a `file:../signer-core` workspace dependency; published packages depend on the npm release. For simple x402 payments from your own application, [`@solvela/sdk`](../typescript) (which bundles a `KeypairSigner` built on these primitives) is still the friendlier entry point — depend on signer-core directly for the spend-down channel primitives or custom integrations.
 
 ## What's inside
 
@@ -17,6 +17,8 @@ Shared x402 protocol primitives for the Solvela ecosystem — payment signing, 4
 | `isStubHeader`, `isStubTransaction` | function | Detect stub payment headers and stub markers in extracted transactions — guards against sending unsigned placeholder payloads. |
 | `sanitizeGatewayError` | function | Slice + redact gateway error bodies before logging or surfacing them. |
 | `redactBase58`, `redactHex` | function | Byte-pattern redactors for log output. |
+| `ChannelTracker` | class | Spend-down channel client: serializes draws per channel (single-flight), signs cumulative vouchers, resyncs `last_cumulative` from structured gateway 402s. |
+| `buildVoucherMessage`, `buildChannelPaymentHeader`, `buildCloseMessage` | function | Spend-down channel voucher/close message construction (domain-separated, golden-vector-pinned). |
 | `SigningError` | error | Thrown by `createPaymentHeader` on signing failure. |
 | `PaymentRequired`, `PaymentAccept`, `CostBreakdown`, `PaymentExpectations` | type | Wire-format types matching the gateway's 402 response shape. |
 
