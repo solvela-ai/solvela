@@ -3568,11 +3568,26 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
         "enforced wallet + unprovisioned tenant must be rejected with 400 via the real route"
     );
 
-    // Cleanup.
+    // Cleanup — the DB row AND the cached budget config: `check_budget` just
+    // cached `budget_config:unknown` (require_tenant=TRUE) with a 60s TTL, and
+    // "unknown" is the shared extraction-failure sentinel — a leftover cache
+    // entry poisons any later test whose payer resolves to it (e.g. every A2A
+    // channel-voucher submission at the intake #499 gate).
     let _ = sqlx::query("DELETE FROM wallet_budgets WHERE wallet_address = $1")
         .bind(&wallet)
         .execute(&pool)
         .await;
+    {
+        let mut conn = redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("redis conn");
+        let _: Result<i64, _> = redis::cmd("DEL")
+            .arg(format!("budget_config:{wallet}"))
+            .arg(format!("tenant_require:{wallet}"))
+            .query_async(&mut conn)
+            .await;
+    }
 }
 
 /// PR1 tenant-attribution: a malformed / over-long `x-tenant` value must NOT
@@ -24498,6 +24513,25 @@ mod a2a_channel_draw_tests {
         });
         if prime_slot {
             *state.slot_cache.lock().await = Some((SEED_SLOT, Instant::now()));
+        }
+        // Defensive: clear any leftover cached budget config for the "unknown"
+        // extraction-failure sentinel (60s TTL) — a prior require_tenant test
+        // that provisioned the literal "unknown" wallet would otherwise fail
+        // every channel submission here at the intake #499 gate (a voucher's
+        // extracted payer IS "unknown" by design).
+        {
+            let mut conn = state
+                .usage
+                .redis_client()
+                .expect("fixture wires Redis")
+                .get_multiplexed_async_connection()
+                .await
+                .expect("redis conn");
+            let _: Result<i64, _> = redis::cmd("DEL")
+                .arg("budget_config:unknown")
+                .arg("tenant_require:unknown")
+                .query_async(&mut conn)
+                .await;
         }
         // Generous main limiter: several tests poll `tasks/get` in a loop
         // from the shared "unknown" oneshot bucket — the production per-IP
