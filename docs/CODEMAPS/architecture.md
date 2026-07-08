@@ -316,7 +316,7 @@ No need for a running server; all tests are isolated and fast.
 - **Dockerfile** — 2-stage build (`rust:1.88-slim-trixie` builder → `debian:trixie-slim` runtime, non-root `solvela` user); binary at `/app/solvela-gateway`
 - **fly.toml** — Fly.io config; port 8402, region ord (Chicago)
 - **docker-compose.yml** — Local dev: PostgreSQL 16, Redis 7
-- **Dashboard** — Next.js on Vercel (`solvela.vercel.app`)
+- **Dashboard** — Next.js on Vercel (`app.solvela.ai`)
 
 Migrations run automatically on startup (idempotent `CREATE IF NOT EXISTS`).
 

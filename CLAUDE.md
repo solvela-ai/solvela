@@ -258,5 +258,5 @@ These skills contain patterns, checklists, and constraints specific to this proj
 - Dockerfile: 2-stage build with dummy-source dependency caching (`rust:1.88-slim-trixie` builder → `debian:trixie-slim` runtime, non-root `solvela` user)
 - Fly.io config in `fly.toml` (app: `solvela-gateway`, port 8402, region ord)
 - Docker Compose for local dev: PostgreSQL 16 + Redis 7
-- Dashboard: Next.js on Vercel (`solvela.vercel.app`)
+- Dashboard: Next.js on Vercel (`app.solvela.ai`; same project also serves `solvela.ai` + `docs.solvela.ai`)
 - Migrations in `migrations/` run automatically on startup (idempotent `CREATE IF NOT EXISTS`)
