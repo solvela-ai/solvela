@@ -259,6 +259,7 @@ async fn handle_new_request(
         artifact_text: None,
         tx_signature: None,
         receipt_path: None,
+        deliver_free: false,
         created_at: chrono::Utc::now(),
     };
 
@@ -1572,14 +1573,28 @@ fn project_task(record: &TaskRecord) -> Task {
         // output sits on the record. `status.state` still reports the honest
         // stored state (`working`).
         TaskState::Completed | TaskState::Working => {
-            let mut meta = serde_json::Map::new();
-            meta.insert(
-                x402_meta::STATUS_KEY.to_string(),
-                json!(x402_meta::PAYMENT_COMPLETED),
-            );
-            if let Some(receipts) = receipts_obj() {
-                meta.insert(x402_meta::RECEIPTS_KEY.to_string(), receipts);
-            }
+            // D5 (channel-on-A2A plan, Rev-3 item 2): a DELIVER-FREE channel
+            // completion (persist lost the close race / lock ownership — the
+            // agent was NOT debited) omits BOTH `x402.payment.status` and
+            // `x402.payment.receipts`, on this projection exactly as on the
+            // in-band response — a `tasks/get` within TTL must never report
+            // an undebited task as PAID. Keyed on the explicit record marker,
+            // never inferred from refs-absence (a failed best-effort D6 ref
+            // write on a genuinely DEBITED task must not read as unpaid).
+            // Key OMISSION only — names never change (§9 STOP).
+            let metadata = if record.deliver_free {
+                None
+            } else {
+                let mut meta = serde_json::Map::new();
+                meta.insert(
+                    x402_meta::STATUS_KEY.to_string(),
+                    json!(x402_meta::PAYMENT_COMPLETED),
+                );
+                if let Some(receipts) = receipts_obj() {
+                    meta.insert(x402_meta::RECEIPTS_KEY.to_string(), receipts);
+                }
+                Some(meta)
+            };
             let artifacts = record.artifact_text.as_ref().map(|text| {
                 vec![Artifact {
                     artifact_id: new_wire_id(),
@@ -1593,7 +1608,7 @@ fn project_task(record: &TaskRecord) -> Task {
                  record."
                     .to_string()
             });
-            (Some(agent_message(text, Some(meta))), artifacts)
+            (Some(agent_message(text, metadata)), artifacts)
         }
         TaskState::Failed => {
             let mut meta = serde_json::Map::new();
@@ -4199,6 +4214,7 @@ supports_vision = false
             artifact_text: None,
             tx_signature: None,
             receipt_path: None,
+            deliver_free: false,
             created_at: chrono::Utc::now(),
         };
         if task_store::save_task(&state, &record).await.is_err() {
@@ -4374,6 +4390,7 @@ supports_vision = false
                 artifact_text: None,
                 tx_signature: None,
                 receipt_path: None,
+                deliver_free: false,
                 created_at: chrono::Utc::now(),
             };
             if task_store::save_task(&state, &record).await.is_err() {
@@ -4423,6 +4440,7 @@ supports_vision = false
             artifact_text: None,
             tx_signature: None,
             receipt_path: None,
+            deliver_free: false,
             created_at: chrono::Utc::now(),
         };
         let err = call(ghost_id.clone(), ghost_record)
@@ -4458,6 +4476,7 @@ supports_vision = false
             artifact_text: None,
             tx_signature: None,
             receipt_path: None,
+            deliver_free: false,
             created_at: chrono::Utc::now(),
         };
         if task_store::save_task(state, &record).await.is_err() {
@@ -4541,6 +4560,7 @@ supports_vision = false
             artifact_text: None,
             tx_signature: None,
             receipt_path: None,
+            deliver_free: false,
             created_at: chrono::Utc::now(),
         };
 
@@ -4843,6 +4863,7 @@ supports_vision = false
             artifact_text: None,
             tx_signature: None,
             receipt_path: None,
+            deliver_free: false,
             created_at: chrono::Utc::now(),
         };
         let get = |id: String| {
@@ -4936,6 +4957,64 @@ supports_vision = false
         assert_eq!(
             task["status"]["message"]["metadata"]["x402.payment.status"],
             "payment-failed"
+        );
+    }
+
+    /// D5 (channel-on-A2A plan, Rev-3 item 2): a DELIVER-FREE completion —
+    /// written by `task_store::complete_deliver_free` — must project with
+    /// NEITHER `x402.payment.status` NOR `x402.payment.receipts` on
+    /// `tasks/get`, while a debited Completed record (previous test) keeps
+    /// both. The marker survives the projection even though the record state
+    /// is plain `Completed`, and the delivered artifact is still recoverable.
+    #[tokio::test]
+    async fn tasks_get_deliver_free_omits_payment_keys() {
+        let state = test_state_with_redis();
+        if state.cache.is_none() {
+            eprintln!("skipping deliver-free projection test: Redis unavailable");
+            return;
+        }
+
+        let rec = TaskRecord {
+            id: new_task_id(),
+            state: TaskState::Working,
+            original_message: "hello".to_string(),
+            payment_required: json!({"x402_version": 2}),
+            model: Some("test-model".to_string()),
+            max_tokens: Some(100),
+            context_id: task_store::new_context_id(),
+            artifact_text: None,
+            tx_signature: None,
+            receipt_path: None,
+            deliver_free: false,
+            created_at: chrono::Utc::now(),
+        };
+        task_store::save_task(&state, &rec).await.expect("save");
+
+        // The deliver-free terminal write: Working→Completed + marker +
+        // artifact text in ONE save.
+        task_store::complete_deliver_free(&state, &rec.id, Some("free answer".to_string()))
+            .await
+            .expect("deliver-free terminal write");
+
+        let task = handle_tasks_get(&state, &rpc_request("tasks/get", &rec.id))
+            .await
+            .expect("tasks/get must succeed");
+        assert_eq!(task["status"]["state"], "completed");
+        assert_eq!(
+            task["artifacts"][0]["parts"][0]["text"], "free answer",
+            "deliver-free still recovers the delivered output"
+        );
+        let metadata = &task["status"]["message"]["metadata"];
+        assert!(
+            metadata.get("x402.payment.status").is_none()
+                || metadata["x402.payment.status"].is_null(),
+            "deliver-free projection must OMIT x402.payment.status (undebited \
+             task must never read as PAID): {metadata}"
+        );
+        assert!(
+            metadata.get("x402.payment.receipts").is_none()
+                || metadata["x402.payment.receipts"].is_null(),
+            "deliver-free projection must OMIT x402.payment.receipts: {metadata}"
         );
     }
 
