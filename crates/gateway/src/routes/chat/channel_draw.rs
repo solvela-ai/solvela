@@ -659,42 +659,16 @@ async fn channel_draw_locked(
         // gateway loss — the agent still receives its response, but `last` did
         // NOT advance (deposit intact), so NO debit occurred and, by the
         // ledger invariant, NO spend/receipt is written. All arms DELIVER the
-        // earned response (invariant-11 behaviour); FIX 2 splits ONLY the
-        // observability so a DB OUTAGE (which free-serves every draw) is LOUD
-        // and separately alertable from the routine close-race loser arm:
-        //   - `race`      = the accepted invariant-11 loser (a close won the
-        //                   status='open' CAS) — expected, stays a `warn!`;
-        //   - `db_error`  = a genuine DB/transaction fault (Db) — paging
-        //                   `error!` (also folds the UNIQUE-voucher duplicate,
-        //                   which FIX 3's lock recheck already makes unreachable
-        //                   in practice; `// ponytail:` splitting it out would
-        //                   need pgcode inspection for a case that can't occur);
-        //   - `overflow`  = an unstorable atomic (i64 bounds / corrupt row) —
-        //                   also paging `error!`.
-        let reason = match &e {
-            ChannelRepoError::AdvanceNotApplied => "race",
-            ChannelRepoError::Db(_) => "db_error",
-            ChannelRepoError::ValueTooLargeForBigint(_)
-            | ChannelRepoError::NegativeStoredAmount(_) => "overflow",
-            // `persist_voucher_and_advance` cannot currently return these — but
-            // classify them EXPLICITLY (no bare `_` wildcard) so that if its
-            // error surface ever grows to include one, it is BOTH a loud
-            // `reason="unexpected"` runtime signal (paging `error!` via the
-            // non-`AdvanceNotApplied` branch below) AND — because this match is
-            // now exhaustive — a COMPILE error here nudging the author to
-            // classify the new case deliberately rather than let it fall into an
-            // unlabelled bucket.
-            ChannelRepoError::BadChannelId
-            | ChannelRepoError::BadSessionKey
-            | ChannelRepoError::FundingAlreadyUsed
-            | ChannelRepoError::ChannelNotFound
-            | ChannelRepoError::RefundWouldCollide(_) => "unexpected",
-        };
-        counter!(
-            "solvela_channel_draw_persist_failed_total",
-            "reason" => reason
-        )
-        .increment(1);
+        // earned response (invariant-11 behaviour); the shared classifier
+        // (`crate::channels::persist_failure_reason` — PR-0, one code site for
+        // chat/search) splits ONLY the observability, by NAME, so a DB OUTAGE
+        // (which free-serves every draw) PAGES via the #684 cron while the
+        // routine close-race loser stays notice-tier:
+        //   - `race`      = the accepted invariant-11 loser — notice-only,
+        //                   stays a `warn!`;
+        //   - `db_error` / `overflow` / `unexpected` = paging `error!`, ALSO
+        //                   emitted on `solvela_channel_draw_persist_page_total`.
+        let reason = crate::channels::emit_persist_failure_counters(&e);
         if matches!(e, ChannelRepoError::AdvanceNotApplied) {
             warn!(
                 error = %e,

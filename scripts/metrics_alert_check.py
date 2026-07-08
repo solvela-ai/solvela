@@ -50,6 +50,12 @@ PAGE_COUNTERS = [
     "solvela_channel_refund_balance_insufficient_total",
     "solvela_channel_refund_daily_cap_exceeded_total",
     "solvela_channel_draw_lock_lost_total",
+    # error!-class persist failures (db_error/overflow/unexpected) — a DB
+    # outage free-serves every channel draw. The benign race/lock_lost arms
+    # stay on the notice-tier *_persist_failed_total name (tiering is BY NAME:
+    # parse() sums across label sets, so a mixed-tier name would page on its
+    # benign arms too).
+    "solvela_channel_draw_persist_page_total",
 ]
 
 # Informational: worth eyes, but a benign explanation exists (e.g. client
@@ -60,6 +66,10 @@ NOTICE_COUNTERS = [
     "solvela_a2a_cancel_total",
     "solvela_channel_draw_serve_timeout_total",
     "solvela_channel_refund_held_total",
+    # Benign persist-failure arms only (race = invariant-11 close-race loser,
+    # lock_lost = pre-persist ownership abort); the paging arms additionally
+    # emit *_persist_page_total above.
+    "solvela_channel_draw_persist_failed_total",
 ]
 
 # Gauges: instantaneous thresholds, no baseline needed.

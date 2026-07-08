@@ -82,6 +82,20 @@ fn test_prometheus_handle() -> metrics_exporter_prometheus::PrometheusHandle {
         .clone()
 }
 
+/// Read a single Prometheus counter value from the shared global test
+/// recorder. Returns 0.0 when the line is absent (never incremented) — so a
+/// deleted `counter!` increment makes the asserting test fail (the metric
+/// line simply never appears). `needle` is the full `name{labels}` prefix.
+fn metric_counter(render: &str, needle: &str) -> f64 {
+    render
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .find(|l| l.contains(needle))
+        .and_then(|l| l.split_whitespace().last())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0)
+}
+
 // ---------------------------------------------------------------------------
 // Mock payment verifier for integration tests
 // ---------------------------------------------------------------------------
@@ -20979,6 +20993,11 @@ price_per_request_usdc = 0.01
         let session = key.verifying_key().to_bytes();
         let agent = bs58::encode(session).into_string();
         create_channel(&pool, cid, &agent, session, 1_000_000).await;
+        let handle = test_prometheus_handle();
+        let before = metric_counter(
+            &handle.render(),
+            "solvela_channel_draw_persist_failed_total{reason=\"lock_lost\"}",
+        );
 
         // A 1.5s serve gives a window to reassign the lock token mid-draw.
         let (app, _state) = enabled_channel_app(
@@ -21043,6 +21062,120 @@ price_per_request_usdc = 0.01
             voucher_row_count(&pool, cid).await,
             0,
             "no voucher row on a lock-lost draw"
+        );
+        // PR-0 tier split: the search lock-lost arm shares the chat draw's
+        // NOTICE-tier emission — and, being deliberately benign, must never
+        // touch the page-tier name. (`>=` — the Prometheus family is
+        // process-global under parallel tests; the zero check is label-scoped.)
+        let after = metric_counter(
+            &handle.render(),
+            "solvela_channel_draw_persist_failed_total{reason=\"lock_lost\"}",
+        );
+        assert!(
+            after >= before + 1.0,
+            "the search lock-lost abort must increment persist_failed_total{{reason=lock_lost}} (before={before}, after={after})"
+        );
+        assert_eq!(
+            metric_counter(
+                &handle.render(),
+                "solvela_channel_draw_persist_page_total{reason=\"lock_lost\"}"
+            ),
+            0.0,
+            "the lock-lost abort must NOT emit the page-tier persist counter"
+        );
+    }
+
+    /// PR-0: the search persist-failure arm emitted NO counter before this PR
+    /// — a DB outage would free-serve every search draw silently. Pins that a
+    /// genuine DB fault now increments BOTH tier names through the real route
+    /// (via the shared `crate::channels` classifier).
+    #[tokio::test]
+    async fn search_draw_persist_db_error_pages() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping search_draw_persist_db_error_pages: dev stack unavailable");
+            return;
+        };
+        let handle = test_prometheus_handle();
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        // The app gets a DEDICATED pool so closing it mid-serve cannot touch
+        // the assertion pool.
+        let app_pool = sqlx::PgPool::connect(&db_url())
+            .await
+            .expect("dedicated app pool");
+        let (app, _state) = enabled_channel_app(
+            Arc::new(DelayProvider {
+                delay: std::time::Duration::from_millis(1_500),
+            }),
+            Arc::new(AlwaysPassVerifier),
+            app_pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        let before_notice = metric_counter(
+            &handle.render(),
+            "solvela_channel_draw_persist_failed_total{reason=\"db_error\"}",
+        );
+        let before_page = metric_counter(
+            &handle.render(),
+            "solvela_channel_draw_persist_page_total{reason=\"db_error\"}",
+        );
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            SEARCH_BODY.as_bytes(),
+        );
+        let draw_app = app.clone();
+        let draw =
+            tokio::spawn(async move { draw_app.oneshot(search_request(&header)).await.unwrap() });
+
+        // Mid-serve (provider sleeps 1.5s; the pre-serve channel reads and
+        // tenant check are done): close the app pool so the POST-serve persist
+        // hits a real `sqlx::Error` — the `db_error` arm.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        app_pool.close().await;
+
+        let resp = draw.await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a persist DB fault still delivers the earned results"
+        );
+        // (`>=` — the Prometheus family is process-global under parallel tests.)
+        assert!(
+            metric_counter(
+                &handle.render(),
+                "solvela_channel_draw_persist_failed_total{reason=\"db_error\"}",
+            ) >= before_notice + 1.0,
+            "the search persist-failure arm must increment the notice-tier total"
+        );
+        assert!(
+            metric_counter(
+                &handle.render(),
+                "solvela_channel_draw_persist_page_total{reason=\"db_error\"}",
+            ) >= before_page + 1.0,
+            "the search persist-failure arm must increment the PAGE-tier name the #684 cron watches"
+        );
+        // No debit on the failed persist (assertion pool is still open).
+        assert_eq!(
+            channel_last_cumulative(&pool, cid).await,
+            0,
+            "no advance on a persist DB fault"
+        );
+        assert_eq!(
+            voucher_row_count(&pool, cid).await,
+            0,
+            "no voucher row on a persist DB fault"
         );
     }
 
@@ -21990,19 +22123,8 @@ mod chat_channel_draw_tests {
         );
     }
 
-    /// Read a single Prometheus counter value from the shared global test
-    /// recorder. Returns 0.0 when the line is absent (never incremented) — so a
-    /// deleted `counter!` increment makes the asserting test fail (the metric
-    /// line simply never appears). `needle` is the full `name{labels}` prefix.
-    fn metric_counter(render: &str, needle: &str) -> f64 {
-        render
-            .lines()
-            .filter(|l| !l.starts_with('#'))
-            .find(|l| l.contains(needle))
-            .and_then(|l| l.split_whitespace().last())
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0)
-    }
+    // (`metric_counter` — the Prometheus line reader — is defined at the top
+    // level of this file, shared with the search channel-draw tests.)
 
     // -- money path: DB + Redis (skip when the dev stack is down) -----------
 
@@ -22476,6 +22598,182 @@ mod chat_channel_draw_tests {
             ) >= 1.0,
             "the invariant-11 close-race loser must increment persist_failed_total{{reason=race}}"
         );
+        // PR-0 tier split: the benign close-race arm stays NOTICE-tier only —
+        // the page-tier name must never carry `reason="race"`. Label-scoped
+        // zero check: parallel tests may emit page-tier `db_error`, never
+        // `race`, so the process-global recorder cannot flake this.
+        assert_eq!(
+            metric_counter(
+                &test_prometheus_handle().render(),
+                "solvela_channel_draw_persist_page_total{reason=\"race\"}"
+            ),
+            0.0,
+            "the close-race loser must NOT emit the page-tier persist counter"
+        );
+    }
+
+    /// PR-0 (P0-1): the persist-failure page/notice TIER SPLIT through the
+    /// real route. Alerting is BY NAME (the #684 cron sums label sets and
+    /// matches names only), so the tiers are two names — this pins which arms
+    /// feed which: a genuine DB fault (the arm that free-serves EVERY draw
+    /// during a DB outage) must increment BOTH names; the invariant-11
+    /// close-race loser must increment ONLY the notice-tier name.
+    #[tokio::test]
+    async fn persist_db_error_pages_race_stays_notice() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping persist_db_error_pages_race_stays_notice: dev stack unavailable");
+            return;
+        };
+        let handle = test_prometheus_handle();
+        // The app gets a DEDICATED pool so the db_error leg can close it
+        // mid-serve without touching the assertion pool.
+        let app_pool = sqlx::PgPool::connect(&db_url())
+            .await
+            .expect("dedicated app pool");
+        let (app, _state) = enabled_chat_channel_app(
+            slow_fixed_usage_registry(std::time::Duration::from_millis(1_500), 1000, 1000),
+            Arc::new(AlwaysPassVerifier),
+            None,
+            app_pool.clone(),
+            redis,
+        )
+        .await;
+
+        // --- Leg 1: close race → notice-tier ONLY ---------------------------
+        let body = unique_chat_body(false);
+        let quote = quote_atomic(&app, "/v1/chat/completions", &body).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+        let before_race = metric_counter(
+            &handle.render(),
+            "solvela_channel_draw_persist_failed_total{reason=\"race\"}",
+        );
+        let header = chat_voucher_header(
+            &key,
+            cid,
+            quote,
+            quote,
+            1,
+            body.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let draw_app = app.clone();
+        let draw = tokio::spawn(async move {
+            draw_app
+                .oneshot(chat_request("/v1/chat/completions", &body, Some(&header)))
+                .await
+                .unwrap()
+        });
+        // Mid-serve (provider sleeps 1.5s): freeze the channel out from under
+        // the draw — the crash-window close (same simulation as
+        // `chat_draw_close_race_loser_delivers_but_records_nothing`).
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        sqlx::query("UPDATE channels SET status = 'closing' WHERE channel_id = $1")
+            .bind(bs58::encode(cid).into_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            draw.await.unwrap().status(),
+            StatusCode::OK,
+            "the race loser still delivers the earned response"
+        );
+        // (`>=` — the Prometheus family is process-global under parallel tests.)
+        assert!(
+            metric_counter(
+                &handle.render(),
+                "solvela_channel_draw_persist_failed_total{reason=\"race\"}",
+            ) >= before_race + 1.0,
+            "the close race must increment the notice-tier name"
+        );
+        assert_eq!(
+            metric_counter(
+                &handle.render(),
+                "solvela_channel_draw_persist_page_total{reason=\"race\"}",
+            ),
+            0.0,
+            "the close race must NOT reach the page-tier name"
+        );
+
+        // --- Leg 2: genuine DB fault → BOTH names ---------------------------
+        let body2 = unique_chat_body(false);
+        let quote2 = quote_atomic(&app, "/v1/chat/completions", &body2).await;
+        let key2 = fresh_key();
+        let cid2 = rand32();
+        let agent2 = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid2,
+            &agent2,
+            key2.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+        let before_notice = metric_counter(
+            &handle.render(),
+            "solvela_channel_draw_persist_failed_total{reason=\"db_error\"}",
+        );
+        let before_page = metric_counter(
+            &handle.render(),
+            "solvela_channel_draw_persist_page_total{reason=\"db_error\"}",
+        );
+        let header2 = chat_voucher_header(
+            &key2,
+            cid2,
+            quote2,
+            quote2,
+            1,
+            body2.as_bytes(),
+            "/v1/chat/completions",
+        );
+        let draw_app = app.clone();
+        let draw2 = tokio::spawn(async move {
+            draw_app
+                .oneshot(chat_request("/v1/chat/completions", &body2, Some(&header2)))
+                .await
+                .unwrap()
+        });
+        // Mid-serve (provider sleeps 1.5s; the pre-serve channel reads and
+        // tenant check are done): close the app's pool so the POST-serve
+        // persist hits a real `sqlx::Error` — the `db_error` arm.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        app_pool.close().await;
+        assert_eq!(
+            draw2.await.unwrap().status(),
+            StatusCode::OK,
+            "a persist DB fault still delivers the earned response"
+        );
+        assert!(
+            metric_counter(
+                &handle.render(),
+                "solvela_channel_draw_persist_failed_total{reason=\"db_error\"}",
+            ) >= before_notice + 1.0,
+            "a genuine DB fault must increment the notice-tier total"
+        );
+        assert!(
+            metric_counter(
+                &handle.render(),
+                "solvela_channel_draw_persist_page_total{reason=\"db_error\"}",
+            ) >= before_page + 1.0,
+            "a genuine DB fault must increment the PAGE-tier name the #684 cron watches"
+        );
+        // No debit on the failed persist (assertion pool is still open).
+        let row = channel_row(&pool, cid2).await;
+        assert_eq!(
+            row.last_voucher_cumulative_atomic, 0,
+            "no advance on a persist DB fault"
+        );
+        assert_eq!(voucher_row_count(&pool, cid2).await, 0);
+        assert_eq!(spend_row_count(&pool, &agent2).await, 0);
     }
 
     /// HALT 3/5: a chat channel draw must NEVER reach `verify_and_settle` (the
@@ -23283,6 +23581,17 @@ mod chat_channel_draw_tests {
         assert!(
             after >= before + 1.0,
             "the lock-lost abort must increment persist_failed_total{{reason=lock_lost}} (before={before}, after={after})"
+        );
+        // PR-0 tier split: lock-lost is a deliberately-benign arm — notice-tier
+        // only, never the page-tier name (label-scoped zero check, so the
+        // process-global recorder cannot flake this).
+        assert_eq!(
+            metric_counter(
+                &handle.render(),
+                "solvela_channel_draw_persist_page_total{reason=\"lock_lost\"}"
+            ),
+            0.0,
+            "the lock-lost abort must NOT emit the page-tier persist counter"
         );
     }
 

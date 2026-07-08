@@ -26,8 +26,10 @@
 //! voucher-advance ARE the operation — losing them loses funds), unlike the
 //! fire-and-forget spend-log/audit side effects on the chat hot path.
 
-use solvela_x402::channel::ChannelState;
+use metrics::counter;
 use sqlx::PgPool;
+
+use solvela_x402::channel::ChannelState;
 
 /// Lifecycle state of a channel. The DB `CHECK (status IN ('open','closing',
 /// 'closed'))` mirrors these; a typed enum at the `set_status` call site stops a
@@ -100,6 +102,81 @@ pub enum ChannelRepoError {
         "voucher advance not applied (channel missing, not open, or cumulative did not increase)"
     )]
     AdvanceNotApplied,
+}
+
+/// Reason label for a failed [`persist_voucher_and_advance`] — the shared
+/// chat/search classification of the deliver-free persist arms (PR-0 of the
+/// 2026-07-06 channel-on-A2A plan; the A2A leg reuses it via the D7 hoist):
+///
+/// - `"race"` — [`ChannelRepoError::AdvanceNotApplied`]: the accepted
+///   invariant-11 close-race loser (a cooperative close won the
+///   `status = 'open'` CAS). Expected, benign — notice-tier only.
+/// - `"db_error"` — a genuine DB/transaction fault. A DB outage free-serves
+///   EVERY draw, so this is page-tier (also folds the UNIQUE-voucher
+///   duplicate, which the pre-persist lock recheck already makes unreachable
+///   in practice; splitting it out would need pgcode inspection for a case
+///   that can't occur).
+/// - `"overflow"` — an unstorable atomic (i64 bounds / corrupt row) — page-tier.
+/// - `"unexpected"` — variants [`persist_voucher_and_advance`] cannot
+///   currently return, classified EXPLICITLY (no bare `_` wildcard) so that if
+///   its error surface ever grows to include one it is BOTH a loud page-tier
+///   runtime signal AND — because this match is exhaustive — a COMPILE error
+///   here nudging the author to classify the new case deliberately rather
+///   than let it fall into an unlabelled bucket.
+pub fn persist_failure_reason(e: &ChannelRepoError) -> &'static str {
+    match e {
+        ChannelRepoError::AdvanceNotApplied => "race",
+        ChannelRepoError::Db(_) => "db_error",
+        ChannelRepoError::ValueTooLargeForBigint(_) | ChannelRepoError::NegativeStoredAmount(_) => {
+            "overflow"
+        }
+        ChannelRepoError::BadChannelId
+        | ChannelRepoError::BadSessionKey
+        | ChannelRepoError::FundingAlreadyUsed
+        | ChannelRepoError::ChannelNotFound
+        | ChannelRepoError::RefundWouldCollide(_) => "unexpected",
+    }
+}
+
+/// True iff a persist-failure `reason` label is page-tier: everything except
+/// the deliberately-benign arms — `race` (the invariant-11 close-race loser)
+/// and `lock_lost` (the pre-persist ownership-recheck abort, emitted at its
+/// own call sites under the notice-tier name). An unknown/future reason
+/// defaults to PAGING — fail loud, never silently re-create the un-paged gap
+/// PR-0 closes.
+pub fn persist_failure_pages(reason: &str) -> bool {
+    !matches!(reason, "race" | "lock_lost")
+}
+
+/// Emit the tiered persist-failure counters for one failed
+/// [`persist_voucher_and_advance`] and return the reason label for logging.
+///
+/// ONE code site for the tier split, because alerting is BY NAME — the #684
+/// cron (`scripts/metrics_alert_check.py`) sums across label sets and matches
+/// names only, so the tiers must be two NAMES, kept identical across every
+/// draw surface:
+/// - notice-tier `solvela_channel_draw_persist_failed_total` on EVERY arm
+///   (the pre-existing name — `NOTICE_COUNTERS`);
+/// - page-tier `solvela_channel_draw_persist_page_total` ADDITIONALLY on the
+///   `error!`-class arms (`PAGE_COUNTERS` + `ops/metrics-baseline.json`).
+///
+/// Observability only — callers own the draw outcome (every arm still
+/// delivers the earned response; deposit intact, no debit).
+pub fn emit_persist_failure_counters(e: &ChannelRepoError) -> &'static str {
+    let reason = persist_failure_reason(e);
+    counter!(
+        "solvela_channel_draw_persist_failed_total",
+        "reason" => reason
+    )
+    .increment(1);
+    if persist_failure_pages(reason) {
+        counter!(
+            "solvela_channel_draw_persist_page_total",
+            "reason" => reason
+        )
+        .increment(1);
+    }
+    reason
 }
 
 /// Convert a `u64` atomic value to the `i64` BIGINT stored form. Fail-closed on
@@ -566,6 +643,56 @@ mod tests {
         assert_eq!(ChannelStatus::Open.as_str(), "open");
         assert_eq!(ChannelStatus::Closing.as_str(), "closing");
         assert_eq!(ChannelStatus::Closed.as_str(), "closed");
+    }
+
+    /// PR-0 (page/notice tier split): the shared persist-failure classifier.
+    /// Benign arms stay notice-only; `db_error`/`overflow` — and the
+    /// compile-forced `unexpected` bucket — are page-tier (routing
+    /// `unexpected` anywhere else would re-create the un-paged gap).
+    #[test]
+    fn persist_failure_reason_tier_split() {
+        // Benign: the invariant-11 close-race loser and the pre-persist
+        // lock-ownership abort (emitted at its own call sites) — notice only.
+        assert_eq!(
+            persist_failure_reason(&ChannelRepoError::AdvanceNotApplied),
+            "race"
+        );
+        assert!(!persist_failure_pages("race"));
+        assert!(!persist_failure_pages("lock_lost"));
+
+        // Page-tier: a genuine DB fault free-serves every draw.
+        assert_eq!(
+            persist_failure_reason(&ChannelRepoError::Db(sqlx::Error::PoolClosed)),
+            "db_error"
+        );
+        assert!(persist_failure_pages("db_error"));
+
+        // Page-tier: unstorable atomic (i64 bounds / corrupt row).
+        assert_eq!(
+            persist_failure_reason(&ChannelRepoError::ValueTooLargeForBigint(u64::MAX)),
+            "overflow"
+        );
+        assert_eq!(
+            persist_failure_reason(&ChannelRepoError::NegativeStoredAmount(-1)),
+            "overflow"
+        );
+        assert!(persist_failure_pages("overflow"));
+
+        // Page-tier: the compile-forced bucket for variants
+        // `persist_voucher_and_advance` cannot currently return.
+        assert_eq!(
+            persist_failure_reason(&ChannelRepoError::ChannelNotFound),
+            "unexpected"
+        );
+        assert_eq!(
+            persist_failure_reason(&ChannelRepoError::BadChannelId),
+            "unexpected"
+        );
+        assert!(persist_failure_pages("unexpected"));
+
+        // A future unclassified reason defaults to PAGING — fail loud, never
+        // silently re-create the gap.
+        assert!(persist_failure_pages("some_future_reason"));
     }
 
     // -- DB-backed repository tests (skip when no DATABASE_URL) --------------
