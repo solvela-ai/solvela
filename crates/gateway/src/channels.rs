@@ -26,10 +26,129 @@
 //! voucher-advance ARE the operation — losing them loses funds), unlike the
 //! fire-and-forget spend-log/audit side effects on the chat hot path.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use metrics::counter;
 use sqlx::PgPool;
+use tracing::warn;
 
 use solvela_x402::channel::ChannelState;
+
+use crate::AppState;
+
+/// Best-effort budget (seconds) for the token-guarded Redis release — bounds a
+/// hung Redis from stalling the already-earned response (or a detached release
+/// task from lingering).
+const LOCK_RELEASE_TIMEOUT_SECS: u64 = 5;
+
+/// Max acceptable staleness of the RPC-free cached Solana slot a channel draw
+/// checks the voucher expiry against. Past this,
+/// `routes::escrow::fetch_cached_slot_bounded` fails closed rather than measure
+/// `expiry_slot - current_slot` against an arbitrarily-old slot during an RPC
+/// outage (defence in depth behind the voucher signature +
+/// `cumulative ≤ deposited` primary guards). Shared by every draw surface
+/// (chat, A2A) — hoisted here with the guard (D7, 2026-07-06 channel-on-A2A
+/// plan) so the bound can never drift between surfaces.
+pub(crate) const CHANNEL_SLOT_MAX_STALENESS: Duration = Duration::from_secs(60);
+
+/// RAII guard for the per-channel draw lock (Decision G; hoisted from
+/// `routes/chat/channel_draw.rs` per D7 of the 2026-07-06 channel-on-A2A plan
+/// — visibility/motion only, zero behavior change — so chat and the A2A
+/// channel leg share ONE lock-lifecycle implementation. Upkeep rule: any
+/// future divergent fix to draw orchestration lands HERE, never in one
+/// surface's copy).
+///
+/// The lock is HELD across the whole draw and must be RELEASED on every exit,
+/// including a cancelled future (client disconnect / stop-generation) or a
+/// panic mid-serve — neither of which reaches an explicit `.await`. `Drop`
+/// cannot `.await`, so it spawns a DETACHED, token-guarded (Lua
+/// compare-and-delete) release so the successor draw is never cross-deleted and
+/// a dropped/panicked serve still frees the lock. The normal path calls
+/// [`ChannelDrawLockGuard::release`] (awaited, prompt) which marks the guard
+/// released so `Drop` becomes a no-op — exactly one release either way, no
+/// double-release.
+pub(crate) struct ChannelDrawLockGuard {
+    state: Arc<AppState>,
+    channel_id: String,
+    token: String,
+    released: bool,
+}
+
+impl ChannelDrawLockGuard {
+    pub(crate) fn new(state: Arc<AppState>, channel_id: String, token: String) -> Self {
+        Self {
+            state,
+            channel_id,
+            token,
+            released: false,
+        }
+    }
+
+    /// This draw's lock token — for the pre-persist ownership recheck (FIX 3).
+    pub(crate) fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Explicit, awaited release on the normal completion path. Marks the guard
+    /// released only AFTER the release genuinely RESOLVES within budget, so a
+    /// cancellation DURING this await — OR an internal Redis-release timeout —
+    /// still lets `Drop` fire the detached release (token-guarded, so a racing
+    /// double-release is a harmless no-op).
+    pub(crate) async fn release(mut self) {
+        if let Some(cache) = self.state.cache.as_ref() {
+            if tokio::time::timeout(
+                Duration::from_secs(LOCK_RELEASE_TIMEOUT_SECS),
+                cache.release_channel_draw_lock(&self.channel_id, &self.token),
+            )
+            .await
+            .is_err()
+            {
+                // Timeout elapsed: the inner Lua compare-and-delete may or may
+                // not have landed — we have NO confirmation either way. Do NOT
+                // mark the guard released; leaving `released = false` lets `Drop`
+                // fire a SECOND detached, token-guarded attempt (an idempotent
+                // no-op if our token was already deleted, a legitimate catch-up
+                // delete if it was not). Suppressing that retry here is exactly
+                // the slow-Redis case that most needs it — hence a dedicated
+                // alertable counter rather than only a `warn!`.
+                counter!("solvela_channel_draw_lock_release_timeout_total").increment(1);
+                warn!(
+                    channel_id = %self.channel_id,
+                    "channel draw lock release timed out — no confirmation the CAS \
+                     landed; Drop will retry (the 900s TTL backstops if both fail)"
+                );
+                return;
+            }
+        }
+        // Either the release resolved within budget, or there is no cache to
+        // release against — nothing left for `Drop` to retry.
+        self.released = true;
+    }
+}
+
+impl Drop for ChannelDrawLockGuard {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        // Reached only on cancellation/panic (the explicit `release` sets
+        // `released`). Drop can't `.await`, so detach a token-guarded release
+        // onto the runtime so a dropped/panicked future still frees the lock.
+        let state = Arc::clone(&self.state);
+        let channel_id = std::mem::take(&mut self.channel_id);
+        let token = std::mem::take(&mut self.token);
+        tokio::spawn(async move {
+            if let Some(cache) = state.cache.as_ref() {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(LOCK_RELEASE_TIMEOUT_SECS),
+                    cache.release_channel_draw_lock(&channel_id, &token),
+                )
+                .await;
+            }
+        });
+    }
+}
 
 /// Lifecycle state of a channel. The DB `CHECK (status IN ('open','closing',
 /// 'closed'))` mirrors these; a typed enum at the `set_status` call site stops a
