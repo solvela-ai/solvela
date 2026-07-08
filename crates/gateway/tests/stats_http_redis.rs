@@ -113,6 +113,7 @@ fn stats_router(usage: UsageTracker, db_pool: Option<PgPool>) -> axum::Router {
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
     )
+    .expect("test router builds: default request timeout is valid")
 }
 
 /// A randomly-generated, valid base58 Solana-style wallet (44 chars) so each

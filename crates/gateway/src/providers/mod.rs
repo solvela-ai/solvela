@@ -240,6 +240,15 @@ impl ProviderRegistry {
 /// `test_hanging_provider_budget_fits_within_global_timeout`.
 pub const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Retry budget every provider adapter passes to [`retry_with_backoff`].
+///
+/// Single source of truth: raising it widens the worst-case latency of a
+/// *retryable* (connect / 5xx) failure, which must still fit inside
+/// [`crate::DEFAULT_REQUEST_TIMEOUT_SECS`]. Referenced by all six adapters and
+/// by `test_hanging_provider_budget_fits_within_global_timeout`, so a bump
+/// cannot silently leave the budget test checking a stale number.
+pub const PROVIDER_MAX_RETRIES: u32 = 2;
+
 /// Retries a future up to `max_retries` times with exponential backoff.
 /// Only retries transient errors (connection errors, 5xx).
 /// Does NOT retry 4xx errors (auth, rate limit, bad request) or per-attempt
@@ -270,6 +279,17 @@ where
         // chained models fail over instead (better), and a primary-only model
         // errors at 90s instead of maybe succeeding at 90s+1s+<90s, which the
         // 120s global layer would usually have killed anyway.
+        // UNSTATED INVARIANT this predicate rests on: the provider
+        // `reqwest::Client` (main.rs) configures only a whole-request
+        // `.timeout()` and a `.read_timeout()` — never a `.connect_timeout()`.
+        // Under reqwest 0.12, `is_connect()` and `is_timeout()` both walk the
+        // source chain, so a *connect-phase* timeout would satisfy BOTH (a
+        // `hyper_util` Connect error carrying an `io::ErrorKind::TimedOut`).
+        // Today no such error can be produced, so `is_connect()` below only
+        // ever sees genuine connect failures. If a `.connect_timeout()` is
+        // ever added to that client, connect-phase timeouts would start being
+        // retried through the `is_connect()` arm — silently reintroducing the
+        // 2×90s+backoff budget blowout for that error class. Revisit here.
         let is_transient =
             last_err.is_connect() || last_err.status().is_some_and(|s| s.is_server_error());
 
@@ -424,9 +444,9 @@ mod tests {
     /// against the retry loop's actual behaviour, not restated as a constant.
     #[tokio::test]
     async fn test_hanging_provider_budget_fits_within_global_timeout() {
-        // Every provider adapter calls `retry_with_backoff(2, ..)`.
-        const PROVIDER_MAX_RETRIES: u32 = 2;
-
+        // `PROVIDER_MAX_RETRIES` is the SAME const every provider adapter
+        // passes to `retry_with_backoff` — bumping it re-runs this budget check
+        // against the new value rather than a stale hand-copied literal.
         let attempts = AtomicU32::new(0);
 
         // A 1ns total-request timeout deterministically wins the race against

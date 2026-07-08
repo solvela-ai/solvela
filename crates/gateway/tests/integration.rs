@@ -732,7 +732,8 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
     let router = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
-    );
+    )
+    .expect("test router builds: default request timeout is valid");
     (router, state)
 }
 
@@ -792,6 +793,7 @@ fn test_app_channels_disabled() -> axum::Router {
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// Build a test app with a NON-default configured USDC mint and a
@@ -850,6 +852,7 @@ fn test_app_with_usdc_mint_and_providers(mint: &str, providers: ProviderRegistry
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// [`test_app_with_usdc_mint_and_providers`] with no providers configured —
@@ -1467,7 +1470,8 @@ fn test_app_dev_bypass_capturing_native_relay(
     let router = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
-    );
+    )
+    .expect("test router builds: default request timeout is valid");
     (router, captured)
 }
 
@@ -1537,7 +1541,8 @@ supports_vision = true
     let router = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
-    );
+    )
+    .expect("test router builds: default request timeout is valid");
     (router, captured)
 }
 
@@ -1642,7 +1647,8 @@ fn test_app_with_provider_registry_and_exact_verifier_native(
     let router = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
-    );
+    )
+    .expect("test router builds: default request timeout is valid");
     (router, state)
 }
 
@@ -1702,6 +1708,7 @@ fn test_app_with_models_and_providers(
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// Minimal models TOML carrying one free + one paid NVIDIA model, used by the
@@ -1907,6 +1914,7 @@ fn app_with_semantic_cache(sem: Arc<gateway::cache::semantic::SemanticCache>) ->
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// A paraphrase of a previously-cached prompt is served from the semantic
@@ -2227,6 +2235,7 @@ fn app_with_semantic_cache_and_escrow(
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// [`app_with_semantic_cache_and_escrow`] composed with a real `db_pool` (the
@@ -2312,6 +2321,7 @@ fn app_with_semantic_cache_escrow_and_db_pool(
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// Closes the test gap flagged in review: an escrow-paid request that hits the
@@ -2981,6 +2991,7 @@ fn test_app_with_provider_registry_and_escrow_verifier(
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// Build a test app with escrow support enabled.
@@ -3073,6 +3084,7 @@ fn test_app_with_escrow_and_usdc_mint(mint: &str) -> axum::Router {
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// Build a minimal valid PaymentPayload base64-encoded header for a given model path.
@@ -3552,7 +3564,8 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
     let app = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
-    );
+    )
+    .expect("test router builds: default request timeout is valid");
 
     let body = serde_json::json!({
         "model": "openai/gpt-4o",
@@ -6098,6 +6111,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     gateway::build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// Test 6: no nonce pool configured → 404 with error message.
@@ -8140,6 +8154,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// Test 15: escrow health returns populated metrics when metrics are configured.
@@ -8323,7 +8338,8 @@ async fn test_escrow_health_reflects_incremented_metrics() {
     let app = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
-    );
+    )
+    .expect("test router builds: default request timeout is valid");
 
     let response = app
         .oneshot(
@@ -8558,7 +8574,8 @@ async fn test_escrow_health_status_down_without_claimer() {
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
 
-    let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
+    let app = build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid");
 
     let response = app
         .oneshot(
@@ -9100,7 +9117,8 @@ async fn test_proxy_require_tenant_wallet_rejected_before_settlement() {
     let app = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
-    );
+    )
+    .expect("test router builds: default request timeout is valid");
 
     let response = app
         .oneshot(
@@ -10628,7 +10646,8 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
     let app = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
-    );
+    )
+    .expect("test router builds: default request timeout is valid");
 
     let response = app
         .oneshot(
@@ -11291,6 +11310,7 @@ fn test_app_with_free_limit(free_max: u32) -> axum::Router {
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// Build a chat request for `model` with a fixed `ConnectInfo` peer IP so the
@@ -11660,7 +11680,8 @@ async fn dev_bypass_still_works() {
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(0),
     });
-    let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
+    let app = build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid");
 
     // A PAID model with no payment header is served via dev-bypass (200), not 402.
     let resp = app
@@ -11742,6 +11763,7 @@ fn test_app_with_global_cap(global_cap: u32) -> axum::Router {
         free_global_cap: FreeTierGlobalCap::new(global_cap),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// The aggregate cap trips on COMBINED free traffic even from DISTINCT IPs —
@@ -11876,7 +11898,8 @@ async fn free_per_ip_and_global_cap_are_independent() {
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(100),
     });
-    let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
+    let app = build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid");
 
     let ip = "192.0.2.50";
     let r1 = app
@@ -12774,7 +12797,8 @@ fn test_app_with_db_pool(
     let router = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
-    );
+    )
+    .expect("test router builds: default request timeout is valid");
     (router, state)
 }
 
@@ -13421,6 +13445,7 @@ fn test_app_with_receipts_limit(max: u32) -> axum::Router {
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// Build a receipts GET with a fixed `ConnectInfo` peer IP so the receipts
@@ -13824,7 +13849,8 @@ fn a2a_app_with_providers_and_bypass(
     let router = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
-    );
+    )
+    .expect("test router builds: default request timeout is valid");
     Some((router, state))
 }
 
@@ -14413,7 +14439,8 @@ fn a2a_app_with_verifier_and_db(
     let router = build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
-    );
+    )
+    .expect("test router builds: default request timeout is valid");
     Some((router, state))
 }
 
@@ -16000,6 +16027,7 @@ mod faucet_route_tests {
             Arc::clone(&new_state),
             RateLimiter::new(RateLimitConfig::default()),
         )
+        .expect("test router builds: default request timeout is valid")
     }
 
     async fn post_faucet(app: axum::Router, wallet: &str) -> (StatusCode, serde_json::Value) {
@@ -16188,6 +16216,7 @@ mod faucet_route_tests {
             Arc::clone(&new_state),
             RateLimiter::new(RateLimitConfig::default()),
         )
+        .expect("test router builds: default request timeout is valid")
     }
 
     /// A strict faucet limiter of `max` per 24h window, with the SAME cap on the
@@ -16722,6 +16751,7 @@ mod escrow_deposit_tx_tests {
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         build_router(state, RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid")
     }
 
     async fn post_deposit_tx(
@@ -17076,6 +17106,7 @@ mod escrow_deposit_tx_tests {
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         build_router(state, RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid")
     }
 
     /// `POST /v1/escrow/deposit-tx` with a fixed `ConnectInfo` peer IP so the
@@ -17275,6 +17306,7 @@ price_per_request_usdc = 0.01
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         build_router(state, RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid")
     }
 
     /// (a) Unpaid request → 402 with the correct cost breakdown including the
@@ -17611,6 +17643,7 @@ price_per_request_usdc = 0.01
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         build_router(state, RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid")
     }
 
     /// #499 POSITIVE-reject pin (search path): a wallet provisioned
@@ -17768,7 +17801,8 @@ price_per_request_usdc = 0.01
         let app = build_router(
             Arc::clone(&state),
             RateLimiter::new(RateLimitConfig::default()),
-        );
+        )
+        .expect("test router builds: default request timeout is valid");
 
         let response = app
             .oneshot(
@@ -19802,6 +19836,7 @@ mod channel_open_guard_tests {
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         build_router(state, RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid")
     }
 
     async fn post_open(app: axum::Router, agent_wallet: &str) -> axum::response::Response {
@@ -20149,6 +20184,7 @@ price_per_request_usdc = 0.01
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         build_router(state, RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid")
     }
 
     /// A fully-wired `/v1/search` app with channels ENABLED, backed by the live
@@ -20212,7 +20248,8 @@ price_per_request_usdc = 0.01
         if seed_slot {
             *state.slot_cache.lock().await = Some((SEED_SLOT, Instant::now()));
         }
-        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()));
+        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid");
         (app, state)
     }
 
@@ -21544,6 +21581,7 @@ price_per_request_usdc = 0.01
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         build_router(state, RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid")
     }
 
     fn close_request(channel_id_b58: &str, signature_b64: &str) -> Request<Body> {
@@ -21864,7 +21902,8 @@ mod chat_channel_draw_tests {
         // Prime the RPC-free slot cache so `fetch_cached_slot` never touches the
         // network (Pass-B HALT 6 — the draw must use the cached slot).
         *state.slot_cache.lock().await = Some((SEED_SLOT, Instant::now()));
-        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()));
+        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid");
         (app, state)
     }
 
@@ -23925,7 +23964,8 @@ mod chat_channel_draw_tests {
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         *state.slot_cache.lock().await = Some((SEED_SLOT, Instant::now()));
-        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()));
+        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid");
         (app, state)
     }
 
@@ -23991,7 +24031,8 @@ mod chat_channel_draw_tests {
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
-        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()));
+        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid");
         (app, state)
     }
 }
@@ -24603,6 +24644,7 @@ internal = true
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         build_router(state, rate_limiter)
+            .expect("test router builds: default request timeout is valid")
     }
 
     /// Standard app: stub-or-none provider, always-pass verifier, priced entry.
@@ -25049,7 +25091,8 @@ internal = true
             deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
-        let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
+        let app = build_router(state, RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid");
 
         let body = format!(r#"{{"mints":["{USDC_MINT_B58}"]}}"#);
         let response = app
@@ -25141,7 +25184,8 @@ internal = true
         let app = build_router(
             Arc::clone(&state),
             RateLimiter::new(RateLimitConfig::default()),
-        );
+        )
+        .expect("test router builds: default request timeout is valid");
 
         let body = format!(r#"{{"mints":["{USDC_MINT_B58}"]}}"#);
         let response = app
@@ -25323,6 +25367,7 @@ price_per_request_usdc = 0.001
             free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
         });
         build_router(state, RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid")
     }
 
     /// A fully-wired `/v1/solana/price` app with channels ENABLED, backed by
@@ -25383,7 +25428,8 @@ price_per_request_usdc = 0.001
         if seed_slot {
             *state.slot_cache.lock().await = Some((SEED_SLOT, Instant::now()));
         }
-        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()));
+        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()))
+            .expect("test router builds: default request timeout is valid");
         (app, state)
     }
 
@@ -26021,7 +26067,8 @@ mod a2a_channel_draw_tests {
                 window: Duration::from_secs(60),
                 unknown_max_requests: 10_000,
             }),
-        );
+        )
+        .expect("test router builds: default request timeout is valid");
         (app, state)
     }
 

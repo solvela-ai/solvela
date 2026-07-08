@@ -58,7 +58,7 @@ impl LLMProvider for XAIProvider {
     ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
         let original_model = req.model.clone();
         let req_body = build_chat_body(&req)?;
-        let response = super::retry_with_backoff(2, || {
+        let response = super::retry_with_backoff(super::PROVIDER_MAX_RETRIES, || {
             self.client
                 .post(XAI_URL)
                 .timeout(super::PROVIDER_REQUEST_TIMEOUT)

@@ -1263,8 +1263,12 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Build router
-    let app = build_router(state, rate_limiter);
+    // Build router. A misconfigured global request timeout (at or below the
+    // per-attempt provider budget) is fatal here: `?` propagates to `main`'s
+    // `anyhow::Result` and the process exits non-zero rather than serving
+    // traffic that 408s every slow request. Same posture as a failed migration
+    // (CLAUDE.md #15).
+    let app = build_router(state, rate_limiter)?;
 
     let addr = format!("{}:{}", app_config.server.host, app_config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

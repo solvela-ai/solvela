@@ -473,7 +473,7 @@ impl LLMProvider for GoogleProvider {
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
         let req_body = serde_json::to_value(&gemini_req)?;
-        let response = super::retry_with_backoff(2, || {
+        let response = super::retry_with_backoff(super::PROVIDER_MAX_RETRIES, || {
             self.client
                 .post(&url)
                 .timeout(super::PROVIDER_REQUEST_TIMEOUT)

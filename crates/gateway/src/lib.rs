@@ -325,22 +325,104 @@ pub fn handle_panic(_err: Box<dyn std::any::Any + Send + 'static>) -> axum::resp
 /// MUST stay strictly above the per-attempt upstream timeout
 /// ([`providers::PROVIDER_REQUEST_TIMEOUT`]) so a hanging provider surfaces
 /// an `Err` to the model fallback chain before this layer 408s the whole
-/// request. Pinned by
-/// `providers::tests::test_hanging_provider_budget_fits_within_global_timeout`.
+/// request. Pinned for the compile-time default by
+/// `providers::tests::test_hanging_provider_budget_fits_within_global_timeout`,
+/// and for the *runtime configured* value by [`resolve_request_timeout_secs`].
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
+
+/// Startup misconfiguration of the global request timeout.
+///
+/// Fatal by design: [`build_router`] refuses to build and `main` exits
+/// non-zero, mirroring the migration-failure rule (`CLAUDE.md` #15). Serving
+/// traffic under a timeout that guarantees 408s on every slow request is worse
+/// than not starting.
+#[derive(Debug, thiserror::Error)]
+pub enum RequestTimeoutConfigError {
+    #[error(
+        "{var}={value:?} is not a valid whole number of seconds \
+         (unset it to use the {DEFAULT_REQUEST_TIMEOUT_SECS}s default)"
+    )]
+    Unparsable { var: &'static str, value: String },
+
+    #[error(
+        "{var}={timeout_secs} must be strictly greater than the per-attempt upstream \
+         provider timeout ({provider_timeout_secs}s). At {timeout_secs}s the global \
+         TimeoutLayer 408s every slow request before a hung provider can surface its \
+         Err, so the model fallback chain can never advance. Set it above \
+         {provider_timeout_secs}s (default: {DEFAULT_REQUEST_TIMEOUT_SECS}s)."
+    )]
+    NotAboveProviderBudget {
+        var: &'static str,
+        timeout_secs: u64,
+        provider_timeout_secs: u64,
+    },
+}
+
+/// Resolve the global request timeout from the environment, fail-closed.
+///
+/// Reads `SOLVELA_REQUEST_TIMEOUT_SECS` (legacy: `RCR_REQUEST_TIMEOUT_SECS`),
+/// falling back to [`DEFAULT_REQUEST_TIMEOUT_SECS`] only when **unset**. A set
+/// value that is unparsable, or that is not strictly greater than
+/// [`providers::PROVIDER_REQUEST_TIMEOUT`], is a hard error — never silently
+/// coerced to the default (a silent coercion would hide the exact
+/// misconfiguration this guard exists to catch).
+pub fn resolve_request_timeout_secs() -> Result<u64, RequestTimeoutConfigError> {
+    let (var, value) = match std::env::var("SOLVELA_REQUEST_TIMEOUT_SECS") {
+        Ok(v) => ("SOLVELA_REQUEST_TIMEOUT_SECS", v),
+        Err(_) => match std::env::var("RCR_REQUEST_TIMEOUT_SECS") {
+            Ok(v) => ("RCR_REQUEST_TIMEOUT_SECS", v),
+            Err(_) => return Ok(DEFAULT_REQUEST_TIMEOUT_SECS),
+        },
+    };
+
+    let timeout_secs =
+        value
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| RequestTimeoutConfigError::Unparsable {
+                var,
+                value: value.clone(),
+            })?;
+
+    check_request_timeout_secs(var, timeout_secs)
+}
+
+/// The ordering invariant itself, split out so it is testable without mutating
+/// process-global env vars (which race under the parallel test harness).
+///
+/// `timeout_secs` MUST be strictly greater than
+/// [`providers::PROVIDER_REQUEST_TIMEOUT`] — see
+/// [`RequestTimeoutConfigError::NotAboveProviderBudget`].
+fn check_request_timeout_secs(
+    var: &'static str,
+    timeout_secs: u64,
+) -> Result<u64, RequestTimeoutConfigError> {
+    let provider_timeout_secs = providers::PROVIDER_REQUEST_TIMEOUT.as_secs();
+    if timeout_secs <= provider_timeout_secs {
+        return Err(RequestTimeoutConfigError::NotAboveProviderBudget {
+            var,
+            timeout_secs,
+            provider_timeout_secs,
+        });
+    }
+    Ok(timeout_secs)
+}
 
 /// Build the Axum router with all routes and middleware.
 ///
 /// This is used by both `main.rs` and integration tests.
 /// The `rate_limiter` is passed in so callers can retain a clone for background
 /// cleanup tasks (see `main.rs`).
-pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
-    // Configurable request timeout (default 120s)
-    let timeout_secs: u64 = std::env::var("SOLVELA_REQUEST_TIMEOUT_SECS")
-        .or_else(|_| std::env::var("RCR_REQUEST_TIMEOUT_SECS"))
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
+///
+/// Returns `Err` when the global request timeout is misconfigured (see
+/// [`resolve_request_timeout_secs`]); the gateway must not start in that state.
+pub fn build_router(
+    state: Arc<AppState>,
+    rate_limiter: RateLimiter,
+) -> Result<Router, RequestTimeoutConfigError> {
+    // Configurable request timeout (default 120s), guarded against being set
+    // at or below the per-attempt provider timeout.
+    let timeout_secs = resolve_request_timeout_secs()?;
 
     // Configurable max concurrent in-flight requests (default 256)
     let max_concurrent: usize = std::env::var("SOLVELA_MAX_CONCURRENT_REQUESTS")
@@ -349,203 +431,214 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .and_then(|v| v.parse().ok())
         .unwrap_or(256);
 
-    Router::new()
-        // GET serves the x402 discovery 402 (so registry health-checkers probing
-        // with a GET see the challenge instead of a 405); POST is the real
-        // OpenAI-compatible endpoint (which itself returns the discovery 402 for
-        // an UNPAID empty/malformed body — see `chat_completions`).
-        .route(
-            "/v1/chat/completions",
-            get(routes::chat::chat_completions_discovery_get).post(routes::chat::chat_completions),
-        )
-        // Inbound Anthropic-Messages-compatible endpoint. POST translates the
-        // Anthropic wire format to the internal OpenAI-shaped pipeline and back,
-        // riding the SAME x402 money path as /v1/chat/completions (via the
-        // shared `chat_completions_inner` core — no forked payment logic). GET
-        // serves the x402 discovery 402 for registry health-checkers, mirroring
-        // the chat route.
-        .route(
-            "/v1/messages",
-            get(routes::messages::create_message_discovery_get)
-                .post(routes::messages::create_message),
-        )
-        // Anthropic token-counting endpoint. Free (Anthropic does not charge for
-        // count_tokens), no payment path — a verbatim reverse-proxy to Anthropic's
-        // own count_tokens endpoint so a native Claude client gets exact counts.
-        .route(
-            "/v1/messages/count_tokens",
-            post(routes::messages::count_message_tokens),
-        )
-        .route(
-            "/v1/images/generations",
-            post(routes::images::image_generations),
-        )
-        .route("/v1/search", post(routes::search::search))
-        .route("/v1/solana/price", post(routes::price::solana_price))
-        .route("/v1/models", get(routes::models::list_models))
-        .route("/v1/services", get(routes::services::list_services))
-        .route(
-            "/v1/services/register",
-            post(routes::services::register_service),
-        )
-        .route(
-            "/v1/services/{service_id}/proxy",
-            post(routes::proxy::proxy_service),
-        )
-        .route(
-            "/v1/receipts/{receipt_id}",
-            get(routes::receipts::get_receipt),
-        )
-        .route("/v1/supported", get(routes::supported::supported))
-        .route("/v1/nonce", get(routes::nonce::get_nonce))
-        .route(
-            "/v1/wallet/{address}/stats",
-            get(routes::stats::wallet_stats),
-        )
-        .route("/v1/escrow/config", get(routes::escrow::escrow_config))
-        .route("/v1/escrow/health", get(routes::escrow::escrow_health))
-        .route("/v1/escrow/deposit-tx", post(routes::escrow::deposit_tx))
-        .route(
-            "/v1/escrow/settle",
-            post(routes::escrow_settle::handle_settle),
-        )
-        .route("/v1/channel/open", post(routes::channel::open))
-        .route("/v1/channel/close", post(routes::channel::close))
-        .route("/v1/faucet/gas", post(routes::faucet::gas_faucet))
-        .route("/pricing", get(routes::pricing::pricing))
-        .route("/health", get(routes::health::health))
-        .route("/v1/admin/stats", get(routes::admin_stats::admin_stats))
-        .route(
-            "/v1/orgs",
-            post(routes::orgs::create_org).get(routes::orgs::list_orgs),
-        )
-        .route("/v1/orgs/{id}", get(routes::orgs::get_org))
-        .route(
-            "/v1/orgs/{id}/teams",
-            post(routes::orgs::create_team).get(routes::orgs::list_teams),
-        )
-        .route(
-            "/v1/orgs/{id}/members",
-            post(routes::orgs::add_member).get(routes::orgs::list_members),
-        )
-        .route(
-            "/v1/orgs/{id}/teams/{tid}/wallets",
-            post(routes::orgs::assign_wallet).get(routes::orgs::list_team_wallets),
-        )
-        .route(
-            "/v1/orgs/{id}/api-keys",
-            post(routes::orgs::create_api_key).get(routes::orgs::list_api_keys),
-        )
-        .route(
-            "/v1/orgs/{id}/api-keys/{kid}",
-            axum::routing::delete(routes::orgs::revoke_api_key),
-        )
-        .route(
-            "/v1/orgs/{id}/audit-logs",
-            get(routes::orgs::list_audit_logs),
-        )
-        .route(
-            "/v1/orgs/{id}/teams/{tid}/budget",
-            axum::routing::put(routes::orgs::set_team_budget).get(routes::orgs::get_team_budget),
-        )
-        .route(
-            "/v1/wallets/{wallet}/budget",
-            axum::routing::put(routes::orgs::set_wallet_budget)
-                .get(routes::orgs::get_wallet_budget),
-        )
-        .route(
-            "/v1/orgs/{id}/teams/{tid}/stats",
-            get(routes::orgs::get_team_stats),
-        )
-        .route("/v1/orgs/{id}/stats", get(routes::orgs::get_org_stats))
-        // A2A v0.3 canonical AgentCard path (RFC 8615) + pre-v0.3 alias.
-        .route(
-            "/.well-known/agent-card.json",
-            get(a2a::agent_card::agent_card),
-        )
-        .route("/.well-known/agent.json", get(a2a::agent_card::agent_card))
-        // Static well-known files (x402-registry domain verification, etc.),
-        // served verbatim from `server.wellknown_files`; 404 when unconfigured.
-        .route(
-            "/.well-known/402index-verify.txt",
-            get(
-                |axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>| async move {
-                    match state.config.server.wellknown_files.get("402index-verify.txt") {
-                        Some(contents) => contents.clone().into_response(),
-                        None => axum::http::StatusCode::NOT_FOUND.into_response(),
-                    }
-                },
-            ),
-        )
-        .route("/a2a", post(a2a::jsonrpc::a2a_endpoint))
-        // OpenAPI-first x402 discovery surfaces (x402scan et al.): the spec
-        // served verbatim at the root path, the `/.well-known/x402` resource
-        // list, and a favicon to clear the FAVICON_MISSING audit flag. All
-        // public, additive discovery metadata — no payment/wire change.
-        .route("/openapi.json", get(routes::openapi::openapi_spec))
-        .route("/.well-known/x402", get(routes::openapi::well_known_x402))
-        .route("/favicon.ico", get(routes::openapi::favicon))
-        .route("/metrics", get(routes::metrics::get_metrics))
-        .layer(axum::middleware::from_fn(
-            middleware::rate_limit::rate_limit,
-        ))
-        .layer(axum::Extension(rate_limiter))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            middleware::api_key::extract_api_key,
-        ))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            middleware::x402::extract_payment,
-        ))
-        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10 MB
-        .layer(TraceLayer::new_for_http())
-        .layer(axum::middleware::from_fn(
-            middleware::metrics::record_metrics,
-        ))
-        .layer(build_cors())
-        // Security headers — applied to every response
-        .layer(SetResponseHeaderLayer::if_not_present(
-            HeaderName::from_static("x-content-type-options"),
-            HeaderValue::from_static("nosniff"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            HeaderName::from_static("x-frame-options"),
-            HeaderValue::from_static("DENY"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            HeaderName::from_static("referrer-policy"),
-            HeaderValue::from_static("no-referrer"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            HeaderName::from_static("content-security-policy"),
-            HeaderValue::from_static("default-src 'none'"),
-        ))
-        .layer({
-            // Only add HSTS in production — omit the layer entirely in non-prod
-            // environments so the header is never emitted (not even as an empty value).
-            // SOLVELA_ENV is canonical; RCR_ENV is accepted as a deprecated fallback.
-            let env_value = std::env::var("SOLVELA_ENV").or_else(|_| std::env::var("RCR_ENV"));
-            let is_prod = matches!(env_value.as_deref(), Ok("production") | Ok("prod"));
-            tower::util::option_layer(is_prod.then(|| {
-                SetResponseHeaderLayer::if_not_present(
-                    HeaderName::from_static("strict-transport-security"),
-                    HeaderValue::from_static("max-age=31536000; includeSubDomains"),
-                )
-            }))
-        })
-        // Request ID
-        .layer(RequestIdLayer)
-        // Concurrency limit — rejects excess requests with 503
-        .layer(ConcurrencyLimitLayer::new(max_concurrent))
-        // Global request timeout — returns 408 on expiry
-        .layer(TimeoutLayer::with_status_code(
-            axum::http::StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(timeout_secs),
-        ))
-        // Catch panics — outermost layer, returns JSON 500 instead of dropping connection
-        .layer(CatchPanicLayer::custom(handle_panic))
-        .with_state(state)
+    Ok(
+        Router::new()
+            // GET serves the x402 discovery 402 (so registry health-checkers probing
+            // with a GET see the challenge instead of a 405); POST is the real
+            // OpenAI-compatible endpoint (which itself returns the discovery 402 for
+            // an UNPAID empty/malformed body — see `chat_completions`).
+            .route(
+                "/v1/chat/completions",
+                get(routes::chat::chat_completions_discovery_get)
+                    .post(routes::chat::chat_completions),
+            )
+            // Inbound Anthropic-Messages-compatible endpoint. POST translates the
+            // Anthropic wire format to the internal OpenAI-shaped pipeline and back,
+            // riding the SAME x402 money path as /v1/chat/completions (via the
+            // shared `chat_completions_inner` core — no forked payment logic). GET
+            // serves the x402 discovery 402 for registry health-checkers, mirroring
+            // the chat route.
+            .route(
+                "/v1/messages",
+                get(routes::messages::create_message_discovery_get)
+                    .post(routes::messages::create_message),
+            )
+            // Anthropic token-counting endpoint. Free (Anthropic does not charge for
+            // count_tokens), no payment path — a verbatim reverse-proxy to Anthropic's
+            // own count_tokens endpoint so a native Claude client gets exact counts.
+            .route(
+                "/v1/messages/count_tokens",
+                post(routes::messages::count_message_tokens),
+            )
+            .route(
+                "/v1/images/generations",
+                post(routes::images::image_generations),
+            )
+            .route("/v1/search", post(routes::search::search))
+            .route("/v1/solana/price", post(routes::price::solana_price))
+            .route("/v1/models", get(routes::models::list_models))
+            .route("/v1/services", get(routes::services::list_services))
+            .route(
+                "/v1/services/register",
+                post(routes::services::register_service),
+            )
+            .route(
+                "/v1/services/{service_id}/proxy",
+                post(routes::proxy::proxy_service),
+            )
+            .route(
+                "/v1/receipts/{receipt_id}",
+                get(routes::receipts::get_receipt),
+            )
+            .route("/v1/supported", get(routes::supported::supported))
+            .route("/v1/nonce", get(routes::nonce::get_nonce))
+            .route(
+                "/v1/wallet/{address}/stats",
+                get(routes::stats::wallet_stats),
+            )
+            .route("/v1/escrow/config", get(routes::escrow::escrow_config))
+            .route("/v1/escrow/health", get(routes::escrow::escrow_health))
+            .route("/v1/escrow/deposit-tx", post(routes::escrow::deposit_tx))
+            .route(
+                "/v1/escrow/settle",
+                post(routes::escrow_settle::handle_settle),
+            )
+            .route("/v1/channel/open", post(routes::channel::open))
+            .route("/v1/channel/close", post(routes::channel::close))
+            .route("/v1/faucet/gas", post(routes::faucet::gas_faucet))
+            .route("/pricing", get(routes::pricing::pricing))
+            .route("/health", get(routes::health::health))
+            .route("/v1/admin/stats", get(routes::admin_stats::admin_stats))
+            .route(
+                "/v1/orgs",
+                post(routes::orgs::create_org).get(routes::orgs::list_orgs),
+            )
+            .route("/v1/orgs/{id}", get(routes::orgs::get_org))
+            .route(
+                "/v1/orgs/{id}/teams",
+                post(routes::orgs::create_team).get(routes::orgs::list_teams),
+            )
+            .route(
+                "/v1/orgs/{id}/members",
+                post(routes::orgs::add_member).get(routes::orgs::list_members),
+            )
+            .route(
+                "/v1/orgs/{id}/teams/{tid}/wallets",
+                post(routes::orgs::assign_wallet).get(routes::orgs::list_team_wallets),
+            )
+            .route(
+                "/v1/orgs/{id}/api-keys",
+                post(routes::orgs::create_api_key).get(routes::orgs::list_api_keys),
+            )
+            .route(
+                "/v1/orgs/{id}/api-keys/{kid}",
+                axum::routing::delete(routes::orgs::revoke_api_key),
+            )
+            .route(
+                "/v1/orgs/{id}/audit-logs",
+                get(routes::orgs::list_audit_logs),
+            )
+            .route(
+                "/v1/orgs/{id}/teams/{tid}/budget",
+                axum::routing::put(routes::orgs::set_team_budget)
+                    .get(routes::orgs::get_team_budget),
+            )
+            .route(
+                "/v1/wallets/{wallet}/budget",
+                axum::routing::put(routes::orgs::set_wallet_budget)
+                    .get(routes::orgs::get_wallet_budget),
+            )
+            .route(
+                "/v1/orgs/{id}/teams/{tid}/stats",
+                get(routes::orgs::get_team_stats),
+            )
+            .route("/v1/orgs/{id}/stats", get(routes::orgs::get_org_stats))
+            // A2A v0.3 canonical AgentCard path (RFC 8615) + pre-v0.3 alias.
+            .route(
+                "/.well-known/agent-card.json",
+                get(a2a::agent_card::agent_card),
+            )
+            .route("/.well-known/agent.json", get(a2a::agent_card::agent_card))
+            // Static well-known files (x402-registry domain verification, etc.),
+            // served verbatim from `server.wellknown_files`; 404 when unconfigured.
+            .route(
+                "/.well-known/402index-verify.txt",
+                get(
+                    |axum::extract::State(state): axum::extract::State<
+                        std::sync::Arc<AppState>,
+                    >| async move {
+                        match state
+                            .config
+                            .server
+                            .wellknown_files
+                            .get("402index-verify.txt")
+                        {
+                            Some(contents) => contents.clone().into_response(),
+                            None => axum::http::StatusCode::NOT_FOUND.into_response(),
+                        }
+                    },
+                ),
+            )
+            .route("/a2a", post(a2a::jsonrpc::a2a_endpoint))
+            // OpenAPI-first x402 discovery surfaces (x402scan et al.): the spec
+            // served verbatim at the root path, the `/.well-known/x402` resource
+            // list, and a favicon to clear the FAVICON_MISSING audit flag. All
+            // public, additive discovery metadata — no payment/wire change.
+            .route("/openapi.json", get(routes::openapi::openapi_spec))
+            .route("/.well-known/x402", get(routes::openapi::well_known_x402))
+            .route("/favicon.ico", get(routes::openapi::favicon))
+            .route("/metrics", get(routes::metrics::get_metrics))
+            .layer(axum::middleware::from_fn(
+                middleware::rate_limit::rate_limit,
+            ))
+            .layer(axum::Extension(rate_limiter))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                middleware::api_key::extract_api_key,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                middleware::x402::extract_payment,
+            ))
+            .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10 MB
+            .layer(TraceLayer::new_for_http())
+            .layer(axum::middleware::from_fn(
+                middleware::metrics::record_metrics,
+            ))
+            .layer(build_cors())
+            // Security headers — applied to every response
+            .layer(SetResponseHeaderLayer::if_not_present(
+                HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            ))
+            .layer(SetResponseHeaderLayer::if_not_present(
+                HeaderName::from_static("x-frame-options"),
+                HeaderValue::from_static("DENY"),
+            ))
+            .layer(SetResponseHeaderLayer::if_not_present(
+                HeaderName::from_static("referrer-policy"),
+                HeaderValue::from_static("no-referrer"),
+            ))
+            .layer(SetResponseHeaderLayer::if_not_present(
+                HeaderName::from_static("content-security-policy"),
+                HeaderValue::from_static("default-src 'none'"),
+            ))
+            .layer({
+                // Only add HSTS in production — omit the layer entirely in non-prod
+                // environments so the header is never emitted (not even as an empty value).
+                // SOLVELA_ENV is canonical; RCR_ENV is accepted as a deprecated fallback.
+                let env_value = std::env::var("SOLVELA_ENV").or_else(|_| std::env::var("RCR_ENV"));
+                let is_prod = matches!(env_value.as_deref(), Ok("production") | Ok("prod"));
+                tower::util::option_layer(is_prod.then(|| {
+                    SetResponseHeaderLayer::if_not_present(
+                        HeaderName::from_static("strict-transport-security"),
+                        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+                    )
+                }))
+            })
+            // Request ID
+            .layer(RequestIdLayer)
+            // Concurrency limit — rejects excess requests with 503
+            .layer(ConcurrencyLimitLayer::new(max_concurrent))
+            // Global request timeout — returns 408 on expiry
+            .layer(TimeoutLayer::with_status_code(
+                axum::http::StatusCode::REQUEST_TIMEOUT,
+                Duration::from_secs(timeout_secs),
+            ))
+            // Catch panics — outermost layer, returns JSON 500 instead of dropping connection
+            .layer(CatchPanicLayer::custom(handle_panic))
+            .with_state(state),
+    )
 }
 
 /// Build a restrictive CORS policy.
@@ -727,6 +820,58 @@ fn build_cors() -> CorsLayer {
                 .parse()
                 .expect("'x-session-id' is a valid header name"),
         ])
+}
+
+#[cfg(test)]
+mod request_timeout_config_tests {
+    use super::{
+        check_request_timeout_secs, providers::PROVIDER_REQUEST_TIMEOUT, RequestTimeoutConfigError,
+        DEFAULT_REQUEST_TIMEOUT_SECS,
+    };
+
+    const VAR: &str = "SOLVELA_REQUEST_TIMEOUT_SECS";
+
+    /// The shipped default must satisfy the invariant the guard enforces —
+    /// otherwise an operator who sets nothing at all is already broken.
+    #[test]
+    fn default_request_timeout_is_accepted() {
+        assert_eq!(
+            check_request_timeout_secs(VAR, DEFAULT_REQUEST_TIMEOUT_SECS)
+                .expect("default is valid"),
+            DEFAULT_REQUEST_TIMEOUT_SECS
+        );
+    }
+
+    /// A configured timeout at or below the per-attempt provider budget makes
+    /// the tower-http `TimeoutLayer` 408 EVERY slow request before a single
+    /// un-retried 90s provider attempt can surface its `Err` — strictly worse
+    /// than the retried-timeout defect, because it hits every slow call rather
+    /// than only retried ones. The gateway must refuse to start.
+    #[test]
+    fn request_timeout_at_or_below_provider_budget_is_rejected() {
+        let provider_secs = PROVIDER_REQUEST_TIMEOUT.as_secs();
+
+        // 60s (the reviewer's scenario), the exact boundary, and 0.
+        for too_low in [0, 1, 60, provider_secs] {
+            let err = check_request_timeout_secs(VAR, too_low).expect_err(
+                "a global timeout that cannot outlast one provider attempt must be rejected",
+            );
+            assert!(
+                matches!(
+                    err,
+                    RequestTimeoutConfigError::NotAboveProviderBudget { timeout_secs, provider_timeout_secs, .. }
+                        if timeout_secs == too_low && provider_timeout_secs == provider_secs
+                ),
+                "expected NotAboveProviderBudget for {too_low}s, got {err:?}"
+            );
+        }
+
+        // One second above the provider budget is the smallest legal value.
+        assert_eq!(
+            check_request_timeout_secs(VAR, provider_secs + 1).expect("strictly above is legal"),
+            provider_secs + 1
+        );
+    }
 }
 
 #[cfg(test)]
