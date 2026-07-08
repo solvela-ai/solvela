@@ -290,6 +290,13 @@ pub struct SpendLogEntry {
     /// Vendor-settlement record for marketplace services with a per-service
     /// `vendor_wallet` (settlement-platform P1). `None` on every other path.
     pub vendor: Option<VendorSettlement>,
+    /// Smart-router tier for this request (e.g. "Simple", "Complex", or "N/A"
+    /// for direct model IDs), from `resolve_model_with_debug`. Attribution/
+    /// observability only — never gates or changes billing. `None` on paths
+    /// that never run the router (service proxy, search, A2A).
+    pub routing_tier: Option<String>,
+    /// Smart-router score paired with `routing_tier`; same `None` semantics.
+    pub routing_score: Option<f64>,
 }
 
 /// Fee-receivable record for a vendor-settled marketplace request.
@@ -467,8 +474,8 @@ impl UsageTracker {
                     },
                 };
                 let result = sqlx::query(
-                    r#"INSERT INTO spend_logs (id, wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, request_id, session_id, tenant, vendor_wallet, vendor_settled_atomic, vendor_fee_receivable_atomic, created_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
+                    r#"INSERT INTO spend_logs (id, wallet_address, model, provider, input_tokens, output_tokens, cost_usdc, tx_signature, request_id, session_id, tenant, vendor_wallet, vendor_settled_atomic, vendor_fee_receivable_atomic, routing_tier, routing_score, created_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"#,
                 )
                 .bind(id)
                 .bind(&db_entry.wallet_address)
@@ -484,6 +491,8 @@ impl UsageTracker {
                 .bind(vendor_bind.map(|(wallet, _, _)| wallet.to_string()))
                 .bind(vendor_bind.map(|(_, settled, _)| settled))
                 .bind(vendor_bind.map(|(_, _, fee)| fee))
+                .bind(&db_entry.routing_tier)
+                .bind(db_entry.routing_score)
                 .bind(created_at)
                 .execute(&pool)
                 .await;
@@ -2030,6 +2039,8 @@ mod tests {
             tenant_enforced: false,
             estimated_cost_usdc: None,
             vendor: None,
+            routing_tier: None,
+            routing_score: None,
         });
     }
 

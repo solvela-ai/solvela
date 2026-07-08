@@ -186,6 +186,8 @@ async fn log_spend_persists_row_when_db_configured(pool: PgPool) {
         tenant_enforced: false,
         estimated_cost_usdc: None,
         vendor: None,
+        routing_tier: None,
+        routing_score: None,
     });
 
     // Fire-and-forget: poll briefly for the row to land.
@@ -262,6 +264,8 @@ async fn log_spend_persists_vendor_fee_receivable(pool: PgPool) {
             // floor(20_000 × 105 / 100) − 20_000
             fee_receivable_atomic: 1_000,
         }),
+        routing_tier: None,
+        routing_score: None,
     });
 
     // Fire-and-forget: poll briefly for the row to land.
@@ -301,6 +305,99 @@ async fn log_spend_persists_vendor_fee_receivable(pool: PgPool) {
     assert_eq!(row.2, Some(1_000));
 }
 
+/// Routing telemetry must survive the REAL write path: `log_spend` → the
+/// actual Postgres INSERT → read the row back. A smart-routed request records
+/// its tier + score; a path with no router (proxy/search/A2A) records NULLs —
+/// never a fabricated tier.
+#[sqlx::test(migrations = "../../migrations")]
+async fn log_spend_persists_routing_telemetry(pool: PgPool) {
+    let tracker = UsageTracker::new(Some(pool.clone()), None);
+
+    // Smart-routed chat request: tier + score present.
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: WALLET_A.to_string(),
+        model: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        input_tokens: 10,
+        output_tokens: 20,
+        cost_usdc: 0.0010,
+        tx_signature: None,
+        request_id: Some("req-routed".to_string()),
+        session_id: None,
+        tenant: None,
+        tenant_enforced: false,
+        estimated_cost_usdc: None,
+        vendor: None,
+        routing_tier: Some("Complex".to_string()),
+        routing_score: Some(0.87),
+    });
+
+    // Router-less path (proxy/search/A2A shape): both columns stay NULL.
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: WALLET_B.to_string(),
+        model: "vendor-data-api".to_string(),
+        provider: "external-service".to_string(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usdc: 0.0200,
+        tx_signature: None,
+        request_id: Some("req-unrouted".to_string()),
+        session_id: None,
+        tenant: None,
+        tenant_enforced: false,
+        estimated_cost_usdc: None,
+        vendor: None,
+        routing_tier: None,
+        routing_score: None,
+    });
+
+    // Fire-and-forget: poll until BOTH rows land (fail loud on timeout — a
+    // "no error" run with zero rows must not pass).
+    let mut total: i64 = 0;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        total = sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM spend_logs")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        if total == 2 {
+            break;
+        }
+    }
+    assert_eq!(
+        total, 2,
+        "both log_spend rows must be INSERTed into live Postgres within 1s"
+    );
+
+    let routed: (Option<String>, Option<f64>) = sqlx::query_as(
+        "SELECT routing_tier, routing_score FROM spend_logs WHERE wallet_address = $1",
+    )
+    .bind(WALLET_A)
+    .fetch_one(&pool)
+    .await
+    .expect("read back routed row");
+    assert_eq!(
+        routed.0.as_deref(),
+        Some("Complex"),
+        "routing_tier must round-trip through the production INSERT"
+    );
+    assert_eq!(
+        routed.1,
+        Some(0.87),
+        "routing_score must round-trip through the production INSERT"
+    );
+
+    let unrouted: (Option<String>, Option<f64>) = sqlx::query_as(
+        "SELECT routing_tier, routing_score FROM spend_logs WHERE wallet_address = $1",
+    )
+    .bind(WALLET_B)
+    .fetch_one(&pool)
+    .await
+    .expect("read back unrouted row");
+    assert_eq!(unrouted.0, None, "router-less rows must record NULL tier");
+    assert_eq!(unrouted.1, None, "router-less rows must record NULL score");
+}
+
 #[tokio::test]
 async fn log_spend_with_no_backends_does_not_panic() {
     // Pure smoke: emits a tracing event without touching DB or Redis.
@@ -319,6 +416,8 @@ async fn log_spend_with_no_backends_does_not_panic() {
         tenant_enforced: false,
         estimated_cost_usdc: None,
         vendor: None,
+        routing_tier: None,
+        routing_score: None,
     });
 }
 
@@ -496,6 +595,8 @@ fn vendor_failure_entry(vendor: Option<VendorSettlement>) -> SpendLogEntry {
         tenant_enforced: false,
         estimated_cost_usdc: None,
         vendor,
+        routing_tier: None,
+        routing_score: None,
     }
 }
 

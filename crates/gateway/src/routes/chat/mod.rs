@@ -724,6 +724,8 @@ pub(crate) async fn chat_completions_inner(
                     tenant_enforced: false,
                     estimated_cost_usdc: None,
                     vendor: None,
+                    routing_tier: Some(routing_tier.clone()),
+                    routing_score: Some(routing_score),
                 });
                 Ok(result.response)
             }
@@ -1676,6 +1678,8 @@ pub(crate) async fn chat_completions_inner(
                                 tenant_enforced: budget_reservation.tenant_enforced(),
                                 estimated_cost_usdc: Some(estimated_cost),
                                 vendor: None,
+                                routing_tier: Some(routing_tier.clone()),
+                                routing_score: Some(routing_score),
                             });
                             // P2 receipt: same write point as the spend row —
                             // every paid completion that records spend records
@@ -1762,6 +1766,8 @@ pub(crate) async fn chat_completions_inner(
                         tenant_enforced: budget_reservation.tenant_enforced(),
                         estimated_cost_usdc: Some(estimated_cost),
                         vendor: None,
+                        routing_tier: Some(routing_tier.clone()),
+                        routing_score: Some(routing_score),
                     });
                     // P2 receipt: billed amount mirrors the ledger (discounted
                     // on an escrow semantic hit); the breakdown is the C1
@@ -1838,6 +1844,8 @@ pub(crate) async fn chat_completions_inner(
                         tenant_enforced: budget_reservation.tenant_enforced(),
                         estimated_cost_usdc: Some(estimated_cost),
                         vendor: None,
+                        routing_tier: Some(routing_tier.clone()),
+                        routing_score: Some(routing_score),
                     });
                     // P2 receipt — the STREAMING arm (the #541 bug class):
                     // every settled streaming completion records a receipt at

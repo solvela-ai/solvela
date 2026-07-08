@@ -629,6 +629,8 @@ async fn channel_draw_locked(
         // increments the counters by `cost_usdc` directly (None branch).
         estimated_cost_usdc: None,
         vendor: None,
+        routing_tier: Some(ctx.routing_tier.to_string()),
+        routing_score: Some(ctx.routing_score),
     });
 
     // Receipt: the canonical integer split of the REALIZED total —
