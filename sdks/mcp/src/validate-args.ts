@@ -31,7 +31,8 @@ export type FieldSpec =
   | { kind: 'string'; required: boolean }
   | { kind: 'number'; required: boolean }
   | { kind: 'boolean'; required: boolean }
-  | { kind: 'stringEnum'; required: boolean; values: readonly string[] };
+  | { kind: 'stringEnum'; required: boolean; values: readonly string[] }
+  | { kind: 'stringArray'; required: boolean };
 
 export type Schema = Record<string, FieldSpec>;
 
@@ -98,6 +99,16 @@ export function validateArgs<T>(toolName: string, args: unknown, schema: Schema)
           throw new McpError(
             ErrorCode.InvalidParams,
             `${toolName}: field '${field}' must be one of ${spec.values.map((v) => `'${v}'`).join('|')}, got ${JSON.stringify(val)}`,
+          );
+        }
+        break;
+      case 'stringArray':
+        // Type-shape only (array of strings); content rules (length bounds,
+        // emptiness) are call-site concerns per this module's scope note.
+        if (!Array.isArray(val) || !val.every((v) => typeof v === 'string')) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            `${toolName}: field '${field}' must be an array of strings`,
           );
         }
         break;

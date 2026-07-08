@@ -102,6 +102,29 @@ const BASE_TOOLS: Tool[] = [
     },
   },
   {
+    name: 'solana_price',
+    description:
+      'Get live USD prices for Solana tokens (SPL mints) through the Solvela gateway. ' +
+      'Pass 1–50 base58 mint addresses; returns the per-mint USD price, decimals, and 24h change ' +
+      '(null for mints the upstream has no reliable price for). Payment is handled automatically ' +
+      'via USDC on Solana (x402): a flat per-call price plus the standard 5% platform fee, settled ' +
+      'server-side. The exact USDC amount paid is reported with each result. ' +
+      'Always available (no escrow mode required).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mints: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Base58 SPL mint addresses to price (1–50 per call). ' +
+            'Example: ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"] for USDC.',
+        },
+      },
+      required: ['mints'],
+    },
+  },
+  {
     name: 'wallet_status',
     description:
       'Check the status of the configured Solana wallet and gateway connectivity. ' +
