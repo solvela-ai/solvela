@@ -31,100 +31,149 @@ const WEIGHTS: [f64; 15] = [
 // asserts each const is byte-identical to `normalize_for_keywords()` of its
 // unpadded form, so the two representations cannot drift.
 //
+// A table is a list of MARKER GROUPS, not a flat list of words. Each inner slice
+// holds the morphological variants of ONE marker ("analyze"/"analyzing"/
+// "analysis"), and the group counts AT MOST ONCE toward the density scale — a
+// prompt saying both "analyze" and "analysis" is expressing one concept, not
+// two. Word-boundary matching cost the recall that bare-substring matching got
+// for free ("reason" used to hit inside "reasoning"); explicit variants buy it
+// back without a stemmer, and stay inspectable.
+//
 // These are the WORD-BOUNDARY tables only. Code presence, math/logic and
 // numeric list markers read RAW text and are not listed here.
 // ---------------------------------------------------------------------------
 
-/// 3. Reasoning markers.
-const REASONING_MARKERS: &[&str] = &[
-    " prove ",
-    " theorem ",
-    " step by step ",
-    " reason ",
-    " analyze ",
-    " evaluate ",
-    " compare and contrast ",
-    " think through ",
-    " explain why ",
+/// 3. Reasoning markers. Highest-weighted dimension (0.18).
+const REASONING_MARKERS: &[&[&str]] = &[
+    &[
+        " prove ",
+        " proves ",
+        " proved ",
+        " proving ",
+        " proof ",
+        " proofs ",
+    ],
+    &[" theorem ", " theorems "],
+    &[" step by step "],
+    &[" reason ", " reasons ", " reasoning ", " reasoned "],
+    &[
+        " analyze ",
+        " analyzes ",
+        " analyzing ",
+        " analyzed ",
+        " analysis ",
+        " analyse ",
+        " analyses ",
+        " analysing ",
+    ],
+    &[
+        " evaluate ",
+        " evaluates ",
+        " evaluating ",
+        " evaluated ",
+        " evaluation ",
+    ],
+    &[" compare and contrast "],
+    &[" think through ", " thinking through "],
+    &[" explain why "],
 ];
 
 /// 4. Technical terms.
-const TECHNICAL_TERMS: &[&str] = &[
-    " algorithm ",
-    " kubernetes ",
-    " database ",
-    " architecture ",
-    " distributed ",
-    " concurrent ",
-    " protocol ",
-    " optimization ",
-    " benchmark ",
+const TECHNICAL_TERMS: &[&[&str]] = &[
+    &[" algorithm ", " algorithms ", " algorithmic "],
+    &[" kubernetes "],
+    &[" database ", " databases "],
+    &[" architecture ", " architectures ", " architectural "],
+    &[" distributed "],
+    &[" concurrent ", " concurrency ", " concurrently "],
+    &[" protocol ", " protocols "],
+    &[
+        " optimization ",
+        " optimizations ",
+        " optimize ",
+        " optimizes ",
+        " optimizing ",
+        " optimized ",
+        " optimisation ",
+        " optimise ",
+    ],
+    &[" benchmark ", " benchmarks ", " benchmarking "],
 ];
 
 /// 5. Creative markers.
-const CREATIVE_MARKERS: &[&str] = &[
-    " story ",
-    " poem ",
-    " brainstorm ",
-    " creative ",
-    " imagine ",
-    " fiction ",
-    " narrative ",
+const CREATIVE_MARKERS: &[&[&str]] = &[
+    &[" story ", " stories "],
+    &[" poem ", " poems ", " poetry "],
+    &[" brainstorm ", " brainstorming "],
+    &[" creative ", " creatively ", " creativity "],
+    &[" imagine ", " imagining ", " imagined "],
+    &[" fiction ", " fictional "],
+    &[" narrative ", " narratives "],
 ];
 
 /// 6. Simple indicators (negative signal).
-const SIMPLE_INDICATORS: &[&str] = &[
-    " what is ",
-    " define ",
-    " translate ",
-    " hello ",
-    " hi ",
-    " thanks ",
-    " yes ",
-    " no ",
+///
+/// Deliberately NOT given morphological variants: this dimension pushes a prompt
+/// DOWN a tier (toward the cheaper model), so broadening its recall is a
+/// money-path change in the wrong direction. Widen only with a measurement.
+const SIMPLE_INDICATORS: &[&[&str]] = &[
+    &[" what is "],
+    &[" define "],
+    &[" translate "],
+    &[" hello "],
+    &[" hi "],
+    &[" thanks "],
+    &[" yes "],
+    &[" no "],
 ];
 
 /// 7. Multi-step word markers.
 ///
 /// The NUMERIC list markers live in [`count_numeric_list_markers`] and read
 /// raw text.
-const MULTI_STEP_MARKERS: &[&str] = &[
-    " first ",
-    " then ",
-    " next ",
-    " finally ",
-    " step 1 ",
-    " step 2 ",
+const MULTI_STEP_MARKERS: &[&[&str]] = &[
+    &[" first "],
+    &[" then "],
+    &[" next "],
+    &[" finally "],
+    &[" step 1 "],
+    &[" step 2 "],
 ];
 
 /// 9. Agentic task markers.
-const AGENTIC_MARKERS: &[&str] = &[
-    " read file ",
-    " write file ",
-    " edit ",
-    " deploy ",
-    " execute ",
-    " run command ",
-    " install ",
+const AGENTIC_MARKERS: &[&[&str]] = &[
+    &[" read file "],
+    &[" write file "],
+    &[" edit ", " edits ", " editing "],
+    &[" deploy ", " deploys ", " deploying ", " deployment "],
+    &[" execute ", " executes ", " executing ", " execution "],
+    &[" run command "],
+    &[" install ", " installs ", " installing ", " installation "],
 ];
 
-/// 14. Output format complexity.
-const OUTPUT_FORMAT_MARKERS: &[&str] = &[" json ", " csv ", " xml ", " markdown ", " structured "];
+/// 14. Output format complexity. Format names have no useful morphology.
+const OUTPUT_FORMAT_MARKERS: &[&[&str]] = &[
+    &[" json "],
+    &[" csv "],
+    &[" xml "],
+    &[" markdown "],
+    &[" structured "],
+];
 
 /// 15. Domain specificity.
-const DOMAIN_MARKERS: &[&str] = &[
-    " medical ",
-    " legal ",
-    " scientific ",
-    " clinical ",
-    " regulatory ",
-    " compliance ",
-    " diagnosis ",
+const DOMAIN_MARKERS: &[&[&str]] = &[
+    &[" medical "],
+    &[" legal "],
+    &[" scientific ", " science "],
+    &[" clinical "],
+    &[" regulatory ", " regulation ", " regulations "],
+    &[" compliance ", " compliant "],
+    &[" diagnosis ", " diagnoses ", " diagnostic "],
 ];
 
 /// Every word-boundary table, for the drift guard in tests.
 #[cfg(test)]
-const ALL_KEYWORD_TABLES: &[&[&str]] = &[
+const ALL_KEYWORD_TABLES: &[&[&[&str]]] = &[
     REASONING_MARKERS,
     TECHNICAL_TERMS,
     CREATIVE_MARKERS,
@@ -141,10 +190,11 @@ const ALL_KEYWORD_TABLES: &[&[&str]] = &[
 /// concatenated prompt (the normalized copy used for word-boundary matching).
 ///
 /// MEASURED 2026-07-08 — release build, 100k warmed iterations, keyword-dense
-/// ~430-char prompt, one dev workstation: **~7.7 us per classification**. The
-/// "<1 microsecond" claim this doc used to carry was never benchmarked and was
-/// never true: the same harness puts the pre-2026-07-08 scorer at ~5.1 us.
-/// Re-measure before quoting a number here; do not restore an unmeasured claim.
+/// ~430-char prompt, one dev workstation, best of 3: **~8.4 us per
+/// classification**. The "<1 microsecond" claim this doc used to carry was never
+/// benchmarked and was never true: the same harness puts the pre-2026-07-08
+/// scorer at ~4.8 us. Re-measure before quoting a number here; do not restore an
+/// unmeasured claim.
 pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> ScorerResult {
     let text = concatenate_user_content(messages);
     // Word-boundary view of the same text, built once. Used ONLY by the
@@ -350,18 +400,24 @@ fn density_score(matches: usize) -> f64 {
     }
 }
 
-/// Count keywords present in `normalized`.
+/// Count how many MARKER GROUPS are present in `normalized`.
 ///
-/// `normalized` MUST come from [`normalize_for_keywords`], and `keywords` MUST
-/// be pre-padded (`" prove "`) — the padding IS the word-boundary check. Both
-/// sides are already normalized, so this allocates nothing.
-fn count_keywords(normalized: &str, keywords: &[&str]) -> usize {
-    keywords.iter().filter(|k| normalized.contains(**k)).count()
+/// A group matches once if ANY of its morphological variants is present, so
+/// "analyze ... analysis" counts as one marker, not two.
+///
+/// `normalized` MUST come from [`normalize_for_keywords`], and every variant
+/// MUST be pre-padded (`" prove "`) — the padding IS the word-boundary check.
+/// Both sides are already normalized, so this allocates nothing.
+fn count_keywords(normalized: &str, groups: &[&[&str]]) -> usize {
+    groups
+        .iter()
+        .filter(|group| group.iter().any(|k| normalized.contains(*k)))
+        .count()
 }
 
-/// Score keyword density: returns 0.0-1.0 based on how many keywords are found.
-fn score_keyword_density(normalized: &str, keywords: &[&str]) -> f64 {
-    density_score(count_keywords(normalized, keywords))
+/// Score keyword density: returns 0.0-1.0 based on how many marker groups match.
+fn score_keyword_density(normalized: &str, groups: &[&[&str]]) -> f64 {
+    density_score(count_keywords(normalized, groups))
 }
 
 /// Score code presence: backticks, common keywords, indentation patterns.
@@ -497,19 +553,25 @@ mod tests {
     #[test]
     fn keyword_density_matches_on_word_boundaries_only() {
         let haystack = normalize_for_keywords("Within, you know your credit score.");
-        assert_eq!(score_keyword_density(&haystack, &[" hi ", " no "]), 0.0);
-        assert_eq!(score_keyword_density(&haystack, &[" edit "]), 0.0);
+        assert_eq!(
+            score_keyword_density(&haystack, &[&[" hi "], &[" no "]]),
+            0.0
+        );
+        assert_eq!(score_keyword_density(&haystack, &[&[" edit "]]), 0.0);
 
         // ...but the real words still match.
         let real = normalize_for_keywords("Hi! No thanks.");
-        assert_eq!(score_keyword_density(&real, &[" hi ", " no "]), 0.6);
+        assert_eq!(score_keyword_density(&real, &[&[" hi "], &[" no "]]), 0.6);
     }
 
     /// FIX 4: hyphenated phrasing matches the spaced multi-word keyword.
     #[test]
     fn hyphenated_phrases_match_spaced_keywords() {
         let haystack = normalize_for_keywords("Walk me through this step-by-step: how?");
-        assert_eq!(score_keyword_density(&haystack, &[" step by step "]), 0.3);
+        assert_eq!(
+            score_keyword_density(&haystack, &[&[" step by step "]]),
+            0.3
+        );
     }
 
     /// The keyword tables are stored pre-normalized and pre-padded so matching
@@ -518,16 +580,19 @@ mod tests {
     #[test]
     fn padded_keywords_match_the_normalizer() {
         for table in ALL_KEYWORD_TABLES {
-            for kw in *table {
-                assert!(
-                    kw.starts_with(' ') && kw.ends_with(' '),
-                    "keyword {kw:?} is not padded"
-                );
-                assert_eq!(
-                    *kw,
-                    normalize_for_keywords(kw.trim()),
-                    "keyword {kw:?} is not what the normalizer produces"
-                );
+            for group in *table {
+                assert!(!group.is_empty(), "empty marker group");
+                for kw in *group {
+                    assert!(
+                        kw.starts_with(' ') && kw.ends_with(' '),
+                        "keyword {kw:?} is not padded"
+                    );
+                    assert_eq!(
+                        *kw,
+                        normalize_for_keywords(kw.trim()),
+                        "keyword {kw:?} is not what the normalizer produces"
+                    );
+                }
             }
         }
     }
