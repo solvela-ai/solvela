@@ -4,7 +4,7 @@
 # dashboard
 
 ## Purpose
-The product web app at `solvela.vercel.app`. A Next.js 16 App Router project that combines the Solvela dashboard (Overview / Usage / Models / Wallet / Settings) with the public docs site powered by Fumadocs. Styled with Tailwind + a serif-typography, terminal-card design system.
+The product web app at `app.solvela.ai` (docs at `docs.solvela.ai`, marketing root `solvela.ai` — one Vercel project). A Next.js 16 App Router project that combines the Solvela dashboard (Overview / Usage / Models / Wallet / Settings) with the public docs site powered by Fumadocs. Styled with Tailwind + a serif-typography, terminal-card design system.
 
 ## Key Files
 | File | Description |

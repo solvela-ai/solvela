@@ -223,7 +223,7 @@ Run with `npm --prefix dashboard test`. The dashboard does not currently bundle 
 - **Start** — `npm start` (production server)
 - **Dev** — `npm run dev` (dev server with hot reload)
 - **Deploy** — Vercel (automatic from git push)
-- **Hosting:** `solvela.vercel.app`
+- **Hosting:** `app.solvela.ai` (aliases: `solvela.ai`, `docs.solvela.ai`)
 
 ## Environment Variables (frontend)
 

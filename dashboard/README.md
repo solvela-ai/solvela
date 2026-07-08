@@ -1,6 +1,6 @@
 # Solvela dashboard
 
-The product web app at [solvela.vercel.app](https://solvela.vercel.app). A
+The product web app at [app.solvela.ai](https://app.solvela.ai). A
 Next.js 16 App Router project that combines the Solvela dashboard pages
 (Overview / Usage / Models / Wallet / Settings) with the public docs site
 powered by Fumadocs. Styled with Tailwind and a serif / terminal-card
@@ -65,7 +65,7 @@ MDX rewrites and Fumadocs config. Env wiring lives in
 
 ## Deployment
 
-Deployed to Vercel from `main`. Production URL: `solvela.vercel.app`.
+Deployed to Vercel from `main`. Production domains (one project): `app.solvela.ai` (dashboard), `docs.solvela.ai` (docs), `solvela.ai` (marketing root).
 
 See the operator notes in [`AGENTS.md`](./AGENTS.md) for design-system
 guardrails and the project's "exercise the change in a browser before
