@@ -1,15 +1,17 @@
-// Cross-SDK 402-parse smoke (channel plan PR-B, invariant 12 / HALT 12).
+// Cross-SDK 402-parse smoke (channel plan PR-B / Slice B).
 //
 // Parses the LIVE gateway 402 challenge fixture shared with the Go and Python
 // SDK suites (`crates/gateway/tests/fixtures/chat_402_challenge.json`, pinned
 // byte-shape-identical to the real route by the gateway integration test
 // `x402_challenge_smoke_tests::live_402_body_matches_cross_sdk_fixture`).
 //
-// This SDK's `parseScheme` rejects the ENTIRE 402 on any unknown scheme, so a
-// gateway that ever advertised a new scheme (e.g. `channel`) in `accepts[]`
-// would break every deployed paid call at parse time — the memorialized
-// cross-repo wire-drift failure mode. This smoke is the standing tripwire:
-// the live shape must keep parsing, and the strictness itself is pinned.
+// Since Slice B (channel plan §7), `PaymentRequired.fromJSON` SKIPS
+// unknown-scheme entries (representing them in `unrecognizedSchemes`) instead
+// of rejecting the whole 402 — a gateway advertising a new scheme (e.g.
+// `channel`) in `accepts[]` no longer breaks deployed paid calls at parse
+// time. The direct per-entry parser (`PaymentAccept.fromJSON`) stays strict,
+// and scheme selection stays fail-closed (skip is never select). This smoke
+// pins that tolerance against the live fixture shape.
 import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 
@@ -33,14 +35,21 @@ describe('live 402 challenge fixture (cross-SDK smoke)', () => {
     expect(pr.costBreakdown.currency).toBe('USDC');
   });
 
-  it('rejects an accepts[] entry carrying an unknown scheme (why the gateway must never advertise one)', () => {
+  it('tolerates an accepts[] entry carrying an unknown scheme (skip-or-represent, never select)', () => {
     const raw = JSON.parse(readFileSync(FIXTURE_URL, 'utf-8'));
     const channelEntry = { ...raw.accepts[0], scheme: 'channel' };
+    // The DIRECT per-entry parser stays strict...
     expect(() => PaymentAccept.fromJSON(channelEntry)).toThrow(ClientError);
-    // ...and the rejection takes down the WHOLE challenge parse — exact users
-    // included — which is exactly the invariant-12 blast radius.
-    expect(() =>
-      PaymentRequired.fromJSON({ ...raw, accepts: [...raw.accepts, channelEntry] }),
-    ).toThrow(ClientError);
+    // ...but the 402-body parse no longer poisons: the unknown entry is
+    // skipped-and-represented, and the known entries survive unchanged for
+    // fail-closed selection (Slice B, channel plan §7).
+    const pr = PaymentRequired.fromJSON({
+      ...raw,
+      accepts: [...raw.accepts, channelEntry],
+    });
+    expect(pr.accepts.map((a) => a.scheme)).toEqual(
+      raw.accepts.map((a: { scheme: string }) => a.scheme),
+    );
+    expect(pr.unrecognizedSchemes).toEqual(['channel']);
   });
 });

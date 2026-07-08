@@ -271,8 +271,39 @@ class TestPaymentAcceptScheme:
         # An unknown wire scheme means either a malformed gateway response or
         # a protocol upgrade the SDK has not been taught yet — either way we
         # would rather fail loudly than silently mis-branch in scheme matching.
+        # (This is the DIRECT per-entry parser; the 402-body parser skips such
+        # entries instead — see TestPaymentRequiredTolerantAccepts.)
         with pytest.raises(ClientError, match="Unknown payment scheme"):
             PaymentAccept.from_dict(self._accept_data("instant"))
+
+    def test_payment_required_skips_unknown_scheme_entries(self) -> None:
+        # Slice B tolerance: unknown-scheme entries — whatever their shape,
+        # including non-dict garbage — are skipped-and-represented, never
+        # poisoning the body parse. Known-scheme entries stay fully strict.
+        data = {
+            "x402_version": 2,
+            "resource": {"url": "/v1/chat/completions", "method": "POST"},
+            "accepts": [
+                self._accept_data("exact"),
+                {"scheme": "channel", "amount": "1000"},  # partial shape
+                {"amount": "1000"},  # no scheme at all
+                "not-even-an-object",
+            ],
+            "cost_breakdown": {
+                "provider_cost": "950",
+                "platform_fee": "50",
+                "total": "1000",
+                "currency": "USDC",
+                "fee_percent": 5,
+            },
+            "error": "Payment required",
+        }
+        pr = PaymentRequired.from_dict(data)
+        assert [a.scheme for a in pr.accepts] == ["exact"]
+        assert pr.unrecognized_schemes[0] == "channel"
+        assert len(pr.unrecognized_schemes) == 3
+        # unrecognized_schemes is SDK-side representation, not a wire field.
+        assert "unrecognized_schemes" not in pr.to_dict()
 
     def test_scheme_alias_exposed_from_package(self) -> None:
         # Consumers writing scheme-aware callbacks need to annotate against
