@@ -1186,6 +1186,7 @@ async fn settle_paid_task(
                 None,
                 estimated_input_tokens,
                 &tx_signature,
+                None,
             );
             if receipt_path.is_none() {
                 tracing::error!(
@@ -1325,6 +1326,7 @@ async fn settle_paid_task(
         result.data.usage.as_ref(),
         estimated_input_tokens,
         &tx_signature,
+        None,
     );
     // Round-1 review fix (parity with the Failed arm above): a `None` here
     // means the ledger/receipt write was skipped (corrupt stored
@@ -1979,6 +1981,13 @@ async fn revert_working_and_release(state: &Arc<AppState>, task_id: &str) {
 /// - the scheme parses through `PaymentScheme::from_accepted_str` (unknown
 ///   schemes are an error upstream at the verifier; here we record the canonical
 ///   wire string and never default-route).
+///
+/// `payer_wallet_override` (2026-07-06 channel-on-A2A plan §9 item 9 — the ONE
+/// sanctioned signature change): the channel leg passes
+/// `Some(&drawable.agent_wallet)` — the DB-sourced channel wallet — because
+/// `extract_payer_wallet` is the `"unknown"` sentinel for a voucher (it carries
+/// no payer identity; see `payment_util.rs`). The exact/escrow arms pass `None`
+/// (their payer derivation below is byte-identical to before).
 #[allow(clippy::too_many_arguments)]
 fn record_a2a_settlement(
     state: &Arc<AppState>,
@@ -1990,6 +1999,7 @@ fn record_a2a_settlement(
     usage: Option<&solvela_protocol::Usage>,
     estimated_input_tokens: u32,
     tx_signature: &Option<String>,
+    payer_wallet_override: Option<&str>,
 ) -> Option<String> {
     // Parse the stored quote: it holds the cost_breakdown the agent paid against.
     let payment_required: solvela_x402::types::PaymentRequired =
@@ -2073,18 +2083,26 @@ fn record_a2a_settlement(
         return None;
     };
 
-    let payer_wallet = crate::payment_util::extract_payer_wallet(payload);
+    // Channel attribution rule (invariant 10 of the channel-on-A2A plan): a
+    // voucher's payer wallet comes from the DB `ChannelRow.agent_wallet`
+    // (threaded in via `payer_wallet_override` by the channel leg), NEVER from
+    // `extract_payer_wallet`, whose Channel arm is the `"unknown"` sentinel.
+    // Exact/escrow arms pass `None` and keep the original derivation.
+    let payer_wallet = match payer_wallet_override {
+        Some(wallet) => wallet.to_string(),
+        None => crate::payment_util::extract_payer_wallet(payload),
+    };
     // Parse the scheme through the exhaustive enum (never default-route an
     // unknown scheme onto a financial record). The verifier already accepted
     // this scheme; an unparseable string here means a record we cannot label
     // truthfully — skip rather than mislabel.
     //
-    // PR-B note (deliberate, not a cascade surprise): `from_accepted_str` now
-    // also parses "channel", but a channel voucher can never reach this record
-    // site on A2A — the offer match restricts submissions to the stored quote's
-    // exact/escrow entries, and `PayloadData::Channel` is rejected fail-closed
-    // before verification (see the replay block above). If either guard ever
-    // regressed, this records a truthful "channel" label rather than skipping.
+    // Channel-on-A2A note (updates the stale PR-B comment): since the Slice-A
+    // channel leg landed, a channel voucher DOES reach this record site — via
+    // `settle_channel_task` (a2a/channel_leg.rs), which calls it only after a
+    // successful `persist_voucher_and_advance` debit and passes
+    // `payer_wallet_override = Some(agent_wallet)`. `from_accepted_str`
+    // labels the row "channel" truthfully.
     let scheme = match PaymentScheme::from_accepted_str(&payload.accepted.scheme) {
         Ok(s) => s,
         Err(e) => {
