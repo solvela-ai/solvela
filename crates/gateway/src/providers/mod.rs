@@ -250,10 +250,23 @@ pub const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 pub const PROVIDER_MAX_RETRIES: u32 = 2;
 
 /// Retries a future up to `max_retries` times with exponential backoff.
-/// Only retries transient errors (connection errors, 5xx).
-/// Does NOT retry 4xx errors (auth, rate limit, bad request) or per-attempt
-/// timeouts (a hung upstream must surface immediately — see the comment on
-/// the transient classification below).
+///
+/// In practice **only connection errors are retried**. Specifically:
+///
+/// - **Connect errors** (`is_connect()`) → retried. The one live retry path.
+/// - **Per-attempt timeouts** (`is_timeout()`) → deliberately NOT retried. A
+///   hung upstream must surface immediately; see the transient-classification
+///   comment below for the budget rationale.
+/// - **HTTP status errors (4xx *and* 5xx)** → never reach this function's
+///   predicate at all. Every caller passes a closure ending in `.send()`, and
+///   `reqwest` resolves `.send()` to `Ok(Response)` for *any* status code — a
+///   5xx only becomes an `Err` at `.error_for_status()`, which all six provider
+///   adapters call **after** `retry_with_backoff` returns. So a 5xx exits this
+///   function via `Ok(val)` on attempt 1, and `last_err.status()` is always
+///   `None`. 5xx responses are not retried today.
+///
+/// The `is_server_error()` arm below is therefore currently unreachable. It is
+/// retained deliberately — see the comment on it.
 pub async fn retry_with_backoff<F, Fut, T>(max_retries: u32, f: F) -> Result<T, reqwest::Error>
 where
     F: Fn() -> Fut,
@@ -290,6 +303,17 @@ where
         // ever added to that client, connect-phase timeouts would start being
         // retried through the `is_connect()` arm — silently reintroducing the
         // 2×90s+backoff budget blowout for that error class. Revisit here.
+        //
+        // The `is_server_error()` arm is CURRENTLY UNREACHABLE: `last_err`
+        // originates from a closure ending in `.send()`, which yields
+        // `Ok(Response)` for a 5xx, so `status()` is always `None` here (only
+        // `.error_for_status()` mints a status-carrying `Err`, and all six
+        // adapters call it *after* this wrapper returns). Kept, not deleted, so
+        // that moving `.error_for_status()` INSIDE a retry closure — the one
+        // condition that makes this arm live — restores 5xx retries rather than
+        // silently leaving them unretried. If that move ever happens, re-check
+        // the latency budget first: 5xx retries cost real attempts against
+        // PROVIDER_REQUEST_TIMEOUT.
         let is_transient =
             last_err.is_connect() || last_err.status().is_some_and(|s| s.is_server_error());
 
