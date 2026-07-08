@@ -156,7 +156,9 @@ Next.js 16 + Tailwind + Recharts. Pages: Overview, Usage, Models, Wallet, Settin
 
 ## Smart Router
 
-The scorer in `crates/router/src/scorer.rs` classifies requests across 15 weighted dimensions (code presence, reasoning markers, technical terms, etc.) into tiers: Simple / Medium / Complex / Reasoning. Each routing profile (eco/auto/premium/free) maps tiers to specific models. Scoring is pure rule-based, <1us, zero external calls.
+The scorer in `crates/router/src/scorer.rs` classifies requests across 15 weighted dimensions (code presence, reasoning markers, technical terms, etc.) into tiers: Simple / Medium / Complex / Reasoning. Each routing profile (eco/auto/premium/free) maps tiers to specific models. Scoring is pure rule-based, ~8us per classification (measured 2026-07-08; the long-standing "<1us" claim was never benchmarked and was never true), zero external calls.
+
+Accuracy is measured, not assumed: `crates/router/tests/golden_set.rs` pins every prompt's classification and asserts agreement with a hand-labeled `intended` column. The `intended` values are the SPEC — never edit them to make a code change look good. Changing the scorer is expected to fail the pin test; inspect each moved row, confirm it moved toward `intended`, then update `current` only.
 
 ## Environment Variables
 
