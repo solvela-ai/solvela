@@ -108,7 +108,9 @@ const BASE_TOOLS: Tool[] = [
       'Pass 1–50 base58 mint addresses; returns the per-mint USD price, decimals, and 24h change ' +
       '(null for mints the upstream has no reliable price for). Payment is handled automatically ' +
       'via USDC on Solana (x402): a flat per-call price plus the standard 5% platform fee, settled ' +
-      'server-side. The exact USDC amount paid is reported with each result. ' +
+      'server-side. The flat price is charged per call regardless of results — a response where ' +
+      'every mint comes back null still costs the same (like web_search with zero results). ' +
+      'The exact USDC amount paid is reported with each result. ' +
       'Always available (no escrow mode required).',
     inputSchema: {
       type: 'object',

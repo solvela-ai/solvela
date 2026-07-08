@@ -293,7 +293,7 @@ Search the web through the gateway's x402-paid `POST /v1/search` endpoint. Payme
 
 ### `solana_price`
 
-Get live USD prices for Solana tokens (SPL mints) through the gateway's x402-paid `POST /v1/solana/price` endpoint (Jupiter upstream). Payment is handled automatically: a flat per-call USDC price plus the standard 5% platform fee, settled on Solana. Always available (no escrow mode required). Mints the upstream has no reliable price for come back as explicit "no reliable price" rows, never an error for the whole batch. The result includes the same cost line as `web_search`, derived from the 402 challenge's `cost_breakdown`.
+Get live USD prices for Solana tokens (SPL mints) through the gateway's x402-paid `POST /v1/solana/price` endpoint (Jupiter upstream). Payment is handled automatically: a flat per-call USDC price plus the standard 5% platform fee, settled on Solana. Always available (no escrow mode required). Mints the upstream has no reliable price for come back as explicit "no reliable price" rows, never an error for the whole batch — and the flat per-call price is charged regardless of how many mints resolve (an all-null response still costs the same, mirroring `web_search` with zero results). The result includes the same cost line as `web_search`, derived from the 402 challenge's `cost_breakdown`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
