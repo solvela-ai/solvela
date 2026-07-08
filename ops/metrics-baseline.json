@@ -15,5 +15,6 @@
   "solvela_channel_refund_corrupt_row_total": 0,
   "solvela_channel_refund_balance_insufficient_total": 0,
   "solvela_channel_refund_daily_cap_exceeded_total": 0,
-  "solvela_channel_draw_lock_lost_total": 0
+  "solvela_channel_draw_lock_lost_total": 0,
+  "solvela_channel_draw_persist_page_total": 0
 }

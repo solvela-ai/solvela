@@ -923,10 +923,16 @@ async fn channel_draw_locked(
         // provider-failure arm) and the delivered 200 carries no receipt header.
         // Logged WITH the cumulative so the bounded loss is reconcilable. Do NOT
         // fail the already-delivered response; the agent resyncs on its next
-        // draw (R9).
+        // draw (R9). PR-0: this arm emitted NO counter before the tier split —
+        // the shared classifier (`crate::channels::persist_failure_reason`, one
+        // code site with the chat draw) now emits the notice-tier total on
+        // every arm plus the page-tier name on `db_error`/`overflow`/
+        // `unexpected`, so a DB outage here pages via the #684 cron.
+        let reason = crate::channels::emit_persist_failure_counters(&e);
         warn!(
             error = %e,
             channel_id,
+            reason,
             cumulative_atomic = voucher.cumulative_atomic,
             last_cumulative = state_view.last_cumulative_atomic,
             "channel draw: persist failed after a successful serve — bounded \
