@@ -112,7 +112,7 @@ Each routing profile then maps tiers to specific models:
 See [Smart Router](/docs/concepts/smart-router#routing-table) for the authoritative `(profile, tier) → model ID` table.
 
 <Note>
-Scoring is pure rule-based and runs in under **1 microsecond** with zero external calls. There is no ML model involved — the scorer is a deterministic weighted sum over the 15 dimensions.
+Scoring is pure rule-based and completes in **single-digit microseconds** with zero external calls. There is no ML model involved — the scorer is a deterministic weighted sum over the 15 dimensions.
 </Note>
 
 ## Payment Verification Detail

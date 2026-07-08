@@ -14,13 +14,21 @@
 //! deliberately, not silently.
 //!
 //! `golden_set_measures_accuracy_against_intended` computes
-//! `current == intended` across the table.
+//! `current == intended` across the table. `intended` is the SPECIFICATION and
+//! is immutable — never edit a label to match the code, or the number below
+//! stops meaning anything.
 //!
-//! Measured 2026-07-08: 40/73 = 54.79% (see `MEASURED_ACCURACY_PERCENT`
-//! below). Floor is set ~2.8 points below so the test only fails on a real
-//! regression, not the model's day-to-day noise. Divergences are not bugs
-//! by themselves — some are intentional tradeoffs (a 15-dimension rule-based
-//! scorer targeting <1us cannot do semantic understanding); the point of
+//! Measured 2026-07-08: 41/73 = 56.16% (see `ACCURACY_FLOOR_PERCENT` below).
+//! Was 40/73 = 54.79% before the Tier-1 correctness fixes. Those fixes
+//! (`has_tools` wiring; word-boundary keyword matching) took it to 57.53%;
+//! then removing the spurious numeric-list-marker signal — a bare digit in
+//! "127.0.0.1" or "[[2,1],[1,2]]" was counting as "1." — gave back 1.37 points
+//! of *unearned* accuracy. Kept anyway: Tier 2 recalibrates thresholds against
+//! this table, so a signal that is wrong must not be fitted to. Floor is set
+//! ~2.7 points below so the test only fails on a real regression, not the
+//! model's day-to-day noise. Divergences are not bugs
+//! by themselves — some are intentional tradeoffs (a microsecond-scale
+//! rule-based scorer cannot do semantic understanding); the point of
 //! this table is to make the gap between "what the scorer does" and "what
 //! it should do" a visible, tracked number instead of a vibe.
 
@@ -183,7 +191,7 @@ const TABLE: &[Row] = &[
         prompt: "I'm evaluating whether to use PostgreSQL or MongoDB for a new analytics platform that needs to handle both structured transactional data and semi-structured event logs at scale. PostgreSQL offers strong ACID guarantees, mature indexing strategies including GIN and GiST indexes, and excellent support for complex joins across normalized schemas, which matters because our reporting layer needs to correlate user accounts, billing records, and audit trails with strict referential integrity. On the other hand, MongoDB's flexible document model would let us ingest rapidly evolving event schemas from dozens of microservices without constant migrations, and its horizontal sharding story is simpler to reason about than Postgres partitioning at our projected volume of two billion events per month. I'm also weighing operational concerns: our team already runs Postgres in production for the core billing system, so adding MongoDB introduces a second database technology to operate, monitor, and back up. Given these constraints — mixed workload types, need for referential integrity on financial data, but also high-volume schema-flexible event ingestion, and limited operational bandwidth — which architecture would you recommend, and how would you structure the schema boundary between the two systems if we end up using both?",
         has_tools: false,
         intended: Tier::Reasoning,
-        current: Tier::Medium,
+        current: Tier::Complex,
     },
     Row {
         prompt: "We're a team of eight engineers building a B2B SaaS product that currently exists as a single Rails monolith deployed as one process, but we're hitting scaling pain: deploys take twenty minutes, a bug in the reporting module recently took down checkout, and onboarding new engineers means understanding the entire codebase before they can ship anything safely. Leadership is pushing for a microservices migration, citing independent deployability and fault isolation, but I'm worried about the operational overhead of running a dozen services with our current team size — distributed tracing, service discovery, network latency between services that used to be in-process function calls, and the classic distributed transaction problem when an order needs to touch billing, inventory, and notifications atomically. Some engineers on the team argue for a middle path: a modular monolith with strict internal module boundaries enforced by tooling, deployed as a single unit but structured so it could be split later if needed. Given our team size, current pain points, and the fact that we don't yet have strong DevOps tooling or a platform team, walk me through the tradeoffs of full microservices versus a modular monolith versus a hybrid approach, and recommend which path minimizes risk over the next twelve months.",
@@ -232,11 +240,10 @@ const TABLE: &[Row] = &[
         current: Tier::Simple,
     },
     // --- Tool-augmented requests (has_tools = true) (5) ---
-    // NOTE: latent/library-level coverage only. Both production call sites of
-    // `classify` (routes/chat/mod.rs and a2a/handler.rs in the gateway)
-    // currently hardcode `has_tools: false`, so the tool-usage dimension never
-    // fires on live traffic — these rows pin the library contract, not a
-    // gateway-observable behavior.
+    // NOTE: `routes/chat/mod.rs` now derives `has_tools` from the real
+    // `ChatRequest.tools` (non-empty), so these rows describe live gateway
+    // behavior on `POST /v1/chat/completions`. The A2A call site still passes
+    // `false` because A2A messages carry no tool definitions at all.
     Row { prompt: "Search the web for the latest Solana price and summarize it.", has_tools: true, intended: Tier::Medium, current: Tier::Simple },
     Row { prompt: "Look up today's weather in Tokyo.", has_tools: true, intended: Tier::Simple, current: Tier::Simple },
     Row { prompt: "Find recent news about AI regulation and give me a bullet list.", has_tools: true, intended: Tier::Medium, current: Tier::Medium },
@@ -268,7 +275,7 @@ const TABLE: &[Row] = &[
         prompt: "Design a caching layer that stays within a strict memory budget of 100MB while maintaining sub-millisecond lookups.",
         has_tools: false,
         intended: Tier::Complex,
-        current: Tier::Simple,
+        current: Tier::Medium,
     },
     Row {
         prompt: "Do you know the difference between TCP and UDP?",
@@ -292,7 +299,7 @@ const TABLE: &[Row] = &[
         prompt: "Walk me through this step-by-step: how do I set up a Postgres replica?",
         has_tools: false,
         intended: Tier::Medium,
-        current: Tier::Simple,
+        current: Tier::Medium,
     },
     Row {
         prompt: "What do you know about well-known distributed consensus algorithms like Raft?",
@@ -316,14 +323,30 @@ fn actual_tier(prompt: &str, has_tools: bool) -> Tier {
 /// Printer helper — regenerate the `current` column after an intentional
 /// scorer change with:
 ///   cargo test -p solvela-router --test golden_set print_current_tiers -- --ignored --nocapture
+///
+/// Columns: `live` (what `classify()` returns now), `was` (the `current` column
+/// in the table), `intended` (the immutable spec). `MOVED` marks rows whose
+/// classification changed, `->OK` / `->BAD` says whether the move went toward
+/// or away from `intended`, so a scorer change can never be rubber-stamped.
 #[test]
 #[ignore]
 fn print_current_tiers() {
     for row in TABLE {
         let result = classify(&[user_msg(row.prompt)], row.has_tools);
+        let moved = result.tier != row.current;
+        let verdict = match (
+            moved,
+            result.tier == row.intended,
+            row.current == row.intended,
+        ) {
+            (false, _, _) => "same",
+            (true, true, _) => "MOVED->OK",
+            (true, false, true) => "MOVED->BAD",
+            (true, false, false) => "MOVED->neutral",
+        };
         println!(
-            "{:?}\tscore={:.4}\tprompt={:?}",
-            result.tier, result.score, row.prompt
+            "{verdict}\tlive={:?}\twas={:?}\tintended={:?}\tscore={:.4}\tprompt={:?}",
+            result.tier, row.current, row.intended, result.score, row.prompt
         );
     }
 }
@@ -343,11 +366,11 @@ fn golden_set_pins_current_classification() {
     }
 }
 
-/// Floor set ~2.8 points below the 2026-07-08 measured accuracy of
-/// 40/73 = 54.79%, so an unrelated scorer tweak doesn't fail this test but a
+/// Floor set ~2.7 points below the 2026-07-08 measured accuracy of
+/// 41/73 = 56.16%, so an unrelated scorer tweak doesn't fail this test but a
 /// real accuracy regression does. Raise the floor (with a fresh measurement
 /// comment) when the scorer improves.
-const ACCURACY_FLOOR_PERCENT: f64 = 52.0;
+const ACCURACY_FLOOR_PERCENT: f64 = 53.5;
 
 #[test]
 fn golden_set_measures_accuracy_against_intended() {

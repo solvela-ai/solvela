@@ -7,7 +7,8 @@ The router classifies each incoming chat request across 15 weighted
 dimensions (code presence, reasoning markers, technical terms, etc.) into
 tiers — Simple / Medium / Complex / Reasoning — then maps each tier to a
 specific model under the chosen profile (eco / auto / premium / free).
-Scoring is pure, sub-microsecond, and makes zero external calls.
+Scoring is pure and makes zero external calls (measured 2026-07-08: ~8.4 us
+per classification, release build, keyword-dense prompt).
 
 ## Install
 
