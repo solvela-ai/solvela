@@ -59,8 +59,9 @@ All endpoints accept and return `application/json`. Streaming responses use SSE 
 | `GET` | `/v1/nonce` | Fetch a durable nonce for replay-safe transactions |
 | `POST` | `/v1/images/generations` | Image generation (OpenAI-compatible) |
 | `POST` | `/v1/messages` | Anthropic-native relay — forwards a validated Anthropic request byte-for-byte to Anthropic-provider models, preserving thinking-block `signature`s, `redacted_thinking`, and native `tool_use` (only `usage` is parsed, for billing). Single-turn works today; multi-turn extended thinking is not yet supported. |
-| `POST` | `/v1/search` | x402-paid web search ($0.01/query + 5% platform fee). Returns normalized `title`/`url`/`snippet`. |
-| `GET` | `/v1/services` | Lists the x402 service-marketplace tools (e.g. web search) with per-call pricing |
+| `POST` | `/v1/search` | x402-paid web search ($0.01/query + 5% platform fee). Returns normalized `title`/`url`/`snippet`. See [Agent Toolbelt](/docs/api/marketplace#post-v1search) |
+| `POST` | `/v1/solana/price` | x402-paid SPL token prices ($0.001/query + 5% platform fee). Up to 50 mints per call; unpriceable mints come back `null`. See [Agent Toolbelt](/docs/api/marketplace#post-v1solanaprice) |
+| `GET` | `/v1/services` | Discovery: lists every x402 marketplace tool with its endpoint and per-call pricing. No payment required. See [Agent Toolbelt](/docs/api/marketplace) |
 | `POST` | `/v1/escrow/settle` | Client-initiated early escrow claim after stream completion (see [Escrow → F4 settle](/docs/concepts/escrow#client-initiated-settle-f4)) |
 | `GET` | `/.well-known/agent-card.json` | A2A AgentCard for agent discovery (v0.3 canonical path; /.well-known/agent.json kept as alias) |
 | `POST` | `/a2a` | A2A protocol JSON-RPC endpoint |
