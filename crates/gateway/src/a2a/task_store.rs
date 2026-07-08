@@ -18,7 +18,13 @@ use crate::a2a::types::TaskState;
 use crate::AppState;
 
 /// Default TTL for task records (10 minutes — allows retries after payment-required).
-const TASK_TTL: Duration = Duration::from_secs(600);
+///
+/// `pub(crate)`: `ChannelConfig::validate` boot-validates the A2A channel-draw
+/// serve bound STRICTLY below this (D6 of the 2026-07-06 channel-on-A2A plan)
+/// — the `Working` write is the last pre-serve TTL refresh, so the record must
+/// provably outlive every serve or a debited client loses its `tasks/get`
+/// recovery.
+pub(crate) const TASK_TTL: Duration = Duration::from_secs(600);
 
 /// Stored task state in Redis.
 #[derive(Debug, Clone, Serialize, Deserialize)]

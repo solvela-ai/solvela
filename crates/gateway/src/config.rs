@@ -71,6 +71,22 @@ pub struct ChannelConfig {
     /// arm is exercisable end-to-end in tests.
     #[serde(default)]
     pub draw_serve_timeout_secs: Option<u64>,
+    /// Hard ceiling (seconds) on the provider serve an A2A channel draw may
+    /// run while holding the per-channel draw lock (D6 of the 2026-07-06
+    /// channel-on-A2A plan; TOML `[channel] a2a_draw_serve_timeout_secs`).
+    /// DISTINCT from the chat bound above: the A2A task record's Redis TTL is
+    /// 600s (`a2a::task_store::TASK_TTL`, last refreshed by the `Working`
+    /// write), so the serve must finish strictly inside it — a serve landing
+    /// in the (600s, chat-650s] window would DEBIT while the `Completed`
+    /// write, the D6 refs, and the `tasks/get` recovery a debited disconnected
+    /// client depends on all fail not-found. A timeout is a total non-charge
+    /// (voucher unconsumed; the client may retry the SAME voucher). `None` →
+    /// the [`DEFAULT_A2A_DRAW_SERVE_TIMEOUT_SECS`] default (540s).
+    /// Boot-validated `< TASK_TTL (600s)` — and thereby `< the 900s draw-lock
+    /// TTL — in [`ChannelConfig::validate`]. Exposed so the timeout arm is
+    /// exercisable end-to-end in tests.
+    #[serde(default)]
+    pub a2a_draw_serve_timeout_secs: Option<u64>,
 }
 
 /// Default chat channel-draw serve timeout (seconds) when
@@ -79,12 +95,27 @@ pub struct ChannelConfig {
 /// the 900s draw-lock TTL (`cache::CHANNEL_DRAW_LOCK_TTL_SECS`).
 pub const DEFAULT_DRAW_SERVE_TIMEOUT_SECS: u64 = 650;
 
+/// Default A2A channel-draw serve timeout (seconds) when
+/// [`ChannelConfig::a2a_draw_serve_timeout_secs`] is unset (D6-a). 540s sits
+/// strictly below the 600s A2A task-record TTL (`a2a::task_store::TASK_TTL` —
+/// the `Working` write is the last pre-serve refresh, so the record provably
+/// outlives every serve) and well below the 900s draw-lock TTL
+/// (`cache::CHANNEL_DRAW_LOCK_TTL_SECS`).
+pub const DEFAULT_A2A_DRAW_SERVE_TIMEOUT_SECS: u64 = 540;
+
 impl ChannelConfig {
     /// The effective chat channel-draw serve timeout in seconds — the
     /// configured override or [`DEFAULT_DRAW_SERVE_TIMEOUT_SECS`].
     pub fn draw_serve_timeout_secs(&self) -> u64 {
         self.draw_serve_timeout_secs
             .unwrap_or(DEFAULT_DRAW_SERVE_TIMEOUT_SECS)
+    }
+
+    /// The effective A2A channel-draw serve timeout in seconds — the
+    /// configured override or [`DEFAULT_A2A_DRAW_SERVE_TIMEOUT_SECS`] (D6-a).
+    pub fn a2a_draw_serve_timeout_secs(&self) -> u64 {
+        self.a2a_draw_serve_timeout_secs
+            .unwrap_or(DEFAULT_A2A_DRAW_SERVE_TIMEOUT_SECS)
     }
 
     /// Fail-closed startup validation of the channel's money-safety bounds.
@@ -109,6 +140,25 @@ impl ChannelConfig {
                  close-expires-mid-serve window a successor draw could be admitted into. Lower \
                  draw_serve_timeout_secs below {ttl}.",
                 ttl = crate::cache::CHANNEL_DRAW_LOCK_TTL_SECS
+            ));
+        }
+        // D6 (channel-on-A2A plan, change 5): the A2A serve bound must stay
+        // STRICTLY below the 600s A2A task-record TTL — the `Working` write is
+        // the record's last pre-serve refresh, so a serve allowed to reach the
+        // TTL could DEBIT (the persist needs no task record) while the
+        // `Completed` write, the D6 refs, and the `tasks/get` recovery a
+        // debited disconnected client depends on all fail not-found. 600 < 900
+        // also keeps it below the draw-lock TTL by construction.
+        let a2a_timeout = self.a2a_draw_serve_timeout_secs();
+        let task_ttl = crate::a2a::task_store::TASK_TTL.as_secs();
+        if a2a_timeout >= task_ttl {
+            return Err(format!(
+                "channel.a2a_draw_serve_timeout_secs ({a2a_timeout}) must be strictly below the \
+                 A2A task-record TTL ({task_ttl}s): a serve that outlives the task record can \
+                 debit the channel while destroying the tasks/get recovery a debited client \
+                 depends on (and must also stay below the {lock_ttl}s draw-lock TTL). Lower \
+                 a2a_draw_serve_timeout_secs below {task_ttl}.",
+                lock_ttl = crate::cache::CHANNEL_DRAW_LOCK_TTL_SECS
             ));
         }
         Ok(())
@@ -994,6 +1044,68 @@ draw_serve_timeout_secs = 1
             cfg.validate().is_ok(),
             "the {DEFAULT_DRAW_SERVE_TIMEOUT_SECS}s default must boot cleanly below the {ttl}s TTL"
         );
+    }
+
+    /// D6 (channel-on-A2A plan): the A2A channel-draw serve bound — default
+    /// 540s, TOML override, and the refuse-to-boot validation strictly below
+    /// the 600s A2A task-record TTL (test A-14's boot-validation leg).
+    #[test]
+    fn channel_a2a_draw_serve_timeout_defaults_overrides_and_validates() {
+        let task_ttl = crate::a2a::task_store::TASK_TTL.as_secs();
+        assert_eq!(task_ttl, 600, "D6 is calibrated against the 600s task TTL");
+
+        // Unset → the 540s default, strictly below the task TTL.
+        assert_eq!(ChannelConfig::default().a2a_draw_serve_timeout_secs(), 540);
+        assert_eq!(
+            ChannelConfig::default().a2a_draw_serve_timeout_secs(),
+            DEFAULT_A2A_DRAW_SERVE_TIMEOUT_SECS
+        );
+
+        // Configured override wins (tests use a tiny value to reach the arm).
+        let toml = r#"
+[server]
+[solana]
+rpc_url = "https://api.devnet.solana.com"
+recipient_wallet = ""
+[providers]
+[channel]
+enabled = true
+a2a_draw_serve_timeout_secs = 1
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("valid config TOML");
+        assert_eq!(config.channel.a2a_draw_serve_timeout_secs, Some(1));
+        assert_eq!(config.channel.a2a_draw_serve_timeout_secs(), 1);
+
+        // Enabled + a bound at/above the task TTL → refuse to boot (a serve
+        // outliving the record debits while destroying tasks/get recovery).
+        for bad in [task_ttl, task_ttl + 1, 900] {
+            let cfg = ChannelConfig {
+                enabled: true,
+                a2a_draw_serve_timeout_secs: Some(bad),
+                ..Default::default()
+            };
+            let err = cfg.validate().unwrap_err();
+            assert!(
+                err.contains("a2a_draw_serve_timeout_secs") && err.contains(&task_ttl.to_string()),
+                "the reject message must name the knob and the TTL bound: {err}"
+            );
+        }
+
+        // Disabled channel: the bound is inert (no draw runs) → Ok.
+        let cfg = ChannelConfig {
+            enabled: false,
+            a2a_draw_serve_timeout_secs: Some(task_ttl + 10_000),
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
+
+        // Enabled + the 540s default (unset) boots cleanly.
+        let cfg = ChannelConfig {
+            enabled: true,
+            a2a_draw_serve_timeout_secs: None,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok());
     }
 
     // -------------------------------------------------------------------------
