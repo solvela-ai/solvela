@@ -563,9 +563,39 @@ mod tests {
         }
     }
 
-    /// Code presence and math/logic read punctuation the normalizer destroys —
-    /// they must keep the RAW text. A regression here silently zeroes a
-    /// dimension.
+    /// Dimensions 2 (code presence) and 10 (math/logic) read punctuation the
+    /// normalizer destroys, so `classify()` must hand them the RAW text.
+    ///
+    /// This asserts through `classify()` on the returned `signals` array, not on
+    /// the helpers in isolation: the failure mode being guarded is a WIRING
+    /// mistake (`signals[1] = score_code_presence(&normalized)`), and a helper-
+    /// level assertion cannot see it. Verified by mutating both call sites to
+    /// `&normalized` and watching this test fail.
+    #[test]
+    fn classify_feeds_code_and_math_dimensions_the_raw_text() {
+        let prompt = "```rust\nfn main() { let x = 2 + 2 * 3; }\n```";
+        let raw = prompt.to_lowercase();
+        let normalized = normalize_for_keywords(&raw);
+
+        // The guard is only meaningful if raw and normalized disagree here.
+        assert_ne!(score_code_presence(&raw), score_code_presence(&normalized));
+        assert_ne!(score_math_presence(&raw), score_math_presence(&normalized));
+
+        let result = classify(&[user_msg(prompt)], false);
+        assert_eq!(
+            result.signals[1],
+            score_code_presence(&raw),
+            "dimension 2 must be scored on the raw text"
+        );
+        assert_eq!(
+            result.signals[9],
+            score_math_presence(&raw),
+            "dimension 10 must be scored on the raw text"
+        );
+    }
+
+    /// Helper-level companion to the wiring test above: the normalizer really
+    /// does destroy the punctuation these two dimensions depend on.
     #[test]
     fn code_and_math_dimensions_read_raw_punctuation() {
         let code = "```rust\nfn main() {}\n```";
