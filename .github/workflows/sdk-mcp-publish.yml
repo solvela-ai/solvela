@@ -343,20 +343,24 @@ jobs:
           # The package metadata (npm view, above) can be visible while the
           # tarball + its bin entry are still propagating on npm's CDN, so a
           # fresh `npx -y` transiently fails with "solvela-mcp: not found"
-          # (observed on the @solvela/mcp-server@0.1.0 publish, 2026-06-29;
-          # the identical npx worked minutes later — false-fail, not a package
-          # defect). Retry the round-trip with backoff before declaring
-          # failure, mirroring the signer-core resolve poll above.
-          # ~10 x 15s ≈ 2.5 min covers the observed publish->CDN lag.
-          for i in $(seq 1 10); do
+          # (observed on the @solvela/mcp-server@0.1.0 publish 2026-06-29 AND
+          # again on 0.1.1 2026-07-08 — both exhausted the old 10 x 15s budget
+          # and both packages were byte-correct on the registry; the identical
+          # npx worked minutes later). Retry the round-trip with backoff before
+          # declaring failure, mirroring the signer-core resolve poll above.
+          #
+          # 24 x 15s ≈ 6 min: the 2.5 min budget was measured too short TWICE.
+          # A red run on a package that published correctly is worse than a slow
+          # green one — it invites someone to re-run a money-path publish.
+          for i in $(seq 1 24); do
             set +e
             OUT=$(printf '%s\n' "$INIT" | SOLVELA_SIGNING_MODE=off timeout 120 npx -y "$PKG" 2>smoke.err)
             set -e
             if echo "$OUT" | grep -q '"result"'; then
-              echo "Attempt $i/10: npx smoke OK — $PKG resolved, installed signer-core from the registry, and answered initialize."
+              echo "Attempt $i/24: npx smoke OK — $PKG resolved, installed signer-core from the registry, and answered initialize."
               exit 0
             fi
-            echo "Attempt $i/10: $PKG not launchable yet (publish->CDN lag); clearing npx cache and sleeping 15s"
+            echo "Attempt $i/24: $PKG not launchable yet (publish->CDN lag); clearing npx cache and sleeping 15s"
             # Drop any cached negative resolution so the next attempt re-fetches.
             npm cache clean --force >/dev/null 2>&1 || true
             CACHE_DIR=$(npm config get cache 2>/dev/null || true)
@@ -364,7 +368,7 @@ jobs:
             sleep 15
           done
 
-          echo "ERROR: npx smoke failed for $PKG after 10 attempts (~2.5 min of publish->CDN propagation wait)"
+          echo "ERROR: npx smoke failed for $PKG after 24 attempts (~6 min of publish->CDN propagation wait)"
           echo "--- stdout ---"; echo "$OUT"
           echo "--- stderr ---"; cat smoke.err
           exit 1

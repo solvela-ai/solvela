@@ -374,19 +374,24 @@ jobs:
           # The package metadata (npm view, above) can be visible while the
           # tarball + its bin entry are still propagating on npm's CDN, so a
           # fresh `npx -y` transiently fails with "solvela-dropin: not
-          # found" (observed on the @solvela/mcp-server@0.1.0 publish,
-          # 2026-06-29; the identical npx worked minutes later — false-fail,
-          # not a package defect). Retry with backoff before declaring
-          # failure. ~10 x 15s ≈ 2.5 min covers the observed publish->CDN lag.
-          for i in $(seq 1 10); do
+          # found" (observed on @solvela/mcp-server@0.1.0 2026-06-29, on
+          # @solvela/dropin@0.1.0 2026-07-06, and again on mcp-server@0.1.1
+          # 2026-07-08 — every one exhausted the old 10 x 15s budget while the
+          # package was byte-correct on the registry; the identical npx worked
+          # minutes later). Retry with backoff before declaring failure.
+          #
+          # 24 x 15s ≈ 6 min: the 2.5 min budget was measured too short THREE
+          # times. A red run on a package that published correctly is worse
+          # than a slow green one — it invites a money-path publish re-run.
+          for i in $(seq 1 24); do
             set +e
             OUT=$(timeout 120 npx -y "$PKG" help 2>smoke.err)
             set -e
             if echo "$OUT" | grep -q 'Claude Code drop-in signing sidecar'; then
-              echo "Attempt $i/10: npx smoke OK — $PKG resolved, installed signer-core from the registry, and printed the usage banner."
+              echo "Attempt $i/24: npx smoke OK — $PKG resolved, installed signer-core from the registry, and printed the usage banner."
               exit 0
             fi
-            echo "Attempt $i/10: $PKG not launchable yet (publish->CDN lag); clearing npx cache and sleeping 15s"
+            echo "Attempt $i/24: $PKG not launchable yet (publish->CDN lag); clearing npx cache and sleeping 15s"
             # Drop any cached negative resolution so the next attempt re-fetches.
             npm cache clean --force >/dev/null 2>&1 || true
             CACHE_DIR=$(npm config get cache 2>/dev/null || true)
