@@ -69,6 +69,7 @@ fn router_with_pool(pool: PgPool) -> Router {
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: UsageTracker::noop(),
         cache: None,

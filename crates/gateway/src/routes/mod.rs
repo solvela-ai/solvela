@@ -13,6 +13,7 @@ pub mod models;
 pub mod nonce;
 pub mod openapi;
 pub mod orgs;
+pub mod price;
 pub mod pricing;
 pub mod proxy;
 pub mod receipts;
