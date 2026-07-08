@@ -113,19 +113,13 @@ pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> 
         ],
     );
 
-    // 7. Multi-step patterns
-    //
-    // Known imprecision: the list markers "1."/"2."/"3." normalize to the bare
-    // tokens " 1 "/" 2 "/" 3 ", so a stray digit ("matrix [[2,1],[1,2]]",
-    // "127.0.0.1") also counts as a list marker. The alternative — matching the
-    // literal " 1. " against normalized text — never matches at all and loses
-    // every real numbered list. Measured on the golden set the current form is
-    // net-positive; a proper list-marker regex is Tier-2 work.
-    signals[6] = score_keyword_density(
-        &normalized,
-        &[
-            "first", "then", "next", "finally", "step 1", "step 2", "1.", "2.", "3.",
-        ],
+    // 7. Multi-step patterns — word markers on the normalized text, numeric list
+    //    markers on the RAW text (they are punctuation, like code and math).
+    signals[6] = density_score(
+        count_keywords(
+            &normalized,
+            &["first", "then", "next", "finally", "step 1", "step 2"],
+        ) + count_numeric_list_markers(&text),
     );
 
     // 8. Question complexity — multiple questions suggest complexity
@@ -273,21 +267,56 @@ fn normalize_for_keywords(text: &str) -> String {
     out
 }
 
-/// Score keyword density: returns 0.0-1.0 based on how many keywords are found.
+/// Count numeric list markers in RAW text: a whitespace-delimited token that is
+/// one-or-more ASCII digits followed by exactly one `.` or `)` — `"1."`, `"2)"`,
+/// `"10."`.
 ///
-/// `normalized` MUST come from [`normalize_for_keywords`]; keywords are matched
-/// on word/phrase boundaries, never as bare substrings.
-fn score_keyword_density(normalized: &str, keywords: &[&str]) -> f64 {
-    let matches = keywords
-        .iter()
-        .filter(|k| normalized.contains(&normalize_for_keywords(k)))
-        .count();
+/// This is punctuation-dependent, exactly like code presence and math symbols,
+/// so it MUST read the raw text. On the normalized text `"[[2,1],[1,2]]"`
+/// collapses to bare `" 2 1 1 2 "` and every stray digit becomes a "list
+/// marker"; `"127.0.0.1"`, `"gpt-4.1"` and `"3.14"` do the same. Requiring the
+/// terminator AND a token boundary on both sides rejects all of those: a
+/// `split_whitespace` token is bounded by whitespace or the string ends, which
+/// is precisely the "followed by whitespace or end-of-string" condition.
+fn count_numeric_list_markers(text: &str) -> usize {
+    text.split_whitespace()
+        .filter(|token| {
+            let digits = match token.strip_suffix('.') {
+                Some(d) => d,
+                None => match token.strip_suffix(')') {
+                    Some(d) => d,
+                    None => return false,
+                },
+            };
+            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        })
+        .count()
+}
+
+/// Map a raw match count onto the shared 0.0-1.0 density scale.
+fn density_score(matches: usize) -> f64 {
     match matches {
         0 => 0.0,
         1 => 0.3,
         2 => 0.6,
         _ => 1.0,
     }
+}
+
+/// Count keywords present in `normalized`.
+///
+/// `normalized` MUST come from [`normalize_for_keywords`]; keywords are matched
+/// on word/phrase boundaries, never as bare substrings.
+fn count_keywords(normalized: &str, keywords: &[&str]) -> usize {
+    keywords
+        .iter()
+        .filter(|k| normalized.contains(&normalize_for_keywords(k)))
+        .count()
+}
+
+/// Score keyword density: returns 0.0-1.0 based on how many keywords are found.
+fn score_keyword_density(normalized: &str, keywords: &[&str]) -> f64 {
+    density_score(count_keywords(normalized, keywords))
 }
 
 /// Score code presence: backticks, common keywords, indentation patterns.
@@ -299,8 +328,8 @@ fn score_code_presence(text: &str) -> f64 {
     // `"let "` still matches the English "let me", and `"const "`/`"var "` are
     // matched against RAW text (trailing space), so they are not word-bounded.
     // MEASURED 2026-07-08: dropping `let`/`const`/`var` costs accuracy —
-    // 57.53% -> 56.16% alone, 54.79% on top of dropping `-`/`/` from
-    // `score_math_presence`. Left in place pending an operator decision.
+    // 56.16% -> 54.79% alone, 53.42% on top of dropping `-`/`/` from
+    // `score_math_presence`. Operator decision: leave as-is until Tier 2.
     let code_keywords = [
         "function", "class", "def ", "fn ", "impl ", "struct ", "const ", "let ", "var ", "import",
         "return", "async", "await",
@@ -320,17 +349,20 @@ fn score_code_presence(text: &str) -> f64 {
 /// currently acting as a proxy for "punctuation-rich technical writing" and is
 /// propping those prompts over the 0.2 Complex threshold:
 ///
-///   drop `/` alone      57.53% -> 57.53%  (zero rows move)
-///   drop `-` alone      57.53% -> 57.53%  (2 rows move, both further from spec)
-///   drop `*` alone      57.53% -> 57.53%  (1 row moves, further from spec)
-///   drop `-` and `/`    57.53% -> 56.16%  (the multiplayer/UDP row falls
+///   drop `/` alone      56.16% -> 56.16%
+///   drop `-` alone      56.16% -> 56.16%
+///   drop `*` alone      56.16% -> 56.16%
+///   drop `-` and `/`    56.16% -> 54.79%  (the multiplayer/UDP row falls
 ///                                          Complex -> Medium, and Complex is
 ///                                          its `intended` value)
-///   drop `-`, `/`, `*`  57.53% -> 56.16%
+///   drop `-`, `/`, `*`  56.16% -> 54.79%
 ///
 /// The real defect is under-scoring of long analytical prompts (weights /
 /// `Tier::from_score` thresholds), which is deliberately Tier-2 work. Fix that
-/// first, then delete these symbols.
+/// first, then delete these symbols. Removing the spurious numeric-list-marker
+/// signal (see [`count_numeric_list_markers`]) cost accuracy for the same
+/// reason and on overlapping rows — two independent pieces of evidence that the
+/// 0.2 Complex cutoff is too high, not that the signals were right.
 fn score_math_presence(text: &str) -> f64 {
     let mut score = 0.0;
     let math_indicators = ["=", "+", "-", "*", "/", "∑", "∫", "∀", "∃", "≥", "≤"];
@@ -433,6 +465,37 @@ mod tests {
     fn hyphenated_phrases_match_spaced_keywords() {
         let haystack = normalize_for_keywords("Walk me through this step-by-step: how?");
         assert_eq!(score_keyword_density(&haystack, &["step by step"]), 0.3);
+    }
+
+    /// Numeric list markers are punctuation, so they are detected on the RAW
+    /// text. A digit is only a list marker when it is a whole whitespace-
+    /// delimited token ending in exactly one `.` or `)`.
+    #[test]
+    fn numeric_list_markers_need_a_terminator_and_token_boundaries() {
+        assert_eq!(
+            count_numeric_list_markers("1. Read the CSV file. 2. Parse the rows."),
+            2
+        );
+        assert_eq!(count_numeric_list_markers("1) alpha 2) beta 10. gamma"), 3);
+        // Trailing marker at end-of-string still counts.
+        assert_eq!(count_numeric_list_markers("do this 1."), 1);
+
+        // ...and none of these are list markers.
+        for text in [
+            "Find the eigenvalues of the matrix [[2,1],[1,2]].",
+            "Getting ECONNREFUSED 127.0.0.1:5432 from my Node app.",
+            "Use gpt-4.1 for this.",
+            "pi is roughly 3.14",
+            "Solve for x: 2x + 5 = 13",
+            "What is 17 * 24?",
+            "1.Read the file",
+        ] {
+            assert_eq!(
+                count_numeric_list_markers(text),
+                0,
+                "false positive: {text}"
+            );
+        }
     }
 
     /// Code presence and math/logic read punctuation the normalizer destroys —
