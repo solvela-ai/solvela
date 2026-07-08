@@ -131,9 +131,11 @@ type Resource struct {
 }
 
 // Scheme is the x402 payment scheme. Mirrors Python's
-// `Scheme = Literal["exact", "escrow"]` + `_KNOWN_SCHEMES` guard: a gateway
-// response carrying an unknown scheme is rejected at parse time rather than
-// silently mis-branching at scheme-matching time.
+// `Scheme = Literal["exact", "escrow"]` + `_KNOWN_SCHEMES` guard: a directly
+// decoded PaymentAccept carrying an unknown scheme is rejected at parse time
+// rather than silently mis-branching at scheme-matching time. A 402 body
+// advertising a scheme not in this set still parses — the entry is
+// skipped-and-represented (see PaymentRequired.UnmarshalJSON), never selected.
 type Scheme string
 
 const (
@@ -184,12 +186,67 @@ func (p *PaymentAccept) UnmarshalJSON(data []byte) error {
 }
 
 // PaymentRequired represents a 402 Payment Required response.
+//
+// Accepts holds only the entries whose scheme this SDK implements; entries
+// with an unrecognized scheme (e.g. a future "channel" advert) are skipped at
+// parse time and represented in UnrecognizedSchemes (SDK-side only — never
+// serialized back to the wire). Skipping is forward-compatibility, NOT
+// selection: findCompatibleScheme stays fail-closed and the client surfaces a
+// PaymentRequiredError when no recognized entry remains.
 type PaymentRequired struct {
 	X402Version   int             `json:"x402_version"`
 	Resource      Resource        `json:"resource"`
 	Accepts       []PaymentAccept `json:"accepts"`
 	CostBreakdown CostBreakdown   `json:"cost_breakdown"`
 	Error         string          `json:"error"`
+	// UnrecognizedSchemes lists the (truncated) scheme strings of accepts[]
+	// entries skipped during decoding. Diagnostic only — never selectable.
+	UnrecognizedSchemes []string `json:"-"`
+}
+
+// UnmarshalJSON decodes a PaymentRequired tolerantly at the accepts[] level:
+// entries carrying a scheme this SDK does not implement are skipped and
+// represented in UnrecognizedSchemes instead of poisoning the whole 402
+// (Slice B of the channel plan — forward compatibility with future schemes).
+// Known-scheme entries stay fully strict: a malformed exact/escrow advert is
+// still a loud parse failure, never signable.
+func (p *PaymentRequired) UnmarshalJSON(data []byte) error {
+	type alias PaymentRequired
+	aux := &struct {
+		Accepts []json.RawMessage `json:"accepts"`
+		*alias
+	}{alias: (*alias)(p)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	p.Accepts = nil
+	p.UnrecognizedSchemes = nil
+	for _, raw := range aux.Accepts {
+		var peek struct {
+			Scheme string `json:"scheme"`
+		}
+		if err := json.Unmarshal(raw, &peek); err != nil {
+			// Not even an object with a string scheme — an entry this SDK
+			// cannot understand must not poison the entries it CAN pay.
+			p.UnrecognizedSchemes = append(p.UnrecognizedSchemes, "<unparseable>")
+			continue
+		}
+		if _, err := parseScheme(peek.Scheme); err != nil {
+			// Skip-or-represent, never select. Truncated — untrusted data.
+			s := peek.Scheme
+			if len(s) > 64 {
+				s = s[:64]
+			}
+			p.UnrecognizedSchemes = append(p.UnrecognizedSchemes, s)
+			continue
+		}
+		var accept PaymentAccept
+		if err := json.Unmarshal(raw, &accept); err != nil {
+			return err
+		}
+		p.Accepts = append(p.Accepts, accept)
+	}
+	return nil
 }
 
 // CostBreakdown provides the cost details for a request.

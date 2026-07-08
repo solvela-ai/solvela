@@ -1,16 +1,19 @@
 package solvela
 
-// Cross-SDK 402-parse smoke (channel plan PR-B, invariant 12 / HALT 12).
+// Cross-SDK 402-parse smoke (channel plan PR-B / Slice B).
 //
 // Parses the LIVE gateway 402 challenge fixture shared with the TS and Python
 // SDK suites (crates/gateway/tests/fixtures/chat_402_challenge.json, pinned
 // byte-shape-identical to the real route by the gateway integration test
 // x402_challenge_smoke_tests::live_402_body_matches_cross_sdk_fixture).
 //
-// PaymentAccept.UnmarshalJSON rejects the ENTIRE 402 on any unknown scheme, so
-// a gateway that ever advertised a new scheme (e.g. "channel") in accepts[]
-// would break every deployed paid call at parse time — the memorialized
-// cross-repo wire-drift failure mode. This smoke is the standing tripwire.
+// Since Slice B (channel plan §7), PaymentRequired.UnmarshalJSON SKIPS
+// unknown-scheme entries (representing them in UnrecognizedSchemes) instead
+// of rejecting the whole 402 — a gateway advertising a new scheme (e.g.
+// "channel") in accepts[] no longer breaks deployed paid calls at parse time.
+// The direct per-entry parser (PaymentAccept.UnmarshalJSON) stays strict, and
+// scheme selection stays fail-closed (skip is never select). This smoke pins
+// that tolerance against the live fixture shape.
 
 import (
 	"encoding/json"
@@ -42,7 +45,7 @@ func TestLive402FixtureParses(t *testing.T) {
 	}
 }
 
-func TestLive402FixtureWithChannelSchemeRejected(t *testing.T) {
+func TestLive402FixtureWithChannelSchemeParsesAndKeepsExact(t *testing.T) {
 	data, err := os.ReadFile(x402FixturePath)
 	if err != nil {
 		t.Fatalf("read shared 402 fixture: %v", err)
@@ -71,10 +74,20 @@ func TestLive402FixtureWithChannelSchemeRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal mutated fixture: %v", err)
 	}
+	var orig PaymentRequired
+	if err := json.Unmarshal(data, &orig); err != nil {
+		t.Fatalf("unmutated fixture must parse: %v", err)
+	}
 	var pr PaymentRequired
-	if err := json.Unmarshal(body, &pr); err == nil {
-		t.Fatal("a 402 carrying an unknown scheme must be rejected at parse time — " +
-			"this strictness is why the gateway must never advertise 'channel' " +
-			"in accepts[] (invariant 12 / HALT 12)")
+	if err := json.Unmarshal(body, &pr); err != nil {
+		t.Fatalf("Slice B tolerance: a channel advert must not poison the 402 parse: %v", err)
+	}
+	// The known entries survive unchanged for fail-closed selection; the
+	// unknown one is represented, never selected.
+	if len(pr.Accepts) != len(orig.Accepts) {
+		t.Fatalf("known accepts entries must survive: got %d, want %d", len(pr.Accepts), len(orig.Accepts))
+	}
+	if len(pr.UnrecognizedSchemes) != 1 || pr.UnrecognizedSchemes[0] != "channel" {
+		t.Fatalf("skipped schemes must be represented, got %v", pr.UnrecognizedSchemes)
 	}
 }

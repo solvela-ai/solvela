@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, NewType, get_args
 
@@ -32,6 +32,8 @@ _KNOWN_FINISH_REASONS: frozenset[str] = frozenset(get_args(FinishReason))
 
 # x402 schemes recognized by this client. Adding a new scheme requires updating
 # `_find_compatible_scheme` in client.py and the `Scheme` Literal below.
+# A 402 body advertising a scheme NOT in this set still parses — the entry is
+# skipped-and-represented (see `PaymentRequired.from_dict`), never selected.
 Scheme = Literal["exact", "escrow"]
 _KNOWN_SCHEMES: frozenset[str] = frozenset(get_args(Scheme))
 
@@ -564,13 +566,22 @@ class CostBreakdown:
 
 @dataclass
 class PaymentRequired:
-    """402 Payment Required response body."""
+    """402 Payment Required response body.
+
+    ``accepts`` holds only the entries whose scheme this SDK implements;
+    entries with an unrecognized scheme (e.g. a future ``channel`` advert)
+    are skipped at parse time and represented in ``unrecognized_schemes``
+    (SDK-side only — never serialized back to the wire). Skipping is
+    forward-compatibility, NOT selection: scheme selection stays fail-closed
+    and errors loudly when no recognized entry remains.
+    """
 
     x402_version: int
     resource: Resource
     accepts: list[PaymentAccept]
     cost_breakdown: CostBreakdown
     error: str
+    unrecognized_schemes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -583,12 +594,27 @@ class PaymentRequired:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PaymentRequired:
+        accepts: list[PaymentAccept] = []
+        unrecognized: list[str] = []
+        for entry in data["accepts"]:
+            scheme = entry.get("scheme") if isinstance(entry, dict) else None
+            if isinstance(scheme, str) and scheme in _KNOWN_SCHEMES:
+                # Known-scheme entries stay fully strict — a malformed exact/
+                # escrow advert is still a loud parse failure, never signable.
+                accepts.append(PaymentAccept.from_dict(entry))
+            else:
+                # Skip-or-represent, never select: an entry this SDK cannot
+                # understand (unknown scheme, or no parseable scheme at all)
+                # must not poison the whole 402 for the entries it CAN pay.
+                # Truncated repr — the value is untrusted gateway data.
+                unrecognized.append(str(scheme)[:64])
         return cls(
             x402_version=data["x402_version"],
             resource=Resource.from_dict(data["resource"]),
-            accepts=[PaymentAccept.from_dict(a) for a in data["accepts"]],
+            accepts=accepts,
             cost_breakdown=CostBreakdown.from_dict(data["cost_breakdown"]),
             error=data["error"],
+            unrecognized_schemes=unrecognized,
         )
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from solvela.client import SolvelaClient
@@ -429,6 +431,67 @@ class TestFindCompatibleScheme:
         )
         with pytest.raises(ClientError, match="No compatible payment scheme"):
             client._find_compatible_scheme(pr)
+
+
+class TestTolerantSchemeParsing:
+    """Slice B (channel-on-A2A plan §7): unknown/``channel`` accepts[] entries
+    parse without poisoning the 402 body (skip-or-represent), while scheme
+    SELECTION stays fail-closed — an unknown scheme is never silently picked.
+    """
+
+    def _body(self, schemes: list[str]) -> dict[str, Any]:
+        def entry(scheme: str) -> dict[str, Any]:
+            e: dict[str, Any] = {
+                "scheme": scheme,
+                "network": SOLANA_NETWORK,
+                "amount": "1000",
+                "asset": USDC_MINT,
+                "pay_to": "RecipientPubkey111111111111111111111111111",
+                "max_timeout_seconds": 300,
+            }
+            if scheme == "channel":
+                # A future channel advert need not carry the exact/escrow
+                # field set — tolerance must not depend on the entry's shape.
+                del e["max_timeout_seconds"]
+                e["channel_id"] = "Chan111111111111111111111111111111111111111"
+            return e
+
+        return {
+            "x402_version": 2,
+            "resource": {
+                "url": "https://gw.test/v1/chat/completions",
+                "method": "POST",
+            },
+            "accepts": [entry(s) for s in schemes],
+            "cost_breakdown": {
+                "provider_cost": "950",
+                "platform_fee": "50",
+                "total": "1000",
+                "currency": "USDC",
+                "fee_percent": 5,
+            },
+            "error": "Payment required",
+        }
+
+    def test_accepts_with_channel_entry_parses_and_selects_exact(self) -> None:
+        # The plan-mandated Slice B contract: a 402 offering BOTH a channel
+        # entry and an exact entry parses, and selection picks the same exact
+        # entry it would have picked without the channel entry present.
+        pr = PaymentRequired.from_dict(self._body(["channel", "exact"]))
+        assert [a.scheme for a in pr.accepts] == ["exact"]
+        assert pr.unrecognized_schemes == ["channel"]
+        accept = SolvelaClient(config=ClientConfig())._find_compatible_scheme(pr)
+        assert accept.scheme == "exact"
+
+    def test_accepts_with_only_unknown_schemes_fails_selection_loudly(self) -> None:
+        # Skip never becomes select: a body offering ONLY schemes this SDK
+        # does not implement must parse (no crash) and then fail selection
+        # loudly — no silent signing against an unknown scheme.
+        pr = PaymentRequired.from_dict(self._body(["channel"]))
+        assert pr.accepts == []
+        assert pr.unrecognized_schemes == ["channel"]
+        with pytest.raises(ClientError, match="No compatible payment scheme"):
+            SolvelaClient(config=ClientConfig())._find_compatible_scheme(pr)
 
 
 def _accept_escrow() -> PaymentAccept:

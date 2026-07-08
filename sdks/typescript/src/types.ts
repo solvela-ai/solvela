@@ -299,11 +299,13 @@ export class ChatChunk {
 // ── Payment types ──
 
 /**
- * Known x402 payment schemes. A gateway response carrying an unknown scheme
- * indicates either a malformed payload or a protocol upgrade the SDK has
- * not been taught yet; either way, fail fast at parse time rather than
- * silently mis-branching at the scheme-matching call site. Mirrors Python's
- * `Scheme = Literal["exact", "escrow"]` + `_KNOWN_SCHEMES` guard.
+ * Known x402 payment schemes. A directly parsed PaymentAccept carrying an
+ * unknown scheme indicates either a malformed payload or a protocol upgrade
+ * the SDK has not been taught yet; either way, fail fast at parse time rather
+ * than silently mis-branching at the scheme-matching call site. Mirrors
+ * Python's `Scheme = Literal["exact", "escrow"]` + `_KNOWN_SCHEMES` guard.
+ * A 402 body advertising a scheme not in this set still parses — the entry is
+ * skipped-and-represented (see `PaymentRequired.fromJSON`), never selected.
  */
 export type Scheme = 'exact' | 'escrow';
 
@@ -403,6 +405,16 @@ export class CostBreakdown {
   }
 }
 
+/**
+ * 402 Payment Required response body.
+ *
+ * `accepts` holds only the entries whose scheme this SDK implements; entries
+ * with an unrecognized scheme (e.g. a future `channel` advert) are skipped at
+ * parse time and represented in `unrecognizedSchemes` (SDK-side only — never
+ * serialized back to the wire). Skipping is forward-compatibility, NOT
+ * selection: scheme selection stays fail-closed and the client throws
+ * PaymentRequiredError when no recognized entry remains.
+ */
 export class PaymentRequired {
   constructor(
     public readonly x402Version: number,
@@ -410,6 +422,7 @@ export class PaymentRequired {
     public readonly accepts: PaymentAccept[],
     public readonly costBreakdown: CostBreakdown,
     public readonly error: string,
+    public readonly unrecognizedSchemes: readonly string[] = [],
   ) {}
 
   toJSON(): Record<string, unknown> {
@@ -424,12 +437,29 @@ export class PaymentRequired {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static fromJSON(data: any): PaymentRequired {
+    const accepts: PaymentAccept[] = [];
+    const unrecognized: string[] = [];
+    for (const entry of data.accepts ?? []) {
+      const scheme = (entry as { scheme?: unknown } | null)?.scheme;
+      if (typeof scheme === 'string' && KNOWN_SCHEMES.has(scheme)) {
+        // Known-scheme entries stay fully strict — a malformed exact/escrow
+        // advert is still a loud parse failure, never signable.
+        accepts.push(PaymentAccept.fromJSON(entry));
+      } else {
+        // Skip-or-represent, never select: an entry this SDK cannot
+        // understand (unknown scheme, or no parseable scheme at all) must
+        // not poison the whole 402 for the entries it CAN pay (Slice B of
+        // the channel plan). Truncated — the value is untrusted gateway data.
+        unrecognized.push(String(scheme).slice(0, 64));
+      }
+    }
     return new PaymentRequired(
       data.x402_version,
       Resource.fromJSON(data.resource),
-      (data.accepts ?? []).map((a: unknown) => PaymentAccept.fromJSON(a)),
+      accepts,
       CostBreakdown.fromJSON(data.cost_breakdown),
       data.error,
+      unrecognized,
     );
   }
 }

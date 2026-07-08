@@ -11,6 +11,7 @@ import {
   SignerError,
   AmountExceedsMaxError,
   EscrowProgramMismatchError,
+  PaymentRequiredError,
 } from '../../src/errors.js';
 import type { Signer } from '../../src/signer.js';
 import type { Resource } from '../../src/types.js';
@@ -26,6 +27,7 @@ import { SOLANA_NETWORK, USDC_MINT, MAINNET_ESCROW_PROGRAM_ID } from '../../src/
 
 class StubSigner implements Signer {
   public called = false;
+  public lastAccepted?: PaymentAccept;
   async signPayment(
     _amount: number,
     _recipient: string,
@@ -33,6 +35,7 @@ class StubSigner implements Signer {
     accepted: PaymentAccept,
   ): Promise<PaymentPayload> {
     this.called = true;
+    this.lastAccepted = accepted;
     return new PaymentPayload(
       2,
       resource,
@@ -391,6 +394,90 @@ describe('Security: Scheme literal validation', () => {
     expect(() =>
       PaymentAccept.fromJSON({ ...validBase, scheme: 'escrow' }),
     ).not.toThrow();
+  });
+});
+
+// Slice B (channel-on-A2A plan §7): unknown/`channel` accepts[] entries parse
+// without poisoning the 402 body (skip-or-represent), while scheme SELECTION
+// stays fail-closed — an unknown scheme is never silently picked.
+describe('Slice B: tolerant channel-scheme parsing', () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  // A future channel advert need not carry the exact/escrow field set —
+  // tolerance must not depend on the entry's shape.
+  const channelEntry = {
+    scheme: 'channel',
+    network: SOLANA_NETWORK,
+    amount: '1000000',
+    asset: USDC_MINT,
+    pay_to: '11111111111111111111111111111111',
+    channel_id: 'Chan111111111111111111111111111111111111111',
+  };
+
+  it('accepts_with_channel_entry_parses_and_selects_exact', async () => {
+    const body = pr({});
+    (body.accepts as unknown[]).unshift(channelEntry);
+
+    // Parse: the unknown entry is skipped-and-represented, never poisoning
+    // the exact entry the client can actually pay.
+    const parsed = PaymentRequired.fromJSON(body);
+    expect(parsed.accepts.map((a) => a.scheme)).toEqual(['exact']);
+    expect(parsed.unrecognizedSchemes).toEqual(['channel']);
+
+    // Real path: 402 -> sign -> retry -> 200; the signer must be handed the
+    // same exact entry it would have received without the channel entry.
+    const success = {
+      id: 'chatcmpl-1',
+      object: 'chat.completion',
+      created: 123,
+      model: 'gpt-4',
+      choices: [
+        { index: 0, message: { role: 'assistant', content: 'Hi!' }, finish_reason: 'stop' },
+      ],
+      usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+    };
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 402,
+        json: () => Promise.resolve(body),
+        body: null,
+        statusText: 'Payment Required',
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        json: () => Promise.resolve(success),
+        body: null,
+        statusText: 'OK',
+      }) as unknown as typeof fetch;
+
+    const signer = new StubSigner();
+    const client = new SolvelaClient({ signer });
+    const result = await client.chat(
+      new ChatRequest('gpt-4', [new ChatMessage('user', 'Hi')]),
+    );
+    expect(result.choices[0].message.content).toBe('Hi!');
+    expect(signer.lastAccepted?.scheme).toBe('exact');
+  });
+
+  it('a body offering ONLY unknown schemes fails selection loudly (no silent signing)', async () => {
+    const body = { ...pr({}), accepts: [channelEntry] };
+    // Parse must not crash...
+    const parsed = PaymentRequired.fromJSON(body);
+    expect(parsed.accepts).toEqual([]);
+    expect(parsed.unrecognizedSchemes).toEqual(['channel']);
+
+    // ...and the client fails closed instead of silently signing.
+    mockFetchOnce(402, body);
+    const signer = new StubSigner();
+    const client = new SolvelaClient({ signer });
+    await expect(
+      client.chat(new ChatRequest('gpt-4', [new ChatMessage('user', 'Hi')])),
+    ).rejects.toThrow(PaymentRequiredError);
+    expect(signer.called).toBe(false);
   });
 });
 
