@@ -131,7 +131,7 @@ const TABLE: &[Row] = &[
         prompt: "Getting ECONNREFUSED 127.0.0.1:5432 when connecting to Postgres from my Node app. Any idea why?",
         has_tools: false,
         intended: Tier::Medium,
-        current: Tier::Simple,
+        current: Tier::Medium,
     },
     Row {
         prompt: "This SQL query throws an error: column \"user_id\" does not exist. Query: ```SELECT user_id FROM orders```",
@@ -171,12 +171,12 @@ const TABLE: &[Row] = &[
         current: Tier::Medium,
     },
     // --- Hard short math one-liners (7) ---
-    Row { prompt: "Integrate x^2 * e^x dx", has_tools: false, intended: Tier::Reasoning, current: Tier::Simple },
+    Row { prompt: "Integrate x^2 * e^x dx", has_tools: false, intended: Tier::Reasoning, current: Tier::Medium },
     Row { prompt: "Prove sqrt(2) is irrational.", has_tools: false, intended: Tier::Reasoning, current: Tier::Medium },
     Row { prompt: "What is the derivative of sin(x) * cos(x)?", has_tools: false, intended: Tier::Complex, current: Tier::Simple },
     Row { prompt: "Solve for x: 2x + 5 = 13", has_tools: false, intended: Tier::Simple, current: Tier::Simple },
     Row { prompt: "Prove that the sum of two even numbers is even.", has_tools: false, intended: Tier::Complex, current: Tier::Medium },
-    Row { prompt: "Find the eigenvalues of the matrix [[2,1],[1,2]].", has_tools: false, intended: Tier::Complex, current: Tier::Simple },
+    Row { prompt: "Find the eigenvalues of the matrix [[2,1],[1,2]].", has_tools: false, intended: Tier::Complex, current: Tier::Medium },
     Row { prompt: "What is 17 * 24?", has_tools: false, intended: Tier::Simple, current: Tier::Simple },
     // --- Long analytical / comparison prompts (6) ---
     Row {
@@ -201,7 +201,7 @@ const TABLE: &[Row] = &[
         prompt: "We're redesigning the API layer for a mobile app that currently makes an average of fourteen sequential REST requests to render a single product detail screen, causing noticeable load times on slower networks, and the team is split between migrating to GraphQL to let the client request exactly the fields it needs in one round trip, versus aggressively restructuring our REST endpoints with better resource composition and adding a BFF (backend-for-frontend) layer that batches the existing calls server-side. GraphQL would solve the over-fetching and under-fetching problem elegantly and give frontend engineers more autonomy to iterate without waiting on backend endpoint changes, but it introduces new operational concerns: query complexity analysis to prevent expensive nested queries from overloading the database, N+1 query problems that require a dataloader pattern to avoid, and a steeper learning curve for the two backend engineers who've never worked with it. The BFF approach keeps our existing REST knowledge but adds another service to maintain and doesn't solve the underlying schema rigidity problem long-term. Given our team's REST-heavy experience, our database's current load headroom, and a three-month deadline before the next major app release, analyze which approach better balances short-term delivery risk against long-term API flexibility.",
         has_tools: false,
         intended: Tier::Reasoning,
-        current: Tier::Medium,
+        current: Tier::Complex,
     },
     Row {
         prompt: "We're building a real-time multiplayer game that needs to synchronize player positions, actions, and world state across up to sixty-four concurrent players per match, with a target of sub-100-millisecond perceived input latency even on moderately lossy mobile networks, and I need to decide on the transport protocol for the game state synchronization channel. TCP guarantees in-order, reliable delivery, which sounds appealing for correctness, but its head-of-line blocking means a single dropped packet stalls delivery of every subsequent packet until retransmission completes, which is exactly the kind of latency spike that ruins a fast-paced game; UDP has no such guarantee but lets us implement our own lightweight reliability layer on top, sending frequent position updates where a dropped packet just means we use the next one, while layering acknowledgment-based reliability only on critical events like item pickups or match-ending actions. We're also considering WebRTC data channels for browser clients, which use SCTP over UDP and support both reliable and unreliable ordered/unordered delivery modes per channel. Evaluate the tradeoffs of raw UDP with a custom reliability layer versus WebRTC data channels versus falling back to TCP with aggressive tuning, given our latency target, our need to support both native mobile clients and a browser client, and a two-person networking team with limited game-netcode experience.",
@@ -267,7 +267,7 @@ const TABLE: &[Row] = &[
         prompt: "Design a caching layer that stays within a strict memory budget of 100MB while maintaining sub-millisecond lookups.",
         has_tools: false,
         intended: Tier::Complex,
-        current: Tier::Simple,
+        current: Tier::Medium,
     },
     Row {
         prompt: "Do you know the difference between TCP and UDP?",
@@ -291,7 +291,7 @@ const TABLE: &[Row] = &[
         prompt: "Walk me through this step-by-step: how do I set up a Postgres replica?",
         has_tools: false,
         intended: Tier::Medium,
-        current: Tier::Simple,
+        current: Tier::Medium,
     },
     Row {
         prompt: "What do you know about well-known distributed consensus algorithms like Raft?",

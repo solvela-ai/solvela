@@ -28,6 +28,11 @@ const WEIGHTS: [f64; 15] = [
 /// <1 microsecond per classification.
 pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> ScorerResult {
     let text = concatenate_user_content(messages);
+    // Word-boundary view of the same text, built once. Used ONLY by the
+    // keyword-density dimensions (3, 4, 5, 6, 7, 9, 14, 15). Dimensions 2
+    // (code presence) and 10 (math/logic) read punctuation — backticks,
+    // `"def "`, `=`, `+` — and must keep the RAW text.
+    let normalized = normalize_for_keywords(&text);
     let word_count = text.split_whitespace().count();
     let msg_count = messages.len();
 
@@ -49,7 +54,7 @@ pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> 
 
     // 3. Reasoning markers
     signals[2] = score_keyword_density(
-        &text,
+        &normalized,
         &[
             "prove",
             "theorem",
@@ -65,7 +70,7 @@ pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> 
 
     // 4. Technical terms
     signals[3] = score_keyword_density(
-        &text,
+        &normalized,
         &[
             "algorithm",
             "kubernetes",
@@ -81,7 +86,7 @@ pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> 
 
     // 5. Creative markers
     signals[4] = score_keyword_density(
-        &text,
+        &normalized,
         &[
             "story",
             "poem",
@@ -95,7 +100,7 @@ pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> 
 
     // 6. Simple indicators (negative signal — pushes score down)
     signals[5] = -score_keyword_density(
-        &text,
+        &normalized,
         &[
             "what is",
             "define",
@@ -109,8 +114,15 @@ pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> 
     );
 
     // 7. Multi-step patterns
+    //
+    // Known imprecision: the list markers "1."/"2."/"3." normalize to the bare
+    // tokens " 1 "/" 2 "/" 3 ", so a stray digit ("matrix [[2,1],[1,2]]",
+    // "127.0.0.1") also counts as a list marker. The alternative — matching the
+    // literal " 1. " against normalized text — never matches at all and loses
+    // every real numbered list. Measured on the golden set the current form is
+    // net-positive; a proper list-marker regex is Tier-2 work.
     signals[6] = score_keyword_density(
-        &text,
+        &normalized,
         &[
             "first", "then", "next", "finally", "step 1", "step 2", "1.", "2.", "3.",
         ],
@@ -127,7 +139,7 @@ pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> 
 
     // 9. Agentic task markers
     signals[8] = score_keyword_density(
-        &text,
+        &normalized,
         &[
             "read file",
             "write file",
@@ -168,11 +180,14 @@ pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> 
     signals[12] = if has_tools { 0.8 } else { 0.0 };
 
     // 14. Output format complexity
-    signals[13] = score_keyword_density(&text, &["json", "csv", "xml", "markdown", "structured"]);
+    signals[13] = score_keyword_density(
+        &normalized,
+        &["json", "csv", "xml", "markdown", "structured"],
+    );
 
     // 15. Domain specificity
     signals[14] = score_keyword_density(
-        &text,
+        &normalized,
         &[
             "medical",
             "legal",
@@ -227,9 +242,46 @@ fn concatenate_user_content(messages: &[solvela_protocol::ChatMessage]) -> Strin
         .to_lowercase()
 }
 
+/// Normalize text for word-boundary keyword matching.
+///
+/// Lowercases, replaces every non-alphanumeric char with a space, collapses
+/// runs of spaces, and pads with a leading and trailing space. Matching a
+/// keyword is then `normalized.contains(&normalize_for_keywords(kw))` — the
+/// keyword normalizes to `" foo bar "`, so it can only match on true
+/// word/phrase boundaries.
+///
+/// This is what stops `"hi"` firing inside "within", `"no"` inside "know",
+/// `"edit"` inside "credit", and `"class"` inside "classification"; it also
+/// makes hyphenated phrasings ("step-by-step") match their spaced keywords
+/// ("step by step") for free.
+///
+/// NOT for the code-presence or math/logic dimensions: both read punctuation
+/// this deliberately destroys.
+fn normalize_for_keywords(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(' ');
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            out.extend(ch.to_lowercase());
+        } else if !out.ends_with(' ') {
+            out.push(' ');
+        }
+    }
+    if !out.ends_with(' ') {
+        out.push(' ');
+    }
+    out
+}
+
 /// Score keyword density: returns 0.0-1.0 based on how many keywords are found.
-fn score_keyword_density(text: &str, keywords: &[&str]) -> f64 {
-    let matches = keywords.iter().filter(|k| text.contains(**k)).count();
+///
+/// `normalized` MUST come from [`normalize_for_keywords`]; keywords are matched
+/// on word/phrase boundaries, never as bare substrings.
+fn score_keyword_density(normalized: &str, keywords: &[&str]) -> f64 {
+    let matches = keywords
+        .iter()
+        .filter(|k| normalized.contains(&normalize_for_keywords(k)))
+        .count();
     match matches {
         0 => 0.0,
         1 => 0.3,
@@ -325,6 +377,50 @@ mod tests {
         let without_tools = classify(&messages, false);
         let with_tools = classify(&messages, true);
         assert!(with_tools.score > without_tools.score);
+    }
+
+    #[test]
+    fn normalize_collapses_punctuation_and_pads_boundaries() {
+        assert_eq!(
+            normalize_for_keywords("Step-by-step: DO it!"),
+            " step by step do it "
+        );
+        assert_eq!(normalize_for_keywords(""), " ");
+    }
+
+    /// Keyword-density dimensions must match whole words/phrases, never bare
+    /// substrings. Before this, the NEGATIVE simple-indicator "hi" fired inside
+    /// "within" and "no" inside "know", systematically dragging ordinary
+    /// prompts toward Simple; "edit" fired in "credit".
+    #[test]
+    fn keyword_density_matches_on_word_boundaries_only() {
+        let haystack = normalize_for_keywords("Within, you know your credit score.");
+        assert_eq!(score_keyword_density(&haystack, &["hi", "no"]), 0.0);
+        assert_eq!(score_keyword_density(&haystack, &["edit"]), 0.0);
+
+        // ...but the real words still match.
+        let real = normalize_for_keywords("Hi! No thanks.");
+        assert_eq!(score_keyword_density(&real, &["hi", "no"]), 0.6);
+    }
+
+    /// FIX 4: hyphenated phrasing matches the spaced multi-word keyword.
+    #[test]
+    fn hyphenated_phrases_match_spaced_keywords() {
+        let haystack = normalize_for_keywords("Walk me through this step-by-step: how?");
+        assert_eq!(score_keyword_density(&haystack, &["step by step"]), 0.3);
+    }
+
+    /// Code presence and math/logic read punctuation the normalizer destroys —
+    /// they must keep the RAW text. A regression here silently zeroes a
+    /// dimension.
+    #[test]
+    fn code_and_math_dimensions_read_raw_punctuation() {
+        let code = "```rust\nfn main() {}\n```";
+        assert!(score_code_presence(code) > score_code_presence(&normalize_for_keywords(code)));
+
+        let math = "solve x = 2 + 2 * 3";
+        assert!(score_math_presence(math) > 0.0);
+        assert_eq!(score_math_presence(&normalize_for_keywords(math)), 0.0);
     }
 
     #[test]
