@@ -670,6 +670,10 @@ pub async fn proxy_service(
         // cost. None preserves the legacy behavior here.
         estimated_cost_usdc: None,
         vendor: payment_target.into_vendor_settlement(),
+        // The service-marketplace proxy never runs the smart router — no
+        // routing telemetry.
+        routing_tier: None,
+        routing_score: None,
     };
     // Record spend + receipt UNCONDITIONALLY at settlement time, for both
     // vendor and plain services (#556). `log_spend` is fire-and-forget (it

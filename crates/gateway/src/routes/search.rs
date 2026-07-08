@@ -602,6 +602,9 @@ pub async fn search(
         // Internal gateway-hosted tool pays the gateway recipient — no vendor
         // settlement leg (that path is for external `vendor_wallet` services).
         vendor: None,
+        // Search never runs the smart router — no routing telemetry.
+        routing_tier: None,
+        routing_score: None,
     };
     state.usage.log_spend(spend_entry);
     // `receipt_header_path` is `Some` only when a retrievable receipt exists (DB
@@ -987,6 +990,9 @@ async fn channel_draw_locked(
         tenant_enforced: false,
         estimated_cost_usdc: None,
         vendor: None,
+        // Search never runs the smart router — no routing telemetry.
+        routing_tier: None,
+        routing_score: None,
     };
     state.usage.log_spend(spend_entry);
     let receipt_header_path = receipts::record_receipt(state.db_pool.as_ref(), receipt_record);

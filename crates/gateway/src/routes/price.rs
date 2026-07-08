@@ -595,6 +595,9 @@ pub async fn solana_price(
         // Internal gateway-hosted tool pays the gateway recipient — no vendor
         // settlement leg.
         vendor: None,
+        // The price tool never runs the smart router — no routing telemetry.
+        routing_tier: None,
+        routing_score: None,
     };
     state.usage.log_spend(spend_entry);
     let receipt_header_path = receipts::record_receipt(state.db_pool.as_ref(), receipt_record);
@@ -946,6 +949,9 @@ async fn channel_draw_locked(
         tenant_enforced: false,
         estimated_cost_usdc: None,
         vendor: None,
+        // The price tool never runs the smart router — no routing telemetry.
+        routing_tier: None,
+        routing_score: None,
     };
     state.usage.log_spend(spend_entry);
     let receipt_header_path = receipts::record_receipt(state.db_pool.as_ref(), receipt_record);

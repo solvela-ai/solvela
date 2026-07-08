@@ -2243,6 +2243,11 @@ pub(super) fn record_a2a_settlement(
         // increments the counters by `cost_usdc` directly (None branch).
         estimated_cost_usdc: None,
         vendor: None,
+        // A2A resolves its model at message/send time but does not thread the
+        // router tier/score to this settlement site — record NULL rather than
+        // fabricate a value.
+        routing_tier: None,
+        routing_score: None,
     });
 
     // Durable receipt (fire-and-forget). Returns the public path when a DB pool
