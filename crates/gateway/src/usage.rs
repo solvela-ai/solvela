@@ -290,10 +290,19 @@ pub struct SpendLogEntry {
     /// Vendor-settlement record for marketplace services with a per-service
     /// `vendor_wallet` (settlement-platform P1). `None` on every other path.
     pub vendor: Option<VendorSettlement>,
-    /// Smart-router tier for this request (e.g. "Simple", "Complex", or "N/A"
-    /// for direct model IDs), from `resolve_model_with_debug`. Attribution/
-    /// observability only — never gates or changes billing. `None` on paths
-    /// that never run the router (service proxy, search, A2A).
+    /// Smart-router tier for this request (e.g. "Simple", "Complex"), from
+    /// `resolve_model_with_debug`. Attribution/observability only — never gates
+    /// or changes billing.
+    ///
+    /// `None` means **the router never ran** — the one encoding for that state.
+    /// It covers both the paths with no router at all (service proxy, search,
+    /// A2A) and the chat paths that resolved an alias or a direct model ID.
+    /// The `"N/A"`/`0.0` sentinel those chat paths hand to the `X-Solvela-Tier`
+    /// / `X-Solvela-Score` debug headers is *never* persisted: callers map it
+    /// via `routes::chat::routing_telemetry` first. Storing it would make
+    /// `'N/A'` a pseudo-tier in `GROUP BY` and drag `AVG(routing_score)` toward
+    /// zero. `Some(_)` therefore always denotes a real router classification —
+    /// including a genuine score of `0.0`.
     pub routing_tier: Option<String>,
     /// Smart-router score paired with `routing_tier`; same `None` semantics.
     pub routing_score: Option<f64>,

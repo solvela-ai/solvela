@@ -10,6 +10,7 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use gateway::routes::chat::{routing_telemetry, ROUTING_TIER_NOT_ROUTED};
 use gateway::usage::{
     get_stats_by_day, get_stats_by_model, get_wallet_stats, BudgetConfig, SpendLogEntry,
     UsageError, UsageTracker, VendorSettlement,
@@ -17,6 +18,7 @@ use gateway::usage::{
 
 const WALLET_A: &str = "DZNuWFpYwzEAcyaMQzqgbxA4d1f4Yq8EU2YbLPLYxNTw";
 const WALLET_B: &str = "GbZ6oTmEa9PEd6FGQEmTm3GbXCQkAGqNGGJYXrW8oQte";
+const WALLET_C: &str = "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1";
 
 /// Seed N spend rows directly via SQL — bypassing `log_spend`'s `tokio::spawn`
 /// so the read-side tests are deterministic.
@@ -308,7 +310,11 @@ async fn log_spend_persists_vendor_fee_receivable(pool: PgPool) {
 /// Routing telemetry must survive the REAL write path: `log_spend` → the
 /// actual Postgres INSERT → read the row back. A smart-routed request records
 /// its tier + score; a path with no router (proxy/search/A2A) records NULLs —
-/// never a fabricated tier.
+/// never a fabricated tier. A chat request that resolved a direct model ID (or
+/// an alias) also records NULLs: the `"N/A"`/`0.0` debug-header sentinel that
+/// `resolve_model_with_debug` produces must be mapped away by
+/// `routing_telemetry` before it can reach the ledger and pollute
+/// `GROUP BY routing_tier` / `AVG(routing_score)`.
 #[sqlx::test(migrations = "../../migrations")]
 async fn log_spend_persists_routing_telemetry(pool: PgPool) {
     let tracker = UsageTracker::new(Some(pool.clone()), None);
@@ -351,7 +357,29 @@ async fn log_spend_persists_routing_telemetry(pool: PgPool) {
         routing_score: None,
     });
 
-    // Fire-and-forget: poll until BOTH rows land (fail loud on timeout — a
+    // Direct-model-ID chat request: `resolve_model_with_debug` hands the caller
+    // the debug-header sentinel, and the caller maps it through the SAME helper
+    // production uses. The ledger must see NULL/NULL, not 'N/A'/0.0.
+    let (direct_tier, direct_score) = routing_telemetry(ROUTING_TIER_NOT_ROUTED, 0.0);
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: WALLET_C.to_string(),
+        model: "openai/gpt-4o-mini".to_string(),
+        provider: "openai".to_string(),
+        input_tokens: 5,
+        output_tokens: 7,
+        cost_usdc: 0.0005,
+        tx_signature: None,
+        request_id: Some("req-direct-model-id".to_string()),
+        session_id: None,
+        tenant: None,
+        tenant_enforced: false,
+        estimated_cost_usdc: None,
+        vendor: None,
+        routing_tier: direct_tier,
+        routing_score: direct_score,
+    });
+
+    // Fire-and-forget: poll until ALL rows land (fail loud on timeout — a
     // "no error" run with zero rows must not pass).
     let mut total: i64 = 0;
     for _ in 0..50 {
@@ -360,13 +388,13 @@ async fn log_spend_persists_routing_telemetry(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .expect("count");
-        if total == 2 {
+        if total == 3 {
             break;
         }
     }
     assert_eq!(
-        total, 2,
-        "both log_spend rows must be INSERTed into live Postgres within 1s"
+        total, 3,
+        "all three log_spend rows must be INSERTed into live Postgres within 1s"
     );
 
     let routed: (Option<String>, Option<f64>) = sqlx::query_as(
@@ -396,6 +424,40 @@ async fn log_spend_persists_routing_telemetry(pool: PgPool) {
     .expect("read back unrouted row");
     assert_eq!(unrouted.0, None, "router-less rows must record NULL tier");
     assert_eq!(unrouted.1, None, "router-less rows must record NULL score");
+
+    // Row CONTENT, not just "no error": the direct-model-ID row must be
+    // indistinguishable from the router-less row — NULL/NULL — and must NOT
+    // carry the 'N/A'/0.0 sentinel.
+    let direct: (Option<String>, Option<f64>, i32) = sqlx::query_as(
+        "SELECT routing_tier, routing_score, input_tokens FROM spend_logs WHERE wallet_address = $1",
+    )
+    .bind(WALLET_C)
+    .fetch_one(&pool)
+    .await
+    .expect("read back direct-model-id row");
+    assert_eq!(direct.2, 5, "the direct-model-id row is the one we wrote");
+    assert_eq!(
+        direct.0, None,
+        "direct-model-id rows must record NULL tier, never the 'N/A' sentinel"
+    );
+    assert_eq!(
+        direct.1, None,
+        "direct-model-id rows must record NULL score, never a fabricated 0.0"
+    );
+
+    // And the sentinel must be absent from the whole table: a single 'N/A' row
+    // would become a pseudo-tier in every GROUP BY, and a single fabricated 0.0
+    // would drag AVG(routing_score) toward zero.
+    let sentinel_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM spend_logs WHERE routing_tier = 'N/A' OR routing_score = 0.0",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("sentinel scan");
+    assert_eq!(
+        sentinel_rows, 0,
+        "the 'N/A'/0.0 debug-header sentinel must never reach spend_logs"
+    );
 }
 
 #[tokio::test]

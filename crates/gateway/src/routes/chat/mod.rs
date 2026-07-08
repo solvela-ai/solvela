@@ -340,6 +340,11 @@ pub(crate) async fn chat_completions_inner(
     let (resolved_model, routing_profile, routing_tier, routing_score) =
         resolve_model_with_debug(&req, &state)?;
     req.model = resolved_model;
+    // Ledger encoding of the router's output. The debug headers below keep the
+    // raw "N/A"/0.0 sentinel; every spend row instead stores NULL/NULL when the
+    // router never ran, so 'N/A' can't become a pseudo-tier and a non-routed
+    // request can't be mistaken for a genuine 0.0 score.
+    let (log_routing_tier, log_routing_score) = routing_telemetry(&routing_tier, routing_score);
 
     info!(
         original_model,
@@ -724,8 +729,8 @@ pub(crate) async fn chat_completions_inner(
                     tenant_enforced: false,
                     estimated_cost_usdc: None,
                     vendor: None,
-                    routing_tier: Some(routing_tier.clone()),
-                    routing_score: Some(routing_score),
+                    routing_tier: log_routing_tier.clone(),
+                    routing_score: log_routing_score,
                 });
                 Ok(result.response)
             }
@@ -1678,8 +1683,8 @@ pub(crate) async fn chat_completions_inner(
                                 tenant_enforced: budget_reservation.tenant_enforced(),
                                 estimated_cost_usdc: Some(estimated_cost),
                                 vendor: None,
-                                routing_tier: Some(routing_tier.clone()),
-                                routing_score: Some(routing_score),
+                                routing_tier: log_routing_tier.clone(),
+                                routing_score: log_routing_score,
                             });
                             // P2 receipt: same write point as the spend row —
                             // every paid completion that records spend records
@@ -1766,8 +1771,8 @@ pub(crate) async fn chat_completions_inner(
                         tenant_enforced: budget_reservation.tenant_enforced(),
                         estimated_cost_usdc: Some(estimated_cost),
                         vendor: None,
-                        routing_tier: Some(routing_tier.clone()),
-                        routing_score: Some(routing_score),
+                        routing_tier: log_routing_tier.clone(),
+                        routing_score: log_routing_score,
                     });
                     // P2 receipt: billed amount mirrors the ledger (discounted
                     // on an escrow semantic hit); the breakdown is the C1
@@ -1844,8 +1849,8 @@ pub(crate) async fn chat_completions_inner(
                         tenant_enforced: budget_reservation.tenant_enforced(),
                         estimated_cost_usdc: Some(estimated_cost),
                         vendor: None,
-                        routing_tier: Some(routing_tier.clone()),
-                        routing_score: Some(routing_score),
+                        routing_tier: log_routing_tier.clone(),
+                        routing_score: log_routing_score,
                     });
                     // P2 receipt — the STREAMING arm (the #541 bug class):
                     // every settled streaming completion records a receipt at
@@ -2480,9 +2485,38 @@ pub(crate) fn resolve_model_provider(req: &ChatRequest, state: &AppState) -> Opt
         .map(|m| m.provider.clone())
 }
 
+/// Tier sentinel meaning "the smart router never ran" — emitted verbatim in the
+/// `X-Solvela-Tier` debug header (paired with a `0.0` `X-Solvela-Score`) for the
+/// alias and direct-model-ID branches of [`resolve_model_with_debug`].
+///
+/// A **header convention only**. It must never reach the spend ledger: run it
+/// through [`routing_telemetry`] first.
+pub const ROUTING_TIER_NOT_ROUTED: &str = "N/A";
+
+/// Translate the debug-header tier/score pair into what `spend_logs` stores.
+///
+/// "The router did not run" is a single semantic state, so it gets a single
+/// encoding — `(None, None)`, i.e. the same NULL/NULL the genuinely router-less
+/// paths (service proxy, search, A2A) already write. Persisting the
+/// `"N/A"`/`0.0` sentinel instead would make `'N/A'` a pseudo-tier in `GROUP BY`,
+/// drag every `AVG(routing_score)`/percentile toward zero (direct model IDs are
+/// plausibly the bulk of paid traffic), and leave `WHERE routing_tier IS NULL`
+/// silently missing those rows.
+///
+/// A real router run that happens to score `0.0` is real data and is preserved.
+pub fn routing_telemetry(tier: &str, score: f64) -> (Option<String>, Option<f64>) {
+    if tier == ROUTING_TIER_NOT_ROUTED {
+        (None, None)
+    } else {
+        (Some(tier.to_string()), Some(score))
+    }
+}
+
 /// Resolve model ID from aliases, smart routing profiles, or direct model IDs.
 ///
 /// Returns (resolved_model, profile_name, tier_name, score) for debug headers.
+/// The non-routed branches return the [`ROUTING_TIER_NOT_ROUTED`] sentinel —
+/// callers persisting to the ledger must map it via [`routing_telemetry`].
 fn resolve_model_with_debug(
     req: &ChatRequest,
     state: &AppState,
@@ -2504,7 +2538,7 @@ fn resolve_model_with_debug(
         return Ok((
             canonical.to_string(),
             "direct".to_string(),
-            "N/A".to_string(),
+            ROUTING_TIER_NOT_ROUTED.to_string(),
             0.0,
         ));
     }
@@ -2514,7 +2548,7 @@ fn resolve_model_with_debug(
         return Ok((
             req.model.clone(),
             "direct".to_string(),
-            "N/A".to_string(),
+            ROUTING_TIER_NOT_ROUTED.to_string(),
             0.0,
         ));
     }
@@ -2550,5 +2584,26 @@ mod tests {
         assert_eq!(name.as_str(), "x-solvela-fallback");
         let legacy = HeaderName::from_static("x-rcr-fallback");
         assert_eq!(legacy.as_str(), "x-rcr-fallback");
+    }
+
+    /// The ledger must never persist the "N/A"/0.0 debug-header sentinel:
+    /// "router did not run" is NULL/NULL on the spend row, exactly like the
+    /// router-less paths (proxy/search/A2A), so routing_score aggregates are
+    /// not biased toward zero by direct-model-ID traffic.
+    #[test]
+    fn routing_telemetry_maps_sentinel_to_none() {
+        assert_eq!(
+            routing_telemetry(ROUTING_TIER_NOT_ROUTED, 0.0),
+            (None, None)
+        );
+        assert_eq!(
+            routing_telemetry("Complex", 0.87),
+            (Some("Complex".to_string()), Some(0.87))
+        );
+        // A genuine router run that scores 0.0 is still real output.
+        assert_eq!(
+            routing_telemetry("Simple", 0.0),
+            (Some("Simple".to_string()), Some(0.0))
+        );
     }
 }

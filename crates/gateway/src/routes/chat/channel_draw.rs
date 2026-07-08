@@ -73,7 +73,7 @@ use super::cost::{
 };
 use super::provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
 use super::response::build_session_token;
-use super::WireDialect;
+use super::{routing_telemetry, WireDialect};
 use crate::routes::debug_headers::PaymentStatus;
 
 /// Everything a chat channel draw needs from the shared money-path core —
@@ -611,6 +611,10 @@ async fn channel_draw_locked(
         // arms. Attribution only — the billed amount is `realized_advance`.
         None => (estimate_input_tokens(ctx.req), 0),
     };
+    // Debug headers keep the raw "N/A"/0.0 sentinel; the ledger stores NULL/NULL
+    // when the router never ran (alias / direct model ID).
+    let (log_routing_tier, log_routing_score) =
+        routing_telemetry(ctx.routing_tier, ctx.routing_score);
     ctx.state.usage.log_spend(SpendLogEntry {
         wallet_address: agent_wallet.clone(),
         model: ctx.req.model.clone(),
@@ -629,8 +633,8 @@ async fn channel_draw_locked(
         // increments the counters by `cost_usdc` directly (None branch).
         estimated_cost_usdc: None,
         vendor: None,
-        routing_tier: Some(ctx.routing_tier.to_string()),
-        routing_score: Some(ctx.routing_score),
+        routing_tier: log_routing_tier,
+        routing_score: log_routing_score,
     });
 
     // Receipt: the canonical integer split of the REALIZED total —
