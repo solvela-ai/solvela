@@ -39,7 +39,8 @@ use crate::AppState;
 /// the wire pin is `tests/fixtures/a2a_error_and_offer.json` — update both in
 /// lockstep with any change here.
 const ERR_INVALID_PARAMS: i32 = -32602;
-const ERR_INTERNAL: i32 = -32603;
+/// `pub(super)`: shared with the channel leg (`a2a/channel_leg.rs`).
+pub(super) const ERR_INTERNAL: i32 = -32603;
 /// A2A v0.3 §8.2 `TaskNotFoundError`.
 const ERR_TASK_NOT_FOUND: i32 = -32001;
 /// A2A v0.3 §8.2 `TaskNotCancelableError`.
@@ -49,9 +50,9 @@ const ERR_TASK_NOT_CANCELABLE: i32 = -32002;
 /// declares `pushNotifications: false` (NOT `-32601`). Used by the dispatcher.
 pub(crate) const ERR_PUSH_NOT_SUPPORTED: i32 = -32003;
 /// Implementation-specific: payment verification/settlement failure.
-const ERR_PAYMENT_FAILED: i32 = -32007;
+pub(super) const ERR_PAYMENT_FAILED: i32 = -32007;
 /// Implementation-specific: LLM provider failure.
-const ERR_PROVIDER_ERROR: i32 = -32008;
+pub(super) const ERR_PROVIDER_ERROR: i32 = -32008;
 /// Implementation-specific: unknown model id/alias/profile.
 const ERR_MODEL_NOT_FOUND: i32 = -32009;
 
@@ -259,6 +260,7 @@ async fn handle_new_request(
         artifact_text: None,
         tx_signature: None,
         receipt_path: None,
+        deliver_free: false,
         created_at: chrono::Utc::now(),
     };
 
@@ -414,6 +416,33 @@ async fn handle_payment_submitted(
             message: format!("Invalid payment payload: {e}"),
             data: None,
         })?;
+
+    // ── Channel kill switch (channel-on-A2A plan §5 step 1b, change 3) ──────
+    //
+    // Money-free, PRE-lock: with `channel.enabled = false` (the named Slice-A
+    // kill switch / prod rollback lever) — or without the DB pool (durable
+    // ledger) or Redis (draw lock) the draw requires — a channel-shaped
+    // submission rejects with the byte-identical pre-Slice-A message, making a
+    // disabled gateway wire-indistinguishable from one without the feature.
+    // Sits with the other #566-hoisted money-free pre-checks; config is
+    // process-static, so no under-lock re-check is needed. Mirrors the triple
+    // gate every sibling draw surface enforces (chat `channel_draw.rs`,
+    // search). The seam's pairing rejects in `settle_paid_task` are the
+    // backstop if the scheme string lies about a channel payload.
+    let channel_shaped = payload.accepted.scheme == "channel"
+        || matches!(
+            payload.payload,
+            solvela_x402::types::PayloadData::Channel(_)
+        );
+    if channel_shaped
+        && !(state.config.channel.enabled && state.db_pool.is_some() && state.cache.is_some())
+    {
+        return Err(JsonRpcErrorData {
+            code: ERR_PAYMENT_FAILED,
+            message: "channel scheme is not accepted on this endpoint".to_string(),
+            data: None,
+        });
+    }
 
     // Issue #499: reject `require_tenant = TRUE` wallets on the A2A path.
     //
@@ -914,29 +943,63 @@ async fn settle_paid_task(
         );
         Some("dev_bypass".to_string())
     } else {
-        // Replay check
-        let tx_raw = match &payload.payload {
-            solvela_x402::types::PayloadData::Direct(p) => &p.transaction,
-            solvela_x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
-            // Fail-closed: A2A is a protocol adapter (CLAUDE.md #14) with no
-            // channel-voucher path — reject a channel payload, never panic. This
-            // is the site that compile-forces the A2A channel decision.
-            //
-            // Round-1 review fix (grief-lock vector): this arm sits AFTER the
-            // Working write + lock acquisition, and the payload SHAPE is
-            // client-controlled — returning without the shared epilogue let
-            // anyone holding a task_id stick a payable task in `Working` with
-            // the lock held (up to the task TTL) with ZERO funds moving. It is
-            // the FIFTH pre-settle failure arm and routes through the same
-            // revert-then-release as the other four.
-            solvela_x402::types::PayloadData::Channel(_) => {
+        // ── Channel-voucher seam (channel-on-A2A plan §5 step 5) ────────────
+        //
+        // The former unconditional `PayloadData::Channel` reject arm is now
+        // the channel leg's entry: a well-paired ("channel", Channel)
+        // submission diverges into `settle_channel_task` — deliver-then-record
+        // (#486/D4), per-channel draw lock, `verify_voucher` — and NEVER
+        // reaches the replay / offer-validation / `verify_and_settle` sequence
+        // below. A voucher has no tx to replay or settle: its replay defense
+        // is the D3 digest binding + monotonic-cumulative + draw lock + DB CAS
+        // triad — the sanctioned `check_and_record_tx` bypass (§9 item 3),
+        // exactly as on the chat draw. The two pairing rejects mirror the chat
+        // fork (routes/chat/mod.rs): ANY channel-ish mismatch is fail-closed —
+        // never a silent fallback to an exact/escrow settle (invariant 5).
+        //
+        // All three channel-ish arms sit AFTER the Working write + settle-lock
+        // acquisition, so the reject arms route through the same shared
+        // revert-then-release epilogue as the other pre-settle failure arms
+        // (the round-1 grief-lock posture is preserved); the leg itself owns
+        // its lock/marker disposition per §5 steps 6-15. Exact/escrow
+        // submissions proceed through the existing sequence UNCHANGED
+        // (invariant 12).
+        let tx_raw = match (payload.accepted.scheme.as_str(), &payload.payload) {
+            ("channel", solvela_x402::types::PayloadData::Channel(voucher_payload)) => {
+                return super::channel_leg::settle_channel_task(
+                    state,
+                    task_id,
+                    &record,
+                    &payload,
+                    voucher_payload,
+                    &resolved_model,
+                    &model_info,
+                    messages,
+                    enforced_max_tokens,
+                )
+                .await;
+            }
+            ("channel", _) => {
                 revert_working_and_release(state, task_id).await;
                 return Err(JsonRpcErrorData {
                     code: ERR_PAYMENT_FAILED,
-                    message: "channel scheme is not accepted on this endpoint".to_string(),
+                    message: "scheme is 'channel' but the payload is not a channel voucher"
+                        .to_string(),
                     data: None,
                 });
             }
+            (_, solvela_x402::types::PayloadData::Channel(_)) => {
+                revert_working_and_release(state, task_id).await;
+                return Err(JsonRpcErrorData {
+                    code: ERR_PAYMENT_FAILED,
+                    message: "payment payload is a channel voucher but the scheme is not \
+                              'channel'"
+                        .to_string(),
+                    data: None,
+                });
+            }
+            (_, solvela_x402::types::PayloadData::Direct(p)) => &p.transaction,
+            (_, solvela_x402::types::PayloadData::Escrow(p)) => &p.deposit_tx,
         };
 
         let is_durable_nonce = crate::routes::chat::uses_durable_nonce(tx_raw);
@@ -1186,6 +1249,7 @@ async fn settle_paid_task(
                 None,
                 estimated_input_tokens,
                 &tx_signature,
+                None,
             );
             if receipt_path.is_none() {
                 tracing::error!(
@@ -1325,6 +1389,7 @@ async fn settle_paid_task(
         result.data.usage.as_ref(),
         estimated_input_tokens,
         &tx_signature,
+        None,
     );
     // Round-1 review fix (parity with the Failed arm above): a `None` here
     // means the ledger/receipt write was skipped (corrupt stored
@@ -1570,14 +1635,28 @@ fn project_task(record: &TaskRecord) -> Task {
         // output sits on the record. `status.state` still reports the honest
         // stored state (`working`).
         TaskState::Completed | TaskState::Working => {
-            let mut meta = serde_json::Map::new();
-            meta.insert(
-                x402_meta::STATUS_KEY.to_string(),
-                json!(x402_meta::PAYMENT_COMPLETED),
-            );
-            if let Some(receipts) = receipts_obj() {
-                meta.insert(x402_meta::RECEIPTS_KEY.to_string(), receipts);
-            }
+            // D5 (channel-on-A2A plan, Rev-3 item 2): a DELIVER-FREE channel
+            // completion (persist lost the close race / lock ownership — the
+            // agent was NOT debited) omits BOTH `x402.payment.status` and
+            // `x402.payment.receipts`, on this projection exactly as on the
+            // in-band response — a `tasks/get` within TTL must never report
+            // an undebited task as PAID. Keyed on the explicit record marker,
+            // never inferred from refs-absence (a failed best-effort D6 ref
+            // write on a genuinely DEBITED task must not read as unpaid).
+            // Key OMISSION only — names never change (§9 STOP).
+            let metadata = if record.deliver_free {
+                None
+            } else {
+                let mut meta = serde_json::Map::new();
+                meta.insert(
+                    x402_meta::STATUS_KEY.to_string(),
+                    json!(x402_meta::PAYMENT_COMPLETED),
+                );
+                if let Some(receipts) = receipts_obj() {
+                    meta.insert(x402_meta::RECEIPTS_KEY.to_string(), receipts);
+                }
+                Some(meta)
+            };
             let artifacts = record.artifact_text.as_ref().map(|text| {
                 vec![Artifact {
                     artifact_id: new_wire_id(),
@@ -1591,7 +1670,7 @@ fn project_task(record: &TaskRecord) -> Task {
                  record."
                     .to_string()
             });
-            (Some(agent_message(text, Some(meta))), artifacts)
+            (Some(agent_message(text, metadata)), artifacts)
         }
         TaskState::Failed => {
             let mut meta = serde_json::Map::new();
@@ -1875,12 +1954,12 @@ fn not_cancelable_for_state(task_id: &str, state: TaskState) -> JsonRpcErrorData
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Mint a v0.3 wire id (UUID v4) for `messageId` / `artifactId`.
-fn new_wire_id() -> String {
+pub(super) fn new_wire_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
 /// RFC 3339 / ISO-8601 UTC timestamp for `TaskStatus.timestamp` (A2A v0.3).
-fn now_timestamp() -> String {
+pub(super) fn now_timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
@@ -1945,7 +2024,7 @@ fn reject_for_task_state(task_id: &str, state: TaskState) -> JsonRpcErrorData {
 /// under-delivered — and the case is observable via
 /// `solvela_a2a_task_stuck_working_total` (D10-a: counter only; no alert
 /// wiring exists in-repo).
-async fn revert_working_and_release(state: &Arc<AppState>, task_id: &str) {
+pub(super) async fn revert_working_and_release(state: &Arc<AppState>, task_id: &str) {
     if let Err(e) = task_store::update_task_state(state, task_id, TaskState::InputRequired).await {
         metrics::counter!("solvela_a2a_task_stuck_working_total").increment(1);
         tracing::error!(
@@ -1979,8 +2058,15 @@ async fn revert_working_and_release(state: &Arc<AppState>, task_id: &str) {
 /// - the scheme parses through `PaymentScheme::from_accepted_str` (unknown
 ///   schemes are an error upstream at the verifier; here we record the canonical
 ///   wire string and never default-route).
+///
+/// `payer_wallet_override` (2026-07-06 channel-on-A2A plan §9 item 9 — the ONE
+/// sanctioned signature change): the channel leg passes
+/// `Some(&drawable.agent_wallet)` — the DB-sourced channel wallet — because
+/// `extract_payer_wallet` is the `"unknown"` sentinel for a voucher (it carries
+/// no payer identity; see `payment_util.rs`). The exact/escrow arms pass `None`
+/// (their payer derivation below is byte-identical to before).
 #[allow(clippy::too_many_arguments)]
-fn record_a2a_settlement(
+pub(super) fn record_a2a_settlement(
     state: &Arc<AppState>,
     task_id: &str,
     payload: &solvela_x402::types::PaymentPayload,
@@ -1990,6 +2076,7 @@ fn record_a2a_settlement(
     usage: Option<&solvela_protocol::Usage>,
     estimated_input_tokens: u32,
     tx_signature: &Option<String>,
+    payer_wallet_override: Option<&str>,
 ) -> Option<String> {
     // Parse the stored quote: it holds the cost_breakdown the agent paid against.
     let payment_required: solvela_x402::types::PaymentRequired =
@@ -2073,18 +2160,26 @@ fn record_a2a_settlement(
         return None;
     };
 
-    let payer_wallet = crate::payment_util::extract_payer_wallet(payload);
+    // Channel attribution rule (invariant 10 of the channel-on-A2A plan): a
+    // voucher's payer wallet comes from the DB `ChannelRow.agent_wallet`
+    // (threaded in via `payer_wallet_override` by the channel leg), NEVER from
+    // `extract_payer_wallet`, whose Channel arm is the `"unknown"` sentinel.
+    // Exact/escrow arms pass `None` and keep the original derivation.
+    let payer_wallet = match payer_wallet_override {
+        Some(wallet) => wallet.to_string(),
+        None => crate::payment_util::extract_payer_wallet(payload),
+    };
     // Parse the scheme through the exhaustive enum (never default-route an
     // unknown scheme onto a financial record). The verifier already accepted
     // this scheme; an unparseable string here means a record we cannot label
     // truthfully — skip rather than mislabel.
     //
-    // PR-B note (deliberate, not a cascade surprise): `from_accepted_str` now
-    // also parses "channel", but a channel voucher can never reach this record
-    // site on A2A — the offer match restricts submissions to the stored quote's
-    // exact/escrow entries, and `PayloadData::Channel` is rejected fail-closed
-    // before verification (see the replay block above). If either guard ever
-    // regressed, this records a truthful "channel" label rather than skipping.
+    // Channel-on-A2A note (updates the stale PR-B comment): since the Slice-A
+    // channel leg landed, a channel voucher DOES reach this record site — via
+    // `settle_channel_task` (a2a/channel_leg.rs), which calls it only after a
+    // successful `persist_voucher_and_advance` debit and passes
+    // `payer_wallet_override = Some(agent_wallet)`. `from_accepted_str`
+    // labels the row "channel" truthfully.
     let scheme = match PaymentScheme::from_accepted_str(&payload.accepted.scheme) {
         Ok(s) => s,
         Err(e) => {
@@ -4185,6 +4280,7 @@ supports_vision = false
             artifact_text: None,
             tx_signature: None,
             receipt_path: None,
+            deliver_free: false,
             created_at: chrono::Utc::now(),
         };
         if task_store::save_task(&state, &record).await.is_err() {
@@ -4360,6 +4456,7 @@ supports_vision = false
                 artifact_text: None,
                 tx_signature: None,
                 receipt_path: None,
+                deliver_free: false,
                 created_at: chrono::Utc::now(),
             };
             if task_store::save_task(&state, &record).await.is_err() {
@@ -4409,6 +4506,7 @@ supports_vision = false
             artifact_text: None,
             tx_signature: None,
             receipt_path: None,
+            deliver_free: false,
             created_at: chrono::Utc::now(),
         };
         let err = call(ghost_id.clone(), ghost_record)
@@ -4444,6 +4542,7 @@ supports_vision = false
             artifact_text: None,
             tx_signature: None,
             receipt_path: None,
+            deliver_free: false,
             created_at: chrono::Utc::now(),
         };
         if task_store::save_task(state, &record).await.is_err() {
@@ -4527,6 +4626,7 @@ supports_vision = false
             artifact_text: None,
             tx_signature: None,
             receipt_path: None,
+            deliver_free: false,
             created_at: chrono::Utc::now(),
         };
 
@@ -4829,6 +4929,7 @@ supports_vision = false
             artifact_text: None,
             tx_signature: None,
             receipt_path: None,
+            deliver_free: false,
             created_at: chrono::Utc::now(),
         };
         let get = |id: String| {
@@ -4922,6 +5023,64 @@ supports_vision = false
         assert_eq!(
             task["status"]["message"]["metadata"]["x402.payment.status"],
             "payment-failed"
+        );
+    }
+
+    /// D5 (channel-on-A2A plan, Rev-3 item 2): a DELIVER-FREE completion —
+    /// written by `task_store::complete_deliver_free` — must project with
+    /// NEITHER `x402.payment.status` NOR `x402.payment.receipts` on
+    /// `tasks/get`, while a debited Completed record (previous test) keeps
+    /// both. The marker survives the projection even though the record state
+    /// is plain `Completed`, and the delivered artifact is still recoverable.
+    #[tokio::test]
+    async fn tasks_get_deliver_free_omits_payment_keys() {
+        let state = test_state_with_redis();
+        if state.cache.is_none() {
+            eprintln!("skipping deliver-free projection test: Redis unavailable");
+            return;
+        }
+
+        let rec = TaskRecord {
+            id: new_task_id(),
+            state: TaskState::Working,
+            original_message: "hello".to_string(),
+            payment_required: json!({"x402_version": 2}),
+            model: Some("test-model".to_string()),
+            max_tokens: Some(100),
+            context_id: task_store::new_context_id(),
+            artifact_text: None,
+            tx_signature: None,
+            receipt_path: None,
+            deliver_free: false,
+            created_at: chrono::Utc::now(),
+        };
+        task_store::save_task(&state, &rec).await.expect("save");
+
+        // The deliver-free terminal write: Working→Completed + marker +
+        // artifact text in ONE save.
+        task_store::complete_deliver_free(&state, &rec.id, Some("free answer".to_string()))
+            .await
+            .expect("deliver-free terminal write");
+
+        let task = handle_tasks_get(&state, &rpc_request("tasks/get", &rec.id))
+            .await
+            .expect("tasks/get must succeed");
+        assert_eq!(task["status"]["state"], "completed");
+        assert_eq!(
+            task["artifacts"][0]["parts"][0]["text"], "free answer",
+            "deliver-free still recovers the delivered output"
+        );
+        let metadata = &task["status"]["message"]["metadata"];
+        assert!(
+            metadata.get("x402.payment.status").is_none()
+                || metadata["x402.payment.status"].is_null(),
+            "deliver-free projection must OMIT x402.payment.status (undebited \
+             task must never read as PAID): {metadata}"
+        );
+        assert!(
+            metadata.get("x402.payment.receipts").is_none()
+                || metadata["x402.payment.receipts"].is_null(),
+            "deliver-free projection must OMIT x402.payment.receipts: {metadata}"
         );
     }
 

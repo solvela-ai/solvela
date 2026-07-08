@@ -18,7 +18,13 @@ use crate::a2a::types::TaskState;
 use crate::AppState;
 
 /// Default TTL for task records (10 minutes — allows retries after payment-required).
-const TASK_TTL: Duration = Duration::from_secs(600);
+///
+/// `pub(crate)`: `ChannelConfig::validate` boot-validates the A2A channel-draw
+/// serve bound STRICTLY below this (D6 of the 2026-07-06 channel-on-A2A plan)
+/// — the `Working` write is the last pre-serve TTL refresh, so the record must
+/// provably outlive every serve or a debited client loses its `tasks/get`
+/// recovery.
+pub(crate) const TASK_TTL: Duration = Duration::from_secs(600);
 
 /// Stored task state in Redis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +73,21 @@ pub struct TaskRecord {
     /// on both terminal arms when a retrievable receipt was written.
     #[serde(default)]
     pub receipt_path: Option<String>,
+    /// D5 marker (channel-on-A2A plan, Rev-3 item 2): `true` iff this task
+    /// completed DELIVER-FREE — a channel draw whose persist lost the close
+    /// race / lock ownership, so the artifacts were delivered but NO debit
+    /// occurred and NO receipt exists. `project_task` keys the omission of
+    /// BOTH `x402.payment.status` and `x402.payment.receipts` on it, so a
+    /// `tasks/get` within TTL never reports an undebited task as PAID.
+    ///
+    /// An EXPLICIT marker, pinned over inferring from refs-absence: the D6
+    /// ref write is best-effort, so a failed ref write on a genuinely DEBITED
+    /// task must not read as unpaid. Written only by
+    /// [`complete_deliver_free`] — the same terminal save that makes the arm
+    /// deliver-free. `serde(default)` keeps legacy/exact/escrow records
+    /// deserializing as `false` (Redis-internal record state, not a wire key).
+    #[serde(default)]
+    pub deliver_free: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -222,6 +243,43 @@ pub async fn persist_terminal_refs(
     save_task(state, &updated).await
 }
 
+/// Terminal save for a DELIVER-FREE channel completion (D5, channel-on-A2A
+/// plan): ONE load-check-save that transitions the task to `Completed`, sets
+/// the [`TaskRecord::deliver_free`] marker, and stores the delivered artifact
+/// text — the SAME save, so a later `tasks/get` projection can never observe
+/// `Completed` without the marker (Rev-3 item 2). No refs are written: a
+/// deliver-free task has no tx signature and no receipt by definition (no
+/// debit occurred).
+///
+/// Money-free: the debit already did NOT happen (the persist lost the close
+/// race / lock ownership); this write changes no amount and fires no
+/// settlement. The state transition is checked the same way
+/// [`update_task_state`] checks it.
+pub async fn complete_deliver_free(
+    state: &Arc<AppState>,
+    task_id: &str,
+    artifact_text: Option<String>,
+) -> Result<(), String> {
+    let record = load_task(state, task_id)
+        .await?
+        .ok_or_else(|| format!("task not found: {task_id}"))?;
+
+    if !record.state.can_transition_to(TaskState::Completed) {
+        return Err(format!(
+            "invalid state transition: {:?} -> Completed",
+            record.state
+        ));
+    }
+
+    let updated = TaskRecord {
+        state: TaskState::Completed,
+        deliver_free: true,
+        artifact_text,
+        ..record
+    };
+    save_task(state, &updated).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +350,7 @@ mod tests {
             artifact_text: None,
             tx_signature: None,
             receipt_path: None,
+            deliver_free: false,
             created_at: chrono::Utc::now(),
         };
 
@@ -318,6 +377,7 @@ mod tests {
             artifact_text: None,
             tx_signature: None,
             receipt_path: None,
+            deliver_free: false,
             created_at: chrono::Utc::now(),
         };
 
@@ -354,6 +414,34 @@ mod tests {
         assert_eq!(deserialized.artifact_text, None);
         assert_eq!(deserialized.tx_signature, None);
         assert_eq!(deserialized.receipt_path, None);
+        // D5 marker (channel-on-A2A plan): additive too — legacy and
+        // exact/escrow records deserialize as NOT deliver-free, so their
+        // `tasks/get` projections keep the payment-completed metadata.
+        assert!(!deserialized.deliver_free);
+    }
+
+    /// D5 marker roundtrip: a deliver-free record persists and reloads with
+    /// the marker intact (the `tasks/get` truthfulness keying depends on it).
+    #[test]
+    fn test_task_record_deliver_free_roundtrips() {
+        let record = TaskRecord {
+            id: new_task_id(),
+            state: TaskState::Completed,
+            original_message: "test".to_string(),
+            payment_required: serde_json::json!({}),
+            model: None,
+            max_tokens: None,
+            context_id: new_context_id(),
+            artifact_text: Some("free answer".to_string()),
+            tx_signature: None,
+            receipt_path: None,
+            deliver_free: true,
+            created_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&record).expect("serialize"); // safe: known struct
+        let deserialized: TaskRecord = serde_json::from_str(&json).expect("deserialize"); // safe: just serialized
+        assert!(deserialized.deliver_free);
+        assert_eq!(deserialized.artifact_text.as_deref(), Some("free answer"));
     }
 
     /// Slice 3 regression (A2A v0.3 shape strictness): records persisted

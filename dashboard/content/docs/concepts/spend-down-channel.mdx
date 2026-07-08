@@ -6,7 +6,7 @@ description: Fund once on-chain, pay per request with signed vouchers — no per
 
 The spend-down channel lets an agent make many paid requests from a single on-chain USDC deposit. Instead of building a fresh Solana transaction for every call, the client attaches a signed **voucher** to each request. Vouchers are verified off-chain — per-request on-chain cost drops to zero — while custody never transfers: the gateway can only ever settle amounts the client has explicitly signed.
 
-Channel vouchers are accepted on `/v1/chat/completions`, `/v1/messages`, `/v1/search`, and `/v1/solana/price` — one funding primitive, every paid surface. Fund the channel once and an agent can reason, search the web, and price SPL tokens across hundreds of calls without another Solana transaction. See the [Agent Toolbelt](/docs/api/marketplace) for the marketplace tools.
+Channel vouchers are accepted on `/v1/chat/completions`, `/v1/messages`, `/v1/search`, `/v1/solana/price`, and the [A2A paid leg](/docs/concepts/a2a#channel-vouchers-on-a2a) (`message/send`) — one funding primitive, every paid surface. Fund the channel once and an agent can reason, search the web, and price SPL tokens across hundreds of calls without another Solana transaction. Opening and closing a channel are always REST + Solana-signer flows; only the draws differ per surface. See the [Agent Toolbelt](/docs/api/marketplace) for the marketplace tools.
 
 **Who uses it today:** [`@solvela/dropin`](/docs/sdks/claude-code) (the Claude Code sidecar) and [`@solvela/signer-core`](https://www.npmjs.com/package/@solvela/signer-core) (TypeScript signing primitives — `ChannelTracker`).
 
@@ -56,7 +56,11 @@ The channel is non-custodial by construction: the gateway can never settle more 
 
 ## Not advertised in the 402
 
-The `accepts[]` array in a `402` response lists only `exact` and `escrow`. The channel is **invoked by the client, not offered by the gateway** — channel-aware clients attach the voucher header directly after reading the quote. This keeps existing SDKs that don't know the scheme fully compatible: the 402 wire is unchanged whether or not the channel is enabled.
+The `accepts[]` array in a `402` response lists only `exact` and `escrow` — and the A2A task offer is the same. The channel is **invoked by the client, not offered by the gateway** — channel-aware clients attach the voucher directly after reading the quote (the `payment-signature` header on REST; the `x402.payment.payload` metadata on A2A). This keeps existing SDKs that don't know the scheme fully compatible: the 402 wire is unchanged whether or not the channel is enabled.
+
+## Digest binding per surface
+
+Every voucher signs a `request_digest` binding it to exactly one request. On the REST surfaces that is the SHA-256 of the **raw request bytes**; on A2A — which has no raw body — it is the versioned task binding `SHA-256("solvela-a2a-channel-digest-v1:" + taskId)` (see the [A2A digest contract](/docs/concepts/a2a#channel-vouchers-on-a2a)). The preimage classes are permanently disjoint, so a voucher signed for one surface can never be replayed on another.
 
 ## Limits
 
