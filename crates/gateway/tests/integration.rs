@@ -4467,6 +4467,83 @@ async fn test_chat_smart_routing_eco_profile() {
     assert_eq!(json["object"], "chat.completion");
 }
 
+/// Scorer dimension 13 (tool usage, weight 0.04, signal 0.8) must be driven by
+/// the REAL request, not a hardcoded `false`.
+///
+/// `"Check my calendar for tomorrow's meetings."` scores exactly `-0.032`
+/// without tools (Simple) and exactly `0.0` with them (Medium) — the
+/// Simple/Medium cutoff. Under the `premium` profile that is
+/// `openai/gpt-4o` vs `anthropic/claude-sonnet-4-6`: a cost-visible routing
+/// change. An empty `tools: []` array is a no-op, not tool usage.
+///
+/// Driven end-to-end through `POST /v1/chat/completions` (paid path, debug
+/// headers) rather than at the scorer, because the bug was in the WIRING.
+#[tokio::test]
+async fn test_chat_smart_routing_reads_tools_from_request() {
+    async fn route(tools: serde_json::Value) -> (String, String) {
+        let mut body = serde_json::json!({
+            "model": "premium",
+            "messages": [{"role": "user", "content": "Check my calendar for tomorrow's meetings."}],
+        });
+        if !tools.is_null() {
+            body["tools"] = tools;
+        }
+
+        let response = test_app_with_mock_provider()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("x-solvela-debug", "true")
+                    .header(
+                        "payment-signature",
+                        valid_payment_header("/v1/chat/completions"),
+                    )
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers();
+        let get = |name: &str| {
+            headers
+                .get(name)
+                .unwrap_or_else(|| panic!("missing {name} debug header"))
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        (get("x-solvela-tier"), get("x-solvela-model"))
+    }
+
+    let tool = serde_json::json!([{
+        "type": "function",
+        "function": {"name": "get_calendar", "description": "read the calendar"}
+    }]);
+
+    assert_eq!(
+        route(serde_json::Value::Null).await,
+        ("Simple".to_string(), "openai/gpt-4o".to_string()),
+        "no tools field -> Simple tier"
+    );
+    assert_eq!(
+        route(serde_json::json!([])).await,
+        ("Simple".to_string(), "openai/gpt-4o".to_string()),
+        "empty tools array is not tool usage -> still Simple"
+    );
+    assert_eq!(
+        route(tool).await,
+        (
+            "Medium".to_string(),
+            "anthropic/claude-sonnet-4-6".to_string()
+        ),
+        "a real tool definition fires dimension 13 -> Medium tier, costlier model"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 404 for unknown routes
 // ---------------------------------------------------------------------------

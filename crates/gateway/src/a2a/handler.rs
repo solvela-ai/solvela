@@ -2432,7 +2432,13 @@ fn resolve_model(
             tool_calls: None,
             tool_call_id: None,
         }];
-        let result = scorer::classify(&messages, false);
+        // A2A carries no tool definitions on this path: the A2A `Message`/`Part`
+        // wire types have no tools field, every `ChatRequest` this adapter
+        // builds sets `tools: None`, and the AgentCard advertises
+        // `supports_tools = false`. There is nothing to wire — do not fabricate
+        // a signal the protocol never supplied.
+        let has_tools = false;
+        let result = scorer::classify(&messages, has_tools);
         let model_id = profiles::resolve_model(profile, result.tier);
         return Ok(model_id.to_string());
     }

@@ -2523,7 +2523,16 @@ fn resolve_model_with_debug(
 ) -> Result<(String, String, String, f64), GatewayError> {
     // Check for profile-based routing (e.g., "auto", "eco", "premium")
     if let Some(profile) = Profile::from_alias(&req.model) {
-        let result = scorer::classify(&req.messages, false);
+        // Scorer dimension 13 (tool usage). A request that ships tool
+        // definitions is agentic work and should score up. An EMPTY `tools: []`
+        // array is not tool usage — clients send it as a no-op.
+        //
+        // MONEY PATH: on paid profiles this can push a tool-carrying request up
+        // a tier and therefore select a costlier model. Pass-through pricing +
+        // the 5% fee are unchanged; the amount charged follows whichever model
+        // actually serves.
+        let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
+        let result = scorer::classify(&req.messages, has_tools);
         let model_id = profiles::resolve_model(profile, result.tier);
         return Ok((
             model_id.to_string(),

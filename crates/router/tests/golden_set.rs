@@ -232,11 +232,10 @@ const TABLE: &[Row] = &[
         current: Tier::Simple,
     },
     // --- Tool-augmented requests (has_tools = true) (5) ---
-    // NOTE: latent/library-level coverage only. Both production call sites of
-    // `classify` (routes/chat/mod.rs and a2a/handler.rs in the gateway)
-    // currently hardcode `has_tools: false`, so the tool-usage dimension never
-    // fires on live traffic — these rows pin the library contract, not a
-    // gateway-observable behavior.
+    // NOTE: `routes/chat/mod.rs` now derives `has_tools` from the real
+    // `ChatRequest.tools` (non-empty), so these rows describe live gateway
+    // behavior on `POST /v1/chat/completions`. The A2A call site still passes
+    // `false` because A2A messages carry no tool definitions at all.
     Row { prompt: "Search the web for the latest Solana price and summarize it.", has_tools: true, intended: Tier::Medium, current: Tier::Simple },
     Row { prompt: "Look up today's weather in Tokyo.", has_tools: true, intended: Tier::Simple, current: Tier::Simple },
     Row { prompt: "Find recent news about AI regulation and give me a bullet list.", has_tools: true, intended: Tier::Medium, current: Tier::Medium },
@@ -316,14 +315,30 @@ fn actual_tier(prompt: &str, has_tools: bool) -> Tier {
 /// Printer helper — regenerate the `current` column after an intentional
 /// scorer change with:
 ///   cargo test -p solvela-router --test golden_set print_current_tiers -- --ignored --nocapture
+///
+/// Columns: `live` (what `classify()` returns now), `was` (the `current` column
+/// in the table), `intended` (the immutable spec). `MOVED` marks rows whose
+/// classification changed, `->OK` / `->BAD` says whether the move went toward
+/// or away from `intended`, so a scorer change can never be rubber-stamped.
 #[test]
 #[ignore]
 fn print_current_tiers() {
     for row in TABLE {
         let result = classify(&[user_msg(row.prompt)], row.has_tools);
+        let moved = result.tier != row.current;
+        let verdict = match (
+            moved,
+            result.tier == row.intended,
+            row.current == row.intended,
+        ) {
+            (false, _, _) => "same",
+            (true, true, _) => "MOVED->OK",
+            (true, false, true) => "MOVED->BAD",
+            (true, false, false) => "MOVED->neutral",
+        };
         println!(
-            "{:?}\tscore={:.4}\tprompt={:?}",
-            result.tier, result.score, row.prompt
+            "{verdict}\tlive={:?}\twas={:?}\tintended={:?}\tscore={:.4}\tprompt={:?}",
+            result.tier, row.current, row.intended, result.score, row.prompt
         );
     }
 }
