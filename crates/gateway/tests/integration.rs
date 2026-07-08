@@ -25734,12 +25734,11 @@ mod a2a_channel_draw_tests {
             "input-required"
         );
         let cache = state.cache.as_ref().expect("cache");
-        assert_eq!(
+        assert!(
             cache
                 .acquire_settle_lock(&task_id, gateway::cache::A2A_SETTLE_LOCK_TTL_SECS)
                 .await
                 .expect("lock store reachable"),
-            true,
             "the kill switch must reject BEFORE the settle lock is taken"
         );
         cache.release_settle_lock(&task_id).await;
