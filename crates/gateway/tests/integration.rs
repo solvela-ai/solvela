@@ -25447,7 +25447,8 @@ mod a2a_channel_draw_tests {
         let row = channel_row(&pool, cid).await;
         assert_eq!(row.last_voucher_cumulative_atomic, quote);
         assert_eq!(voucher_row_count(&pool, cid).await, 1);
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Fire-and-forget spend write: poll, then pin exactly one row.
+        wait_for_spend_row_atomic(&pool, &agent).await;
         assert_eq!(spend_row_count(&pool, &agent).await, 1);
     }
 
@@ -25594,10 +25595,12 @@ mod a2a_channel_draw_tests {
         let env = a2a_call_envelope(&app, &channel_payment_body(&task_b, quote_b, &voucher)).await;
         assert_eq!(env["error"]["code"].as_i64(), Some(-32007), "{env}");
 
-        // One historical debit only; task B still payable.
+        // One historical debit only; task B still payable. (The spend write
+        // is fire-and-forget — poll for it before asserting the count.)
         let row = channel_row(&pool, cid).await;
         assert_eq!(row.last_voucher_cumulative_atomic, quote);
         assert_eq!(voucher_row_count(&pool, cid).await, 1);
+        wait_for_spend_row_atomic(&pool, &agent).await;
         assert_eq!(spend_row_count(&pool, &agent).await, 1);
         assert_eq!(
             get_task(&app, &task_b).await["status"]["state"],
