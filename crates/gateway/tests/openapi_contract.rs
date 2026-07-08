@@ -260,6 +260,7 @@ fn contract_app_with_db(
         providers,
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,

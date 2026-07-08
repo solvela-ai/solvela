@@ -33,6 +33,9 @@ const SEARCH_MAX_QUERY_LEN = 2_000;
  * because the test harness can't resolve a relative value import across src
  * modules; both must track the gateway's cap). */
 const SEARCH_MAX_RESULTS = 20;
+/** Max mints per `POST /v1/solana/price` call (mirrors the gateway bound,
+ * which itself mirrors the Jupiter Price API's documented 50-id batch cap). */
+const PRICE_MAX_MINTS = 50;
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -72,6 +75,29 @@ export interface SearchResults {
   query: string;
   results: SearchResult[];
   provider: string;
+}
+
+/** Price data for one mint (matches the gateway's stable shape). */
+export interface PriceData {
+  /** USD price of one whole token. */
+  usd_price: number;
+  decimals?: number | null;
+  block_id?: number | null;
+  price_change_24h?: number | null;
+}
+
+/** One entry per requested mint; `price` is null when the upstream has no
+ * reliable price for that mint (never an error for the whole batch). */
+export interface MintPrice {
+  mint: string;
+  price: PriceData | null;
+}
+
+/** Normalized response from `POST /v1/solana/price`. */
+export interface PriceResults {
+  prices: MintPrice[];
+  source: string;
+  as_of: string;
 }
 
 export interface ModelInfo {
@@ -343,6 +369,50 @@ export class GatewayClient {
     const url = `${this.apiUrl}/v1/search`;
     const { resp, costMicroCommitted, costBreakdown } = await this.paidCall(url, bodyStr);
     const results = await this.parsePaidJson<SearchResults>(resp, costMicroCommitted, 'search');
+    return { results, costBreakdown };
+  }
+
+  /**
+   * Fetch Solana token prices via the gateway's x402-paid
+   * `POST /v1/solana/price` endpoint.
+   *
+   * Reuses the SINGLE signing path ([`paidCall`]) — the same 402→sign→retry,
+   * session-budget reservation, PaymentExpectations cap, stub-header guard,
+   * and malformed-response refund that `chat` and `search` use. This method
+   * only differs in the URL, the request body, and the response shape.
+   *
+   * Returns the normalized per-mint prices (an unpriced mint comes back with
+   * `price: null`, never a whole-batch error) plus the `cost_breakdown` from
+   * the 402 challenge (the amount actually settled). `costBreakdown` is
+   * `null` only when no 402 was issued (dev-bypass gateway).
+   *
+   * @param mints Base58 SPL mint addresses (1–50, non-empty strings). The
+   *              gateway re-validates (base58-of-32-bytes) and never charges
+   *              a bad request; rejecting here avoids a wasted round-trip.
+   */
+  async solanaPrice(
+    mints: string[],
+  ): Promise<{ results: PriceResults; costBreakdown: CostBreakdown | null }> {
+    // Client-side fast-fail validation. NOT authoritative — the gateway
+    // remains the enforcer (and validates before any charge).
+    if (!Array.isArray(mints) || mints.length === 0) {
+      throw new Error("'mints' must not be empty");
+    }
+    if (mints.length > PRICE_MAX_MINTS) {
+      throw new Error(`'mints' must contain at most ${PRICE_MAX_MINTS} entries`);
+    }
+    if (!mints.every((m) => typeof m === 'string' && m.trim().length > 0)) {
+      throw new Error("'mints' entries must be non-empty strings");
+    }
+
+    const bodyStr = JSON.stringify({ mints });
+    const url = `${this.apiUrl}/v1/solana/price`;
+    const { resp, costMicroCommitted, costBreakdown } = await this.paidCall(url, bodyStr);
+    const results = await this.parsePaidJson<PriceResults>(
+      resp,
+      costMicroCommitted,
+      'solana_price',
+    );
     return { results, costBreakdown };
   }
 

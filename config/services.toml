@@ -25,6 +25,25 @@ description = "x402-paid web search (Tavily upstream); normalized title/url/snip
 pricing_label = "$0.0105/query (incl. 5% platform fee)"
 price_per_request_usdc = 0.01
 
+# Solana price tool (Agent Toolbelt pick #2 — "pay USDC on Solana to read
+# Solana"). Served by THIS gateway at `POST /v1/solana/price`, x402-paid, flat
+# per-call price + 5% platform fee. The gateway queries the Jupiter Price API
+# (lite-api.jup.ag — keyless; an optional JUPITER_API_KEY switches to the
+# keyed api.jup.ag host, same contract) server-side. Unlike web-search there
+# is NO API-key gate: this entry alone enables the route (absent → 503).
+#
+# `price_per_request_usdc` = pure margin (the upstream is free) — operator-
+# adjustable. The agent pays price × 1.05 = $0.00105 (5% platform fee on top).
+[services.solana-price]
+name = "Solana Price Data"
+endpoint = "/v1/solana/price"
+category = "data"
+x402_enabled = true
+internal = true
+description = "x402-paid Solana token prices (Jupiter upstream); per-mint USD price, batch up to 50 mints, unknown mints returned as null"
+pricing_label = "$0.00105/query (incl. 5% platform fee)"
+price_per_request_usdc = 0.001
+
 #
 # [services.llm-gateway]
 # name = "LLM Intelligence"

@@ -699,6 +699,7 @@ fn test_app_with_state() -> (axum::Router, Arc<AppState>) {
         providers: ProviderRegistry::from_env(reqwest::Client::new()), // No keys set in test env
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None, // No Redis in tests — replay check uses in-memory LRU fallback
@@ -760,6 +761,7 @@ fn test_app_channels_disabled() -> axum::Router {
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -817,6 +819,7 @@ fn test_app_with_usdc_mint_and_providers(mint: &str, providers: ProviderRegistry
         providers,
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -1431,6 +1434,7 @@ fn test_app_dev_bypass_capturing_native_relay(
         providers: mock_provider_registry(),
         native_anthropic: Some(native_relay_pointed_at(&base_url)),
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -1500,6 +1504,7 @@ supports_vision = true
         providers: mock_provider_registry(),
         native_anthropic: Some(native_relay_pointed_at(&base_url)),
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -1604,6 +1609,7 @@ fn test_app_with_provider_registry_and_exact_verifier_native(
         providers,
         native_anthropic,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -1665,6 +1671,7 @@ fn test_app_with_models_and_providers(
         providers,
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -1869,6 +1876,7 @@ fn app_with_semantic_cache(sem: Arc<gateway::cache::semantic::SemanticCache>) ->
         providers: mock_provider_registry(),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -2188,6 +2196,7 @@ fn app_with_semantic_cache_and_escrow(
         providers: mock_provider_registry(),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -2272,6 +2281,7 @@ fn app_with_semantic_cache_escrow_and_db_pool(
         providers: mock_provider_registry(),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
         cache: None,
@@ -2940,6 +2950,7 @@ fn test_app_with_provider_registry_and_escrow_verifier(
         providers,
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -3031,6 +3042,7 @@ fn test_app_with_escrow_and_usdc_mint(mint: &str) -> axum::Router {
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -3507,6 +3519,7 @@ async fn test_chat_enforced_wallet_unprovisioned_tenant_returns_400_e2e() {
         providers: mock_provider_registry(),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client.clone())),
         cache: None,
@@ -6039,6 +6052,7 @@ fn test_app_with_nonce_pool() -> axum::Router {
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -8080,6 +8094,7 @@ fn test_app_with_escrow_metrics() -> axum::Router {
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -8253,6 +8268,7 @@ async fn test_escrow_health_reflects_incremented_metrics() {
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -8496,6 +8512,7 @@ async fn test_escrow_health_status_down_without_claimer() {
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -9035,6 +9052,7 @@ async fn test_proxy_require_tenant_wallet_rejected_before_settlement() {
         providers: mock_provider_registry(),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(None, Some(client.clone())),
         cache: None,
@@ -10564,6 +10582,7 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         providers: ProviderRegistry::from_env(reqwest::Client::new()),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -11223,6 +11242,7 @@ fn test_app_with_free_limit(free_max: u32) -> axum::Router {
         providers: mock_provider_registry(),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -11586,6 +11606,7 @@ async fn dev_bypass_still_works() {
         providers: mock_provider_registry(),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -11675,6 +11696,7 @@ fn test_app_with_global_cap(global_cap: u32) -> axum::Router {
         providers: mock_provider_registry(),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -11808,6 +11830,7 @@ async fn free_per_ip_and_global_cap_are_independent() {
         providers: mock_provider_registry(),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -12703,6 +12726,7 @@ fn test_app_with_db_pool(
         providers,
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
         cache: None,
@@ -13351,6 +13375,7 @@ fn test_app_with_receipts_limit(max: u32) -> axum::Router {
         providers: mock_provider_registry(),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::noop(),
         cache: None,
@@ -13751,6 +13776,7 @@ fn a2a_app_with_providers_and_bypass(
         providers,
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(pool.clone(), None),
         cache: Some(cache),
@@ -14339,6 +14365,7 @@ fn a2a_app_with_verifier_and_db(
         providers: mock_provider_registry(),
         native_anthropic: None,
         search_provider: None,
+        price_provider: None,
         facilitator,
         usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
         cache: Some(cache),
@@ -15924,6 +15951,7 @@ mod faucet_route_tests {
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: None,
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
             cache: None,
@@ -16111,6 +16139,7 @@ mod faucet_route_tests {
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: None,
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
             cache: None,
@@ -16647,6 +16676,7 @@ mod escrow_deposit_tx_tests {
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: None,
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
             cache: None,
@@ -17000,6 +17030,7 @@ mod escrow_deposit_tx_tests {
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: None,
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
             cache: None,
@@ -17200,6 +17231,7 @@ price_per_request_usdc = 0.01
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: provider,
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
             cache: None,
@@ -17535,6 +17567,7 @@ price_per_request_usdc = 0.01
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: provider,
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::new(None, Some(redis_client)),
             cache: None,
@@ -17689,6 +17722,7 @@ price_per_request_usdc = 0.01
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: Some(Arc::new(StubSearchProvider)),
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
             cache: None,
@@ -19724,6 +19758,7 @@ mod channel_open_guard_tests {
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: None,
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
             cache: None,
@@ -20070,6 +20105,7 @@ price_per_request_usdc = 0.01
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: Some(Arc::new(StubProvider)),
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
             cache: None,
@@ -20130,6 +20166,7 @@ price_per_request_usdc = 0.01
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: Some(provider),
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client)),
             cache: Some(cache),
@@ -21459,6 +21496,7 @@ price_per_request_usdc = 0.01
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: Some(Arc::new(StubProvider)),
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::noop(),
             cache: None, // the gate under test
@@ -21780,6 +21818,7 @@ mod chat_channel_draw_tests {
             providers,
             native_anthropic,
             search_provider: None,
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client)),
             cache: Some(cache),
@@ -23842,6 +23881,7 @@ mod chat_channel_draw_tests {
             providers,
             native_anthropic: None,
             search_provider: None,
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client)),
             cache: Some(cache),
@@ -23908,6 +23948,7 @@ mod chat_channel_draw_tests {
             providers: fixed_usage_provider_registry(1000, 1000),
             native_anthropic: None,
             search_provider: None,
+            price_provider: None,
             facilitator,
             usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client)),
             cache: Some(cache),
@@ -24375,4 +24416,1440 @@ async fn stuck_working_at_rest_increments_counter_at_both_intakes() {
         0,
         "intake fast-fails must never reach settlement"
     );
+}
+
+// ===========================================================================
+// Solana price tool (`POST /v1/solana/price`) — Agent Toolbelt pick #2
+//
+// Exercised end-to-end through the REAL route via `build_router` + `oneshot`
+// (no live server). Mirrors `web_search_tests` (the donor tool): same flat
+// price + 5% fee money path, same exact-scheme machinery, same settle-then-
+// serve posture. Covers:
+//   (a) unpaid → 402 with the correct cost breakdown incl. the 5% fee
+//   (b) the tool is listed by `GET /v1/services`
+//   (c) provider not configured → 503 (defensive; always Some in production)
+//   (d) service registry entry missing → 503 (the enablement gate for a
+//       KEYLESS upstream — this is the divergence from web-search's env gate)
+//   (e) a paid request settles and returns normalized per-mint prices,
+//       with an unknown mint carried as an EXPLICIT null (not an error)
+//   (f) invalid bodies (empty/invalid/oversized mints) 400 BEFORE any
+//       settlement — a request that was never going to run is never charged
+//   (g) upstream failure AFTER settlement → 502 (charge-without-delivery,
+//       the same #486 posture as the donor's exact path)
+//   (h) the outer per-IP rate limiter applies to this route (inherited)
+// ---------------------------------------------------------------------------
+mod solana_price_tests {
+    use super::*;
+
+    use async_trait::async_trait;
+    use gateway::providers::price::{
+        MintPrice, PriceData, PriceError, PriceProvider, PriceResults,
+    };
+
+    /// Services TOML with an INTERNAL, priced `solana-price` entry served at
+    /// `/v1/solana/price`. Priced at $0.001 (matches `config/services.toml`);
+    /// the agent pays $0.00105 with the 5% fee.
+    const PRICE_SERVICES_TOML: &str = r#"
+[services.solana-price]
+name = "Solana Price Data"
+endpoint = "/v1/solana/price"
+category = "data"
+x402_enabled = true
+internal = true
+description = "x402-paid Solana token prices"
+pricing_label = "$0.00105/query"
+price_per_request_usdc = 0.001
+"#;
+
+    /// A services TOML WITHOUT the `solana-price` entry — the enablement gate:
+    /// with a keyless upstream there is no API-key gate, so the registry entry
+    /// alone decides whether the route is live.
+    const PRICE_ENTRY_MISSING_TOML: &str = r#"
+[services.other-tool]
+name = "Other Tool"
+endpoint = "/v1/other"
+category = "data"
+x402_enabled = true
+internal = true
+"#;
+
+    /// Mainnet USDC mint — priced by the stub provider.
+    const USDC_MINT_B58: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    /// Wrapped SOL — priced by the stub provider.
+    const WSOL_MINT_B58: &str = "So11111111111111111111111111111111111111112";
+    /// A structurally-valid mint the stub provider does NOT price (devnet
+    /// USDC) — exercises the explicit-null unknown-mint contract.
+    const UNKNOWN_MINT_B58: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+
+    /// $0.001 + 5% fee = 1_050 atomic — what the agent must pay per call.
+    const PRICE_TOTAL_ATOMIC: u64 = 1_050;
+
+    /// A stub price provider that prices USDC + wSOL and omits everything
+    /// else (mirroring Jupiter's omit-unknown semantics, already normalized
+    /// to explicit `None` at the adapter boundary).
+    struct StubPriceProvider;
+
+    #[async_trait]
+    impl PriceProvider for StubPriceProvider {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        async fn prices(&self, mints: &[String]) -> Result<PriceResults, PriceError> {
+            let prices = mints
+                .iter()
+                .map(|m| MintPrice {
+                    mint: m.clone(),
+                    price: match m.as_str() {
+                        USDC_MINT_B58 => Some(PriceData {
+                            usd_price: serde_json::Number::from_f64(0.9998).unwrap(),
+                            decimals: Some(6),
+                            block_id: Some(431_537_809),
+                            price_change_24h: serde_json::Number::from_f64(-0.002),
+                        }),
+                        WSOL_MINT_B58 => Some(PriceData {
+                            usd_price: serde_json::Number::from_f64(78.005).unwrap(),
+                            decimals: Some(9),
+                            block_id: Some(431_537_809),
+                            price_change_24h: serde_json::Number::from_f64(-3.99),
+                        }),
+                        _ => None,
+                    },
+                })
+                .collect();
+            Ok(PriceResults {
+                prices,
+                source: "stub".to_string(),
+                as_of: "2026-07-08T00:00:00Z".to_string(),
+            })
+        }
+    }
+
+    /// A provider that ALWAYS fails — exercises the paid upstream-failure arm
+    /// (502 AFTER settlement; the charge stands, mirroring the donor).
+    struct FailingPriceProvider;
+
+    #[async_trait]
+    impl PriceProvider for FailingPriceProvider {
+        fn name(&self) -> &str {
+            "failing-stub"
+        }
+        async fn prices(&self, _mints: &[String]) -> Result<PriceResults, PriceError> {
+            Err(PriceError::Status(500))
+        }
+    }
+
+    /// Build a `/v1/solana/price`-capable app with full knob control.
+    fn price_app_with(
+        provider: Option<Arc<dyn PriceProvider>>,
+        verifier: Arc<dyn PaymentVerifier>,
+        services_toml: &str,
+        rate_limiter: RateLimiter,
+    ) -> axum::Router {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(services_toml).unwrap();
+        let facilitator = solvela_x402::facilitator::Facilitator::new(vec![verifier]);
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
+            search_provider: None,
+            price_provider: provider,
+            facilitator,
+            usage: gateway::usage::UsageTracker::noop(),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        build_router(state, rate_limiter)
+    }
+
+    /// Standard app: stub-or-none provider, always-pass verifier, priced entry.
+    fn price_app(provider: Option<Arc<dyn PriceProvider>>) -> axum::Router {
+        price_app_with(
+            provider,
+            Arc::new(AlwaysPassVerifier),
+            PRICE_SERVICES_TOML,
+            RateLimiter::new(RateLimitConfig::default()),
+        )
+    }
+
+    fn price_request(body: &str, payment_header: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/v1/solana/price")
+            .header("content-type", "application/json");
+        if let Some(h) = payment_header {
+            builder = builder.header("payment-signature", h);
+        }
+        builder.body(Body::from(body.to_string())).unwrap()
+    }
+
+    /// (a) Unpaid request → 402 with the correct cost breakdown including the
+    /// 5% platform fee. $0.001 → provider 0.001000, fee 0.000050, total 0.001050.
+    #[tokio::test]
+    async fn price_unpaid_returns_402_with_5pct_fee_breakdown() {
+        let app = price_app(Some(Arc::new(StubPriceProvider)));
+
+        let body = format!(r#"{{"mints":["{USDC_MINT_B58}"]}}"#);
+        let response = app.oneshot(price_request(&body, None)).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let pr: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(pr["error"], "Payment required");
+        assert_eq!(pr["resource"]["url"], "/v1/solana/price");
+        assert_eq!(pr["resource"]["method"], "POST");
+
+        let cost = &pr["cost_breakdown"];
+        assert_eq!(cost["currency"], "USDC");
+        assert_eq!(cost["fee_percent"], 5);
+        assert_eq!(cost["provider_cost"], "0.001000");
+        assert_eq!(cost["platform_fee"], "0.000050");
+        assert_eq!(cost["total"], "0.001050");
+
+        let accepts = pr["accepts"].as_array().unwrap();
+        assert_eq!(accepts[0]["scheme"], "exact");
+        assert_eq!(accepts[0]["amount"], PRICE_TOTAL_ATOMIC.to_string()); // 1_000 * 105 / 100
+        assert_eq!(accepts[0]["network"], SOLANA_NETWORK);
+        assert_eq!(accepts[0]["asset"], USDC_MINT);
+        assert_eq!(accepts[0]["pay_to"], TEST_RECIPIENT_WALLET);
+    }
+
+    /// (b) The solana-price tool is listed by `GET /v1/services`.
+    #[tokio::test]
+    async fn price_tool_listed_in_services() {
+        let app = price_app(Some(Arc::new(StubPriceProvider)));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/services")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let data = json["data"].as_array().unwrap();
+        let entry = data
+            .iter()
+            .find(|s| s["id"] == "solana-price")
+            .expect("solana-price must be listed in /v1/services");
+        assert_eq!(entry["category"], "data");
+        assert_eq!(entry["endpoint"], "/v1/solana/price");
+        assert_eq!(entry["x402_enabled"], true);
+        assert_eq!(entry["price_per_request_usdc"], 0.001);
+    }
+
+    /// (c) With no price provider wired (defensive — production always wires
+    /// one since the upstream is keyless), the route returns 503.
+    #[tokio::test]
+    async fn price_returns_503_when_provider_not_configured() {
+        let app = price_app(None);
+
+        let body = format!(r#"{{"mints":["{USDC_MINT_B58}"]}}"#);
+        let response = app.oneshot(price_request(&body, None)).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["type"], "service_unavailable");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not configured"));
+    }
+
+    /// (d) ENABLEMENT DIVERGENCE from the web-search donor: the upstream is
+    /// keyless, so there is NO API-key gate — the `services.toml` entry alone
+    /// enables the route. With the entry missing, the route is a clean 503
+    /// (never a free or default-priced response).
+    #[tokio::test]
+    async fn price_returns_503_when_service_entry_missing() {
+        let app = price_app_with(
+            Some(Arc::new(StubPriceProvider)),
+            Arc::new(AlwaysPassVerifier),
+            PRICE_ENTRY_MISSING_TOML,
+            RateLimiter::new(RateLimitConfig::default()),
+        );
+
+        let body = format!(r#"{{"mints":["{USDC_MINT_B58}"]}}"#);
+        let response = app.oneshot(price_request(&body, None)).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a missing registry entry must disable the route (503), never quote a default price"
+        );
+    }
+
+    /// (e) A paid request settles through the facilitator and returns the
+    /// normalized per-mint prices, with an unknown mint carried as an EXPLICIT
+    /// `null` price (not an error for the whole batch). Proves the full money
+    /// path serves the tool only AFTER on-chain settlement.
+    #[tokio::test]
+    async fn price_paid_request_settles_and_returns_normalized_prices() {
+        let app = price_app(Some(Arc::new(StubPriceProvider)));
+
+        let body = format!(r#"{{"mints":["{USDC_MINT_B58}","{UNKNOWN_MINT_B58}"]}}"#);
+        let response = app
+            .oneshot(price_request(
+                &body,
+                Some(&valid_payment_header_with(
+                    "/v1/solana/price",
+                    USDC_MINT,
+                    TEST_RECIPIENT_WALLET,
+                )),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["source"], "stub");
+        assert!(json["as_of"].is_string(), "as_of must be present: {json}");
+        let prices = json["prices"].as_array().unwrap();
+        assert_eq!(prices.len(), 2, "one entry per requested mint, in order");
+        assert_eq!(prices[0]["mint"], USDC_MINT_B58);
+        assert_eq!(prices[0]["price"]["usd_price"], 0.9998);
+        assert_eq!(prices[0]["price"]["decimals"], 6);
+        assert_eq!(prices[1]["mint"], UNKNOWN_MINT_B58);
+        assert!(
+            prices[1]["price"].is_null(),
+            "an unpriced mint must be an EXPLICIT null entry, got: {json}"
+        );
+    }
+
+    /// A paid request whose amount is BELOW the quoted cost is rejected —
+    /// never under-charged or served.
+    #[tokio::test]
+    async fn price_paid_request_rejects_insufficient_amount() {
+        let app = price_app(Some(Arc::new(StubPriceProvider)));
+
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/solana/price".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "exact".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "1000".to_string(), // below 1_050
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Direct(SolanaPayload {
+                transaction: base64::engine::general_purpose::STANDARD
+                    .encode(b"mock_tx_price_insufficient"),
+            }),
+        };
+        let header =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap());
+
+        let body = format!(r#"{{"mints":["{USDC_MINT_B58}"]}}"#);
+        let response = app
+            .oneshot(price_request(&body, Some(&header)))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("insufficient"));
+    }
+
+    /// Run a request that must be rejected with 400 BEFORE any settlement.
+    async fn assert_400_never_settles(body: &str, label: &str) {
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let app = price_app_with(
+            Some(Arc::new(StubPriceProvider)),
+            Arc::new(SettleRecordingVerifier {
+                settled: Arc::clone(&settled),
+            }),
+            PRICE_SERVICES_TOML,
+            RateLimiter::new(RateLimitConfig::default()),
+        );
+
+        let response = app
+            .oneshot(price_request(
+                body,
+                Some(&valid_payment_header_with(
+                    "/v1/solana/price",
+                    USDC_MINT,
+                    TEST_RECIPIENT_WALLET,
+                )),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{label}: must be rejected with 400"
+        );
+        assert!(
+            !settled.load(std::sync::atomic::Ordering::SeqCst),
+            "{label}: settlement must NOT be reached — funds must not be taken \
+             for a request that was never going to run"
+        );
+    }
+
+    /// (f) Empty `mints` array → 400, never settles.
+    #[tokio::test]
+    async fn price_empty_mints_returns_400_and_never_settles() {
+        assert_400_never_settles(r#"{"mints":[]}"#, "empty mints").await;
+    }
+
+    /// (f) A mint that is not valid base58-of-32-bytes → 400, never settles.
+    #[tokio::test]
+    async fn price_invalid_mint_returns_400_and_never_settles() {
+        assert_400_never_settles(r#"{"mints":["not-a-mint!!"]}"#, "invalid base58 mint").await;
+        // Valid base58 but wrong decoded length (too short) — also rejected.
+        assert_400_never_settles(r#"{"mints":["abc"]}"#, "short mint").await;
+    }
+
+    /// (f) More than the Jupiter batch cap (50) → 400, never settles.
+    #[tokio::test]
+    async fn price_too_many_mints_returns_400_and_never_settles() {
+        let mints: Vec<String> = (0..51).map(|_| format!("\"{USDC_MINT_B58}\"")).collect();
+        let body = format!(r#"{{"mints":[{}]}}"#, mints.join(","));
+        assert_400_never_settles(&body, "51 mints").await;
+    }
+
+    /// (f) Malformed body (no `mints` field) → 400, never settles.
+    #[tokio::test]
+    async fn price_malformed_body_returns_400_and_never_settles() {
+        assert_400_never_settles(r#"{"tokens":["x"]}"#, "missing mints field").await;
+    }
+
+    /// (g) Upstream failure AFTER settlement → 502 and the charge STANDS
+    /// (charge-without-delivery, #486 posture) — mirrors the donor's exact
+    /// path: payment settles first, the upstream call runs after, and a failed
+    /// upstream is an opaque 502 with the spend already recorded.
+    #[tokio::test]
+    async fn price_upstream_failure_returns_502_after_settlement() {
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let app = price_app_with(
+            Some(Arc::new(FailingPriceProvider)),
+            Arc::new(SettleRecordingVerifier {
+                settled: Arc::clone(&settled),
+            }),
+            PRICE_SERVICES_TOML,
+            RateLimiter::new(RateLimitConfig::default()),
+        );
+
+        let body = format!(r#"{{"mints":["{USDC_MINT_B58}"]}}"#);
+        let response = app
+            .oneshot(price_request(
+                &body,
+                Some(&valid_payment_header_with(
+                    "/v1/solana/price",
+                    USDC_MINT,
+                    TEST_RECIPIENT_WALLET,
+                )),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_GATEWAY,
+            "an upstream failure after settlement must be an opaque 502"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["error"], "price provider error",
+            "the 502 body must be static — never leak upstream internals"
+        );
+        assert!(
+            settled.load(std::sync::atomic::Ordering::SeqCst),
+            "settlement MUST have been reached before the upstream call \
+             (mirrors the donor: the charge stands on upstream failure)"
+        );
+    }
+
+    /// (h) The outer per-IP rate limiter applies to `/v1/solana/price`
+    /// (inherited from `build_router`'s global layer — no route opt-out).
+    /// `oneshot` requests carry no `ConnectInfo`, so they land in the shared
+    /// "unknown" bucket bounded by `unknown_max_requests`.
+    #[tokio::test]
+    async fn price_rate_limit_inherited_from_outer_limiter() {
+        let app = price_app_with(
+            Some(Arc::new(StubPriceProvider)),
+            Arc::new(AlwaysPassVerifier),
+            PRICE_SERVICES_TOML,
+            RateLimiter::new(RateLimitConfig {
+                max_requests: 2,
+                window: std::time::Duration::from_secs(60),
+                unknown_max_requests: 2,
+            }),
+        );
+
+        let body = format!(r#"{{"mints":["{USDC_MINT_B58}"]}}"#);
+        for i in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(price_request(&body, None))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::PAYMENT_REQUIRED,
+                "request {i} under the limit must reach the handler (402)"
+            );
+        }
+        let resp = app.oneshot(price_request(&body, None)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the 3rd request must be rejected by the inherited outer rate limiter"
+        );
+    }
+
+    /// #499 POSITIVE-reject pin (price path): a wallet provisioned
+    /// `require_tenant = TRUE` MUST be rejected with 403 BEFORE any settlement
+    /// on `/v1/solana/price`. Mirrors the donor's search test. Self-skips if
+    /// local Redis is unavailable.
+    #[tokio::test]
+    async fn price_require_tenant_wallet_rejected_before_settlement() {
+        let client = match redis::Client::open("redis://127.0.0.1:6379") {
+            Ok(c) if c.get_multiplexed_async_connection().await.is_ok() => c,
+            _ => {
+                eprintln!("skipping price require_tenant reject test: Redis unavailable");
+                return;
+            }
+        };
+
+        let payer = format!("ReqTenantPrice{}", uuid::Uuid::new_v4().simple());
+        let cache_key = format!("budget_config:{payer}");
+
+        let cached = serde_json::to_string(&gateway::usage::BudgetConfig {
+            hourly: None,
+            daily: Some(100.0),
+            monthly: None,
+            require_tenant: true,
+        })
+        .unwrap();
+        {
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("redis conn");
+            let _: () = redis::cmd("SET")
+                .arg(&cache_key)
+                .arg(&cached)
+                .arg("EX")
+                .arg(60)
+                .query_async(&mut conn)
+                .await
+                .expect("seed budget_config cache");
+        }
+
+        let settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Redis-backed UsageTracker so the #499 gate resolves the seeded flag.
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(PRICE_SERVICES_TOML).unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![Arc::new(SettleRecordingVerifier {
+                settled: Arc::clone(&settled),
+            })
+                as Arc<dyn PaymentVerifier>]);
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
+            search_provider: None,
+            price_provider: Some(Arc::new(StubPriceProvider)),
+            facilitator,
+            usage: gateway::usage::UsageTracker::new(None, Some(client.clone())),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        let app = build_router(state, RateLimiter::new(RateLimitConfig::default()));
+
+        let body = format!(r#"{{"mints":["{USDC_MINT_B58}"]}}"#);
+        let response = app
+            .oneshot(price_request(
+                &body,
+                Some(&valid_escrow_payment_header_for_payer(
+                    "/v1/solana/price",
+                    &payer,
+                )),
+            ))
+            .await
+            .unwrap();
+
+        // Clean up the seeded key regardless of assertion outcome below.
+        {
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("redis conn");
+            let _: Result<i64, _> = redis::cmd("DEL")
+                .arg(&cache_key)
+                .query_async(&mut conn)
+                .await;
+        }
+
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a require_tenant=TRUE wallet must be rejected with 403 on /v1/solana/price"
+        );
+        assert!(
+            !settled.load(std::sync::atomic::Ordering::SeqCst),
+            "settlement must NOT run when a require_tenant wallet is rejected (#499)"
+        );
+    }
+
+    /// Contract parity with the donor (F4): a PAID price response carries the
+    /// `x-solvela-receipt` header when PostgreSQL is configured. Self-skips
+    /// when Postgres is unavailable.
+    #[tokio::test]
+    async fn price_paid_request_emits_receipt_header() {
+        let Some(pool) = try_receipts_db_pool().await else {
+            return; // self-skip without Postgres
+        };
+
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(PRICE_SERVICES_TOML).unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![
+                Arc::new(AlwaysPassVerifier) as Arc<dyn PaymentVerifier>
+            ]);
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
+            search_provider: None,
+            price_provider: Some(Arc::new(StubPriceProvider)),
+            facilitator,
+            usage: gateway::usage::UsageTracker::new(Some(pool.clone()), None),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: Some(pool.clone()),
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        let app = build_router(
+            Arc::clone(&state),
+            RateLimiter::new(RateLimitConfig::default()),
+        );
+
+        let body = format!(r#"{{"mints":["{USDC_MINT_B58}"]}}"#);
+        let response = app
+            .oneshot(price_request(
+                &body,
+                Some(&valid_payment_header_with(
+                    "/v1/solana/price",
+                    USDC_MINT,
+                    TEST_RECIPIENT_WALLET,
+                )),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let path = receipt_header_path(&response);
+        assert!(
+            path.starts_with("/v1/receipts/"),
+            "price receipt header must be the receipt path, got: {path}"
+        );
+    }
+}
+
+// ===========================================================================
+// v0 spend-down channel DRAW — `/v1/solana/price` channel-voucher fork parity
+//
+// The price route mirrors the donor's (`/v1/search`) hand-inserted channel
+// fork, so it gets the same parity coverage: pure gate/mismatch tests always
+// run; the money-path tests are backed by the live dev stack (Postgres +
+// Redis) and SKIP cleanly when it is unreachable. Helpers are module-local
+// copies, following the `channel_draw_tests`/`chat_channel_draw_tests`
+// convention (self-contained modules, no cross-module test helpers).
+// ===========================================================================
+mod price_channel_draw_tests {
+    use super::*;
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use gateway::cache::{CacheConfig, ResponseCache};
+    use gateway::providers::price::{
+        MintPrice, PriceData, PriceError, PriceProvider, PriceResults,
+    };
+    use std::time::Instant;
+
+    const PRICE_CHANNEL_SERVICES_TOML: &str = r#"
+[services.solana-price]
+name = "Solana Price Data"
+endpoint = "/v1/solana/price"
+category = "data"
+x402_enabled = true
+internal = true
+description = "x402-paid Solana token prices"
+pricing_label = "$0.00105/query"
+price_per_request_usdc = 0.001
+"#;
+
+    const PRICE_BODY: &str = r#"{"mints":["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]}"#;
+    /// $0.001 provider + 5% fee = 1_050 atomic — the flat billed per draw.
+    const BILLED_ATOMIC: u64 = 1_050;
+    const SEED_SLOT: u64 = 1_000_000;
+    const VOUCHER_EXPIRY_SLOT: u64 = 1_000_750;
+
+    const CHANNEL_DB_URL: &str = "postgres://solvela:solvela_dev_password@127.0.0.1:5432/solvela";
+    const CHANNEL_REDIS_URL: &str = "redis://127.0.0.1:6379";
+
+    fn db_url() -> String {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| CHANNEL_DB_URL.to_string())
+    }
+    fn redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| CHANNEL_REDIS_URL.to_string())
+    }
+
+    /// Acquire the live dev stack (Postgres + Redis) or `None` to SKIP.
+    async fn stack() -> Option<(sqlx::PgPool, redis::Client)> {
+        let pool = sqlx::PgPool::connect(&db_url()).await.ok()?;
+        let channels_exists: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.channels')::text")
+                .fetch_one(&pool)
+                .await
+                .ok()?;
+        channels_exists?;
+        let refunds_exists: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.channel_refunds')::text")
+                .fetch_one(&pool)
+                .await
+                .ok()?;
+        refunds_exists?;
+        let client = redis::Client::open(redis_url()).ok()?;
+        let cache = ResponseCache::new(&redis_url(), CacheConfig::default()).ok()?;
+        if !cache.ping().await {
+            return None;
+        }
+        Some((pool, client))
+    }
+
+    /// A stub price provider returning one priced mint with no network call.
+    struct StubProvider;
+    #[async_trait]
+    impl PriceProvider for StubProvider {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        async fn prices(&self, mints: &[String]) -> Result<PriceResults, PriceError> {
+            Ok(PriceResults {
+                prices: mints
+                    .iter()
+                    .map(|m| MintPrice {
+                        mint: m.clone(),
+                        price: Some(PriceData {
+                            usd_price: serde_json::Number::from_f64(1.0).unwrap(),
+                            decimals: Some(6),
+                            block_id: Some(1),
+                            price_change_24h: None,
+                        }),
+                    })
+                    .collect(),
+                source: "stub".to_string(),
+                as_of: "2026-07-08T00:00:00Z".to_string(),
+            })
+        }
+    }
+
+    /// A provider that ALWAYS fails — the most consequential money branch: a
+    /// served-then-failed draw must NOT advance `last` and must write NO
+    /// spend/receipt (the agent keeps its draw; this is the settle-vs-refund
+    /// posture DIVERGENCE between the channel fork and the exact path).
+    struct FailingProvider;
+    #[async_trait]
+    impl PriceProvider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing-stub"
+        }
+        async fn prices(&self, _mints: &[String]) -> Result<PriceResults, PriceError> {
+            Err(PriceError::Parse("simulated upstream failure".to_string()))
+        }
+    }
+
+    /// A minimal `/v1/solana/price` app with channels DISABLED and no
+    /// DB/Redis — for the pure gate/mismatch tests.
+    fn disabled_channel_app() -> axum::Router {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(PRICE_CHANNEL_SERVICES_TOML).unwrap();
+        let facilitator =
+            solvela_x402::facilitator::Facilitator::new(vec![Arc::new(AlwaysPassVerifier)]);
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
+            search_provider: None,
+            price_provider: Some(Arc::new(StubProvider)),
+            facilitator,
+            usage: gateway::usage::UsageTracker::noop(),
+            cache: None,
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: None,
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        build_router(state, RateLimiter::new(RateLimitConfig::default()))
+    }
+
+    /// A fully-wired `/v1/solana/price` app with channels ENABLED, backed by
+    /// the live dev Postgres + Redis.
+    async fn enabled_channel_app(
+        provider: Arc<dyn PriceProvider>,
+        verifier: Arc<dyn PaymentVerifier>,
+        pool: sqlx::PgPool,
+        redis_client: redis::Client,
+        rpc_url: &str,
+        seed_slot: bool,
+    ) -> (axum::Router, Arc<AppState>) {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(PRICE_CHANNEL_SERVICES_TOML).unwrap();
+        let facilitator = solvela_x402::facilitator::Facilitator::new(vec![verifier]);
+        let cache = ResponseCache::new(&redis_url(), CacheConfig::default()).unwrap();
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        config.solana.rpc_url = rpc_url.to_string();
+        config.channel.enabled = true;
+
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers: ProviderRegistry::from_env(reqwest::Client::new()),
+            native_anthropic: None,
+            search_provider: None,
+            price_provider: Some(provider),
+            facilitator,
+            usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client)),
+            cache: Some(cache),
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: Some(pool),
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        if seed_slot {
+            *state.slot_cache.lock().await = Some((SEED_SLOT, Instant::now()));
+        }
+        let app = build_router(state.clone(), RateLimiter::new(RateLimitConfig::default()));
+        (app, state)
+    }
+
+    fn rand32() -> [u8; 32] {
+        let mut b = [0u8; 32];
+        b[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        b[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        b
+    }
+
+    fn fresh_key() -> SigningKey {
+        SigningKey::from_bytes(&rand32())
+    }
+
+    /// Seed an OPEN channel ledger row directly (see the donor module's note on
+    /// why a raw INSERT).
+    async fn create_channel(
+        pool: &sqlx::PgPool,
+        channel_id: [u8; 32],
+        agent_wallet: &str,
+        session_key: [u8; 32],
+        deposited: u64,
+    ) {
+        sqlx::query(
+            "INSERT INTO channels
+               (channel_id, agent_wallet, session_key, provider, mint,
+                deposited_atomic, settled_atomic, last_voucher_cumulative_atomic,
+                expiry_slot, status, funding_tx_sig)
+             VALUES ($1, $2, $3, $4, $5, $6, 0, 0, $7, 'open', $8)",
+        )
+        .bind(bs58::encode(channel_id).into_string())
+        .bind(agent_wallet)
+        .bind(bs58::encode(session_key).into_string())
+        .bind(TEST_RECIPIENT_WALLET)
+        .bind(USDC_MINT)
+        .bind(i64::try_from(deposited).unwrap())
+        .bind(VOUCHER_EXPIRY_SLOT as i64)
+        .bind(format!("sig-{}", uuid::Uuid::new_v4()))
+        .execute(pool)
+        .await
+        .expect("insert channel row");
+    }
+
+    /// Build a signed channel-voucher `PAYMENT-SIGNATURE` header, with the
+    /// SDK-contract `accepted.amount` supplied by the caller (the happy paths
+    /// pass the per-call price; the mismatch test passes a wrong value).
+    fn voucher_header_with_amount(
+        signing_key: &SigningKey,
+        channel_id: [u8; 32],
+        cumulative_atomic: u64,
+        expiry_slot: u64,
+        nonce: u64,
+        body: &[u8],
+        accepted_amount: &str,
+    ) -> String {
+        let digest = gateway::routes::channel::request_digest(body);
+        let msg = solvela_x402::channel::build_voucher_message(
+            &channel_id,
+            cumulative_atomic,
+            expiry_slot,
+            nonce,
+            &digest,
+        );
+        let signature = signing_key.sign(&msg).to_bytes();
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/solana/price".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "channel".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: accepted_amount.to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Channel(solvela_x402::types::ChannelVoucherPayload {
+                channel_id: bs58::encode(channel_id).into_string(),
+                cumulative_atomic,
+                expiry_slot,
+                nonce,
+                request_digest: base64::engine::general_purpose::STANDARD.encode(digest),
+                signature: base64::engine::general_purpose::STANDARD.encode(signature),
+            }),
+        };
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap())
+    }
+
+    fn voucher_header(
+        signing_key: &SigningKey,
+        channel_id: [u8; 32],
+        cumulative_atomic: u64,
+        expiry_slot: u64,
+        nonce: u64,
+        body: &[u8],
+    ) -> String {
+        voucher_header_with_amount(
+            signing_key,
+            channel_id,
+            cumulative_atomic,
+            expiry_slot,
+            nonce,
+            body,
+            &BILLED_ATOMIC.to_string(),
+        )
+    }
+
+    fn price_request(header: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/solana/price")
+            .header("content-type", "application/json")
+            .header("payment-signature", header)
+            .body(Body::from(PRICE_BODY))
+            .unwrap()
+    }
+
+    async fn status_and_json(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    async fn channel_last_cumulative(pool: &sqlx::PgPool, channel_id: [u8; 32]) -> u64 {
+        gateway::channels::load_channel(pool, &bs58::encode(channel_id).into_string())
+            .await
+            .unwrap()
+            .unwrap()
+            .last_voucher_cumulative_atomic
+    }
+
+    async fn voucher_row_count(pool: &sqlx::PgPool, channel_id: [u8; 32]) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM channel_vouchers WHERE channel_id = $1")
+            .bind(bs58::encode(channel_id).into_string())
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    // -- pure / no-DB: always run ------------------------------------------
+
+    /// A channel voucher against a DISABLED channel scheme → 404 (uniform with
+    /// open/close), never a fake in-memory draw.
+    #[tokio::test]
+    async fn price_channel_draw_404_when_disabled() {
+        let app = disabled_channel_app();
+        let key = fresh_key();
+        let cid = rand32();
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            PRICE_BODY.as_bytes(),
+        );
+        let (status, json) =
+            status_and_json(app.oneshot(price_request(&header)).await.unwrap()).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "disabled channel draw must 404"
+        );
+        assert_eq!(json["error"], "channel not available");
+    }
+
+    /// No-silent-fallback: a `scheme="channel"` header whose payload is NOT a
+    /// channel voucher is a fail-closed reject — never serviced as exact.
+    #[tokio::test]
+    async fn price_channel_scheme_with_direct_payload_rejected() {
+        let app = disabled_channel_app();
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/solana/price".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "channel".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: "1050".to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Direct(SolanaPayload {
+                transaction: base64::engine::general_purpose::STANDARD.encode(b"not-a-voucher"),
+            }),
+        };
+        let header =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap());
+        let (status, json) =
+            status_and_json(app.oneshot(price_request(&header)).await.unwrap()).await;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a channel voucher"));
+    }
+
+    /// No-silent-fallback (mirror image): a channel-voucher PAYLOAD under a
+    /// NON-"channel" scheme (`exact`) is rejected fail-closed.
+    #[tokio::test]
+    async fn price_channel_payload_with_exact_scheme_rejected() {
+        let app = disabled_channel_app();
+        let key = fresh_key();
+        let cid = rand32();
+        let digest = gateway::routes::channel::request_digest(PRICE_BODY.as_bytes());
+        let msg = solvela_x402::channel::build_voucher_message(
+            &cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            &digest,
+        );
+        let sig = key.sign(&msg).to_bytes();
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/solana/price".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "exact".to_string(), // MISMATCH: payload is a channel voucher
+                network: SOLANA_NETWORK.to_string(),
+                amount: "1050".to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Channel(solvela_x402::types::ChannelVoucherPayload {
+                channel_id: bs58::encode(cid).into_string(),
+                cumulative_atomic: BILLED_ATOMIC,
+                expiry_slot: VOUCHER_EXPIRY_SLOT,
+                nonce: 1,
+                request_digest: base64::engine::general_purpose::STANDARD.encode(digest),
+                signature: base64::engine::general_purpose::STANDARD.encode(sig),
+            }),
+        };
+        let header =
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap());
+        let (status, json) =
+            status_and_json(app.oneshot(price_request(&header)).await.unwrap()).await;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("scheme is not 'channel'"));
+    }
+
+    // -- money path: DB + Redis (skip when the dev stack is down) -----------
+
+    /// Happy path: one channel draw serves the tool AFTER verifying the
+    /// voucher, advances the durable `last_voucher_cumulative`, and carries a
+    /// receipt (positive side of the ledger invariant).
+    #[tokio::test]
+    async fn price_channel_draw_happy_path_advances_last() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping price_channel_draw_happy_path_advances_last: dev stack unavailable"
+            );
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            PRICE_BODY.as_bytes(),
+        );
+        let resp = app.oneshot(price_request(&header)).await.unwrap();
+        assert!(
+            resp.headers().contains_key("x-solvela-receipt"),
+            "a debited draw must advertise a receipt"
+        );
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(status, StatusCode::OK, "a valid voucher must serve: {json}");
+        assert_eq!(json["source"], "stub");
+        assert_eq!(
+            json["prices"][0]["mint"],
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        );
+
+        assert_eq!(
+            channel_last_cumulative(&pool, cid).await,
+            BILLED_ATOMIC,
+            "last_voucher_cumulative must advance by exactly the flat billed amount"
+        );
+        assert_eq!(voucher_row_count(&pool, cid).await, 1);
+    }
+
+    /// The channel-fork posture DIVERGENCE from the exact path: an upstream
+    /// failure on a channel draw is a NO-CHARGE (last does NOT advance, no
+    /// spend/receipt, no receipt header) — the agent keeps its draw. (On the
+    /// exact path the charge stands, per the donor's #486 posture.)
+    #[tokio::test]
+    async fn price_channel_draw_upstream_failure_no_charge() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping price_channel_draw_upstream_failure_no_charge: dev stack unavailable"
+            );
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(FailingProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        let header = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            PRICE_BODY.as_bytes(),
+        );
+        let resp = app.oneshot(price_request(&header)).await.unwrap();
+        assert!(
+            !resp.headers().contains_key("x-solvela-receipt"),
+            "a non-charge must NOT advertise a receipt (ledger invariant)"
+        );
+        let (status, json) = status_and_json(resp).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(json["error"], "price provider error");
+
+        assert_eq!(
+            channel_last_cumulative(&pool, cid).await,
+            0,
+            "a failed draw must NOT advance last (the agent was not debited)"
+        );
+        assert_eq!(
+            voucher_row_count(&pool, cid).await,
+            0,
+            "a failed draw must record NO voucher row"
+        );
+    }
+
+    /// Two SEQUENTIAL draws both succeed with no TTL stall — proves the copied
+    /// lock lifecycle releases on success.
+    #[tokio::test]
+    async fn price_sequential_channel_draws_both_succeed() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping price_sequential_channel_draws_both_succeed: dev stack unavailable"
+            );
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        let started = Instant::now();
+        let h1 = voucher_header(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            PRICE_BODY.as_bytes(),
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(price_request(&h1))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let h2 = voucher_header(
+            &key,
+            cid,
+            2 * BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            2,
+            PRICE_BODY.as_bytes(),
+        );
+        assert_eq!(
+            app.oneshot(price_request(&h2)).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "sequential draws must not stall on the lock TTL"
+        );
+        assert_eq!(channel_last_cumulative(&pool, cid).await, 2 * BILLED_ATOMIC);
+        assert_eq!(voucher_row_count(&pool, cid).await, 2);
+    }
+
+    /// SDK-contract check parity: a voucher whose `accepted.amount` does not
+    /// equal the per-call price is rejected (billing never reads that field —
+    /// the gateway quote is authoritative — but a mismatch signals SDK↔gateway
+    /// price disagreement).
+    #[tokio::test]
+    async fn price_channel_draw_rejects_accepted_amount_mismatch() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping price_channel_draw_rejects_accepted_amount_mismatch: dev stack unavailable");
+            return;
+        };
+        let key = fresh_key();
+        let cid = rand32();
+        let session = key.verifying_key().to_bytes();
+        let agent = bs58::encode(session).into_string();
+        create_channel(&pool, cid, &agent, session, 1_000_000).await;
+
+        let (app, _state) = enabled_channel_app(
+            Arc::new(StubProvider),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            "https://api.devnet.solana.com",
+            true,
+        )
+        .await;
+
+        // Wrong accepted.amount (the donor's SEARCH price, not ours).
+        let header = voucher_header_with_amount(
+            &key,
+            cid,
+            BILLED_ATOMIC,
+            VOUCHER_EXPIRY_SLOT,
+            1,
+            PRICE_BODY.as_bytes(),
+            "10500",
+        );
+        let (status, json) =
+            status_and_json(app.oneshot(price_request(&header)).await.unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("per-call price"));
+        assert_eq!(
+            channel_last_cumulative(&pool, cid).await,
+            0,
+            "a rejected draw must not debit"
+        );
+    }
 }

@@ -8,6 +8,7 @@ pub mod health;
 pub mod heartbeat;
 pub mod nvidia;
 pub mod openai;
+pub mod price;
 pub mod search;
 pub mod xai;
 

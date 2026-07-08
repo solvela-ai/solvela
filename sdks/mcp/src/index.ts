@@ -43,6 +43,7 @@ import { createSessionStore } from './session.js';
 import { validateArgs } from './validate-args.js';
 import { parseStrictUsdc } from './parse-amount.js';
 import { formatSearchResults, formatSearchCost } from './format-search.js';
+import { formatPriceResults } from './format-price.js';
 import { createPaymentHeader, decodePaymentHeader, isStubTransaction } from '@solvela/signer-core';
 import type { PaymentRequired, PaymentAccept } from '@solvela/signer-core';
 import { Connection, PublicKey } from '@solana/web3.js';
@@ -179,7 +180,7 @@ const client = new GatewayClient({
 const server = new Server(
   {
     name: 'solvela',
-    version: '0.1.0',
+    version: '0.1.1',
   },
   {
     capabilities: { tools: {} },
@@ -285,6 +286,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [
             { type: 'text', text: formatSearchResults(results) },
+            { type: 'text', text: formatSearchCost(costBreakdown) },
+          ],
+        };
+      }
+
+      case 'solana_price': {
+        // T-3A: runtime-validate args before dispatch — MCP schema is advisory.
+        // Content validation (1–50 mints, non-empty entries) lives in
+        // client.solanaPrice() so it is unit-testable and shared with any
+        // other caller. The per-call cost line reuses formatSearchCost — it is
+        // breakdown-driven and endpoint-agnostic.
+        const { mints } = validateArgs<{ mints: string[] }>('solana_price', args, {
+          mints: { kind: 'stringArray', required: true },
+        });
+
+        const { results, costBreakdown } = await client.solanaPrice(mints);
+
+        return {
+          content: [
+            { type: 'text', text: formatPriceResults(results) },
             { type: 'text', text: formatSearchCost(costBreakdown) },
           ],
         };
