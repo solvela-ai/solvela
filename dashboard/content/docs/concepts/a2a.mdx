@@ -309,6 +309,42 @@ A2A adds no payment logic of its own. On the payment-submitted path the gateway 
 - **Prompt guard** — the same injection/jailbreak/PII checks as the chat route run as a money-free pre-check BEFORE the settlement lock and on-chain settlement, so blocked content rejects with no funds moved (but never on the unpaid quote path, so anonymous callers cannot force the scans for free).
 - **Output cap** — the provider is called with the same `max_tokens` cap that priced the quote (the model's completion-token ceiling, stored on the task at quote time), so actual output cannot exceed what the agent paid for.
 
-One A2A-specific restriction: wallets provisioned with per-tenant budgeting (`require_tenant`) are rejected on the A2A path with a payment-failed error before any settlement — those wallets must use `POST /v1/chat/completions`, where per-tenant budget enforcement runs.
+One A2A-specific restriction: wallets provisioned with per-tenant budgeting (`require_tenant`) are rejected on the A2A path with a payment-failed error before any settlement — those wallets must use `POST /v1/chat/completions`, where per-tenant budget enforcement runs. This applies to channel vouchers too: the wallet is checked from the channel's ledger row, not the payload.
+
+## Channel vouchers on A2A
+
+The [spend-down channel](/docs/concepts/spend-down-channel) works on the A2A paid leg too: repeat callers can settle tasks with signed vouchers instead of a per-task on-chain transaction. Discovery is documentation-only — the task's `accepts[]` still lists only `exact` (plus `escrow` when configured), exactly like the REST 402; channel-aware clients opt in by reading the quote and submitting a voucher payload. A gateway with channels disabled rejects voucher submissions with `channel scheme is not accepted on this endpoint`, indistinguishable from one without the feature.
+
+**The hybrid flow.** Opening and closing a channel are REST + Solana-signer operations (`POST /v1/channel/open` with a signed USDC funding transfer; `POST /v1/channel/close`), not A2A methods — an A2A-only agent cannot open one. With an open channel:
+
+1. Send `message/send` without payment as usual → `input-required` Task. Read the fee-inclusive quote from the first `accepts[]` entry's `amount`.
+2. Sign a voucher for `previous cumulative + quote` and submit it as `x402.payment.payload` with `accepted.scheme: "channel"`, `accepted.amount` echoing the quote **exactly**, and `network`/`asset`/`pay_to` as advertised.
+3. The gateway verifies the voucher off-chain, serves the request, then advances the channel ledger — the task completes with `x402.payment.status: "payment-completed"` and a receipt reference. No Solana transaction happens.
+
+**The digest contract (versioned: `solvela-a2a-channel-digest-v1`).** A2A has no raw request body to hash, so the voucher's `request_digest` binds to the task instead:
+
+```
+request_digest = base64( SHA-256( "solvela-a2a-channel-digest-v1:" + taskId ) )   // UTF-8 bytes
+```
+
+The task id is an unguessable capability minted at quote time, and the served request derives entirely from the task's stored message — binding the voucher to the task binds it to the request content. The version prefix keeps this preimage permanently distinct from the REST channel digests (SHA-256 of the raw request bytes), so a voucher signed for one surface can never be replayed on the other. The prefix is a permanent wire contract; any change would be a new version, never an edit.
+
+**Voucher expiry.** Expiry is checked once, at acceptance (requiring a ~50-slot buffer), and deliberately never re-checked at settlement — a voucher verified in time is legitimately consumed even when the serve outlasts its signed expiry (the A2A serve bound is 540 s ≈ 1,350 slots). Sign `expiry_slot ≥ current slot + ~1,500 slots` (current slot from `GET /v1/escrow/config`) so acceptance never races the buffer.
+
+**Settlement semantics.** Channel settlement on A2A is deliver-then-record: the channel is drawn only after the provider delivers. A provider failure or serve timeout takes **no draw** — the task reverts to `input-required` and the **same voucher** may be resubmitted (its delta still equals the quote). This deliberately differs from `exact`/`escrow`, which settle on-chain before the provider call. Draws are strictly serial per channel (the same per-channel lock as the REST surfaces), and channel submissions never touch the tx replay set — replay defense is the digest binding plus the strictly-increasing cumulative.
+
+**Channel-specific error surface:**
+
+| Arm | Code | `error.data` |
+|-----|------|--------------|
+| Channel not enabled / not configured on this gateway | `-32007` — message `channel scheme is not accepted on this endpoint` | — |
+| Scheme/payload pairing mismatch; amount echo or network/asset/pay_to mismatch; malformed voucher; unknown or closed channel; bad signature; tenant-restricted wallet | `-32007`, static message | — |
+| Post-authentication voucher rejections (wrong delta, stale cumulative, expiry, over-draw) | `-32007` | `{ "last_cumulative": "<atomic string>" }` — the channel's authoritative cumulative (the same resync field the REST surfaces return); recompute the next voucher as `last_cumulative + quote` |
+| Draw lock busy; current-slot unavailable; channel load error | `-32603` (retryable) | — |
+| Provider failure / serve timeout — **no draw was taken**; retry the same voucher | `-32008` | — |
+
+**Exhausted channel (over-draw).** When a voucher's `cumulative` would exceed the deposit, the resync figure cannot help — your `last_cumulative` was already right. The task reverts to `input-required` and its stored quote still lists `exact`, so the recovery is to pay that same task per-request; replenishment means opening a **new** channel (there is no top-up).
+
+**Receipts have no chain anchor.** A channel settlement produces a durable receipt (`x402.payment.receipts.receipt`) but **no** `tx_signature` — nothing touched Solana. The audit artifact is the channel's append-only voucher row (`channel_id`, cumulative), which the receipt reflects. In the rare case the gateway delivers but cannot record the draw (an internal race with a concurrent close), the task completes **without** `x402.payment.status` or `x402.payment.receipts` — on the in-band response and on every later `tasks/get` poll — and nothing was drawn: the absence of a receipt always means the absence of a debit.
 
 See [x402 Protocol](/docs/concepts/x402) for the underlying payment flow and [Escrow System](/docs/concepts/escrow) for the escrow scheme.
