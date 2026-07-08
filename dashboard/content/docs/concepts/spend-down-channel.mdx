@@ -6,7 +6,7 @@ description: Fund once on-chain, pay per request with signed vouchers — no per
 
 The spend-down channel lets an agent make many paid requests from a single on-chain USDC deposit. Instead of building a fresh Solana transaction for every call, the client attaches a signed **voucher** to each request. Vouchers are verified off-chain — per-request on-chain cost drops to zero — while custody never transfers: the gateway can only ever settle amounts the client has explicitly signed.
 
-Channel vouchers are accepted on `/v1/chat/completions`, `/v1/messages`, and `/v1/search`.
+Channel vouchers are accepted on `/v1/chat/completions`, `/v1/messages`, `/v1/search`, and `/v1/solana/price` — one funding primitive, every paid surface. Fund the channel once and an agent can reason, search the web, and price SPL tokens across hundreds of calls without another Solana transaction. See the [Agent Toolbelt](/docs/api/marketplace) for the marketplace tools.
 
 **Who uses it today:** [`@solvela/dropin`](/docs/sdks/claude-code) (the Claude Code sidecar) and [`@solvela/signer-core`](https://www.npmjs.com/package/@solvela/signer-core) (TypeScript signing primitives — `ChannelTracker`).
 
