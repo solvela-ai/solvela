@@ -1,0 +1,312 @@
+---
+title: Agent Toolbelt
+description: The x402 service marketplace — discover and call the gateway's paid tools with the same wallet that pays for chat
+---
+
+
+Solvela is not only an LLM gateway. The same wallet, the same 402 challenge, and the same settlement path also buy **tools**: gateway-hosted endpoints that take USDC-SPL per call and return structured data. Today the toolbelt holds web search and Solana token prices.
+
+Everything on this page is machine-discoverable at `GET /v1/services` — no API key, no account, no signup.
+
+<CardGroup>
+  <Card title="GET /v1/services" description="Discover every registered tool, its endpoint, and its per-call price. No payment required." href="/docs/api/marketplace#discovery-get-v1services" />
+  <Card title="POST /v1/search" description="x402-paid web search. Normalized title / url / snippet results." href="/docs/api/marketplace#post-v1search" />
+  <Card title="POST /v1/solana/price" description="x402-paid SPL token prices. Up to 50 mints per call." href="/docs/api/marketplace#post-v1solanaprice" />
+  <Card title="Spend-Down Channel" description="Fund once, then draw across chat, search, and prices with no per-call transaction." href="/docs/concepts/spend-down-channel" />
+</CardGroup>
+
+## Discovery: `GET /v1/services`
+
+Returns the service registry. Free, unauthenticated, and the canonical machine-readable answer to "what can I buy here?".
+
+```bash
+curl https://api.solvela.ai/v1/services
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "solana-price",
+      "name": "Solana Price Data",
+      "category": "data",
+      "endpoint": "/v1/solana/price",
+      "x402_enabled": true,
+      "internal": true,
+      "description": "x402-paid Solana token prices (Jupiter upstream); per-mint USD price, batch up to 50 mints, unknown mints returned as null",
+      "pricing": "$0.00105/query (incl. 5% platform fee)",
+      "chains": ["solana"],
+      "source": "config",
+      "price_per_request_usdc": 0.001
+    },
+    {
+      "id": "web-search",
+      "name": "Web Search",
+      "category": "search",
+      "endpoint": "/v1/search",
+      "x402_enabled": true,
+      "internal": true,
+      "description": "x402-paid web search (Tavily upstream); normalized title/url/snippet results",
+      "pricing": "$0.0105/query (incl. 5% platform fee)",
+      "chains": ["solana"],
+      "source": "config",
+      "price_per_request_usdc": 0.01
+    }
+  ],
+  "total": 2
+}
+```
+
+### Response fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Stable machine identifier (`[a-z0-9-]`, max 64 chars) |
+| `name` | string | Human-readable service name |
+| `category` | string | Grouping label — `search`, `data`, … |
+| `endpoint` | string | Relative path for internal (gateway-hosted) services; absolute `https://` URL for external ones |
+| `x402_enabled` | boolean | Whether the endpoint requires x402 payment |
+| `internal` | boolean | `true` when the gateway itself serves the endpoint |
+| `description` | string \| null | Free-text description |
+| `pricing` | string | Human-readable pricing label, **fee-inclusive** |
+| `chains` | string[] | Payment chains — always `["solana"]` today |
+| `source` | string | `"config"` (loaded from `config/services.toml`) or `"api"` (registered at runtime) |
+| `price_per_request_usdc` | float \| null | Flat per-call price **before** the 5% platform fee |
+
+Entries are sorted alphabetically by `id`, so the response is deterministic.
+
+### Filtering
+
+| Query param | Effect |
+|-------------|--------|
+| `?category=<cat>` | Only services in that category (case-insensitive) |
+| `?internal=true` | Only gateway-hosted services |
+| `?internal=false` | Only external, third-party x402 endpoints |
+
+```bash
+curl "https://api.solvela.ai/v1/services?category=data"
+```
+
+<Note>
+  `price_per_request_usdc` is the **pre-fee** price. `pricing` is the **post-fee** label. For `web-search`, `0.01` and `$0.0105/query` describe the same tool — the difference is the 5% platform fee. Always pay the `amount` from the 402 challenge, never a number you computed yourself.
+</Note>
+
+## `POST /v1/search`
+
+x402-paid web search. The gateway holds the upstream search key (Tavily) and calls it server-side; your client never sees it.
+
+**Price:** `$0.01` provider cost + `$0.0005` platform fee = **`$0.0105`** per call (`10500` atomic USDC).
+
+### Request
+
+```bash
+curl -X POST https://api.solvela.ai/v1/search \
+  -H "Content-Type: application/json" \
+  -H "payment-signature: <base64 PaymentPayload>" \
+  -d '{"query": "solana x402 protocol", "max_results": 5}'
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `query` | string | yes | Trimmed; must be non-empty and at most 2000 characters |
+| `max_results` | integer | no | Clamped to `1..=20`. Omit to use the adapter's default |
+
+The request body is capped at 64 KiB.
+
+### Response
+
+```json
+{
+  "query": "solana x402 protocol",
+  "results": [
+    {
+      "title": "x402: an HTTP-native payment protocol",
+      "url": "https://example.com/x402",
+      "snippet": "x402 revives HTTP 402 Payment Required as a machine-payable ..."
+    }
+  ],
+  "provider": "tavily"
+}
+```
+
+`results` may be **empty**. `provider` names the adapter that answered and is informational — do not branch on it.
+
+<Warning>
+  The price is flat and charged **per call, not per result**. A query that returns zero results costs exactly the same `$0.0105`. Payment is settled before the upstream search runs.
+</Warning>
+
+## `POST /v1/solana/price`
+
+x402-paid USD prices for SPL token mints. The gateway queries the Jupiter Price API server-side.
+
+**Price:** `$0.001` provider cost + `$0.00005` platform fee = **`$0.00105`** per call (`1050` atomic USDC).
+
+### Request
+
+```bash
+curl -X POST https://api.solvela.ai/v1/solana/price \
+  -H "Content-Type: application/json" \
+  -H "payment-signature: <base64 PaymentPayload>" \
+  -d '{"mints": [
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "So11111111111111111111111111111111111111112"
+      ]}'
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `mints` | string[] | yes | 1 to 50 entries. Each must be a base58 address decoding to exactly 32 bytes |
+
+The request body is capped at 16 KiB. An empty list, a list over 50 entries, or any non-base58 mint is a `400` — rejected **before** any payment is taken.
+
+### Response
+
+```json
+{
+  "prices": [
+    {
+      "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "price": {
+        "usd_price": 0.9998736983419257,
+        "decimals": 6,
+        "block_id": 431537809,
+        "price_change_24h": -0.0024366454583391443
+      }
+    },
+    {
+      "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "price": null
+    }
+  ],
+  "source": "jupiter",
+  "as_of": "2026-07-08T00:00:00Z"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `prices[].mint` | string | The requested mint, echoed back |
+| `prices[].price` | object \| null | `null` when the upstream has no reliable price for that mint |
+| `prices[].price.usd_price` | number | USD price of one whole token |
+| `prices[].price.decimals` | integer \| null | Token decimals (display metadata) |
+| `prices[].price.block_id` | integer \| null | Chain slot the price was derived at (recency indicator) |
+| `prices[].price.price_change_24h` | number \| null | 24-hour percentage change (`-3.99` = −3.99%) |
+| `source` | string | Adapter that answered (`"jupiter"`). Informational |
+| `as_of` | string | RFC 3339 UTC timestamp of when the upstream answered |
+
+### Behavior you can rely on
+
+- **One entry per requested mint, in request order.** The `prices` array is a positional mirror of your `mints` array.
+- **An unpriceable mint is a `null`, never a batch failure.** The upstream omits mints it cannot price; the gateway normalizes each omission to an explicit `price: null` so a single bad mint never poisons the other 49.
+- **Send each mint once.** Duplicates are tolerated but the repeat comes back `price: null` — the upstream entry is consumed by the first occurrence.
+- **The flat fee is charged regardless of how many mints resolve.** A 50-mint request where every entry comes back `null` costs the same `$0.00105` as one that resolves all 50.
+- **Responses are not cached.** Prices are time-sensitive, so every paid call hits the upstream. (Solvela's [response cache](/docs/concepts/response-cache) is also wallet-agnostic, which would be wrong for market data.)
+
+## Payment
+
+Both tools speak the same [x402](/docs/concepts/x402) dialect as the rest of the gateway: no `payment-signature` header returns a `402` carrying the quote.
+
+```json
+{
+  "x402_version": 2,
+  "resource": { "url": "/v1/solana/price", "method": "POST" },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "amount": "1050",
+      "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "pay_to": "<gateway recipient wallet>",
+      "max_timeout_seconds": 300
+    }
+  ],
+  "cost_breakdown": {
+    "provider_cost": "0.001000",
+    "platform_fee": "0.000050",
+    "total": "0.001050",
+    "currency": "USDC",
+    "fee_percent": 5
+  },
+  "error": "Payment required"
+}
+```
+
+Sign a transfer for `accepts[0].amount`, base64-encode the `PaymentPayload`, and resend with the `payment-signature` header. The `cost_breakdown` always separates provider cost from the 5% platform fee.
+
+### Accepted schemes
+
+| Scheme | Advertised in the 402? | Accepted? |
+|--------|------------------------|-----------|
+| `exact` | Yes | Yes |
+| [`channel`](/docs/concepts/spend-down-channel) | No — invoked by the client | Yes |
+| [`escrow`](/docs/concepts/escrow) | No | **No** — rejected as a scheme/payload mismatch |
+
+<Note>
+  These tools are narrower than `/v1/chat/completions`, which also accepts `escrow`. The marketplace tools cost a fraction of a cent, so escrow's two-transaction round trip buys nothing. An escrow payload sent to a toolbelt endpoint is rejected outright — never silently downgraded to a direct transfer.
+</Note>
+
+### One channel, every surface
+
+This is where the toolbelt earns its name. A [spend-down channel](/docs/concepts/spend-down-channel) is funded **once** on-chain, and its vouchers are accepted on `/v1/chat/completions`, `/v1/messages`, `/v1/search`, **and** `/v1/solana/price`. An agent that opens one channel can then reason, search, and price tokens across hundreds of calls without a single further Solana transaction — each call just signs a fresh cumulative voucher over that exact request body.
+
+Channel draws on the toolbelt are strictly serial per channel and carry the same guarantee as everywhere else: the gateway can never settle more than the highest cumulative amount you have signed, and never more than your deposit.
+
+<Note>
+  Channel support ships behind an operator flag. When channels are disabled — or the gateway is running without PostgreSQL or Redis — a voucher-paid request returns `404`, never a silently un-ledgered draw.
+</Note>
+
+## Errors
+
+| Status | When |
+|--------|------|
+| `400` | Malformed body, empty `query` / `mints`, over-cap batch, non-base58 mint, or a payment payload whose `network` / `asset` / `pay_to` / `method` does not match the 402 |
+| `402` | No `payment-signature` header (body is the `PaymentRequired` object above), or verification failed / replayed |
+| `403` | The payer wallet requires per-tenant budgeting — use `POST /v1/chat/completions`, which enforces that matrix |
+| `404` | Channel voucher supplied but channels are unavailable, or the channel is not open |
+| `502` | The upstream tool provider failed |
+| `503` | The tool is not configured on this gateway (missing `TAVILY_API_KEY` for search, or a missing/unpriced registry entry for either tool) |
+
+Body validation runs **before** any payment work. A request that could never have run — empty query, 51 mints, a mint that isn't base58 — is a `400` with nothing charged, no `402` issued, and no settlement attempted.
+
+### Upstream failure: the settle posture differs by scheme
+
+A `502` from these endpoints has a static body and never leaks upstream internals:
+
+```json
+{ "error": "search provider error" }
+```
+
+```json
+{ "error": "price provider error" }
+```
+
+What it costs you depends on **how you paid**:
+
+| Scheme | Order of operations | Upstream fails → |
+|--------|---------------------|------------------|
+| `exact` | Settle on-chain, **then** call the tool | **You are charged.** The USDC moved on-chain before the tool ran; it cannot be un-moved. A spend row and a receipt are written, and the `502` still carries an `x-solvela-receipt` header so the charge stays auditable. |
+| `channel` | Call the tool, **then** advance the ledger | **You are not charged.** The voucher is not persisted, the channel's cumulative `last` does not advance, your deposit is untouched, and no spend or receipt row is written. Re-sign the same cumulative on your next attempt. |
+
+<Warning>
+  This asymmetry is real, not an oversight. An `exact` payment is an on-chain transfer that must be confirmed before the gateway will serve you — once confirmed, a failing upstream is a charge-without-delivery event that the receipt makes visible. A channel draw is an off-chain ledger entry the gateway controls, so it can honestly withhold the debit when delivery fails. If charge-on-upstream-failure is unacceptable for your workload, pay with a channel.
+</Warning>
+
+## Configuration
+
+Tools are registered in `config/services.toml`, which is the single source of truth for both the price the route quotes and the entry `GET /v1/services` lists. Operators enable them like this:
+
+```bash
+# Web search — requires an upstream key; absent → /v1/search returns 503.
+export TAVILY_API_KEY=tvly-...
+
+# Solana prices — the Jupiter lite host is keyless, so no key is required.
+# Set this only to use the keyed host (same contract, higher rate limits).
+export JUPITER_API_KEY=...
+```
+
+For `/v1/solana/price` the registry entry alone is the enablement gate: remove or unprice the `solana-price` entry and the route returns `503` — never a free or default-priced response.
+
+<Note>
+  Source: `crates/gateway/src/routes/search.rs`, `crates/gateway/src/routes/price.rs`, and `config/services.toml` in the monorepo. The [MCP server](/docs/sdks/mcp) exposes both tools as `web_search` and `solana_price`, handling the 402 dance for you.
+</Note>

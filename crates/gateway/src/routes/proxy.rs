@@ -1039,6 +1039,7 @@ mod tests {
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: None,
+            price_provider: None,
             facilitator: Facilitator::new(vec![]),
             usage: UsageTracker::noop(),
             cache: None, // no Redis — triggers the LRU fallback path
@@ -1194,6 +1195,7 @@ mod tests {
             providers: ProviderRegistry::from_env(reqwest::Client::new()),
             native_anthropic: None,
             search_provider: None,
+            price_provider: None,
             facilitator: Facilitator::new(vec![]),
             usage: UsageTracker::noop(),
             cache: None,

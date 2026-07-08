@@ -71,6 +71,12 @@ pub struct AppState {
     /// env-gating. When `None`, `POST /v1/search` returns 503 (never a free or
     /// stub-paid response). See [`crate::providers::search`].
     pub search_provider: Option<Arc<dyn providers::search::SearchProvider>>,
+    /// Solana price tool upstream adapter (Jupiter). Unlike `search_provider`
+    /// there is no API-key env gate — the Jupiter lite host is keyless, so
+    /// `main.rs` always wires `Some`; the route's real enablement gate is the
+    /// `solana-price` entry in `config/services.toml` (missing/unpriced → 503).
+    /// `None` only in tests / defensively. See [`crate::providers::price`].
+    pub price_provider: Option<Arc<dyn providers::price::PriceProvider>>,
     pub facilitator: Facilitator,
     pub usage: usage::UsageTracker,
     pub cache: Option<cache::ResponseCache>,
@@ -239,6 +245,8 @@ pub enum ReplayPath {
     A2a,
     /// `POST /v1/search` (internal web-search tool)
     Search,
+    /// `POST /v1/solana/price` (internal Solana-price tool)
+    SolanaPrice,
 }
 
 /// In-memory replay protection fallback used when Redis is absent.
@@ -253,6 +261,7 @@ pub struct ReplaySet {
     proxy: Mutex<LruCache<String, std::time::Instant>>,
     a2a: Mutex<LruCache<String, std::time::Instant>>,
     search: Mutex<LruCache<String, std::time::Instant>>,
+    solana_price: Mutex<LruCache<String, std::time::Instant>>,
 }
 
 impl ReplaySet {
@@ -270,6 +279,7 @@ impl ReplaySet {
             proxy: bucket(),
             a2a: bucket(),
             search: bucket(),
+            solana_price: bucket(),
         }
     }
 
@@ -282,6 +292,7 @@ impl ReplaySet {
             ReplayPath::Proxy => &self.proxy,
             ReplayPath::A2a => &self.a2a,
             ReplayPath::Search => &self.search,
+            ReplayPath::SolanaPrice => &self.solana_price,
         }
     }
 }
@@ -360,6 +371,7 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
             post(routes::images::image_generations),
         )
         .route("/v1/search", post(routes::search::search))
+        .route("/v1/solana/price", post(routes::price::solana_price))
         .route("/v1/models", get(routes::models::list_models))
         .route("/v1/services", get(routes::services::list_services))
         .route(
@@ -713,19 +725,24 @@ mod replay_set_tests {
 
     #[test]
     fn for_path_returns_distinct_buckets() {
-        // Four buckets, four distinct memory addresses — the wrapper
+        // Five buckets, five distinct memory addresses — the wrapper
         // hands out independent Mutex pointers per path.
         let rs = ReplaySet::new();
         let chat = rs.for_path(ReplayPath::Chat) as *const _;
         let proxy = rs.for_path(ReplayPath::Proxy) as *const _;
         let a2a = rs.for_path(ReplayPath::A2a) as *const _;
         let search = rs.for_path(ReplayPath::Search) as *const _;
+        let price = rs.for_path(ReplayPath::SolanaPrice) as *const _;
         assert_ne!(chat, proxy, "chat and proxy buckets must differ");
         assert_ne!(chat, a2a, "chat and a2a buckets must differ");
         assert_ne!(proxy, a2a, "proxy and a2a buckets must differ");
         assert_ne!(search, chat, "search and chat buckets must differ");
         assert_ne!(search, proxy, "search and proxy buckets must differ");
         assert_ne!(search, a2a, "search and a2a buckets must differ");
+        assert_ne!(price, chat, "price and chat buckets must differ");
+        assert_ne!(price, proxy, "price and proxy buckets must differ");
+        assert_ne!(price, a2a, "price and a2a buckets must differ");
+        assert_ne!(price, search, "price and search buckets must differ");
     }
 
     #[test]

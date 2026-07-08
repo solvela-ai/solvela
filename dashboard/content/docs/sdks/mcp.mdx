@@ -112,6 +112,7 @@ The MCP server exposes the following tools to connected agents:
 | `chat` | Send a prompt to a specific LLM model |
 | `smart_chat` | Send a prompt via the smart router — it auto-selects the model |
 | `web_search` | Search the web and get titled, linked result snippets (always available; no escrow mode required) |
+| `solana_price` | Get live USD prices for 1–50 base58 SPL mints — per-mint price, decimals, and 24h change (`null` for mints the upstream can't price). Always available; no escrow mode required |
 | `wallet_status` | Check the configured Solana wallet's status and gateway connectivity |
 | `list_models` | List available models with pricing |
 | `spending` | Show USDC spending statistics for the current session |

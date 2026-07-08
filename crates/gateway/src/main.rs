@@ -412,6 +412,18 @@ async fn main() -> anyhow::Result<()> {
         "initialized web-search provider"
     );
 
+    // Initialize the Solana price tool adapter. NOT env-gated (the Jupiter
+    // lite host is keyless) — always present; the route's enablement gate is
+    // the `solana-price` entry in `config/services.toml` (missing → 503). An
+    // optional JUPITER_API_KEY switches to the keyed host (same contract).
+    let price_provider = Some(gateway::providers::price::price_provider_from_env(
+        http_client.clone(),
+    ));
+    info!(
+        price_provider = price_provider.as_ref().map(|p| p.name()),
+        "initialized solana-price provider"
+    );
+
     // Initialize Solana payment verifier.
     //
     // SECURITY: In production mode (RCR_ENV=production), a valid Solana config
@@ -923,6 +935,7 @@ async fn main() -> anyhow::Result<()> {
         providers,
         native_anthropic,
         search_provider,
+        price_provider,
         facilitator,
         usage,
         cache: response_cache,

@@ -77,7 +77,7 @@ first. (signer-core's publish-ready manifest is already on main.)
 - `NPM_TOKEN` is a **repo-level** secret (confirmed present, last rotated
   2026-06-06). It is the same secret the existing npm publish workflows
   (`sdk-typescript-publish.yml`, `ai-sdk-provider-publish.yml`) use, and
-  `@solvela/sdk@0.3.0` published with it recently — so it is known-good.
+  `@solvela/sdk@0.4.0` published with it recently — so it is known-good.
   Confirm it is an **automation/granular token** with publish rights to
   the `@solvela/*` scope and not expired. There is no token fallback:
   a missing/expired token fails the publish closed (correct behavior).
