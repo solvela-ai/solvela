@@ -737,6 +737,81 @@ mod tests {
         }
     }
 
+    /// A provider that fails every call with a REAL reqwest timeout-classified
+    /// error — the exact error a hung upstream produces when the per-attempt
+    /// timeout (`PROVIDER_REQUEST_TIMEOUT`) fires.
+    struct TimeoutErrProvider {
+        name: String,
+        dispatched: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TimeoutErrProvider {
+        /// Construct a real `reqwest::Error` with `is_timeout() == true`: a 1ns
+        /// total-request timeout deterministically wins the race against the
+        /// (unroutable TEST-NET) connect. Same construction as the
+        /// `retry_with_backoff` tests in `providers/mod.rs`.
+        async fn real_timeout_error() -> ProviderError {
+            let err = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_nanos(1))
+                .build()
+                .unwrap()
+                .get("http://192.0.2.1:1")
+                .send()
+                .await
+                .expect_err("1ns timeout must fire");
+            assert!(err.is_timeout(), "precondition: {err:?}");
+            Box::new(err)
+        }
+    }
+
+    #[async_trait]
+    impl LLMProvider for TimeoutErrProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn supported_models(&self) -> Vec<ModelRegistration> {
+            vec![]
+        }
+        async fn chat_completion(&self, req: ChatRequest) -> Result<ChatResponse, ProviderError> {
+            self.dispatched.lock().unwrap().push(req.model.clone());
+            Err(Self::real_timeout_error().await)
+        }
+        async fn chat_completion_stream(
+            &self,
+            req: ChatRequest,
+        ) -> Result<ChatStream, ProviderError> {
+            self.dispatched.lock().unwrap().push(req.model.clone());
+            Err(Self::real_timeout_error().await)
+        }
+    }
+
+    /// A provider that answers every call with a stub response.
+    struct SucceedingProvider {
+        name: String,
+        dispatched: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl LLMProvider for SucceedingProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn supported_models(&self) -> Vec<ModelRegistration> {
+            vec![]
+        }
+        async fn chat_completion(&self, req: ChatRequest) -> Result<ChatResponse, ProviderError> {
+            self.dispatched.lock().unwrap().push(req.model.clone());
+            Ok(ChatResponse {
+                id: "chatcmpl-test".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: req.model,
+                choices: vec![],
+                usage: None,
+            })
+        }
+    }
+
     /// Registry with a vision-capable and a non-vision model under the same
     /// provider, so a chain can mix them.
     fn vision_mixed_registry() -> ModelRegistry {
@@ -947,6 +1022,71 @@ supports_streaming = true
         assert!(
             err.to_string().contains("simulated provider failure"),
             "{err}"
+        );
+    }
+
+    /// The prod-defect scenario at the chain level: a provider failing with a
+    /// timeout-classified `Err` (a hung upstream whose per-attempt timeout
+    /// fired) must advance `chat_with_model_fallback` to the next chain entry,
+    /// which then serves the request as a fallback. Before the
+    /// `retry_with_backoff` fix, the timeout `Err` never surfaced within the
+    /// global request timeout, so this loop never ran its `Err` arm — the
+    /// client got a bare 408 and the documented fallback never fired.
+    #[tokio::test]
+    async fn timeout_err_advances_model_fallback_chain() {
+        let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut map: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+        // Primary openai/gpt-4o hangs (times out); next-in-chain
+        // anthropic/claude-sonnet-4-6 succeeds.
+        map.insert(
+            "openai".to_string(),
+            Arc::new(TimeoutErrProvider {
+                name: "openai".to_string(),
+                dispatched: dispatched.clone(),
+            }),
+        );
+        map.insert(
+            "anthropic".to_string(),
+            Arc::new(SucceedingProvider {
+                name: "anthropic".to_string(),
+                dispatched: dispatched.clone(),
+            }),
+        );
+        let providers = ProviderRegistry::from_providers(map);
+        let health = ProviderHealthTracker::new(CircuitBreakerConfig::default());
+        let registry = gpt4o_chain_mixed_registry();
+
+        let req = ChatRequest {
+            model: "openai/gpt-4o".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Text("hello".to_string()),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let result =
+            chat_with_model_fallback(&providers, &health, &registry, "openai", "gpt-4o", req)
+                .await
+                .expect("the chain must advance past the timed-out primary and succeed");
+
+        assert!(result.was_fallback, "response must be marked as a fallback");
+        assert_eq!(result.actual_provider, "anthropic");
+        assert_eq!(result.actual_model, "claude-sonnet-4-6");
+        let calls = dispatched.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec!["gpt-4o".to_string(), "claude-sonnet-4-6".to_string()],
+            "the timed-out primary must be dispatched first, then the chain \
+             must advance to the next entry"
         );
     }
 

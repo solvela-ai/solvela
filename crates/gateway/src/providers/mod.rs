@@ -122,8 +122,8 @@ impl ProviderRegistry {
     ///
     /// All providers share the given `reqwest::Client` so that TCP connections
     /// and TLS sessions are reused across providers. The client-level timeout
-    /// (typically 10s) is overridden per-request with a 90s timeout for LLM
-    /// API calls in each provider adapter.
+    /// (typically 10s) is overridden per-request with
+    /// [`PROVIDER_REQUEST_TIMEOUT`] for LLM API calls in each provider adapter.
     ///
     /// Only providers with valid API keys are registered. If no API keys
     /// are configured, the registry will be empty and all requests will
@@ -228,9 +228,23 @@ impl ProviderRegistry {
     }
 }
 
+/// Per-attempt timeout for upstream LLM provider requests.
+///
+/// Applied via `.timeout(..)` on every provider's chat / streaming request.
+/// MUST stay strictly below the gateway's global request timeout
+/// ([`crate::DEFAULT_REQUEST_TIMEOUT_SECS`], enforced by the tower-http
+/// `TimeoutLayer` in `build_router`): a hanging upstream has to surface its
+/// `Err` here first so the model fallback chain
+/// (`fallback::chat_with_model_fallback`) can advance to the next model
+/// before the global layer kills the request with a bare 408. Pinned by
+/// `test_hanging_provider_budget_fits_within_global_timeout`.
+pub const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// Retries a future up to `max_retries` times with exponential backoff.
-/// Only retries transient errors (timeouts, connection errors, 5xx).
-/// Does NOT retry 4xx errors (auth, rate limit, bad request).
+/// Only retries transient errors (connection errors, 5xx).
+/// Does NOT retry 4xx errors (auth, rate limit, bad request) or per-attempt
+/// timeouts (a hung upstream must surface immediately — see the comment on
+/// the transient classification below).
 pub async fn retry_with_backoff<F, Fut, T>(max_retries: u32, f: F) -> Result<T, reqwest::Error>
 where
     F: Fn() -> Fut,
@@ -244,9 +258,20 @@ where
     };
 
     for attempt in 1..=max_retries {
-        let is_transient = last_err.is_timeout()
-            || last_err.is_connect()
-            || last_err.status().is_some_and(|s| s.is_server_error());
+        // Timeouts are deliberately NOT retried. Each attempt already gets the
+        // full per-attempt budget (PROVIDER_REQUEST_TIMEOUT = 90s), so retrying
+        // a hung upstream (90s + 1s backoff + 90s = 181s worst case) blows past
+        // the gateway's global request timeout (tower-http TimeoutLayer,
+        // default 120s): the client gets a bare 408 and the provider `Err`
+        // never surfaces, so `chat_with_model_fallback` can never advance to
+        // the next model in the chain. Surfacing the timeout at 90s leaves
+        // ~30s of budget for failover. Accepted trade-off: a genuinely
+        // transient single-attempt timeout is no longer retried same-provider —
+        // chained models fail over instead (better), and a primary-only model
+        // errors at 90s instead of maybe succeeding at 90s+1s+<90s, which the
+        // 120s global layer would usually have killed anyway.
+        let is_transient =
+            last_err.is_connect() || last_err.status().is_some_and(|s| s.is_server_error());
 
         if !is_transient {
             return Err(last_err);
@@ -317,30 +342,132 @@ mod tests {
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
+    /// A per-attempt timeout (a HANGING upstream) must surface its `Err` after
+    /// exactly ONE attempt — never retried same-provider. If it were retried,
+    /// the worst case (90s + 1s backoff + 90s) blows past the gateway's global
+    /// request timeout (tower-http `TimeoutLayer`, default 120s): the client
+    /// gets a bare 408 and `chat_with_model_fallback` never sees the `Err`, so
+    /// the model fallback chain never advances. This is the prod defect where
+    /// a hung `nvidia/meta/llama-3.3-70b-instruct` 408'd at 120s instead of
+    /// falling back to `gemini-3.1-flash-lite`.
     #[tokio::test]
-    async fn test_retry_returns_last_error_after_exhausting_retries() {
+    async fn test_timeout_error_is_not_retried() {
         let call_count = AtomicU32::new(0);
 
-        // Create a client with impossibly short timeout to force timeout errors
+        // A 1ns total-request timeout deterministically wins the race against
+        // the (unroutable TEST-NET) connect, yielding a pure timeout-classified
+        // error — same construction as the exhaustion test below.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_nanos(1))
             .build()
             .unwrap();
 
-        let result = retry_with_backoff(1, || {
+        let result = retry_with_backoff(2, || {
             call_count.fetch_add(1, Ordering::SeqCst);
             let client = client.clone();
-            async move {
-                client
-                    .get("http://192.0.2.1:1") // TEST-NET address, guaranteed unreachable
-                    .send()
-                    .await
-            }
+            async move { client.get("http://192.0.2.1:1").send().await }
         })
         .await;
 
-        assert!(result.is_err());
+        let err = result.expect_err("timeout must surface as Err");
+        assert!(
+            err.is_timeout(),
+            "precondition: error must be timeout-classified, got {err:?}"
+        );
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "a timeout must NOT be retried same-provider — it must surface \
+             immediately so the model fallback chain can advance within the \
+             global request timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_returns_last_error_after_exhausting_retries() {
+        let call_count = AtomicU32::new(0);
+
+        // Connection refused (nothing listens on 127.0.0.1:1) — a connect
+        // error, which IS transient/retryable. (Previously this test forced a
+        // timeout error, but timeouts are no longer retried — see
+        // test_timeout_error_is_not_retried.)
+        let client = reqwest::Client::new();
+
+        let result = retry_with_backoff(1, || {
+            call_count.fetch_add(1, Ordering::SeqCst);
+            let client = client.clone();
+            async move { client.get("http://127.0.0.1:1").send().await }
+        })
+        .await;
+
+        let err = result.expect_err("connection refused must surface as Err");
+        assert!(
+            err.is_connect(),
+            "precondition: error must be connect-classified, got {err:?}"
+        );
         // Should have tried original + 1 retry = 2 attempts
         assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// Budget invariant: the worst-case latency for a HANGING upstream must be
+    /// strictly less than the gateway's default global request timeout
+    /// ([`crate::DEFAULT_REQUEST_TIMEOUT_SECS`], tower-http `TimeoutLayer`),
+    /// or the model fallback chain is structurally dead — the global layer
+    /// kills the request with a bare 408 before the provider `Err` ever
+    /// surfaces to `chat_with_model_fallback`.
+    ///
+    /// The attempt count and backoff are OBSERVED from a real
+    /// `retry_with_backoff` run driven by a real timeout-classified
+    /// `reqwest::Error` — never hardcoded. Re-adding `is_timeout()` to the
+    /// transient predicate makes this test fail (3 attempts × 90s + 3s backoff
+    /// = 273s > 120s), which is the whole point: the invariant is enforced
+    /// against the retry loop's actual behaviour, not restated as a constant.
+    #[tokio::test]
+    async fn test_hanging_provider_budget_fits_within_global_timeout() {
+        // Every provider adapter calls `retry_with_backoff(2, ..)`.
+        const PROVIDER_MAX_RETRIES: u32 = 2;
+
+        let attempts = AtomicU32::new(0);
+
+        // A 1ns total-request timeout deterministically wins the race against
+        // the (unroutable TEST-NET) connect, yielding a pure timeout-classified
+        // error — same construction as `test_timeout_error_is_not_retried`.
+        // Each attempt therefore costs microseconds, not 90s, so whole-second
+        // truncation of the elapsed wall clock recovers the retry loop's
+        // backoff sum EXACTLY: 0s when no retry occurs (the loop never sleeps),
+        // 1s + 2s = 3s if timeouts were (wrongly) retried twice.
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_nanos(1))
+            .build()
+            .expect("test client builds");
+
+        let start = std::time::Instant::now();
+        let result = retry_with_backoff(PROVIDER_MAX_RETRIES, || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            let client = client.clone();
+            async move { client.get("http://192.0.2.1:1").send().await }
+        })
+        .await;
+        let observed_backoff_secs = start.elapsed().as_secs();
+
+        let err = result.expect_err("timeout must surface as Err");
+        assert!(
+            err.is_timeout(),
+            "precondition: error must be timeout-classified, got {err:?}"
+        );
+
+        let observed_attempts = u64::from(attempts.load(Ordering::SeqCst));
+        let worst_case_secs =
+            observed_attempts * PROVIDER_REQUEST_TIMEOUT.as_secs() + observed_backoff_secs;
+
+        assert!(
+            worst_case_secs < crate::DEFAULT_REQUEST_TIMEOUT_SECS,
+            "hanging-provider worst case ({observed_attempts} attempts × \
+             {}s + {observed_backoff_secs}s backoff = {worst_case_secs}s) must be \
+             strictly less than the default global request timeout ({}s), or a hung \
+             upstream 408s instead of failing over to the next model in the chain",
+            PROVIDER_REQUEST_TIMEOUT.as_secs(),
+            crate::DEFAULT_REQUEST_TIMEOUT_SECS
+        );
     }
 }

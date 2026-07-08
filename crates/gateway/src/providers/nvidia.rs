@@ -119,7 +119,7 @@ impl LLMProvider for NvidiaProvider {
         let response = super::retry_with_backoff(2, || {
             self.client
                 .post(NVIDIA_URL)
-                .timeout(std::time::Duration::from_secs(90))
+                .timeout(super::PROVIDER_REQUEST_TIMEOUT)
                 .bearer_auth(&self.api_key)
                 .json(&req_body)
                 .send()
@@ -136,7 +136,7 @@ impl LLMProvider for NvidiaProvider {
         let response = self
             .client
             .post(NVIDIA_URL)
-            .timeout(std::time::Duration::from_secs(90))
+            .timeout(super::PROVIDER_REQUEST_TIMEOUT)
             .bearer_auth(&self.api_key)
             .json(&body)
             .send()

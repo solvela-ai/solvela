@@ -319,6 +319,16 @@ pub fn handle_panic(_err: Box<dyn std::any::Any + Send + 'static>) -> axum::resp
         .into_response()
 }
 
+/// Default global request timeout in seconds (tower-http `TimeoutLayer`)
+/// when `SOLVELA_REQUEST_TIMEOUT_SECS` is unset.
+///
+/// MUST stay strictly above the per-attempt upstream timeout
+/// ([`providers::PROVIDER_REQUEST_TIMEOUT`]) so a hanging provider surfaces
+/// an `Err` to the model fallback chain before this layer 408s the whole
+/// request. Pinned by
+/// `providers::tests::test_hanging_provider_budget_fits_within_global_timeout`.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
+
 /// Build the Axum router with all routes and middleware.
 ///
 /// This is used by both `main.rs` and integration tests.
@@ -330,7 +340,7 @@ pub fn build_router(state: Arc<AppState>, rate_limiter: RateLimiter) -> Router {
         .or_else(|_| std::env::var("RCR_REQUEST_TIMEOUT_SECS"))
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(120);
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
 
     // Configurable max concurrent in-flight requests (default 256)
     let max_concurrent: usize = std::env::var("SOLVELA_MAX_CONCURRENT_REQUESTS")
