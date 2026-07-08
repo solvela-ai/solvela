@@ -116,10 +116,10 @@ impl LLMProvider for NvidiaProvider {
         req: ChatRequest,
     ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
         let req_body = build_chat_body(&req)?;
-        let response = super::retry_with_backoff(2, || {
+        let response = super::retry_with_backoff(super::PROVIDER_MAX_RETRIES, || {
             self.client
                 .post(NVIDIA_URL)
-                .timeout(std::time::Duration::from_secs(90))
+                .timeout(super::PROVIDER_REQUEST_TIMEOUT)
                 .bearer_auth(&self.api_key)
                 .json(&req_body)
                 .send()
@@ -136,7 +136,7 @@ impl LLMProvider for NvidiaProvider {
         let response = self
             .client
             .post(NVIDIA_URL)
-            .timeout(std::time::Duration::from_secs(90))
+            .timeout(super::PROVIDER_REQUEST_TIMEOUT)
             .bearer_auth(&self.api_key)
             .json(&body)
             .send()

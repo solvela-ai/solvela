@@ -127,7 +127,7 @@ impl AnthropicProvider {
         let mut request = self
             .client
             .post(self.messages_url())
-            .timeout(std::time::Duration::from_secs(90))
+            .timeout(super::PROVIDER_REQUEST_TIMEOUT)
             // Gateway key replaces the client's auth — the inbound Solvela bearer
             // is NEVER forwarded to Anthropic.
             .header("x-api-key", &self.api_key)
@@ -975,10 +975,10 @@ impl LLMProvider for AnthropicProvider {
 
         let req_body = serde_json::to_value(&anthropic_req)?;
         let url = self.messages_url();
-        let response = super::retry_with_backoff(2, || {
+        let response = super::retry_with_backoff(super::PROVIDER_MAX_RETRIES, || {
             self.client
                 .post(&url)
-                .timeout(std::time::Duration::from_secs(90))
+                .timeout(super::PROVIDER_REQUEST_TIMEOUT)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", DEFAULT_ANTHROPIC_VERSION)
                 .header("content-type", "application/json")
@@ -1006,7 +1006,7 @@ impl LLMProvider for AnthropicProvider {
         let response = self
             .client
             .post(self.messages_url())
-            .timeout(std::time::Duration::from_secs(90))
+            .timeout(super::PROVIDER_REQUEST_TIMEOUT)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", DEFAULT_ANTHROPIC_VERSION)
             .header("content-type", "application/json")

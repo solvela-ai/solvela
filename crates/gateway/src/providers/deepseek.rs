@@ -106,10 +106,10 @@ impl LLMProvider for DeepSeekProvider {
     ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
         let original_model = req.model.clone();
         let req_body = build_chat_body(&req)?;
-        let response = super::retry_with_backoff(2, || {
+        let response = super::retry_with_backoff(super::PROVIDER_MAX_RETRIES, || {
             self.client
                 .post(DEEPSEEK_URL)
-                .timeout(std::time::Duration::from_secs(90))
+                .timeout(super::PROVIDER_REQUEST_TIMEOUT)
                 .bearer_auth(&self.api_key)
                 .json(&req_body)
                 .send()
@@ -137,7 +137,7 @@ impl LLMProvider for DeepSeekProvider {
         let response = self
             .client
             .post(DEEPSEEK_URL)
-            .timeout(std::time::Duration::from_secs(90))
+            .timeout(super::PROVIDER_REQUEST_TIMEOUT)
             .bearer_auth(&self.api_key)
             .json(&body)
             .send()

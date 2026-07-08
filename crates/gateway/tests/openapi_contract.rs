@@ -289,6 +289,7 @@ fn contract_app_with_db(
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
     build_router(state, RateLimiter::new(RateLimitConfig::default()))
+        .expect("test router builds: default request timeout is valid")
 }
 
 /// App with NO providers configured — exercises the 402 quote path.
