@@ -24376,3 +24376,1512 @@ async fn stuck_working_at_rest_increments_counter_at_both_intakes() {
         "intake fast-fails must never reach settlement"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Channel-on-A2A Slice A — the A2A paid leg accepts spend-down-channel
+// vouchers (2026-07-06 plan; docs-only discovery, ZERO wire-pin flips).
+//
+// Every test drives the REAL `/a2a` route via `tower::ServiceExt::oneshot`
+// (per `feedback_test_through_real_paths`). DB-gated tests acquire the live
+// dev stack (Postgres + Redis) or SKIP loudly.
+// ---------------------------------------------------------------------------
+
+mod a2a_channel_draw_tests {
+    use super::*;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use gateway::cache::{CacheConfig, ResponseCache};
+
+    /// Deposited principal for seeded channels — far above any test quote.
+    const DEPOSITED_ATOMIC: u64 = 100_000_000;
+    /// Seeded slot; voucher expiry sits well beyond the 50-slot buffer.
+    const SEED_SLOT: u64 = 1_000_000;
+    const VOUCHER_EXPIRY_SLOT: u64 = 1_000_750;
+
+    /// The D3(a) versioned digest domain — spelled out LITERALLY here (not
+    /// referencing a gateway constant) so this suite independently pins the
+    /// cross-repo client contract: digest = SHA-256(domain || task_id).
+    const A2A_DIGEST_DOMAIN: &str = "solvela-a2a-channel-digest-v1:";
+
+    const CHANNEL_DB_URL: &str = "postgres://solvela:solvela_dev_password@127.0.0.1:5432/solvela";
+    const CHANNEL_REDIS_URL: &str = "redis://127.0.0.1:6379";
+
+    fn db_url() -> String {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| CHANNEL_DB_URL.to_string())
+    }
+    fn redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| CHANNEL_REDIS_URL.to_string())
+    }
+
+    /// Acquire the live dev stack (Postgres + Redis) or `None` to SKIP.
+    /// Mirrors `chat_channel_draw_tests::stack` (same schema-presence gates).
+    async fn stack() -> Option<(sqlx::PgPool, redis::Client)> {
+        let pool = sqlx::PgPool::connect(&db_url()).await.ok()?;
+        let channels_exists: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.channels')::text")
+                .fetch_one(&pool)
+                .await
+                .ok()?;
+        channels_exists?;
+        let client = redis::Client::open(redis_url()).ok()?;
+        let cache = ResponseCache::new(&redis_url(), CacheConfig::default()).ok()?;
+        if !cache.ping().await {
+            return None;
+        }
+        Some((pool, client))
+    }
+
+    /// A fully-wired A2A app with channels configurable, backed by the live
+    /// dev Postgres + Redis. `prime_slot = false` leaves the RPC-free slot
+    /// cache EMPTY — combined with the dead-port `rpc_url` below, the
+    /// channel leg's bounded slot fetch fails closed (test A-13).
+    async fn a2a_channel_app(
+        providers: ProviderRegistry,
+        verifier: Arc<dyn PaymentVerifier>,
+        pool: sqlx::PgPool,
+        redis_client: redis::Client,
+        channel_enabled: bool,
+        prime_slot: bool,
+        a2a_draw_serve_timeout_secs: Option<u64>,
+    ) -> (axum::Router, Arc<AppState>) {
+        let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+        let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+        let facilitator = solvela_x402::facilitator::Facilitator::new(vec![verifier]);
+        let cache = ResponseCache::new(&redis_url(), CacheConfig::default()).unwrap();
+
+        let mut config = AppConfig::default();
+        config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+        // Dead port so the cached slot is the ONLY slot source: a cache miss
+        // fails fast instead of reaching a live RPC from a test.
+        config.solana.rpc_url = "http://127.0.0.1:9".to_string();
+        config.channel.enabled = channel_enabled;
+        config.channel.a2a_draw_serve_timeout_secs = a2a_draw_serve_timeout_secs;
+
+        let state = Arc::new(AppState {
+            config,
+            model_registry,
+            service_registry: RwLock::new(service_registry),
+            providers,
+            native_anthropic: None,
+            search_provider: None,
+            facilitator,
+            // Postgres + Redis so the #499 require_tenant gate and spend
+            // ledger are REAL (test A-11 / A-1).
+            usage: gateway::usage::UsageTracker::new(Some(pool.clone()), Some(redis_client)),
+            cache: Some(cache),
+            semantic_cache: None,
+            provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+            escrow_claimer: None,
+            fee_payer_pool: None,
+            nonce_pool: None,
+            db_pool: Some(pool),
+            faucet: None,
+            session_secret: b"test-secret".to_vec(),
+            http_client: reqwest::Client::new(),
+            replay_set: AppState::new_replay_set(),
+            slot_cache: gateway::routes::escrow::new_slot_cache(),
+            escrow_metrics: None,
+            admin_token: None,
+            api_key_hmac_secret: None,
+            auth_provider: None,
+            prometheus_handle: Some(test_prometheus_handle()),
+            dev_bypass_payment: false,
+            free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+            receipts_rate_limiter: generous_receipts_limiter(),
+            a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
+            faucet_rate_limiter: generous_faucet_limiter(),
+            deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+            free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+        });
+        if prime_slot {
+            *state.slot_cache.lock().await = Some((SEED_SLOT, Instant::now()));
+        }
+        // Generous main limiter: several tests poll `tasks/get` in a loop
+        // from the shared "unknown" oneshot bucket — the production per-IP
+        // cap must not 429 the polling.
+        let app = build_router(
+            state.clone(),
+            RateLimiter::new(RateLimitConfig {
+                max_requests: 10_000,
+                window: Duration::from_secs(60),
+                unknown_max_requests: 10_000,
+            }),
+        );
+        (app, state)
+    }
+
+    fn rand32() -> [u8; 32] {
+        let mut b = [0u8; 32];
+        b[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        b[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        b
+    }
+
+    fn fresh_key() -> SigningKey {
+        SigningKey::from_bytes(&rand32())
+    }
+
+    /// Seed an OPEN channel ledger row directly (the draw path only needs an
+    /// OPEN row; seeding keeps these tests independent of the open-route
+    /// deposit verification — same rationale as the chat draw suite).
+    async fn create_channel(
+        pool: &sqlx::PgPool,
+        channel_id: [u8; 32],
+        agent_wallet: &str,
+        session_key: [u8; 32],
+        deposited: u64,
+    ) {
+        sqlx::query(
+            "INSERT INTO channels
+               (channel_id, agent_wallet, session_key, provider, mint,
+                deposited_atomic, settled_atomic, last_voucher_cumulative_atomic,
+                expiry_slot, status, funding_tx_sig)
+             VALUES ($1, $2, $3, $4, $5, $6, 0, 0, $7, 'open', $8)",
+        )
+        .bind(bs58::encode(channel_id).into_string())
+        .bind(agent_wallet)
+        .bind(bs58::encode(session_key).into_string())
+        .bind(TEST_RECIPIENT_WALLET)
+        .bind(USDC_MINT)
+        .bind(i64::try_from(deposited).unwrap())
+        .bind(VOUCHER_EXPIRY_SLOT as i64)
+        .bind(format!("sig-{}", uuid::Uuid::new_v4()))
+        .execute(pool)
+        .await
+        .expect("insert channel row");
+    }
+
+    async fn channel_row(
+        pool: &sqlx::PgPool,
+        channel_id: [u8; 32],
+    ) -> gateway::channels::ChannelRow {
+        gateway::channels::load_channel(pool, &bs58::encode(channel_id).into_string())
+            .await
+            .unwrap()
+            .expect("channel row")
+    }
+
+    async fn voucher_row_count(pool: &sqlx::PgPool, channel_id: [u8; 32]) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM channel_vouchers WHERE channel_id = $1")
+            .bind(bs58::encode(channel_id).into_string())
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn spend_row_count(pool: &sqlx::PgPool, wallet: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM spend_logs WHERE wallet_address = $1")
+            .bind(wallet)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Poll (fire-and-forget write) until one spend row exists; return its
+    /// billed cost in atomic USDC.
+    async fn wait_for_spend_row_atomic(pool: &sqlx::PgPool, wallet: &str) -> u64 {
+        for _ in 0..100 {
+            let row: Option<(i64,)> = sqlx::query_as(
+                "SELECT ROUND(cost_usdc * 1000000)::BIGINT FROM spend_logs \
+                 WHERE wallet_address = $1",
+            )
+            .bind(wallet)
+            .fetch_optional(pool)
+            .await
+            .unwrap();
+            if let Some((atomic,)) = row {
+                return u64::try_from(atomic).expect("non-negative spend");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("spend row for {wallet} never appeared");
+    }
+
+    /// Poll until the durable receipt row exists; return
+    /// (payment_scheme, tx_signature, amount_paid_atomic).
+    async fn wait_for_receipt_row(
+        pool: &sqlx::PgPool,
+        wallet: &str,
+    ) -> (String, Option<String>, i64) {
+        for _ in 0..100 {
+            let row: Option<(String, Option<String>, i64)> = sqlx::query_as(
+                "SELECT payment_scheme, tx_signature, amount_paid_atomic \
+                 FROM receipts WHERE payer_wallet = $1",
+            )
+            .bind(wallet)
+            .fetch_optional(pool)
+            .await
+            .unwrap();
+            if let Some(r) = row {
+                return r;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("receipt row for {wallet} never appeared");
+    }
+
+    /// The D3(a) digest for a task id — computed INDEPENDENTLY of the gateway
+    /// implementation (literal domain string + the shared SHA-256 helper).
+    fn a2a_digest(task_id: &str) -> [u8; 32] {
+        gateway::routes::channel::request_digest(format!("{A2A_DIGEST_DOMAIN}{task_id}").as_bytes())
+    }
+
+    /// Sign a channel voucher over an explicit digest.
+    fn signed_voucher(
+        key: &SigningKey,
+        channel_id: [u8; 32],
+        cumulative: u64,
+        nonce: u64,
+        digest: [u8; 32],
+    ) -> solvela_x402::types::ChannelVoucherPayload {
+        let msg = solvela_x402::channel::build_voucher_message(
+            &channel_id,
+            cumulative,
+            VOUCHER_EXPIRY_SLOT,
+            nonce,
+            &digest,
+        );
+        let signature = key.sign(&msg).to_bytes();
+        solvela_x402::types::ChannelVoucherPayload {
+            channel_id: bs58::encode(channel_id).into_string(),
+            cumulative_atomic: cumulative,
+            expiry_slot: VOUCHER_EXPIRY_SLOT,
+            nonce,
+            request_digest: base64::engine::general_purpose::STANDARD.encode(digest),
+            signature: base64::engine::general_purpose::STANDARD.encode(signature),
+        }
+    }
+
+    /// Build the payment-submitted JSON-RPC body carrying a channel voucher.
+    /// `accepted.amount` echoes the quote (the SDK contract); network / asset
+    /// / pay_to echo the advertised values.
+    fn channel_payment_body(
+        task_id: &str,
+        quote: u64,
+        voucher: &solvela_x402::types::ChannelVoucherPayload,
+    ) -> serde_json::Value {
+        let payload = PaymentPayload {
+            x402_version: 2,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "channel".to_string(),
+                network: SOLANA_NETWORK.to_string(),
+                amount: quote.to_string(),
+                asset: USDC_MINT.to_string(),
+                pay_to: TEST_RECIPIENT_WALLET.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Channel(voucher.clone()),
+        };
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "message/send",
+            "id": "a2a-channel-pay",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "pay"}],
+                    "metadata": {
+                        "x402.payment.status": "payment-submitted",
+                        "x402.payment.payload": serde_json::to_value(&payload).unwrap()
+                    }
+                },
+                "taskId": task_id
+            }
+        })
+    }
+
+    async fn get_task(app: &axum::Router, task_id: &str) -> serde_json::Value {
+        a2a_call(
+            app,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "method": "tasks/get", "id": "tg",
+                "params": {"id": task_id}
+            }),
+        )
+        .await
+    }
+
+    /// New task + parsed atomic quote (from the input-required offer — the
+    /// docs-only discovery contract: a channel client reads the quote from
+    /// the same metadata and signs a voucher for it).
+    async fn new_task_and_quote(app: &axum::Router) -> (String, u64) {
+        let (task_id, offer) = a2a_new_request(app).await;
+        let quote: u64 = offer["amount"]
+            .as_str()
+            .expect("offer amount string")
+            .parse()
+            .expect("atomic amount");
+        (task_id, quote)
+    }
+
+    /// A slow provider with fixed usage — widens the serve window so a close
+    /// / second submission can be raced against an in-flight A2A draw.
+    struct SlowUsageProvider {
+        name: String,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl LLMProvider for SlowUsageProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn supported_models(&self) -> Vec<ModelRegistration> {
+            vec![]
+        }
+        async fn chat_completion(
+            &self,
+            req: solvela_protocol::ChatRequest,
+        ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+            tokio::time::sleep(self.delay).await;
+            let mut resp = MockProvider::mock_response(&req.model);
+            resp.usage = Some(Usage {
+                prompt_tokens: 1000,
+                completion_tokens: 1000,
+                total_tokens: 2000,
+            });
+            Ok(resp)
+        }
+        async fn chat_completion_stream(
+            &self,
+            _req: solvela_protocol::ChatRequest,
+        ) -> Result<ChatStream, Box<dyn std::error::Error + Send + Sync>> {
+            Err("SlowUsageProvider does not stream".into())
+        }
+    }
+
+    fn slow_provider_registry(delay: Duration) -> ProviderRegistry {
+        let mut providers: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+        for name in ["openai", "anthropic", "deepseek", "google"] {
+            providers.insert(
+                name.to_string(),
+                Arc::new(SlowUsageProvider {
+                    name: name.to_string(),
+                    delay,
+                }) as Arc<dyn LLMProvider>,
+            );
+        }
+        ProviderRegistry::from_providers(providers)
+    }
+
+    /// A provider that counts invocations — proves an arm is PRE-serve.
+    struct CountingProvider {
+        name: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LLMProvider for CountingProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn supported_models(&self) -> Vec<ModelRegistration> {
+            vec![]
+        }
+        async fn chat_completion(
+            &self,
+            req: solvela_protocol::ChatRequest,
+        ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(MockProvider::mock_response(&req.model))
+        }
+        async fn chat_completion_stream(
+            &self,
+            _req: solvela_protocol::ChatRequest,
+        ) -> Result<ChatStream, Box<dyn std::error::Error + Send + Sync>> {
+            Err("CountingProvider does not stream".into())
+        }
+    }
+
+    fn counting_provider_registry(calls: Arc<AtomicUsize>) -> ProviderRegistry {
+        let mut providers: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+        for name in ["openai", "anthropic", "deepseek", "google"] {
+            providers.insert(
+                name.to_string(),
+                Arc::new(CountingProvider {
+                    name: name.to_string(),
+                    calls: Arc::clone(&calls),
+                }) as Arc<dyn LLMProvider>,
+            );
+        }
+        ProviderRegistry::from_providers(providers)
+    }
+
+    // -- A-1 -----------------------------------------------------------------
+
+    /// Happy path: a voucher with `cumulative = last + quote` settles the
+    /// task off-chain. Completed + artifacts + `payment-completed` +
+    /// receipts (scheme `channel` on the durable row, NO tx signature);
+    /// `last` and `realized` advance by EXACTLY the quoted total; the spend
+    /// row and receipt carry the channel's DB `agent_wallet`, NEVER
+    /// `"unknown"` (plan change 2). Ledger row asserted EVENTUALLY (its
+    /// writes are spawned — change 10; the initiation-before-Completed order
+    /// is code-pinned at the record site, M1 #680).
+    #[tokio::test]
+    async fn a2a_channel_voucher_settles_task_and_advances_channel() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping a2a_channel_voucher_settles_task_and_advances_channel: dev stack unavailable");
+            return;
+        };
+        let (app, _state) = a2a_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            true,
+            true,
+            None,
+        )
+        .await;
+
+        let (task_id, quote) = new_task_and_quote(&app).await;
+        assert!(quote > 0, "paid quote");
+
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let voucher = signed_voucher(&key, cid, quote, 1, a2a_digest(&task_id));
+        let result = a2a_call(&app, &channel_payment_body(&task_id, quote, &voucher)).await;
+
+        assert_eq!(result["status"]["state"], "completed");
+        let text = result["artifacts"][0]["parts"][0]["text"]
+            .as_str()
+            .expect("artifact text");
+        assert!(!text.is_empty(), "delivered artifact must be non-empty");
+
+        let meta = &result["status"]["message"]["metadata"];
+        assert_eq!(meta["x402.payment.status"], "payment-completed");
+        let receipts = &meta["x402.payment.receipts"];
+        let receipt_path = receipts["receipt"].as_str().expect("receipt path");
+        assert!(receipt_path.starts_with("/v1/receipts/"));
+        assert!(
+            receipts.get("tx_signature").is_none(),
+            "a channel receipt has NO on-chain tx signature: {receipts}"
+        );
+
+        // The debit: `last` advanced by EXACTLY the signed quote; A2A is
+        // quote==cap==settlement (#504) so `realized` advances by the same.
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, quote);
+        assert_eq!(row.realized_atomic, quote);
+        assert_eq!(voucher_row_count(&pool, cid).await, 1);
+
+        // Ledger + receipt attribution: the channel's DB agent_wallet, never
+        // "unknown" (the spend/receipt rows are keyed by wallet, so finding
+        // them under `agent` IS the attribution assertion).
+        let spend_atomic = wait_for_spend_row_atomic(&pool, &agent).await;
+        assert_eq!(spend_atomic, quote, "spend row records the quoted total");
+        assert_eq!(
+            spend_row_count(&pool, "unknown").await,
+            0,
+            "never 'unknown'"
+        );
+        let (scheme, tx_sig, amount) = wait_for_receipt_row(&pool, &agent).await;
+        assert_eq!(scheme, "channel");
+        assert_eq!(tx_sig, None, "voucher receipts carry no tx signature");
+        assert_eq!(amount, i64::try_from(quote).unwrap());
+    }
+
+    // -- A-2 -----------------------------------------------------------------
+
+    /// A wrong delta (`cumulative − last ≠ quote`) rejects with
+    /// ERR_PAYMENT_FAILED and the structured `last_cumulative` resync field
+    /// (STRING, same name as REST — plan change 7); the task reverts to
+    /// input-required, the channel is untouched, and a corrected voucher
+    /// then succeeds.
+    #[tokio::test]
+    async fn a2a_channel_wrong_delta_rejected_with_resync() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping a2a_channel_wrong_delta_rejected_with_resync: dev stack unavailable"
+            );
+            return;
+        };
+        let (app, _state) = a2a_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            true,
+            true,
+            None,
+        )
+        .await;
+
+        let (task_id, quote) = new_task_and_quote(&app).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        // Wrong delta: cumulative = quote + 1 while last = 0.
+        let bad = signed_voucher(&key, cid, quote + 1, 1, a2a_digest(&task_id));
+        let envelope = a2a_call_envelope(&app, &channel_payment_body(&task_id, quote, &bad)).await;
+        assert_eq!(envelope["error"]["code"].as_i64(), Some(-32007));
+        assert_eq!(
+            envelope["error"]["data"]["last_cumulative"], "0",
+            "post-auth voucher rejects carry the authoritative last_cumulative \
+             as a STRING (the REST field name, verbatim): {envelope}"
+        );
+
+        // Money-free: task payable again, channel untouched.
+        let task = get_task(&app, &task_id).await;
+        assert_eq!(task["status"]["state"], "input-required");
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, 0);
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+
+        // Corrected voucher succeeds.
+        let good = signed_voucher(&key, cid, quote, 2, a2a_digest(&task_id));
+        let result = a2a_call(&app, &channel_payment_body(&task_id, quote, &good)).await;
+        assert_eq!(result["status"]["state"], "completed");
+        assert_eq!(
+            channel_row(&pool, cid).await.last_voucher_cumulative_atomic,
+            quote
+        );
+    }
+
+    // -- A-3 -----------------------------------------------------------------
+
+    /// Provider failure BEFORE the persist = total non-charge (D4-a): the
+    /// task reverts to input-required, `last` is unchanged, no ledger row —
+    /// and the SAME voucher resubmitted (against a healthy instance sharing
+    /// the store) succeeds. This deliberately differs from exact's
+    /// charged-Failed arm, for the channel kind only.
+    #[tokio::test]
+    async fn a2a_channel_provider_failure_no_debit_retryable() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping a2a_channel_provider_failure_no_debit_retryable: dev stack unavailable"
+            );
+            return;
+        };
+        let (failing_app, _s1) = a2a_channel_app(
+            failing_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis.clone(),
+            true,
+            true,
+            None,
+        )
+        .await;
+
+        let (task_id, quote) = new_task_and_quote(&failing_app).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let voucher = signed_voucher(&key, cid, quote, 1, a2a_digest(&task_id));
+        let body = channel_payment_body(&task_id, quote, &voucher);
+        let envelope = a2a_call_envelope(&failing_app, &body).await;
+        assert_eq!(
+            envelope["error"]["code"].as_i64(),
+            Some(-32008),
+            "provider failure surfaces the provider-error code: {envelope}"
+        );
+
+        // NO debit: voucher unconsumed, task payable again.
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, 0, "no debit");
+        assert_eq!(voucher_row_count(&pool, cid).await, 0);
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+        let task = get_task(&failing_app, &task_id).await;
+        assert_eq!(task["status"]["state"], "input-required");
+
+        // The SAME voucher retries successfully once a provider serves
+        // (second gateway instance over the same Redis/Postgres).
+        let (healthy_app, _s2) = a2a_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            true,
+            true,
+            None,
+        )
+        .await;
+        let result = a2a_call(&healthy_app, &body).await;
+        assert_eq!(result["status"]["state"], "completed");
+        assert_eq!(
+            channel_row(&pool, cid).await.last_voucher_cumulative_atomic,
+            quote,
+            "the same voucher's delta still equals billed — D4 same-voucher retry"
+        );
+    }
+
+    // -- A-4 -----------------------------------------------------------------
+
+    /// The invariant-11 close race: the channel flips to `closing` mid-serve
+    /// → artifacts still delivered, task Completed, but NEITHER
+    /// `x402.payment.status` NOR `x402.payment.receipts` present (D5), no
+    /// ledger row, notice-tier `reason="race"` counter incremented and the
+    /// page-tier name NOT incremented (PR-0 tier split). PLUS the `tasks/get`
+    /// poll leg (Rev-3 item 2): the deliver-free task polled within TTL
+    /// still omits both keys, while a DEBITED task polled the same way
+    /// carries `payment-completed`.
+    #[tokio::test]
+    async fn a2a_channel_persist_race_delivers_free_no_receipt() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping a2a_channel_persist_race_delivers_free_no_receipt: dev stack unavailable"
+            );
+            return;
+        };
+        let handle = test_prometheus_handle();
+        let (app, _state) = a2a_channel_app(
+            slow_provider_registry(Duration::from_millis(1_500)),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            true,
+            true,
+            None,
+        )
+        .await;
+
+        let (task_id, quote) = new_task_and_quote(&app).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let before_race = metric_counter(
+            &handle.render(),
+            "solvela_channel_draw_persist_failed_total{reason=\"race\"}",
+        );
+
+        let voucher = signed_voucher(&key, cid, quote, 1, a2a_digest(&task_id));
+        let body = channel_payment_body(&task_id, quote, &voucher);
+        let race_app = app.clone();
+        let draw = tokio::spawn(async move { a2a_call(&race_app, &body).await });
+
+        // Mid-serve (provider sleeps 1.5s): freeze the channel out from under
+        // the draw — the invariant-11 close.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        sqlx::query("UPDATE channels SET status = 'closing' WHERE channel_id = $1")
+            .bind(bs58::encode(cid).into_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let result = draw.await.unwrap();
+        assert_eq!(
+            result["status"]["state"], "completed",
+            "the race loser still DELIVERS the earned response"
+        );
+        assert!(!result["artifacts"][0]["parts"][0]["text"]
+            .as_str()
+            .expect("artifact text")
+            .is_empty());
+        let meta = &result["status"]["message"]["metadata"];
+        assert!(
+            meta.get("x402.payment.status").is_none() || meta["x402.payment.status"].is_null(),
+            "deliver-free omits x402.payment.status (D5): {meta}"
+        );
+        assert!(
+            meta.get("x402.payment.receipts").is_none() || meta["x402.payment.receipts"].is_null(),
+            "deliver-free omits x402.payment.receipts (D5): {meta}"
+        );
+
+        // No debit, no ledger.
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, 0);
+        assert_eq!(row.realized_atomic, 0);
+        assert_eq!(voucher_row_count(&pool, cid).await, 0);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+
+        // PR-0 tier split: notice-tier race incremented; page-tier race NEVER.
+        assert!(
+            metric_counter(
+                &handle.render(),
+                "solvela_channel_draw_persist_failed_total{reason=\"race\"}",
+            ) >= before_race + 1.0,
+            "the close race must increment the notice-tier name"
+        );
+        assert_eq!(
+            metric_counter(
+                &handle.render(),
+                "solvela_channel_draw_persist_page_total{reason=\"race\"}",
+            ),
+            0.0,
+            "the close race must NOT reach the page-tier name"
+        );
+
+        // tasks/get poll leg (Rev-3 item 2): the projection stays truthful.
+        let polled = get_task(&app, &task_id).await;
+        assert_eq!(polled["status"]["state"], "completed");
+        let polled_meta = &polled["status"]["message"]["metadata"];
+        assert!(
+            polled_meta.get("x402.payment.status").is_none()
+                || polled_meta["x402.payment.status"].is_null(),
+            "tasks/get on a deliver-free task must omit x402.payment.status: {polled_meta}"
+        );
+        assert!(
+            polled_meta.get("x402.payment.receipts").is_none()
+                || polled_meta["x402.payment.receipts"].is_null(),
+            "tasks/get on a deliver-free task must omit x402.payment.receipts: {polled_meta}"
+        );
+
+        // Contrast leg: a DEBITED channel task polled the same way still
+        // carries payment-completed.
+        let (task2, quote2) = new_task_and_quote(&app).await;
+        let key2 = fresh_key();
+        let cid2 = rand32();
+        let agent2 = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid2,
+            &agent2,
+            key2.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+        let v2 = signed_voucher(&key2, cid2, quote2, 1, a2a_digest(&task2));
+        let paid = a2a_call(&app, &channel_payment_body(&task2, quote2, &v2)).await;
+        assert_eq!(paid["status"]["state"], "completed");
+        let polled_paid = get_task(&app, &task2).await;
+        assert_eq!(
+            polled_paid["status"]["message"]["metadata"]["x402.payment.status"],
+            "payment-completed",
+            "a debited task polled via tasks/get keeps payment-completed"
+        );
+    }
+
+    // -- A-5 -----------------------------------------------------------------
+
+    /// The D3 digest binds the voucher to THIS task: a voucher digesting a
+    /// DIFFERENT task id, and one digesting the UNPREFIXED task id (pinning
+    /// the versioned domain prefix), are both rejected PRE-serve — the
+    /// provider is never invoked, nothing is debited.
+    #[tokio::test]
+    async fn a2a_channel_digest_binds_task() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping a2a_channel_digest_binds_task: dev stack unavailable");
+            return;
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (app, _state) = a2a_channel_app(
+            counting_provider_registry(Arc::clone(&calls)),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            true,
+            true,
+            None,
+        )
+        .await;
+
+        let (task_a, quote) = new_task_and_quote(&app).await;
+        let (task_b, _) = new_task_and_quote(&app).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        // (a) digest of a DIFFERENT task id → rejected.
+        let cross = signed_voucher(&key, cid, quote, 1, a2a_digest(&task_b));
+        let env = a2a_call_envelope(&app, &channel_payment_body(&task_a, quote, &cross)).await;
+        assert_eq!(env["error"]["code"].as_i64(), Some(-32007), "{env}");
+
+        // (b) digest of the UNPREFIXED task id → rejected (pins the domain
+        // prefix — SHA-256 of the bare task id must NOT verify).
+        let unprefixed = signed_voucher(
+            &key,
+            cid,
+            quote,
+            2,
+            gateway::routes::channel::request_digest(task_a.as_bytes()),
+        );
+        let env2 =
+            a2a_call_envelope(&app, &channel_payment_body(&task_a, quote, &unprefixed)).await;
+        assert_eq!(env2["error"]["code"].as_i64(), Some(-32007), "{env2}");
+
+        // Pre-serve on both arms: provider never invoked, nothing moved.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "digest rejects are PRE-serve"
+        );
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, 0);
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+        assert_eq!(
+            get_task(&app, &task_a).await["status"]["state"],
+            "input-required"
+        );
+    }
+
+    // -- A-6 -----------------------------------------------------------------
+
+    /// Draw lock held elsewhere → Working reverted, settle lock released,
+    /// ERR_INTERNAL retryable (§4 table) — and once the lock frees, the SAME
+    /// voucher retries to completion.
+    #[tokio::test]
+    async fn a2a_channel_draw_lock_busy_reverts_and_retries() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!(
+                "skipping a2a_channel_draw_lock_busy_reverts_and_retries: dev stack unavailable"
+            );
+            return;
+        };
+        let (app, state) = a2a_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            true,
+            true,
+            None,
+        )
+        .await;
+
+        let (task_id, quote) = new_task_and_quote(&app).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+        let cid_b58 = bs58::encode(cid).into_string();
+
+        // Hold the draw lock externally (a concurrent draw on this channel).
+        let cache = state.cache.as_ref().expect("cache");
+        let token = cache
+            .acquire_channel_draw_lock(&cid_b58)
+            .await
+            .expect("lock acquire")
+            .expect("lock free");
+
+        let voucher = signed_voucher(&key, cid, quote, 1, a2a_digest(&task_id));
+        let body = channel_payment_body(&task_id, quote, &voucher);
+        let env = a2a_call_envelope(&app, &body).await;
+        assert_eq!(
+            env["error"]["code"].as_i64(),
+            Some(-32603),
+            "draw-lock busy is the retryable internal class: {env}"
+        );
+
+        // Working reverted + settle lock released: the task is payable again.
+        assert_eq!(
+            get_task(&app, &task_id).await["status"]["state"],
+            "input-required"
+        );
+        assert_eq!(
+            channel_row(&pool, cid).await.last_voucher_cumulative_atomic,
+            0
+        );
+
+        // Free the draw lock → the SAME voucher retries successfully.
+        cache.release_channel_draw_lock(&cid_b58, &token).await;
+        let result = a2a_call(&app, &body).await;
+        assert_eq!(result["status"]["state"], "completed");
+        assert_eq!(
+            channel_row(&pool, cid).await.last_voucher_cumulative_atomic,
+            quote
+        );
+    }
+
+    // -- A-7 -----------------------------------------------------------------
+
+    /// A second submission while a channel serve is in flight — even with the
+    /// settle-lock TTL simulated expired (token-less DEL) — rejects on the
+    /// `Working` marker (the intake fast-fail, backstopped by the under-lock
+    /// re-check: both REUSED exact-leg machinery). Exactly ONE debit results.
+    #[tokio::test]
+    async fn a2a_second_submission_mid_channel_serve_rejects_on_working() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping a2a_second_submission_mid_channel_serve_rejects_on_working: dev stack unavailable");
+            return;
+        };
+        let (app, state) = a2a_channel_app(
+            slow_provider_registry(Duration::from_millis(1_500)),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            true,
+            true,
+            None,
+        )
+        .await;
+
+        let (task_id, quote) = new_task_and_quote(&app).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let voucher = signed_voucher(&key, cid, quote, 1, a2a_digest(&task_id));
+        let body = channel_payment_body(&task_id, quote, &voucher);
+        let first_app = app.clone();
+        let first_body = body.clone();
+        let first = tokio::spawn(async move { a2a_call(&first_app, &first_body).await });
+
+        // Wait until the settle marker is visibly `working`.
+        let mut working = false;
+        for _ in 0..100 {
+            if get_task(&app, &task_id).await["status"]["state"] == "working" {
+                working = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(working, "first submission must reach the Working marker");
+
+        // Simulate the 120s settle-lock TTL expiring mid-serve.
+        state
+            .cache
+            .as_ref()
+            .expect("cache")
+            .release_settle_lock(&task_id)
+            .await;
+
+        // Second submission (same voucher — any valid submission) must reject
+        // on Working, not double-draw.
+        let env = a2a_call_envelope(&app, &body).await;
+        assert_eq!(env["error"]["code"].as_i64(), Some(-32007), "{env}");
+        assert!(
+            env["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("already in progress"),
+            "the Working reject names the in-flight settlement: {env}"
+        );
+
+        // The first submission completes with exactly ONE debit.
+        let result = first.await.unwrap();
+        assert_eq!(result["status"]["state"], "completed");
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, quote);
+        assert_eq!(voucher_row_count(&pool, cid).await, 1);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(spend_row_count(&pool, &agent).await, 1);
+    }
+
+    // -- A-8 -----------------------------------------------------------------
+
+    /// The no-silent-fallback pairing rejects (§5 step 5, mirroring the chat
+    /// fork): `("channel", Direct-payload)` and `("exact", Channel-payload)`
+    /// both reject fail-closed — no exact/escrow settlement fires (the
+    /// counting verifier proves it), no channel is drawn.
+    #[tokio::test]
+    async fn a2a_channel_scheme_payload_pairing_rejects() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping a2a_channel_scheme_payload_pairing_rejects: dev stack unavailable");
+            return;
+        };
+        let settle_count = Arc::new(AtomicUsize::new(0));
+        let (app, _state) = a2a_channel_app(
+            mock_provider_registry(),
+            Arc::new(SettleCountingDelayVerifier {
+                settle_count: Arc::clone(&settle_count),
+                delay: Duration::from_millis(0),
+            }),
+            pool.clone(),
+            redis,
+            true,
+            true,
+            None,
+        )
+        .await;
+
+        let (task_id, quote) = new_task_and_quote(&app).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        // (a) scheme "channel" + Direct payload.
+        let mut body_a = channel_payment_body(
+            &task_id,
+            quote,
+            &signed_voucher(&key, cid, quote, 1, a2a_digest(&task_id)),
+        );
+        body_a["params"]["message"]["metadata"]["x402.payment.payload"]["payload"] = serde_json::json!({
+            "transaction": base64::engine::general_purpose::STANDARD.encode("mock_tx")
+        });
+        let env_a = a2a_call_envelope(&app, &body_a).await;
+        assert_eq!(env_a["error"]["code"].as_i64(), Some(-32007), "{env_a}");
+        assert!(
+            env_a["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("not a channel voucher"),
+            "pairing reject (channel, non-Channel): {env_a}"
+        );
+
+        // (b) scheme "exact" + Channel payload.
+        let mut body_b = channel_payment_body(
+            &task_id,
+            quote,
+            &signed_voucher(&key, cid, quote, 2, a2a_digest(&task_id)),
+        );
+        body_b["params"]["message"]["metadata"]["x402.payment.payload"]["accepted"]["scheme"] =
+            serde_json::json!("exact");
+        let env_b = a2a_call_envelope(&app, &body_b).await;
+        assert_eq!(env_b["error"]["code"].as_i64(), Some(-32007), "{env_b}");
+        assert!(
+            env_b["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("scheme is not 'channel'"),
+            "pairing reject (exact, Channel): {env_b}"
+        );
+
+        // No fallback settle fired, no channel drawn, task still payable.
+        assert_eq!(
+            settle_count.load(Ordering::SeqCst),
+            0,
+            "a pairing mismatch must NEVER fall back to an exact/escrow settle"
+        );
+        assert_eq!(
+            channel_row(&pool, cid).await.last_voucher_cumulative_atomic,
+            0
+        );
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+        assert_eq!(
+            get_task(&app, &task_id).await["status"]["state"],
+            "input-required"
+        );
+    }
+
+    // -- A-10 ----------------------------------------------------------------
+
+    /// A spent voucher replayed on a DIFFERENT task fails the §6
+    /// double-defense (digest binds task A; delta 0 ≠ billed): rejected,
+    /// channel unchanged, exactly one historical debit.
+    #[tokio::test]
+    async fn a2a_spent_voucher_cross_task_rejected() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping a2a_spent_voucher_cross_task_rejected: dev stack unavailable");
+            return;
+        };
+        let (app, _state) = a2a_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            true,
+            true,
+            None,
+        )
+        .await;
+
+        let (task_a, quote) = new_task_and_quote(&app).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        // Spend the voucher on task A.
+        let voucher = signed_voucher(&key, cid, quote, 1, a2a_digest(&task_a));
+        let result = a2a_call(&app, &channel_payment_body(&task_a, quote, &voucher)).await;
+        assert_eq!(result["status"]["state"], "completed");
+        assert_eq!(
+            channel_row(&pool, cid).await.last_voucher_cumulative_atomic,
+            quote
+        );
+
+        // Replay the SAME voucher on task B.
+        let (task_b, quote_b) = new_task_and_quote(&app).await;
+        let env = a2a_call_envelope(&app, &channel_payment_body(&task_b, quote_b, &voucher)).await;
+        assert_eq!(env["error"]["code"].as_i64(), Some(-32007), "{env}");
+
+        // One historical debit only; task B still payable.
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, quote);
+        assert_eq!(voucher_row_count(&pool, cid).await, 1);
+        assert_eq!(spend_row_count(&pool, &agent).await, 1);
+        assert_eq!(
+            get_task(&app, &task_b).await["status"]["state"],
+            "input-required"
+        );
+    }
+
+    // -- A-11 ----------------------------------------------------------------
+
+    /// The #499 BLOCKER fix (step 10b): a `require_tenant = TRUE` wallet's
+    /// channel voucher is rejected pre-serve from the DB `agent_wallet`
+    /// (the intake gate is provably blind for vouchers — extract_payer_wallet
+    /// is "unknown"), money-free, with both locks released.
+    #[tokio::test]
+    async fn a2a_channel_require_tenant_wallet_rejected() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping a2a_channel_require_tenant_wallet_rejected: dev stack unavailable");
+            return;
+        };
+        let (app, state) = a2a_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis.clone(),
+            true,
+            true,
+            None,
+        )
+        .await;
+
+        let (task_id, quote) = new_task_and_quote(&app).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        // Enforce the wallet: require_tenant = TRUE (clear cached config).
+        let _ = sqlx::query("DELETE FROM wallet_budgets WHERE wallet_address = $1")
+            .bind(&agent)
+            .execute(&pool)
+            .await;
+        sqlx::query(
+            "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc, require_tenant) \
+             VALUES ($1, 100.00, TRUE)",
+        )
+        .bind(&agent)
+        .execute(&pool)
+        .await
+        .expect("seed enforced wallet");
+        {
+            let mut conn = redis
+                .get_multiplexed_async_connection()
+                .await
+                .expect("redis conn");
+            let _: Result<i64, _> = redis::cmd("DEL")
+                .arg(format!("budget_config:{agent}"))
+                .query_async(&mut conn)
+                .await;
+        }
+
+        let voucher = signed_voucher(&key, cid, quote, 1, a2a_digest(&task_id));
+        let body = channel_payment_body(&task_id, quote, &voucher);
+        let env = a2a_call_envelope(&app, &body).await;
+        assert_eq!(env["error"]["code"].as_i64(), Some(-32007), "{env}");
+        assert!(
+            env["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("per-tenant budgeting"),
+            "the #499 reject names the tenant requirement: {env}"
+        );
+
+        // Money-free + both locks released: nothing moved and the task is
+        // immediately payable again.
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, 0);
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+        assert_eq!(
+            get_task(&app, &task_id).await["status"]["state"],
+            "input-required"
+        );
+        // Draw lock released: an external acquire succeeds.
+        let cid_b58 = bs58::encode(cid).into_string();
+        let cache = state.cache.as_ref().expect("cache");
+        let token = cache
+            .acquire_channel_draw_lock(&cid_b58)
+            .await
+            .expect("acquire")
+            .expect("draw lock must have been released by the reject");
+        cache.release_channel_draw_lock(&cid_b58, &token).await;
+
+        // Un-enforce → the SAME voucher now succeeds (proves the reject was
+        // the tenant gate, and that the settle lock was released too).
+        let _ = sqlx::query("DELETE FROM wallet_budgets WHERE wallet_address = $1")
+            .bind(&agent)
+            .execute(&pool)
+            .await;
+        {
+            let mut conn = redis
+                .get_multiplexed_async_connection()
+                .await
+                .expect("redis conn");
+            let _: Result<i64, _> = redis::cmd("DEL")
+                .arg(format!("budget_config:{agent}"))
+                .query_async(&mut conn)
+                .await;
+        }
+        let result = a2a_call(&app, &body).await;
+        assert_eq!(result["status"]["state"], "completed");
+    }
+
+    // -- A-12 ----------------------------------------------------------------
+
+    /// The kill switch (step 1b): `channel.enabled = false` rejects a channel
+    /// submission PRE-lock with the byte-identical pre-Slice-A message — a
+    /// disabled gateway is wire-indistinguishable from one without the
+    /// feature (the rollback story). No lock is taken, no Working marker is
+    /// written.
+    #[tokio::test]
+    async fn a2a_channel_disabled_flag_rejects_pre_lock() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping a2a_channel_disabled_flag_rejects_pre_lock: dev stack unavailable");
+            return;
+        };
+        let (app, state) = a2a_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            false, // channel.enabled = false — the kill switch
+            true,
+            None,
+        )
+        .await;
+
+        let (task_id, quote) = new_task_and_quote(&app).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let voucher = signed_voucher(&key, cid, quote, 1, a2a_digest(&task_id));
+        let env = a2a_call_envelope(&app, &channel_payment_body(&task_id, quote, &voucher)).await;
+        assert_eq!(env["error"]["code"].as_i64(), Some(-32007), "{env}");
+        assert_eq!(
+            env["error"]["message"], "channel scheme is not accepted on this endpoint",
+            "the disabled reject is byte-identical to the pre-Slice-A arm: {env}"
+        );
+
+        // Pre-lock: the settle lock was never taken (we can acquire it now)
+        // and the record never left input-required (no Working write).
+        assert_eq!(
+            get_task(&app, &task_id).await["status"]["state"],
+            "input-required"
+        );
+        let cache = state.cache.as_ref().expect("cache");
+        assert_eq!(
+            cache
+                .acquire_settle_lock(&task_id, gateway::cache::A2A_SETTLE_LOCK_TTL_SECS)
+                .await
+                .expect("lock store reachable"),
+            true,
+            "the kill switch must reject BEFORE the settle lock is taken"
+        );
+        cache.release_settle_lock(&task_id).await;
+        assert_eq!(
+            channel_row(&pool, cid).await.last_voucher_cumulative_atomic,
+            0
+        );
+    }
+
+    // -- A-13 ----------------------------------------------------------------
+
+    /// Cached-slot fetch `None` (no cached value; RPC unreachable) → refuse
+    /// retryable BEFORE the draw lock — never verify an expiry against a
+    /// missing/stale slot.
+    #[tokio::test]
+    async fn a2a_channel_slot_fetch_none_fails_closed() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping a2a_channel_slot_fetch_none_fails_closed: dev stack unavailable");
+            return;
+        };
+        let (app, state) = a2a_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            true,
+            false, // UNPRIMED slot cache + dead RPC → fail-closed None
+            None,
+        )
+        .await;
+
+        let (task_id, quote) = new_task_and_quote(&app).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let voucher = signed_voucher(&key, cid, quote, 1, a2a_digest(&task_id));
+        let env = a2a_call_envelope(&app, &channel_payment_body(&task_id, quote, &voucher)).await;
+        assert_eq!(
+            env["error"]["code"].as_i64(),
+            Some(-32603),
+            "slot-fetch None is the retryable internal class: {env}"
+        );
+
+        // No draw: lock never taken, nothing moved, task payable again.
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, 0);
+        assert_eq!(voucher_row_count(&pool, cid).await, 0);
+        assert_eq!(
+            get_task(&app, &task_id).await["status"]["state"],
+            "input-required"
+        );
+        let cid_b58 = bs58::encode(cid).into_string();
+        let cache = state.cache.as_ref().expect("cache");
+        let token = cache
+            .acquire_channel_draw_lock(&cid_b58)
+            .await
+            .expect("acquire")
+            .expect("the draw lock must never have been taken");
+        cache.release_channel_draw_lock(&cid_b58, &token).await;
+    }
+
+    // -- A-14 ----------------------------------------------------------------
+
+    /// The D6 serve bound: a serve exceeding `a2a_draw_serve_timeout_secs`
+    /// (test-shrunk to 1s) is a total NON-charge — task back to
+    /// input-required, voucher unconsumed and REUSABLE (the boot-validation
+    /// reject leg lives in config.rs:
+    /// `channel_a2a_draw_serve_timeout_defaults_overrides_and_validates`).
+    #[tokio::test]
+    async fn a2a_channel_serve_timeout_no_debit() {
+        let Some((pool, redis)) = stack().await else {
+            eprintln!("skipping a2a_channel_serve_timeout_no_debit: dev stack unavailable");
+            return;
+        };
+        let (slow_app, _s1) = a2a_channel_app(
+            slow_provider_registry(Duration::from_secs(5)),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis.clone(),
+            true,
+            true,
+            Some(1), // test-shrunk serve bound
+        )
+        .await;
+
+        let (task_id, quote) = new_task_and_quote(&slow_app).await;
+        let key = fresh_key();
+        let cid = rand32();
+        let agent = bs58::encode(rand32()).into_string();
+        create_channel(
+            &pool,
+            cid,
+            &agent,
+            key.verifying_key().to_bytes(),
+            DEPOSITED_ATOMIC,
+        )
+        .await;
+
+        let voucher = signed_voucher(&key, cid, quote, 1, a2a_digest(&task_id));
+        let body = channel_payment_body(&task_id, quote, &voucher);
+        let env = a2a_call_envelope(&slow_app, &body).await;
+        assert_eq!(
+            env["error"]["code"].as_i64(),
+            Some(-32008),
+            "serve timeout surfaces the provider-error class: {env}"
+        );
+
+        // Total non-charge: voucher unconsumed.
+        let row = channel_row(&pool, cid).await;
+        assert_eq!(row.last_voucher_cumulative_atomic, 0, "no debit on timeout");
+        assert_eq!(voucher_row_count(&pool, cid).await, 0);
+        assert_eq!(spend_row_count(&pool, &agent).await, 0);
+        assert_eq!(
+            get_task(&slow_app, &task_id).await["status"]["state"],
+            "input-required"
+        );
+
+        // The SAME voucher is reusable against a healthy instance.
+        let (fast_app, _s2) = a2a_channel_app(
+            mock_provider_registry(),
+            Arc::new(AlwaysPassVerifier),
+            pool.clone(),
+            redis,
+            true,
+            true,
+            None,
+        )
+        .await;
+        let result = a2a_call(&fast_app, &body).await;
+        assert_eq!(result["status"]["state"], "completed");
+        assert_eq!(
+            channel_row(&pool, cid).await.last_voucher_cumulative_atomic,
+            quote
+        );
+    }
+}
