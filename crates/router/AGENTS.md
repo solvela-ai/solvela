@@ -4,7 +4,7 @@
 # router
 
 ## Purpose
-Smart request router. Provides a 15-dimension rule-based scorer that classifies chat requests into tiers (Simple / Medium / Complex / Reasoning) plus routing profiles (`eco`, `auto`, `premium`, `free`) that map tiers to specific model IDs. Also owns the model registry that loads `config/models.toml` (per-token pricing for 44+ models across 6 providers). Crate name: `solvela-router`. Pure rule-based, <1µs per scoring call, zero external calls.
+Smart request router. Provides a 15-dimension rule-based scorer that classifies chat requests into tiers (Simple / Medium / Complex / Reasoning) plus routing profiles (`eco`, `auto`, `premium`, `free`) that map tiers to specific model IDs. Also owns the model registry that loads `config/models.toml` (per-token pricing for 44+ models across 6 providers). Crate name: `solvela-router`. Pure rule-based, zero external calls, ~7.7 us per scoring call (measured 2026-07-08 — do not quote an unmeasured figure).
 
 ## Key Files
 | File | Description |

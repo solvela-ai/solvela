@@ -22,10 +22,129 @@ const WEIGHTS: [f64; 15] = [
     0.02, // 15. Domain specificity
 ];
 
+// ---------------------------------------------------------------------------
+// Keyword tables
+//
+// Every keyword is stored PRE-NORMALIZED and PRE-PADDED (" prove ", " step by
+// step "), so matching is a bare `normalized.contains(kw)` — no per-call
+// `format!`, no per-keyword allocation. `padded_keywords_match_the_normalizer`
+// asserts each const is byte-identical to `normalize_for_keywords()` of its
+// unpadded form, so the two representations cannot drift.
+//
+// These are the WORD-BOUNDARY tables only. Code presence, math/logic and
+// numeric list markers read RAW text and are not listed here.
+// ---------------------------------------------------------------------------
+
+/// 3. Reasoning markers.
+const REASONING_MARKERS: &[&str] = &[
+    " prove ",
+    " theorem ",
+    " step by step ",
+    " reason ",
+    " analyze ",
+    " evaluate ",
+    " compare and contrast ",
+    " think through ",
+    " explain why ",
+];
+
+/// 4. Technical terms.
+const TECHNICAL_TERMS: &[&str] = &[
+    " algorithm ",
+    " kubernetes ",
+    " database ",
+    " architecture ",
+    " distributed ",
+    " concurrent ",
+    " protocol ",
+    " optimization ",
+    " benchmark ",
+];
+
+/// 5. Creative markers.
+const CREATIVE_MARKERS: &[&str] = &[
+    " story ",
+    " poem ",
+    " brainstorm ",
+    " creative ",
+    " imagine ",
+    " fiction ",
+    " narrative ",
+];
+
+/// 6. Simple indicators (negative signal).
+const SIMPLE_INDICATORS: &[&str] = &[
+    " what is ",
+    " define ",
+    " translate ",
+    " hello ",
+    " hi ",
+    " thanks ",
+    " yes ",
+    " no ",
+];
+
+/// 7. Multi-step word markers.
+///
+/// The NUMERIC list markers live in [`count_numeric_list_markers`] and read
+/// raw text.
+const MULTI_STEP_MARKERS: &[&str] = &[
+    " first ",
+    " then ",
+    " next ",
+    " finally ",
+    " step 1 ",
+    " step 2 ",
+];
+
+/// 9. Agentic task markers.
+const AGENTIC_MARKERS: &[&str] = &[
+    " read file ",
+    " write file ",
+    " edit ",
+    " deploy ",
+    " execute ",
+    " run command ",
+    " install ",
+];
+
+/// 14. Output format complexity.
+const OUTPUT_FORMAT_MARKERS: &[&str] = &[" json ", " csv ", " xml ", " markdown ", " structured "];
+
+/// 15. Domain specificity.
+const DOMAIN_MARKERS: &[&str] = &[
+    " medical ",
+    " legal ",
+    " scientific ",
+    " clinical ",
+    " regulatory ",
+    " compliance ",
+    " diagnosis ",
+];
+
+/// Every word-boundary table, for the drift guard in tests.
+#[cfg(test)]
+const ALL_KEYWORD_TABLES: &[&[&str]] = &[
+    REASONING_MARKERS,
+    TECHNICAL_TERMS,
+    CREATIVE_MARKERS,
+    SIMPLE_INDICATORS,
+    MULTI_STEP_MARKERS,
+    AGENTIC_MARKERS,
+    OUTPUT_FORMAT_MARKERS,
+    DOMAIN_MARKERS,
+];
+
 /// Score a request across 15 dimensions and return a complexity tier.
 ///
-/// The scorer is purely rule-based with zero external calls, targeting
-/// <1 microsecond per classification.
+/// Purely rule-based, zero external calls, one heap allocation beyond the
+/// concatenated prompt (the normalized copy used for word-boundary matching).
+///
+/// MEASURED 2026-07-08 — release build, 100k warmed iterations, keyword-dense
+/// ~430-char prompt, one dev workstation: **~7.7 us per classification**. The
+/// "<1 microsecond" claim this doc used to carry was never benchmarked and was
+/// never true: the same harness puts the pre-2026-07-08 scorer at ~5.1 us.
+/// Re-measure before quoting a number here; do not restore an unmeasured claim.
 pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> ScorerResult {
     let text = concatenate_user_content(messages);
     // Word-boundary view of the same text, built once. Used ONLY by the
@@ -53,73 +172,21 @@ pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> 
     signals[1] = score_code_presence(&text);
 
     // 3. Reasoning markers
-    signals[2] = score_keyword_density(
-        &normalized,
-        &[
-            "prove",
-            "theorem",
-            "step by step",
-            "reason",
-            "analyze",
-            "evaluate",
-            "compare and contrast",
-            "think through",
-            "explain why",
-        ],
-    );
+    signals[2] = score_keyword_density(&normalized, REASONING_MARKERS);
 
     // 4. Technical terms
-    signals[3] = score_keyword_density(
-        &normalized,
-        &[
-            "algorithm",
-            "kubernetes",
-            "database",
-            "architecture",
-            "distributed",
-            "concurrent",
-            "protocol",
-            "optimization",
-            "benchmark",
-        ],
-    );
+    signals[3] = score_keyword_density(&normalized, TECHNICAL_TERMS);
 
     // 5. Creative markers
-    signals[4] = score_keyword_density(
-        &normalized,
-        &[
-            "story",
-            "poem",
-            "brainstorm",
-            "creative",
-            "imagine",
-            "fiction",
-            "narrative",
-        ],
-    );
+    signals[4] = score_keyword_density(&normalized, CREATIVE_MARKERS);
 
     // 6. Simple indicators (negative signal — pushes score down)
-    signals[5] = -score_keyword_density(
-        &normalized,
-        &[
-            "what is",
-            "define",
-            "translate",
-            "hello",
-            "hi",
-            "thanks",
-            "yes",
-            "no",
-        ],
-    );
+    signals[5] = -score_keyword_density(&normalized, SIMPLE_INDICATORS);
 
     // 7. Multi-step patterns — word markers on the normalized text, numeric list
     //    markers on the RAW text (they are punctuation, like code and math).
     signals[6] = density_score(
-        count_keywords(
-            &normalized,
-            &["first", "then", "next", "finally", "step 1", "step 2"],
-        ) + count_numeric_list_markers(&text),
+        count_keywords(&normalized, MULTI_STEP_MARKERS) + count_numeric_list_markers(&text),
     );
 
     // 8. Question complexity — multiple questions suggest complexity
@@ -132,18 +199,7 @@ pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> 
     };
 
     // 9. Agentic task markers
-    signals[8] = score_keyword_density(
-        &normalized,
-        &[
-            "read file",
-            "write file",
-            "edit",
-            "deploy",
-            "execute",
-            "run command",
-            "install",
-        ],
-    );
+    signals[8] = score_keyword_density(&normalized, AGENTIC_MARKERS);
 
     // 10. Math/logic
     signals[9] = score_math_presence(&text);
@@ -174,24 +230,10 @@ pub fn classify(messages: &[solvela_protocol::ChatMessage], has_tools: bool) -> 
     signals[12] = if has_tools { 0.8 } else { 0.0 };
 
     // 14. Output format complexity
-    signals[13] = score_keyword_density(
-        &normalized,
-        &["json", "csv", "xml", "markdown", "structured"],
-    );
+    signals[13] = score_keyword_density(&normalized, OUTPUT_FORMAT_MARKERS);
 
     // 15. Domain specificity
-    signals[14] = score_keyword_density(
-        &normalized,
-        &[
-            "medical",
-            "legal",
-            "scientific",
-            "clinical",
-            "regulatory",
-            "compliance",
-            "diagnosis",
-        ],
-    );
+    signals[14] = score_keyword_density(&normalized, DOMAIN_MARKERS);
 
     // Weighted sum
     let score: f64 = signals.iter().zip(WEIGHTS.iter()).map(|(s, w)| s * w).sum();
@@ -239,10 +281,9 @@ fn concatenate_user_content(messages: &[solvela_protocol::ChatMessage]) -> Strin
 /// Normalize text for word-boundary keyword matching.
 ///
 /// Lowercases, replaces every non-alphanumeric char with a space, collapses
-/// runs of spaces, and pads with a leading and trailing space. Matching a
-/// keyword is then `normalized.contains(&normalize_for_keywords(kw))` — the
-/// keyword normalizes to `" foo bar "`, so it can only match on true
-/// word/phrase boundaries.
+/// runs of spaces, and pads with a leading and trailing space. Keywords are
+/// stored already in this form (`" foo bar "`), so matching is a bare
+/// `normalized.contains(kw)` that can only hit on true word/phrase boundaries.
 ///
 /// This is what stops `"hi"` firing inside "within", `"no"` inside "know",
 /// `"edit"` inside "credit", and `"class"` inside "classification"; it also
@@ -254,14 +295,20 @@ fn concatenate_user_content(messages: &[solvela_protocol::ChatMessage]) -> Strin
 fn normalize_for_keywords(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push(' ');
+    let mut last_was_space = true;
     for ch in text.chars() {
-        if ch.is_alphanumeric() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_was_space = false;
+        } else if ch.is_alphanumeric() {
             out.extend(ch.to_lowercase());
-        } else if !out.ends_with(' ') {
+            last_was_space = false;
+        } else if !last_was_space {
             out.push(' ');
+            last_was_space = true;
         }
     }
-    if !out.ends_with(' ') {
+    if !last_was_space {
         out.push(' ');
     }
     out
@@ -305,13 +352,11 @@ fn density_score(matches: usize) -> f64 {
 
 /// Count keywords present in `normalized`.
 ///
-/// `normalized` MUST come from [`normalize_for_keywords`]; keywords are matched
-/// on word/phrase boundaries, never as bare substrings.
+/// `normalized` MUST come from [`normalize_for_keywords`], and `keywords` MUST
+/// be pre-padded (`" prove "`) — the padding IS the word-boundary check. Both
+/// sides are already normalized, so this allocates nothing.
 fn count_keywords(normalized: &str, keywords: &[&str]) -> usize {
-    keywords
-        .iter()
-        .filter(|k| normalized.contains(&normalize_for_keywords(k)))
-        .count()
+    keywords.iter().filter(|k| normalized.contains(**k)).count()
 }
 
 /// Score keyword density: returns 0.0-1.0 based on how many keywords are found.
@@ -452,19 +497,39 @@ mod tests {
     #[test]
     fn keyword_density_matches_on_word_boundaries_only() {
         let haystack = normalize_for_keywords("Within, you know your credit score.");
-        assert_eq!(score_keyword_density(&haystack, &["hi", "no"]), 0.0);
-        assert_eq!(score_keyword_density(&haystack, &["edit"]), 0.0);
+        assert_eq!(score_keyword_density(&haystack, &[" hi ", " no "]), 0.0);
+        assert_eq!(score_keyword_density(&haystack, &[" edit "]), 0.0);
 
         // ...but the real words still match.
         let real = normalize_for_keywords("Hi! No thanks.");
-        assert_eq!(score_keyword_density(&real, &["hi", "no"]), 0.6);
+        assert_eq!(score_keyword_density(&real, &[" hi ", " no "]), 0.6);
     }
 
     /// FIX 4: hyphenated phrasing matches the spaced multi-word keyword.
     #[test]
     fn hyphenated_phrases_match_spaced_keywords() {
         let haystack = normalize_for_keywords("Walk me through this step-by-step: how?");
-        assert_eq!(score_keyword_density(&haystack, &["step by step"]), 0.3);
+        assert_eq!(score_keyword_density(&haystack, &[" step by step "]), 0.3);
+    }
+
+    /// The keyword tables are stored pre-normalized and pre-padded so matching
+    /// allocates nothing. If they ever drift from what `normalize_for_keywords`
+    /// produces, the affected dimension silently stops matching. Pin both.
+    #[test]
+    fn padded_keywords_match_the_normalizer() {
+        for table in ALL_KEYWORD_TABLES {
+            for kw in *table {
+                assert!(
+                    kw.starts_with(' ') && kw.ends_with(' '),
+                    "keyword {kw:?} is not padded"
+                );
+                assert_eq!(
+                    *kw,
+                    normalize_for_keywords(kw.trim()),
+                    "keyword {kw:?} is not what the normalizer produces"
+                );
+            }
+        }
     }
 
     /// Numeric list markers are punctuation, so they are detected on the RAW

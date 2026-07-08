@@ -27,8 +27,8 @@
 //! this table, so a signal that is wrong must not be fitted to. Floor is set
 //! ~2.7 points below so the test only fails on a real regression, not the
 //! model's day-to-day noise. Divergences are not bugs
-//! by themselves — some are intentional tradeoffs (a 15-dimension rule-based
-//! scorer targeting <1us cannot do semantic understanding); the point of
+//! by themselves — some are intentional tradeoffs (a microsecond-scale
+//! rule-based scorer cannot do semantic understanding); the point of
 //! this table is to make the gap between "what the scorer does" and "what
 //! it should do" a visible, tracked number instead of a vibe.
 
