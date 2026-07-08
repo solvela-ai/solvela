@@ -232,9 +232,18 @@ const TABLE: &[Row] = &[
         current: Tier::Simple,
     },
     // --- Tool-augmented requests (has_tools = true) (5) ---
+    // NOTE: latent/library-level coverage only. Both production call sites of
+    // `classify` (routes/chat/mod.rs and a2a/handler.rs in the gateway)
+    // currently hardcode `has_tools: false`, so the tool-usage dimension never
+    // fires on live traffic — these rows pin the library contract, not a
+    // gateway-observable behavior.
     Row { prompt: "Search the web for the latest Solana price and summarize it.", has_tools: true, intended: Tier::Medium, current: Tier::Simple },
     Row { prompt: "Look up today's weather in Tokyo.", has_tools: true, intended: Tier::Simple, current: Tier::Simple },
     Row { prompt: "Find recent news about AI regulation and give me a bullet list.", has_tools: true, intended: Tier::Medium, current: Tier::Medium },
+    // Boundary-exact row: score computes to exactly 0.0, the Simple/Medium
+    // cutoff (-0.5*0.08 + 0.2*0.04 + 0.8*0.04 == 0.0 in IEEE-754). Any tweak
+    // to the token-count bucket, avg-word-length bucket, or tool-usage weight
+    // flips this row — if this pin fails after a scorer change, look here first.
     Row { prompt: "Check my calendar for tomorrow's meetings.", has_tools: true, intended: Tier::Simple, current: Tier::Medium },
     Row { prompt: "Search for flights from NYC to SFO next Friday.", has_tools: true, intended: Tier::Simple, current: Tier::Medium },
     // --- Non-English prompts (6) ---
