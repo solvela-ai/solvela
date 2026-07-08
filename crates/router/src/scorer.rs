@@ -296,6 +296,11 @@ fn score_code_presence(text: &str) -> f64 {
     if text.contains("```") || text.contains('`') {
         score += 0.4;
     }
+    // `"let "` still matches the English "let me", and `"const "`/`"var "` are
+    // matched against RAW text (trailing space), so they are not word-bounded.
+    // MEASURED 2026-07-08: dropping `let`/`const`/`var` costs accuracy —
+    // 57.53% -> 56.16% alone, 54.79% on top of dropping `-`/`/` from
+    // `score_math_presence`. Left in place pending an operator decision.
     let code_keywords = [
         "function", "class", "def ", "fn ", "impl ", "struct ", "const ", "let ", "var ", "import",
         "return", "async", "await",
@@ -306,6 +311,26 @@ fn score_code_presence(text: &str) -> f64 {
 }
 
 /// Score math/logic presence: equations, formal notation.
+///
+/// MEASURED 2026-07-08, do not "clean up" without re-measuring: `-`, `/` and `*`
+/// are not mathematics — they fire on "state-of-the-art", "and/or", "sub-100-
+/// millisecond", dates, file paths, and markdown bullets. Removing them
+/// nonetheless makes the scorer AGREE LESS with the golden set
+/// (`tests/golden_set.rs`), because in long analytical prose this dimension is
+/// currently acting as a proxy for "punctuation-rich technical writing" and is
+/// propping those prompts over the 0.2 Complex threshold:
+///
+///   drop `/` alone      57.53% -> 57.53%  (zero rows move)
+///   drop `-` alone      57.53% -> 57.53%  (2 rows move, both further from spec)
+///   drop `*` alone      57.53% -> 57.53%  (1 row moves, further from spec)
+///   drop `-` and `/`    57.53% -> 56.16%  (the multiplayer/UDP row falls
+///                                          Complex -> Medium, and Complex is
+///                                          its `intended` value)
+///   drop `-`, `/`, `*`  57.53% -> 56.16%
+///
+/// The real defect is under-scoring of long analytical prompts (weights /
+/// `Tier::from_score` thresholds), which is deliberately Tier-2 work. Fix that
+/// first, then delete these symbols.
 fn score_math_presence(text: &str) -> f64 {
     let mut score = 0.0;
     let math_indicators = ["=", "+", "-", "*", "/", "∑", "∫", "∀", "∃", "≥", "≤"];

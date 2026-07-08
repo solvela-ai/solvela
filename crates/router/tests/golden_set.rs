@@ -14,11 +14,15 @@
 //! deliberately, not silently.
 //!
 //! `golden_set_measures_accuracy_against_intended` computes
-//! `current == intended` across the table.
+//! `current == intended` across the table. `intended` is the SPECIFICATION and
+//! is immutable — never edit a label to match the code, or the number below
+//! stops meaning anything.
 //!
-//! Measured 2026-07-08: 40/73 = 54.79% (see `MEASURED_ACCURACY_PERCENT`
-//! below). Floor is set ~2.8 points below so the test only fails on a real
-//! regression, not the model's day-to-day noise. Divergences are not bugs
+//! Measured 2026-07-08: 42/73 = 57.53% (see `ACCURACY_FLOOR_PERCENT` below).
+//! Was 40/73 = 54.79% before the Tier-1 correctness fixes (`has_tools` wiring;
+//! word-boundary keyword matching). Floor is set ~2.5 points below so the test
+//! only fails on a real regression, not the model's day-to-day noise.
+//! Divergences are not bugs
 //! by themselves — some are intentional tradeoffs (a 15-dimension rule-based
 //! scorer targeting <1us cannot do semantic understanding); the point of
 //! this table is to make the gap between "what the scorer does" and "what
@@ -358,11 +362,11 @@ fn golden_set_pins_current_classification() {
     }
 }
 
-/// Floor set ~2.8 points below the 2026-07-08 measured accuracy of
-/// 40/73 = 54.79%, so an unrelated scorer tweak doesn't fail this test but a
+/// Floor set ~2.5 points below the 2026-07-08 measured accuracy of
+/// 42/73 = 57.53%, so an unrelated scorer tweak doesn't fail this test but a
 /// real accuracy regression does. Raise the floor (with a fresh measurement
 /// comment) when the scorer improves.
-const ACCURACY_FLOOR_PERCENT: f64 = 52.0;
+const ACCURACY_FLOOR_PERCENT: f64 = 55.0;
 
 #[test]
 fn golden_set_measures_accuracy_against_intended() {
