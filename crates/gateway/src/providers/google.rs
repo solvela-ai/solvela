@@ -3,12 +3,13 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use solvela_protocol::{
-    ChatChoice, ChatMessage, ChatRequest, ChatResponse, ContentPart, MessageContent,
-    ModelRegistration, ParseImageError, ParsedImage, Role, Usage,
+    ChatChoice, ChatChunk, ChatChunkChoice, ChatDelta, ChatMessage, ChatRequest, ChatResponse,
+    ContentPart, FunctionCallDelta, MessageContent, ModelRegistration, ParseImageError,
+    ParsedImage, Role, ToolCallDelta, Usage,
 };
 
 use super::cache_usage::CacheUsage;
-use super::LLMProvider;
+use super::{ChatStream, LLMProvider, ProviderError};
 
 /// Provider label for cache-token metering counters.
 const PROVIDER_LABEL: &str = "google";
@@ -80,19 +81,31 @@ struct GeminiContent {
 enum GeminiPart {
     Text {
         text: String,
+        /// `"thought": true` marks a reasoning-summary part on thinking models
+        /// (Gemini 2.5+/3.x). Present ONLY on responses; never constructed for
+        /// requests (so it stays absent on the request wire via
+        /// `skip_serializing_if`). Modelled here so the response/stream readers
+        /// can EXCLUDE thought text from assistant content — otherwise a
+        /// `{"text":"…","thought":true}` part matches this variant (unknown
+        /// fields are ignored) and the reasoning would leak into visible output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought: Option<bool>,
     },
     // NOTE: for an UNTAGGED enum, an enum-level `rename_all` does NOT rename the
     // fields inside struct variants — each variant needs its own `rename_all`,
     // or the wire field is the raw snake_case name (`inline_data`) which Gemini
     // rejects. The per-variant `rename_all = "camelCase"` is load-bearing.
     #[serde(rename_all = "camelCase")]
-    InlineData {
-        inline_data: GeminiInlineData,
-    },
+    InlineData { inline_data: GeminiInlineData },
     #[serde(rename_all = "camelCase")]
-    FileData {
-        file_data: GeminiFileData,
-    },
+    FileData { file_data: GeminiFileData },
+    /// A model-requested tool call. Gemini delivers a `functionCall` part
+    /// COMPLETE in a single (final) frame — name + args together, no id. Only
+    /// read on responses/streams; never constructed for requests. Must precede
+    /// [`GeminiPart::Other`] so an untagged deserialize routes `functionCall`
+    /// here rather than the catch-all.
+    #[serde(rename_all = "camelCase")]
+    FunctionCall { function_call: GeminiFunctionCall },
     /// Forward-compat catch-all for response part kinds we don't model
     /// (`thought`, `executableCode`, …). Never constructed for requests; the
     /// response reader skips it. The captured value is intentionally unread —
@@ -104,8 +117,24 @@ enum GeminiPart {
 
 impl GeminiPart {
     fn text(s: String) -> Self {
-        GeminiPart::Text { text: s }
+        GeminiPart::Text {
+            text: s,
+            thought: None,
+        }
     }
+}
+
+/// A Gemini `functionCall` response payload. `args` is a JSON OBJECT on the
+/// wire; OpenAI's `tool_calls[].function.arguments` is a STRING, so the reader
+/// re-serializes `args` when translating. Response-only, but the untagged
+/// [`GeminiPart`] enum derives `Serialize` for every variant payload, so this
+/// keeps `Serialize` too (it is simply never constructed for requests).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiFunctionCall {
+    name: String,
+    #[serde(default)]
+    args: serde_json::Value,
 }
 
 /// Outbound-only when constructed for a request; also read back on responses,
@@ -144,6 +173,20 @@ struct GeminiGenerationConfig {
 struct GeminiResponse {
     candidates: Option<Vec<GeminiCandidate>>,
     usage_metadata: Option<GeminiUsageMetadata>,
+    /// Present when Gemini blocks the PROMPT (no candidates produced). On the
+    /// stream this arrives as a lone first frame; the parser must surface it as
+    /// an error rather than closing a silent, empty (yet apparently complete)
+    /// stream. `#[serde(default)]`: absent on normal responses.
+    #[serde(default)]
+    prompt_feedback: Option<GeminiPromptFeedback>,
+}
+
+/// Prompt-level feedback. Only `blockReason` is read — a non-empty value means
+/// the prompt itself was rejected (safety, etc.) and no candidates follow.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiPromptFeedback {
+    block_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +379,39 @@ fn to_gemini_request(req: &ChatRequest) -> Result<GeminiRequest, String> {
     })
 }
 
+/// Map a Gemini `finishReason` to the OpenAI-compatible finish reason.
+///
+/// Single source of truth shared by the non-streaming reader and the streaming
+/// parser so the two never drift. NOTE: a tool-call turn reports
+/// `finishReason:"STOP"`; callers that detect a `functionCall` part must
+/// override the result to `"tool_calls"` (Gemini has no dedicated tool-call
+/// finish reason). See `spawn_gemini_sse_parser`.
+fn map_gemini_finish_reason(reason: &str) -> String {
+    match reason {
+        "STOP" => "stop".to_string(),
+        "MAX_TOKENS" => "length".to_string(),
+        "SAFETY" => "content_filter".to_string(),
+        other => other.to_lowercase(),
+    }
+}
+
+/// Visible assistant text of a Gemini part, or `None` for parts that carry no
+/// visible content: images, tool calls, forward-compat kinds, AND reasoning
+/// (`"thought": true`) parts — thought text must never leak into content.
+fn part_visible_text(p: &GeminiPart) -> Option<&str> {
+    match p {
+        GeminiPart::Text {
+            thought: Some(true),
+            ..
+        } => None,
+        GeminiPart::Text { text, .. } => Some(text.as_str()),
+        GeminiPart::InlineData { .. }
+        | GeminiPart::FileData { .. }
+        | GeminiPart::FunctionCall { .. }
+        | GeminiPart::Other(_) => None,
+    }
+}
+
 fn from_gemini_response(resp: GeminiResponse, original_model: &str) -> ChatResponse {
     let (content, finish_reason) = match resp.candidates.as_ref().and_then(|c| c.first()) {
         Some(c) => {
@@ -343,23 +419,13 @@ fn from_gemini_response(resp: GeminiResponse, original_model: &str) -> ChatRespo
                 .content
                 .parts
                 .iter()
-                .filter_map(|p| match p {
-                    GeminiPart::Text { text } => Some(text.as_str()),
-                    // Non-text response parts (inline/file data, or any
-                    // forward-compat `Other` kind like `thought`) contribute no
-                    // assistant text and are skipped.
-                    GeminiPart::InlineData { .. }
-                    | GeminiPart::FileData { .. }
-                    | GeminiPart::Other(_) => None,
-                })
+                .filter_map(part_visible_text)
                 .collect::<Vec<_>>()
                 .join("");
-            let reason = c.finish_reason.as_ref().map(|r| match r.as_str() {
-                "STOP" => "stop".to_string(),
-                "MAX_TOKENS" => "length".to_string(),
-                "SAFETY" => "content_filter".to_string(),
-                other => other.to_lowercase(),
-            });
+            let reason = c
+                .finish_reason
+                .as_ref()
+                .map(|r| map_gemini_finish_reason(r));
             (text, reason)
         }
         None => {
@@ -438,6 +504,208 @@ fn from_gemini_response(resp: GeminiResponse, original_model: &str) -> ChatRespo
     }
 }
 
+/// Spawn an SSE parser for Gemini `streamGenerateContent?alt=sse` responses.
+///
+/// Gemini is NOT OpenAI-wire-compatible, so this cannot use
+/// `super::spawn_openai_sse_parser`. It mirrors `spawn_anthropic_sse_parser`:
+/// buffer bytes, split on `\n\n`, take `data:` lines, deserialize each frame as
+/// a [`GeminiResponse`], and translate to OpenAI-format [`ChatChunk`]s.
+///
+/// Gemini stream semantics handled here:
+/// - Text parts are INCREMENTAL — each frame's text is appended, never diffed.
+/// - The FIRST emitted chunk is a role marker (`delta.role = Assistant`); later
+///   chunks carry only content.
+/// - A `functionCall` part arrives COMPLETE in one frame → one `tool_calls`
+///   delta (synthesized id, stringified args). A tool-call turn's terminal
+///   `finish_reason` is forced to `"tool_calls"` (Gemini reports `STOP`).
+/// - `finishReason` appears only on the terminal frame → emit an empty-delta
+///   terminal chunk and close. Gemini sends no `[DONE]`; the gateway's SSE layer
+///   appends its own terminator, so the parser must not emit one.
+/// - Reasoning (`"thought": true`) parts are excluded from `delta.content`.
+/// - Frames with no candidates are skipped, EXCEPT a `promptFeedback.blockReason`
+///   frame, which is surfaced as an `Err` (fail-closed — never a silent, empty
+///   yet apparently-complete stream). Upstream byte-stream errors are forwarded
+///   as `Err`; a single unparseable frame is warned + skipped (matching the
+///   OpenAI/Anthropic parsers).
+fn spawn_gemini_sse_parser(response: reqwest::Response, model: String) -> ChatStream {
+    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<ChatChunk, ProviderError>>(32);
+    tokio::spawn(async move {
+        use futures::{SinkExt, StreamExt};
+
+        let mut byte_stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let id = format!("gemini-{}", uuid::Uuid::new_v4());
+        let created = chrono::Utc::now().timestamp();
+        let mut role_sent = false;
+
+        // Build a single-choice chunk carrying `delta` (+ optional finish).
+        let make_chunk = |delta: ChatDelta, finish_reason: Option<String>| ChatChunk {
+            id: id.clone(),
+            object: "chat.completion.chunk".to_string(),
+            created,
+            model: model.clone(),
+            choices: vec![ChatChunkChoice {
+                index: 0,
+                delta,
+                finish_reason,
+            }],
+        };
+
+        while let Some(chunk_result) = byte_stream.next().await {
+            let bytes = match chunk_result {
+                Ok(b) => b,
+                Err(e) => {
+                    // Never end a stream as if complete on an upstream byte error.
+                    let _ = tx.send(Err(Box::new(e) as ProviderError)).await;
+                    return;
+                }
+            };
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(pos) = buffer.find("\n\n") {
+                let event_block = buffer[..pos].to_string();
+                buffer.drain(..pos + 2);
+
+                let Some(data) = event_block
+                    .lines()
+                    .find_map(|l| l.strip_prefix("data: ").map(|d| d.trim().to_string()))
+                else {
+                    continue;
+                };
+
+                let frame: GeminiResponse = match serde_json::from_str(&data) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let truncated: String = data.chars().take(200).collect();
+                        warn!(
+                            error = %e,
+                            raw_data = %truncated,
+                            "gemini_stream_parse_error: skipping unparseable SSE frame"
+                        );
+                        continue;
+                    }
+                };
+
+                let candidate = match frame.candidates.as_ref().and_then(|c| c.first()) {
+                    Some(c) => c,
+                    None => {
+                        // No candidates: a prompt-block frame fails closed; any
+                        // other empty frame is tolerated (skipped).
+                        if let Some(reason) = frame
+                            .prompt_feedback
+                            .as_ref()
+                            .and_then(|pf| pf.block_reason.as_ref())
+                        {
+                            let _ = tx
+                                .send(Err(format!("gemini prompt blocked: {reason}").into()))
+                                .await;
+                            return;
+                        }
+                        continue;
+                    }
+                };
+
+                // Role marker as the very first chunk (mirrors anthropic's
+                // message_start role chunk).
+                if !role_sent {
+                    role_sent = true;
+                    let role_chunk = make_chunk(
+                        ChatDelta {
+                            role: Some(Role::Assistant),
+                            content: None,
+                            tool_calls: None,
+                        },
+                        None,
+                    );
+                    if tx.send(Ok(role_chunk)).await.is_err() {
+                        return;
+                    }
+                }
+
+                // This frame's incremental visible text (thought parts excluded).
+                let text: String = candidate
+                    .content
+                    .parts
+                    .iter()
+                    .filter_map(part_visible_text)
+                    .collect();
+                if !text.is_empty() {
+                    let content_chunk = make_chunk(
+                        ChatDelta {
+                            role: None,
+                            content: Some(text),
+                            tool_calls: None,
+                        },
+                        None,
+                    );
+                    if tx.send(Ok(content_chunk)).await.is_err() {
+                        return;
+                    }
+                }
+
+                // Tool calls: each complete `functionCall` part → one tool_calls
+                // delta. OpenAI `arguments` is a STRING; Gemini `args` is an
+                // object, so re-serialize it.
+                let tool_calls: Vec<ToolCallDelta> = candidate
+                    .content
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        GeminiPart::FunctionCall { function_call } => Some(function_call),
+                        _ => None,
+                    })
+                    .enumerate()
+                    .map(|(i, fc)| ToolCallDelta {
+                        index: i as u32,
+                        // Gemini supplies no id; synthesize a deterministic one.
+                        id: Some(format!("call_{i}")),
+                        r#type: Some("function".to_string()),
+                        function: Some(FunctionCallDelta {
+                            name: Some(fc.name.clone()),
+                            arguments: Some(fc.args.to_string()),
+                        }),
+                    })
+                    .collect();
+                let has_tool_call = !tool_calls.is_empty();
+                if has_tool_call {
+                    let tool_chunk = make_chunk(
+                        ChatDelta {
+                            role: None,
+                            content: None,
+                            tool_calls: Some(tool_calls),
+                        },
+                        None,
+                    );
+                    if tx.send(Ok(tool_chunk)).await.is_err() {
+                        return;
+                    }
+                }
+
+                // Terminal frame: emit the empty-delta finish chunk and close.
+                if let Some(reason) = candidate.finish_reason.as_ref() {
+                    // OVERRIDE: Gemini reports `STOP` even for a tool-call turn.
+                    let finish = if has_tool_call {
+                        "tool_calls".to_string()
+                    } else {
+                        map_gemini_finish_reason(reason)
+                    };
+                    let terminal = make_chunk(
+                        ChatDelta {
+                            role: None,
+                            content: None,
+                            tool_calls: None,
+                        },
+                        Some(finish),
+                    );
+                    let _ = tx.send(Ok(terminal)).await;
+                    return;
+                }
+            }
+        }
+    });
+    Box::pin(rx)
+}
+
 #[async_trait]
 impl LLMProvider for GoogleProvider {
     fn name(&self) -> &str {
@@ -507,6 +775,47 @@ impl LLMProvider for GoogleProvider {
 
         Ok(from_gemini_response(gemini_resp, &original_model))
     }
+
+    async fn chat_completion_stream(&self, req: ChatRequest) -> Result<ChatStream, ProviderError> {
+        // Model label echoed in the response chunks (e.g. "google/gemini-...").
+        let model = req.model.clone();
+
+        // Extract Gemini model name (e.g. "google/gemini-2.5-flash" → "gemini-2.5-flash").
+        let model_name = req.model.strip_prefix("google/").unwrap_or(&req.model);
+
+        // Allowlist the model-name characters before URL interpolation. The
+        // guard rejects `:` and `?`, so appending the streaming verb + query
+        // AFTER interpolation stays injection-safe.
+        validate_gemini_model_name(model_name).map_err(|e| -> ProviderError { e.into() })?;
+
+        // `:streamGenerateContent?alt=sse` yields line-delimited `data: {...}`
+        // SSE frames. WITHOUT `alt=sse` Gemini streams a single JSON ARRAY,
+        // which the `\n\n`-delimited frame parser cannot consume.
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?alt=sse"
+        );
+
+        // Propagate translation errors (e.g. a malformed image) rather than
+        // dropping content — mirrors the non-streaming path and anthropic.
+        let gemini_req = to_gemini_request(&req).map_err(|e| -> ProviderError { e.into() })?;
+        let body = serde_json::to_value(&gemini_req)?;
+
+        // API key as a header (not a URL query param) to prevent key leakage in
+        // server/proxy logs. No retry wrapper (mirrors anthropic streaming):
+        // a stream cannot be safely replayed mid-flight.
+        let response = self
+            .client
+            .post(url)
+            .timeout(super::PROVIDER_REQUEST_TIMEOUT)
+            .header("content-type", "application/json")
+            .header("x-goog-api-key", &self.api_key)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(spawn_gemini_sse_parser(response, model))
+    }
 }
 
 #[cfg(test)]
@@ -516,7 +825,7 @@ mod tests {
     /// Text of a `GeminiPart::Text`, else `None`.
     fn part_text(p: &GeminiPart) -> Option<&str> {
         match p {
-            GeminiPart::Text { text } => Some(text.as_str()),
+            GeminiPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         }
     }
@@ -874,6 +1183,7 @@ mod tests {
                 total_token_count: Some(8),
                 cached_content_token_count: None,
             }),
+            prompt_feedback: None,
         };
 
         let chat_resp = from_gemini_response(gemini_resp, "google/gemini-2.5-flash");
@@ -932,6 +1242,7 @@ mod tests {
                 total_token_count: Some(1020),
                 cached_content_token_count: Some(700),
             }),
+            prompt_feedback: None,
         };
         let chat_resp = from_gemini_response(gemini_resp, model);
 
@@ -984,5 +1295,190 @@ mod tests {
                 "model id {bad:?} must be rejected"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Streaming SSE translation (spawn_gemini_sse_parser).
+    // ---------------------------------------------------------------------
+
+    /// Drive `spawn_gemini_sse_parser` over a raw Gemini
+    /// `streamGenerateContent?alt=sse` byte fixture, collecting the full result
+    /// sequence. Builds a `reqwest::Response` in-process (no network, no mock
+    /// server) exactly like the anthropic streaming tests.
+    async fn drive_gemini_sse(sse: &str, model: &str) -> Vec<Result<ChatChunk, ProviderError>> {
+        use futures::StreamExt;
+        let http_resp = axum::http::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse.as_bytes().to_vec())
+            .expect("response build must succeed");
+        let response = reqwest::Response::from(http_resp);
+        let mut stream = spawn_gemini_sse_parser(response, model.to_string());
+        let mut out = Vec::new();
+        while let Some(item) = stream.next().await {
+            out.push(item);
+        }
+        out
+    }
+
+    /// Convenience: assert every item is `Ok` and return the chunks.
+    async fn gemini_chunks(sse: &str) -> Vec<ChatChunk> {
+        drive_gemini_sse(sse, "google/gemini-3.1-flash-lite")
+            .await
+            .into_iter()
+            .map(|r| r.expect("every stream item must be Ok"))
+            .collect()
+    }
+
+    /// Concatenate `delta.content` across all chunks (the reassembled message).
+    fn joined_content(chunks: &[ChatChunk]) -> String {
+        chunks
+            .iter()
+            .filter_map(|c| c.choices[0].delta.content.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn gemini_stream_incremental_text_concatenates_role_on_first_only() {
+        // Text is INCREMENTAL: each frame's text is appended, never diffed.
+        let sse = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]},\"index\":0}]}\n\n\
+                   data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\" world\"}]},\"index\":0}]}\n\n\
+                   data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"!\"}]},\"finishReason\":\"STOP\",\"index\":0}]}\n\n";
+        let chunks = gemini_chunks(sse).await;
+
+        // role marker, "Hello", " world", "!", terminal = 5 chunks.
+        assert_eq!(chunks.len(), 5, "role + 3 content + terminal");
+        assert_eq!(joined_content(&chunks), "Hello world!");
+
+        // Role appears ONLY on the first chunk.
+        assert_eq!(chunks[0].choices[0].delta.role, Some(Role::Assistant));
+        assert_eq!(chunks[0].choices[0].delta.content, None);
+        assert!(
+            chunks[1..]
+                .iter()
+                .all(|c| c.choices[0].delta.role.is_none()),
+            "role must be present only on the first chunk"
+        );
+
+        // Terminal chunk: empty delta + finish_reason "stop".
+        let terminal = chunks.last().unwrap();
+        assert_eq!(terminal.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert!(terminal.choices[0].delta.content.is_none());
+        assert!(terminal.choices[0].delta.role.is_none());
+        assert!(terminal.choices[0].delta.tool_calls.is_none());
+
+        // Chunk shape: OpenAI streaming object tag + carried model.
+        assert_eq!(chunks[0].object, "chat.completion.chunk");
+        assert_eq!(chunks[0].model, "google/gemini-3.1-flash-lite");
+    }
+
+    #[tokio::test]
+    async fn gemini_stream_max_tokens_maps_to_length() {
+        let sse = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"trunc\"}]},\"finishReason\":\"MAX_TOKENS\",\"index\":0}]}\n\n";
+        let chunks = gemini_chunks(sse).await;
+        assert_eq!(joined_content(&chunks), "trunc");
+        assert_eq!(
+            chunks.last().unwrap().choices[0].finish_reason.as_deref(),
+            Some("length")
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_stream_safety_maps_to_content_filter() {
+        let sse = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"x\"}]},\"finishReason\":\"SAFETY\",\"index\":0}]}\n\n";
+        let chunks = gemini_chunks(sse).await;
+        assert_eq!(
+            chunks.last().unwrap().choices[0].finish_reason.as_deref(),
+            Some("content_filter")
+        );
+    }
+
+    /// Highest-risk case: a `functionCall` part arrives complete in one frame.
+    /// It must become one `tool_calls` delta (index 0, synthesized id,
+    /// STRINGIFIED args) and the terminal finish_reason must be "tool_calls" —
+    /// NOT "stop", even though Gemini reports `finishReason:"STOP"`.
+    #[tokio::test]
+    async fn gemini_stream_function_call_overrides_finish_to_tool_calls() {
+        let sse = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"location\":\"NYC\",\"unit\":\"c\"}}}]},\"finishReason\":\"STOP\",\"index\":0}]}\n\n";
+        let chunks = gemini_chunks(sse).await;
+
+        // role marker, tool_calls chunk, terminal = 3 chunks (no content chunk).
+        assert_eq!(chunks.len(), 3, "role + tool_calls + terminal");
+        assert_eq!(chunks[0].choices[0].delta.role, Some(Role::Assistant));
+
+        let tcs = chunks[1].choices[0]
+            .delta
+            .tool_calls
+            .as_ref()
+            .expect("second chunk carries the tool_calls delta");
+        assert_eq!(tcs.len(), 1);
+        let tc = &tcs[0];
+        assert_eq!(tc.index, 0);
+        assert_eq!(
+            tc.id.as_deref(),
+            Some("call_0"),
+            "synthesized deterministic id"
+        );
+        assert_eq!(tc.r#type.as_deref(), Some("function"));
+        let f = tc.function.as_ref().unwrap();
+        assert_eq!(f.name.as_deref(), Some("get_weather"));
+        // OpenAI arguments is a STRING; assert the stringified Gemini args object
+        // (order-independent by re-parsing).
+        let args: serde_json::Value = serde_json::from_str(f.arguments.as_ref().unwrap())
+            .expect("arguments must be a JSON string");
+        assert_eq!(args, serde_json::json!({"location":"NYC","unit":"c"}));
+
+        // CRITICAL OVERRIDE: tool-call turn ⇒ finish_reason "tool_calls", not "stop".
+        let terminal = chunks.last().unwrap();
+        assert_eq!(
+            terminal.choices[0].finish_reason.as_deref(),
+            Some("tool_calls"),
+            "a tool-call turn must report tool_calls, not Gemini's raw STOP"
+        );
+        assert!(terminal.choices[0].delta.tool_calls.is_none());
+    }
+
+    /// A `"thought": true` part is reasoning and must be EXCLUDED from
+    /// `delta.content`, so it never leaks into visible output.
+    #[tokio::test]
+    async fn gemini_stream_thought_part_excluded_from_content() {
+        let sse = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"secret reasoning\",\"thought\":true},{\"text\":\"visible answer\"}]},\"finishReason\":\"STOP\",\"index\":0}]}\n\n";
+        let chunks = gemini_chunks(sse).await;
+        let content = joined_content(&chunks);
+        assert_eq!(content, "visible answer");
+        assert!(
+            !content.contains("secret reasoning"),
+            "thought text must never leak into visible content"
+        );
+    }
+
+    /// Frames with absent/empty `candidates` are tolerated (skipped), not fatal.
+    #[tokio::test]
+    async fn gemini_stream_empty_candidates_frame_tolerated() {
+        let sse = "data: {\"candidates\":[]}\n\n\
+                   data: {\"usageMetadata\":{\"promptTokenCount\":3}}\n\n\
+                   data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\",\"index\":0}]}\n\n";
+        let chunks = gemini_chunks(sse).await;
+        // Empty/no-candidate frames skipped; normal sequence still produced.
+        assert_eq!(joined_content(&chunks), "ok");
+        assert_eq!(
+            chunks.last().unwrap().choices[0].finish_reason.as_deref(),
+            Some("stop")
+        );
+        assert_eq!(chunks[0].choices[0].delta.role, Some(Role::Assistant));
+    }
+
+    /// A prompt-block frame (no candidates + `promptFeedback.blockReason`) must
+    /// surface as an `Err` — fail closed, never a silent, empty-yet-complete
+    /// stream.
+    #[tokio::test]
+    async fn gemini_stream_prompt_block_fails_closed() {
+        let sse = "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}\n\n";
+        let out = drive_gemini_sse(sse, "google/gemini-3.1-flash-lite").await;
+        assert_eq!(out.len(), 1, "a blocked prompt yields exactly one item");
+        assert!(
+            out[0].is_err(),
+            "a blocked prompt must surface as Err, not a silent empty stream"
+        );
     }
 }
