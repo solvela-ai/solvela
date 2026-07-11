@@ -728,6 +728,7 @@ pub(crate) async fn chat_completions_inner(
                     tenant: tenant.clone(),
                     tenant_enforced: false,
                     estimated_cost_usdc: None,
+                    reserved: Default::default(),
                     vendor: None,
                     routing_tier: log_routing_tier.clone(),
                     routing_score: log_routing_score,
@@ -1682,6 +1683,11 @@ pub(crate) async fn chat_completions_inner(
                                 // so the Skip path never accumulates per-tenant spend.
                                 tenant_enforced: budget_reservation.tenant_enforced(),
                                 estimated_cost_usdc: Some(estimated_cost),
+                                // Per-window reserved flags so log_spend nets each
+                                // counter to actual (delta for reserved windows,
+                                // full cost for unreserved) — the spend-counter
+                                // -drift fix. Threaded from the same reservation.
+                                reserved: budget_reservation.reserved_windows(),
                                 vendor: None,
                                 routing_tier: log_routing_tier.clone(),
                                 routing_score: log_routing_score,
@@ -1770,6 +1776,11 @@ pub(crate) async fn chat_completions_inner(
                         // counters only when a provisioned bucket was enforced.
                         tenant_enforced: budget_reservation.tenant_enforced(),
                         estimated_cost_usdc: Some(estimated_cost),
+                        // Per-window reserved flags so log_spend nets each counter
+                        // to actual (delta for reserved windows, full cost for
+                        // unreserved) — the spend-counter-drift fix. Threaded from
+                        // the same reservation.
+                        reserved: budget_reservation.reserved_windows(),
                         vendor: None,
                         routing_tier: log_routing_tier.clone(),
                         routing_score: log_routing_score,
@@ -1848,6 +1859,11 @@ pub(crate) async fn chat_completions_inner(
                         // counters only when a provisioned bucket was enforced.
                         tenant_enforced: budget_reservation.tenant_enforced(),
                         estimated_cost_usdc: Some(estimated_cost),
+                        // Per-window reserved flags so log_spend nets each counter
+                        // to actual (delta for reserved windows, full cost for
+                        // unreserved) — the spend-counter-drift fix. Threaded from
+                        // the same reservation.
+                        reserved: budget_reservation.reserved_windows(),
                         vendor: None,
                         routing_tier: log_routing_tier.clone(),
                         routing_score: log_routing_score,

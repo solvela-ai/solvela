@@ -79,6 +79,7 @@ async fn log_spend_writes_redis_hourly_daily_monthly_counters(pool: PgPool) {
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         vendor: None,
         routing_tier: None,
         routing_score: None,
@@ -132,6 +133,7 @@ async fn log_spend_accumulates_across_calls(pool: PgPool) {
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         vendor: None,
         routing_tier: None,
         routing_score: None,
@@ -187,6 +189,7 @@ async fn log_spend_zero_cost_no_reservation_skips_redis_but_writes_db(pool: PgPo
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         vendor: None,
         routing_tier: None,
         routing_score: None,
@@ -241,6 +244,7 @@ async fn log_spend_zero_cost_no_reservation_skips_redis_but_writes_db(pool: PgPo
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         vendor: None,
         routing_tier: None,
         routing_score: None,
@@ -618,6 +622,7 @@ async fn log_spend_writes_team_counters_when_wallet_in_team(pool: PgPool) {
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         vendor: None,
         routing_tier: None,
         routing_score: None,
@@ -1298,7 +1303,7 @@ async fn tenant_counter_reconciles_estimate_to_actual(pool: PgPool) {
 
     // Reserve an estimate of $0.0050 on the tenant bucket.
     let estimated = 0.0050;
-    tracker
+    let reservation = tracker
         .check_budget(&wallet, estimated, Some(tenant))
         .await
         .expect("reserve estimate");
@@ -1329,8 +1334,12 @@ async fn tenant_counter_reconciles_estimate_to_actual(pool: PgPool) {
         // A provisioned tenant bucket was enforced by check_budget above, so the
         // handler would thread tenant_enforced=true → reconcile per-tenant
         // counters.
-        tenant_enforced: true,
+        tenant_enforced: reservation.tenant_enforced(),
         estimated_cost_usdc: Some(estimated),
+        // Per-window reserved flags from the SAME reservation the handler would
+        // thread, so each reserved window nets to actual (delta) and each
+        // unreserved window nets to actual (full cost) — no double count.
+        reserved: reservation.reserved_windows(),
         vendor: None,
         routing_tier: None,
         routing_score: None,
@@ -1380,6 +1389,8 @@ async fn log_spend_writes_tenant_counters_with_correct_key(pool: PgPool) {
         // Tenant enforcement was active for this request → reconcile counters.
         tenant_enforced: true,
         estimated_cost_usdc: None,
+        // No estimate reserved (None branch) → reserved flags are inert here.
+        reserved: Default::default(),
         vendor: None,
         routing_tier: None,
         routing_score: None,
@@ -1556,7 +1567,7 @@ async fn tenant_counters_reconcile_all_three_windows(pool: PgPool) {
     let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
 
     let estimated = 0.0050;
-    tracker
+    let reservation = tracker
         .check_budget(&wallet, estimated, Some(tenant))
         .await
         .expect("reserve estimate");
@@ -1586,8 +1597,12 @@ async fn tenant_counters_reconcile_all_three_windows(pool: PgPool) {
         request_id: None,
         session_id: None,
         tenant: Some(tenant.to_string()),
-        tenant_enforced: true,
+        tenant_enforced: reservation.tenant_enforced(),
         estimated_cost_usdc: Some(estimated),
+        // Per-window reserved flags from the SAME reservation the handler would
+        // thread, so each reserved window nets to actual (delta) and each
+        // unreserved window nets to actual (full cost) — no double count.
+        reserved: reservation.reserved_windows(),
         vendor: None,
         routing_tier: None,
         routing_score: None,
@@ -1647,7 +1662,7 @@ async fn tenant_cap_escape_blocked_end_to_end(pool: PgPool) {
     // First request: reserve a small estimate, then settle a LARGE actual via
     // log_spend so the tenant counter ends near the cap (0.90 of 1.00).
     let estimated = 0.10;
-    tracker
+    let reservation = tracker
         .check_budget(&wallet, estimated, Some(tenant))
         .await
         .expect("first request fits");
@@ -1664,8 +1679,12 @@ async fn tenant_cap_escape_blocked_end_to_end(pool: PgPool) {
         request_id: None,
         session_id: None,
         tenant: Some(tenant.to_string()),
-        tenant_enforced: true,
+        tenant_enforced: reservation.tenant_enforced(),
         estimated_cost_usdc: Some(estimated),
+        // Per-window reserved flags from the SAME reservation the handler would
+        // thread, so each reserved window nets to actual (delta) and each
+        // unreserved window nets to actual (full cost) — no double count.
+        reserved: reservation.reserved_windows(),
         vendor: None,
         routing_tier: None,
         routing_score: None,
@@ -1733,6 +1752,7 @@ async fn log_spend_skips_tenant_counter_when_not_enforced(pool: PgPool) {
         tenant: Some(tenant.to_string()),
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         vendor: None,
         routing_tier: None,
         routing_score: None,
@@ -1784,6 +1804,7 @@ async fn wallet_daily_counter_unchanged_by_tag_on_unenforced_wallet(pool: PgPool
         // Unenforced wallet → Skip path → tenant_enforced is false either way.
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         vendor: None,
         routing_tier: None,
         routing_score: None,
@@ -2052,6 +2073,9 @@ async fn skip_path_reservation_flag_suppresses_tenant_counter_through_real_path(
         // Sourced from the real reservation, NOT hard-coded.
         tenant_enforced: reservation.tenant_enforced(),
         estimated_cost_usdc: Some(0.0050),
+        // Sourced from the real reservation too (Skip path → only the wallet
+        // daily window reserved; no tenant windows).
+        reserved: reservation.reserved_windows(),
         vendor: None,
         routing_tier: None,
         routing_score: None,
@@ -2466,6 +2490,374 @@ async fn check_budget_team_config_corrupt_cache_is_deled_and_requeried(pool: PgP
             &format!("team_spend:{}:{}", team_id, now.format("%Y-%m-%dT%H")),
             &format!("team_spend:{}:{}", team_id, now.format("%Y-%m")),
             &format!("spend:{}:{}", wallet, now.format("%Y-%m-%d")),
+        ],
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// Spend-counter-drift regression (unreserved windows settle to ACTUAL, never
+// the negative `actual − estimate` delta). Driven through the REAL path
+// (check_budget → log_spend) so a store()-seeded shortcut can't mask a missing
+// production write; the `reserved` flags are sourced from the returned
+// `BudgetReservation`, exactly as the chat handler threads them.
+// ---------------------------------------------------------------------------
+
+/// Poll a Redis counter until it reaches `want` (± 1e-9) or the attempts run
+/// out, returning the last observed value. Missing key reads as 0.0.
+async fn poll_spend_until(client: &redis::Client, key: &str, want: f64) -> f64 {
+    let mut last = f64::NAN;
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if let Ok(v) = get_redis_spend(client, key).await {
+            last = v;
+            if (last - want).abs() < 1e-9 {
+                break;
+            }
+        }
+    }
+    last
+}
+
+/// Test A — WALLET family. A wallet with ONLY a daily limit (hourly + monthly
+/// NULL) reserves the estimate against the daily window alone. With an actual
+/// cost UNDER the estimate, the UNRESERVED monthly counter must settle to the
+/// ACTUAL cost — never negative. Before the fix, `log_spend` applied the single
+/// `(actual − estimate)` delta to every window, so the never-reserved monthly
+/// counter drifted to `actual − estimate` (< 0); its 31d TTL (refreshed on every
+/// incr) meant it never self-healed. Prod proof: wallet 39sVox… monthly =
+/// -0.017976 (daily=5, hourly=NULL, monthly=NULL).
+#[sqlx::test(migrations = "../../migrations")]
+async fn wallet_unreserved_monthly_window_settles_to_actual_not_negative(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let now = Utc::now();
+
+    // Only a DAILY limit — hourly + monthly are NULL (never reserved).
+    sqlx::query("INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc) VALUES ($1, 5.00)")
+        .bind(&wallet)
+        .execute(&pool)
+        .await
+        .expect("seed wallet daily-only budget");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    let estimated = 0.0050;
+    let reservation = tracker
+        .check_budget(&wallet, estimated, None)
+        .await
+        .expect("estimate must fit the daily cap");
+    let rw = reservation.reserved_windows();
+    assert!(
+        rw.wallet.daily && !rw.wallet.hourly && !rw.wallet.monthly,
+        "daily-only wallet must reserve the daily window alone, got {rw:?}"
+    );
+
+    // Actual usage lands UNDER the estimate — the drift-producing case.
+    let actual = 0.0025;
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: wallet.clone(),
+        model: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        input_tokens: 10,
+        output_tokens: 5,
+        cost_usdc: actual,
+        tx_signature: None,
+        request_id: None,
+        session_id: None,
+        tenant: None,
+        tenant_enforced: reservation.tenant_enforced(),
+        estimated_cost_usdc: Some(estimated),
+        reserved: rw,
+        vendor: None,
+        routing_tier: None,
+        routing_score: None,
+    });
+
+    let month_key = format!("spend:{}:{}", wallet, now.format("%Y-%m"));
+    let day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
+    let hour_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H"));
+
+    // UNRESERVED monthly counter must settle to the actual cost, never the
+    // negative `actual − estimate` the old single-scalar delta produced.
+    let month = poll_spend_until(&client, &month_key, actual).await;
+    assert!(
+        (month - actual).abs() < 1e-9,
+        "unreserved monthly counter must settle to the actual cost {actual}, got {month} \
+         (negative ⇒ the spend-counter-drift bug)"
+    );
+
+    // The RESERVED daily window must ALSO net to actual (reserve + delta).
+    let day = get_redis_spend(&client, &day_key).await.expect("get day");
+    assert!(
+        (day - actual).abs() < 1e-9,
+        "reserved daily counter must net to actual {actual}, got {day}"
+    );
+
+    redis_del(
+        &client,
+        &[
+            &hour_key,
+            &day_key,
+            &month_key,
+            &format!("budget_config:{wallet}"),
+            &format!("team_member:{wallet}"),
+        ],
+    )
+    .await;
+}
+
+/// Test B — PER-TENANT family. A provisioned tenant budget with ONLY a daily
+/// limit reserves the tenant daily window alone, yet `log_spend` writes all
+/// three tenant windows. The UNRESERVED tenant monthly counter must settle to
+/// the ACTUAL cost, never the negative delta.
+#[sqlx::test(migrations = "../../migrations")]
+async fn tenant_unreserved_monthly_window_settles_to_actual_not_negative(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let tenant = "acme";
+    let now = Utc::now();
+
+    sqlx::query(
+        "INSERT INTO wallet_budgets (wallet_address, daily_limit_usdc) VALUES ($1, 100.00)",
+    )
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("seed wallet");
+    // Tenant: DAILY limit only (hourly + monthly NULL → never reserved).
+    sqlx::query(
+        "INSERT INTO tenant_budgets (wallet_address, tenant, daily_limit_usdc) VALUES ($1, $2, 10.00)",
+    )
+    .bind(&wallet)
+    .bind(tenant)
+    .execute(&pool)
+    .await
+    .expect("seed tenant daily-only budget");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    let estimated = 0.0050;
+    let reservation = tracker
+        .check_budget(&wallet, estimated, Some(tenant))
+        .await
+        .expect("estimate must fit the tenant daily cap");
+    let rw = reservation.reserved_windows();
+    assert!(
+        rw.tenant.daily && !rw.tenant.hourly && !rw.tenant.monthly,
+        "tenant daily-only must reserve the tenant daily window alone, got {rw:?}"
+    );
+    assert!(
+        reservation.tenant_enforced(),
+        "a provisioned tenant with a daily limit must report enforced"
+    );
+
+    let actual = 0.0025;
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: wallet.clone(),
+        model: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        input_tokens: 10,
+        output_tokens: 5,
+        cost_usdc: actual,
+        tx_signature: None,
+        request_id: None,
+        session_id: None,
+        tenant: Some(tenant.to_string()),
+        tenant_enforced: reservation.tenant_enforced(),
+        estimated_cost_usdc: Some(estimated),
+        reserved: rw,
+        vendor: None,
+        routing_tier: None,
+        routing_score: None,
+    });
+
+    let tenant_month_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m"));
+    let month = poll_spend_until(&client, &tenant_month_key, actual).await;
+    assert!(
+        (month - actual).abs() < 1e-9,
+        "unreserved tenant monthly counter must settle to the actual cost {actual}, got {month} \
+         (negative ⇒ the spend-counter-drift bug)"
+    );
+
+    // The reserved tenant daily window nets to actual too.
+    let tenant_day_key = format!("spend:{}:{}:{}", wallet, tenant, now.format("%Y-%m-%d"));
+    let day = get_redis_spend(&client, &tenant_day_key)
+        .await
+        .expect("get tenant day");
+    assert!(
+        (day - actual).abs() < 1e-9,
+        "reserved tenant daily counter must net to actual {actual}, got {day}"
+    );
+
+    redis_del_tenant(&client, &wallet, tenant).await;
+}
+
+/// Test C — TEAM family. A team budget with ONLY a daily limit reserves the team
+/// daily window alone, yet `log_spend` writes all three team windows. The
+/// UNRESERVED team monthly counter must settle to the ACTUAL cost, never the
+/// negative delta.
+#[sqlx::test(migrations = "../../migrations")]
+async fn team_unreserved_monthly_window_settles_to_actual_not_negative(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let now = Utc::now();
+
+    // Wallet in a team; team has ONLY a daily limit. Wallet uses the default
+    // $100/day cap (no wallet_budgets row).
+    let team_id = seed_team_for_wallet(&pool, &wallet).await;
+    sqlx::query("INSERT INTO team_budgets (team_id, daily_limit_usdc) VALUES ($1, 10.00)")
+        .bind(team_id)
+        .execute(&pool)
+        .await
+        .expect("seed team daily-only budget");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    let estimated = 0.0050;
+    let reservation = tracker
+        .check_budget(&wallet, estimated, None)
+        .await
+        .expect("estimate must fit the team daily cap");
+    let rw = reservation.reserved_windows();
+    assert!(
+        rw.team.daily && !rw.team.hourly && !rw.team.monthly,
+        "team daily-only must reserve the team daily window alone, got {rw:?}"
+    );
+
+    let actual = 0.0025;
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: wallet.clone(),
+        model: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        input_tokens: 10,
+        output_tokens: 5,
+        cost_usdc: actual,
+        tx_signature: None,
+        request_id: None,
+        session_id: None,
+        tenant: None,
+        tenant_enforced: reservation.tenant_enforced(),
+        estimated_cost_usdc: Some(estimated),
+        reserved: rw,
+        vendor: None,
+        routing_tier: None,
+        routing_score: None,
+    });
+
+    let team_month_key = format!("team_spend:{}:{}", team_id, now.format("%Y-%m"));
+    let month = poll_spend_until(&client, &team_month_key, actual).await;
+    assert!(
+        (month - actual).abs() < 1e-9,
+        "unreserved team monthly counter must settle to the actual cost {actual}, got {month} \
+         (negative ⇒ the spend-counter-drift bug)"
+    );
+
+    // The reserved team daily window nets to actual too.
+    let team_day_key = format!("team_spend:{}:{}", team_id, now.format("%Y-%m-%d"));
+    let day = get_redis_spend(&client, &team_day_key)
+        .await
+        .expect("get team day");
+    assert!(
+        (day - actual).abs() < 1e-9,
+        "reserved team daily counter must net to actual {actual}, got {day}"
+    );
+
+    redis_del(
+        &client,
+        &[
+            &team_month_key,
+            &team_day_key,
+            &format!("team_spend:{}:{}", team_id, now.format("%Y-%m-%dT%H")),
+            &format!("budget_config:{wallet}"),
+            &format!("team_member:{wallet}"),
+            &format!("team_budget:{team_id}"),
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m-%d")),
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H")),
+            &format!("spend:{}:{}", wallet, now.format("%Y-%m")),
+        ],
+    )
+    .await;
+}
+
+/// Test D — regression guard. A FULLY-limited wallet (hourly + daily + monthly
+/// all set) reserves the estimate on ALL three windows, so each must net to
+/// EXACTLY the actual cost after `log_spend` (reserve + `(actual − estimate)`
+/// delta) — no double count. This passed before the fix too and MUST keep
+/// passing: it pins that the per-window reconciliation never regresses a
+/// reserved window into applying the full cost on top of its reservation.
+#[sqlx::test(migrations = "../../migrations")]
+async fn fully_limited_wallet_all_windows_net_to_actual_no_double_count(pool: PgPool) {
+    let client = redis_client();
+    let wallet = unique_wallet();
+    let now = Utc::now();
+
+    sqlx::query(
+        "INSERT INTO wallet_budgets \
+         (wallet_address, hourly_limit_usdc, daily_limit_usdc, monthly_limit_usdc) \
+         VALUES ($1, 50.00, 100.00, 500.00)",
+    )
+    .bind(&wallet)
+    .execute(&pool)
+    .await
+    .expect("seed fully-limited wallet");
+
+    let tracker = UsageTracker::new(Some(pool.clone()), Some(client.clone()));
+
+    let estimated = 0.0050;
+    let reservation = tracker
+        .check_budget(&wallet, estimated, None)
+        .await
+        .expect("estimate must fit all three caps");
+    let rw = reservation.reserved_windows();
+    assert!(
+        rw.wallet.hourly && rw.wallet.daily && rw.wallet.monthly,
+        "a fully-limited wallet must reserve all three windows, got {rw:?}"
+    );
+
+    // Actual UNDER estimate exercises the negative delta on reserved windows.
+    let actual = 0.0025;
+    tracker.log_spend(SpendLogEntry {
+        wallet_address: wallet.clone(),
+        model: "openai/gpt-4o".to_string(),
+        provider: "openai".to_string(),
+        input_tokens: 10,
+        output_tokens: 5,
+        cost_usdc: actual,
+        tx_signature: None,
+        request_id: None,
+        session_id: None,
+        tenant: None,
+        tenant_enforced: reservation.tenant_enforced(),
+        estimated_cost_usdc: Some(estimated),
+        reserved: rw,
+        vendor: None,
+        routing_tier: None,
+        routing_score: None,
+    });
+
+    let hour_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H"));
+    let day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
+    let month_key = format!("spend:{}:{}", wallet, now.format("%Y-%m"));
+
+    // Every reserved window must net to EXACTLY actual — no window double-counts
+    // (which would land at estimate + actual).
+    for k in [&hour_key, &day_key, &month_key] {
+        let settled = poll_spend_until(&client, k, actual).await;
+        assert!(
+            (settled - actual).abs() < 1e-9,
+            "reserved window {k} must net to exactly actual {actual} (no double count), got {settled}"
+        );
+    }
+
+    redis_del(
+        &client,
+        &[
+            &hour_key,
+            &day_key,
+            &month_key,
+            &format!("budget_config:{wallet}"),
+            &format!("team_member:{wallet}"),
         ],
     )
     .await;

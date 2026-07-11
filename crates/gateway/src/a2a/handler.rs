@@ -2240,8 +2240,10 @@ pub(super) fn record_a2a_settlement(
         tenant: None,
         tenant_enforced: false,
         // No Redis reservation was pre-committed on the A2A path, so log_spend
-        // increments the counters by `cost_usdc` directly (None branch).
+        // increments the counters by `cost_usdc` directly (None branch); the
+        // default reserved-window flags are inert without an estimate.
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         vendor: None,
         // A2A resolves its model at message/send time but does not thread the
         // router tier/score to this settlement site — record NULL rather than

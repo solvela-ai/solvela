@@ -251,6 +251,40 @@ pub struct SpendSummary {
     pub monthly_cost_usdc: f64,
 }
 
+/// Which of a family's three budget windows (hourly / daily / monthly) had a
+/// configured limit and therefore had the estimate RESERVED against them by
+/// [`UsageTracker::check_budget`].
+///
+/// `log_spend` reconciles a RESERVED window by the `(actual − estimate)` delta
+/// (the estimate was already added, so this nets the window to `actual`) and an
+/// UNRESERVED window by the full `actual` cost. An unreserved window has no
+/// configured limit, so `check_budget` never added the estimate to it; applying
+/// the delta there (as the old single-scalar reconciliation did) drifts it
+/// monotonically negative — bounded by TTL for hourly, but effectively permanent
+/// for the monthly counter that every incr refreshes. Positional, per family.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReservedWindows {
+    pub hourly: bool,
+    pub daily: bool,
+    pub monthly: bool,
+}
+
+/// Per-family reserved-window flags captured by a [`BudgetReservation`], threaded
+/// into [`SpendLogEntry::reserved`] so `log_spend` settles each Redis counter
+/// correctly (delta for a reserved window, full cost for an unreserved one).
+///
+/// Default = nothing reserved. Every `log_spend` caller that did NOT go through
+/// `check_budget` (service proxy, search, price tool, channel draw, A2A, the
+/// free-tier $0 row) passes `estimated_cost_usdc: None` and this default; with
+/// no estimate to net out, `log_spend` increments the full cost on every window
+/// regardless, so the flags are inert on those paths.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReservedBudgetWindows {
+    pub wallet: ReservedWindows,
+    pub tenant: ReservedWindows,
+    pub team: ReservedWindows,
+}
+
 /// Input struct for `log_spend()` — groups all spend log fields.
 ///
 /// Replaces positional arguments to keep the API clean as fields grow.
@@ -287,6 +321,15 @@ pub struct SpendLogEntry {
     /// counters were not pre-committed (legacy / proxy / test paths) and
     /// `log_spend` increments by `cost_usdc` directly.
     pub estimated_cost_usdc: Option<f64>,
+    /// Which budget windows the reservation committed the estimate against, per
+    /// family (wallet / tenant / team), positional hourly/daily/monthly. Only
+    /// consulted when `estimated_cost_usdc` is `Some`: `log_spend` reconciles a
+    /// reserved window by the `(actual − estimate)` delta and an UNRESERVED
+    /// window by the full `actual` cost. Threaded from
+    /// [`BudgetReservation::reserved_windows`]. Default (nothing reserved) on
+    /// every non-`check_budget` path, which passes `estimated_cost_usdc: None`
+    /// and therefore increments the full cost on every window anyway.
+    pub reserved: ReservedBudgetWindows,
     /// Vendor-settlement record for marketplace services with a per-service
     /// `vendor_wallet` (settlement-platform P1). `None` on every other path.
     pub vendor: Option<VendorSettlement>,
@@ -572,9 +615,23 @@ impl UsageTracker {
             } else {
                 None
             };
-            let cost = match entry.estimated_cost_usdc {
-                Some(reserved) => entry.cost_usdc - reserved,
-                None => entry.cost_usdc,
+            // Per-window reconciliation (the spend-counter-drift fix). Each
+            // Redis counter settles INDEPENDENTLY: a window that had the estimate
+            // reserved at `check_budget` time nets by the `(actual − estimate)`
+            // delta (which can be negative when real usage lands under the
+            // estimate — a legitimate downward adjustment that must post), while
+            // a window with NO configured limit never received the estimate and
+            // so nets by the full `actual` cost. The previous code applied one
+            // scalar delta to EVERY window, so unreserved windows drifted
+            // negative by the estimate every request.
+            let actual = entry.cost_usdc;
+            let estimate = entry.estimated_cost_usdc;
+            let reserved = entry.reserved;
+            let window_amount = move |was_reserved: bool| -> f64 {
+                match estimate {
+                    Some(e) if was_reserved => actual - e,
+                    _ => actual,
+                }
             };
             tokio::spawn(async move {
                 let mut conn = match client.get_multiplexed_async_connection().await {
@@ -587,7 +644,7 @@ impl UsageTracker {
                         warn!(
                             error = %e,
                             wallet = %wallet,
-                            cost_usdc = cost,
+                            cost_usdc = actual,
                             "Redis unavailable for spend tracking — budget enforcement degraded"
                         );
                         return;
@@ -598,15 +655,33 @@ impl UsageTracker {
 
                 // Hourly spend counter
                 let hour_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%dT%H"));
-                incr_and_expire(&mut conn, &hour_key, cost, 7200).await;
+                incr_and_expire(
+                    &mut conn,
+                    &hour_key,
+                    window_amount(reserved.wallet.hourly),
+                    7200,
+                )
+                .await;
 
                 // Daily spend counter
                 let day_key = format!("spend:{}:{}", wallet, now.format("%Y-%m-%d"));
-                incr_and_expire(&mut conn, &day_key, cost, 86400).await;
+                incr_and_expire(
+                    &mut conn,
+                    &day_key,
+                    window_amount(reserved.wallet.daily),
+                    86400,
+                )
+                .await;
 
                 // Monthly spend counter
                 let month_key = format!("spend:{}:{}", wallet, now.format("%Y-%m"));
-                incr_and_expire(&mut conn, &month_key, cost, 86400 * 31).await;
+                incr_and_expire(
+                    &mut conn,
+                    &month_key,
+                    window_amount(reserved.wallet.monthly),
+                    86400 * 31,
+                )
+                .await;
 
                 // Per-tenant counters: settle the same `cost` delta on the
                 // `spend:{wallet}:{tenant}:{period}` keys that `check_budget`'s
@@ -620,15 +695,33 @@ impl UsageTracker {
                 if let Some(tag) = tenant.as_deref() {
                     let tenant_hour_key =
                         format!("spend:{}:{}:{}", wallet, tag, now.format("%Y-%m-%dT%H"));
-                    incr_and_expire(&mut conn, &tenant_hour_key, cost, 7200).await;
+                    incr_and_expire(
+                        &mut conn,
+                        &tenant_hour_key,
+                        window_amount(reserved.tenant.hourly),
+                        7200,
+                    )
+                    .await;
 
                     let tenant_day_key =
                         format!("spend:{}:{}:{}", wallet, tag, now.format("%Y-%m-%d"));
-                    incr_and_expire(&mut conn, &tenant_day_key, cost, 86400).await;
+                    incr_and_expire(
+                        &mut conn,
+                        &tenant_day_key,
+                        window_amount(reserved.tenant.daily),
+                        86400,
+                    )
+                    .await;
 
                     let tenant_month_key =
                         format!("spend:{}:{}:{}", wallet, tag, now.format("%Y-%m"));
-                    incr_and_expire(&mut conn, &tenant_month_key, cost, 86400 * 31).await;
+                    incr_and_expire(
+                        &mut conn,
+                        &tenant_month_key,
+                        window_amount(reserved.tenant.monthly),
+                        86400 * 31,
+                    )
+                    .await;
                 }
 
                 // Team-level counters: look up team membership.
@@ -653,13 +746,31 @@ impl UsageTracker {
                     let tid_str = tid.to_string();
                     let team_hour_key =
                         format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%dT%H"));
-                    incr_and_expire(&mut conn, &team_hour_key, cost, 7200).await;
+                    incr_and_expire(
+                        &mut conn,
+                        &team_hour_key,
+                        window_amount(reserved.team.hourly),
+                        7200,
+                    )
+                    .await;
 
                     let team_day_key = format!("team_spend:{}:{}", tid_str, now.format("%Y-%m-%d"));
-                    incr_and_expire(&mut conn, &team_day_key, cost, 86400).await;
+                    incr_and_expire(
+                        &mut conn,
+                        &team_day_key,
+                        window_amount(reserved.team.daily),
+                        86400,
+                    )
+                    .await;
 
                     let team_month_key = format!("team_spend:{}:{}", tid_str, now.format("%Y-%m"));
-                    incr_and_expire(&mut conn, &team_month_key, cost, 86400 * 31).await;
+                    incr_and_expire(
+                        &mut conn,
+                        &team_month_key,
+                        window_amount(reserved.team.monthly),
+                        86400 * 31,
+                    )
+                    .await;
                 }
             });
         }
@@ -740,6 +851,15 @@ impl UsageTracker {
         // hourly and daily over-counted by `estimated_cost_usdc`.
         let mut committed: Vec<(String, f64)> = Vec::new();
 
+        // Which windows we actually reserve the estimate against, per family.
+        // A window is flagged reserved exactly where its `try_commit!` runs
+        // (i.e. it had a configured limit), so `log_spend` can net a reserved
+        // window by the delta and an unreserved window by the full cost. On any
+        // rejection the whole reservation rolls back and returns `Err`, so these
+        // flags only ever reach `log_spend` on the success path — where every
+        // flagged window was in fact committed.
+        let mut reserved = ReservedBudgetWindows::default();
+
         // Helper: try to commit one window. On exceeded → roll back everything
         // accumulated so far + return the BudgetExceeded error. On Redis error
         // → roll back + propagate as Redis error.
@@ -784,6 +904,7 @@ impl UsageTracker {
                 hourly_limit,
                 7200
             );
+            reserved.wallet.hourly = true;
         }
 
         // --- Wallet daily limit ---
@@ -794,6 +915,7 @@ impl UsageTracker {
                 daily_limit,
                 86400
             );
+            reserved.wallet.daily = true;
         }
 
         // --- Wallet monthly limit ---
@@ -804,6 +926,7 @@ impl UsageTracker {
                 monthly_limit,
                 86400 * 31
             );
+            reserved.wallet.monthly = true;
         }
 
         // --- Team-level budget enforcement ---
@@ -829,6 +952,7 @@ impl UsageTracker {
                                 hourly_limit,
                                 7200
                             );
+                            reserved.team.hourly = true;
                         }
                         if let Some(daily_limit) = team_cfg.daily {
                             let _ = try_commit!(
@@ -837,6 +961,7 @@ impl UsageTracker {
                                 daily_limit,
                                 86400
                             );
+                            reserved.team.daily = true;
                         }
                         if let Some(monthly_limit) = team_cfg.monthly {
                             let _ = try_commit!(
@@ -845,6 +970,7 @@ impl UsageTracker {
                                 monthly_limit,
                                 86400 * 31
                             );
+                            reserved.team.monthly = true;
                         }
                     }
                     TeamLookup::Absent => {
@@ -1029,6 +1155,7 @@ impl UsageTracker {
                         hourly_limit,
                         7200
                     );
+                    reserved.tenant.hourly = true;
                 }
                 if let Some(daily_limit) = tcfg.daily {
                     let _ = try_commit!(
@@ -1042,6 +1169,7 @@ impl UsageTracker {
                         daily_limit,
                         86400
                     );
+                    reserved.tenant.daily = true;
                 }
                 if let Some(monthly_limit) = tcfg.monthly {
                     let _ = try_commit!(
@@ -1050,6 +1178,7 @@ impl UsageTracker {
                         monthly_limit,
                         86400 * 31
                     );
+                    reserved.tenant.monthly = true;
                 }
             }
         }
@@ -1057,6 +1186,7 @@ impl UsageTracker {
         Ok(BudgetReservation {
             committed,
             tenant_enforced,
+            reserved,
         })
     }
 
@@ -1219,6 +1349,13 @@ pub struct BudgetReservation {
     /// reads Postgres `spend_logs`, not these Redis counters, so gating the
     /// counter writes here loses nothing for reporting.
     tenant_enforced: bool,
+    /// Which windows (per family) this reservation committed the estimate
+    /// against. Threaded into `SpendLogEntry.reserved` so `log_spend` nets each
+    /// reserved window by the `(actual − estimate)` delta and each unreserved
+    /// window by the full actual cost — see [`ReservedBudgetWindows`]. By
+    /// construction `tenant_enforced` equals `reserved.tenant` having any window
+    /// set (both derive from the same provisioned tenant limits).
+    reserved: ReservedBudgetWindows,
 }
 
 impl BudgetReservation {
@@ -1228,6 +1365,15 @@ impl BudgetReservation {
     /// per-tenant counters when enforcement was real.
     pub fn tenant_enforced(&self) -> bool {
         self.tenant_enforced
+    }
+
+    /// The per-family windows this reservation committed the estimate to. The
+    /// chat handler threads this into `SpendLogEntry.reserved` so `log_spend`
+    /// reconciles each reserved window by the `(actual − estimate)` delta and
+    /// each unreserved window by the full actual cost (the spend-counter-drift
+    /// fix). See [`ReservedBudgetWindows`].
+    pub fn reserved_windows(&self) -> ReservedBudgetWindows {
+        self.reserved
     }
 }
 
@@ -2047,6 +2193,7 @@ mod tests {
             tenant: None,
             tenant_enforced: false,
             estimated_cost_usdc: None,
+            reserved: Default::default(),
             vendor: None,
             routing_tier: None,
             routing_score: None,
