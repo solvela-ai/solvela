@@ -561,6 +561,17 @@ fn spawn_gemini_sse_parser(response: reqwest::Response, model: String) -> ChatSt
                 }
             };
             buffer.push_str(&String::from_utf8_lossy(&bytes));
+            // Gemini frames its SSE with CRLF: each line ends `\r\n` and events
+            // are separated by a blank `\r\n` line (delimiter `\r\n\r\n`), unlike
+            // OpenAI/Anthropic which use bare LF (`\n\n`). Normalize CRLF→LF so
+            // the single `\n\n` split below handles both. Without this the
+            // `\n\n` search never matches Gemini's `\r\n\r\n`, the buffer
+            // accumulates unbounded, and the stream yields zero frames — a 200
+            // with an empty body. A lone trailing `\r` split across byte chunks
+            // re-pairs with its `\n` on the next chunk and normalizes then.
+            if buffer.contains('\r') {
+                buffer = buffer.replace("\r\n", "\n");
+            }
 
             while let Some(pos) = buffer.find("\n\n") {
                 let event_block = buffer[..pos].to_string();
@@ -1336,6 +1347,34 @@ mod tests {
             .iter()
             .filter_map(|c| c.choices[0].delta.content.clone())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn gemini_stream_crlf_framing_yields_frames_not_empty_body() {
+        // REGRESSION (prod v452, 2026-07-11): Gemini frames its SSE with CRLF —
+        // each line ends `\r\n` and events are separated by a blank `\r\n` line
+        // (delimiter `\r\n\r\n`), NOT the bare LF (`\n\n`) the other fixtures use.
+        // Before the CRLF-normalization fix the `\n\n` split never matched, the
+        // buffer accumulated unbounded, and the parser emitted ZERO chunks — the
+        // gateway served a 200 with an EMPTY body (output_tokens=0). These are
+        // the real bytes captured from `streamGenerateContent?alt=sse` for
+        // gemini-3.1-flash-lite (the terminal frame carries an empty-text part
+        // with a `thoughtSignature`, exactly as Gemini 3.x sends it).
+        let sse = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"1, 2, 3\"}],\"role\":\"model\"},\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":7,\"totalTokenCount\":10},\"modelVersion\":\"gemini-3.1-flash-lite\"}\r\n\r\n\
+                   data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\",\"thoughtSignature\":\"EjQKMg\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":7,\"totalTokenCount\":10},\"modelVersion\":\"gemini-3.1-flash-lite\"}\r\n\r\n";
+        let chunks = gemini_chunks(sse).await;
+
+        // The prod bug was an EMPTY stream. Assert we got real frames.
+        assert!(
+            !chunks.is_empty(),
+            "CRLF-framed Gemini stream must yield chunks, not an empty body"
+        );
+        assert_eq!(joined_content(&chunks), "1, 2, 3");
+        assert_eq!(
+            chunks.last().unwrap().choices[0].finish_reason.as_deref(),
+            Some("stop"),
+            "terminal STOP must map to finish_reason \"stop\""
+        );
     }
 
     #[tokio::test]
