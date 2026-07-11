@@ -592,6 +592,7 @@ pub async fn solana_price(
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         // Internal gateway-hosted tool pays the gateway recipient — no vendor
         // settlement leg.
         vendor: None,
@@ -948,6 +949,7 @@ async fn channel_draw_locked(
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         vendor: None,
         // The price tool never runs the smart router — no routing telemetry.
         routing_tier: None,

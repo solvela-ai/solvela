@@ -599,6 +599,7 @@ pub async fn search(
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         // Internal gateway-hosted tool pays the gateway recipient — no vendor
         // settlement leg (that path is for external `vendor_wallet` services).
         vendor: None,
@@ -989,6 +990,7 @@ async fn channel_draw_locked(
         tenant: None,
         tenant_enforced: false,
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         vendor: None,
         // Search never runs the smart router — no routing telemetry.
         routing_tier: None,

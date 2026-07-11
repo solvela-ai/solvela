@@ -632,6 +632,7 @@ async fn channel_draw_locked(
         // No reservation was committed (no check_budget), so log_spend
         // increments the counters by `cost_usdc` directly (None branch).
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         vendor: None,
         routing_tier: log_routing_tier,
         routing_score: log_routing_score,

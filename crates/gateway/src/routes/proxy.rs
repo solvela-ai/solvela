@@ -669,6 +669,7 @@ pub async fn proxy_service(
         // reservation is committed and log_spend increments by the full
         // cost. None preserves the legacy behavior here.
         estimated_cost_usdc: None,
+        reserved: Default::default(),
         vendor: payment_target.into_vendor_settlement(),
         // The service-marketplace proxy never runs the smart router — no
         // routing telemetry.
