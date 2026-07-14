@@ -437,10 +437,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           );
         }
 
-        const { amount_usdc, max_timeout_seconds = 300 } = args as {
+        // F12: runtime-validate the arg shapes before dispatch (like every
+        // sibling tool) — a raw `as` cast let a string max_timeout_seconds
+        // flow into expiry math. parseStrictUsdc below stays the stricter
+        // content check on amount_usdc.
+        const { amount_usdc, max_timeout_seconds = 300 } = validateArgs<{
           amount_usdc: string;
           max_timeout_seconds?: number;
-        };
+        }>('deposit_escrow', args, {
+          amount_usdc: { kind: 'string', required: true },
+          max_timeout_seconds: { kind: 'number', required: false },
+        });
 
         // H3: Strict amount parsing — extracted to parseStrictUsdc so the
         // tests can import the real function instead of re-implementing the
@@ -889,20 +896,15 @@ async function main() {
   // HF7: Health check with short timeout (5 s) so it never blocks MCP handshake.
   const healthTimeoutMs = 5000;
   try {
-    const healthController = new AbortController();
-    const healthTimer = setTimeout(() => healthController.abort(), healthTimeoutMs);
-    let health: Record<string, unknown>;
-    try {
-      const healthResp = await Promise.race([
-        client.health(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Health check timed out after ${healthTimeoutMs}ms`)), healthTimeoutMs),
-        ),
-      ]);
-      health = healthResp as Record<string, unknown>;
-    } finally {
-      clearTimeout(healthTimer);
-    }
+    // F19: the Promise.race below is the timeout mechanism. (An earlier
+    // AbortController here was dead code — client.health() takes no signal.)
+    const healthResp = await Promise.race([
+      client.health(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Health check timed out after ${healthTimeoutMs}ms`)), healthTimeoutMs),
+      ),
+    ]);
+    const health = healthResp as Record<string, unknown>;
 
     // HF12: Stronger warning when signing is ON but dev_bypass is active —
     // key is in memory but payments are not verified.

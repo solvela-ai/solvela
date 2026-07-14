@@ -20,9 +20,9 @@
  *
  * NOT covered (call-site concerns):
  *   - inter-field invariants (e.g. amount > 0)
- *   - format validation (regex)
- *   - the deposit_escrow tool already does its own stricter check on
- *     `amount_usdc` and is not migrated here
+ *   - format validation (regex) — e.g. deposit_escrow validates its arg
+ *     SHAPES here but keeps its own stricter parseStrictUsdc content check
+ *     on `amount_usdc`
  */
 
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';

@@ -16015,6 +16015,9 @@ mod faucet_route_tests {
     struct MockSource {
         usdc: u64,
         sol: u64,
+        /// The faucet's own gas-wallet balance (F10 source check). Defaults to
+        /// plenty in `new`; `with_source_sol` pins it for the dry-source test.
+        source_sol: u64,
         send_ok: bool,
         sends: AtomicUsize,
     }
@@ -16023,7 +16026,17 @@ mod faucet_route_tests {
             Self {
                 usdc,
                 sol,
+                source_sol: 1_000_000_000,
                 send_ok,
+                sends: AtomicUsize::new(0),
+            }
+        }
+        fn with_source_sol(usdc: u64, source_sol: u64) -> Self {
+            Self {
+                usdc,
+                sol: 0,
+                source_sol,
+                send_ok: true,
                 sends: AtomicUsize::new(0),
             }
         }
@@ -16035,6 +16048,9 @@ mod faucet_route_tests {
         }
         async fn usdc_balance(&self, _w: &str) -> Result<u64, FaucetError> {
             Ok(self.usdc)
+        }
+        async fn source_sol_balance(&self) -> Result<u64, FaucetError> {
+            Ok(self.source_sol)
         }
         async fn send_drip(&self, _w: &str, _l: u64) -> Result<String, FaucetError> {
             self.sends.fetch_add(1, Ordering::SeqCst);
@@ -16185,6 +16201,21 @@ mod faucet_route_tests {
         let (status, json) = post_faucet(app, FAUCET_WALLET).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["reason"], serde_json::json!("already_has_sol"));
+        assert_eq!(source.sends.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn route_source_empty_503() {
+        // F10 through the real route: a dry source (gas) wallet must surface a
+        // distinct 503 `source_empty` — not the retryable-looking 502
+        // `send_failed` loop — and never attempt a send.
+        let source = Arc::new(MockSource::with_source_sol(100_000, 0));
+        let ledger = Arc::new(MockLedger::default());
+        let app = app_with_faucet(Some(wired_faucet(source.clone(), ledger)));
+        let (status, json) = post_faucet(app, FAUCET_WALLET).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["funded"], serde_json::json!(false));
+        assert_eq!(json["reason"], serde_json::json!("source_empty"));
         assert_eq!(source.sends.load(Ordering::SeqCst), 0);
     }
 
