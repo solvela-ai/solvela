@@ -22,9 +22,10 @@
 //! 6. **SOL low-water** — wallet SOL `< sol_low_water_lamports`.
 //!
 //! On a DEFINITIVE post-reservation decline (daily cap reached, USDC below the
-//! floor, SOL already above the low-water mark, or a pre-broadcast send error)
-//! the reservation row is DELETEd so a legitimate retry is possible. On send
-//! SUCCESS the row's `tx_signature` is filled in.
+//! floor, SOL already above the low-water mark, the source gas wallet unable
+//! to cover a drip, or a pre-broadcast send error) the reservation row is
+//! DELETEd so a legitimate retry is possible. On send SUCCESS the row's
+//! `tx_signature` is filled in.
 //!
 //! ## Money-path safety: prefer under-dripping to double-dripping
 //!
@@ -116,6 +117,10 @@ pub trait GasSource: Send + Sync {
     /// USDC-SPL balance of `wallet_b58` in atomic (6-decimal) units; a missing
     /// ATA is treated as 0 by the implementation.
     async fn usdc_balance(&self, wallet_b58: &str) -> Result<u64, FaucetError>;
+    /// Native SOL balance of the faucet's OWN gas (source) wallet in lamports.
+    /// Read just before a send (F10) so a dry source declines with a clear
+    /// `source_empty` instead of an opaque broadcast-failure loop.
+    async fn source_sol_balance(&self) -> Result<u64, FaucetError>;
     /// Build, sign, and broadcast a `lamports` SOL transfer to `wallet_b58`.
     /// Returns the tx signature on success.
     async fn send_drip(&self, wallet_b58: &str, lamports: u64) -> Result<String, FaucetError>;
@@ -154,11 +159,20 @@ pub trait GasLedger: Send + Sync {
 /// `result` metric label.
 #[derive(Debug, PartialEq)]
 pub enum DripOutcome {
-    Funded { tx_signature: String, lamports: u64 },
-    AlreadyFunded { tx_signature: Option<String> },
+    Funded {
+        tx_signature: String,
+        lamports: u64,
+    },
+    AlreadyFunded {
+        tx_signature: Option<String>,
+    },
     InsufficientUsdc,
     AlreadyHasSol,
     DailyCap,
+    /// The faucet's OWN gas (source) wallet cannot cover a drip + tx fee —
+    /// an operator-side outage (refill the gas wallet), NOT a caller error
+    /// and NOT a retryable send failure (F10).
+    SourceEmpty,
     SendFailed,
     BadWallet,
     Disabled,
@@ -173,12 +187,18 @@ impl DripOutcome {
             DripOutcome::InsufficientUsdc => "insufficient_usdc",
             DripOutcome::AlreadyHasSol => "already_has_sol",
             DripOutcome::DailyCap => "daily_cap",
+            DripOutcome::SourceEmpty => "source_empty",
             DripOutcome::SendFailed => "send_failed",
             DripOutcome::BadWallet => "bad_wallet",
             DripOutcome::Disabled => "disabled",
         }
     }
 }
+
+/// Flat network fee (lamports) a single system-transfer drip costs the source
+/// wallet on top of the dripped amount. Solana's base signature fee is 5000
+/// lamports; the faucet never adds priority fees.
+const DRIP_TX_FEE_LAMPORTS: u64 = 5_000;
 
 /// Gating thresholds copied from `FaucetConfig` (so the `Faucet` is
 /// self-contained and the route never re-reads config at request time).
@@ -234,10 +254,20 @@ impl Faucet {
         {
             Ok(true) => { /* reservation acquired — continue */ }
             Ok(false) => {
+                // F11: the lookup stays fail-open (the wallet IS already
+                // funded; the signature is best-effort decoration) — but a DB
+                // error must be visible, not silently swallowed.
                 let prior = self
                     .ledger
                     .prior_signature(wallet_b58)
                     .await
+                    .inspect_err(|e| {
+                        warn!(
+                            error = %e,
+                            wallet = %wallet_b58,
+                            "faucet prior-signature lookup failed; returning already_funded without a signature"
+                        );
+                    })
                     .unwrap_or(None);
                 return DripOutcome::AlreadyFunded {
                     tx_signature: prior,
@@ -311,6 +341,39 @@ impl Faucet {
                 return DripOutcome::SendFailed;
             }
         }
+
+        // F10: source (gas) wallet balance — checked only now that a drip is
+        // actually about to send (every cheaper gate has passed), so the extra
+        // RPC read never runs for declined requests. A dry source is an
+        // operator-side outage: decline with a distinct outcome instead of an
+        // opaque SendFailed/502 loop, and roll back (pre-broadcast) so a retry
+        // after a refill can succeed. The read is best-effort clarity, not a
+        // new failure mode: on an RPC error we proceed to the send, which
+        // fails closed on its own (and rolls back) if the source really is dry.
+        let required_lamports = self
+            .params
+            .drip_lamports
+            .saturating_add(DRIP_TX_FEE_LAMPORTS);
+        match self.source.source_sol_balance().await {
+            Ok(balance) if balance < required_lamports => {
+                warn!(
+                    source_balance_lamports = balance,
+                    required_lamports,
+                    drip_lamports = self.params.drip_lamports,
+                    "faucet gas source wallet cannot cover a drip — refill the gas wallet"
+                );
+                self.rollback(wallet_b58).await;
+                return DripOutcome::SourceEmpty;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(error = %e, "faucet source balance read failed; attempting send anyway");
+            }
+        }
+        // ponytail: no balance_monitor tie-in — the warn! above plus the
+        // solvela_gas_drips_total{result="source_empty"} counter is the
+        // operator signal; wire the gas wallet into balance_monitor as a
+        // follow-up before the faucet is ever enabled in prod.
 
         // Send the drip. Roll back ONLY on errors that are definitively
         // pre-broadcast (the tx never hit the wire), so a retry can succeed.
@@ -391,6 +454,14 @@ impl PgGasLedger {
     }
 }
 
+/// Checked lamports → Postgres BIGINT conversion (F9): a value above
+/// `i64::MAX` must refuse loudly, never truncate-wrap (`as i64`) into a
+/// wrong/negative ledger row.
+fn lamports_to_i64(lamports: u64) -> Result<i64, FaucetError> {
+    i64::try_from(lamports)
+        .map_err(|_| FaucetError::Ledger(format!("lamports {lamports} exceeds BIGINT range")))
+}
+
 #[async_trait]
 impl GasLedger for PgGasLedger {
     async fn reserve(&self, wallet_b58: &str, lamports: u64) -> Result<bool, FaucetError> {
@@ -399,7 +470,7 @@ impl GasLedger for PgGasLedger {
              ON CONFLICT (wallet_address) DO NOTHING",
         )
         .bind(wallet_b58)
-        .bind(lamports as i64)
+        .bind(lamports_to_i64(lamports)?)
         .execute(&self.pool)
         .await
         .map_err(|e| FaucetError::Ledger(e.to_string()))?;
@@ -411,11 +482,21 @@ impl GasLedger for PgGasLedger {
         // (tx_signature IS NULL). This is a belt-and-braces guard: rollback is
         // only ever called before a successful send, but scoping the DELETE to
         // un-broadcast rows makes a concurrent funded row impossible to clear.
-        sqlx::query("DELETE FROM gas_drips WHERE wallet_address = $1 AND tx_signature IS NULL")
-            .bind(wallet_b58)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| FaucetError::Ledger(e.to_string()))?;
+        let res =
+            sqlx::query("DELETE FROM gas_drips WHERE wallet_address = $1 AND tx_signature IS NULL")
+                .bind(wallet_b58)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| FaucetError::Ledger(e.to_string()))?;
+        if res.rows_affected() == 0 {
+            // F15: still Ok (rollback is best-effort by contract), but a 0-row
+            // rollback means the row is missing or already broadcast — visible,
+            // not silent.
+            warn!(
+                wallet = %wallet_b58,
+                "faucet reservation rollback deleted 0 rows (row missing or already broadcast)"
+            );
+        }
         Ok(())
     }
 
@@ -440,12 +521,22 @@ impl GasLedger for PgGasLedger {
         wallet_b58: &str,
         tx_signature: &str,
     ) -> Result<(), FaucetError> {
-        sqlx::query("UPDATE gas_drips SET tx_signature = $2 WHERE wallet_address = $1")
+        let res = sqlx::query("UPDATE gas_drips SET tx_signature = $2 WHERE wallet_address = $1")
             .bind(wallet_b58)
             .bind(tx_signature)
             .execute(&self.pool)
             .await
             .map_err(|e| FaucetError::Ledger(e.to_string()))?;
+        if res.rows_affected() == 0 {
+            // F15: a broadcast drip with no reservation row to attach its
+            // signature to means the ledger and the chain disagree — loud, so
+            // an operator can reconcile from the logged signature.
+            warn!(
+                wallet = %wallet_b58,
+                signature = %tx_signature,
+                "faucet record_signature updated 0 rows — broadcast drip has no reservation row"
+            );
+        }
         Ok(())
     }
 
@@ -555,6 +646,10 @@ impl GasSource for RpcGasSource {
         )
         .await
         .map_err(|e| FaucetError::Rpc(e.to_string()))
+    }
+
+    async fn source_sol_balance(&self) -> Result<u64, FaucetError> {
+        self.sol_balance(&self.source_pubkey_b58).await
     }
 
     async fn send_drip(&self, wallet_b58: &str, lamports: u64) -> Result<String, FaucetError> {
@@ -689,6 +784,10 @@ pub async fn gas_faucet(
         // the top of the handler, before the rate limiter and before any drip
         // work); the arm is kept only to keep the match exhaustive.
         DripOutcome::Disabled => (StatusCode::OK, decline("disabled")),
+        // F10: the faucet's OWN gas wallet is dry — an operator-side outage,
+        // distinct from a transient send failure so callers stop retry-looping
+        // against an empty source. 503 (the faucet service is out), not 502.
+        DripOutcome::SourceEmpty => (StatusCode::SERVICE_UNAVAILABLE, decline("source_empty")),
         // A send failure is the one "we tried and it broke" case → 502.
         DripOutcome::SendFailed => (StatusCode::BAD_GATEWAY, decline("send_failed")),
     };
@@ -793,12 +892,19 @@ mod tests {
         AlreadyProcessed,
     }
 
+    /// A source-wallet balance comfortably above any drip under test.
+    const PLENTY_SOURCE_SOL: u64 = 1_000_000_000;
+
     struct MockSource {
         usdc: u64,
         sol: u64,
+        /// The faucet's own gas-wallet balance (F10 source check).
+        source_sol: u64,
         send_mode: SendMode,
         /// When true, `sol_balance` returns an RPC error (gate-6 RPC failure).
         sol_read_fails: bool,
+        /// When true, `source_sol_balance` returns an RPC error (F10 read failure).
+        source_read_fails: bool,
         sends: AtomicUsize,
     }
 
@@ -807,12 +913,14 @@ mod tests {
             Self {
                 usdc,
                 sol,
+                source_sol: PLENTY_SOURCE_SOL,
                 send_mode: if send_ok {
                     SendMode::Ok
                 } else {
                     SendMode::Fail
                 },
                 sol_read_fails: false,
+                source_read_fails: false,
                 sends: AtomicUsize::new(0),
             }
         }
@@ -821,8 +929,10 @@ mod tests {
             Self {
                 usdc,
                 sol,
+                source_sol: PLENTY_SOURCE_SOL,
                 send_mode,
                 sol_read_fails: false,
+                source_read_fails: false,
                 sends: AtomicUsize::new(0),
             }
         }
@@ -831,8 +941,34 @@ mod tests {
             Self {
                 usdc,
                 sol: 0,
+                source_sol: PLENTY_SOURCE_SOL,
                 send_mode: SendMode::Ok,
                 sol_read_fails: true,
+                source_read_fails: false,
+                sends: AtomicUsize::new(0),
+            }
+        }
+
+        fn with_source_sol(usdc: u64, source_sol: u64) -> Self {
+            Self {
+                usdc,
+                sol: 0,
+                source_sol,
+                send_mode: SendMode::Ok,
+                sol_read_fails: false,
+                source_read_fails: false,
+                sends: AtomicUsize::new(0),
+            }
+        }
+
+        fn with_failing_source_read(usdc: u64) -> Self {
+            Self {
+                usdc,
+                sol: 0,
+                source_sol: 0,
+                send_mode: SendMode::Ok,
+                sol_read_fails: false,
+                source_read_fails: true,
                 sends: AtomicUsize::new(0),
             }
         }
@@ -850,6 +986,14 @@ mod tests {
         }
         async fn usdc_balance(&self, _w: &str) -> Result<u64, FaucetError> {
             Ok(self.usdc)
+        }
+        async fn source_sol_balance(&self) -> Result<u64, FaucetError> {
+            if self.source_read_fails {
+                return Err(FaucetError::Rpc(
+                    "forced source balance read failure".to_string(),
+                ));
+            }
+            Ok(self.source_sol)
         }
         async fn send_drip(&self, _w: &str, _l: u64) -> Result<String, FaucetError> {
             self.sends.fetch_add(1, Ordering::SeqCst);
@@ -1068,6 +1212,74 @@ mod tests {
             ledger.reserved.lock().unwrap().contains_key(VALID_WALLET),
             "reservation must be retained on a gate-6 RPC failure"
         );
+    }
+
+    #[tokio::test]
+    async fn source_empty_declines_and_rolls_back() {
+        // F10: a dry source (gas) wallet must decline with a DISTINCT outcome —
+        // not an opaque SendFailed/502 loop — and roll the reservation back so
+        // a retry after the operator refills the gas wallet can succeed.
+        let source = Arc::new(MockSource::with_source_sol(
+            100_000,
+            test_params().drip_lamports + DRIP_TX_FEE_LAMPORTS - 1,
+        ));
+        let ledger = Arc::new(MockLedger::default());
+        let faucet = faucet_with(source.clone(), ledger.clone());
+
+        let out = faucet.drip(VALID_WALLET).await;
+        assert_eq!(out, DripOutcome::SourceEmpty);
+        assert_eq!(
+            source.sends.load(Ordering::SeqCst),
+            0,
+            "must not attempt a send from a dry source"
+        );
+        // Rolled back → no lingering reservation blocking a post-refill retry.
+        assert!(!ledger.reserved.lock().unwrap().contains_key(VALID_WALLET));
+    }
+
+    #[tokio::test]
+    async fn source_at_exact_requirement_funds() {
+        // F10 boundary: source balance == drip + tx fee is sufficient.
+        let source = Arc::new(MockSource::with_source_sol(
+            100_000,
+            test_params().drip_lamports + DRIP_TX_FEE_LAMPORTS,
+        ));
+        let faucet = faucet_with(source.clone(), Arc::new(MockLedger::default()));
+        assert!(matches!(
+            faucet.drip(VALID_WALLET).await,
+            DripOutcome::Funded { .. }
+        ));
+        assert_eq!(source.sends.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn source_balance_read_failure_proceeds_to_send() {
+        // F10: the source-balance check is a best-effort clarity read, not a
+        // new failure mode — an RPC error on it must NOT block the drip (a
+        // truly dry source still fails closed at the send, which rolls back).
+        let source = Arc::new(MockSource::with_failing_source_read(100_000));
+        let faucet = faucet_with(source.clone(), Arc::new(MockLedger::default()));
+        assert!(matches!(
+            faucet.drip(VALID_WALLET).await,
+            DripOutcome::Funded { .. }
+        ));
+        assert_eq!(source.sends.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn lamports_to_i64_overflow_fails_closed() {
+        // F9: a lamports value above BIGINT range must refuse loudly, never
+        // truncate-wrap (`as i64`) into a wrong/negative ledger row.
+        assert_eq!(lamports_to_i64(0).unwrap(), 0);
+        assert_eq!(lamports_to_i64(i64::MAX as u64).unwrap(), i64::MAX);
+        assert!(matches!(
+            lamports_to_i64(i64::MAX as u64 + 1),
+            Err(FaucetError::Ledger(_))
+        ));
+        assert!(matches!(
+            lamports_to_i64(u64::MAX),
+            Err(FaucetError::Ledger(_))
+        ));
     }
 
     #[tokio::test]

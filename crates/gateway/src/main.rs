@@ -748,6 +748,12 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = app_config.channel.validate() {
         anyhow::bail!("invalid [channel] configuration: {e}");
     }
+    // F16: an active faucet with a 0-lamport drip is a config error — refuse
+    // to boot rather than serve drips that fund nothing (same fail-closed
+    // posture as the channel/semantic-cache validation above).
+    if let Err(e) = app_config.faucet.validate() {
+        anyhow::bail!("invalid [faucet] configuration: {e}");
+    }
     let semantic_cache = build_semantic_cache(&app_config, redis_url.as_str()).await;
 
     // Initialize provider health tracker
@@ -907,8 +913,20 @@ async fn main() -> anyhow::Result<()> {
     // The `source_key` is a DEDICATED gas wallet — never the fee-payer reserve
     // (which pays providers and is regulatory-sensitive). When unset/empty the
     // faucet stays disabled. Degradation: no DATABASE_URL ⇒ disabled with a warn.
-    let faucet = if app_config.faucet.is_active() {
-        match (&db_pool, app_config.faucet.source_key.as_deref()) {
+    // F8: move the gas key OUT of the config BEFORE `app_config` is cloned
+    // into the process-lifetime `AppState` below — the plaintext key must not
+    // persist beyond building the signer (`RpcGasSource` keeps its own
+    // zeroize-on-drop copy of the decoded keypair). The `Zeroizing` wrapper
+    // wipes the moved heap bytes when this block ends. Capture `is_active()`
+    // first: it inspects the very field we take.
+    let faucet_active = app_config.faucet.is_active();
+    let faucet_source_key = app_config
+        .faucet
+        .source_key
+        .take()
+        .map(zeroize::Zeroizing::new);
+    let faucet = if faucet_active {
+        match (&db_pool, faucet_source_key.as_deref()) {
             (Some(pool), Some(source_key)) => {
                 match gateway::routes::faucet::RpcGasSource::from_keypair_b58(
                     http_client.clone(),
@@ -960,6 +978,9 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    // F8: zeroize the plaintext key now — main() lives for the whole process,
+    // so without this explicit drop the Zeroizing local would too.
+    drop(faucet_source_key);
 
     // Build shared state
     let state = Arc::new(AppState {
