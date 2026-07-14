@@ -74,6 +74,16 @@ cargo build-sbf
 
 `tests/unit.rs::test_program_id_matches_active_feature` pins the ID per feature configuration; run `cargo test` both with and without `--features devnet` after touching either `declare_id!`.
 
+**LiteSVM feature-mismatch footgun:** `tests/integration.rs` `include_bytes!`s whatever `target/deploy/solvela_escrow.so` is on disk, but the test binary's expected program ID follows the *current invocation's* features. Building the `.so` with `--features devnet` and then running `cargo test --features sbf --test integration` (without `devnet`) fails 16/24 tests. The sbf build and the LiteSVM test invocation must pass MATCHING cluster features:
+
+```bash
+# devnet-flavored integration run — cluster features must match on BOTH commands
+anchor build -- --features devnet        # or: cargo build-sbf -- --features devnet
+cargo test --features sbf,devnet --manifest-path programs/escrow/Cargo.toml --test integration
+```
+
+The same rule applies to the `mainnet` feature.
+
 Before invoking `solana program deploy`, verify the resulting `.so` is the right variant by inspecting the constants:
 
 ```bash

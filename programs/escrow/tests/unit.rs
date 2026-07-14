@@ -181,8 +181,10 @@ mod tests {
         // Per-cluster program ID (issue #120 path A): the default build MUST
         // keep the deployed mainnet ID; devnet rehearsal is opt-in via
         // `--features devnet` so neither cluster can pick up the other's ID
-        // by accident. Runs under both configurations: default (mainnet ID)
-        // and `--features devnet` (devnet ID).
+        // by accident. CI runs this under both feature configurations: the
+        // `unit` and `mainnet-build` jobs (default / `--features mainnet` →
+        // mainnet ID) and the `devnet-build` job (`--features devnet` →
+        // devnet ID).
         use std::str::FromStr;
         let mainnet = Pubkey::from_str("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU").unwrap();
         let devnet = Pubkey::from_str("GyJRAC46bDoBQJNzTnbupWj8T62GipFKnizHExLXPwvo").unwrap();
