@@ -42,6 +42,22 @@ async fn main() -> anyhow::Result<()> {
     // Existing env vars take precedence — .env values are not overwritten.
     dotenvy::dotenv().ok();
 
+    // Build-time hook (used only by the Docker image build): `solvela-gateway
+    // warm-embedder` downloads the semantic-cache embedding model into
+    // MODEL_CACHE_DIR and exits, so the runtime image ships the ~133MB model
+    // baked in instead of fetching it from Hugging Face at container startup
+    // (which would add a slow, network-dependent step to every cold start).
+    // ponytail: a one-off argv branch, not a clap subcommand — this is the only one.
+    if std::env::args().nth(1).as_deref() == Some("warm-embedder") {
+        let dir = std::env::var("SOLVELA_CACHE__SEMANTIC__MODEL_CACHE_DIR")
+            .unwrap_or_else(|_| "/models/bge".to_string());
+        eprintln!("warm-embedder: loading bge-small-en-v1.5 into {dir}");
+        cache::embedder::LocalBge::with_cache_dir(&dir)
+            .map_err(|e| anyhow::anyhow!("warm-embedder failed to load model: {e}"))?;
+        eprintln!("warm-embedder: model cached in {dir}");
+        return Ok(());
+    }
+
     // Initialize tracing — text by default, JSON when SOLVELA_LOG_FORMAT=json (or RCR_LOG_FORMAT)
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "gateway=info,tower_http=info".into());
@@ -703,6 +719,24 @@ async fn main() -> anyhow::Result<()> {
     // Operator misconfiguration of the semantic cache is fatal — fail fast
     // rather than silently disabling the tier (which `build_semantic_cache`
     // does for genuine infra failures like Redis being down).
+    //
+    // Environment overrides (SOLVELA_CACHE__SEMANTIC__*) — same manual per-field
+    // pattern as the faucet/channel above. The Docker image sets MODEL_CACHE_DIR
+    // to the baked-in model (/models/bge); ENABLED is the per-environment flip.
+    if let Ok(val) = env_with_fallback(
+        "SOLVELA_CACHE__SEMANTIC__ENABLED",
+        "RCR_CACHE__SEMANTIC__ENABLED",
+    ) {
+        app_config.cache.semantic.enabled = matches!(val.as_str(), "true" | "1" | "yes");
+    }
+    if let Ok(val) = env_with_fallback(
+        "SOLVELA_CACHE__SEMANTIC__MODEL_CACHE_DIR",
+        "RCR_CACHE__SEMANTIC__MODEL_CACHE_DIR",
+    ) {
+        if !val.trim().is_empty() {
+            app_config.cache.semantic.model_cache_dir = Some(val);
+        }
+    }
     if let Err(e) = app_config.cache.semantic.validate() {
         anyhow::bail!("invalid [cache.semantic] configuration: {e}");
     }

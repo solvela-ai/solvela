@@ -44,6 +44,13 @@ RUN touch crates/protocol/src/lib.rs crates/x402/src/lib.rs crates/router/src/li
 
 RUN cargo build --release --bin solvela-gateway
 
+# Bake the semantic-cache embedding model (bge-small-en-v1.5, ~133MB) into the
+# image so the runtime never fetches it from Hugging Face at container startup.
+# Needs network during build (Fly's remote builder has it); the `warm-embedder`
+# argv branch downloads into MODEL_CACHE_DIR and exits.
+RUN SOLVELA_CACHE__SEMANTIC__MODEL_CACHE_DIR=/models/bge \
+    ./target/release/solvela-gateway warm-embedder
+
 # Stage 2: Runtime
 FROM debian:trixie-slim
 
@@ -58,6 +65,10 @@ WORKDIR /app
 
 COPY --from=builder --chown=solvela:solvela /app/target/release/solvela-gateway .
 COPY --from=builder --chown=solvela:solvela /app/config/ config/
+# Baked semantic-cache model (see builder `warm-embedder` step). MODEL_CACHE_DIR
+# points the runtime at it so no Hugging Face fetch happens on startup.
+COPY --from=builder --chown=solvela:solvela /models/bge /models/bge
+ENV SOLVELA_CACHE__SEMANTIC__MODEL_CACHE_DIR=/models/bge
 
 USER solvela
 
