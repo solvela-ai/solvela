@@ -175,4 +175,34 @@ mod tests {
         // Reference both in every config so neither binding warns as unused.
         let _ = (mainnet, devnet);
     }
+
+    #[test]
+    fn test_program_id_matches_active_feature() {
+        // Per-cluster program ID (issue #120 path A): the default build MUST
+        // keep the deployed mainnet ID; devnet rehearsal is opt-in via
+        // `--features devnet` so neither cluster can pick up the other's ID
+        // by accident. CI runs this under both feature configurations: the
+        // `unit` and `mainnet-build` jobs (default / `--features mainnet` →
+        // mainnet ID) and the `devnet-build` job (`--features devnet` →
+        // devnet ID).
+        use std::str::FromStr;
+        let mainnet = Pubkey::from_str("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU").unwrap();
+        let devnet = Pubkey::from_str("GyJRAC46bDoBQJNzTnbupWj8T62GipFKnizHExLXPwvo").unwrap();
+
+        #[cfg(not(feature = "devnet"))]
+        assert_eq!(
+            solvela_escrow::ID,
+            mainnet,
+            "default build must declare the deployed mainnet program ID"
+        );
+        #[cfg(feature = "devnet")]
+        assert_eq!(
+            solvela_escrow::ID,
+            devnet,
+            "devnet builds must declare the devnet program ID, never the mainnet one"
+        );
+
+        // Reference both in every config so neither binding warns as unused.
+        let _ = (mainnet, devnet);
+    }
 }

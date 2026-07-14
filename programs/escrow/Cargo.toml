@@ -35,6 +35,13 @@ default = []
 # default builds (e.g. `cargo check --lib`, local-validator tests) target
 # devnet so the same source compiles for both environments without edits.
 mainnet = []
+# Switches declare_id! to the devnet program ID
+# (GyJRAC46bDoBQJNzTnbupWj8T62GipFKnizHExLXPwvo) for devnet rehearsal
+# deploys — issue #120 path A. The default build keeps the deployed mainnet
+# ID. Mutually exclusive with `mainnet` (compile_error! in lib.rs): devnet
+# builds pair the devnet ID with the default devnet USDC mint. The devnet
+# program keypair is operator-held and never committed to this repo.
+devnet = []
 # Enables the LiteSVM integration tests in tests/integration.rs and
 # tests/helpers.rs. Requires `anchor build` to have produced
 # target/deploy/solvela_escrow.so first; without this feature the
