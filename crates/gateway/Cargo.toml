@@ -82,4 +82,4 @@ tokio-stream = "0.1"
 # against docs/openapi.json (OpenAPI 3.1 schemas = JSON Schema 2020-12).
 # Default features are disabled — they pull in network/file `$ref` resolution,
 # which the self-contained spec never needs.
-jsonschema = { version = "0.46", default-features = false }
+jsonschema = { version = "0.47", default-features = false }
