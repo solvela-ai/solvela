@@ -105,6 +105,8 @@ GitHub-side DCO check will still fire on push.
 
 Trustless USDC-SPL escrow with deposit/claim/refund instructions. **NOT a workspace member** to avoid dep version conflicts. PDA seeds: `[b"escrow", agent.key().as_ref(), &service_id]`.
 
+Per-cluster program IDs (issue #120 path A): the default build declares the deployed mainnet ID; `cargo build-sbf -- --features devnet` (or `cargo test --manifest-path programs/escrow/Cargo.toml --features devnet`) switches `declare_id!` to the devnet rehearsal ID `GyJRAC46bDoBQJNzTnbupWj8T62GipFKnizHExLXPwvo`. The devnet program keypair is operator-held, never committed. See `programs/escrow/AGENTS.md` for the deploy checklist.
+
 ### Configuration (`config/`)
 
 - `models.toml` — Model registry with per-token pricing (6 providers, 44+ models)

@@ -57,18 +57,22 @@ This produces the same `.so` artifact and runs the same SBF compilation pipeline
 
 ### Deployment Checklist
 
-**Cluster policy: mainnet-only.** The on-chain program ID
-`9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU` is hardcoded in `src/lib.rs` via `declare_id!` and is only deployed to mainnet-beta. `Anchor.toml` intentionally omits `[programs.localnet]` and `[programs.devnet]` sections so `anchor deploy --provider.cluster {localnet,devnet}` fails fast with a "program not found" error instead of silently targeting the mainnet ID on the wrong cluster. Local integration tests run via LiteSVM (`tests/integration.rs`), not `anchor deploy`. Devnet rehearsal would require per-cluster keypairs and cluster-conditional `declare_id!` — track that as its own scoped effort if/when needed (see closed issue #120 path A).
+**Cluster policy: per-cluster program IDs (issue #120 path A).** `declare_id!` in `src/lib.rs` is feature-gated: the DEFAULT build declares the deployed mainnet ID `9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU` (byte-identical to the previous mainnet-only artifact); building with `--features devnet` declares the devnet rehearsal ID `GyJRAC46bDoBQJNzTnbupWj8T62GipFKnizHExLXPwvo`. The devnet program keypair is operator-held and never committed. `Anchor.toml` carries `[programs.mainnet]` and `[programs.devnet]`; `[programs.localnet]` remains intentionally absent — local integration tests run via LiteSVM (`tests/integration.rs`), not `anchor deploy`, so a localnet deploy fails fast with "program not found".
 
-The `mainnet` feature flag selects which USDC mint the deployed program accepts at compile time. **Mainnet deploys MUST be built with `--features mainnet`** — without it, the program targets the devnet USDC mint (`4zMM…`) and would silently reject all mainnet USDC deposits with `mint mismatch`. This feature flag is independent of the cluster policy above and exists only because the same source compiles for both LiteSVM (default, devnet mint) and mainnet deploys.
+The `mainnet` feature flag selects which USDC mint the deployed program accepts at compile time. **Mainnet deploys MUST be built with `--features mainnet`** — without it, the program targets the devnet USDC mint (`4zMM…`) and would silently reject all mainnet USDC deposits with `mint mismatch`. This feature flag is independent of the program-ID selection above and exists only because the same source compiles for both LiteSVM (default, devnet mint) and mainnet deploys. `mainnet` and `devnet` are mutually exclusive (`compile_error!` in `lib.rs`): a devnet build pairs the devnet ID with the default devnet mint.
 
 ```bash
-# Mainnet deploy — selects EPjFW…USDC mint
+# Mainnet deploy — mainnet ID (default) + EPjFW…USDC mint
 cargo build-sbf -- --features mainnet
 
-# LiteSVM / test build (no on-chain deploy) — selects 4zMM…USDC mint
+# Devnet rehearsal deploy — devnet ID + 4zMM…devnet USDC mint
+cargo build-sbf -- --features devnet
+
+# LiteSVM / test build (no on-chain deploy) — mainnet ID + 4zMM…USDC mint
 cargo build-sbf
 ```
+
+`tests/unit.rs::test_program_id_matches_active_feature` pins the ID per feature configuration; run `cargo test` both with and without `--features devnet` after touching either `declare_id!`.
 
 Before invoking `solana program deploy`, verify the resulting `.so` is the right variant by inspecting the constants:
 
