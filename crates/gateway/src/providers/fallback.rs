@@ -59,9 +59,9 @@ fn candidate_rejects_images(registry: &ModelRegistry, provider: &str, model_id: 
 /// `<= 0.0` (costs are validated non-negative) rather than `== 0.0` to avoid the
 /// `clippy::float_cmp` lint under `-D warnings`.
 fn candidate_is_free(registry: &ModelRegistry, model_id: &str) -> bool {
-    registry.get(model_id).is_some_and(|m| {
-        m.input_cost_per_million <= 0.0 && m.output_cost_per_million <= 0.0
-    })
+    registry
+        .get(model_id)
+        .is_some_and(|m| m.input_cost_per_million <= 0.0 && m.output_cost_per_million <= 0.0)
 }
 
 /// Result from a fallback-aware request. Tracks whether the response
