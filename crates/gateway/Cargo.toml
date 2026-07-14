@@ -73,6 +73,9 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 
 [dev-dependencies]
+# `test-util` (paused time via `#[tokio::test(start_paused = true)]`) is NOT in
+# tokio's "full" feature set — enable it here for deterministic timeout tests.
+tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
 ed25519-dalek = { workspace = true }

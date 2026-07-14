@@ -240,6 +240,22 @@ impl ProviderRegistry {
 /// `test_hanging_provider_budget_fits_within_global_timeout`.
 pub const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Fast-failover budget for a **non-terminal** link in a model fallback chain.
+///
+/// A hung upstream would otherwise burn the full [`PROVIDER_REQUEST_TIMEOUT`]
+/// (90s) before its `Err` surfaces and the chain advances — the free-tier
+/// "90s first impression" (NVIDIA hung → only then drops to the $0 Gemini
+/// terminal link). When there IS a next candidate to try, cap the attempt here
+/// instead so failover happens in seconds. The LAST chain link is never capped
+/// — a request with nowhere left to go still gets the full 90s budget. Because
+/// this only ever *shortens* an attempt, it cannot violate the global-timeout
+/// budget the `PROVIDER_REQUEST_TIMEOUT` doc describes.
+///
+// ponytail: 10s is a tuning knob, not a law — raise it if a slow-but-healthy
+// non-terminal provider (e.g. a reasoning model's TTFB) starts fast-failing
+// spuriously; lower it for a snappier free tier.
+pub const FAILOVER_FAST_ATTEMPT: Duration = Duration::from_secs(10);
+
 /// Retry budget every provider adapter passes to [`retry_with_backoff`].
 ///
 /// Single source of truth: raising it widens the worst-case latency of a

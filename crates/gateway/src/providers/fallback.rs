@@ -48,6 +48,22 @@ fn candidate_rejects_images(registry: &ModelRegistry, provider: &str, model_id: 
     }
 }
 
+/// True if a candidate model is a **free** ($0 in / $0 out) model per the
+/// registry.
+///
+/// Free-tier models are all small/fast, so a multi-second silence means the
+/// upstream is hung, not thinking — safe to fast-fail to the next chain link
+/// (see [`super::FAILOVER_FAST_ATTEMPT`]). Paid/reasoning models can legitimately
+/// take far longer, so they are NEVER fast-failed: unknown-to-registry or any
+/// non-zero cost ⇒ not free ⇒ full [`super::PROVIDER_REQUEST_TIMEOUT`] budget.
+/// `<= 0.0` (costs are validated non-negative) rather than `== 0.0` to avoid the
+/// `clippy::float_cmp` lint under `-D warnings`.
+fn candidate_is_free(registry: &ModelRegistry, model_id: &str) -> bool {
+    registry.get(model_id).is_some_and(|m| {
+        m.input_cost_per_million <= 0.0 && m.output_cost_per_million <= 0.0
+    })
+}
+
 /// Result from a fallback-aware request. Tracks whether the response
 /// came from the originally requested model or a fallback.
 #[derive(Debug)]
@@ -77,7 +93,7 @@ pub async fn chat_with_model_fallback(
     let request_has_images = req.messages.iter().any(|m| m.content.has_image_parts());
     let mut last_error: Option<ProviderError> = None;
 
-    for (prov, model_id) in &chain {
+    for (idx, (prov, model_id)) in chain.iter().enumerate() {
         // Skip if provider is not configured
         let provider = match providers.get(prov) {
             Some(p) => p,
@@ -107,8 +123,28 @@ pub async fn chat_with_model_fallback(
         let mut model_req = req.clone();
         model_req.model = model_id.to_string();
 
+        // Fail fast to the next link when this one is a NON-terminal FREE model:
+        // a hung free upstream must not burn the full 90s budget when there's a
+        // fallback waiting (the free-tier "90s first impression"). Paid/reasoning
+        // models and the last link keep the full budget. Only ever shortens an
+        // attempt, so the global-timeout budget invariant is preserved.
+        let fast_fail = idx + 1 < chain.len() && candidate_is_free(registry, model_id);
         let start = Instant::now();
-        match provider.chat_completion(model_req).await {
+        let call = provider.chat_completion(model_req);
+        let outcome = if fast_fail {
+            tokio::time::timeout(super::FAILOVER_FAST_ATTEMPT, call)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(format!(
+                        "free model {prov}/{model_id} exceeded the {}s fast-failover budget; trying next",
+                        super::FAILOVER_FAST_ATTEMPT.as_secs()
+                    )
+                    .into())
+                })
+        } else {
+            call.await
+        };
+        match outcome {
             Ok(response) => {
                 let latency_ms = start.elapsed().as_millis() as u64;
                 health
@@ -172,7 +208,7 @@ pub async fn stream_with_model_fallback(
     let request_has_images = req.messages.iter().any(|m| m.content.has_image_parts());
     let mut last_error: Option<ProviderError> = None;
 
-    for (prov, model_id) in &chain {
+    for (idx, (prov, model_id)) in chain.iter().enumerate() {
         let provider = match providers.get(prov) {
             Some(p) => p,
             None => continue,
@@ -196,8 +232,25 @@ pub async fn stream_with_model_fallback(
         let mut model_req = req.clone();
         model_req.model = model_id.to_string();
 
+        // Same free-tier fast-failover as the non-streaming path: a hung free
+        // upstream that never returns a stream head drops to the next link fast.
+        let fast_fail = idx + 1 < chain.len() && candidate_is_free(registry, model_id);
         let start = Instant::now();
-        match provider.chat_completion_stream(model_req).await {
+        let call = provider.chat_completion_stream(model_req);
+        let outcome = if fast_fail {
+            tokio::time::timeout(super::FAILOVER_FAST_ATTEMPT, call)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(format!(
+                        "free model {prov}/{model_id} exceeded the {}s fast-failover budget; trying next",
+                        super::FAILOVER_FAST_ATTEMPT.as_secs()
+                    )
+                    .into())
+                })
+        } else {
+            call.await
+        };
+        match outcome {
             Ok(stream) => {
                 let latency_ms = start.elapsed().as_millis() as u64;
                 health
@@ -1087,6 +1140,141 @@ supports_streaming = true
             vec!["gpt-4o".to_string(), "claude-sonnet-4-6".to_string()],
             "the timed-out primary must be dispatched first, then the chain \
              must advance to the next entry"
+        );
+    }
+
+    /// A provider whose call HANGS for effectively forever before erroring —
+    /// a truly hung upstream (accepts the request, never answers). Under
+    /// `start_paused`, virtual time only advances past this if a fast-failover
+    /// timeout caps the call; otherwise the loop would wait the full hang.
+    struct HangingProvider {
+        name: String,
+        dispatched: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl LLMProvider for HangingProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn supported_models(&self) -> Vec<ModelRegistration> {
+            vec![]
+        }
+        async fn chat_completion(&self, req: ChatRequest) -> Result<ChatResponse, ProviderError> {
+            self.dispatched.lock().unwrap().push(req.model.clone());
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            Err("hung upstream finally errored".into())
+        }
+    }
+
+    /// Like `gpt4o_chain_mixed_registry` but the primary `gpt-4o` is FREE
+    /// ($0/$0) — the free-tier condition that arms fast-failover.
+    fn gpt4o_free_primary_registry() -> ModelRegistry {
+        ModelRegistry::from_toml(
+            r#"
+[models.gpt-4o]
+provider = "openai"
+model_id = "gpt-4o"
+display_name = "GPT-4o (free in test)"
+input_cost_per_million = 0.0
+output_cost_per_million = 0.0
+context_window = 128000
+supports_streaming = true
+
+[models.claude-sonnet]
+provider = "anthropic"
+model_id = "claude-sonnet-4-6"
+display_name = "Claude Sonnet"
+input_cost_per_million = 1.0
+output_cost_per_million = 1.0
+context_window = 128000
+supports_streaming = true
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn candidate_is_free_classifies_by_registry_cost() {
+        let registry = gpt4o_free_primary_registry();
+        assert!(
+            candidate_is_free(&registry, "gpt-4o"),
+            "$0/$0 model must classify as free"
+        );
+        assert!(
+            !candidate_is_free(&registry, "claude-sonnet-4-6"),
+            "a priced model must NOT classify as free"
+        );
+        assert!(
+            !candidate_is_free(&registry, "not-in-registry"),
+            "unknown model defaults to NOT free (keeps the full 90s budget)"
+        );
+    }
+
+    /// The free-tier "90s first impression" fix: a HUNG **free** non-terminal
+    /// model must fail over within `FAILOVER_FAST_ATTEMPT`, not after the full
+    /// `PROVIDER_REQUEST_TIMEOUT` (90s). Paused time makes the assertion about
+    /// VIRTUAL elapsed: fast-fail ⇒ ~10s; a regression that dropped the timeout
+    /// wrap ⇒ the full 3600s hang, which the upper bound below catches.
+    #[tokio::test(start_paused = true)]
+    async fn hung_free_nonterminal_fast_fails_to_next_link() {
+        let dispatched = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut map: HashMap<String, Arc<dyn LLMProvider>> = HashMap::new();
+        map.insert(
+            "openai".to_string(),
+            Arc::new(HangingProvider {
+                name: "openai".to_string(),
+                dispatched: dispatched.clone(),
+            }),
+        );
+        map.insert(
+            "anthropic".to_string(),
+            Arc::new(SucceedingProvider {
+                name: "anthropic".to_string(),
+                dispatched: dispatched.clone(),
+            }),
+        );
+        let providers = ProviderRegistry::from_providers(map);
+        let health = ProviderHealthTracker::new(CircuitBreakerConfig::default());
+        let registry = gpt4o_free_primary_registry();
+
+        let req = ChatRequest {
+            model: "openai/gpt-4o".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: MessageContent::Text("hello".to_string()),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: false,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let started = tokio::time::Instant::now();
+        let result =
+            chat_with_model_fallback(&providers, &health, &registry, "openai", "gpt-4o", req)
+                .await
+                .expect("a hung free primary must fast-fail over to the succeeding fallback");
+        let elapsed = started.elapsed();
+
+        assert_eq!(result.actual_model, "claude-sonnet-4-6");
+        assert!(result.was_fallback, "response must be marked as a fallback");
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "expected failover near {}s (fast budget), took {elapsed:?} — the \
+             fast-fail wrap did not fire",
+            crate::providers::FAILOVER_FAST_ATTEMPT.as_secs()
+        );
+        let calls = dispatched.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec!["gpt-4o".to_string(), "claude-sonnet-4-6".to_string()],
+            "hung free primary dispatched first, then failover to the next link"
         );
     }
 
