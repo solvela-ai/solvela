@@ -98,6 +98,18 @@ pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey = Pubkey([
     255, 16, 132, 4, 142, 123, 216, 219, 233, 248, 89,
 ]);
 
+/// The SPL Memo (v2) program ID: `MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr`
+/// (deployed identically on all clusters; verified against
+/// solana-program.com/docs/memo, 2026-07-14).
+///
+/// Appended to channel-refund transfers so two distinct refund obligations can
+/// never serialize to byte-identical transactions (#743). The program takes
+/// zero accounts and validates its data as UTF-8 on-chain.
+pub const MEMO_PROGRAM_ID: Pubkey = Pubkey([
+    5, 74, 83, 90, 153, 41, 33, 6, 77, 36, 232, 113, 96, 218, 56, 124, 124, 53, 181, 221, 188, 146,
+    187, 129, 228, 31, 168, 64, 65, 5, 68, 141,
+]);
+
 /// Derive the Associated Token Account (ATA) address for a given wallet and mint.
 ///
 /// The ATA address is a Program Derived Address (PDA) computed as:
