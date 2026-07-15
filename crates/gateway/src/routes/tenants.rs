@@ -9,6 +9,14 @@
 //! [`crate::routes::admin_stats`]: hidden 404 when unconfigured, 401 on
 //! mismatch).
 //!
+//! SECURITY BOUNDARY (migration 011, `usage.rs` module note): the `x-tenant`
+//! header these budgets meter is UNAUTHENTICATED and FORGEABLE. Per-tenant
+//! budgets are cooperative accounting under ONE trusted single-wallet proxy
+//! (Telsi-style) metering its own downstream customers — NOT isolation
+//! between mutually-distrusting tenants. A row provisioned here is only as
+//! sound as the proxy asserting the tags; the non-forgeable backstop is the
+//! wallet (and team) cap.
+//!
 //! Unlike the paid hot path (CLAUDE.md rule #9), the DB write here is
 //! deliberately AWAITED: the endpoint's whole contract is "when it returns
 //! 2xx the row durably exists before first traffic", so a fire-and-forget
@@ -22,8 +30,8 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{FromRequest, FromRequestParts, Path, Request, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -31,6 +39,7 @@ use serde_json::json;
 
 use solvela_x402::solana_types::Pubkey;
 
+use crate::audit::{log_audit, AuditEntry};
 use crate::routes::chat::validate_tenant;
 use crate::AppState;
 
@@ -184,27 +193,29 @@ fn validate_caps(body: &ProvisionTenantBudgetRequest) -> Result<ValidatedCaps, R
 /// the stored caps when the row was created, 200 when an existing row was
 /// updated. Protected by admin token (Bearer auth).
 ///
-/// The body is taken as raw [`Bytes`](axum::body::Bytes) and parsed inside
-/// the handler — NOT via the `Json` extractor — so the admin-token gate runs
-/// before any body *parsing* or Content-Type check: a pre-auth 400/415/422
-/// from an extractor would let an unauthenticated caller detect that the
-/// route exists, contradicting the hidden-404 contract above. (Axum still
-/// buffers the body bytes pre-handler, bounded by the router-wide
-/// `RequestBodyLimitLayer` — same as every other body-consuming route.)
-/// Consequence (intended): there is no Content-Type requirement — any body
-/// that parses as the JSON request type is accepted.
+/// The handler takes the whole [`Request`] — NOT typed extractors — so the
+/// admin-token gate runs before ANY fallible extraction: no path parsing, no
+/// body parsing, no Content-Type check. A pre-auth 400/415/422 from an
+/// extractor would let an unauthenticated caller detect that the route
+/// exists, contradicting the hidden-404 contract above (e.g. a `Path` in the
+/// signature answers a route-specific `400 Invalid UTF-8` for a `%ff` segment
+/// before the handler body ever runs). Post-auth, the path params and body
+/// bytes are extracted by running axum's own `Path` / `Bytes` extractors
+/// programmatically — same decoding and same body-limit-bounded buffering as
+/// the extractor position gave, with `Path`'s rejection mapped to this
+/// handler's plain 400 JSON shape. Consequence (intended): there is no
+/// Content-Type requirement — any body that parses as the JSON request type
+/// is accepted.
 ///
-/// Flow: auth → parse body → validate (wallet, tenant, caps) → DB gate →
-/// upsert → cache-bust.
+/// Flow: auth → parse path params → buffer + parse body → validate (wallet,
+/// tenant, caps) → DB gate → upsert → cache-bust → audit.
 pub async fn provision_tenant_budget(
     State(state): State<Arc<AppState>>,
-    Path((wallet, tenant)): Path<(String, String)>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
+    req: Request,
 ) -> Result<Response, Response> {
     // Gate behind admin token — if not configured, hide the endpoint entirely
     // (same shape as `routes::admin_stats`). Keep this the FIRST check: no
-    // body parsing, no validation, no logging before auth.
+    // path parsing, no body parsing, no validation, no logging before auth.
     let admin_token = match &state.admin_token {
         Some(t) => t,
         None => {
@@ -215,7 +226,8 @@ pub async fn provision_tenant_budget(
     };
 
     // Validate Bearer token using constant-time comparison
-    let authorized = headers
+    let authorized = req
+        .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
@@ -228,6 +240,28 @@ pub async fn provision_tenant_budget(
         )
             .into_response());
     }
+
+    // Extract the path params (post-auth) by running axum's own `Path`
+    // extractor programmatically — identical percent-decoding to the
+    // extractor position, but its rejection (e.g. invalid UTF-8 in a
+    // segment) becomes our own 400 shape instead of a pre-auth response.
+    let (mut parts, raw_body) = req.into_parts();
+    let Path((wallet, tenant)) = Path::<(String, String)>::from_request_parts(&mut parts, &state)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid path parameters: {e}") })),
+            )
+                .into_response()
+        })?;
+
+    // Buffer the body (post-auth) via axum's own `Bytes` extractor — same
+    // body-limit-bounded read as the extractor position; a read failure
+    // returns the extractor's own rejection (now safely behind auth).
+    let body = axum::body::Bytes::from_request(Request::from_parts(parts, raw_body), &state)
+        .await
+        .map_err(|e| e.into_response())?;
 
     // Parse the body ourselves (post-auth). `deny_unknown_fields` rejections
     // surface here as our own 400 shape, same as malformed JSON.
@@ -379,6 +413,33 @@ pub async fn provision_tenant_budget(
         tenant = %tenant,
         created = inserted,
         "tenant budget provisioned"
+    );
+
+    // Audit-log parity with the structural sibling `set_wallet_budget`
+    // (`routes/orgs/budget.rs`, `budget.wallet_updated`). `log_audit` is
+    // fire-and-forget internally (rule #9): it never blocks the response and
+    // an audit failure never fails the request. Never log header contents —
+    // the canonical caps + created flag only.
+    log_audit(
+        pool,
+        AuditEntry {
+            org_id: None,
+            // Admin-only route (token gate above), so this entry is
+            // attributable to a privileged operator action.
+            actor_wallet: None,
+            actor_api_key: None,
+            actor_admin: true,
+            action: "budget.tenant_provisioned".to_string(),
+            resource_type: "tenant_budget".to_string(),
+            resource_id: Some(format!("{wallet}:{tenant}")),
+            details: Some(json!({
+                "hourly_limit_usdc": &caps.hourly,
+                "daily_limit_usdc": &caps.daily,
+                "monthly_limit_usdc": &caps.monthly,
+                "created": inserted,
+            })),
+            ip_address: None,
+        },
     );
 
     let status = if inserted {

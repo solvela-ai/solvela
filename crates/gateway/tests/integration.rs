@@ -11146,6 +11146,89 @@ async fn test_tenant_provision_accepts_missing_content_type() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+#[tokio::test]
+async fn test_tenant_provision_hidden_404_for_invalid_utf8_path_without_admin_token() {
+    // Auth must be answered before PATH parsing, not just body parsing: with
+    // no admin token configured, a `%ff` (invalid-UTF-8 percent-encoding)
+    // wallet segment must get the same hidden 404 as every other
+    // unauthenticated shape — a pre-auth 400 from the `Path` extractor would
+    // let an unauthenticated caller detect that the route exists.
+    let app = test_app_without_admin_token();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            "%ff",
+            "acme",
+            Some("some-token"),
+            TENANT_CAPS_BODY,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "not found");
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_401_for_invalid_utf8_path_before_path_parsing() {
+    // Admin token configured, missing or wrong Bearer, `%ff` wallet segment:
+    // the auth gate must answer (401) before path parsing is even attempted.
+    for bearer in [None, Some("wrong-token")] {
+        let app = test_app();
+
+        let response = app
+            .oneshot(put_tenant_budget_request(
+                "%ff",
+                "acme",
+                bearer,
+                TENANT_CAPS_BODY,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "bearer {bearer:?}: auth must be answered before path parsing"
+        );
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "unauthorized");
+    }
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_400_for_invalid_utf8_path_with_valid_token() {
+    // Correct Bearer + `%ff` wallet segment: the path-parse failure surfaces
+    // POST-auth as the handler's own plain-JSON 400 shape, not the `Path`
+    // extractor's default text rejection.
+    let app = test_app();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            "%ff",
+            "acme",
+            Some(TEST_ADMIN_TOKEN),
+            TENANT_CAPS_BODY,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("path"),
+        "error should be the handler's own 400 shape naming the path: {error}"
+    );
+}
+
 // ── A2A Protocol Integration Tests ──────────────────────────────────────────
 
 #[tokio::test]

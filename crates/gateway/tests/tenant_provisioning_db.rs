@@ -261,6 +261,55 @@ async fn provision_all_null_caps_creates_uncapped_row(pool: PgPool) {
     assert_eq!(row, (None, None, None), "all three caps must be NULL");
 }
 
+/// A successful provision must write an `audit_logs` row — parity with the
+/// structural sibling `set_wallet_budget` (`budget.wallet_updated`). The
+/// write is fire-and-forget (`tokio::spawn` inside `log_audit`), so poll
+/// briefly instead of asserting immediately after the response.
+#[sqlx::test(migrations = "../../migrations")]
+async fn provision_writes_audit_log_row(pool: PgPool) {
+    let wallet = random_pubkey_wallet();
+    let app = provisioning_router(
+        UsageTracker::new(Some(pool.clone()), None),
+        Some(pool.clone()),
+    );
+    let (status, json) = put_tenant_budget(
+        app,
+        &wallet,
+        "acme",
+        r#"{"hourly_limit_usdc":null,"daily_limit_usdc":"5.000000","monthly_limit_usdc":"90.000000"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{json}");
+
+    let resource_id = format!("{wallet}:acme");
+    let mut row: Option<(bool, String, Option<serde_json::Value>)> = None;
+    for _ in 0..100 {
+        row = sqlx::query_as(
+            r#"SELECT actor_admin, resource_type, details
+               FROM audit_logs
+               WHERE action = 'budget.tenant_provisioned' AND resource_id = $1"#,
+        )
+        .bind(&resource_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("query audit_logs");
+        if row.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let (actor_admin, resource_type, details) =
+        row.expect("provision must write a budget.tenant_provisioned audit_logs row");
+    assert!(actor_admin, "provision is an admin-token action");
+    assert_eq!(resource_type, "tenant_budget");
+    let details = details.expect("audit details JSON");
+    assert!(details["hourly_limit_usdc"].is_null());
+    assert_eq!(details["daily_limit_usdc"], "5.000000");
+    assert_eq!(details["monthly_limit_usdc"], "90.000000");
+    assert_eq!(details["created"], true);
+}
+
 /// A successful provision must DELETE the `tenant_budget:{wallet}:{tenant}`
 /// Redis key — otherwise the 60s budget-config cache (including its negative
 /// "none" sentinel) can keep rejecting a freshly provisioned tenant under
