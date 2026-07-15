@@ -5,7 +5,11 @@
 > feature lists the exact switch to flip it. See [`STATUS.md`](../../STATUS.md) for the
 > chronological deploy log.
 >
-> Last reviewed: 2026-07-14 (Fly v457).
+> Last reviewed: 2026-07-14 late (Fly v463).
+>
+> **Correction (2026-07-14):** the first revision of this page listed escrow and the payment
+> channel as dormant. A prod secrets audit showed both had been **enabled since ~2026-07-05**
+> (when the channel disbursement slice shipped). This page now reflects the audited state.
 
 ## Live in production
 
@@ -26,18 +30,18 @@ These are on right now and serve real traffic.
 | **Agent toolbelt** | `POST /v1/search`, `POST /v1/solana/price`, discovery via `GET /v1/services` (#708/#712). |
 | **`/metrics`** | Prometheus, gated by `SOLVELA_ADMIN_TOKEN` (Bearer). |
 | **Org / team / API-key / audit / budget** | Enterprise hierarchy; active when `DATABASE_URL` is set. |
+| **Escrow payment scheme** (mainnet) | `SOLVELA_SOLANA__ESCROW_PROGRAM_ID` set since ~2026-07-05; 402 advertises `exact` + `escrow`. Deposit→claim→expiry-refund proven end-to-end on devnet 2026-07-14. Caveat: upgrade authority is a warm single-sig ([#175](https://github.com/solvela-ai/solvela/issues/175) — Squads multisig is the fast-follow). |
+| **Payment-channel voucher settlement** (mainnet) | `SOLVELA_CHANNEL__ENABLED=true` since ~2026-07-05, bounded: 100 USDC max deposit, 500 USDC/day refund cap. Open→draw→close→refund proven on devnet 2026-07-14. Refund phantom-confirm ([#743](https://github.com/solvela-ai/solvela/issues/743)) fixed in [#746](https://github.com/solvela-ai/solvela/pull/746) (v463): per-obligation memo + landed-tx verification before any row is stamped confirmed. |
+| **Gas-drip faucet** (USDC-only onboarding, mainnet) | **Enabled 2026-07-14** (v462) after Tier-3 hardening ([#742](https://github.com/solvela-ai/solvela/pull/742)) and a full devnet drip proof. Small capped float: 0.01 SOL per drip, 1 SOL/day cap, once-per-wallet, requires ≥0.1 USDC in the wallet. |
 
 ## Dormant — built, off by default
 
-Fully built and merged, shipped **disabled**. This is deliberate optionality — the switch is
-already there; flipping it is a config change, not a build. Do **not** enable on mainnet
-without proving the money path on devnet first.
-
-| Feature | Off switch (default) | How to turn on | Before enabling on mainnet |
-|---|---|---|---|
-| **Escrow payment scheme** (trustless USDC-SPL escrow program) | `solana.escrow_program_id` unset → 402 advertises `exact` only | Set `SOLVELA_SOLANA__ESCROW_PROGRAM_ID=<program id>` | Prove deposit→claim→refund on devnet. Note: escrow program upgrade authority is a warm single-sig ([#175](https://github.com/solvela-ai/solvela/issues/175), open — Squads multisig is the fast-follow). |
-| **Payment-channel voucher settlement** (spend-down channel) | `channel.enabled = false` | `SOLVELA_CHANNEL__ENABLED=true` | Prove open→draw→refund on devnet; refund worker must be running. |
-| **Gas-drip faucet** (USDC-only onboarding) | `faucet.enabled = false` (also inert without a source key) | `SOLVELA_FAUCET__ENABLED=true` **and** `SOLVELA_FAUCET__SOURCE_KEY=<key>` | Finish abuse hardening (Tier-3 F8–F21) + live devnet drip; cap the SOL float and rate-limit. |
+**Currently empty.** Escrow, the payment channel, and the faucet all graduated to live
+(see above). Their kill switches remain one env flip away — unset
+`SOLVELA_SOLANA__ESCROW_PROGRAM_ID`, set `SOLVELA_CHANNEL__ENABLED=false`, or set
+`SOLVELA_FAUCET__ENABLED=false` — and the gateway degrades to the exact-only core with no
+redeploy. (The channel refund worker deliberately keeps draining already-frozen refund
+obligations even when `channel.enabled=false`.)
 
 ## Not built / parked
 
