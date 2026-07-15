@@ -42,10 +42,14 @@ use cost::{
 };
 use payment::{decode_payment_from_header, extract_payment_info, fire_escrow_claim};
 use provider::{ProviderCallContext, ProviderCallError, ProviderCallResult};
-use response::{build_session_token, validate_session_id, validate_tenant};
+use response::{build_session_token, validate_session_id};
 
 // Re-export `uses_durable_nonce` for use by `crate::routes::proxy`
 pub(crate) use payment::uses_durable_nonce;
+// Re-export `validate_tenant` for `crate::routes::tenants`: the provisioning
+// endpoint must accept exactly the tag alphabet the chat path can produce
+// (a row under any other tag would be dead config).
+pub(crate) use response::validate_tenant;
 
 /// Maximum number of messages allowed in a single chat request.
 /// Prevents excessive memory usage and cost from very long conversations.
