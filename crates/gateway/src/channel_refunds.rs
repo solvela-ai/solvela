@@ -1068,12 +1068,21 @@ impl RefundWorker {
         tx_signature: &str,
         signed_tx: &[u8],
     ) -> bool {
+        // EVERY failure branch below increments the confirm-verify-failed
+        // family, `reason`-labeled per repo convention (receipts.rs), so no
+        // confirm-gate refusal is ever signal-less; `recipient_wallet_invalid`
+        // is the config-shaped series, distinguishable from row-shaped ones.
         let guard = HoldGuard::FromInFlight {
             expected_signature: Some(tx_signature),
         };
         let Ok(destination) =
             solvela_x402::escrow::pda::decode_bs58_pubkey(&row.destination_wallet)
         else {
+            metrics::counter!(
+                "solvela_channel_refund_confirm_verify_failed_total",
+                "reason" => "corrupt_destination"
+            )
+            .increment(1);
             error!(
                 channel_id = %row.channel_id,
                 "refund worker: corrupt frozen destination_wallet at confirm — holding"
@@ -1082,6 +1091,11 @@ impl RefundWorker {
             return false;
         };
         let Ok(mint) = solvela_x402::escrow::pda::decode_bs58_pubkey(&row.mint) else {
+            metrics::counter!(
+                "solvela_channel_refund_confirm_verify_failed_total",
+                "reason" => "corrupt_mint"
+            )
+            .increment(1);
             error!(
                 channel_id = %row.channel_id,
                 "refund worker: corrupt frozen mint at confirm — holding"
@@ -1091,6 +1105,15 @@ impl RefundWorker {
         };
         let Ok(owner) = solvela_x402::escrow::pda::decode_bs58_pubkey(&self.recipient_wallet)
         else {
+            // Config-shaped, not row-shaped: retain in_flight (holding would
+            // strand a healthy row over a fixable config), but never
+            // signal-less — this series is the alert surface for the window
+            // where startup wallet validation was skipped.
+            metrics::counter!(
+                "solvela_channel_refund_confirm_verify_failed_total",
+                "reason" => "recipient_wallet_invalid"
+            )
+            .increment(1);
             error!(
                 channel_id = %row.channel_id,
                 "refund worker: recipient_wallet is not a valid pubkey — cannot verify the \
@@ -1111,8 +1134,11 @@ impl RefundWorker {
         match solvela_x402::usdc_transfer::verify_signed_usdc_transfer(signed_tx, &expected) {
             Ok(()) => true,
             Err(e) => {
-                metrics::counter!("solvela_channel_refund_confirm_verify_failed_total")
-                    .increment(1);
+                metrics::counter!(
+                    "solvela_channel_refund_confirm_verify_failed_total",
+                    "reason" => "verify_mismatch"
+                )
+                .increment(1);
                 error!(
                     channel_id = %row.channel_id,
                     tx_signature,
@@ -2594,6 +2620,16 @@ mod tests {
             confirmation_status: Some("confirmed".to_string()),
         });
         let worker = test_worker(pool.clone(), rpc.clone());
+        // Pin the alert surface, not just the status flip: a refactor
+        // dropping the counter call must fail here. `after > before` on the
+        // reason-filtered series is the interference-safe form (sibling
+        // parallel tests may also bump the family — see held_total's note).
+        let metrics_handle = crate::cache::test_metrics::install_test_recorder();
+        let verify_failed_before = crate::cache::test_metrics::counter_value_filtered(
+            &metrics_handle,
+            "solvela_channel_refund_confirm_verify_failed_total",
+            "verify_mismatch",
+        );
         tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
         worker.sweep().await;
 
@@ -2601,6 +2637,16 @@ mod tests {
         assert_eq!(
             row.status, "held",
             "a landed tx that pays a sibling must never confirm this row"
+        );
+        let verify_failed_after = crate::cache::test_metrics::counter_value_filtered(
+            &metrics_handle,
+            "solvela_channel_refund_confirm_verify_failed_total",
+            "verify_mismatch",
+        );
+        assert!(
+            verify_failed_after > verify_failed_before,
+            "the blocked phantom confirm must fire the verify-failed counter, \
+             got {verify_failed_before} -> {verify_failed_after}"
         );
         let ch = channels::load_channel(&pool, &cid).await.unwrap().unwrap();
         assert_ne!(
@@ -2635,6 +2681,12 @@ mod tests {
             confirmation_status: Some("confirmed".to_string()),
         });
         let worker = test_worker(pool.clone(), rpc.clone());
+        let metrics_handle = crate::cache::test_metrics::install_test_recorder();
+        let verify_failed_before = crate::cache::test_metrics::counter_value_filtered(
+            &metrics_handle,
+            "solvela_channel_refund_confirm_verify_failed_total",
+            "verify_mismatch",
+        );
         tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
         worker.sweep().await;
 
@@ -2642,6 +2694,79 @@ mod tests {
         assert_eq!(
             row.status, "held",
             "memoless bytes cannot prove which obligation the landed tx paid"
+        );
+        let verify_failed_after = crate::cache::test_metrics::counter_value_filtered(
+            &metrics_handle,
+            "solvela_channel_refund_confirm_verify_failed_total",
+            "verify_mismatch",
+        );
+        assert!(
+            verify_failed_after > verify_failed_before,
+            "the blocked phantom confirm must fire the verify-failed counter, \
+             got {verify_failed_before} -> {verify_failed_after}"
+        );
+        let ch = channels::load_channel(&pool, &cid).await.unwrap().unwrap();
+        assert_ne!(ch.status, "closed");
+        assert!(rpc.sends.lock().unwrap().is_empty(), "nothing broadcast");
+    }
+
+    /// Config-shaped confirm-gate failure (finding 1 of the #743 review): an
+    /// operational `recipient_wallet` that does not decode must RETAIN the
+    /// row `in_flight` (holding would strand a healthy row over a fixable
+    /// config error) while firing the distinguishable
+    /// `reason="recipient_wallet_invalid"` series, so the narrow window
+    /// where startup wallet validation was skipped is never signal-less.
+    #[tokio::test]
+    async fn worker_retains_in_flight_when_recipient_wallet_invalid_at_confirm() {
+        let Some(pool) = isolated_db("confirm_bad_recipient").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        let signed = signed_refund_bytes(Some(&refund_memo(&cid)), 46_220);
+        claim_signed(&pool, &cid, &signed).await;
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.status.lock().unwrap() = Some(SignatureStatus {
+            err: None,
+            confirmation_status: Some("confirmed".to_string()),
+        });
+        // Worker with an undecodable recipient wallet (and no signer — the
+        // confirm path must not need one).
+        let worker = RefundWorker::new(
+            pool.clone(),
+            rpc.clone(),
+            None,
+            "not base58 0OIl".to_string(),
+            None,
+        );
+        let metrics_handle = crate::cache::test_metrics::install_test_recorder();
+        let config_failed_before = crate::cache::test_metrics::counter_value_filtered(
+            &metrics_handle,
+            "solvela_channel_refund_confirm_verify_failed_total",
+            "recipient_wallet_invalid",
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(
+            row.status, "in_flight",
+            "a config error must retain the row, never hold or confirm it"
+        );
+        let config_failed_after = crate::cache::test_metrics::counter_value_filtered(
+            &metrics_handle,
+            "solvela_channel_refund_confirm_verify_failed_total",
+            "recipient_wallet_invalid",
+        );
+        assert!(
+            config_failed_after > config_failed_before,
+            "the config-shaped refusal must fire its own counter series, \
+             got {config_failed_before} -> {config_failed_after}"
         );
         let ch = channels::load_channel(&pool, &cid).await.unwrap().unwrap();
         assert_ne!(ch.status, "closed");

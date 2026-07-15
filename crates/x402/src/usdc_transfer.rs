@@ -1049,6 +1049,104 @@ mod tests {
         ));
     }
 
+    /// A multi-signature framing can never be the worker's own single-signer
+    /// transfer — reject on count before any content is trusted.
+    #[test]
+    fn verify_rejects_multi_signature_transaction() {
+        let (owner, _) = test_owner_keypair();
+        let signed = signed_with_memo(TEST_MEMO);
+        // Re-frame the wire bytes as a 2-signature transaction.
+        let mut wire = vec![2u8];
+        wire.extend_from_slice(&signed.wire_bytes[1..65]);
+        wire.extend_from_slice(&signed.wire_bytes[1..65]);
+        wire.extend_from_slice(&signed.wire_bytes[65..]);
+        assert!(matches!(
+            verify_signed_usdc_transfer(
+                &wire,
+                &expected_transfer(
+                    &signed.signature_b58,
+                    &owner,
+                    &test_destination(),
+                    &test_mint(),
+                    TEST_MEMO,
+                ),
+            ),
+            Err(UsdcTransferVerifyError::SignatureCount(2))
+        ));
+    }
+
+    /// A properly-signed message whose TransferChecked mint account is NOT
+    /// the obligation mint must fail on the mint check specifically. The
+    /// mint account key (index 4) is corrupted while the already-derived
+    /// destination-ATA bytes stay untouched, then the message is RE-SIGNED so
+    /// no earlier check can mask the mint comparison.
+    #[test]
+    fn verify_rejects_wrong_mint_account() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let (owner, keypair) = test_owner_keypair();
+        let mut msg = build_usdc_transfer_checked_with_memo_message(
+            &owner,
+            &test_destination(),
+            &test_mint(),
+            TEST_AMOUNT,
+            &TEST_BLOCKHASH,
+            TEST_MEMO,
+        )
+        .expect("builds");
+        // Account key 4 (the mint) starts at 4 + 4*32: header(3) + count(1).
+        let mint_offset = 4 + 4 * 32;
+        msg[mint_offset] ^= 0xFF;
+        let signing_key = SigningKey::from_keypair_bytes(&keypair).expect("valid keypair");
+        let signature = signing_key.sign(&msg);
+        let mut wire = vec![1u8];
+        wire.extend_from_slice(&signature.to_bytes());
+        wire.extend_from_slice(&msg);
+        let signature_b58 = bs58::encode(signature.to_bytes()).into_string();
+        assert!(matches!(
+            verify_signed_usdc_transfer(
+                &wire,
+                &expected_transfer(
+                    &signature_b58,
+                    &owner,
+                    &test_destination(),
+                    &test_mint(),
+                    TEST_MEMO,
+                ),
+            ),
+            Err(UsdcTransferVerifyError::MintMismatch)
+        ));
+    }
+
+    /// An expected source owner that is not a valid ed25519 encoding must be
+    /// rejected up front, never treated as "verification unavailable".
+    #[test]
+    fn verify_rejects_invalid_owner_key() {
+        let signed = signed_with_memo(TEST_MEMO);
+        // Deterministically pick a y-encoding that fails point decompression
+        // (about half of all field elements do; the first hit is stable).
+        let invalid_owner = (0u8..=255)
+            .map(|b| {
+                let mut k = [0u8; 32];
+                k[0] = b;
+                k
+            })
+            .find(|k| ed25519_dalek::VerifyingKey::from_bytes(k).is_err())
+            .expect("some single-byte y must not be on the curve");
+        assert!(matches!(
+            verify_signed_usdc_transfer(
+                &signed.wire_bytes,
+                &expected_transfer(
+                    &signed.signature_b58,
+                    &invalid_owner,
+                    &test_destination(),
+                    &test_mint(),
+                    TEST_MEMO,
+                ),
+            ),
+            Err(UsdcTransferVerifyError::InvalidOwnerKey)
+        ));
+    }
+
     #[test]
     fn verify_rejects_garbage_bytes() {
         let (owner, _) = test_owner_keypair();
