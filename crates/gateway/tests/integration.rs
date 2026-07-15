@@ -10674,9 +10674,9 @@ async fn test_admin_stats_returns_401_without_auth_header() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
-async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
-    // Build a custom app with admin_token = None
+/// Build a test app with NO admin token configured (`admin_token: None`), so
+/// admin-gated endpoints can prove they hide themselves entirely (404).
+fn test_app_without_admin_token() -> axum::Router {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
     let facilitator =
@@ -10720,11 +10720,16 @@ async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
         deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
         free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
     });
-    let app = build_router(
+    build_router(
         Arc::clone(&state),
         RateLimiter::new(RateLimitConfig::default()),
     )
-    .expect("test router builds: default request timeout is valid");
+    .expect("test router builds: default request timeout is valid")
+}
+
+#[tokio::test]
+async fn test_admin_stats_returns_404_when_admin_token_not_configured() {
+    let app = test_app_without_admin_token();
 
     let response = app
         .oneshot(
@@ -10787,6 +10792,441 @@ async fn test_admin_stats_returns_400_for_days_over_365() {
     let error = json["error"].as_str().unwrap();
     assert!(error.contains("days must be between 1 and 365"));
     assert!(error.contains("999"));
+}
+
+// ---------------------------------------------------------------------------
+// Tenant-budget provisioning endpoint tests
+// (PUT /v1/wallet/{wallet}/tenants/{tenant})
+// ---------------------------------------------------------------------------
+
+/// Well-formed provisioning body used wherever the caps themselves are not
+/// under test.
+const TENANT_CAPS_BODY: &str =
+    r#"{"hourly_limit_usdc":null,"daily_limit_usdc":"5.000000","monthly_limit_usdc":"90.000000"}"#;
+
+/// Build a `PUT /v1/wallet/{wallet}/tenants/{tenant}` request.
+fn put_tenant_budget_request(
+    wallet: &str,
+    tenant: &str,
+    bearer: Option<&str>,
+    body: &str,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("PUT")
+        .uri(format!("/v1/wallet/{wallet}/tenants/{tenant}"))
+        .header("content-type", "application/json");
+    if let Some(token) = bearer {
+        builder = builder.header("Authorization", format!("Bearer {token}"));
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_404_when_admin_token_not_configured() {
+    let app = test_app_without_admin_token();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            TEST_RECIPIENT_WALLET_VALID,
+            "acme",
+            Some("some-token"),
+            TENANT_CAPS_BODY,
+        ))
+        .await
+        .unwrap();
+
+    // Endpoint is hidden when admin_token is not configured
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_401_with_wrong_token() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            TEST_RECIPIENT_WALLET_VALID,
+            "acme",
+            Some("wrong-token"),
+            TENANT_CAPS_BODY,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "unauthorized");
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_400_for_invalid_wallet() {
+    let app = test_app();
+
+    // Contains characters that are not base58 (`-`, `l`, `0`), so it cannot
+    // decode to a 32-byte pubkey.
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            "not-a-wallet-0l",
+            "acme",
+            Some(TEST_ADMIN_TOKEN),
+            TENANT_CAPS_BODY,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("wallet"),
+        "error should name the wallet: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_400_for_oversized_tenant() {
+    let app = test_app();
+
+    let long_tenant = "a".repeat(65); // one over the 64-char limit
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            TEST_RECIPIENT_WALLET_VALID,
+            &long_tenant,
+            Some(TEST_ADMIN_TOKEN),
+            TENANT_CAPS_BODY,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("tenant"),
+        "error should name the tenant: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_400_for_tenant_with_invalid_chars() {
+    let app = test_app();
+
+    // `!` is a legal URI sub-delim so it survives routing, but it is outside
+    // the tenant alphabet `[a-zA-Z0-9._-]`. On the chat path this means
+    // "proceed untagged"; here it must be a hard 400.
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            TEST_RECIPIENT_WALLET_VALID,
+            "acme!corp",
+            Some(TEST_ADMIN_TOKEN),
+            TENANT_CAPS_BODY,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("tenant"),
+        "error should name the tenant: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_400_for_bad_cap_decimals() {
+    // Fail-closed cap parsing: negative, >6dp, non-numeric, and
+    // over-DECIMAL(18,6) magnitudes must all be rejected with the offending
+    // field named — never coerced to $0 or clamped.
+    let cases = [
+        (
+            "negative",
+            r#"{"daily_limit_usdc":"-5.000000"}"#,
+            "daily_limit_usdc",
+        ),
+        (
+            "seven dp",
+            r#"{"daily_limit_usdc":"5.0000001"}"#,
+            "daily_limit_usdc",
+        ),
+        (
+            "non-numeric",
+            r#"{"hourly_limit_usdc":"abc"}"#,
+            "hourly_limit_usdc",
+        ),
+        (
+            "13-digit integer part",
+            r#"{"monthly_limit_usdc":"1234567890123"}"#,
+            "monthly_limit_usdc",
+        ),
+        (
+            "exponent",
+            r#"{"daily_limit_usdc":"1e6"}"#,
+            "daily_limit_usdc",
+        ),
+        (
+            "nan",
+            r#"{"monthly_limit_usdc":"NaN"}"#,
+            "monthly_limit_usdc",
+        ),
+    ];
+
+    for (label, body, field) in cases {
+        let app = test_app();
+        let response = app
+            .oneshot(put_tenant_budget_request(
+                TEST_RECIPIENT_WALLET_VALID,
+                "acme",
+                Some(TEST_ADMIN_TOKEN),
+                body,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "case {label:?} must be rejected"
+        );
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let error = json["error"].as_str().unwrap();
+        assert!(
+            error.contains(field),
+            "case {label:?}: error should name {field}: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_tenant_provision_all_null_caps_pass_validation() {
+    // All three windows null is ACCEPTED (provisions the tenant with no caps).
+    // With no DB configured the request must clear validation and stop at the
+    // DB gate (503) — NOT be rejected as 400.
+    let app = test_app();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            TEST_RECIPIENT_WALLET_VALID,
+            "acme",
+            Some(TEST_ADMIN_TOKEN),
+            r#"{"hourly_limit_usdc":null,"daily_limit_usdc":null,"monthly_limit_usdc":null}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_503_without_db() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            TEST_RECIPIENT_WALLET_VALID,
+            "acme",
+            Some(TEST_ADMIN_TOKEN),
+            TENANT_CAPS_BODY,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "database not configured");
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_400_for_unknown_field() {
+    // A typo'd cap field ("daily_limit" for "daily_limit_usdc") must be a hard
+    // 400, never silently dropped — `#[serde(default)]` would otherwise fill
+    // None and 2xx-provision an UNCAPPED window with zero log signal.
+    let app = test_app();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            TEST_RECIPIENT_WALLET_VALID,
+            "acme",
+            Some(TEST_ADMIN_TOKEN),
+            r#"{"daily_limit":"5.000000"}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("unknown field"),
+        "error should say the field is unknown: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_tenant_provision_hidden_404_for_malformed_body_without_admin_token() {
+    // Auth must run BEFORE body parsing: with no admin token configured, even
+    // a garbage body must get the hidden 404 — a pre-auth 400/415 from a body
+    // extractor would let an unauthenticated caller detect the route exists.
+    let app = test_app_without_admin_token();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            TEST_RECIPIENT_WALLET_VALID,
+            "acme",
+            Some("some-token"),
+            "{not json",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_400_for_malformed_json_with_valid_token() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            TEST_RECIPIENT_WALLET_VALID,
+            "acme",
+            Some(TEST_ADMIN_TOKEN),
+            "{not json",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("invalid JSON"),
+        "error should be the handler's own 400 shape: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_tenant_provision_accepts_missing_content_type() {
+    // The handler parses the body itself (Bytes, not the Json extractor), so
+    // there is deliberately NO Content-Type requirement — a valid JSON body
+    // without the header must clear parsing/validation and stop at the DB
+    // gate (503 in this DB-less app), not 415 pre-auth.
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/v1/wallet/{TEST_RECIPIENT_WALLET_VALID}/tenants/acme"
+                ))
+                .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+                .body(Body::from(TENANT_CAPS_BODY))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_tenant_provision_hidden_404_for_invalid_utf8_path_without_admin_token() {
+    // Auth must be answered before PATH parsing, not just body parsing: with
+    // no admin token configured, a `%ff` (invalid-UTF-8 percent-encoding)
+    // wallet segment must get the same hidden 404 as every other
+    // unauthenticated shape — a pre-auth 400 from the `Path` extractor would
+    // let an unauthenticated caller detect that the route exists.
+    let app = test_app_without_admin_token();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            "%ff",
+            "acme",
+            Some("some-token"),
+            TENANT_CAPS_BODY,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "not found");
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_401_for_invalid_utf8_path_before_path_parsing() {
+    // Admin token configured, missing or wrong Bearer, `%ff` wallet segment:
+    // the auth gate must answer (401) before path parsing is even attempted.
+    for bearer in [None, Some("wrong-token")] {
+        let app = test_app();
+
+        let response = app
+            .oneshot(put_tenant_budget_request(
+                "%ff",
+                "acme",
+                bearer,
+                TENANT_CAPS_BODY,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "bearer {bearer:?}: auth must be answered before path parsing"
+        );
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "unauthorized");
+    }
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_400_for_invalid_utf8_path_with_valid_token() {
+    // Correct Bearer + `%ff` wallet segment: the path-parse failure surfaces
+    // POST-auth as the handler's own plain-JSON 400 shape, not the `Path`
+    // extractor's default text rejection.
+    let app = test_app();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            "%ff",
+            "acme",
+            Some(TEST_ADMIN_TOKEN),
+            TENANT_CAPS_BODY,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("path"),
+        "error should be the handler's own 400 shape naming the path: {error}"
+    );
 }
 
 // ── A2A Protocol Integration Tests ──────────────────────────────────────────
