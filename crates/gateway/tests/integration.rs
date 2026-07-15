@@ -11048,6 +11048,104 @@ async fn test_tenant_provision_returns_503_without_db() {
     assert_eq!(json["error"], "database not configured");
 }
 
+#[tokio::test]
+async fn test_tenant_provision_returns_400_for_unknown_field() {
+    // A typo'd cap field ("daily_limit" for "daily_limit_usdc") must be a hard
+    // 400, never silently dropped — `#[serde(default)]` would otherwise fill
+    // None and 2xx-provision an UNCAPPED window with zero log signal.
+    let app = test_app();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            TEST_RECIPIENT_WALLET_VALID,
+            "acme",
+            Some(TEST_ADMIN_TOKEN),
+            r#"{"daily_limit":"5.000000"}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("unknown field"),
+        "error should say the field is unknown: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_tenant_provision_hidden_404_for_malformed_body_without_admin_token() {
+    // Auth must run BEFORE body parsing: with no admin token configured, even
+    // a garbage body must get the hidden 404 — a pre-auth 400/415 from a body
+    // extractor would let an unauthenticated caller detect the route exists.
+    let app = test_app_without_admin_token();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            TEST_RECIPIENT_WALLET_VALID,
+            "acme",
+            Some("some-token"),
+            "{not json",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_tenant_provision_returns_400_for_malformed_json_with_valid_token() {
+    let app = test_app();
+
+    let response = app
+        .oneshot(put_tenant_budget_request(
+            TEST_RECIPIENT_WALLET_VALID,
+            "acme",
+            Some(TEST_ADMIN_TOKEN),
+            "{not json",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("invalid JSON"),
+        "error should be the handler's own 400 shape: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_tenant_provision_accepts_missing_content_type() {
+    // The handler parses the body itself (Bytes, not the Json extractor), so
+    // there is deliberately NO Content-Type requirement — a valid JSON body
+    // without the header must clear parsing/validation and stop at the DB
+    // gate (503 in this DB-less app), not 415 pre-auth.
+    let app = test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/v1/wallet/{TEST_RECIPIENT_WALLET_VALID}/tenants/acme"
+                ))
+                .header("Authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+                .body(Body::from(TENANT_CAPS_BODY))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
 // ── A2A Protocol Integration Tests ──────────────────────────────────────────
 
 #[tokio::test]

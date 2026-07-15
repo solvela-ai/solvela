@@ -37,7 +37,15 @@ use crate::AppState;
 /// Request body for tenant-budget provisioning. Each window is independently
 /// nullable (`null` = no cap on that window); values are 6-dp USDC decimal
 /// strings, the same contract as the stats read side.
+///
+/// `#[serde(deny_unknown_fields)]`: a money-path request must reject an
+/// unknown field rather than silently ignore it — a typo like
+/// `"daily_limit"` (or a camelCase spelling from an external provisioner)
+/// would otherwise drop the caller's intended cap, `#[serde(default)]` would
+/// fill `None`, and the endpoint would 2xx-provision an UNCAPPED window with
+/// zero log signal. Same convention as `routes::channel` / `routes::escrow`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProvisionTenantBudgetRequest {
     #[serde(default)]
     pub hourly_limit_usdc: Option<String>,
@@ -123,6 +131,8 @@ pub(crate) fn format_cap_6dp(atomic: u64) -> String {
 
 /// Parse one optional cap field, mapping a parse failure to a descriptive
 /// 400 that names the offending field.
+// result_large_err: the Err arm is a full axum `Response` by value, which is
+// large but is the route-handler error convention here (see admin_stats).
 #[allow(clippy::result_large_err)]
 fn parse_cap_field(value: Option<&str>, field: &str) -> Result<Option<u64>, Response> {
     match value {
@@ -137,19 +147,62 @@ fn parse_cap_field(value: Option<&str>, field: &str) -> Result<Option<u64>, Resp
     }
 }
 
+/// The three cap windows after fail-closed parsing, normalized to canonical
+/// 6-dp strings (`None` = no cap on that window). These exact strings are
+/// bound into the upsert (via `::numeric`) and echoed in the response body.
+struct ValidatedCaps {
+    hourly: Option<String>,
+    daily: Option<String>,
+    monthly: Option<String>,
+}
+
+impl ValidatedCaps {
+    fn all_none(&self) -> bool {
+        self.hourly.is_none() && self.daily.is_none() && self.monthly.is_none()
+    }
+}
+
+/// Validate all three cap fields of the request body, or produce the 400 for
+/// the first offending field.
+// result_large_err: the Err arm is a full axum `Response` by value (route
+// convention).
+#[allow(clippy::result_large_err)]
+fn validate_caps(body: &ProvisionTenantBudgetRequest) -> Result<ValidatedCaps, Response> {
+    let hourly = parse_cap_field(body.hourly_limit_usdc.as_deref(), "hourly_limit_usdc")?;
+    let daily = parse_cap_field(body.daily_limit_usdc.as_deref(), "daily_limit_usdc")?;
+    let monthly = parse_cap_field(body.monthly_limit_usdc.as_deref(), "monthly_limit_usdc")?;
+    Ok(ValidatedCaps {
+        hourly: hourly.map(format_cap_6dp),
+        daily: daily.map(format_cap_6dp),
+        monthly: monthly.map(format_cap_6dp),
+    })
+}
+
 /// `PUT /v1/wallet/{wallet}/tenants/{tenant}`
 ///
 /// Idempotently provision (upsert) a `tenant_budgets` row. Returns 201 with
 /// the stored caps when the row was created, 200 when an existing row was
 /// updated. Protected by admin token (Bearer auth).
+///
+/// The body is taken as raw [`Bytes`](axum::body::Bytes) and parsed inside
+/// the handler — NOT via the `Json` extractor — so the admin-token gate runs
+/// before any body/Content-Type processing: a pre-auth 400/415/422 from an
+/// extractor would let an unauthenticated caller detect that the route
+/// exists, contradicting the hidden-404 contract above. Consequence
+/// (intended): there is no Content-Type requirement — any body that parses
+/// as the JSON request type is accepted.
+///
+/// Flow: auth → parse body → validate (wallet, tenant, caps) → DB gate →
+/// upsert → cache-bust.
 pub async fn provision_tenant_budget(
     State(state): State<Arc<AppState>>,
     Path((wallet, tenant)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(body): Json<ProvisionTenantBudgetRequest>,
+    body: axum::body::Bytes,
 ) -> Result<Response, Response> {
     // Gate behind admin token — if not configured, hide the endpoint entirely
-    // (same shape as `routes::admin_stats`).
+    // (same shape as `routes::admin_stats`). Keep this the FIRST check: no
+    // body parsing, no validation, no logging before auth.
     let admin_token = match &state.admin_token {
         Some(t) => t,
         None => {
@@ -173,6 +226,16 @@ pub async fn provision_tenant_budget(
         )
             .into_response());
     }
+
+    // Parse the body ourselves (post-auth). `deny_unknown_fields` rejections
+    // surface here as our own 400 shape, same as malformed JSON.
+    let body: ProvisionTenantBudgetRequest = serde_json::from_slice(&body).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("invalid JSON body: {e}") })),
+        )
+            .into_response()
+    })?;
 
     // Validate the wallet path param: must be a base58 32-byte Solana pubkey.
     // Fail closed — a typo'd wallet must not provision a row that enforcement
@@ -202,12 +265,13 @@ pub async fn provision_tenant_budget(
             .into_response());
     }
 
-    // Fail-closed cap parsing (all three windows independently nullable).
-    let hourly = parse_cap_field(body.hourly_limit_usdc.as_deref(), "hourly_limit_usdc")?;
-    let daily = parse_cap_field(body.daily_limit_usdc.as_deref(), "daily_limit_usdc")?;
-    let monthly = parse_cap_field(body.monthly_limit_usdc.as_deref(), "monthly_limit_usdc")?;
+    // Fail-closed cap parsing (all three windows independently nullable),
+    // normalized to canonical 6-dp strings: bound with a ::numeric cast so
+    // Postgres parses the exact decimal (never an f64 in between), and echoed
+    // verbatim in the response body.
+    let caps = validate_caps(&body)?;
 
-    if hourly.is_none() && daily.is_none() && monthly.is_none() {
+    if caps.all_none() {
         // Accepted (mirrors the hand-run SQL path: the row's existence is what
         // `require_tenant` gates on), but worth flagging: this tenant spends
         // uncapped on every window.
@@ -229,16 +293,12 @@ pub async fn provision_tenant_budget(
         }
     };
 
-    // Normalized 6-dp strings: bound with a ::numeric cast so Postgres parses
-    // the exact decimal (never an f64 in between), and echoed verbatim in the
-    // response body.
-    let hourly_str = hourly.map(format_cap_6dp);
-    let daily_str = daily.map(format_cap_6dp);
-    let monthly_str = monthly.map(format_cap_6dp);
-
     // NOT fire-and-forget (deliberate exception to CLAUDE.md rule #9, which
     // covers the paid hot path): the 2xx must mean the row durably exists.
     // `updated_at` is maintained by the migration-011 trigger — never set here.
+    // NOTE: the `(xmax = 0)` insert-vs-update signal requires the UNCONDITIONAL
+    // `DO UPDATE` — adding a `DO UPDATE ... WHERE` guard would break both the
+    // always-one-row guarantee of `fetch_one` and the 201/200 signal.
     let result: Result<(bool,), sqlx::Error> = sqlx::query_as(
         r#"INSERT INTO tenant_budgets
              (wallet_address, tenant, hourly_limit_usdc, daily_limit_usdc, monthly_limit_usdc)
@@ -251,9 +311,9 @@ pub async fn provision_tenant_budget(
     )
     .bind(&wallet)
     .bind(&tenant)
-    .bind(hourly_str.as_deref())
-    .bind(daily_str.as_deref())
-    .bind(monthly_str.as_deref())
+    .bind(caps.hourly.as_deref())
+    .bind(caps.daily.as_deref())
+    .bind(caps.monthly.as_deref())
     .fetch_one(pool)
     .await;
 
@@ -278,6 +338,11 @@ pub async fn provision_tenant_budget(
     // sentinel) so the fresh provision takes effect immediately under
     // `require_tenant`. Failure here must NOT fail the request — the TTL
     // bounds the staleness.
+    //
+    // Known bounded race (deliberately not engineered around): an enforcement
+    // read already in flight before the row landed can re-cache the "none"
+    // sentinel AFTER this DEL, so a fresh provision may still be rejected for
+    // up to 60s under `require_tenant`. Fail-closed and self-healing (TTL).
     if let Some(redis_client) = state.usage.redis_client() {
         match redis_client.get_multiplexed_async_connection().await {
             Ok(mut conn) => {
@@ -288,6 +353,8 @@ pub async fn provision_tenant_budget(
                     .await
                 {
                     tracing::warn!(
+                        wallet = %wallet,
+                        tenant = %tenant,
                         cache_key = %cache_key,
                         error = %e,
                         "failed to invalidate tenant budget cache (stale for up to its TTL)"
@@ -296,6 +363,8 @@ pub async fn provision_tenant_budget(
             }
             Err(e) => {
                 tracing::warn!(
+                    wallet = %wallet,
+                    tenant = %tenant,
                     error = %e,
                     "Redis unavailable for tenant budget cache invalidation"
                 );
@@ -320,9 +389,9 @@ pub async fn provision_tenant_budget(
         Json(json!({
             "wallet_address": wallet,
             "tenant": tenant,
-            "hourly_limit_usdc": hourly_str,
-            "daily_limit_usdc": daily_str,
-            "monthly_limit_usdc": monthly_str,
+            "hourly_limit_usdc": caps.hourly,
+            "daily_limit_usdc": caps.daily,
+            "monthly_limit_usdc": caps.monthly,
             "created": inserted,
         })),
     )
