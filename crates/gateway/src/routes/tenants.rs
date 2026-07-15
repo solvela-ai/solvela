@@ -186,11 +186,13 @@ fn validate_caps(body: &ProvisionTenantBudgetRequest) -> Result<ValidatedCaps, R
 ///
 /// The body is taken as raw [`Bytes`](axum::body::Bytes) and parsed inside
 /// the handler — NOT via the `Json` extractor — so the admin-token gate runs
-/// before any body/Content-Type processing: a pre-auth 400/415/422 from an
-/// extractor would let an unauthenticated caller detect that the route
-/// exists, contradicting the hidden-404 contract above. Consequence
-/// (intended): there is no Content-Type requirement — any body that parses
-/// as the JSON request type is accepted.
+/// before any body *parsing* or Content-Type check: a pre-auth 400/415/422
+/// from an extractor would let an unauthenticated caller detect that the
+/// route exists, contradicting the hidden-404 contract above. (Axum still
+/// buffers the body bytes pre-handler, bounded by the router-wide
+/// `RequestBodyLimitLayer` — same as every other body-consuming route.)
+/// Consequence (intended): there is no Content-Type requirement — any body
+/// that parses as the JSON request type is accepted.
 ///
 /// Flow: auth → parse body → validate (wallet, tenant, caps) → DB gate →
 /// upsert → cache-bust.
