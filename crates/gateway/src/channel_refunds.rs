@@ -45,6 +45,15 @@
 //!   already-acknowledged RPC-honesty residual (a `getSignatureStatuses` that
 //!   lies about a landed transfer), and a signature predicate there would only
 //!   change bookkeeping AFTER the USDC already moved;
+//! - every refund transaction embeds a per-obligation memo
+//!   (`solvela-refund:<channel_id>`, #743) so two obligations can NEVER be
+//!   byte-identical (identical bytes = one signature = cluster dedupe into a
+//!   single landed transfer, silently under-refunding every sibling), and a
+//!   confirm is stamped only after landed-tx CONTENT verification
+//!   ([`RefundWorker::verify_landed_refund`]): the persisted bytes must carry
+//!   the row's exact `tx_signature`, verify under the operational wallet's
+//!   key, and contain this row's memo + frozen transfer tuple — a
+//!   signature-status hit alone launders the dedupe into phantom confirms;
 //! - residual (documented, accepted): a send accepted on-chain in the same
 //!   instant a peer's never-accepted hold wins can leave a LANDED refund in
 //!   `held` under a "never accepted" reason — the late
@@ -133,6 +142,20 @@ pub fn compute_refundable(
             realized: realized_atomic,
         },
     )
+}
+
+/// The per-obligation memo embedded in every refund transaction (#743).
+///
+/// Without it, two refunds with an equal `(source, destination, mint,
+/// amount)` tuple signed against the same recent blockhash serialize
+/// byte-identical → one signature → the cluster dedupes them into a SINGLE
+/// landed transfer, and every sibling row then phantom-confirms off that
+/// signature's status (the devnet Wave-2 silent under-refund). The channel id
+/// is the reservation's primary key, so no two rows can ever share memo
+/// bytes. Also the confirm-side verification key
+/// ([`RefundWorker::handle_in_flight`]'s landed-tx content check).
+fn refund_memo(channel_id: &str) -> String {
+    format!("solvela-refund:{channel_id}")
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,13 +1024,131 @@ impl RefundWorker {
         };
 
         // Typed signing surface: the raw keypair never crosses the crate
-        // boundary; the owner is always the wallet's own pubkey.
-        match wallet.sign_usdc_transfer_checked(&destination, &mint, row.amount_atomic, &blockhash)
-        {
+        // boundary; the owner is always the wallet's own pubkey. The memo
+        // carries THIS row's channel id (#743) so no sibling obligation can
+        // ever produce byte-identical bytes and get deduped on-chain.
+        let memo = refund_memo(&row.channel_id);
+        match wallet.sign_usdc_transfer_checked_with_memo(
+            &destination,
+            &mint,
+            row.amount_atomic,
+            &blockhash,
+            &memo,
+        ) {
             Ok(signed) => Some((signed, last_valid_block_height)),
             Err(e) => {
                 error!(channel_id = %row.channel_id, error = %e, "refund worker: signing failed");
                 None
+            }
+        }
+    }
+
+    /// The #743 confirm gate: prove the landed transaction pays THIS
+    /// obligation before the confirm CAS may stamp it. Returns `true` only on
+    /// full verification.
+    ///
+    /// Entirely local — no `getTransaction` round-trip: the cluster confirmed
+    /// `tx_signature`; an ed25519 signature commits to its message bytes; so
+    /// checking that the PERSISTED bytes (a) carry exactly that signature,
+    /// (b) verify under the operational wallet's key, and (c) contain this
+    /// row's memo (`solvela-refund:<channel_id>`) plus the frozen
+    /// `(destination, mint, amount)` transfer IS checking the landed
+    /// transaction's content (see
+    /// [`solvela_x402::usdc_transfer::verify_signed_usdc_transfer`]).
+    ///
+    /// Fail-closed behavior: any mismatch is conclusive (a retry re-reads the
+    /// same persisted bytes) → held + entry alert, NEVER a confirm. The hold
+    /// is signature-predicated so a peer's concurrent re-sign wins and the
+    /// next sweep re-evaluates fresh state. A corrupt `recipient_wallet`
+    /// (config-shaped, not row-shaped) logs and leaves the row `in_flight` —
+    /// the stuck-refund age alert is the signal while the config is fixed.
+    async fn verify_landed_refund(
+        &self,
+        row: &RefundRow,
+        tx_signature: &str,
+        signed_tx: &[u8],
+    ) -> bool {
+        // EVERY failure branch below increments the confirm-verify-failed
+        // family, `reason`-labeled per repo convention (receipts.rs), so no
+        // confirm-gate refusal is ever signal-less; `recipient_wallet_invalid`
+        // is the config-shaped series, distinguishable from row-shaped ones.
+        let guard = HoldGuard::FromInFlight {
+            expected_signature: Some(tx_signature),
+        };
+        let Ok(destination) =
+            solvela_x402::escrow::pda::decode_bs58_pubkey(&row.destination_wallet)
+        else {
+            metrics::counter!(
+                "solvela_channel_refund_confirm_verify_failed_total",
+                "reason" => "corrupt_destination"
+            )
+            .increment(1);
+            error!(
+                channel_id = %row.channel_id,
+                "refund worker: corrupt frozen destination_wallet at confirm — holding"
+            );
+            self.hold_with_alert(&row.channel_id, guard).await;
+            return false;
+        };
+        let Ok(mint) = solvela_x402::escrow::pda::decode_bs58_pubkey(&row.mint) else {
+            metrics::counter!(
+                "solvela_channel_refund_confirm_verify_failed_total",
+                "reason" => "corrupt_mint"
+            )
+            .increment(1);
+            error!(
+                channel_id = %row.channel_id,
+                "refund worker: corrupt frozen mint at confirm — holding"
+            );
+            self.hold_with_alert(&row.channel_id, guard).await;
+            return false;
+        };
+        let Ok(owner) = solvela_x402::escrow::pda::decode_bs58_pubkey(&self.recipient_wallet)
+        else {
+            // Config-shaped, not row-shaped: retain in_flight (holding would
+            // strand a healthy row over a fixable config), but never
+            // signal-less — this series is the alert surface for the window
+            // where startup wallet validation was skipped.
+            metrics::counter!(
+                "solvela_channel_refund_confirm_verify_failed_total",
+                "reason" => "recipient_wallet_invalid"
+            )
+            .increment(1);
+            error!(
+                channel_id = %row.channel_id,
+                "refund worker: recipient_wallet is not a valid pubkey — cannot verify the \
+                 landed refund; row retained"
+            );
+            return false;
+        };
+
+        let memo = refund_memo(&row.channel_id);
+        let expected = solvela_x402::usdc_transfer::ExpectedUsdcTransfer {
+            signature_b58: tx_signature,
+            source_owner: &owner,
+            destination_wallet: &destination,
+            mint: &mint,
+            amount: row.amount_atomic,
+            memo: &memo,
+        };
+        match solvela_x402::usdc_transfer::verify_signed_usdc_transfer(signed_tx, &expected) {
+            Ok(()) => true,
+            Err(e) => {
+                metrics::counter!(
+                    "solvela_channel_refund_confirm_verify_failed_total",
+                    "reason" => "verify_mismatch"
+                )
+                .increment(1);
+                error!(
+                    channel_id = %row.channel_id,
+                    tx_signature,
+                    amount = row.amount_atomic,
+                    error = %e,
+                    "refund worker: landed transaction does not match this obligation — \
+                     phantom confirm blocked, holding (#743)"
+                );
+                self.hold_with_alert(&row.channel_id, guard).await;
+                false
             }
         }
     }
@@ -1273,6 +1414,19 @@ impl RefundWorker {
                 }
                 match status.confirmation_status.as_deref() {
                     Some("confirmed") | Some("finalized") => {
+                        // #743 confirm gate: a signature-status hit alone is
+                        // NOT proof THIS row's transfer landed — byte-identical
+                        // sibling refunds share one signature and the cluster
+                        // dedupes them into a single landed transfer. Verify
+                        // the persisted bytes ARE the landed transaction for
+                        // this obligation before the CAS may stamp; a mismatch
+                        // fails CLOSED (held + alert, never a stamp).
+                        if !self
+                            .verify_landed_refund(row, tx_signature, signed_tx)
+                            .await
+                        {
+                            return;
+                        }
                         match confirm_refund_and_close_channel(
                             &self.pool,
                             &row.channel_id,
@@ -1516,6 +1670,13 @@ mod tests {
         assert_eq!(RefundStatus::InFlight.as_str(), "in_flight");
         assert_eq!(RefundStatus::Confirmed.as_str(), "confirmed");
         assert_eq!(RefundStatus::Held.as_str(), "held");
+    }
+
+    /// The memo IS the per-obligation uniqueness + confirm-verification key
+    /// (#743) — pin its exact wire form.
+    #[test]
+    fn refund_memo_is_the_prefixed_channel_id() {
+        assert_eq!(refund_memo("2GcY1bMr"), "solvela-refund:2GcY1bMr");
     }
 
     // -- DB-backed tests (skip when no DATABASE_URL — channels.rs precedent) --
@@ -2216,6 +2377,62 @@ mod tests {
 
     // -- worker decision paths: death / rebroadcast / confirm (review item 11) --
 
+    /// Sign REAL refund bytes with the test worker's key (seed `[1u8; 32]`)
+    /// for the standard frozen tuple `(agent_wallet, TEST_MINT, amount)` —
+    /// exactly what the worker itself signs. `memo: None` produces the
+    /// pre-#743 memoless legacy layout.
+    fn signed_refund_bytes(
+        memo: Option<&str>,
+        amount: u64,
+    ) -> solvela_x402::usdc_transfer::SignedUsdcTransfer {
+        use ed25519_dalek::SigningKey;
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let mut keypair = [0u8; 64];
+        keypair[..32].copy_from_slice(&signing_key.to_bytes());
+        keypair[32..].copy_from_slice(signing_key.verifying_key().as_bytes());
+        let fee_pool =
+            solvela_x402::fee_payer::FeePayerPool::from_keys(
+                &[bs58::encode(keypair).into_string()],
+            )
+            .expect("test fee payer pool");
+        let wallet = fee_pool.next().expect("healthy wallet");
+        let destination =
+            solvela_x402::escrow::pda::decode_bs58_pubkey(&agent_wallet()).expect("wallet decodes");
+        let mint = solvela_x402::escrow::pda::decode_bs58_pubkey(TEST_MINT).expect("mint decodes");
+        match memo {
+            Some(m) => wallet
+                .sign_usdc_transfer_checked_with_memo(&destination, &mint, amount, &[7u8; 32], m)
+                .expect("signs"),
+            None => wallet
+                .sign_usdc_transfer_checked(&destination, &mint, amount, &[7u8; 32])
+                .expect("signs"),
+        }
+    }
+
+    /// Claim `signed` for `cid` through the real single-winner CAS.
+    async fn claim_signed(
+        pool: &PgPool,
+        cid: &str,
+        signed: &solvela_x402::usdc_transfer::SignedUsdcTransfer,
+    ) {
+        assert_eq!(
+            claim_refund_for_broadcast(
+                pool,
+                &RefundClaim {
+                    channel_id: cid,
+                    signed_tx: &signed.wire_bytes,
+                    tx_signature: &signed.signature_b58,
+                    last_valid_block_height: 1_000,
+                    amount_atomic: 46_220,
+                    daily_cap_atomic: None,
+                },
+            )
+            .await
+            .unwrap(),
+            ClaimOutcome::Won
+        );
+    }
+
     /// Seed an in_flight row via the real claim CAS (bytes "old-bytes",
     /// signature "sig-old", last_valid_block_height 1_000) so the in_flight
     /// handler's decision inputs are exactly production-shaped.
@@ -2340,8 +2557,9 @@ mod tests {
         );
     }
 
-    /// The history search finds the transaction confirmed → confirm CAS +
-    /// channel closed, no further broadcast.
+    /// The history search finds the transaction confirmed → landed-tx content
+    /// verification passes (the bytes carry THIS row's memo + frozen tuple,
+    /// #743) → confirm CAS + channel closed, no further broadcast.
     #[tokio::test]
     async fn worker_confirms_in_flight_from_history_search() {
         let Some(pool) = isolated_db("confirm_path").await else {
@@ -2353,7 +2571,8 @@ mod tests {
             .unwrap();
         draw_pinned_shape(&pool, &cid).await;
         close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
-        seed_in_flight(&pool, &cid).await;
+        let signed = signed_refund_bytes(Some(&refund_memo(&cid)), 46_220);
+        claim_signed(&pool, &cid, &signed).await;
 
         let rpc = Arc::new(MockRpc::new(1_000_000));
         *rpc.status.lock().unwrap() = Some(SignatureStatus {
@@ -2369,6 +2588,189 @@ mod tests {
         let ch = channels::load_channel(&pool, &cid).await.unwrap().unwrap();
         assert_eq!(ch.status, "closed");
         assert!(rpc.sends.lock().unwrap().is_empty(), "no broadcast needed");
+    }
+
+    /// THE #743 phantom-confirm regression, through the real worker path.
+    /// Incident shape: byte-identical sibling refunds were deduped on-chain
+    /// into ONE landed transfer; each sibling row's signature-status check
+    /// then read `confirmed` and stamped rows whose money never moved. A row
+    /// whose persisted bytes carry a SIBLING obligation's memo must NEVER
+    /// confirm — it holds (alert + operator runbook) and the channel stays
+    /// un-closed, because the landed transfer paid the sibling, not this row.
+    #[tokio::test]
+    async fn worker_never_confirms_landed_tx_that_pays_a_sibling_channel() {
+        let Some(pool) = isolated_db("phantom_sibling").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+
+        // Bytes whose memo names a DIFFERENT channel — the dedupe survivor.
+        let sibling_memo = refund_memo(&fresh_channel_id());
+        let foreign = signed_refund_bytes(Some(&sibling_memo), 46_220);
+        claim_signed(&pool, &cid, &foreign).await;
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.status.lock().unwrap() = Some(SignatureStatus {
+            err: None,
+            confirmation_status: Some("confirmed".to_string()),
+        });
+        let worker = test_worker(pool.clone(), rpc.clone());
+        // Pin the alert surface, not just the status flip: a refactor
+        // dropping the counter call must fail here. `after > before` on the
+        // reason-filtered series is the interference-safe form (sibling
+        // parallel tests may also bump the family — see held_total's note).
+        let metrics_handle = crate::cache::test_metrics::install_test_recorder();
+        let verify_failed_before = crate::cache::test_metrics::counter_value_filtered(
+            &metrics_handle,
+            "solvela_channel_refund_confirm_verify_failed_total",
+            "verify_mismatch",
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(
+            row.status, "held",
+            "a landed tx that pays a sibling must never confirm this row"
+        );
+        let verify_failed_after = crate::cache::test_metrics::counter_value_filtered(
+            &metrics_handle,
+            "solvela_channel_refund_confirm_verify_failed_total",
+            "verify_mismatch",
+        );
+        assert!(
+            verify_failed_after > verify_failed_before,
+            "the blocked phantom confirm must fire the verify-failed counter, \
+             got {verify_failed_before} -> {verify_failed_after}"
+        );
+        let ch = channels::load_channel(&pool, &cid).await.unwrap().unwrap();
+        assert_ne!(
+            ch.status, "closed",
+            "the channel must NOT close on a phantom confirm"
+        );
+        assert!(rpc.sends.lock().unwrap().is_empty(), "nothing broadcast");
+    }
+
+    /// The exact devnet incident bytes-shape: pre-#743 MEMOLESS bytes whose
+    /// signature reads `confirmed`. Without a memo the landed transfer cannot
+    /// be proven to pay THIS obligation — never stamp; hold for the operator
+    /// (fail closed).
+    #[tokio::test]
+    async fn worker_never_confirms_memoless_legacy_bytes() {
+        let Some(pool) = isolated_db("phantom_memoless").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+
+        let legacy = signed_refund_bytes(None, 46_220);
+        claim_signed(&pool, &cid, &legacy).await;
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.status.lock().unwrap() = Some(SignatureStatus {
+            err: None,
+            confirmation_status: Some("confirmed".to_string()),
+        });
+        let worker = test_worker(pool.clone(), rpc.clone());
+        let metrics_handle = crate::cache::test_metrics::install_test_recorder();
+        let verify_failed_before = crate::cache::test_metrics::counter_value_filtered(
+            &metrics_handle,
+            "solvela_channel_refund_confirm_verify_failed_total",
+            "verify_mismatch",
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(
+            row.status, "held",
+            "memoless bytes cannot prove which obligation the landed tx paid"
+        );
+        let verify_failed_after = crate::cache::test_metrics::counter_value_filtered(
+            &metrics_handle,
+            "solvela_channel_refund_confirm_verify_failed_total",
+            "verify_mismatch",
+        );
+        assert!(
+            verify_failed_after > verify_failed_before,
+            "the blocked phantom confirm must fire the verify-failed counter, \
+             got {verify_failed_before} -> {verify_failed_after}"
+        );
+        let ch = channels::load_channel(&pool, &cid).await.unwrap().unwrap();
+        assert_ne!(ch.status, "closed");
+        assert!(rpc.sends.lock().unwrap().is_empty(), "nothing broadcast");
+    }
+
+    /// Config-shaped confirm-gate failure (finding 1 of the #743 review): an
+    /// operational `recipient_wallet` that does not decode must RETAIN the
+    /// row `in_flight` (holding would strand a healthy row over a fixable
+    /// config error) while firing the distinguishable
+    /// `reason="recipient_wallet_invalid"` series, so the narrow window
+    /// where startup wallet validation was skipped is never signal-less.
+    #[tokio::test]
+    async fn worker_retains_in_flight_when_recipient_wallet_invalid_at_confirm() {
+        let Some(pool) = isolated_db("confirm_bad_recipient").await else {
+            return;
+        };
+        let cid = fresh_channel_id();
+        create_channel(&pool, &new_channel(&cid, 50_000))
+            .await
+            .unwrap();
+        draw_pinned_shape(&pool, &cid).await;
+        close_channel_and_reserve_refund(&pool, &cid).await.unwrap();
+        let signed = signed_refund_bytes(Some(&refund_memo(&cid)), 46_220);
+        claim_signed(&pool, &cid, &signed).await;
+
+        let rpc = Arc::new(MockRpc::new(1_000_000));
+        *rpc.status.lock().unwrap() = Some(SignatureStatus {
+            err: None,
+            confirmation_status: Some("confirmed".to_string()),
+        });
+        // Worker with an undecodable recipient wallet (and no signer — the
+        // confirm path must not need one).
+        let worker = RefundWorker::new(
+            pool.clone(),
+            rpc.clone(),
+            None,
+            "not base58 0OIl".to_string(),
+            None,
+        );
+        let metrics_handle = crate::cache::test_metrics::install_test_recorder();
+        let config_failed_before = crate::cache::test_metrics::counter_value_filtered(
+            &metrics_handle,
+            "solvela_channel_refund_confirm_verify_failed_total",
+            "recipient_wallet_invalid",
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        worker.sweep().await;
+
+        let row = load_refund_row(&pool, &cid).await.unwrap();
+        assert_eq!(
+            row.status, "in_flight",
+            "a config error must retain the row, never hold or confirm it"
+        );
+        let config_failed_after = crate::cache::test_metrics::counter_value_filtered(
+            &metrics_handle,
+            "solvela_channel_refund_confirm_verify_failed_total",
+            "recipient_wallet_invalid",
+        );
+        assert!(
+            config_failed_after > config_failed_before,
+            "the config-shaped refusal must fire its own counter series, \
+             got {config_failed_before} -> {config_failed_after}"
+        );
+        let ch = channels::load_channel(&pool, &cid).await.unwrap().unwrap();
+        assert_ne!(ch.status, "closed");
+        assert!(rpc.sends.lock().unwrap().is_empty(), "nothing broadcast");
     }
 
     /// A corrupt FROZEN tuple (unfixable by retry) → held with the entry alert,

@@ -56,10 +56,15 @@ impl FeePayerWallet {
 
     /// Sign a USDC `CreateIdempotent + TransferChecked` transfer FROM this
     /// wallet (it is the fee payer, token authority, and ATA-create funder) —
-    /// see [`crate::usdc_transfer`]. The typed signing surface for the
-    /// gateway's channel-refund worker: raw keypair bytes never leave this
+    /// see [`crate::usdc_transfer`]. Raw keypair bytes never leave this
     /// crate, and the message owner is always this wallet's own pubkey (a
     /// caller cannot point the builder at a key it does not hold).
+    ///
+    /// **NOT for channel refunds** — use
+    /// [`Self::sign_usdc_transfer_checked_with_memo`]: without a
+    /// per-obligation memo, two equal transfers signed against one blockhash
+    /// are byte-identical and the cluster dedupes them into a single landed
+    /// transaction (#743).
     pub fn sign_usdc_transfer_checked(
         &self,
         destination_wallet: &[u8; 32],
@@ -76,6 +81,33 @@ impl FeePayerWallet {
             mint,
             amount,
             recent_blockhash,
+            &self.keypair,
+        )
+    }
+
+    /// [`Self::sign_usdc_transfer_checked`] plus an SPL Memo instruction
+    /// carrying `memo` — the typed signing surface for the gateway's
+    /// channel-refund worker (#743): the memo makes each obligation's
+    /// transaction bytes unique, so sibling refunds can never share a
+    /// signature and be deduped on-chain into one landed transfer.
+    pub fn sign_usdc_transfer_checked_with_memo(
+        &self,
+        destination_wallet: &[u8; 32],
+        mint: &[u8; 32],
+        amount: u64,
+        recent_blockhash: &[u8; 32],
+        memo: &str,
+    ) -> Result<crate::usdc_transfer::SignedUsdcTransfer, crate::usdc_transfer::UsdcTransferError>
+    {
+        let owner = crate::solana::keypair_pubkey(&self.keypair)
+            .map_err(|e| crate::usdc_transfer::UsdcTransferError::InvalidKeypair(e.to_string()))?;
+        crate::usdc_transfer::sign_usdc_transfer_checked_with_memo(
+            &owner,
+            destination_wallet,
+            mint,
+            amount,
+            recent_blockhash,
+            memo,
             &self.keypair,
         )
     }
@@ -378,6 +410,38 @@ mod tests {
             &mint,
             46_220,
             &blockhash,
+            wallet.keypair_bytes(),
+        )
+        .expect("free signer signs");
+
+        assert_eq!(via_wallet.wire_bytes, via_free.wire_bytes);
+        assert_eq!(via_wallet.signature_b58, via_free.signature_b58);
+        assert_eq!(via_wallet.base64_tx, via_free.base64_tx);
+    }
+
+    /// Same parity pin for the with-memo surface (#743): the wallet method's
+    /// output is byte-identical to the crate-private free signer.
+    #[test]
+    fn wallet_sign_usdc_transfer_checked_with_memo_matches_free_signer() {
+        let pool = FeePayerPool::from_keys(&[test_keypair_b58_from_seed(9)]).unwrap();
+        let wallet = pool.next().unwrap();
+        let destination = [0x22u8; 32];
+        let mint = [0x33u8; 32];
+        let blockhash = [7u8; 32];
+        let memo = "solvela-refund:test-channel-1";
+
+        let via_wallet = wallet
+            .sign_usdc_transfer_checked_with_memo(&destination, &mint, 46_220, &blockhash, memo)
+            .expect("wallet method signs");
+
+        let owner = crate::solana::keypair_pubkey(wallet.keypair_bytes()).unwrap();
+        let via_free = crate::usdc_transfer::sign_usdc_transfer_checked_with_memo(
+            &owner,
+            &destination,
+            &mint,
+            46_220,
+            &blockhash,
+            memo,
             wallet.keypair_bytes(),
         )
         .expect("free signer signs");
