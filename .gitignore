@@ -59,6 +59,8 @@ GEMINI.md
 Thumbs.db
 __pycache__/
 assets/
+# …but the CLI's Windows exe icon is tracked source (embedded via build.rs)
+!crates/cli/assets/
 dashboard/.next/
 dashboard/.source/
 dashboard/node_modules/
