@@ -66,7 +66,11 @@ if (!['auto', 'escrow', 'direct', 'off'].includes(rawSigningMode)) {
 const signingMode = rawSigningMode as 'auto' | 'escrow' | 'direct' | 'off';
 
 // HF11: Validate SOLVELA_SESSION_BUDGET — reject NaN/non-positive values.
-const budgetStr = process.env['SOLVELA_SESSION_BUDGET'] ?? process.env['RCR_SESSION_BUDGET']; // compat
+// Empty string means unset (no cap): the .mcpb manifest wires this from an
+// optional user_config field, and Claude Desktop passes '' when it's blank.
+const budgetStr =
+  (process.env['SOLVELA_SESSION_BUDGET'] ?? process.env['RCR_SESSION_BUDGET'])?.trim() ||
+  undefined; // compat
 let sessionBudget: number | undefined;
 if (budgetStr !== undefined) {
   // Number() (vs parseFloat) rejects trailing-garbage like "5USD" — parseFloat
@@ -161,7 +165,7 @@ let resolvedWalletAddress: string | undefined;
 let resolvedPrivateKey: string | undefined;
 
 const client = new GatewayClient({
-  apiUrl: process.env['SOLVELA_API_URL'] ?? process.env['RCR_API_URL'], // compat
+  apiUrl: process.env['SOLVELA_API_URL'] ?? process.env['RCR_API_URL'], // compat; '' normalized in GatewayClient
   sessionBudget,
   timeoutMs,
   signingMode,
@@ -180,7 +184,7 @@ const client = new GatewayClient({
 const server = new Server(
   {
     name: 'solvela',
-    version: '0.1.1',
+    version: '0.1.2',
   },
   {
     capabilities: { tools: {} },

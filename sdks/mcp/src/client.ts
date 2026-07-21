@@ -203,10 +203,15 @@ export class GatewayClient {
         'RCR_API_URL will be removed by 2026-08-01.\n',
       );
     }
+    // Empty/whitespace-only → default: the .mcpb manifest wires this from a
+    // user_config field, and Claude Desktop passes '' when it's cleared — `??`
+    // alone would let '' shadow the default and break every request URL.
     this.apiUrl = (
-      opts.apiUrl ??
-      process.env['SOLVELA_API_URL'] ??
-      process.env['RCR_API_URL'] ?? // backward-compat fallback (warning emitted above)
+      (
+        opts.apiUrl ??
+        process.env['SOLVELA_API_URL'] ??
+        process.env['RCR_API_URL'] // backward-compat fallback (warning emitted above)
+      )?.trim() ||
       'https://api.solvela.ai'
     ).replace(/\/$/, '');
 
