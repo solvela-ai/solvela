@@ -55,6 +55,37 @@ import { ensureGas } from './ensure-gas.js';
 // Bootstrap client from environment
 // ---------------------------------------------------------------------------
 
+// Make stderr blocking so a Fatal written right before process.exit() is never
+// lost — on Windows pipes (Claude Desktop) async stderr writes are discarded at
+// exit, which made every startup fatal below invisible in Desktop's MCP log.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(process.stderr as any)._handle?.setBlocking?.(true);
+
+// Claude Desktop (.mcpb) launch normalization. Desktop substitutes user_config
+// values into the env vars wired in manifest.json; blank optional fields
+// arrive as '' — and when the extension's settings were never saved, Desktop
+// passes the template UNSUBSTITUTED (literally "${user_config.session_budget}",
+// observed Desktop 1.1.5368). Treat both as unset, then under the manifest's
+// SOLVELA_MCPB marker apply the manifest defaults so a fresh install boots
+// before the settings screen is ever opened. npm/CLI launches are unaffected:
+// '' was already unset-equivalent at every read site, and the marker is only
+// set by the .mcpb manifest.
+for (const name of [
+  'SOLVELA_API_URL',
+  'SOLANA_RPC_URL',
+  'SOLANA_WALLET_KEY',
+  'SOLVELA_SESSION_BUDGET',
+]) {
+  const v = process.env[name]?.trim();
+  if (v !== undefined && (v === '' || /^\$\{user_config\.[^}]+\}$/.test(v))) {
+    delete process.env[name];
+  }
+}
+if (process.env['SOLVELA_MCPB'] === '1') {
+  process.env['SOLVELA_API_URL'] ??= 'https://api.solvela.ai';
+  process.env['SOLANA_RPC_URL'] ??= 'https://api.mainnet-beta.solana.com';
+}
+
 // HF10: Validate SOLVELA_SIGNING_MODE before use.
 const rawSigningMode = process.env['SOLVELA_SIGNING_MODE'] ?? 'auto';
 if (!['auto', 'escrow', 'direct', 'off'].includes(rawSigningMode)) {
@@ -184,7 +215,7 @@ const client = new GatewayClient({
 const server = new Server(
   {
     name: 'solvela',
-    version: '0.1.2',
+    version: '0.1.3',
   },
   {
     capabilities: { tools: {} },
