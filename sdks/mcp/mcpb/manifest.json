@@ -1,0 +1,80 @@
+{
+  "manifest_version": "0.2",
+  "name": "solvela-mcp",
+  "display_name": "Solvela",
+  "version": "0.1.1",
+  "description": "Pay for LLM API calls with USDC on Solana — no API keys, no accounts, just a wallet.",
+  "long_description": "Solvela exposes a pay-per-call LLM gateway as MCP tools: chat with 44+ models across 6 providers, smart routing, web search, and Solana price data — all paid per request with USDC-SPL via the x402 protocol.\n\nNo signup required. On first run the server auto-creates a non-custodial wallet at ~/.solvela/wallet.json (or uses the key you provide below). The private key never leaves your machine; only signed transactions reach the gateway. Fund the printed address with USDC on Solana to start — network gas is covered by the gateway's SOL drip, so you never need SOL.",
+  "author": {
+    "name": "Solvela",
+    "email": "partnerships@solvela.ai",
+    "url": "https://solvela.ai"
+  },
+  "homepage": "https://solvela.ai",
+  "documentation": "https://docs.solvela.ai",
+  "support": "https://github.com/solvela-ai/solvela/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/solvela-ai/solvela"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["solana", "usdc", "x402", "llm", "payments", "ai-agent"],
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {
+        "SOLVELA_API_URL": "${user_config.gateway_url}",
+        "SOLANA_RPC_URL": "${user_config.solana_rpc_url}",
+        "SOLANA_WALLET_KEY": "${user_config.solana_wallet_key}",
+        "SOLVELA_SESSION_BUDGET": "${user_config.session_budget}"
+      }
+    }
+  },
+  "user_config": {
+    "solana_wallet_key": {
+      "type": "string",
+      "title": "Solana wallet key (optional)",
+      "description": "Base58 secret key of an existing wallet. Leave empty to auto-create a non-custodial wallet at ~/.solvela/wallet.json on first run. The key never leaves this machine.",
+      "sensitive": true,
+      "required": false
+    },
+    "session_budget": {
+      "type": "string",
+      "title": "Session budget (USDC, optional)",
+      "description": "Maximum USDC to spend per session, e.g. 1.00. Leave empty for no session cap.",
+      "required": false
+    },
+    "solana_rpc_url": {
+      "type": "string",
+      "title": "Solana RPC URL",
+      "description": "RPC endpoint used to submit signed transactions.",
+      "required": false,
+      "default": "https://api.mainnet-beta.solana.com"
+    },
+    "gateway_url": {
+      "type": "string",
+      "title": "Gateway URL",
+      "description": "Solvela gateway endpoint. Only change this if you run your own gateway.",
+      "required": false,
+      "default": "https://api.solvela.ai"
+    }
+  },
+  "tools": [
+    { "name": "chat", "description": "Chat with any supported LLM model, paid per call in USDC" },
+    { "name": "smart_chat", "description": "Chat via smart routing (eco/auto/premium/free profiles)" },
+    { "name": "web_search", "description": "Pay-per-call web search" },
+    { "name": "solana_price", "description": "Live Solana token prices" },
+    { "name": "wallet_status", "description": "Wallet address, USDC balance, and gateway health" },
+    { "name": "list_models", "description": "List available models and per-token pricing" },
+    { "name": "spending", "description": "Session spend summary and budget remaining" }
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}
