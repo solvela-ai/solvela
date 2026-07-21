@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:mcpb": "npm run build && node scripts/build-mcpb.mjs",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "test": "node --test tests/server.test.ts tests/contract.test.ts tests/session.test.ts tests/escrow.test.ts tests/wallet.test.ts tests/ensure-gas.test.ts tests/search.test.ts tests/price.test.ts",
@@ -36,14 +37,16 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@solvela/signer-core": "file:../signer-core",
-    "@solana/web3.js": "^1.87.0",
     "@solana/spl-token": "^0.4.0",
+    "@solana/web3.js": "^1.87.0",
+    "@solvela/signer-core": "file:../signer-core",
     "async-mutex": "^0.5.0",
     "bs58": "^5.0.0"
   },
   "devDependencies": {
+    "@anthropic-ai/mcpb": "1.1.1",
     "@types/node": "^22.0.0",
+    "esbuild": "0.25.5",
     "typescript": "^5.6.0"
   },
   "overrides": {
