@@ -113,6 +113,26 @@ describe('server startup under the Claude Desktop (.mcpb) default env', () => {
     assert.ok(r.gotInitResponse, `expected initialize response; stderr: ${r.stderr}`);
   });
 
+  it('boots when Desktop passes UNSUBSTITUTED templates (settings never saved)', async () => {
+    // Observed on Desktop 1.1.5368: until the user saves the extension's
+    // settings once, env arrives as the literal manifest templates. URL vars
+    // stay stubbed here so the SOLVELA_MCPB defaults branch cannot reach the
+    // production gateway/faucet from CI.
+    const r = await spawnServer({
+      ...desktopDefaultEnv,
+      SOLVELA_MCPB: '1',
+      // eslint-disable-next-line no-template-curly-in-string
+      SOLANA_WALLET_KEY: '${user_config.solana_wallet_key}',
+      // eslint-disable-next-line no-template-curly-in-string
+      SOLVELA_SESSION_BUDGET: '${user_config.session_budget}',
+    });
+    assert.ok(
+      !r.stderr.includes('Fatal'),
+      `server must treat unsubstituted templates as unset; stderr: ${r.stderr}`,
+    );
+    assert.ok(r.gotInitResponse, `expected initialize response; stderr: ${r.stderr}`);
+  });
+
   it('still fails closed on a genuinely invalid budget', async () => {
     const r = await spawnServer({ ...desktopDefaultEnv, SOLVELA_SESSION_BUDGET: 'abc' });
     assert.equal(r.code, 1);

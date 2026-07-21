@@ -26,6 +26,7 @@
       "command": "node",
       "args": ["${__dirname}/server/index.js"],
       "env": {
+        "SOLVELA_MCPB": "1",
         "SOLVELA_API_URL": "${user_config.gateway_url}",
         "SOLANA_RPC_URL": "${user_config.solana_rpc_url}",
         "SOLANA_WALLET_KEY": "${user_config.solana_wallet_key}",
