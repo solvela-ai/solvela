@@ -48,11 +48,11 @@ const CURRENT_SLOT = 1_000_000;
 const EXPIRY_MARGIN = 1200n;
 
 /** The gateway's direct-shape x402 402 body (per signer-core's PaymentRequiredSchema). */
-function challengeBody(amount: string = QUOTE_ATOMIC): string {
+function challengeBody(amount: string = QUOTE_ATOMIC, resourceUrl = '/v1/messages'): string {
   return JSON.stringify({
     x402_version: 2,
     error: 'Payment required',
-    resource: { url: '/v1/messages', method: 'POST' },
+    resource: { url: resourceUrl, method: 'POST' },
     accepts: [
       {
         scheme: 'exact',
@@ -174,7 +174,7 @@ async function startSidecar(
   };
 }
 
-/** Standard "gateway" behavior: config + 402-then-serve on /v1/messages. */
+/** Standard "gateway" behavior: config + 402-then-serve on either paid surface. */
 function standardHandler(paidResponse: (req: RecordedRequest, res: ServerResponse) => void): FakeHandler {
   return (req, res) => {
     if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
@@ -182,10 +182,14 @@ function standardHandler(paidResponse: (req: RecordedRequest, res: ServerRespons
       res.end(escrowConfigBody());
       return;
     }
-    if (req.method === 'POST' && req.url.startsWith('/v1/messages')) {
+    if (
+      req.method === 'POST' &&
+      (req.url.startsWith('/v1/messages') || req.url.startsWith('/v1/chat/completions'))
+    ) {
       if (!req.headers['payment-signature']) {
+        // A real gateway names the path it is quoting — the sidecar echoes it.
         res.writeHead(402, { 'content-type': 'application/json' });
-        res.end(challengeBody());
+        res.end(challengeBody(QUOTE_ATOMIC, req.url.split('?')[0]));
         return;
       }
       paidResponse(req, res);
@@ -598,7 +602,7 @@ describe('count_tokens + routing', () => {
     });
     const sc = await startSidecar(gw.url);
 
-    const resp = await authedPost(`${sc.url}/v1/chat/completions`, '{}');
+    const resp = await authedPost(`${sc.url}/v1/embeddings`, '{}');
     assert.equal(resp.status, 404);
     await resp.text();
     const getResp = await fetch(`${sc.url}/v1/messages`, {
@@ -608,6 +612,117 @@ describe('count_tokens + routing', () => {
     await getResp.text();
 
     assert.equal(gw.requests.length, 0);
+
+    await sc.close();
+    await gw.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6b. OpenAI-compatible surface — the SAME money path on /v1/chat/completions
+// ---------------------------------------------------------------------------
+
+const chatPosts = (gw: FakeGateway) =>
+  gw.requests.filter((r) => r.method === 'POST' && r.url.startsWith('/v1/chat/completions'));
+
+describe('POST /v1/chat/completions — OpenAI-compatible surface', () => {
+  it('runs the identical draw: 402 → signed retry with IDENTICAL bytes → verbatim relay', async () => {
+    const gw = await startFakeGateway(
+      standardHandler((_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"id":"chatcmpl-1","object":"chat.completion"}');
+      }),
+    );
+    const sc = await startSidecar(gw.url);
+
+    const body = Buffer.from('{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}');
+    const resp = await authedPost(`${sc.url}/v1/chat/completions?stream=false`, body);
+
+    assert.equal(resp.status, 200);
+    assert.equal(await resp.text(), '{"id":"chatcmpl-1","object":"chat.completion"}');
+
+    const posts = chatPosts(gw);
+    assert.equal(posts.length, 2, 'exactly one unpaid forward + one paid retry');
+
+    // Query string preserved on BOTH legs.
+    assert.equal(posts[0].url, '/v1/chat/completions?stream=false');
+    assert.equal(posts[1].url, '/v1/chat/completions?stream=false');
+
+    // The voucher digest binds to the bytes: the retry MUST be byte-identical.
+    assert.deepEqual(posts[0].body, body);
+    assert.deepEqual(posts[1].body, posts[0].body);
+
+    // First leg unpaid; retry carries the voucher. The LOCAL token never leaves.
+    assert.equal(posts[0].headers['payment-signature'], undefined);
+    assert.equal(typeof posts[1].headers['payment-signature'], 'string');
+    for (const p of posts) {
+      assert.equal(p.headers['authorization'], undefined);
+      assert.equal(p.headers['x-api-key'], undefined);
+    }
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('binds the voucher to the chat resource url, not a hardcoded /v1/messages', async () => {
+    const gw = await startFakeGateway(
+      standardHandler((_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
+      }),
+    );
+    const sc = await startSidecar(gw.url);
+
+    await (await authedPost(`${sc.url}/v1/chat/completions`, '{"model":"m","messages":[]}')).text();
+
+    const paid = chatPosts(gw)[1];
+    const decoded = decodeHeader(paid.headers['payment-signature'] as string);
+    assert.equal(decoded.resource.url, '/v1/chat/completions');
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('emits an OpenAI-shaped error envelope, not the Anthropic one', async () => {
+    const gw = await startFakeGateway((_req, res) => {
+      res.writeHead(200).end('should never be reached');
+    });
+    const sc = await startSidecar(gw.url);
+
+    // Bad local token → 401 before any dispatch.
+    const resp = await fetch(`${sc.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer wrong-token', 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(resp.status, 401);
+    const parsed = (await resp.json()) as { type?: string; error: { type: string; message: string } };
+
+    // OpenAI envelope: a bare `error` object, NO top-level `type: "error"`.
+    assert.ok(!('type' in parsed), 'Anthropic-only top-level `type` must not appear');
+    assert.equal(parsed.error.type, 'authentication_error');
+    assert.equal(typeof parsed.error.message, 'string');
+
+    assert.equal(gw.requests.length, 0);
+    await sc.close();
+    await gw.close();
+  });
+
+  it('leaves the Anthropic envelope on /v1/messages untouched (regression guard)', async () => {
+    const gw = await startFakeGateway((_req, res) => {
+      res.writeHead(200).end('should never be reached');
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await fetch(`${sc.url}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer wrong-token', 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(resp.status, 401);
+    const parsed = (await resp.json()) as { type: string; error: { type: string } };
+
+    assert.equal(parsed.type, 'error', 'Claude Code depends on the top-level `type: "error"`');
+    assert.equal(parsed.error.type, 'authentication_error');
 
     await sc.close();
     await gw.close();

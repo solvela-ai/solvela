@@ -1,6 +1,11 @@
 /**
- * The sidecar HTTP server — the localhost process Claude Code points at via
- * `ANTHROPIC_BASE_URL`.
+ * The sidecar HTTP server — the localhost process a coding agent points at:
+ * Claude Code via `ANTHROPIC_BASE_URL` (`POST /v1/messages`), or any
+ * OpenAI-compatible client via its base URL (`POST /v1/chat/completions`).
+ *
+ * Both surfaces run ONE money path — see [`PAID_PATHS`]. The dialect changes
+ * only the request/response/error envelopes; nothing about the quote, the
+ * voucher, or the bytes the digest binds to differs between them.
  *
  * Per-request money path (LOCKED by the sidecar design + channel plan):
  *   1. authenticate the LOCAL bearer (`Authorization: Bearer` or `x-api-key`,
@@ -182,6 +187,38 @@ function allowlistedHeaders(req: IncomingMessage): Record<string, string> {
   return out;
 }
 
+/**
+ * Which wire dialect a request speaks. Mirrors the gateway's `WireDialect`
+ * (`routes/chat/mod.rs`): the money path is identical for both, only the
+ * request/response/error envelopes differ.
+ */
+type WireDialect = 'anthropic' | 'openai';
+
+/**
+ * The paid surfaces the sidecar serves, and the dialect each speaks. Both run
+ * the SAME draw — buffer bytes → unpaid forward → 402 → voucher → identical
+ * retry. Adding a row here does not add a money path, it reuses this one.
+ */
+const PAID_PATHS = new Map<string, WireDialect>([
+  ['/v1/messages', 'anthropic'],
+  ['/v1/chat/completions', 'openai'],
+]);
+
+/** Free verbatim reverse-proxy — Anthropic-only; OpenAI has no equivalent. */
+const FREE_PATH = '/v1/messages/count_tokens';
+
+const NOT_FOUND_MSG =
+  'not found — the sidecar serves POST /v1/messages, /v1/chat/completions and /v1/messages/count_tokens only';
+
+/**
+ * Dialect for a path, including paths we do not serve (a 404 still has to pick
+ * an envelope). Anything under `/v1/chat/` is OpenAI; everything else defaults
+ * to Anthropic, preserving the sidecar's original behavior byte-for-byte.
+ */
+function dialectFor(pathname: string): WireDialect {
+  return PAID_PATHS.get(pathname) ?? (pathname.startsWith('/v1/chat/') ? 'openai' : 'anthropic');
+}
+
 /** Map an HTTP status to the Anthropic wire error type Claude Code expects. */
 function anthropicErrorType(status: number): string {
   switch (status) {
@@ -202,10 +239,41 @@ function anthropicErrorType(status: number): string {
   }
 }
 
-/** Anthropic-envelope error, so Claude Code renders sidecar failures cleanly. */
-function jsonError(res: ServerResponse, status: number, message: string): void {
+/** Map an HTTP status to the OpenAI wire error type OpenAI-compatible clients expect. */
+function openaiErrorType(status: number): string {
+  switch (status) {
+    case 401:
+      return 'authentication_error';
+    case 400:
+    case 404:
+    case 413:
+      return 'invalid_request_error';
+    case 429:
+      return 'rate_limit_error';
+    default:
+      return 'server_error';
+  }
+}
+
+/**
+ * Dialect-shaped error envelope, so BOTH Claude Code and OpenAI-compatible
+ * clients render sidecar failures cleanly. The shapes differ structurally, not
+ * just in the type string: Anthropic wraps in `{type:"error",error:{…}}`,
+ * OpenAI emits a bare `{error:{…}}`. Emitting the wrong one on a paid surface
+ * makes a client mis-classify failures (retry/cooldown decisions key off it).
+ */
+function jsonError(
+  res: ServerResponse,
+  status: number,
+  message: string,
+  dialect: WireDialect,
+): void {
   res.writeHead(status, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ type: 'error', error: { type: anthropicErrorType(status), message } }));
+  res.end(
+    dialect === 'openai'
+      ? JSON.stringify({ error: { message, type: openaiErrorType(status), code: null } })
+      : JSON.stringify({ type: 'error', error: { type: anthropicErrorType(status), message } }),
+  );
 }
 
 async function readBody(req: IncomingMessage) {
@@ -299,10 +367,14 @@ export function createSidecarServer(opts: SidecarOptions): Server {
       if (!res.writableFinished) clientGone.abort();
     });
 
+    // Re-derived here (not threaded out of `handle`) so a throw BEFORE the
+    // dialect is resolved still answers in the caller's envelope.
+    const dialect = dialectFor(new URL(req.url ?? '/', 'http://127.0.0.1').pathname);
+
     handle(req, res, clientGone.signal).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
       if (err instanceof BodyTooLargeError) {
-        if (!res.headersSent) jsonError(res, 413, msg);
+        if (!res.headersSent) jsonError(res, 413, msg, dialect);
         else res.destroy();
         return;
       }
@@ -312,7 +384,7 @@ export function createSidecarServer(opts: SidecarOptions): Server {
         return;
       }
       console.error(`[solvela-dropin] request failed: ${sanitizeGatewayError(msg)}`);
-      if (!res.headersSent) jsonError(res, 502, sanitizeGatewayError(msg));
+      if (!res.headersSent) jsonError(res, 502, sanitizeGatewayError(msg), dialect);
       else res.destroy();
     });
   });
@@ -323,21 +395,24 @@ export function createSidecarServer(opts: SidecarOptions): Server {
     clientGone: AbortSignal,
   ): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const dialect = dialectFor(url.pathname);
+    /** Every failure in this request answers in the caller's own dialect. */
+    const fail = (status: number, message: string) => jsonError(res, status, message, dialect);
 
     // Local auth on EVERYTHING — the open port must not be driveable by a
     // stray local process, and count_tokens rides the same token.
     const provided = extractLocalToken(req);
     if (provided === undefined || !tokenMatches(provided, opts.localToken)) {
-      jsonError(res, 401, 'invalid or missing local sidecar token (ANTHROPIC_AUTH_TOKEN)');
+      fail(401, 'invalid or missing local sidecar token (ANTHROPIC_AUTH_TOKEN)');
       return;
     }
 
     if (req.method !== 'POST') {
-      jsonError(res, 404, 'not found — the sidecar serves POST /v1/messages and /v1/messages/count_tokens only');
+      fail(404, NOT_FOUND_MSG);
       return;
     }
 
-    if (url.pathname === '/v1/messages/count_tokens') {
+    if (url.pathname === FREE_PATH) {
       // Free verbatim reverse-proxy — no payment header, ever.
       const body = await readBody(req);
       const upstream = await fetch(`${opts.gatewayUrl}${url.pathname}${url.search}`, {
@@ -350,8 +425,8 @@ export function createSidecarServer(opts: SidecarOptions): Server {
       return;
     }
 
-    if (url.pathname !== '/v1/messages') {
-      jsonError(res, 404, 'not found — the sidecar serves POST /v1/messages and /v1/messages/count_tokens only');
+    if (!PAID_PATHS.has(url.pathname)) {
+      fail(404, NOT_FOUND_MSG);
       return;
     }
 
@@ -390,13 +465,13 @@ export function createSidecarServer(opts: SidecarOptions): Server {
         err instanceof Error ? err.message : 'parse error',
       )}`;
       console.error(`[solvela-dropin] ${msg}`);
-      jsonError(res, 502, msg);
+      fail(502, msg);
       return;
     }
     if (!accept) {
       const msg = 'gateway 402 offered no exact quote to derive the channel draw amount from; refusing to sign';
       console.error(`[solvela-dropin] ${msg}`);
-      jsonError(res, 502, msg);
+      fail(502, msg);
       return;
     }
 
@@ -408,7 +483,7 @@ export function createSidecarServer(opts: SidecarOptions): Server {
       const msg =
         err instanceof Error ? err.message : 'current Solana slot unavailable; refusing to sign a voucher';
       console.error(`[solvela-dropin] draw refused (slot source): ${msg}`);
-      jsonError(res, 503, msg);
+      fail(503, msg);
       return;
     }
 
@@ -454,7 +529,7 @@ export function createSidecarServer(opts: SidecarOptions): Server {
         // validation (e.g. malformed quote) → 502.
         const status = err.status >= 400 && err.status <= 599 ? err.status : 502;
         console.error(`[solvela-dropin] channel draw rejected (gateway status ${err.status}): ${err.message}`);
-        jsonError(res, status, err.message);
+        fail(status, err.message);
         return;
       }
       // Anything else (e.g. the retry fetch itself rejecting) propagates to
@@ -468,7 +543,7 @@ export function createSidecarServer(opts: SidecarOptions): Server {
     // garbage.
     if (!(drawResult instanceof Response)) {
       console.error('[solvela-dropin] draw resolved with a non-Response value — refusing to relay (fail closed)');
-      jsonError(res, 502, 'internal relay error after a successful draw');
+      fail(502, 'internal relay error after a successful draw');
       return;
     }
 
