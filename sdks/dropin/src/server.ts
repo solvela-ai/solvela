@@ -29,8 +29,10 @@
  * Lifecycle: every request gets an AbortController tied to the client
  * connection — a client that disconnects aborts the in-flight upstream
  * fetch/stream (no orphaned full-rate streams). All outbound fetches carry
- * deadlines: short for metadata/probe legs, a long total ceiling (650s,
- * matching the gateway's draw-serve posture) for the paid serve.
+ * deadlines: short for metadata legs and for the unpaid probe's HEADERS, a long
+ * total ceiling (650s, matching the gateway's draw-serve posture) for anything
+ * whose BODY is relayed to the client — the paid serve, and equally the
+ * gateway's zero-cost free-tier 200 that never 402s at all.
  *
  * The channel is strictly serial: signer-core's `ChannelTracker` single-flight
  * gate queues concurrent Claude Code requests (parallel subagents serialize).
@@ -210,6 +212,32 @@ const FREE_PATH = '/v1/messages/count_tokens';
 const NOT_FOUND_MSG =
   'not found — the sidecar serves POST /v1/messages, /v1/chat/completions and /v1/messages/count_tokens only';
 
+/** Base for resolving origin-form request targets (`/v1/messages?x=1`). */
+const LOCAL_BASE = 'http://127.0.0.1';
+
+/**
+ * Parse a request target WITHOUT ever throwing.
+ *
+ * Node's HTTP parser accepts absolute-form targets the WHATWG `URL` parser
+ * rejects with `ERR_INVALID_URL` — `POST http://a:b:c/v1/messages HTTP/1.1`,
+ * `http://[::1/x`, `http://%/x`, `http://[]/x`. That throw used to happen
+ * synchronously in the `createServer` listener, BEFORE local auth and outside
+ * any `catch`; with no `uncaughtException` handler in this package it EXITED
+ * the signing sidecar, so any local process could kill it with no token.
+ *
+ * An unparseable target resolves to the root, which matches no [`PAID_PATHS`]
+ * or [`FREE_PATH`] entry and therefore answers a plain 404 — the gateway is
+ * never contacted and nothing is ever signed. Exact-match routing on
+ * `url.pathname` is unchanged for every target the URL parser does accept.
+ */
+function parseRequestTarget(rawUrl: string | undefined): URL {
+  try {
+    return new URL(rawUrl ?? '/', LOCAL_BASE);
+  } catch {
+    return new URL('/', LOCAL_BASE);
+  }
+}
+
 /**
  * Dialect for a path, including paths we do not serve (a 404 still has to pick
  * an envelope). Anything under `/v1/chat/` is OpenAI; everything else defaults
@@ -239,7 +267,15 @@ function anthropicErrorType(status: number): string {
   }
 }
 
-/** Map an HTTP status to the OpenAI wire error type OpenAI-compatible clients expect. */
+/** Map an HTTP status to the OpenAI wire error type OpenAI-compatible clients expect.
+ *
+ * 503 is deliberately NOT `server_error`: the sidecar's own 503 is the
+ * fail-closed slot-unavailable arm (retryable, nothing signed), and the
+ * Anthropic dialect already distinguishes it as `overloaded_error`. The type
+ * emitted here matches what the gateway itself puts in the OpenAI envelope for
+ * a 503 (`GatewayError::ServiceUnavailable`, `crates/gateway/src/error.rs`), so
+ * a client sees one consistent vocabulary across the sidecar's own errors and
+ * the gateway errors the sidecar relays verbatim. */
 function openaiErrorType(status: number): string {
   switch (status) {
     case 401:
@@ -250,6 +286,9 @@ function openaiErrorType(status: number): string {
       return 'invalid_request_error';
     case 429:
       return 'rate_limit_error';
+    case 503:
+    case 529:
+      return 'service_unavailable';
     default:
       return 'server_error';
   }
@@ -367,11 +406,14 @@ export function createSidecarServer(opts: SidecarOptions): Server {
       if (!res.writableFinished) clientGone.abort();
     });
 
-    // Re-derived here (not threaded out of `handle`) so a throw BEFORE the
-    // dialect is resolved still answers in the caller's envelope.
-    const dialect = dialectFor(new URL(req.url ?? '/', 'http://127.0.0.1').pathname);
+    // Resolved ONCE here and threaded into `handle`, so the envelope the outer
+    // catch answers in and the one `handle` answers in are the SAME value and
+    // cannot drift apart. `parseRequestTarget` never throws — nothing in this
+    // synchronous listener may, since an escape here kills the process.
+    const url = parseRequestTarget(req.url);
+    const dialect = dialectFor(url.pathname);
 
-    handle(req, res, clientGone.signal).catch((err: unknown) => {
+    handle(req, res, clientGone.signal, url, dialect).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
       if (err instanceof BodyTooLargeError) {
         if (!res.headersSent) jsonError(res, 413, msg, dialect);
@@ -393,9 +435,9 @@ export function createSidecarServer(opts: SidecarOptions): Server {
     req: IncomingMessage,
     res: ServerResponse,
     clientGone: AbortSignal,
+    url: URL,
+    dialect: WireDialect,
   ): Promise<void> {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    const dialect = dialectFor(url.pathname);
     /** Every failure in this request answers in the caller's own dialect. */
     const fail = (status: number, message: string) => jsonError(res, status, message, dialect);
 
@@ -436,24 +478,49 @@ export function createSidecarServer(opts: SidecarOptions): Server {
     const target = `${opts.gatewayUrl}${url.pathname}${url.search}`;
     const fwdHeaders = allowlistedHeaders(req);
 
-    // Unpaid probe — expected to 402 (the quote) or fail fast. A non-402 here
-    // is an error body / dev stub, so its relay riding the short deadline too
-    // is fine (the paid serve below is the long-lived leg).
-    const first = await fetch(target, {
-      method: 'POST',
-      headers: fwdHeaders,
-      body: rawBody,
-      signal: AbortSignal.any([clientGone, AbortSignal.timeout(SHORT_TIMEOUT_MS)]),
-    });
-    if (first.status !== 402) {
-      await relay(first, res, clientGone);
-      return;
+    // Unpaid probe — expected to 402 (the quote) or fail fast. Its HEADERS ride
+    // the SHORT deadline: nothing is signed yet, so a hung gateway must not
+    // hold the caller for the full serve ceiling.
+    //
+    // A non-402 is NOT necessarily a short error body: the gateway's zero-cost
+    // bypass (`is_free_estimate`, `crates/gateway/src/routes/chat/mod.rs`)
+    // serves free-tier models (0.0/0.0 in `config/models.toml`) as a full
+    // streaming 200 with NO 402 at all. Anything being RELAYED to the client
+    // therefore gets the deadline swapped up to the paid serve ceiling before
+    // the body is piped — leaving the probe deadline attached guillotined
+    // free-tier SSE mid-stream. The deadline is a manual controller precisely
+    // so it can be re-armed without re-issuing the request (a second POST would
+    // double the upstream call).
+    const probeDeadline = new AbortController();
+    let probeTimer = setTimeout(
+      () => probeDeadline.abort(new Error('gateway did not answer the unpaid probe in time')),
+      SHORT_TIMEOUT_MS,
+    );
+    let challengeText: string;
+    try {
+      const first = await fetch(target, {
+        method: 'POST',
+        headers: fwdHeaders,
+        body: rawBody,
+        signal: AbortSignal.any([clientGone, probeDeadline.signal]),
+      });
+      if (first.status !== 402) {
+        clearTimeout(probeTimer);
+        probeTimer = setTimeout(
+          () => probeDeadline.abort(new Error('gateway response exceeded the serve ceiling')),
+          PAID_SERVE_TIMEOUT_MS,
+        );
+        await relay(first, res, clientGone);
+        return;
+      }
+      challengeText = await first.text();
+    } finally {
+      clearTimeout(probeTimer);
     }
 
     // 402 → the quote is the exact entry's fee-inclusive amount. The 402 never
     // advertises `channel` — the channel is header-invoked; no exact entry
     // means no quotable draw, so fail closed (never pick another scheme).
-    const challengeText = await first.text();
     let accept;
     let resourceUrl: string;
     try {
