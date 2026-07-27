@@ -958,6 +958,41 @@ describe('lifecycle + relay fidelity', () => {
     await gw.close();
   });
 
+  it('a paid-retry fetch that rejects outright answers 502 in the OpenAI envelope', async () => {
+    // The OUTER catch (the createServer listener's `.catch`) is reachable from
+    // an OpenAI client three ways — the paid-retry fetch rejecting, the serve
+    // deadline firing, `relay()`'s writeHead throwing — and every one of them
+    // was previously pinned ONLY on /v1/messages. Hardcoding `'anthropic'` on
+    // that 502 line therefore survived the whole suite.
+    const gw = await startFakeGateway((req, res, raw) => {
+      if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(escrowConfigBody());
+        return;
+      }
+      if (req.method === 'POST' && req.url.startsWith('/v1/chat/completions')) {
+        if (!req.headers['payment-signature']) {
+          res.writeHead(402, { 'content-type': 'application/json' });
+          res.end(challengeBody(QUOTE_ATOMIC, `${GATEWAY_RESOURCE_ORIGIN}/v1/chat/completions`));
+          return;
+        }
+        raw.socket.destroy(); // the retry never gets a response — fetch rejects
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(`${sc.url}/v1/chat/completions`, '{"model":"m","messages":[]}');
+    assert.equal(resp.status, 502);
+    const parsed = (await resp.json()) as { type?: string; error: { type: string } };
+    assert.ok(!('type' in parsed), 'the outer catch must answer in the CALLER\'s dialect');
+    assert.equal(parsed.error.type, 'server_error');
+
+    await sc.close();
+    await gw.close();
+  });
+
   it('maps sidecar error statuses to Anthropic error types (401/503)', async () => {
     // One slot-null fake serves both assertions: unauthenticated -> 401
     // authentication_error; authenticated draw with no slot -> 503
@@ -1043,8 +1078,29 @@ function rawRequest(
   });
 }
 
+/** Split a raw HTTP response into its status line and parsed JSON body. Node
+ * frames these chunked (no content-length), so the JSON object is lifted out
+ * of the raw text rather than de-chunked — enough for an error envelope. */
+function parseRawResponse(raw: string): { status: number; body: unknown } {
+  const status = Number(/^HTTP\/1\.1 (\d{3}) /.exec(raw)?.[1] ?? 0);
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  return {
+    status,
+    body: start < 0 || end < start ? undefined : JSON.parse(raw.slice(start, end + 1)),
+  };
+}
+
+const MALFORMED_HEADERS = [
+  'Host: 127.0.0.1',
+  `Authorization: Bearer ${LOCAL_TOKEN}`,
+  'Content-Type: application/json',
+  'Content-Length: 0',
+  'Connection: close',
+];
+
 describe('malformed request targets', () => {
-  it('answers an error and STAYS ALIVE on targets the WHATWG URL parser rejects', async () => {
+  it('answers 400 (not a misdirecting 404) and STAYS ALIVE on targets the URL parser rejects', async () => {
     const gw = await startFakeGateway(
       standardHandler((_req, res) => {
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -1054,19 +1110,20 @@ describe('malformed request targets', () => {
     const sc = await startSidecar(gw.url);
 
     // Node's HTTP parser accepts every one of these as `req.url`;
-    // `new URL(target, base)` throws ERR_INVALID_URL on all of them.
+    // `new URL(target, base)` throws ERR_INVALID_URL on all of them. An
+    // unparseable request TARGET is a client protocol error (400), not a
+    // routing miss (404) — and the 404 body's "the sidecar serves
+    // POST /v1/messages, …" text actively misdirects.
     for (const target of ['http://a:b:c/v1/messages', 'http://[::1/x', 'http://%/x', 'http://[]/x']) {
-      const raw = await rawRequest(sc.url, `POST ${target} HTTP/1.1`, [
-        'Host: 127.0.0.1',
-        `Authorization: Bearer ${LOCAL_TOKEN}`,
-        'Content-Type: application/json',
-        'Content-Length: 0',
-        'Connection: close',
-      ]);
-      assert.match(
-        raw,
-        /^HTTP\/1\.1 404 /,
-        `expected an error response for ${target}, got: ${raw.slice(0, 160)}`,
+      const raw = await rawRequest(sc.url, `POST ${target} HTTP/1.1`, MALFORMED_HEADERS);
+      const { status, body } = parseRawResponse(raw);
+      assert.equal(status, 400, `expected 400 for ${target}, got: ${raw.slice(0, 160)}`);
+      const err = body as { error: { type: string; message: string } };
+      assert.equal(err.error.type, 'invalid_request_error');
+      assert.doesNotMatch(
+        err.error.message,
+        /the sidecar serves POST/,
+        'the 404 routing text misdirects on a malformed request target',
       );
     }
 
@@ -1078,6 +1135,72 @@ describe('malformed request targets', () => {
     const resp = await authedPost(`${sc.url}/v1/messages`, '{"model":"m","messages":[]}');
     assert.equal(resp.status, 200);
     assert.equal(await resp.text(), '{"id":"msg_alive"}');
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('answers a malformed /v1/chat/ target in the OpenAI envelope, not the Anthropic one', async () => {
+    // Collapsing an unparseable target to `/` forced `dialectFor('/')` →
+    // anthropic, so an OpenAI client got `{type:"error",error:{…}}`.
+    const gw = await startFakeGateway((_req, res) => {
+      res.writeHead(200).end('should never be reached');
+    });
+    const sc = await startSidecar(gw.url);
+
+    const openai = parseRawResponse(
+      await rawRequest(sc.url, 'POST http://a:b:c/v1/chat/completions HTTP/1.1', MALFORMED_HEADERS),
+    );
+    assert.equal(openai.status, 400);
+    assert.ok(!('type' in (openai.body as object)), 'OpenAI envelope has no top-level `type`');
+    assert.equal((openai.body as { error: { type: string } }).error.type, 'invalid_request_error');
+
+    const anthropic = parseRawResponse(
+      await rawRequest(sc.url, 'POST http://a:b:c/v1/messages HTTP/1.1', MALFORMED_HEADERS),
+    );
+    assert.equal(anthropic.status, 400);
+    assert.equal((anthropic.body as { type: string }).type, 'error');
+
+    assert.equal(gw.requests.length, 0);
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('logs the raw target ONCE per burst, truncated — never one stderr write per request', async () => {
+    // Reviewer 1: unbounded malformed request lines must not become unbounded
+    // stderr writes. Silence is equally wrong — a burst against a signing-key
+    // holder has to be visible somewhere.
+    const gw = await startFakeGateway((_req, res) => {
+      res.writeHead(200).end('should never be reached');
+    });
+    const sc = await startSidecar(gw.url);
+
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    };
+    try {
+      // First one carries a 5000-char target: the log line must be truncated.
+      const targets = [
+        `http://a:b:c/${'v'.repeat(5000)}`,
+        ...Array.from({ length: 19 }, () => 'http://a:b:c/v1/messages'),
+      ];
+      for (const target of targets) {
+        const { status } = parseRawResponse(
+          await rawRequest(sc.url, `POST ${target} HTTP/1.1`, MALFORMED_HEADERS),
+        );
+        assert.equal(status, 400);
+      }
+    } finally {
+      console.error = realError;
+    }
+
+    const lines = logged.filter((l) => l.includes('unparseable request target'));
+    assert.equal(lines.length, 1, `20 malformed targets produced ${lines.length} stderr writes`);
+    assert.ok(lines[0].length < 400, `log line not truncated: ${lines[0].length} chars`);
+    assert.ok(lines[0].includes('vvvv'), 'the raw target is what an operator needs to see');
 
     await sc.close();
     await gw.close();
@@ -1130,6 +1253,112 @@ describe('non-402 relay deadline', () => {
     assert.equal(chatPosts(gw)[0].headers['payment-signature'], undefined);
 
     stopped?.();
+    await sc.close();
+    await gw.close();
+  });
+
+  // The streaming case above CANNOT catch the real bug: a streaming gateway
+  // emits response HEADERS on the first token, so `await fetch(...)` settles
+  // early and any re-arm after it lands in time. `stream:false` is the OpenAI
+  // DEFAULT, and a non-streaming completion sends NO headers until the whole
+  // body is finished — one deadline governs the entire request, and a re-arm
+  // placed after the fetch promise is never reached. Reproduced on the
+  // pre-fix build: `status=502 after 10045ms`.
+  it('does not guillotine a slow NON-streaming free-tier (no-402) 200', async () => {
+    const completion = '{"id":"chatcmpl-slow","object":"chat.completion","choices":[]}';
+    let stopped: (() => void) | undefined;
+    const gw = await startFakeGateway((req, res) => {
+      if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(escrowConfigBody());
+        return;
+      }
+      // Headers AND body together, after the delay — exactly what a
+      // non-streaming upstream completion looks like on the wire.
+      const timer = setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(completion);
+      }, 11_000);
+      stopped = () => clearTimeout(timer);
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(
+      `${sc.url}/v1/chat/completions`,
+      '{"model":"nvidia/free","messages":[{"role":"user","content":"hi"}]}',
+    );
+    assert.equal(resp.status, 200, 'a slow non-streaming free-tier 200 must not become a 502');
+    assert.equal(await resp.text(), completion);
+
+    // A free 200 is relayed as-is — no quote, no voucher, nothing signed.
+    assert.equal(chatPosts(gw).length, 1);
+    assert.equal(chatPosts(gw)[0].headers['payment-signature'], undefined);
+
+    stopped?.();
+    await sc.close();
+    await gw.close();
+  });
+
+  // Same bug, sibling leg: count_tokens attached the short deadline and kept
+  // it through `relay()`. Claude Code calls count_tokens before large prompts.
+  it('does not guillotine a slow count_tokens forward', async () => {
+    const counted = '{"input_tokens":180000}';
+    let stopped: (() => void) | undefined;
+    const gw = await startFakeGateway((_req, res) => {
+      const timer = setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(counted);
+      }, 11_000);
+      stopped = () => clearTimeout(timer);
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(
+      `${sc.url}/v1/messages/count_tokens`,
+      '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"…big…"}]}',
+    );
+    assert.equal(resp.status, 200, 'a slow count_tokens must not become a 502');
+    assert.equal(await resp.text(), counted);
+
+    stopped?.();
+    await sc.close();
+    await gw.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10b. A 402 with no `resource` is a malformed quote — fail closed
+// ---------------------------------------------------------------------------
+
+describe('402 without a resource url', () => {
+  it('refuses to sign a voucher bound to a url the gateway never named', async () => {
+    // `resource` is `optional(...)` in signer-core's PaymentRequiredSchema, so
+    // this is a LIVE branch. Substituting the local `url.pathname` would sign a
+    // draw whose wrapper declares a resource the gateway never quoted — a
+    // silent invention on the money path.
+    const gw = await startFakeGateway((req, res) => {
+      if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(escrowConfigBody());
+        return;
+      }
+      const noResource = JSON.parse(challengeBody()) as Record<string, unknown>;
+      delete noResource.resource;
+      res.writeHead(402, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(noResource));
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(`${sc.url}/v1/chat/completions`, '{"model":"m","messages":[]}');
+    assert.equal(resp.status, 502);
+    const parsed = (await resp.json()) as { type?: string; error: { type: string; message: string } };
+    assert.ok(!('type' in parsed), 'OpenAI envelope');
+    assert.match(parsed.error.message, /resource/i);
+
+    // Only the unpaid probe — NOTHING was signed against a resource-less quote.
+    assert.equal(chatPosts(gw).length, 1, 'a resource-less 402 must not produce a signed retry');
+    assert.equal(chatPosts(gw)[0].headers['payment-signature'], undefined);
+
     await sc.close();
     await gw.close();
   });

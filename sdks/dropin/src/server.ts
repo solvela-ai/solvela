@@ -29,10 +29,11 @@
  * Lifecycle: every request gets an AbortController tied to the client
  * connection — a client that disconnects aborts the in-flight upstream
  * fetch/stream (no orphaned full-rate streams). All outbound fetches carry
- * deadlines: short for metadata legs and for the unpaid probe's HEADERS, a long
- * total ceiling (650s, matching the gateway's draw-serve posture) for anything
- * whose BODY is relayed to the client — the paid serve, and equally the
- * gateway's zero-cost free-tier 200 that never 402s at all.
+ * deadlines, split by whether the client is served from the response: the
+ * metadata leg (`/v1/escrow/config`) gets a short one, and EVERY served leg —
+ * the paid serve, the unpaid probe (which may itself be the gateway's
+ * zero-cost free-tier 200), the count_tokens forward — gets the long 650s
+ * ceiling, armed through the relayed body. See [`serveLeg`].
  *
  * The channel is strictly serial: signer-core's `ChannelTracker` single-flight
  * gate queues concurrent Claude Code requests (parallel subagents serialize).
@@ -62,11 +63,13 @@ const DEFAULT_EXPIRY_MARGIN_SLOTS = 1200n;
 /** How long a fetched `current_slot` may be reused before a mandatory refresh. */
 const DEFAULT_SLOT_TTL_MS = 30_000;
 
-/** Deadline for short outbound legs: slot/config fetch, the unpaid 402 probe,
- * and the count_tokens forward. None of these serves a completion. */
+/** Deadline for the one outbound leg that is pure metadata and is NEVER
+ * relayed to the client: `GET /v1/escrow/config`. A leg whose response the
+ * client receives cannot use this — see [`serveLeg`]. */
 const SHORT_TIMEOUT_MS = 10_000;
-/** Total ceiling for the paid serve (headers + streamed body) — matches the
- * gateway's `draw_serve_timeout_secs` posture (650s > the 600s native relay). */
+/** Total ceiling for any leg the client is served from (headers + body) —
+ * matches the gateway's `draw_serve_timeout_secs` posture (650s > the 600s
+ * native relay). */
 const PAID_SERVE_TIMEOUT_MS = 650_000;
 
 /** Generous request-body cap — defense in depth on a local-auth-gated port. */
@@ -215,8 +218,19 @@ const NOT_FOUND_MSG =
 /** Base for resolving origin-form request targets (`/v1/messages?x=1`). */
 const LOCAL_BASE = 'http://127.0.0.1';
 
+/** Answer for a request target the URL parser rejects. Deliberately NOT
+ * [`NOT_FOUND_MSG`]: "the sidecar serves POST /v1/messages, …" misdirects a
+ * client whose request LINE, not whose route, is the problem. */
+const MALFORMED_TARGET_MSG = 'malformed request target — could not be parsed as a URL';
+
+/** Cap on how much of an unparseable target reaches the log. */
+const MALFORMED_TARGET_LOG_CHARS = 120;
+/** Minimum gap between malformed-target log lines. A misconfigured client can
+ * loop; unbounded bad request lines must not become unbounded stderr writes. */
+const MALFORMED_TARGET_LOG_INTERVAL_MS = 60_000;
+
 /**
- * Parse a request target WITHOUT ever throwing.
+ * Parse a request target WITHOUT ever throwing; `null` = unparseable.
  *
  * Node's HTTP parser accepts absolute-form targets the WHATWG `URL` parser
  * rejects with `ERR_INVALID_URL` — `POST http://a:b:c/v1/messages HTTP/1.1`,
@@ -225,17 +239,28 @@ const LOCAL_BASE = 'http://127.0.0.1';
  * any `catch`; with no `uncaughtException` handler in this package it EXITED
  * the signing sidecar, so any local process could kill it with no token.
  *
- * An unparseable target resolves to the root, which matches no [`PAID_PATHS`]
- * or [`FREE_PATH`] entry and therefore answers a plain 404 — the gateway is
- * never contacted and nothing is ever signed. Exact-match routing on
- * `url.pathname` is unchanged for every target the URL parser does accept.
+ * The `null` is load-bearing: an earlier fix collapsed these to `/`, which
+ * discarded the one fact that mattered (the target was unparseable) and so
+ * answered a misdirecting 404 with no log. The caller answers 400 instead —
+ * still without contacting the gateway or signing anything. Exact-match
+ * routing on `url.pathname` is unchanged for every target `URL` accepts.
  */
-function parseRequestTarget(rawUrl: string | undefined): URL {
+function parseRequestTarget(rawUrl: string | undefined): URL | null {
   try {
     return new URL(rawUrl ?? '/', LOCAL_BASE);
   } catch {
-    return new URL('/', LOCAL_BASE);
+    return null;
   }
+}
+
+/**
+ * Dialect for a target the URL parser rejected. There is no reliable pathname
+ * to route on, so this sniffs the raw target for the OpenAI surface and
+ * otherwise keeps the sidecar's Anthropic default — best available, and it
+ * only ever decides which 400 envelope is emitted. No money path reads it.
+ */
+function dialectForRawTarget(rawUrl: string | undefined): WireDialect {
+  return rawUrl?.includes('/v1/chat/') ? 'openai' : 'anthropic';
 }
 
 /**
@@ -384,6 +409,53 @@ async function relay(
 }
 
 /**
+ * Run ONE outbound leg whose response the client is served from, under a
+ * single deadline that stays armed from the request until `consume` has
+ * finished with the body.
+ *
+ * Why one deadline and not short-then-long: a deadline that is swapped up
+ * after `await fetch(...)` settles only ever covers time-to-HEADERS, and
+ * `stream:false` — the OpenAI default — sends NO headers until the entire
+ * completion is finished. A 10s "probe" deadline therefore governed the whole
+ * request and 502'd every free-tier non-streaming completion slower than 10s
+ * (`is_free_estimate`, `crates/gateway/src/routes/chat/cost.rs`, bypasses the
+ * 402 for 0.0/0.0 models, so the probe response IS the completion). Before
+ * headers land there is nothing on the wire that distinguishes a hung gateway
+ * from a slow completion, so the only deadline that can legitimately bound a
+ * relayed leg is the serve ceiling. (A gateway that never accepts the
+ * connection is still bounded — undici's default `connectTimeout` is 10s.)
+ *
+ * `clientGone` is composed in, so a client that walks away still cancels the
+ * leg immediately.
+ */
+async function serveLeg<T>(
+  target: string,
+  init: { method: string; headers: Record<string, string>; body: Uint8Array<ArrayBuffer> },
+  clientGone: AbortSignal,
+  consume: (resp: Response) => Promise<T>,
+): Promise<T> {
+  const deadline = new AbortController();
+  const timer = setTimeout(
+    () =>
+      deadline.abort(
+        new Error(
+          `gateway did not complete the response within the ${PAID_SERVE_TIMEOUT_MS / 1000}s serve ceiling`,
+        ),
+      ),
+    PAID_SERVE_TIMEOUT_MS,
+  );
+  try {
+    const resp = await fetch(target, {
+      ...init,
+      signal: AbortSignal.any([clientGone, deadline.signal]),
+    });
+    return await consume(resp);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Build the sidecar server. The caller MUST listen on 127.0.0.1 only.
  * One `ChannelTracker` per server — one channel per sidecar instance; its
  * single-flight gate serializes concurrent draws.
@@ -395,6 +467,8 @@ export function createSidecarServer(opts: SidecarOptions): Server {
     lastCumulative: opts.lastCumulative ?? 0n,
     ...opts.trackerOptions,
   });
+  let malformedTargets = 0;
+  let malformedLoggedAt = 0;
 
   return createServer((req, res) => {
     // Tie the whole outbound lifecycle to the client connection: a client
@@ -411,7 +485,7 @@ export function createSidecarServer(opts: SidecarOptions): Server {
     // cannot drift apart. `parseRequestTarget` never throws — nothing in this
     // synchronous listener may, since an escape here kills the process.
     const url = parseRequestTarget(req.url);
-    const dialect = dialectFor(url.pathname);
+    const dialect = url === null ? dialectForRawTarget(req.url) : dialectFor(url.pathname);
 
     handle(req, res, clientGone.signal, url, dialect).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
@@ -431,11 +505,29 @@ export function createSidecarServer(opts: SidecarOptions): Server {
     });
   });
 
+  /** Rate-limited, truncated record of unparseable request targets. Per
+   * server, so a burst is visible exactly once per interval and never once per
+   * request. Reached only AFTER local auth, so an unauthenticated flood cannot
+   * drive it at all. */
+  function noteMalformedTarget(rawUrl: string | undefined): void {
+    malformedTargets += 1;
+    const now = Date.now();
+    if (malformedLoggedAt !== 0 && now - malformedLoggedAt < MALFORMED_TARGET_LOG_INTERVAL_MS) {
+      return;
+    }
+    malformedLoggedAt = now;
+    console.error(
+      `[solvela-dropin] unparseable request target (${malformedTargets} so far): ${JSON.stringify(
+        String(rawUrl ?? '').slice(0, MALFORMED_TARGET_LOG_CHARS),
+      )}`,
+    );
+  }
+
   async function handle(
     req: IncomingMessage,
     res: ServerResponse,
     clientGone: AbortSignal,
-    url: URL,
+    url: URL | null,
     dialect: WireDialect,
   ): Promise<void> {
     /** Every failure in this request answers in the caller's own dialect. */
@@ -449,21 +541,29 @@ export function createSidecarServer(opts: SidecarOptions): Server {
       return;
     }
 
+    if (url === null) {
+      noteMalformedTarget(req.url);
+      fail(400, MALFORMED_TARGET_MSG);
+      return;
+    }
+
     if (req.method !== 'POST') {
       fail(404, NOT_FOUND_MSG);
       return;
     }
 
     if (url.pathname === FREE_PATH) {
-      // Free verbatim reverse-proxy — no payment header, ever.
+      // Free verbatim reverse-proxy — no payment header, ever. Its response is
+      // relayed, so it rides the serve ceiling like every other served leg
+      // (Claude Code calls count_tokens before large prompts, and a 10s
+      // deadline surfaced a raw DOMException as a 502).
       const body = await readBody(req);
-      const upstream = await fetch(`${opts.gatewayUrl}${url.pathname}${url.search}`, {
-        method: 'POST',
-        headers: allowlistedHeaders(req),
-        body,
-        signal: AbortSignal.any([clientGone, AbortSignal.timeout(SHORT_TIMEOUT_MS)]),
-      });
-      await relay(upstream, res, clientGone);
+      await serveLeg(
+        `${opts.gatewayUrl}${url.pathname}${url.search}`,
+        { method: 'POST', headers: allowlistedHeaders(req), body },
+        clientGone,
+        (upstream) => relay(upstream, res, clientGone),
+      );
       return;
     }
 
@@ -478,55 +578,40 @@ export function createSidecarServer(opts: SidecarOptions): Server {
     const target = `${opts.gatewayUrl}${url.pathname}${url.search}`;
     const fwdHeaders = allowlistedHeaders(req);
 
-    // Unpaid probe — expected to 402 (the quote) or fail fast. Its HEADERS ride
-    // the SHORT deadline: nothing is signed yet, so a hung gateway must not
-    // hold the caller for the full serve ceiling.
-    //
-    // A non-402 is NOT necessarily a short error body: the gateway's zero-cost
-    // bypass (`is_free_estimate`, `crates/gateway/src/routes/chat/mod.rs`)
-    // serves free-tier models (0.0/0.0 in `config/models.toml`) as a full
-    // streaming 200 with NO 402 at all. Anything being RELAYED to the client
-    // therefore gets the deadline swapped up to the paid serve ceiling before
-    // the body is piped — leaving the probe deadline attached guillotined
-    // free-tier SSE mid-stream. The deadline is a manual controller precisely
-    // so it can be re-armed without re-issuing the request (a second POST would
-    // double the upstream call).
-    const probeDeadline = new AbortController();
-    let probeTimer = setTimeout(
-      () => probeDeadline.abort(new Error('gateway did not answer the unpaid probe in time')),
-      SHORT_TIMEOUT_MS,
+    // Unpaid probe — usually a 402 (the quote), but NOT necessarily: the
+    // gateway's zero-cost bypass (`is_free_estimate`,
+    // `crates/gateway/src/routes/chat/cost.rs`) serves free-tier models
+    // (0.0/0.0 in `config/models.toml`) as a full 200 with NO 402 at all, so
+    // this leg's response may BE the completion the client is served. It is
+    // therefore a served leg (see [`serveLeg`]) — one ceiling, armed through
+    // the relayed body. `null` = already relayed, nothing to quote.
+    const challengeText = await serveLeg(
+      target,
+      { method: 'POST', headers: fwdHeaders, body: rawBody },
+      clientGone,
+      async (first) => {
+        if (first.status !== 402) {
+          await relay(first, res, clientGone);
+          return null;
+        }
+        return first.text();
+      },
     );
-    let challengeText: string;
-    try {
-      const first = await fetch(target, {
-        method: 'POST',
-        headers: fwdHeaders,
-        body: rawBody,
-        signal: AbortSignal.any([clientGone, probeDeadline.signal]),
-      });
-      if (first.status !== 402) {
-        clearTimeout(probeTimer);
-        probeTimer = setTimeout(
-          () => probeDeadline.abort(new Error('gateway response exceeded the serve ceiling')),
-          PAID_SERVE_TIMEOUT_MS,
-        );
-        await relay(first, res, clientGone);
-        return;
-      }
-      challengeText = await first.text();
-    } finally {
-      clearTimeout(probeTimer);
-    }
+    if (challengeText === null) return;
 
     // 402 → the quote is the exact entry's fee-inclusive amount. The 402 never
     // advertises `channel` — the channel is header-invoked; no exact entry
     // means no quotable draw, so fail closed (never pick another scheme).
     let accept;
-    let resourceUrl: string;
+    let resourceUrl: string | undefined;
     try {
       const pr = parse402(challengeText);
       accept = pr.accepts.find((a) => a.scheme === 'exact');
-      resourceUrl = pr.resource?.url ?? url.pathname;
+      // `resource` is optional in the 402 schema, so this is a LIVE branch.
+      // Substituting the local request path would sign a draw whose wrapper
+      // declares a resource the gateway never named — an invention on the
+      // money path. Fail closed below instead.
+      resourceUrl = pr.resource?.url;
     } catch (err) {
       const msg = `gateway 402 challenge was malformed: ${sanitizeGatewayError(
         err instanceof Error ? err.message : 'parse error',
@@ -537,6 +622,12 @@ export function createSidecarServer(opts: SidecarOptions): Server {
     }
     if (!accept) {
       const msg = 'gateway 402 offered no exact quote to derive the channel draw amount from; refusing to sign';
+      console.error(`[solvela-dropin] ${msg}`);
+      fail(502, msg);
+      return;
+    }
+    if (resourceUrl === undefined) {
+      const msg = 'gateway 402 named no resource url to bind the voucher to; refusing to sign';
       console.error(`[solvela-dropin] ${msg}`);
       fail(502, msg);
       return;
