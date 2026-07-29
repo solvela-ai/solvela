@@ -42,7 +42,7 @@
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "2.0.51",
-    "@ai-sdk/provider-utils": "^4.0.30",
+    "@ai-sdk/provider-utils": "^5.0.5",
     "@solvela/signer-core": "file:../signer-core",
     "bs58": "^5.0.0",
     "valibot": "^1.4.0"
