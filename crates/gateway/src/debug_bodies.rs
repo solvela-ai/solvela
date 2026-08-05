@@ -28,10 +28,11 @@
 //! logged verbatim if a caller pasted one into a prompt. The gate being
 //! operator-only and off by default is the control for that.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use serde::Serialize;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Env var that opens the gate. Read once per process.
 const ENV_VAR: &str = "SOLVELA_DEBUG_BODIES";
@@ -65,10 +66,35 @@ const SECRET_PREFIXES: &[&str] = &[
     "hf_",         // Hugging Face
 ];
 
+/// How many times the gate initializer has actually run. The operator warning
+/// below lives inside that initializer, so this doubles as the emitted-warning
+/// count — it exists so `test_gate_resolves_at_most_once` can prove the warning
+/// cannot fire per request without installing a global tracing subscriber
+/// (which would race the rest of the test binary).
+static GATE_RESOLUTIONS: AtomicUsize = AtomicUsize::new(0);
+
 /// Is body logging on? Decided once, from the environment, at first call.
+///
+/// When the gate resolves OPEN this emits a single `warn!` — bodies in the logs
+/// are a deliberate, operator-only diagnostic and an operator who forgets the
+/// flag is set has prompts and completions landing in their log sink. The
+/// warning is inside the `OnceLock` initializer, so it fires exactly once per
+/// process no matter how many requests flow through.
 pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_enables(std::env::var(ENV_VAR).ok().as_deref()))
+    *ENABLED.get_or_init(|| {
+        GATE_RESOLUTIONS.fetch_add(1, Ordering::Relaxed);
+        let on = env_enables(std::env::var(ENV_VAR).ok().as_deref());
+        if on {
+            warn!(
+                env_var = ENV_VAR,
+                "DEBUG BODY LOGGING IS ON: provider request and response bodies \
+                 (prompts and completions) are being written to the logs. This is a \
+                 dev/ops diagnostic — unset {ENV_VAR} in production.",
+            );
+        }
+        on
+    })
 }
 
 /// Pure gate decision, split out so the closed-by-default behaviour is testable
@@ -213,6 +239,21 @@ mod tests {
             "test env must not preset {ENV_VAR}"
         );
         assert!(!enabled(), "body logging must be OFF by default");
+    }
+
+    /// The operator warning lives inside the gate initializer, so it must be
+    /// impossible for it to fire per request. Hammering `enabled()` must not
+    /// re-run that initializer even once more.
+    #[test]
+    fn test_gate_resolves_at_most_once() {
+        for _ in 0..1_000 {
+            let _ = enabled();
+        }
+        assert!(
+            GATE_RESOLUTIONS.load(Ordering::Relaxed) <= 1,
+            "gate initializer ran {} times — the operator warning would fire per request",
+            GATE_RESOLUTIONS.load(Ordering::Relaxed)
+        );
     }
 
     // ── Secrets never reach the log line ─────────────────────────────────────
