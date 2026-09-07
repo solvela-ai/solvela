@@ -38,7 +38,7 @@ If you are using the TypeScript, Python, Rust, or Go SDK, you never need to impl
         {
           "scheme": "exact",
           "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-          "amount": "2625",
+          "amount": "2500",
           "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
           "pay_to": "<gateway-recipient-wallet>",
           "max_timeout_seconds": 300
@@ -46,7 +46,7 @@ If you are using the TypeScript, Python, Rust, or Go SDK, you never need to impl
         {
           "scheme": "escrow",
           "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-          "amount": "2625",
+          "amount": "2500",
           "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
           "pay_to": "<gateway-recipient-wallet>",
           "max_timeout_seconds": 300,
@@ -55,10 +55,10 @@ If you are using the TypeScript, Python, Rust, or Go SDK, you never need to impl
       ],
       "cost_breakdown": {
         "provider_cost": "0.002500",
-        "platform_fee": "0.000125",
-        "total": "0.002625",
+        "platform_fee": "0.000000",
+        "total": "0.002500",
         "currency": "USDC",
-        "fee_percent": 5
+        "fee_percent": 0
       },
       "error": "Payment required"
     }
@@ -140,10 +140,10 @@ The `cost_breakdown` object is present on every 402 response. All monetary value
 | Field | Type | Description |
 |-------|------|-------------|
 | `provider_cost` | string | What the upstream LLM charges for this request |
-| `platform_fee` | string | 5% of `provider_cost`, retained by Solvela |
+| `platform_fee` | string | Platform fee (default 5% when enabled, 0% on hosted gateway), retained by gateway operator |
 | `total` | string | `provider_cost` + `platform_fee` |
 | `currency` | string | Always `"USDC"` today |
-| `fee_percent` | number | Platform fee percentage (currently `5`, serialized as an integer) |
+| `fee_percent` | number | Platform fee percentage (0 on hosted gateway, default 5 on self-hosted, configurable via `SOLVELA_PLATFORM_FEE_PERCENT`) |
 
 ---
 

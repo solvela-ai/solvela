@@ -26,10 +26,10 @@ function ModelRow({ m }: { m: Model }) {
         <Badge className={providerBadgeClass(m.provider)}>{m.provider}</Badge>
       </td>
       <td className="px-5 py-3 text-right tabular-nums text-text-secondary text-xs font-mono">
-        ${(m.pricing.input_per_million_usdc * 1.05).toFixed(3)}
+        ${m.pricing.input_per_million_usdc.toFixed(3)}
       </td>
       <td className="px-5 py-3 text-right tabular-nums text-text-secondary text-xs font-mono">
-        ${(m.pricing.output_per_million_usdc * 1.05).toFixed(3)}
+        ${m.pricing.output_per_million_usdc.toFixed(3)}
       </td>
       <td className="px-5 py-3 text-center text-text-secondary text-xs font-mono">
         {m.capabilities.context_window >= 1_000_000
@@ -72,7 +72,7 @@ export default async function ModelsPage() {
         title="Models"
         subtitle={
           models.length > 0
-            ? `${models.length} models · 5% platform fee included · live from /pricing`
+            ? `${models.length} models · no platform fee (hosted gateway) · live from /pricing`
             : "Model registry"
         }
       />
@@ -128,7 +128,7 @@ export default async function ModelsPage() {
         </TerminalCard>
 
         <p className="text-xs text-text-tertiary font-mono">
-          Prices in USDC per million tokens including the 5% platform fee.
+          Prices in USDC per million tokens (provider cost only; no platform fee on hosted gateway).
           Source:{" "}
           <code>GET /pricing</code>
         </p>

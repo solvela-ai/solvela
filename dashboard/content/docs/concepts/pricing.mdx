@@ -1,18 +1,40 @@
 ---
 title: Pricing
-description: Per-token USDC pricing with a 5% platform fee — the paid model catalog plus a free NVIDIA NIM tier
+description: Per-token USDC pricing — the paid model catalog plus a free NVIDIA NIM tier. No platform fee on the hosted gateway.
 ---
 
 
-Solvela charges per token based on the upstream provider's list price plus a **5% platform fee**. All prices are in USDC. There are no monthly fees, no minimum spend, and no subscription.
+Solvela charges per token based on the upstream provider's list price. The gateway software includes a configurable platform fee (default 5%); the **hosted gateway at api.solvela.ai runs with the fee suspended**, so you pay only the provider cost. All prices are in USDC. There are no monthly fees, no minimum spend, and no subscription.
 
 ## Fee structure
+
+On the hosted gateway, the fee is suspended, so:
+
+```
+total = provider_cost
+```
+
+On a self-hosted gateway with the default fee enabled:
 
 ```
 total = provider_cost * 1.05
 ```
 
-Every `402` response includes a `cost_breakdown` showing the split:
+Every `402` response includes a `cost_breakdown` showing the split. On the hosted gateway (fee suspended):
+
+```json
+{
+  "cost_breakdown": {
+    "provider_cost": "0.002500",
+    "platform_fee": "0.000000",
+    "total": "0.002500",
+    "currency": "USDC",
+    "fee_percent": 0
+  }
+}
+```
+
+On a self-hosted gateway with the fee enabled (default 5%):
 
 ```json
 {
@@ -30,7 +52,7 @@ Amounts in the `accepts[].amount` field are in **atomic USDC units** (6 decimal 
 
 ## Model pricing table
 
-All prices are USDC per million tokens (provider cost before the 5% fee).
+All prices are USDC per million tokens (provider cost only; the hosted gateway has no platform fee).
 
 ### OpenAI
 
@@ -94,7 +116,7 @@ The `free` / `oss` / `open` profile routes here. Fifteen Nemotron models are **f
 | NVIDIA Nemotron Nano 9B v2 | `nvidia/nvidia/nvidia-nemotron-nano-9b-v2` | $0.04 | $0.16 | 128K |
 
 <Note>
-  These are provider list prices. The actual amount charged includes the 5% platform fee. Always check the `cost_breakdown` in the `402` response for the exact amount you will pay.
+  These are provider list prices. The hosted gateway at api.solvela.ai has no platform fee, so the amount charged equals the provider cost. Always check the `cost_breakdown` in the `402` response for the exact amount you will pay. Self-hosted gateways may add a platform fee via `SOLVELA_PLATFORM_FEE_PERCENT`.
 </Note>
 
 ## Query pricing programmatically
@@ -115,13 +137,26 @@ The gateway estimates cost at request time using:
 
 1. **Input tokens**: estimated from the messages in the request (character count / 4, approximately)
 2. **Output tokens**: the completion-token ceiling — the tightest of `max_tokens` (if specified), the model's declared `max_output_tokens`, and a global 8,192-token cap. When `max_tokens` is omitted, the quote reserves for the full ceiling (up to 8,192 tokens), not a flat default
-3. **Cost**: `(input_tokens * input_rate + output_tokens * output_rate) / 1_000_000 * 1.05`
+3. **Cost** (on the hosted gateway, no fee): `(input_tokens * input_rate + output_tokens * output_rate) / 1_000_000`
+4. **Cost** (on self-hosted with fee enabled): `(input_tokens * input_rate + output_tokens * output_rate) / 1_000_000 * 1.05`
 
 The actual cost charged via escrow claim is based on the real token usage returned by the provider (when available).
 
 ## Example cost calculation
 
-A request to `gpt-4o` with 500 input tokens and 200 output tokens:
+A request to `gpt-4o` with 500 input tokens and 200 output tokens, on the hosted gateway (fee suspended):
+
+```
+input_cost  = 500 / 1,000,000 * $2.50  = $0.00125
+output_cost = 200 / 1,000,000 * $10.00 = $0.00200
+provider_cost = $0.00325
+platform_fee  = $0.00000 (suspended)
+total         = $0.00325 USDC
+```
+
+Atomic amount: `3250` (multiply total by 1,000,000, round up).
+
+With a self-hosted gateway at default 5% fee:
 
 ```
 input_cost  = 500 / 1,000,000 * $2.50  = $0.00125
