@@ -415,7 +415,7 @@
       },
       "ReceiptCostBreakdown": {
         "type": "object",
-        "description": "Agent-facing cost breakdown that produced the bill: provider cost + platform fee = total. On vendor-settled services the agent fee is 0 (the vendor absorbs the 5% — see `vendor`).",
+        "description": "Agent-facing cost breakdown that produced the bill: provider cost + platform fee = total. On vendor-settled services the agent fee is 0 (the vendor absorbs the platform fee — see `vendor`).",
         "required": ["provider_cost_atomic", "provider_cost_usdc", "platform_fee_atomic", "platform_fee_usdc", "total_atomic", "total_usdc", "currency"],
         "properties": {
           "provider_cost_atomic": { "type": "integer", "minimum": 0 },
@@ -429,7 +429,7 @@
       },
       "ReceiptVendorSettlement": {
         "type": "object",
-        "description": "Vendor-settlement evidence, present only when the request hit a marketplace service with a per-service `vendor_wallet`: the agent's transfer settled `settled_atomic` directly to the vendor on-chain, and Solvela's 5% platform fee is recorded as an off-chain receivable against the vendor (never charged to the agent).",
+        "description": "Vendor-settlement evidence, present only when the request hit a marketplace service with a per-service `vendor_wallet`: the agent's transfer settled `settled_atomic` directly to the vendor on-chain, and Solvela's platform fee is recorded as an off-chain receivable against the vendor (never charged to the agent).",
         "required": ["vendor_wallet", "settled_atomic", "settled_usdc", "fee_receivable_atomic", "fee_receivable_usdc"],
         "properties": {
           "vendor_wallet": { "type": "string", "description": "Vendor wallet (base58 pubkey) the payment settled to." },

@@ -15,7 +15,19 @@ function Cap({ on }: { on: boolean }) {
   );
 }
 
-function ModelRow({ m }: { m: Model }) {
+/**
+ * Compute displayed price with platform fee applied.
+ * On hosted gateway (fee_percent=0), displayed price equals base.
+ * On self-hosted (fee_percent>0), displayed price = base * (1 + fee_percent/100).
+ */
+function computeDisplayPrice(basePrice: number, feePercent: number): number {
+  return basePrice * (1 + feePercent / 100);
+}
+
+function ModelRow({ m, platformFeePercent }: { m: Model; platformFeePercent: number }) {
+  const displayInput = computeDisplayPrice(m.pricing.input_per_million_usdc, platformFeePercent);
+  const displayOutput = computeDisplayPrice(m.pricing.output_per_million_usdc, platformFeePercent);
+
   return (
     <tr className="border-b border-border last:border-0 hover:bg-bg-surface transition-colors">
       <td className="px-5 py-3">
@@ -26,10 +38,10 @@ function ModelRow({ m }: { m: Model }) {
         <Badge className={providerBadgeClass(m.provider)}>{m.provider}</Badge>
       </td>
       <td className="px-5 py-3 text-right tabular-nums text-text-secondary text-xs font-mono">
-        ${m.pricing.input_per_million_usdc.toFixed(3)}
+        ${displayInput.toFixed(3)}
       </td>
       <td className="px-5 py-3 text-right tabular-nums text-text-secondary text-xs font-mono">
-        ${m.pricing.output_per_million_usdc.toFixed(3)}
+        ${displayOutput.toFixed(3)}
       </td>
       <td className="px-5 py-3 text-center text-text-secondary text-xs font-mono">
         {m.capabilities.context_window >= 1_000_000
@@ -58,13 +70,19 @@ function ModelRow({ m }: { m: Model }) {
 export default async function ModelsPage() {
   let models: Model[] = [];
   let error: string | null = null;
+  let platformFeePercent = 0;
 
   try {
     const pricing = await fetchPricing();
     models = pricing.models;
+    platformFeePercent = pricing.platform.fee_percent;
   } catch (err) {
     error = err instanceof Error ? err.message : "Failed to load models";
   }
+
+  const feeCaption = platformFeePercent === 0
+    ? "no platform fee (hosted gateway)"
+    : `includes ${platformFeePercent}% platform fee`;
 
   return (
     <div className="flex flex-col h-full">
@@ -72,7 +90,7 @@ export default async function ModelsPage() {
         title="Models"
         subtitle={
           models.length > 0
-            ? `${models.length} models · no platform fee (hosted gateway) · live from /pricing`
+            ? `${models.length} models · ${feeCaption} · live from /pricing`
             : "Model registry"
         }
       />
@@ -109,7 +127,7 @@ export default async function ModelsPage() {
               </thead>
               <tbody>
                 {models.length > 0 ? (
-                  models.map((m) => <ModelRow key={m.id} m={m} />)
+                  models.map((m) => <ModelRow key={m.id} m={m} platformFeePercent={platformFeePercent} />)
                 ) : (
                   <tr>
                     <td
@@ -128,7 +146,7 @@ export default async function ModelsPage() {
         </TerminalCard>
 
         <p className="text-xs text-text-tertiary font-mono">
-          Prices in USDC per million tokens (provider cost only; no platform fee on hosted gateway).
+          Prices in USDC per million tokens ({platformFeePercent === 0 ? "provider cost only" : `including ${platformFeePercent}% platform fee`}).
           Source:{" "}
           <code>GET /pricing</code>
         </p>

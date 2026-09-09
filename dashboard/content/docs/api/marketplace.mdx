@@ -35,7 +35,7 @@ curl https://api.solvela.ai/v1/services
       "x402_enabled": true,
       "internal": true,
       "description": "x402-paid Solana token prices (Jupiter upstream); per-mint USD price, batch up to 50 mints, unknown mints returned as null",
-      "pricing": "$0.00105/query (incl. 5% platform fee)",
+      "pricing": "$0.001/query (no platform fee on hosted gateway)",
       "chains": ["solana"],
       "source": "config",
       "price_per_request_usdc": 0.001
@@ -48,7 +48,7 @@ curl https://api.solvela.ai/v1/services
       "x402_enabled": true,
       "internal": true,
       "description": "x402-paid web search (Tavily upstream); normalized title/url/snippet results",
-      "pricing": "$0.0105/query (incl. 5% platform fee)",
+      "pricing": "$0.01/query (no platform fee on hosted gateway)",
       "chains": ["solana"],
       "source": "config",
       "price_per_request_usdc": 0.01
@@ -69,10 +69,10 @@ curl https://api.solvela.ai/v1/services
 | `x402_enabled` | boolean | Whether the endpoint requires x402 payment |
 | `internal` | boolean | `true` when the gateway itself serves the endpoint |
 | `description` | string \| null | Free-text description |
-| `pricing` | string | Human-readable pricing label, **fee-inclusive** |
+| `pricing` | string | Human-readable pricing label (hosted gateway has no platform fee) |
 | `chains` | string[] | Payment chains — always `["solana"]` today |
 | `source` | string | `"config"` (loaded from `config/services.toml`) or `"api"` (registered at runtime) |
-| `price_per_request_usdc` | float \| null | Flat per-call price **before** the 5% platform fee |
+| `price_per_request_usdc` | float \| null | Flat per-call price (no platform fee on hosted gateway; configurable on self-hosted) |
 
 Entries are sorted alphabetically by `id`, so the response is deterministic.
 
@@ -89,14 +89,14 @@ curl "https://api.solvela.ai/v1/services?category=data"
 ```
 
 <Note>
-  `price_per_request_usdc` is the **pre-fee** price. `pricing` is the **post-fee** label. For `web-search`, `0.01` and `$0.0105/query` describe the same tool — the difference is the 5% platform fee. Always pay the `amount` from the 402 challenge, never a number you computed yourself.
+  `price_per_request_usdc` is the provider cost. `pricing` is the human-readable label. On the hosted gateway, both represent the same amount with no platform fee added. Always pay the `amount` from the 402 challenge, never a number you computed yourself.
 </Note>
 
 ## `POST /v1/search`
 
 x402-paid web search. The gateway holds the upstream search key (Tavily) and calls it server-side; your client never sees it.
 
-**Price:** `$0.01` provider cost + `$0.0005` platform fee = **`$0.0105`** per call (`10500` atomic USDC).
+**Price:** `$0.01` per call on the hosted gateway (`10000` atomic USDC; default 5% platform fee when self-hosting).
 
 ### Request
 
@@ -140,7 +140,7 @@ The request body is capped at 64 KiB.
 
 x402-paid USD prices for SPL token mints. The gateway queries the Jupiter Price API server-side.
 
-**Price:** `$0.001` provider cost + `$0.00005` platform fee = **`$0.00105`** per call (`1050` atomic USDC).
+**Price:** `$0.001` per call on the hosted gateway (`1000` atomic USDC; default 5% platform fee when self-hosting).
 
 ### Request
 
@@ -215,7 +215,7 @@ Both tools speak the same [x402](/docs/concepts/x402) dialect as the rest of the
     {
       "scheme": "exact",
       "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-      "amount": "1050",
+      "amount": "1000",
       "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
       "pay_to": "<gateway recipient wallet>",
       "max_timeout_seconds": 300
@@ -223,16 +223,16 @@ Both tools speak the same [x402](/docs/concepts/x402) dialect as the rest of the
   ],
   "cost_breakdown": {
     "provider_cost": "0.001000",
-    "platform_fee": "0.000050",
-    "total": "0.001050",
+    "platform_fee": "0.000000",
+    "total": "0.001000",
     "currency": "USDC",
-    "fee_percent": 5
+    "fee_percent": 0
   },
   "error": "Payment required"
 }
 ```
 
-Sign a transfer for `accepts[0].amount`, base64-encode the `PaymentPayload`, and resend with the `payment-signature` header. The `cost_breakdown` always separates provider cost from the 5% platform fee.
+Sign a transfer for `accepts[0].amount`, base64-encode the `PaymentPayload`, and resend with the `payment-signature` header. The `cost_breakdown` always separates provider cost from any platform fee (0 on the hosted gateway).
 
 ### Accepted schemes
 

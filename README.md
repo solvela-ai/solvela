@@ -55,7 +55,7 @@ OpenAI, Anthropic, Google, xAI, DeepSeek, and NVIDIA NIM (a free Nemotron tier p
 
 ### Service Marketplace
 
-Proxy any x402-enabled external service through the gateway. Admin-controlled registration with SSRF prevention, background health monitoring, and 5% platform fee on all proxied requests.
+Proxy any x402-enabled external service through the gateway. Admin-controlled registration with SSRF prevention, background health monitoring, and a configurable platform fee (default 5%, suspended on the hosted gateway).
 
 ### Prometheus Monitoring
 
