@@ -114,7 +114,11 @@ async fn json_body(response: axum::response::Response) -> serde_json::Value {
 /// "0.040960" → "40960" (the atomic-unit string the 402 `accepts[].amount` carries).
 fn decimal_to_atomic_string(decimal: &str) -> String {
     let (whole, frac) = decimal.split_once('.').expect("6-dp decimal string");
-    assert_eq!(frac.len(), 6, "USDC decimal must have exactly 6 dp: {decimal}");
+    assert_eq!(
+        frac.len(),
+        6,
+        "USDC decimal must have exactly 6 dp: {decimal}"
+    );
     format!("{whole}{frac}")
         .parse::<u64>()
         .expect("atomic parses as u64")
@@ -147,14 +151,22 @@ async fn zero_fee_chat_402_quotes_provider_cost_only() {
     let v = json_body(response).await;
     let cb = &v["cost_breakdown"];
     assert_eq!(cb["fee_percent"], 0, "402 fee_percent must be 0: {cb}");
-    assert_eq!(cb["platform_fee"], "0.000000", "402 platform_fee must be zero: {cb}");
+    assert_eq!(
+        cb["platform_fee"], "0.000000",
+        "402 platform_fee must be zero: {cb}"
+    );
     let total = cb["total"].as_str().expect("total is a string");
     assert_eq!(
         total,
-        cb["provider_cost"].as_str().expect("provider_cost is a string"),
+        cb["provider_cost"]
+            .as_str()
+            .expect("provider_cost is a string"),
         "at 0% the total must equal the provider cost: {cb}"
     );
-    assert_ne!(total, "0.000000", "priced model must quote a non-zero total");
+    assert_ne!(
+        total, "0.000000",
+        "priced model must quote a non-zero total"
+    );
     assert_eq!(
         v["accepts"][0]["amount"],
         decimal_to_atomic_string(total),
@@ -181,15 +193,26 @@ async fn zero_fee_discovery_402_has_no_phantom_fee_split() {
 
     let v = json_body(response).await;
     let cb = &v["cost_breakdown"];
-    assert_eq!(cb["fee_percent"], 0, "discovery fee_percent must be 0: {cb}");
-    assert_eq!(cb["platform_fee"], "0.000000", "discovery platform_fee must be zero: {cb}");
+    assert_eq!(
+        cb["fee_percent"], 0,
+        "discovery fee_percent must be 0: {cb}"
+    );
+    assert_eq!(
+        cb["platform_fee"], "0.000000",
+        "discovery platform_fee must be zero: {cb}"
+    );
     let total = cb["total"].as_str().expect("total is a string");
     assert_eq!(
         total,
-        cb["provider_cost"].as_str().expect("provider_cost is a string"),
+        cb["provider_cost"]
+            .as_str()
+            .expect("provider_cost is a string"),
         "at 0% the discovery total must equal the provider cost: {cb}"
     );
-    assert_ne!(total, "0.000000", "discovery floor must be non-zero for a priced model");
+    assert_ne!(
+        total, "0.000000",
+        "discovery floor must be non-zero for a priced model"
+    );
 }
 
 /// (c) `GET /v1/models`: every `pricing.fee_percent` reflects the live knob.
@@ -212,7 +235,10 @@ async fn zero_fee_models_list_reports_fee_percent_zero() {
     let data = v["data"].as_array().expect("data is an array");
     assert!(!data.is_empty(), "models list must not be empty");
     for m in data {
-        assert_eq!(m["pricing"]["fee_percent"], 0, "model fee_percent must be 0: {m}");
+        assert_eq!(
+            m["pricing"]["fee_percent"], 0,
+            "model fee_percent must be 0: {m}"
+        );
     }
 }
 
@@ -253,6 +279,9 @@ async fn zero_fee_pricing_page_reports_zero_everywhere() {
             ex["total_usdc"], ex["provider_cost_usdc"],
             "at 0% the example total must equal the provider cost: {ex}"
         );
-        assert_ne!(ex["total_usdc"], "0.000000", "priced example must be non-zero: {ex}");
+        assert_ne!(
+            ex["total_usdc"], "0.000000",
+            "priced example must be non-zero: {ex}"
+        );
     }
 }

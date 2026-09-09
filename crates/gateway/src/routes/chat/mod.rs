@@ -30,6 +30,7 @@ use crate::error::GatewayError;
 use crate::middleware::prompt_guard::{self, GuardResult, PromptGuardConfig};
 use crate::receipts;
 use crate::routes::debug_headers::{is_debug_enabled, PaymentStatus};
+use crate::routes::service_payment::split_total_atomic;
 use crate::usage::SpendLogEntry;
 use crate::AppState;
 
@@ -2328,14 +2329,13 @@ pub(crate) fn chat_completions_discovery(state: &AppState, resource_url: &str) -
     let amount = floor_atomic.to_string();
 
     // The discovery floor is a single all-in figure (the registry estimate
-    // already folds in the 5% platform fee exactly once). Present it honestly:
+    // already folds in the platform fee exactly once). Present it honestly:
     // the total is the floor; the provider_cost / platform_fee split is derived
-    // by the canonical integer fee math so the breakdown sums to the total and
-    // never re-applies the fee.
-    //   total = provider * 105/100  ⇒  provider = floor(total * 100 / 105)
+    // by the canonical integer fee math (at the LIVE percent — hard-coding
+    // `* 100 / 105` here would report a phantom ~4.76% fee at a 0% knob) so the
+    // breakdown sums to the total and never re-applies the fee.
     let total_atomic = floor_atomic;
-    let provider_atomic = (total_atomic as u128 * 100 / 105) as u64;
-    let fee_atomic = total_atomic.saturating_sub(provider_atomic);
+    let (provider_atomic, fee_atomic) = split_total_atomic(total_atomic);
     let to_usdc =
         |atomic: u64| -> String { format!("{}.{:06}", atomic / 1_000_000, atomic % 1_000_000) };
     let cost_breakdown = solvela_protocol::CostBreakdown {
@@ -2343,7 +2343,7 @@ pub(crate) fn chat_completions_discovery(state: &AppState, resource_url: &str) -
         platform_fee: to_usdc(fee_atomic),
         total: to_usdc(total_atomic),
         currency: "USDC".to_string(),
-        fee_percent: solvela_protocol::PLATFORM_FEE_PERCENT,
+        fee_percent: solvela_protocol::platform_fee_percent(),
     };
 
     info!(

@@ -55,7 +55,7 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use solvela_x402::types::{
-    CostBreakdown, PaymentAccept, PaymentRequired, Resource, PLATFORM_FEE_PERCENT, SOLANA_NETWORK,
+    platform_fee_percent, CostBreakdown, PaymentAccept, PaymentRequired, Resource, SOLANA_NETWORK,
     X402_VERSION,
 };
 
@@ -276,7 +276,7 @@ pub async fn solana_price(
                 platform_fee: format!("{fee_usdc:.6}"),
                 total: format!("{total_usdc:.6}"),
                 currency: "USDC".to_string(),
-                fee_percent: PLATFORM_FEE_PERCENT,
+                fee_percent: platform_fee_percent(),
             },
             error: "Payment required".to_string(),
             extensions: None,

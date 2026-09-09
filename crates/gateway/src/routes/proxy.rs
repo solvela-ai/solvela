@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use solvela_x402::types::{
-    CostBreakdown, PaymentAccept, PaymentRequired, Resource, PLATFORM_FEE_PERCENT, SOLANA_NETWORK,
+    platform_fee_percent, CostBreakdown, PaymentAccept, PaymentRequired, Resource, SOLANA_NETWORK,
     X402_VERSION,
 };
 
@@ -78,7 +78,7 @@ impl PaymentTarget {
     /// to a `0.000000` fee would contradict the amounts on the vendor path.
     fn agent_fee_percent(&self) -> u8 {
         match self {
-            Self::Gateway { .. } => PLATFORM_FEE_PERCENT,
+            Self::Gateway { .. } => platform_fee_percent(),
             Self::Vendor { .. } => 0,
         }
     }
@@ -1611,7 +1611,7 @@ mod tests {
                 assert_eq!(pr.cost_breakdown.provider_cost, "0.010000");
                 assert_eq!(pr.cost_breakdown.platform_fee, "0.000500");
                 assert_eq!(pr.cost_breakdown.total, "0.010500");
-                assert_eq!(pr.cost_breakdown.fee_percent, PLATFORM_FEE_PERCENT);
+                assert_eq!(pr.cost_breakdown.fee_percent, platform_fee_percent());
             }
             other => panic!("expected PaymentChallenge, got {other:?}"),
         }

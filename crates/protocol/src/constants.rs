@@ -19,10 +19,17 @@ pub const MAINNET_ESCROW_PROGRAM_ID: &str = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtF
 /// Maximum timeout for payment authorization (5 minutes).
 pub const MAX_TIMEOUT_SECONDS: u64 = 300;
 
-/// The platform fee multiplier (1.05 = provider cost + 5%).
+/// The DEFAULT platform fee multiplier (1.05 = provider cost + 5%).
+///
+/// Compile-time default only — runtime code must use
+/// [`platform_fee_multiplier`], which tracks the live knob.
 pub const PLATFORM_FEE_MULTIPLIER: f64 = 1.05;
 
-/// Platform fee percentage.
+/// DEFAULT platform fee percentage, and the docs source of truth
+/// (`scripts/audit-docs/checks/numeric_claims.py` parses this literal).
+///
+/// Runtime code must use [`platform_fee_percent`], not this constant — the
+/// live value is configurable via `SOLVELA_PLATFORM_FEE_PERCENT`.
 pub const PLATFORM_FEE_PERCENT: u8 = 5;
 
 /// Live, process-global platform-fee percentage.

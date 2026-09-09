@@ -7,6 +7,8 @@ use tracing::warn;
 
 use solvela_protocol::{ChatRequest, ModelRegistration, Usage};
 
+use crate::routes::service_payment::apply_platform_fee_atomic;
+
 /// Payment scheme parsed off the `X-PAYMENT` header at the request boundary.
 ///
 /// Carries a financial invariant: only `Escrow` realises the semantic-cache
@@ -381,7 +383,11 @@ pub(crate) fn estimate_native_anthropic_input_tokens(body: &[u8]) -> u32 {
 /// `u128::MAX`. Without this guard, a corrupt `models.toml` entry with `NaN`
 /// pricing would silently quote a $0 cost (escrow claim then no-ops on the
 /// `claim_amount == 0` guard), and an `INFINITY` entry would wrap on the
-/// `* 105 / 100` step. Both are silent revenue gaps.
+/// platform-fee step. Both are silent revenue gaps.
+///
+/// The fee itself is applied EXACTLY ONCE via the canonical
+/// [`apply_platform_fee_atomic`] helper, which reads the LIVE platform-fee
+/// percent (`SOLVELA_PLATFORM_FEE_PERCENT`, default 5).
 pub(crate) fn compute_actual_atomic_cost(
     prompt_tokens: u32,
     completion_tokens: u32,
@@ -410,13 +416,11 @@ pub(crate) fn compute_actual_atomic_cost(
     let output_atomic = (completion_tokens as u128) * output_cost_atomic_per_million / 1_000_000;
     let provider_atomic = input_atomic + output_atomic;
 
-    // 5% platform fee: total = provider * 105 / 100
-    let total_atomic = provider_atomic * 105 / 100;
-
-    // Final overflow guard: u128 → u64. With sane pricing this never trips,
-    // but guarding here means a pathological combination of huge tokens ×
-    // huge pricing surfaces as None instead of silent wrap.
-    u64::try_from(total_atomic).ok()
+    // Platform fee at the live percent, applied exactly once. The u128 → u64
+    // narrowing happens BEFORE the fee (and again inside the helper): with sane
+    // pricing neither trips, but guarding means a pathological combination of
+    // huge tokens × huge pricing surfaces as None instead of a silent wrap.
+    apply_platform_fee_atomic(u64::try_from(provider_atomic).ok()?)
 }
 
 /// Upper bound for the `total` USDC cost that `estimated_atomic_cost` will accept.
