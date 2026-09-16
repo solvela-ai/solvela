@@ -181,6 +181,13 @@ impl RateLimitConfig {
     }
 }
 
+/// Sentinel error returned by [`RateLimiter::check`] / [`FreeTierGlobalCap::check`]
+/// when the caller is over the limit. Carries no data — the 429 response is
+/// built from the limiter's own `config()` at the call site, not from this
+/// value — so it stays a plain marker rather than `()` (clippy::result_unit_err).
+#[derive(Debug, Clone, Copy)]
+pub struct RateLimited;
+
 /// Per-client rate limit state.
 #[derive(Debug)]
 struct RateLimitEntry {
@@ -217,11 +224,11 @@ impl RateLimiter {
     }
 
     /// Check if a request from the given client should be allowed.
-    /// Returns `Ok(remaining)` or `Err(())` if rate limited.
+    /// Returns `Ok(remaining)` or `Err(RateLimited)` if rate limited.
     ///
     /// When `client_id` is `"unknown"`, applies the stricter
     /// `unknown_max_requests` limit instead of the normal `max_requests`.
-    pub async fn check(&self, client_id: &str) -> Result<u32, ()> {
+    pub async fn check(&self, client_id: &str) -> Result<u32, RateLimited> {
         // Decide whether emergency cleanup is needed under a SHORT lock
         // on `entries`. Previously this function held `entries` for its
         // entire body — including across the nested
@@ -262,7 +269,7 @@ impl RateLimiter {
         };
 
         if entry.count > effective_limit {
-            Err(())
+            Err(RateLimited)
         } else {
             Ok(effective_limit - entry.count)
         }
@@ -390,8 +397,8 @@ impl FreeTierGlobalCap {
 
     /// Check (and consume one slot of) the aggregate free-tier budget.
     ///
-    /// Returns `Ok(())` when the request is under the cap, `Err(())` when the
-    /// aggregate window is exhausted (caller emits the shared 429).
+    /// Returns `Ok(())` when the request is under the cap, `Err(RateLimited)`
+    /// when the aggregate window is exhausted (caller emits the shared 429).
     ///
     /// Store selection:
     /// - `cache = Some` (Redis configured): increment the shared Redis window
@@ -400,7 +407,10 @@ impl FreeTierGlobalCap {
     ///   hard-fail free traffic (fail-open to in-memory, NOT fail-open to
     ///   unbounded), and the provider's own 429 is the ultimate backstop.
     /// - `cache = None` (no Redis): use the in-memory per-instance counter.
-    pub async fn check(&self, cache: Option<&crate::cache::ResponseCache>) -> Result<(), ()> {
+    pub async fn check(
+        &self,
+        cache: Option<&crate::cache::ResponseCache>,
+    ) -> Result<(), RateLimited> {
         let minute = Self::epoch_minute();
 
         let count = match cache {
@@ -421,7 +431,7 @@ impl FreeTierGlobalCap {
         };
 
         if count > self.cap as u64 {
-            Err(())
+            Err(RateLimited)
         } else {
             Ok(())
         }
@@ -492,7 +502,7 @@ pub async fn rate_limit(request: Request, next: Next) -> Response {
                 }
                 response
             }
-            Err(()) => {
+            Err(RateLimited) => {
                 warn!(client_id, "rate limit exceeded");
                 rate_limited_response(&limiter.config)
             }
