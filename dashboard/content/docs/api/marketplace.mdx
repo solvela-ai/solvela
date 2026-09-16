@@ -133,7 +133,7 @@ The request body is capped at 64 KiB.
 `results` may be **empty**. `provider` names the adapter that answered and is informational — do not branch on it.
 
 <Warning>
-  The price is flat and charged **per call, not per result**. A query that returns zero results costs exactly the same `$0.0105`. Payment is settled before the upstream search runs.
+  The price is flat and charged **per call, not per result**. A query that returns zero results costs exactly the same as one that returns ten. Payment is settled before the upstream search runs.
 </Warning>
 
 ## `POST /v1/solana/price`
@@ -200,7 +200,7 @@ The request body is capped at 16 KiB. An empty list, a list over 50 entries, or 
 - **One entry per requested mint, in request order.** The `prices` array is a positional mirror of your `mints` array.
 - **An unpriceable mint is a `null`, never a batch failure.** The upstream omits mints it cannot price; the gateway normalizes each omission to an explicit `price: null` so a single bad mint never poisons the other 49.
 - **Send each mint once.** Duplicates are tolerated but the repeat comes back `price: null` — the upstream entry is consumed by the first occurrence.
-- **The flat fee is charged regardless of how many mints resolve.** A 50-mint request where every entry comes back `null` costs the same `$0.00105` as one that resolves all 50.
+- **The flat fee is charged regardless of how many mints resolve.** A 50-mint request where every entry comes back `null` costs the same as one that resolves all 50.
 - **Responses are not cached.** Prices are time-sensitive, so every paid call hits the upstream. (Solvela's [response cache](/docs/concepts/response-cache) is also wallet-agnostic, which would be wrong for market data.)
 
 ## Payment
