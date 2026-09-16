@@ -60,7 +60,9 @@ pub fn platform_fee_percent() -> u8 {
 ///
 /// Rejects anything above 100 — it never clamps, and a rejected call leaves the
 /// live value unchanged (a partially-applied money knob is worse than a refused
-/// one). Intended to be called ONCE, at process startup, before serving.
+/// one). Intended to be called ONCE, at process startup, before serving: a
+/// mid-flight change tears quotes, because a single 402 reads the percent
+/// and the amounts it describes in separate loads.
 pub fn set_platform_fee_percent(percent: u8) -> Result<(), PlatformFeeError> {
     if percent > 100 {
         return Err(PlatformFeeError::OutOfRange(percent));

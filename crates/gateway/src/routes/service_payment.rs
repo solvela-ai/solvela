@@ -134,7 +134,7 @@ pub fn compute_service_cost(price_usdc: f64) -> Result<ServiceCost, String> {
     let provider_atomic = (price_usdc * 1_000_000.0).round() as u64;
     let total_atomic = apply_platform_fee_atomic(provider_atomic).ok_or_else(|| {
         format!(
-            "price_per_request_usdc ({price_usdc}) overflows u64 atomic USDC              once the platform fee is applied"
+            "price_per_request_usdc ({price_usdc}) overflows u64 atomic USDC once the platform fee is applied"
         )
     })?;
     let fee_atomic = total_atomic - provider_atomic;
