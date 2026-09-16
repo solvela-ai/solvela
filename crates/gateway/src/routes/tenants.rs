@@ -209,6 +209,10 @@ fn validate_caps(body: &ProvisionTenantBudgetRequest) -> Result<ValidatedCaps, R
 ///
 /// Flow: auth → parse path params → buffer + parse body → validate (wallet,
 /// tenant, caps) → DB gate → upsert → cache-bust → audit.
+// The Err variant is an axum `Response` (early-return-on-failure is the
+// idiomatic axum handler shape here); boxing it would fight the framework's
+// `IntoResponse` contract for no runtime gain.
+#[allow(clippy::result_large_err)]
 pub async fn provision_tenant_budget(
     State(state): State<Arc<AppState>>,
     req: Request,
