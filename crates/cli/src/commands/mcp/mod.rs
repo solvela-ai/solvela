@@ -180,7 +180,8 @@ fn claude_cli_install(cfg: &InstallConfig) -> Result<()> {
     use std::io::ErrorKind;
 
     let mut cmd = Command::new("claude");
-    cmd.args(["mcp", "add", "--scope", "user", "--transport", "stdio"]);
+    // Server name is the first positional arg; -e flags must follow it.
+    cmd.args(["mcp", "add", "--scope", "user", "--transport", "stdio", "solvela"]);
 
     // Inject env vars via -e flags.
     cmd.arg("-e")
@@ -201,10 +202,8 @@ fn claude_cli_install(cfg: &InstallConfig) -> Result<()> {
             .arg("SOLANA_WALLET_KEY=<paste-your-base58-private-key-here>");
     }
 
-    // Server name and command.
-    cmd.arg("solvela")
-        .arg("--")
-        .args(["npx", "-y", "@solvela/mcp-server"]);
+    // Command.
+    cmd.arg("--").args(["npx", "-y", "@solvela/mcp-server"]);
 
     tracing::info!("running: claude mcp add --scope user solvela ...");
 
