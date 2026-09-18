@@ -55,7 +55,7 @@ OpenAI, Anthropic, Google, xAI, DeepSeek, and NVIDIA NIM (a free Nemotron tier p
 
 ### Service Marketplace
 
-Proxy any x402-enabled external service through the gateway. Admin-controlled registration with SSRF prevention, background health monitoring, and 5% platform fee on all proxied requests.
+Proxy any x402-enabled external service through the gateway. Admin-controlled registration with SSRF prevention, background health monitoring, and a configurable platform fee (default 5%, suspended on the hosted gateway).
 
 ### Prometheus Monitoring
 
@@ -212,7 +212,7 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 | NVIDIA | `nvidia/nvidia/llama-3.3-nemotron-super-49b-v1.5` | $0.10 | $0.40 | 131K |
 | NVIDIA | `nvidia/nvidia/nvidia-nemotron-nano-9b-v2` | $0.04 | $0.16 | 131K |
 
-All prices are provider cost in USDC. A 5% platform fee is applied on top. See `config/models.toml` for the full registry or query `GET /pricing` at runtime.
+All prices are provider cost in USDC. The gateway software includes a configurable platform fee (default 5%); the hosted service at api.solvela.ai runs with the fee suspended. See `config/models.toml` for the full registry or query `GET /pricing` at runtime.
 
 > **Free-tier data-use notice.** The `free` profile routes to NVIDIA NIM free-tier Nemotron models (tiered by complexity), with `gemini-3.1-flash-lite` as a fallback if NIM is unavailable. These are served via the upstream providers' **free** API tiers, whose terms may permit the provider to use submitted prompts and generated responses to improve their products (and human reviewers may process them) — do not send sensitive data through the free tier. The free tier is also rate-limited and shared per gateway key, so treat it as a demo/evaluation tier rather than a model to build production load on. Paid models on this list are not subject to those free-tier data-use policies.
 
@@ -224,7 +224,7 @@ All prices are provider cost in USDC. A 5% platform fee is applied on top. See `
 |--------|------|-------------|
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat (x402 paid) |
 | `POST` | `/v1/messages` | Anthropic-native `/v1/messages` relay — byte-for-byte passthrough for Anthropic-provider models (x402 paid) |
-| `POST` | `/v1/search` | Web search via the service marketplace ($0.01/query + 5% fee, x402 paid) |
+| `POST` | `/v1/search` | Web search via the service marketplace ($0.01/query, x402 paid; platform fee is configurable, suspended on hosted service) |
 | `POST` | `/v1/images/generations` | OpenAI-compatible image generation (x402 paid) |
 | `POST` | `/v1/services/{id}/proxy` | Proxy to x402-enabled external service |
 | `POST` | `/v1/services/register` | Register external service (admin) |

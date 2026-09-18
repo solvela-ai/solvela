@@ -84,8 +84,8 @@ Registry of x402-compatible services available through the gateway. The marketpl
   <Step title="Provider adapters own format translation">
     Each provider adapter translates between the OpenAI-compatible wire format (from `protocol`) and the native provider format. Callers never see provider-specific types.
   </Step>
-  <Step title="5% platform fee on all requests">
-    The fee is applied uniformly at the gateway layer before proxying. It is included in the cost breakdown returned on 402 responses.
+  <Step title="Configurable platform fee (default 5%)">
+    The gateway applies a configurable platform fee via the `SOLVELA_PLATFORM_FEE_PERCENT` env var (0-100, default 5%). The hosted gateway runs with the fee suspended (0%). The fee is applied uniformly at the gateway layer before proxying and is included in the cost breakdown returned on 402 responses.
   </Step>
   <Step title="Private keys never leave the client">
     The gateway never handles wallet private keys. All signing happens client-side; the gateway only receives and verifies the resulting transaction signature.

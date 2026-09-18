@@ -18,7 +18,7 @@ These are on right now and serve real traffic.
 | Feature | Notes |
 |---|---|
 | **Exact x402 USDC-SPL payment** (mainnet) | The core path. `PAYMENT-SIGNATURE` → verify → proxy. This is what Telsi uses. |
-| **5% platform fee + `cost_breakdown`** | On every request. |
+| **Platform fee + `cost_breakdown`** | Configurable fee (default 5%, via `SOLVELA_PLATFORM_FEE_PERCENT`); suspended on the hosted gateway. Every response carries the live `fee_percent` and `platform_fee` fields. |
 | **OpenAI-compatible API** | `POST /v1/chat/completions`, `GET /v1/models` — 44 models across 6 providers. |
 | **Native `/v1/messages` Anthropic relay** | Byte-passthrough for Anthropic-resolved models; preserves thinking `signature`s, `tool_use`, cache-token usage (#635/#647/#651). |
 | **SSE streaming** | Token-by-token, including real Gemini/Google streaming (#723/#724). |

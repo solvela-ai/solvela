@@ -28,7 +28,7 @@ curl https://api.solvela.ai/v1/models
         "input_per_million": 2.50,
         "output_per_million": 10.00,
         "currency": "USDC",
-        "fee_percent": 5
+        "fee_percent": 0
       },
       "capabilities": {
         "streaming": true,
@@ -53,7 +53,7 @@ curl https://api.solvela.ai/v1/models
 | `pricing.input_per_million` | float | Provider cost per million input tokens, in `pricing.currency` |
 | `pricing.output_per_million` | float | Provider cost per million output tokens, in `pricing.currency` |
 | `pricing.currency` | string | Always `"USDC"` today |
-| `pricing.fee_percent` | integer | Platform fee percentage (always `5`) |
+| `pricing.fee_percent` | integer | Platform fee percentage (default 5, configurable; currently 0 on hosted gateway) |
 | `capabilities.streaming` | boolean | Whether SSE streaming is available |
 | `capabilities.tools` | boolean | Whether function calling / tools are supported |
 | `capabilities.vision` | boolean | Whether image inputs are accepted |
@@ -94,7 +94,7 @@ The table below is the **paid** catalog across the five marquee providers. Separ
 | `deepseek/deepseek-coder` | DeepSeek | $0.28 | $0.42 |
 
 <Note>
-  All prices shown are provider cost before the 5% platform fee. The actual amount charged is `provider_cost * 1.05`.
+  All prices shown are provider cost only. The hosted gateway at api.solvela.ai has no platform fee, so the amount charged equals the provider cost. The `fee_percent` field in the response reflects the live fee setting (currently 0 on hosted). Self-hosted gateways can enable a platform fee via the `SOLVELA_PLATFORM_FEE_PERCENT` env var.
 </Note>
 
 ## GET /pricing

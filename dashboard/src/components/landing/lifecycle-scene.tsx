@@ -42,7 +42,7 @@ const BEATS: Beat[] = [
     key: 1,
     verb: 'get quoted',
     http: '402 payment required',
-    body: 'It posts a request with no signature. The gateway answers 402 with a per-token USDC cost and a flat 5% platform fee — the exact amount, before a cent moves.',
+    body: 'It posts a request with no signature. The gateway answers 402 with a per-token USDC cost (no platform fee on the hosted gateway) — the exact amount, before a cent moves.',
     tone: 'warn',
   },
   {

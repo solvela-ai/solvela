@@ -37,7 +37,7 @@ Details that matter:
 
 ### Wallet-agnostic by design
 
-Cache keys contain no payer identity. If wallet A and wallet B send identical prompts, wallet B receives the response cached for wallet A. **Both wallets pay the gateway's 402 fee** — payment verification runs before the cache check — but the upstream LLM is only charged once. This is an intentional trade-off: prompt deduplication lowers upstream costs and improves margin, at the cost of cross-wallet response sharing. If per-wallet isolation were ever required, the payer address would have to be added to the cache key.
+Cache keys contain no payer identity. If wallet A and wallet B send identical prompts, wallet B receives the response cached for wallet A. **Both wallets pay the quoted cost** (including any platform fee if enabled) — payment verification runs before the cache check — but the upstream LLM is only charged once. This is an intentional trade-off: prompt deduplication lowers upstream costs and improves margin, at the cost of cross-wallet response sharing. If per-wallet isolation were ever required, the payer address would have to be added to the cache key.
 
 ### TTL and Redis dependency
 
@@ -60,7 +60,7 @@ A candidate is returned only if cosine similarity meets the configured threshold
 
 ### Discounted pricing on semantic hits
 
-A semantic hit bills `hit_price_percent` of the full all-in price (provider cost + 5% platform fee). The default is `30` — pay 30%, a 70% discount. A hit costs the gateway no upstream call, so the discounted amount is gateway revenue minus the sub-cent embedding cost.
+A semantic hit bills `hit_price_percent` of the full quoted price (provider cost plus any platform fee if enabled). The default is `30` — pay 30%, a 70% discount. A hit costs the gateway no upstream call, so the discounted amount is gateway revenue minus the sub-cent embedding cost.
 
 <Note>
   The discount is realised on the **escrow** payment scheme only: the gateway claims the discounted fraction from the deposit and refunds the remainder. The direct-transfer `exact` scheme settles the full amount up front, so no discount applies there.
@@ -95,4 +95,4 @@ ttl_secs = 600
 
 - [Escrow System](/docs/concepts/escrow) — how the semantic discount is claimed and refunded on-chain
 - [x402 Protocol](/docs/concepts/x402) — the payment flow that runs before any cache check
-- [Pricing](/docs/concepts/pricing) — model pricing and the 5% platform fee
+- [Pricing](/docs/concepts/pricing) — model pricing and the configurable platform fee

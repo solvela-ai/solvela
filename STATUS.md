@@ -2,6 +2,12 @@
 
 > Live shipping status. See [`CHANGELOG.md`](./CHANGELOG.md) for history, [`SECURITY.md`](./SECURITY.md) for disclosure. For a live-vs-dormant feature matrix and every kill switch, see [`docs/product/feature-state.md`](./docs/product/feature-state.md).
 
+## Platform Fee
+
+The Solvela gateway software includes a **configurable platform fee** (default 5%, integer 0..=100) set via the `SOLVELA_PLATFORM_FEE_PERCENT` environment variable at startup. The **hosted gateway at api.solvela.ai runs with the fee suspended** (`SOLVELA_PLATFORM_FEE_PERCENT=0`), so requests settle at exact provider cost. Every cost breakdown and receipt still carries the live `fee_percent` and `platform_fee` fields, which are currently zero on the hosted service. Self-hosted gateways can set any value; a bad value fails startup with an error.
+
+---
+
 _2026-07-14 (late) — **Deployed Fly v463 — Wave 3: the whole money surface is now live on mainnet, and the channel refund phantom-confirm is fixed.**_
 
 - _**#743 refund phantom-confirm FIXED** ([#746](https://github.com/solvela-ai/solvela/pull/746), v463) — sibling refund obligations with equal (wallet, mint, amount) could serialize to byte-identical transactions, which the cluster dedupes to ONE landed transfer while every row was stamped confirmed (silent under-refund, caught in the Wave-2 devnet rehearsal). Every refund tx now carries a per-obligation SPL Memo (`solvela-refund:<channel_id>`), and no row is stamped confirmed until the persisted signed bytes are verified to match the cluster-confirmed signature AND contain that row's memo + frozen (destination, mint, amount) transfer. Fail-closed: any mismatch holds the row with an alert and a `reason`-labeled counter. Two-round independent money-path review; regressions reproduced the incident shape RED against the old code. Prod had zero exposed rows (one historical refund, already correctly confirmed 2026-07-05)._

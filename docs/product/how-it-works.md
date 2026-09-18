@@ -62,18 +62,20 @@ Solvela's smart router analyzes each request across 15 dimensions -- things like
 
 The agent sends one request and gets the optimal response. No need to know which provider to call or which model to pick.
 
-## The 5% Fee
+## Platform Fee
 
-Solvela charges a 5% platform fee on every request. If the LLM provider charges $0.0025, the total cost to the agent is $0.002625.
+Solvela software includes a **configurable platform fee** (default 5%, can be set to 0..100% via `SOLVELA_PLATFORM_FEE_PERCENT`). The **hosted gateway at api.solvela.ai runs with the fee suspended** — requests settle at exact provider cost.
 
-This fee covers:
+If running a self-hosted gateway with the default 5%, a provider charge of $0.0025 results in a total cost to the agent of $0.002625.
+
+A platform fee, when enabled, covers:
 
 - **Infrastructure**: Servers, databases, caching, and monitoring that keep the gateway running.
 - **Smart routing**: The analysis engine that picks the best model for each request.
 - **Provider management**: Maintaining connections to multiple LLM providers, handling rate limits, retries, and failovers.
 - **Payment verification**: Validating Solana transactions and preventing replay attacks.
 
-Every response includes a cost breakdown showing the provider cost, the platform fee, and the total -- full transparency.
+Every response includes a cost breakdown showing the provider cost, the platform fee (currently 0 on the hosted service), and the total -- full transparency.
 
 ## Trustless Escrow
 

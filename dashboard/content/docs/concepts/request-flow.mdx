@@ -17,7 +17,7 @@ Every request enters the system through the `gateway` binary. The path it takes 
     The request content is scanned for prompt injection attempts, jailbreak patterns, and PII. Requests that fail these checks are rejected before any payment logic runs.
   </Step>
   <Step title="Check for PAYMENT-SIGNATURE header">
-    If the `PAYMENT-SIGNATURE` header is absent, the gateway immediately returns **HTTP 402** with a full cost breakdown (base cost + 5% platform fee) and a list of accepted payment schemes — both exact USDC-SPL transfer and escrow deposit formats are included.
+    If the `PAYMENT-SIGNATURE` header is absent, the gateway immediately returns **HTTP 402** with a full cost breakdown (base provider cost; no platform fee on the hosted gateway) and a list of accepted payment schemes — both exact USDC-SPL transfer and escrow deposit formats are included.
   </Step>
   <Step title="Decode and validate the payment signature">
     When the header is present it is decoded (base64 or raw JSON), then checked against Redis for replay attacks. Duplicate signatures are rejected with a 402.
