@@ -32,7 +32,7 @@
   ],
   "license": "Apache-2.0",
   "dependencies": {
-    "@solana/spl-token": "^0.4.0",
+    "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.87.0",
     "@solvela/signer-core": "^0.1.0",
     "async-mutex": "^0.5.0",
