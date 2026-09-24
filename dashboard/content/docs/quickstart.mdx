@@ -55,7 +55,7 @@ First, send a request without any payment header. The gateway will respond with 
 
 <Tabs items={['TypeScript', 'Python', 'Go', 'cURL']}>
   <Tab value="TypeScript">
-    ```typescript
+    ```typescript doctest
     import { SolvelaClient, ChatRequest, ChatMessage, PaymentRequiredError } from '@solvela/sdk';
 
     const client = new SolvelaClient({
@@ -226,7 +226,7 @@ Build and sign a USDC-SPL transfer transaction to the `pay_to` address for the `
 
 <Tabs items={['TypeScript', 'Python', 'Go', 'solvela CLI']}>
   <Tab value="TypeScript">
-    ```typescript
+    ```typescript doctest
     import { SolvelaClient, ChatRequest, ChatMessage, Wallet, KeypairSigner } from '@solvela/sdk';
 
     // Construct the wallet + signer explicitly — the SDK does not read
