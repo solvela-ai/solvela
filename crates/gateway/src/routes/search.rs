@@ -446,6 +446,15 @@ pub async fn search(
                 "channel voucher is not accepted on the exact path".to_string(),
             ));
         }
+        // Fail-closed: a Nano receipt (#813) is only accepted on the chat
+        // completions path; this endpoint validates `accepted.network` as
+        // Solana upstream, so this arm is reachable only on a mismatch —
+        // reject, never panic.
+        solvela_x402::types::PayloadData::Nano(_) => {
+            return Err(GatewayError::InvalidPayment(
+                "nano receipts are not accepted on this endpoint".to_string(),
+            ));
+        }
     };
     let is_durable_nonce = crate::routes::chat::uses_durable_nonce(tx_raw);
 
@@ -548,6 +557,15 @@ pub async fn search(
         solvela_x402::types::PayloadData::Channel(_) => {
             return Err(GatewayError::InvalidPayment(
                 "channel voucher is not accepted on the exact path".to_string(),
+            ));
+        }
+        // Fail-closed: a Nano receipt (#813) is only accepted on the chat
+        // completions path; this endpoint validates `accepted.network` as
+        // Solana upstream, so this arm is reachable only on a mismatch —
+        // reject, never panic.
+        solvela_x402::types::PayloadData::Nano(_) => {
+            return Err(GatewayError::InvalidPayment(
+                "nano receipts are not accepted on this endpoint".to_string(),
             ));
         }
     };

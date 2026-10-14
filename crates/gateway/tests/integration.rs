@@ -1652,6 +1652,155 @@ fn test_app_with_provider_registry_and_exact_verifier_native(
     (router, state)
 }
 
+// ---------------------------------------------------------------------------
+// Nano (XNO) settlement fixtures (#813)
+// ---------------------------------------------------------------------------
+
+/// The configured receiving `nano_` address for Nano-enabled test apps.
+const TEST_NANO_RECIPIENT: &str =
+    "nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3";
+/// A paying `nano_` account for Nano receipt headers.
+const TEST_NANO_PAYER: &str = "nano_1ipx847tk8o46pwxt5qjdbncjqcbwcc1rrmqnkztrfjy5k7z4imsrata9est";
+/// A canonical (64 uppercase hex) send block hash.
+const TEST_NANO_BLOCK_HASH: &str =
+    "991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948";
+/// Rate used by Nano-enabled test apps: $1.25 / XNO = 1_250_000 micro-USD.
+const TEST_NANO_MICRO_USD_PER_XNO: u64 = 1_250_000;
+
+/// An always-pass verifier for `exact` over `nano:mainnet`, so the full chat
+/// route (network resolution → raw amount check → replay → verify → provider
+/// → no-op settle) is exercised without a Nano node.
+struct AlwaysPassNanoVerifier;
+
+#[async_trait]
+impl PaymentVerifier for AlwaysPassNanoVerifier {
+    fn network(&self) -> &str {
+        solvela_protocol::NANO_NETWORK
+    }
+
+    fn scheme(&self) -> &str {
+        "exact"
+    }
+
+    async fn verify_payment(
+        &self,
+        _payload: &PaymentPayload,
+    ) -> Result<VerificationResult, X402Error> {
+        Ok(VerificationResult {
+            valid: true,
+            reason: None,
+            verified_amount: None,
+        })
+    }
+
+    async fn settle_payment(
+        &self,
+        payload: &PaymentPayload,
+    ) -> Result<SettlementResult, X402Error> {
+        let PayloadData::Nano(p) = &payload.payload else {
+            return Err(X402Error::PayloadMismatch("not a nano receipt".to_string()));
+        };
+        Ok(SettlementResult {
+            success: true,
+            tx_signature: Some(p.block_hash.clone()),
+            network: solvela_protocol::NANO_NETWORK.to_string(),
+            error: None,
+            verified_amount: None,
+            failure_kind: None,
+        })
+    }
+}
+
+/// A mock-provider app with Nano settlement CONFIGURED: both the Solana
+/// `AlwaysPassVerifier` and [`AlwaysPassNanoVerifier`] are registered, and
+/// `config.nano` carries the test recipient + rate.
+fn test_app_with_mock_provider_and_nano() -> (axum::Router, Arc<AppState>) {
+    let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
+    let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
+    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![
+        Arc::new(AlwaysPassVerifier),
+        Arc::new(AlwaysPassNanoVerifier),
+    ]);
+
+    let mut config = AppConfig::default();
+    config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
+    config.nano = Some(gateway::config::NanoConfig {
+        rpc_url: "http://127.0.0.1:7076".to_string(),
+        recipient_account: TEST_NANO_RECIPIENT.to_string(),
+        micro_usd_per_xno: TEST_NANO_MICRO_USD_PER_XNO,
+    });
+
+    let state = Arc::new(AppState {
+        config,
+        model_registry,
+        service_registry: RwLock::new(service_registry),
+        providers: mock_provider_registry(),
+        native_anthropic: None,
+        search_provider: None,
+        price_provider: None,
+        facilitator,
+        usage: gateway::usage::UsageTracker::noop(),
+        cache: None,
+        semantic_cache: None,
+        provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
+        escrow_claimer: None,
+        fee_payer_pool: None,
+        nonce_pool: None,
+        db_pool: None,
+        faucet: None,
+        session_secret: b"test-secret".to_vec(),
+        http_client: reqwest::Client::new(),
+        replay_set: AppState::new_replay_set(),
+        slot_cache: gateway::routes::escrow::new_slot_cache(),
+        escrow_metrics: None,
+        admin_token: Some(gateway::secret::AdminToken::new(
+            TEST_ADMIN_TOKEN.to_string(),
+        )),
+        api_key_hmac_secret: None,
+        auth_provider: None,
+        prometheus_handle: Some(test_prometheus_handle()),
+        dev_bypass_payment: false,
+        free_rate_limiter: RateLimiter::new(RateLimitConfig::free_default()),
+        receipts_rate_limiter: generous_receipts_limiter(),
+        a2a_tasks_rate_limiter: generous_a2a_tasks_limiter(),
+        faucet_rate_limiter: generous_faucet_limiter(),
+        deposit_tx_rate_limiter: generous_deposit_tx_limiter(),
+        free_global_cap: FreeTierGlobalCap::new(FREE_TIER_GLOBAL_RPM_DEFAULT),
+    });
+    let router = build_router(
+        Arc::clone(&state),
+        RateLimiter::new(RateLimitConfig::default()),
+    )
+    .expect("test router builds: default request timeout is valid");
+    (router, state)
+}
+
+/// A `PAYMENT-SIGNATURE` header carrying a Nano receipt for `amount_raw`.
+fn nano_payment_header(resource_url: &str, amount_raw: &str, block_hash: &str) -> String {
+    let payload = PaymentPayload {
+        x402_version: 2,
+        resource: Resource {
+            url: resource_url.to_string(),
+            method: "POST".to_string(),
+        },
+        accepted: PaymentAccept {
+            scheme: "exact".to_string(),
+            network: solvela_protocol::NANO_NETWORK.to_string(),
+            amount: amount_raw.to_string(),
+            asset: solvela_protocol::NANO_ASSET.to_string(),
+            pay_to: TEST_NANO_RECIPIENT.to_string(),
+            max_timeout_seconds: 300,
+            escrow_program_id: None,
+        },
+        payload: PayloadData::Nano(solvela_protocol::NanoPayload {
+            block_hash: block_hash.to_string(),
+            account: TEST_NANO_PAYER.to_string(),
+        }),
+    };
+    let json = serde_json::to_vec(&payload).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(&json)
+}
+
 /// Like [`test_app_with_provider_registry_and_exact_verifier`] but lets the
 /// caller supply the models TOML, so a feature that adds a NEW provider/model
 /// (e.g. NVIDIA) can be exercised end-to-end through the real route without
@@ -5399,6 +5548,278 @@ async fn test_402_offers_escrow_when_configured() {
         accepts[1]["asset"],
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     );
+}
+
+/// Shared chat request body for the Nano tests.
+fn nano_chat_body() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "model": "openai/gpt-4o",
+        "messages": [{"role": "user", "content": "Hello!"}],
+    }))
+    .unwrap()
+}
+
+/// Fetch the unpaid 402 and return the `nano:mainnet` accept entry plus the
+/// Solana exact entry it was converted from.
+async fn fetch_402_accepts(app: axum::Router) -> Vec<serde_json::Value> {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(nano_chat_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let pr: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    pr["accepts"].as_array().unwrap().clone()
+}
+
+/// #813: with Nano configured, the 402 advertises `exact` over `nano:mainnet`
+/// AFTER the Solana entry, quoting the SAME micro-USD total converted to raw
+/// at the configured rate (rounded up), paid to the configured `nano_` account.
+#[tokio::test]
+async fn test_402_offers_nano_when_configured() {
+    let (app, _state) = test_app_with_mock_provider_and_nano();
+    let accepts = fetch_402_accepts(app).await;
+
+    assert_eq!(accepts.len(), 2, "exact/solana + exact/nano");
+    assert_eq!(accepts[0]["scheme"], "exact");
+    assert_eq!(accepts[0]["network"], SOLANA_NETWORK);
+    assert_eq!(accepts[1]["scheme"], "exact");
+    assert_eq!(accepts[1]["network"], "nano:mainnet");
+    assert_eq!(accepts[1]["asset"], "XNO");
+    assert_eq!(accepts[1]["pay_to"], TEST_NANO_RECIPIENT);
+    assert_eq!(accepts[1]["max_timeout_seconds"], 300);
+    assert!(accepts[1].get("escrow_program_id").is_none());
+
+    // The raw amount is the Solana micro-USD quote converted at the rate.
+    let micro: u64 = accepts[0]["amount"].as_str().unwrap().parse().unwrap();
+    let expected_raw =
+        solvela_protocol::usdc_atomic_to_nano_raw(micro, TEST_NANO_MICRO_USD_PER_XNO).unwrap();
+    assert_eq!(accepts[1]["amount"], expected_raw.to_string());
+    assert!(micro > 0, "a real quote, not the discovery floor");
+}
+
+/// #813: an UNCONFIGURED deployment never advertises Nano — the 402 is
+/// byte-shape-identical to pre-#813 (one Solana exact entry).
+#[tokio::test]
+async fn test_402_no_nano_when_not_configured() {
+    let accepts = fetch_402_accepts(test_app()).await;
+    assert_eq!(accepts.len(), 1);
+    assert_eq!(accepts[0]["network"], SOLANA_NETWORK);
+}
+
+/// #813: `/v1/supported` lists the Nano kind iff configured.
+#[tokio::test]
+async fn test_supported_lists_nano_only_when_configured() {
+    for (app, expect_nano) in [
+        (test_app_with_mock_provider_and_nano().0, true),
+        (test_app(), false),
+    ] {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/supported")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let kinds = json["kinds"].as_array().unwrap();
+        let has_nano = kinds
+            .iter()
+            .any(|k| k["network"] == "nano:mainnet" && k["asset"] == "XNO");
+        assert_eq!(has_nano, expect_nano);
+        assert_eq!(kinds[0]["network"], SOLANA_NETWORK, "Solana stays kinds[0]");
+    }
+}
+
+/// #813 happy path: a Nano receipt paying the advertised raw amount is served
+/// through the real route (network resolution → raw amount check → replay →
+/// verify → provider → no-op settle), and the SAME receipt presented again is
+/// rejected as a replay (in-memory replay set, keyed on the block hash).
+#[tokio::test]
+async fn test_chat_with_nano_receipt_is_served_once_then_replay_rejected() {
+    let (app, _state) = test_app_with_mock_provider_and_nano();
+    let accepts = fetch_402_accepts(app.clone()).await;
+    let raw = accepts[1]["amount"].as_str().unwrap().to_string();
+
+    let send = |app: axum::Router| {
+        let header = nano_payment_header("/v1/chat/completions", &raw, TEST_NANO_BLOCK_HASH);
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", header)
+                    .body(Body::from(nano_chat_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    let response = send(app.clone()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["choices"][0]["message"]["content"], "[mock response]");
+
+    let replay = send(app).await;
+    assert_ne!(
+        replay.status(),
+        StatusCode::OK,
+        "same block hash must not pay twice"
+    );
+    let body = replay.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("already been used"), "{text}");
+}
+
+/// #813: a receipt one raw short of the advertised amount is a 400 — the raw
+/// comparison is exact, and the error names raw units, not USDC.
+#[tokio::test]
+async fn test_chat_with_nano_receipt_underpaid_returns_400() {
+    let (app, _state) = test_app_with_mock_provider_and_nano();
+    let accepts = fetch_402_accepts(app.clone()).await;
+    let raw: u128 = accepts[1]["amount"].as_str().unwrap().parse().unwrap();
+    let short = (raw - 1).to_string();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    nano_payment_header("/v1/chat/completions", &short, TEST_NANO_BLOCK_HASH),
+                )
+                .body(Body::from(nano_chat_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("insufficient") && text.contains("raw"),
+        "{text}"
+    );
+}
+
+/// #813: a Nano receipt presented to a deployment WITHOUT Nano configured is
+/// rejected with the fixed unsupported-network message — indistinguishable
+/// from any unknown network, and before any verifier runs.
+#[tokio::test]
+async fn test_chat_with_nano_receipt_rejected_when_not_configured() {
+    let app = test_app_with_mock_provider();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    nano_payment_header(
+                        "/v1/chat/completions",
+                        "2100000000000000000000000000",
+                        TEST_NANO_BLOCK_HASH,
+                    ),
+                )
+                .body(Body::from(nano_chat_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("Payment network is unsupported"), "{text}");
+}
+
+/// #813 cross-pairing: a Nano-network `accepted` carrying a Solana transaction
+/// payload (and vice versa) is a 400 before any verifier runs.
+#[tokio::test]
+async fn test_chat_nano_network_with_solana_payload_rejected() {
+    let (app, _state) = test_app_with_mock_provider_and_nano();
+    let accepts = fetch_402_accepts(app.clone()).await;
+    let raw = accepts[1]["amount"].as_str().unwrap().to_string();
+
+    // Nano accepted block + Direct (Solana) payload.
+    let mut payload: PaymentPayload = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(nano_payment_header(
+                "/v1/chat/completions",
+                &raw,
+                TEST_NANO_BLOCK_HASH,
+            ))
+            .unwrap(),
+    )
+    .unwrap();
+    payload.payload = PayloadData::Direct(SolanaPayload {
+        transaction: base64::engine::general_purpose::STANDARD.encode(b"mock_signed_tx_bytes"),
+    });
+    let header =
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("payment-signature", header)
+                .body(Body::from(nano_chat_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("not a nano receipt"));
+
+    // Solana accepted block + Nano receipt payload.
+    let mut payload: PaymentPayload = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(valid_payment_header("/v1/chat/completions"))
+            .unwrap(),
+    )
+    .unwrap();
+    payload.payload = PayloadData::Nano(solvela_protocol::NanoPayload {
+        block_hash: TEST_NANO_BLOCK_HASH.to_string(),
+        account: TEST_NANO_PAYER.to_string(),
+    });
+    let header =
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("payment-signature", header)
+                .body(Body::from(nano_chat_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("nano receipt but the network"));
 }
 
 #[tokio::test]
@@ -12858,6 +13279,7 @@ async fn test_chat_canonical_payment_reaches_exact_verifier_with_mapped_payload(
         PayloadData::Direct(p) => assert_eq!(p.transaction, tx_b64),
         PayloadData::Escrow(_) => panic!("canonical payment must map to Direct"),
         PayloadData::Channel(_) => panic!("canonical payment must map to Direct"),
+        PayloadData::Nano(_) => panic!("canonical payment must map to Direct"),
     }
 }
 

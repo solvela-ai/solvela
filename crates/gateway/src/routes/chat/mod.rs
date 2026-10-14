@@ -12,6 +12,7 @@ pub(crate) mod cost;
 pub(crate) mod payment;
 mod provider;
 mod response;
+mod settlement_network;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -865,54 +866,12 @@ pub(crate) async fn chat_completions_inner(
                 ));
             }
 
-            // Verify network is Solana
-            if !payload
-                .accepted
-                .network
-                .eq_ignore_ascii_case(solvela_x402::types::SOLANA_NETWORK)
-            {
-                warn!(
-                    network = %payload.accepted.network,
-                    expected = %solvela_x402::types::SOLANA_NETWORK,
-                    "payment network mismatch"
-                );
-                return Err(GatewayError::BadRequest(
-                    "Payment network is unsupported. Use the network advertised in the 402 response."
-                        .to_string(),
-                ));
-            }
-
-            // Verify asset is the CONFIGURED USDC-SPL mint — the same one the
-            // verifier enforces — not the compile-time constant.
-            if payload.accepted.asset != state.config.solana.usdc_mint {
-                // GHSA-cgqx-mg48-949v posture: `asset` is client-controlled —
-                // cap to the max base58 pubkey length (44 chars) before
-                // logging (mirrors the tx_prefix truncation in a2a/handler.rs;
-                // chars-based so a multibyte boundary can never panic).
-                let asset_prefix: String = payload.accepted.asset.chars().take(44).collect();
-                warn!(
-                    asset = %asset_prefix,
-                    expected = %state.config.solana.usdc_mint,
-                    "payment asset mismatch"
-                );
-                return Err(GatewayError::BadRequest(
-                    "Payment asset is unsupported. Use the asset advertised in the 402 response."
-                        .to_string(),
-                ));
-            }
-
-            // Verify pay_to matches the gateway's recipient wallet
-            if payload.accepted.pay_to != state.config.solana.recipient_wallet {
-                warn!(
-                    pay_to = %payload.accepted.pay_to,
-                    expected = %state.config.solana.recipient_wallet,
-                    "payment pay_to mismatch"
-                );
-                return Err(GatewayError::BadRequest(
-                    "Payment recipient does not match. Use the pay_to advertised in the 402 response."
-                        .to_string(),
-                ));
-            }
+            // Resolve the settlement network and validate `asset` / `pay_to`
+            // (and, for Nano, the scheme) against the CONFIGURED values for
+            // that network — the same ones its verifier enforces. An
+            // unconfigured or unknown network is a fixed-string 400.
+            let settlement_network =
+                settlement_network::resolve_settlement_network(&state.config, &payload.accepted)?;
 
             // --- v0 spend-down channel DRAW fork (PR-B) ----------------------
             //
@@ -1008,29 +967,23 @@ pub(crate) async fn chat_completions_inner(
                         "failed to parse expected payment amount as u64".to_string(),
                     )
                 })?;
-            client_amount = payload.accepted.amount.parse().map_err(|_| {
-                warn!(
-                    amount = %payload.accepted.amount,
-                    "client supplied non-integer payment amount"
-                );
-                GatewayError::BadRequest(
-                    "Payment amount must be a valid integer (atomic USDC units).".to_string(),
-                )
-            })?;
-
-            if client_amount < expected_amount {
-                warn!(
-                    client_amount,
-                    expected_amount,
-                    model = %req.model,
-                    "payment amount insufficient"
-                );
-                return Err(GatewayError::BadRequest(format!(
-                    "payment amount insufficient: paid {client_amount} but cost is {expected_amount} atomic USDC"
-                )));
-            }
+            // Per-network unit: micro-USDC on Solana (the signed amount is
+            // billed), raw on Nano (the micro-USD quote is billed — the spend
+            // ledger is USD-denominated). Either way `client_amount` is the
+            // micro-USD figure every downstream branch bills on.
+            client_amount = settlement_network::validate_client_amount(
+                settlement_network,
+                state.config.nano.as_ref(),
+                &payload.accepted.amount,
+                expected_amount,
+                &req.model,
+            )?;
 
             // --- M6: Validate scheme matches PayloadData variant ---
+            settlement_network::validate_payload_matches_network(
+                settlement_network,
+                &payload.payload,
+            )?;
             match (payload.accepted.scheme.as_str(), &payload.payload) {
                 ("exact", solvela_x402::types::PayloadData::Escrow(_)) => {
                     return Err(GatewayError::BadRequest(
@@ -1074,10 +1027,18 @@ pub(crate) async fn chat_completions_inner(
                         "channel voucher is not accepted on the exact/escrow path".to_string(),
                     ));
                 }
+                // A Nano receipt is keyed by its block hash (canonical
+                // uppercase hex, enforced by the verifier — one spelling, one
+                // cache key). The hash never expires on-chain; the verifier's
+                // 90 s freshness window is what the 120 s replay TTL covers.
+                solvela_x402::types::PayloadData::Nano(p) => &p.block_hash,
             };
 
-            // Detect durable nonce to set appropriate replay TTL.
-            let is_durable_nonce = payment::uses_durable_nonce(tx_raw);
+            // Detect durable nonce to set appropriate replay TTL. Only a Solana
+            // transaction can carry one; a Nano receipt is never long-lived.
+            let is_durable_nonce = settlement_network
+                == settlement_network::SettlementNetwork::Solana
+                && payment::uses_durable_nonce(tx_raw);
 
             // S2 FIX: In-memory replay set uses Instant-based TTL
             let replay_detected = if let Some(cache) = &state.cache {
@@ -2267,12 +2228,23 @@ fn build_payment_challenge(
         accepts.push(solvela_x402::types::PaymentAccept {
             scheme: "escrow".to_string(),
             network: solvela_x402::types::SOLANA_NETWORK.to_string(),
-            amount,
+            amount: amount.clone(),
             asset: state.config.solana.usdc_mint.clone(),
             pay_to: state.config.solana.recipient_wallet.clone(),
             max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
             escrow_program_id: state.config.solana.escrow_program_id.clone(),
         });
+    }
+
+    // Offer `exact` over `nano:mainnet` if configured (#813). Always AFTER the
+    // Solana entries: every shipped SDK selects by (scheme, network) and
+    // tolerates extra entries, but `accepts[0]` stays the Solana exact quote
+    // for anything that indexes positionally. The amount is the same quote
+    // converted to raw at the configured rate (rounded up).
+    if let Some(nano) = &state.config.nano {
+        if let Some(accept) = settlement_network::nano_payment_accept(nano, &amount) {
+            accepts.push(accept);
+        }
     }
 
     solvela_x402::types::PaymentRequired {

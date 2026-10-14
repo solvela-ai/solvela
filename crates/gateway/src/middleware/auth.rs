@@ -104,6 +104,9 @@ pub enum AuthError {
 ///   any route requiring auth rejects it with `401`.
 /// - `Err(_)` — backend unavailable/misconfigured; the request fails closed
 ///   with `503`.
+// `async_trait` stamps `#[must_use]` on its generated shims; clippy ≥ 1.99
+// flags that as `double_must_use`. Macro-owned, not ours — allow it.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AuthProvider: Send + Sync {
     /// Attempt to authenticate `req`. See the trait/module docs for the

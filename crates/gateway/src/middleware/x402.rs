@@ -265,6 +265,7 @@ mod tests {
             PayloadData::Direct(p) => assert_eq!(p.transaction, "base64encodedtx"),
             PayloadData::Escrow(_) => panic!("expected Direct variant"),
             PayloadData::Channel(_) => panic!("expected Direct variant"),
+            PayloadData::Nano(_) => panic!("expected Direct variant"),
         }
     }
 
@@ -305,6 +306,7 @@ mod tests {
             PayloadData::Direct(p) => assert_eq!(p.transaction, "dGVzdA=="),
             PayloadData::Escrow(_) => panic!("canonical payment must map to Direct"),
             PayloadData::Channel(_) => panic!("canonical payment must map to Direct"),
+            PayloadData::Nano(_) => panic!("canonical payment must map to Direct"),
         }
     }
 

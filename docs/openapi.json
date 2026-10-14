@@ -322,10 +322,10 @@
               "required": ["scheme", "network", "amount", "asset", "pay_to", "max_timeout_seconds"],
               "properties": {
                 "scheme": { "type": "string", "enum": ["exact", "escrow"] },
-                "network": { "type": "string", "example": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" },
-                "amount": { "type": "string", "description": "Atomic units (USDC has 6 decimals)." },
-                "asset": { "type": "string", "description": "USDC SPL mint address." },
-                "pay_to": { "type": "string", "description": "Recipient wallet address." },
+                "network": { "type": "string", "example": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "description": "Settlement network: `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` for USDC-SPL, or `nano:mainnet` for XNO (advertised only when the deployment configures Nano settlement, always after the Solana entries)." },
+                "amount": { "type": "string", "description": "Atomic units of `asset` on `network`: micro-USDC (6 decimals) on Solana; raw (30 decimals, 1 XNO = 10^30 raw) on `nano:mainnet` — the same micro-USD quote converted at the gateway's configured rate, rounded up." },
+                "asset": { "type": "string", "description": "USDC SPL mint address on Solana; the literal `XNO` on `nano:mainnet` (Nano has no contract address)." },
+                "pay_to": { "type": "string", "description": "Recipient address: a base58 Solana wallet, or a `nano_` account on `nano:mainnet`." },
                 "max_timeout_seconds": { "type": "integer", "example": 300 },
                 "escrow_program_id": { "type": "string", "description": "Escrow program ID. Present only on `scheme: escrow` entries; absent otherwise." }
               }

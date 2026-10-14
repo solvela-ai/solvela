@@ -27,6 +27,10 @@ pub fn extract_payer_wallet(payload: &solvela_x402::types::PaymentPayload) -> St
         // spend/metric labels and must keep failing closed downstream (e.g. the
         // #499 require_tenant gate treats "unknown" as not-tenant-provisioned).
         solvela_x402::types::PayloadData::Channel(_) => "unknown".to_string(),
+        // A Nano receipt carries the paying `nano_` account on the wire; the
+        // NanoVerifier binds it to the block's signer (mismatch = reject), so
+        // on an accepted request this is the verified payer.
+        solvela_x402::types::PayloadData::Nano(p) => p.account.clone(),
     }
 }
 

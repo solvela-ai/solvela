@@ -515,6 +515,7 @@ mod tests {
             PayloadData::Direct(p) => assert_eq!(p.transaction, "dGVzdA=="),
             PayloadData::Escrow(_) => panic!("must map to Direct"),
             PayloadData::Channel(_) => panic!("must map to Direct"),
+            PayloadData::Nano(_) => panic!("must map to Direct"),
         }
     }
 
