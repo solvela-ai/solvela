@@ -22,6 +22,34 @@ pub struct AppConfig {
     /// v0 spend-down channel configuration (`[channel]` / `SOLVELA_CHANNEL__*`).
     #[serde(default)]
     pub channel: ChannelConfig,
+    /// Nano (XNO) settlement — `exact` over `nano:mainnet` (`SOLVELA_NANO__*`).
+    ///
+    /// `None` = not offered (the default). Deliberately `serde(skip)`: this is
+    /// a money-path knob (it carries the exchange rate), so like
+    /// `SOLVELA_PLATFORM_FEE_PERCENT` it is ENV-ONLY and never read from
+    /// `config/default.toml`, whose parse failures are warn-and-default.
+    /// Built in `main.rs` from the three `SOLVELA_NANO__*` variables, all-or-
+    /// nothing, fatal on a partial or malformed set.
+    #[serde(skip)]
+    pub nano: Option<NanoConfig>,
+}
+
+/// Nano (XNO) settlement configuration — see [`AppConfig::nano`].
+///
+/// No secret fields (the gateway never holds a Nano key: it only RECEIVES at
+/// `recipient_account` and reads a node), so `Debug` is derived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NanoConfig {
+    /// Nano node RPC endpoint (`http(s)://host:7076`). Trusted for
+    /// `block_info` — run your own node or use one you trust.
+    pub rpc_url: String,
+    /// The gateway's receiving `nano_` address (syntax-validated at boot).
+    pub recipient_account: String,
+    /// Exchange rate as integer micro-USD per XNO, parsed at boot from the
+    /// decimal `SOLVELA_NANO__USD_PER_XNO` (e.g. `"1.25"` → `1_250_000`).
+    /// The 402 quote converts its micro-USD total to raw with this rate,
+    /// rounding up; the operator owns keeping it current (restart to change).
+    pub micro_usd_per_xno: u64,
 }
 
 /// v0 spend-down channel (`POST /v1/channel/*`) configuration.
@@ -520,6 +548,7 @@ impl Default for AppConfig {
             cache: CacheSettings::default(),
             faucet: FaucetConfig::default(),
             channel: ChannelConfig::default(),
+            nano: None,
         }
     }
 }

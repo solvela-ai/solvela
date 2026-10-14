@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use solvela_x402::types::{SOLANA_NETWORK, X402_VERSION};
+use solvela_x402::types::{NANO_ASSET, NANO_NETWORK, SOLANA_NETWORK, X402_VERSION};
 
 use crate::AppState;
 
@@ -23,7 +23,8 @@ pub struct SupportedKind {
     pub scheme: String,
     /// Network identifier (e.g., "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp").
     pub network: String,
-    /// The USDC-SPL mint address accepted for payments.
+    /// The asset accepted on this network: the USDC-SPL mint address for
+    /// Solana, the `XNO` ticker for Nano (no contract address exists).
     pub asset: String,
 }
 
@@ -43,15 +44,25 @@ pub struct SupportedResponse {
 /// The mint is the CONFIGURED one (`config.solana.usdc_mint`) — the same mint
 /// the payment verifiers enforce — never the compile-time constant, so a
 /// deployment with a non-default mint advertises an asset it will actually
-/// accept.
-fn supported_response(usdc_mint: &str) -> SupportedResponse {
-    SupportedResponse {
-        kinds: vec![SupportedKind {
+/// accept. The `nano:mainnet` kind is listed iff Nano settlement is configured
+/// (`nano_enabled`), mirroring the 402 `accepts[]` builder.
+fn supported_response(usdc_mint: &str, nano_enabled: bool) -> SupportedResponse {
+    let mut kinds = vec![SupportedKind {
+        x402_version: X402_VERSION,
+        scheme: "exact".to_string(),
+        network: SOLANA_NETWORK.to_string(),
+        asset: usdc_mint.to_string(),
+    }];
+    if nano_enabled {
+        kinds.push(SupportedKind {
             x402_version: X402_VERSION,
             scheme: "exact".to_string(),
-            network: SOLANA_NETWORK.to_string(),
-            asset: usdc_mint.to_string(),
-        }],
+            network: NANO_NETWORK.to_string(),
+            asset: NANO_ASSET.to_string(),
+        });
+    }
+    SupportedResponse {
+        kinds,
         gateway: "Solvela",
         pricing_url: "/v1/models",
     }
@@ -62,7 +73,10 @@ fn supported_response(usdc_mint: &str) -> SupportedResponse {
 /// Returns x402 payment schemes and networks supported by this gateway.
 /// Compatible with the OpenFacilitator discovery standard.
 pub async fn supported(State(state): State<Arc<AppState>>) -> Json<SupportedResponse> {
-    Json(supported_response(&state.config.solana.usdc_mint))
+    Json(supported_response(
+        &state.config.solana.usdc_mint,
+        state.config.nano.is_some(),
+    ))
 }
 
 #[cfg(test)]
@@ -72,7 +86,7 @@ mod tests {
 
     #[test]
     fn test_supported_response_default_mint() {
-        let resp = supported_response(USDC_MINT);
+        let resp = supported_response(USDC_MINT, false);
 
         assert_eq!(resp.kinds.len(), 1);
         assert_eq!(resp.kinds[0].x402_version, X402_VERSION);
@@ -90,7 +104,19 @@ mod tests {
     #[test]
     fn test_supported_response_reports_configured_mint() {
         let devnet_mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
-        let resp = supported_response(devnet_mint);
+        let resp = supported_response(devnet_mint, false);
         assert_eq!(resp.kinds[0].asset, devnet_mint);
+    }
+
+    /// The Nano kind is advertised iff Nano settlement is configured, and
+    /// always AFTER the Solana kind (existing clients index `kinds[0]`).
+    #[test]
+    fn test_supported_response_lists_nano_only_when_enabled() {
+        let resp = supported_response(USDC_MINT, true);
+        assert_eq!(resp.kinds.len(), 2);
+        assert_eq!(resp.kinds[0].network, SOLANA_NETWORK);
+        assert_eq!(resp.kinds[1].scheme, "exact");
+        assert_eq!(resp.kinds[1].network, "nano:mainnet");
+        assert_eq!(resp.kinds[1].asset, "XNO");
     }
 }
