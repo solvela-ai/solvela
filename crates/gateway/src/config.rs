@@ -9,6 +9,9 @@ use crate::balance_monitor::MonitorConfig;
 pub struct AppConfig {
     pub server: ServerConfig,
     pub solana: SolanaConfig,
+    /// Opt-in Nano mainnet payments for the chat endpoints.
+    #[serde(default)]
+    pub nano: Option<NanoConfig>,
     pub providers: ProvidersConfig,
     /// Balance monitoring configuration.
     #[serde(default)]
@@ -22,6 +25,33 @@ pub struct AppConfig {
     /// v0 spend-down channel configuration (`[channel]` / `SOLVELA_CHANNEL__*`).
     #[serde(default)]
     pub channel: ChannelConfig,
+}
+
+/// Optional Nano exact settlement. Absent by default; all three values are
+/// required when enabled. Pricing remains USD/USDC internally; this rate is
+/// raw XNO per micro-USDC, maintained by the operator (no implicit price peg).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct NanoConfig {
+    pub rpc_url: String,
+    pub recipient_wallet: String,
+    pub raw_per_usdc_atomic: String,
+}
+
+impl NanoConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        solvela_x402::nano::raw_amount(&self.raw_per_usdc_atomic, true)
+            .map_err(|e| e.to_string())?;
+        solvela_x402::nano::NanoVerifier::new(
+            &self.rpc_url, &self.recipient_wallet, reqwest::Client::new(),
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Checked integer conversion: never reinterpret micro-USDC as Nano raw.
+    pub fn quote(&self, usdc_atomic: u64) -> Option<u128> {
+        let rate = solvela_x402::nano::raw_amount(&self.raw_per_usdc_atomic, true).ok()?;
+        u128::from(usdc_atomic).checked_mul(rate).filter(|v| *v > 0)
+    }
 }
 
 /// v0 spend-down channel (`POST /v1/channel/*`) configuration.
@@ -495,6 +525,7 @@ impl fmt::Debug for SemanticSettings {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            nano: None,
             server: ServerConfig {
                 host: default_host(),
                 port: default_port(),

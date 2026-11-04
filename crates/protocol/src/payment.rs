@@ -26,9 +26,9 @@ pub struct PaymentAccept {
     pub scheme: String,
     /// Network identifier (e.g., "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp").
     pub network: String,
-    /// Amount in atomic units (USDC has 6 decimals).
+    /// Amount in atomic units (USDC has 6 decimals, XNO has 30).
     pub amount: String,
-    /// Token mint/contract address.
+    /// Token mint/contract address, or "XNO" for Nano's native asset.
     pub asset: String,
     /// Recipient wallet address.
     pub pay_to: String,
@@ -173,11 +173,13 @@ pub fn bazaar_discovery_extension() -> serde_json::Value {
     })
 }
 
-/// Solana-specific payment data.
+/// Direct signed transaction data. The legacy Rust name is retained for
+/// compatibility; the accepted network determines the transaction encoding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SolanaPayload {
-    /// Base64-encoded signed versioned transaction.
+    /// Base64-encoded signed Solana versioned transaction, or signed Nano
+    /// state block JSON for network="nano:mainnet".
     pub transaction: String,
 }
 

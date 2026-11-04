@@ -8,8 +8,7 @@ use crate::types::{PaymentPayload, SettlementResult, VerificationResult};
 /// The facilitator service coordinates payment verification and settlement.
 ///
 /// It dispatches to the appropriate `PaymentVerifier` implementation based
-/// on the network specified in the payment payload. Currently Solana-only,
-/// designed for future multi-chain support.
+/// on the network and scheme specified in the payment payload.
 pub struct Facilitator {
     verifiers: Vec<Arc<dyn PaymentVerifier>>,
 }
@@ -76,18 +75,7 @@ impl Facilitator {
 
         let verifier = self.verifier_for(network, scheme)?;
 
-        // Verify first
-        let verification = verifier.verify_payment(payload).await?;
-        if !verification.valid {
-            return Err(Error::InvalidTransaction(
-                verification
-                    .reason
-                    .unwrap_or_else(|| "verification failed".to_string()),
-            ));
-        }
-
-        // Then settle
-        verifier.settle_payment(payload).await
+        verifier.verify_and_settle_payment(payload).await
     }
 
     /// Verify a payment against a caller-supplied expected recipient, then

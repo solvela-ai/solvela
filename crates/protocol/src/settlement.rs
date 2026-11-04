@@ -45,7 +45,7 @@ pub enum SettlementFailureKind {
 pub struct SettlementResult {
     /// Whether settlement was successful.
     pub success: bool,
-    /// Transaction signature (base58 for Solana).
+    /// Transaction reference (base58 signature for Solana, hex block hash for Nano).
     pub tx_signature: Option<String>,
     /// Network the settlement occurred on.
     pub network: String,

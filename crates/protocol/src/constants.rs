@@ -9,6 +9,12 @@ pub const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 /// Solana mainnet network identifier for x402.
 pub const SOLANA_NETWORK: &str = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
 
+/// Opt-in Nano mainnet settlement network and native asset identifier.
+pub const NANO_NETWORK: &str = "nano:mainnet";
+pub const NANO_ASSET: &str = "XNO";
+/// One XNO is 10^30 raw units (amounts require u128, not USDC's u64).
+pub const NANO_DECIMALS: u8 = 30;
+
 /// Solvela escrow program ID deployed on Solana mainnet.
 ///
 /// Pinned alongside [`USDC_MINT`] and [`SOLANA_NETWORK`] so clients can enforce

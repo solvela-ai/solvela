@@ -5,8 +5,8 @@ use crate::types::{PaymentPayload, SettlementResult, VerificationResult};
 /// Chain-agnostic payment verification and settlement trait.
 ///
 /// This trait abstracts the chain-specific logic for verifying and settling
-/// x402 payments. The Solana implementation is the primary (and currently only)
-/// implementation. Designed for future multi-chain support (e.g., EVM/Base).
+/// x402 payments. Solana is the primary implementation; Nano supports atomic
+/// pre-delivery exact settlement through a trusted node.
 #[async_trait]
 pub trait PaymentVerifier: Send + Sync {
     /// Returns the network identifier (e.g., "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp").
@@ -57,6 +57,22 @@ pub trait PaymentVerifier: Send + Sync {
     /// 2. Confirm via `confirmTransaction` RPC
     /// 3. Verify post-tx token balances
     async fn settle_payment(&self, payload: &PaymentPayload) -> Result<SettlementResult, Error>;
+
+    /// Validate and settle before service delivery in one operation. The default
+    /// preserves verify-then-settle behavior. Chains without non-mutating
+    /// validation can override this while rejecting standalone verification.
+    async fn verify_and_settle_payment(
+        &self,
+        payload: &PaymentPayload,
+    ) -> Result<SettlementResult, Error> {
+        let verification = self.verify_payment(payload).await?;
+        if !verification.valid {
+            return Err(Error::InvalidTransaction(
+                verification.reason.unwrap_or_else(|| "verification failed".into()),
+            ));
+        }
+        self.settle_payment(payload).await
+    }
 }
 
 /// Errors that can occur during payment verification or settlement.

@@ -36,6 +36,179 @@ use solvela_x402::types::{
     USDC_MINT,
 };
 
+
+#[test]
+fn nano_config_is_opt_in_and_quotes_checked_raw_amounts() {
+    use gateway::config::NanoConfig;
+    assert!(AppConfig::default().nano.is_none());
+    let mut config = NanoConfig {
+        rpc_url: "http://127.0.0.1:7076".into(),
+        recipient_wallet: "nano_18gmu6engqhgtjnppqam181o5nfhj4sdtgyhy36dan3jr9spt84rzwmktafc".into(),
+        raw_per_usdc_atomic: "1000000000000000000000000".into(),
+    };
+    assert!(config.validate().is_ok());
+    assert_eq!(config.quote(1_000_000), Some(10u128.pow(30)));
+    assert_eq!(config.quote(0), None);
+    config.raw_per_usdc_atomic = u128::MAX.to_string();
+    assert_eq!(config.quote(2), None);
+    for rate in ["0", "-1", "1.2", "340282366920938463463374607431768211456"] {
+        config.raw_per_usdc_atomic = rate.into();
+        assert!(config.validate().is_err(), "{rate}");
+    }
+}
+
+struct NanoTestVerifier {
+    succeeds: bool,
+    settlements: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl PaymentVerifier for NanoTestVerifier {
+    fn network(&self) -> &str { solvela_protocol::NANO_NETWORK }
+    fn scheme(&self) -> &str { "exact" }
+    async fn verify_payment(&self, _: &PaymentPayload) -> Result<VerificationResult, X402Error> {
+        // Like the real verifier: a non-mutating verify must never authorize
+        // deferred Nano settlement. The route must call the atomic operation.
+        Err(X402Error::PayloadMismatch("Nano requires atomic settlement".into()))
+    }
+    async fn settle_payment(&self, _: &PaymentPayload) -> Result<SettlementResult, X402Error> {
+        self.settlements.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !self.succeeds { return Err(X402Error::InvalidSignature("bad block".into())); }
+        Ok(SettlementResult {
+            success: true, tx_signature: Some("D".repeat(64)),
+            network: solvela_protocol::NANO_NETWORK.into(), error: None,
+            verified_amount: None, failure_kind: None,
+        })
+    }
+    async fn verify_and_settle_payment(&self, p: &PaymentPayload) -> Result<SettlementResult, X402Error> {
+        self.settle_payment(p).await
+    }
+}
+
+fn nano_test_app(succeeds: bool, enabled: bool) -> (axum::Router, Arc<std::sync::atomic::AtomicUsize>) {
+    let settlements = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (router, state) = test_app_with_mock_provider_and_exact_verifier(Arc::new(NanoTestVerifier {
+        succeeds, settlements: settlements.clone(),
+    }));
+    drop(router);
+    let mut state = Arc::try_unwrap(state).ok().unwrap();
+    if enabled {
+        state.config.nano = Some(gateway::config::NanoConfig {
+            rpc_url: "http://127.0.0.1:7076".into(),
+            recipient_wallet: "nano_18gmu6engqhgtjnppqam181o5nfhj4sdtgyhy36dan3jr9spt84rzwmktafc".into(),
+            raw_per_usdc_atomic: "1000000000000000000000000".into(),
+        });
+    }
+    let app = build_router(Arc::new(state), RateLimiter::new(RateLimitConfig::default())).unwrap();
+    (app, settlements)
+}
+
+fn nano_chat_request(header: Option<String>) -> Request<Body> {
+    let mut req = Request::builder().method("POST").uri("/v1/chat/completions")
+        .header("content-type", "application/json");
+    if let Some(header) = header { req = req.header("PAYMENT-SIGNATURE", header); }
+    req.body(Body::from(serde_json::json!({
+        "model": "openai/gpt-4o", "max_tokens": 16,
+        "messages": [{"role":"user","content":"Hello!"}]
+    }).to_string())).unwrap()
+}
+
+fn nano_payment_header(accept: serde_json::Value) -> String {
+    let block = serde_json::json!({
+        "type": "state",
+        "account": "nano_1ipx847tk8o46pwxt5qjdbncjqcbwcc1rrmqnkztrfjy5k7z4imsrata9est",
+        "previous": "A".repeat(64),
+        "representative": "nano_1ipx847tk8o46pwxt5qjdbncjqcbwcc1rrmqnkztrfjy5k7z4imsrata9est",
+        "balance": "1000000000000000000000000000000", "link": "B".repeat(64),
+        "signature": "C".repeat(128), "work": "0123456789abcdef"
+    });
+    base64::engine::general_purpose::STANDARD.encode(serde_json::json!({
+        "x402_version": 2,
+        "resource": {"url":"/v1/chat/completions","method":"POST"},
+        "accepted": accept,
+        "payload": {"transaction":base64::engine::general_purpose::STANDARD.encode(block.to_string())}
+    }).to_string())
+}
+
+#[tokio::test]
+async fn nano_challenge_and_payment_use_network_asset_raw_quote_and_atomic_settlement() {
+    for succeeds in [true, false] {
+        let (app, settlements) = nano_test_app(succeeds, true);
+        let quote = app.clone().oneshot(nano_chat_request(None)).await.unwrap();
+        assert_eq!(quote.status(), StatusCode::PAYMENT_REQUIRED);
+        let quote: serde_json::Value = serde_json::from_slice(
+            &quote.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let accepts = quote["accepts"].as_array().unwrap();
+        assert_eq!(accepts[0]["network"], SOLANA_NETWORK);
+        let nano = accepts.iter().find(|a| a["network"] == solvela_protocol::NANO_NETWORK).unwrap();
+        assert_eq!(nano["scheme"], "exact");
+        assert_eq!(nano["asset"], "XNO");
+        assert_eq!(nano["amount"].as_str().unwrap().parse::<u128>().unwrap(),
+            accepts[0]["amount"].as_str().unwrap().parse::<u128>().unwrap() * 10u128.pow(24));
+        assert!(nano["amount"].as_str().unwrap().parse::<u64>().is_err());
+        let response = app.clone().oneshot(nano_chat_request(Some(nano_payment_header(nano.clone())))).await.unwrap();
+        if succeeds {
+            assert_eq!(response.status(), StatusCode::OK);
+        } else {
+            assert!(response.status().is_client_error());
+        }
+        assert_eq!(settlements.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Same payment cannot trigger a second settlement in this process.
+        let response = app.oneshot(nano_chat_request(Some(nano_payment_header(nano.clone())))).await.unwrap();
+        assert!(response.status().is_client_error());
+        assert_eq!(settlements.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn nano_is_absent_when_disabled_and_rejects_underpayment_before_settlement() {
+    let (app, _) = nano_test_app(true, false);
+    let response = app.oneshot(nano_chat_request(None)).await.unwrap();
+    let quote: serde_json::Value = serde_json::from_slice(
+        &response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(quote["accepts"].as_array().unwrap().iter().all(|a| a["network"] != solvela_protocol::NANO_NETWORK));
+
+    let (app, settlements) = nano_test_app(true, true);
+    let response = app.clone().oneshot(nano_chat_request(None)).await.unwrap();
+    let quote: serde_json::Value = serde_json::from_slice(
+        &response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let mut nano = quote["accepts"].as_array().unwrap().iter()
+        .find(|a| a["network"] == solvela_protocol::NANO_NETWORK).unwrap().clone();
+    nano["amount"] = "1".into();
+    let response = app.oneshot(nano_chat_request(Some(nano_payment_header(nano)))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(settlements.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+
+#[tokio::test]
+async fn nano_provider_failure_reports_confirmed_charge_instead_of_no_charge() {
+    let settlements = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (router, state) = test_app_with_provider_registry_and_exact_verifier(
+        failing_provider_registry(),
+        Arc::new(NanoTestVerifier { succeeds: true, settlements: settlements.clone() }),
+    );
+    drop(router);
+    let mut state = Arc::try_unwrap(state).ok().unwrap();
+    state.config.nano = Some(gateway::config::NanoConfig {
+        rpc_url: "http://127.0.0.1:7076".into(),
+        recipient_wallet: "nano_18gmu6engqhgtjnppqam181o5nfhj4sdtgyhy36dan3jr9spt84rzwmktafc".into(),
+        raw_per_usdc_atomic: "1000000000000000000000000".into(),
+    });
+    let app = build_router(Arc::new(state), RateLimiter::new(RateLimitConfig::default())).unwrap();
+    let quote = app.clone().oneshot(nano_chat_request(None)).await.unwrap();
+    let quote: serde_json::Value = serde_json::from_slice(
+        &quote.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let nano = quote["accepts"].as_array().unwrap().iter()
+        .find(|a| a["network"] == solvela_protocol::NANO_NETWORK).unwrap().clone();
+    let response = app.oneshot(nano_chat_request(Some(nano_payment_header(nano)))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = String::from_utf8(response.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains("Nano payment confirmed"));
+    assert!(body.contains("reconciliation"));
+    assert!(!body.contains("NOT charged"));
+    assert_eq!(settlements.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
 // ---------------------------------------------------------------------------
 // Test constants
 // ---------------------------------------------------------------------------

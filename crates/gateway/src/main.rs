@@ -143,6 +143,26 @@ async fn main() -> anyhow::Result<()> {
         Err(_) => config::AppConfig::default(),
     };
 
+    // Nano is opt-in. A partially specified environment must fail startup,
+    // never silently advertise an unusable or incorrectly priced payment leg.
+    for (name, field) in [
+        ("SOLVELA_NANO__RPC_URL", 0),
+        ("SOLVELA_NANO__RECIPIENT_WALLET", 1),
+        ("SOLVELA_NANO__RAW_PER_USDC_ATOMIC", 2),
+    ] {
+        if let Ok(value) = std::env::var(name) {
+            let nano = app_config.nano.get_or_insert_with(Default::default);
+            match field {
+                0 => nano.rpc_url = value,
+                1 => nano.recipient_wallet = value,
+                _ => nano.raw_per_usdc_atomic = value,
+            }
+        }
+    }
+    if let Some(nano) = &app_config.nano {
+        nano.validate().map_err(|e| anyhow::anyhow!("invalid Nano configuration: {e}"))?;
+    }
+
     // Override Solana config from environment variables.
     // Supports SOLVELA_ prefix (preferred), RCR_ prefix (deprecated), and
     // double-underscore Fly.io convention (e.g., SOLVELA_SOLANA__RPC_URL).
@@ -589,6 +609,14 @@ async fn main() -> anyhow::Result<()> {
     // Build verifiers list — always include the direct SolanaVerifier
     let mut verifiers: Vec<Arc<dyn solvela_x402::traits::PaymentVerifier>> =
         vec![Arc::new(solana_verifier)];
+
+    if let Some(nano) = &app_config.nano {
+        verifiers.push(Arc::new(solvela_x402::nano::NanoVerifier::new(
+            &nano.rpc_url,
+            &nano.recipient_wallet,
+            http_client.clone(),
+        )?));
+    }
 
     // ── Fee payer pool (hot wallet rotation) ──────────────────────────────────
     //

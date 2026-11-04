@@ -170,7 +170,11 @@ impl CanonicalPaymentRequired {
                 pay_to: accept.pay_to.clone(),
                 max_timeout_seconds: accept.max_timeout_seconds,
                 // decimals only — NEVER feePayer (see module docs).
-                extra: Some(serde_json::json!({ "decimals": USDC_DECIMALS })),
+                extra: Some(serde_json::json!({ "decimals": if accept.network == crate::constants::NANO_NETWORK {
+                    crate::constants::NANO_DECIMALS
+                } else {
+                    USDC_DECIMALS
+                } })),
             })
             .collect();
 
@@ -330,6 +334,23 @@ impl CanonicalPaymentEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nano_challenge_preserves_raw_units_and_advertises_thirty_decimals() {
+        let mut nano = exact_accept();
+        nano.network = crate::constants::NANO_NETWORK.into();
+        nano.asset = crate::constants::NANO_ASSET.into();
+        nano.amount = "1000000000000000000000000000000".into();
+        nano.pay_to = "nano_18gmu6engqhgtjnppqam181o5nfhj4sdtgyhy36dan3jr9spt84rzwmktafc".into();
+        let challenge = legacy_payment_required(vec![exact_accept(), nano]);
+        let canonical = CanonicalPaymentRequired::from_payment_required(&challenge).unwrap();
+        assert_eq!(canonical.accepts[0].extra.as_ref().unwrap()["decimals"], 6);
+        assert_eq!(canonical.accepts[1].extra.as_ref().unwrap()["decimals"], 30);
+        assert_eq!(canonical.accepts[1].network, "nano:mainnet");
+        assert_eq!(canonical.accepts[1].amount, "1000000000000000000000000000000");
+        let json = serde_json::to_string(&canonical).unwrap();
+        let roundtrip: CanonicalPaymentRequired = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.accepts[1].asset, "XNO");
+    }
     use crate::constants::{MAX_TIMEOUT_SECONDS, SOLANA_NETWORK, USDC_MINT};
     use crate::cost::CostBreakdown;
 

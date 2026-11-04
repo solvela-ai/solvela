@@ -16,6 +16,11 @@ pub fn extract_payer_wallet(payload: &solvela_x402::types::PaymentPayload) -> St
     match &payload.payload {
         solvela_x402::types::PayloadData::Escrow(p) => p.agent_pubkey.clone(),
         solvela_x402::types::PayloadData::Direct(p) => {
+            if payload.accepted.network == solvela_protocol::NANO_NETWORK {
+                return solvela_x402::nano::NanoBlock::decode(&p.transaction)
+                    .map(|block| block.account)
+                    .unwrap_or_else(|_| "unknown".into());
+            }
             // Decode base64 transaction and extract first signer (fee payer)
             extract_signer_from_base64_tx(&p.transaction).unwrap_or_else(|| "unknown".to_string())
         }

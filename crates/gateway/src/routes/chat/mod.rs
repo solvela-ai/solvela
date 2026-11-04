@@ -806,13 +806,14 @@ pub(crate) async fn chat_completions_inner(
     // a successful provider response, so we hold the verified payload here to
     // settle it post-call. `None` for escrow (its deposit already settled).
     let mut payload_for_settle: Option<solvela_x402::types::PaymentPayload> = None;
+    let mut nano_prepaid = false;
     // Gateway-advertised amount — used as defense-in-depth cap when deposit amount is unknown
     let client_amount: u64;
     // M3: budget is checked + reserved BEFORE settlement inside the arm below, so
     // an over-budget request never settles on-chain. These are bound there and
     // consumed after the match (the `None` arm diverges).
     let wallet_address: String;
-    let tx_signature: Option<String>;
+    let mut tx_signature: Option<String>;
     let estimated_cost: f64;
     // P2 receipts: the estimate's full CostBreakdown (the C1 `expected_cost`
     // the 402 quote, payment validation, and budget reservation all derive
@@ -823,6 +824,18 @@ pub(crate) async fn chat_completions_inner(
 
     match payment_payload {
         Some(payload) => {
+            let is_nano = payload.accepted.network == solvela_protocol::NANO_NETWORK;
+            let nano = if is_nano {
+                let config = state.config.nano.as_ref().ok_or_else(|| {
+                    GatewayError::BadRequest("Nano settlement is not enabled.".into())
+                })?;
+                if payload.accepted.scheme != "exact" {
+                    return Err(GatewayError::BadRequest("Nano supports exact payments only.".into()));
+                }
+                Some(config)
+            } else {
+                None
+            };
             // --- H2: Validate all `accepted` fields ---
 
             // GHSA-cgqx-mg48-949v: error responses must not echo attacker-controlled
@@ -865,8 +878,8 @@ pub(crate) async fn chat_completions_inner(
                 ));
             }
 
-            // Verify network is Solana
-            if !payload
+            // Accept only Solana or the explicitly configured Nano leg.
+            if !is_nano && !payload
                 .accepted
                 .network
                 .eq_ignore_ascii_case(solvela_x402::types::SOLANA_NETWORK)
@@ -882,9 +895,9 @@ pub(crate) async fn chat_completions_inner(
                 ));
             }
 
-            // Verify asset is the CONFIGURED USDC-SPL mint — the same one the
-            // verifier enforces — not the compile-time constant.
-            if payload.accepted.asset != state.config.solana.usdc_mint {
+            // Enforce the configured settlement asset on each network.
+            let expected_asset = if is_nano { solvela_protocol::NANO_ASSET } else { &state.config.solana.usdc_mint };
+            if payload.accepted.asset != expected_asset {
                 // GHSA-cgqx-mg48-949v posture: `asset` is client-controlled —
                 // cap to the max base58 pubkey length (44 chars) before
                 // logging (mirrors the tx_prefix truncation in a2a/handler.rs;
@@ -892,7 +905,7 @@ pub(crate) async fn chat_completions_inner(
                 let asset_prefix: String = payload.accepted.asset.chars().take(44).collect();
                 warn!(
                     asset = %asset_prefix,
-                    expected = %state.config.solana.usdc_mint,
+                    expected = %expected_asset,
                     "payment asset mismatch"
                 );
                 return Err(GatewayError::BadRequest(
@@ -902,10 +915,11 @@ pub(crate) async fn chat_completions_inner(
             }
 
             // Verify pay_to matches the gateway's recipient wallet
-            if payload.accepted.pay_to != state.config.solana.recipient_wallet {
+            let expected_recipient = nano.map_or(state.config.solana.recipient_wallet.as_str(), |n| n.recipient_wallet.as_str());
+            if payload.accepted.pay_to != expected_recipient {
                 warn!(
                     pay_to = %payload.accepted.pay_to,
-                    expected = %state.config.solana.recipient_wallet,
+                    expected = %expected_recipient,
                     "payment pay_to mismatch"
                 );
                 return Err(GatewayError::BadRequest(
@@ -1008,7 +1022,18 @@ pub(crate) async fn chat_completions_inner(
                         "failed to parse expected payment amount as u64".to_string(),
                     )
                 })?;
-            client_amount = payload.accepted.amount.parse().map_err(|_| {
+            // Nano raw units never enter the u64 USDC budget/claim machinery.
+            client_amount = if let Some(nano) = nano {
+                let required = nano.quote(expected_amount).ok_or_else(|| {
+                    GatewayError::BadRequest("Nano quote is out of range.".into())
+                })?;
+                let offered = solvela_x402::nano::raw_amount(&payload.accepted.amount, true)
+                    .map_err(|_| GatewayError::BadRequest("Invalid Nano raw amount.".into()))?;
+                if offered < required {
+                    return Err(GatewayError::BadRequest("Insufficient Nano payment.".into()));
+                }
+                expected_amount
+            } else { payload.accepted.amount.parse().map_err(|_| {
                 warn!(
                     amount = %payload.accepted.amount,
                     "client supplied non-integer payment amount"
@@ -1016,7 +1041,7 @@ pub(crate) async fn chat_completions_inner(
                 GatewayError::BadRequest(
                     "Payment amount must be a valid integer (atomic USDC units).".to_string(),
                 )
-            })?;
+            })? };
 
             if client_amount < expected_amount {
                 warn!(
@@ -1229,6 +1254,27 @@ pub(crate) async fn chat_completions_inner(
             // for `exact` and settling later does not double-anything; replay
             // protection above already guards against re-submission of the tx.
             match payment_scheme {
+                PaymentScheme::Exact if is_nano => {
+                    // Nano has no non-mutating signature/work simulation. Node
+                    // process validates and atomically rejects reused blocks.
+                    // Require confirmation before provider work; never defer it.
+                    match state.facilitator.verify_and_settle(&payload).await {
+                        Ok(settlement) if settlement.success => {
+                            tx_signature = settlement.tx_signature;
+                            escrow_deposited_amount = None;
+                            nano_prepaid = true;
+                            counter!("solvela_payments_total", "status" => "verified").increment(1);
+                        }
+                        result => {
+                            warn!(result = ?result, "Nano settlement failed before delivery");
+                            counter!("solvela_payments_total", "status" => "failed").increment(1);
+                            state.usage.release_reservation(&budget_reservation).await;
+                            return Err(GatewayError::InvalidPayment(
+                                "Nano payment could not be confirmed. Check the block on-chain before submitting another payment.".into(),
+                            ));
+                        }
+                    }
+                }
                 PaymentScheme::Exact => {
                     match state.facilitator.verify(&payload).await {
                         Ok(verification) if !verification.valid => {
@@ -1414,6 +1460,34 @@ pub(crate) async fn chat_completions_inner(
         };
         provider::execute_provider_call(&ctx).await
     };
+
+    // Nano is explicitly prepaid. A provider failure cannot reverse the send;
+    // retain/reconcile its reservation and record the collected quote instead
+    // of entering Solana's truthful "not charged" failure arms below.
+    if nano_prepaid && provider_call.is_err() {
+        state.usage.log_spend(SpendLogEntry {
+            wallet_address: wallet_address.clone(),
+            model: req.model.clone(),
+            provider: provider_name.to_string(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usdc: estimated_cost,
+            tx_signature: tx_signature.clone(),
+            request_id: request_id.clone(),
+            session_id: session_id.clone(),
+            tenant: tenant.clone(),
+            tenant_enforced: budget_reservation.tenant_enforced(),
+            estimated_cost_usdc: Some(estimated_cost),
+            reserved: budget_reservation.reserved_windows(),
+            vendor: None,
+            routing_tier: log_routing_tier.clone(),
+            routing_score: log_routing_score,
+        });
+        warn!(tx_signature = ?tx_signature, "provider failed after Nano prepayment; operator reconciliation required");
+        return Err(GatewayError::UpstreamUnavailable(
+            "The Nano payment confirmed but the provider failed. Contact the operator with your block hash for reconciliation; do not submit another payment for this request.".into(),
+        ));
+    }
 
     match provider_call {
         Ok(ProviderCallResult {
@@ -2261,6 +2335,20 @@ fn build_payment_challenge(
         max_timeout_seconds: solvela_x402::types::MAX_TIMEOUT_SECONDS,
         escrow_program_id: None,
     }];
+
+    if let Some(nano) = &state.config.nano {
+        if let Some(raw) = amount.parse::<u64>().ok().and_then(|v| nano.quote(v)) {
+            accepts.push(solvela_x402::types::PaymentAccept {
+                scheme: "exact".into(),
+                network: solvela_protocol::NANO_NETWORK.into(),
+                amount: raw.to_string(),
+                asset: solvela_protocol::NANO_ASSET.into(),
+                pay_to: nano.recipient_wallet.clone(),
+                max_timeout_seconds: 10,
+                escrow_program_id: None,
+            });
+        }
+    }
 
     // Offer escrow scheme if configured
     if state.escrow_claimer.is_some() {

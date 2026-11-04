@@ -3,6 +3,7 @@ pub mod escrow;
 pub mod facilitator;
 pub mod fee_payer;
 pub mod nonce_pool;
+pub mod nano;
 pub mod solana;
 pub mod solana_rpc;
 pub mod solana_types;
