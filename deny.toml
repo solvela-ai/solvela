@@ -34,7 +34,14 @@ ignore = [
     # and via rav1e → ravif (image decode path used by the embedder model
     # cache). RustSec's suggested replacement (`pastey`) requires upstream
     # migration in tokenizers; we'll drop this entry when that lands.
+    # Revisit: 2027-06-01.
     "RUSTSEC-2024-0436",
+    # pin-utils v0.1.0 — unmaintained (RUSTSEC-2026-0441), not vulnerable, and
+    # there is no fixed release (`patched = []`). Only reachable through
+    # hyper 1.x, which axum, reqwest and hyper-util pull in; we cannot remove
+    # it until hyper migrates off it upstream. It handles no payment or key
+    # material. Revisit: 2027-06-01 (or when hyper drops the dependency).
+    "RUSTSEC-2026-0441",
 ]
 
 # ----------------------------------------------------------------------
