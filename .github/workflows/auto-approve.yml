@@ -8,9 +8,11 @@
 #
 # Auto-merge: PRs from the bot authors in MERGE_ALLOW (dependabot and the
 # `sky64-agent` maintenance agent) are also squash-merged here once approved,
-# unless they touch the money path or bump a money-path dependency
-# (MONEY_DEPS). Everyone else's PRs, including the maintainer's, still merge
-# by hand. The merge uses this job's GITHUB_TOKEN, and pushes made with that
+# when every commit is by one of those bots, no file is in NO_AUTO_MERGE
+# (CI, hooks, build and deploy config), and no manifest or lockfile diff line
+# names a money-path dependency (MONEY_DEPS). The decision reads the diff,
+# never the PR title or body, which the agent writes and anyone can edit.
+# Everyone else's PRs, including the maintainer's, still merge by hand. The merge uses this job's GITHUB_TOKEN, and pushes made with that
 # token do not trigger other workflows: a bot merge does NOT run `deploy.yml`.
 # Production only moves when a human merges or deploys.
 #
@@ -86,11 +88,25 @@ jobs:
             const MERGE_ALLOW = ['dependabot[bot]', 'sky64-agent'];
             // Dependency bumps that never auto-merge (approval is unaffected).
             // MONEY_PATH matches file paths, but a bump of a crypto or Solana
-            // crate only changes manifests and lockfiles, so match package
-            // names instead: the PR title, plus the package table dependabot
-            // writes for grouped bumps (not its release notes, which mention
-            // words like "anchors" and "base58" in passing).
+            // crate only changes manifests and lockfiles, so this is matched
+            // against the added/removed lines of those files' diffs.
             const MONEY_DEPS = /\b(solana|spl-|anchor|dalek|ed25519|curve25519|x25519|tweetnacl|bs58|base58|signer-core|x402)|@solana\/|@coral-xyz\//i;
+            const MANIFEST = /(^|\/)(Cargo\.(toml|lock)|package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|pyproject\.toml|poetry\.lock|uv\.lock|requirements[\w.-]*\.txt|go\.(mod|sum))$/;
+            // Files whose change takes effect outside the reviewed code path
+            // (CI, hooks, build scripts, images, deploy): never auto-merged.
+            const NO_AUTO_MERGE = [
+              /^\.github\//,
+              /^\.githooks\//,
+              /(^|\/)Dockerfile[^/]*$/,
+              /(^|\/)\.dockerignore$/,
+              /(^|\/)docker-compose[^/]*\.ya?ml$/,
+              /(^|\/)fly[^/]*\.toml$/,
+              /(^|\/)vercel\.json$/,
+              /(^|\/)build\.rs$/,
+              /(^|\/)(deny|rust-toolchain)\.toml$/,
+              /(^|\/)\.cargo\//,
+              /^migrations\//,
+            ];
 
             // Money-path surfaces: code that signs / verifies / settles payments,
             // computes cost, touches escrow / USDC, or handles secret key material
@@ -149,10 +165,24 @@ jobs:
                 r.state === 'APPROVED'
                 && r.user.login === 'github-actions[bot]'
                 && r.commit_id === sha);
-              const packages = [...(pr.body || '').matchAll(/^\| \[([^\]]+)\]/gm)]
-                .map(m => m[1]).join(' ');
-              const autoMerge = MERGE_ALLOW.includes(pr.user.login)
-                && !MONEY_DEPS.test(`${pr.title} ${packages}`);
+              let autoMerge = false;
+              if (MERGE_ALLOW.includes(pr.user.login)) {
+                const commits = await github.paginate(github.rest.pulls.listCommits,
+                  { owner, repo, pull_number: pr.number, per_page: 100 });
+                const foreign = commits.find(c => !MERGE_ALLOW.includes(c.author?.login));
+                const infra = files.find(f => NO_AUTO_MERGE.some(re => re.test(f.filename))
+                  || (f.previous_filename && NO_AUTO_MERGE.some(re => re.test(f.previous_filename))));
+                // A missing patch (GitHub omits very large diffs) cannot be
+                // checked, so it blocks the merge.
+                const moneyDep = files.find(f => MANIFEST.test(f.filename) && (!f.patch
+                  || f.patch.split('\n').some(l => /^[+-](?![+-])/.test(l) && MONEY_DEPS.test(l))));
+                const why = foreign ? `commit ${foreign.sha.slice(0, 7)} by ${foreign.author?.login ?? 'unknown'}`
+                  : infra ? `touches ${infra.filename}`
+                  : moneyDep ? `${moneyDep.filename} ${moneyDep.patch ? 'changes a money-path dependency' : 'diff unavailable'}`
+                  : null;
+                if (why) core.notice(`PR #${pr.number} not auto-merged: ${why}`);
+                autoMerge = !why && commits.length > 0;
+              }
 
               if (!alreadyApproved) {
                 await github.rest.pulls.createReview({
