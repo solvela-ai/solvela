@@ -89,7 +89,10 @@ jobs:
             // Dependency bumps that never auto-merge (approval is unaffected).
             // MONEY_PATH matches file paths, but a bump of a crypto or Solana
             // crate only changes manifests and lockfiles, so this is matched
-            // against the added/removed lines of those files' diffs.
+            // against every line of those files' diff hunks, context included:
+            // in Cargo.lock only `version`/`checksum` change and the package
+            // `name` is a context line. A neighbouring package in the context
+            // can over-block, which errs the safe way.
             const MONEY_DEPS = /\b(solana|spl-|anchor|dalek|ed25519|curve25519|x25519|tweetnacl|bs58|base58|signer-core|x402)|@solana\/|@coral-xyz\//i;
             const MANIFEST = /(^|\/)(Cargo\.(toml|lock)|package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|pyproject\.toml|poetry\.lock|uv\.lock|requirements[\w.-]*\.txt|go\.(mod|sum))$/;
             // Files whose change takes effect outside the reviewed code path
@@ -174,11 +177,14 @@ jobs:
                   || (f.previous_filename && NO_AUTO_MERGE.some(re => re.test(f.previous_filename))));
                 // A missing patch (GitHub omits very large diffs) cannot be
                 // checked, so it blocks the merge.
-                const moneyDep = files.find(f => MANIFEST.test(f.filename) && (!f.patch
-                  || f.patch.split('\n').some(l => /^[+-](?![+-])/.test(l) && MONEY_DEPS.test(l))));
+                const moneyDep = files.find(f => MANIFEST.test(f.filename)
+                  && (!f.patch || MONEY_DEPS.test(f.patch)));
+                // The title is only an extra block on top of the diff check:
+                // it can stop a merge, never allow one.
                 const why = foreign ? `commit ${foreign.sha.slice(0, 7)} by ${foreign.author?.login ?? 'unknown'}`
                   : infra ? `touches ${infra.filename}`
-                  : moneyDep ? `${moneyDep.filename} ${moneyDep.patch ? 'changes a money-path dependency' : 'diff unavailable'}`
+                  : moneyDep ? `${moneyDep.filename} ${moneyDep.patch ? 'diff names a money-path dependency' : 'diff unavailable'}`
+                  : MONEY_DEPS.test(pr.title) ? 'title names a money-path dependency'
                   : null;
                 if (why) core.notice(`PR #${pr.number} not auto-merged: ${why}`);
                 autoMerge = !why && commits.length > 0;
