@@ -8,7 +8,7 @@
 
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { UnsupportedFunctionalityError } from '@ai-sdk/provider';
-import type { LanguageModelV3 } from '@ai-sdk/provider';
+import type { LanguageModelV4 } from '@ai-sdk/provider';
 
 import { BudgetState } from './budget.js';
 import type { SolvelaProviderSettings } from './config.js';
@@ -27,9 +27,9 @@ import type { SolvelaModelId } from './generated/models.js';
  */
 export interface SolvelaProvider {
   /** Create a language model for the given model ID. */
-  (modelId: SolvelaModelId | (string & {})): LanguageModelV3;
+  (modelId: SolvelaModelId | (string & {})): LanguageModelV4;
   /** Alias for the callable form — explicit method for clarity. */
-  chat(modelId: SolvelaModelId | (string & {})): LanguageModelV3;
+  chat(modelId: SolvelaModelId | (string & {})): LanguageModelV4;
   /**
    * @throws {UnsupportedFunctionalityError} always — not supported in v1.
    */
@@ -100,14 +100,14 @@ export function createSolvelaProvider(
   // Build the callable provider function.
   const provider = function solvelaProvider(
     modelId: SolvelaModelId | (string & {}),
-  ): LanguageModelV3 {
+  ): LanguageModelV4 {
     return inner.chatModel(modelId);
   } as SolvelaProvider;
 
   // Explicit .chat() method — alias for the callable form.
   provider.chat = function chat(
     modelId: SolvelaModelId | (string & {}),
-  ): LanguageModelV3 {
+  ): LanguageModelV4 {
     return inner.chatModel(modelId);
   };
 
