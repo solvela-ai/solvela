@@ -4,7 +4,15 @@
 # but Solvela is a solo-maintainer repo with no second human reviewer — so
 # every green PR otherwise needs a manual approve-as-bot step. This posts that
 # approval automatically (as `github-actions[bot]`) so the PR becomes
-# mergeable. It is APPROVE-ONLY: a human still triggers the actual merge.
+# mergeable.
+#
+# Auto-merge: PRs from the bot authors in MERGE_ALLOW (dependabot and the
+# `sky64-agent` maintenance agent) are also squash-merged here once approved,
+# unless they touch the money path or bump a money-path dependency
+# (MONEY_DEPS). Everyone else's PRs, including the maintainer's, still merge
+# by hand. The merge uses this job's GITHUB_TOKEN, and pushes made with that
+# token do not trigger other workflows: a bot merge does NOT run `deploy.yml`.
+# Production only moves when a human merges or deploys.
 #
 # Security posture: this makes CI the effective gate to `main`. The guards
 # below keep the blast radius to first-party, non-fork PRs from a small author
@@ -34,7 +42,7 @@ on:
 permissions:
   pull-requests: write
   checks: read
-  contents: read
+  contents: write  # squash-merge of MERGE_ALLOW PRs
 
 jobs:
   approve:
@@ -68,9 +76,21 @@ jobs:
             // other guard still applies: dependabot pushes to a same-repo branch
             // (passes the no-fork check), the money-path exclusion below still
             // blocks any bump that touches fund-moving code, and the full
-            // REQUIRED set must be green. Approve-only — merge stays manual
-            // (or dependabot's own auto-merge, where enabled per-PR).
-            const ALLOW = ['sky64', 'dependabot[bot]'];
+            // REQUIRED set must be green. Merge is decided separately below
+            // (MERGE_ALLOW / MONEY_DEPS).
+            // `sky64-agent` is the dsh-superagent maintenance bot; its PRs get
+            // the same guards as dependabot's.
+            const ALLOW = ['sky64', 'dependabot[bot]', 'sky64-agent'];
+            // Authors whose approved PRs are also merged automatically. Not the
+            // maintainer: their PRs stay a deliberate manual merge.
+            const MERGE_ALLOW = ['dependabot[bot]', 'sky64-agent'];
+            // Dependency bumps that never auto-merge (approval is unaffected).
+            // MONEY_PATH matches file paths, but a bump of a crypto or Solana
+            // crate only changes manifests and lockfiles, so match package
+            // names instead: the PR title, plus the package table dependabot
+            // writes for grouped bumps (not its release notes, which mention
+            // words like "anchors" and "base58" in passing).
+            const MONEY_DEPS = /\b(solana|spl-|anchor|dalek|ed25519|curve25519|x25519|tweetnacl|bs58|base58|signer-core|x402)|@solana\/|@coral-xyz\//i;
 
             // Money-path surfaces: code that signs / verifies / settles payments,
             // computes cost, touches escrow / USDC, or handles secret key material
@@ -129,13 +149,33 @@ jobs:
                 r.state === 'APPROVED'
                 && r.user.login === 'github-actions[bot]'
                 && r.commit_id === sha);
-              if (alreadyApproved) continue;
+              const packages = [...(pr.body || '').matchAll(/^\| \[([^\]]+)\]/gm)]
+                .map(m => m[1]).join(' ');
+              const autoMerge = MERGE_ALLOW.includes(pr.user.login)
+                && !MONEY_DEPS.test(`${pr.title} ${packages}`);
 
-              await github.rest.pulls.createReview({
-                owner, repo, pull_number: pr.number, event: 'APPROVE',
-                body: 'Auto-approved: all required checks green for '
-                    + `\`${sha.slice(0, 7)}\`. CI is the gate; `
-                    + 'conversation-resolution still enforced. Merge is manual.',
-              });
-              core.notice(`Auto-approved PR #${pr.number} at ${sha}`);
+              if (!alreadyApproved) {
+                await github.rest.pulls.createReview({
+                  owner, repo, pull_number: pr.number, event: 'APPROVE',
+                  body: 'Auto-approved: all required checks green for '
+                      + `\`${sha.slice(0, 7)}\`. CI is the gate; `
+                      + 'conversation-resolution still enforced. '
+                      + (autoMerge ? 'Auto-merging (no deploy).' : 'Merge is manual.'),
+                });
+                core.notice(`Auto-approved PR #${pr.number} at ${sha}`);
+              }
+              if (!autoMerge) continue;
+
+              // sha pins the merge to the commit whose checks were verified;
+              // a newer push makes GitHub refuse it, and that push's own
+              // workflow_run re-evaluates.
+              try {
+                await github.rest.pulls.merge({
+                  owner, repo, pull_number: pr.number, sha, merge_method: 'squash',
+                });
+                core.notice(`Auto-merged PR #${pr.number} at ${sha}`);
+              } catch (e) {
+                // Unresolved conversations, a conflict or a race: leave it open.
+                core.warning(`Could not auto-merge PR #${pr.number}: ${e.message}`);
+              }
             }
