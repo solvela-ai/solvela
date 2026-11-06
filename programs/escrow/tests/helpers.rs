@@ -19,8 +19,14 @@ use spl_token::{
     ID as TOKEN_PROGRAM_ID,
 };
 
-/// Program ID — must match declare_id!() in lib.rs
-pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
+/// Program ID — re-exported from the program crate so tests automatically
+/// follow whichever variant the `devnet` feature selects (mainnet `9neD…` by
+/// default, devnet `GyJR…` with `--features devnet`). Same rationale as
+/// USDC_MINT below: eliminates a "must match lib.rs" duplication that would
+/// silently desync on a feature-gate change — the loaded .so's declare_id
+/// must match the address LiteSVM registers it at, or Anchor's entrypoint
+/// check_id rejects every transaction.
+pub const PROGRAM_ID: Pubkey = solvela_escrow::ID_CONST;
 
 /// USDC mint the program is currently built for. Re-exported from the
 /// program crate so tests automatically follow whichever variant the

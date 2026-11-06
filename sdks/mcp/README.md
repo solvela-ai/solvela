@@ -121,6 +121,25 @@ Add to your Claude Code MCP configuration (`.claude/settings.json` or project-le
 
 ## Setup with Claude Desktop
 
+### One-click install (Desktop Extension, recommended)
+
+Build the `.mcpb` bundle and open it with Claude Desktop — no Node setup, no
+config editing (Claude Desktop ships its own Node runtime):
+
+```bash
+npm run build:mcpb
+# → out/solvela-mcp-<version>.mcpb — double-click it, or drag into
+#   Claude Desktop → Settings → Extensions
+```
+
+The install dialog asks for optional settings (wallet key, session budget, RPC
+URL); leave the wallet key empty to auto-create a non-custodial wallet at
+`~/.solvela/wallet.json` on first run, exactly like the CLI flow. The bundle is
+a single self-contained file — no `node_modules`, nothing fetched at install
+time.
+
+### Manual config
+
 Add to your Claude Desktop config (`claude_desktop_config.json`):
 
 ```json

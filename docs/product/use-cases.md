@@ -10,7 +10,7 @@ Different questions need different models. A simple classification task doesn't 
 
 ## Pay-Per-Call Billing
 
-No monthly subscriptions. No upfront commitments. No minimum spend. Each API call is priced individually based on the model used and tokens consumed. An agent that makes one call per day pays for one call per day. An agent that makes a million calls pays for a million calls. Every response includes a cost breakdown: provider cost, platform fee (5%), and total in USDC.
+No monthly subscriptions. No upfront commitments. No minimum spend. Each API call is priced individually based on the model used and tokens consumed. An agent that makes one call per day pays for one call per day. An agent that makes a million calls pays for a million calls. Every response includes a cost breakdown: provider cost, platform fee (suspended on the hosted gateway; default 5% on self-hosted), and total in USDC.
 
 ## Trustless Escrow
 

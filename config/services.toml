@@ -8,13 +8,15 @@
 # ── Internal services (served by this gateway) ──────────────────────
 #
 # Web search tool (Agent Toolbelt PR #1). Served by THIS gateway at
-# `POST /v1/search`, x402-paid, flat per-call price + 5% platform fee. The
+# `POST /v1/search`, x402-paid, flat per-call price plus the configurable
+# platform fee (default 5%, suspended on the hosted gateway). The
 # gateway proxies an upstream search API (Tavily) using its own
 # `TAVILY_API_KEY`; the route returns 503 when no key is configured. Pricing
 # lives here so it is the single source of truth and `/v1/search` reads it.
 #
 # `price_per_request_usdc` = upstream-cost-covering default ($0.01; Tavily is
-# ~$0.008/call). The agent pays price × 1.05 = $0.0105 (5% platform fee on top).
+# ~$0.008/call). The agent pays price plus the live platform fee; the 402
+# quote is authoritative.
 [services.web-search]
 name = "Web Search"
 endpoint = "/v1/search"
@@ -22,18 +24,20 @@ category = "search"
 x402_enabled = true
 internal = true
 description = "x402-paid web search (Tavily upstream); normalized title/url/snippet results"
-pricing_label = "$0.0105/query (incl. 5% platform fee)"
+pricing_label = "$0.010/query + platform fee (see the 402 quote)"
 price_per_request_usdc = 0.01
 
 # Solana price tool (Agent Toolbelt pick #2 — "pay USDC on Solana to read
 # Solana"). Served by THIS gateway at `POST /v1/solana/price`, x402-paid, flat
-# per-call price + 5% platform fee. The gateway queries the Jupiter Price API
+# per-call price plus the configurable platform fee (default 5%, suspended on
+# the hosted gateway). The gateway queries the Jupiter Price API
 # (lite-api.jup.ag — keyless; an optional JUPITER_API_KEY switches to the
 # keyed api.jup.ag host, same contract) server-side. Unlike web-search there
 # is NO API-key gate: this entry alone enables the route (absent → 503).
 #
 # `price_per_request_usdc` = pure margin (the upstream is free) — operator-
-# adjustable. The agent pays price × 1.05 = $0.00105 (5% platform fee on top).
+# adjustable. The agent pays price plus the live platform fee; the 402 quote
+# is authoritative.
 [services.solana-price]
 name = "Solana Price Data"
 endpoint = "/v1/solana/price"
@@ -41,7 +45,7 @@ category = "data"
 x402_enabled = true
 internal = true
 description = "x402-paid Solana token prices (Jupiter upstream); per-mint USD price, batch up to 50 mints, unknown mints returned as null"
-pricing_label = "$0.00105/query (incl. 5% platform fee)"
+pricing_label = "$0.001/query + platform fee (see the 402 quote)"
 price_per_request_usdc = 0.001
 
 #

@@ -64,7 +64,20 @@ pub const MAX_ESCROW_SLOTS: u64 = 216_000;
 /// so the gateway rejects the deposit before delivering a response.
 pub const MIN_EXPIRY_BUFFER: u64 = 50;
 
+// `mainnet` pairs the mainnet USDC mint with the default (mainnet) program
+// ID; `devnet` pairs the devnet program ID with the default devnet mint.
+// Enabling both would bake a devnet ID into a mainnet-mint artifact (or vice
+// versa), so the combination fails the build instead of shipping a hybrid.
+#[cfg(all(feature = "mainnet", feature = "devnet"))]
+compile_error!("features `mainnet` and `devnet` are mutually exclusive");
+
+// Program ID per cluster (issue #120 path A). The default build declares the
+// deployed mainnet ID; devnet rehearsal deploys opt in via `--features
+// devnet`. The devnet program keypair is operator-held, never committed.
+#[cfg(not(feature = "devnet"))]
 declare_id!("9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU");
+#[cfg(feature = "devnet")]
+declare_id!("GyJRAC46bDoBQJNzTnbupWj8T62GipFKnizHExLXPwvo");
 
 #[program]
 pub mod solvela_escrow {

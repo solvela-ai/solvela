@@ -102,6 +102,10 @@ pub fn is_valid_wallet_address(address: &str) -> bool {
 /// `GET /v1/wallet/:address/stats`
 ///
 /// Returns spend statistics for the given wallet over the requested period.
+// The Err variant is an axum `Response` (early-return-on-failure is the
+// idiomatic axum handler shape here); boxing it would fight the framework's
+// `IntoResponse` contract for no runtime gain.
+#[allow(clippy::result_large_err)]
 pub async fn wallet_stats(
     State(state): State<Arc<AppState>>,
     Path(address): Path<String>,

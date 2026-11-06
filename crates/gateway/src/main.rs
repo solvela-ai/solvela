@@ -24,6 +24,56 @@ fn env_with_fallback(solvela_name: &str, rcr_name: &str) -> Result<String, std::
     }
 }
 
+/// Environment variable holding the startup platform-fee percentage.
+const PLATFORM_FEE_PERCENT_ENV: &str = "SOLVELA_PLATFORM_FEE_PERCENT";
+
+/// Apply `SOLVELA_PLATFORM_FEE_PERCENT` to the process-global fee knob.
+///
+/// Unset → leave the default ([`solvela_protocol::PLATFORM_FEE_PERCENT`], 5%).
+/// Set → must parse as `0..=100`; anything else (empty string, whitespace,
+/// `"5.0"`, `"abc"`, `101`) is an `Err` that aborts startup. There is no
+/// fallback branch on purpose: silently serving 5% when the operator
+/// configured something else mis-charges every request.
+fn apply_platform_fee_env() -> anyhow::Result<()> {
+    let raw = match std::env::var(PLATFORM_FEE_PERCENT_ENV) {
+        Ok(raw) => Some(raw),
+        // Only a genuinely absent variable falls back to the default; a
+        // present-but-non-UTF-8 value is a configuration error.
+        Err(std::env::VarError::NotPresent) => None,
+        Err(e) => anyhow::bail!("{PLATFORM_FEE_PERCENT_ENV} is not readable: {e}"),
+    };
+    let Some(percent) = parse_platform_fee_env(raw.as_deref())? else {
+        return Ok(());
+    };
+    solvela_protocol::set_platform_fee_percent(percent)?;
+    info!(
+        platform_fee_percent = percent,
+        "platform fee configured from env"
+    );
+    Ok(())
+}
+
+/// Pure decision table for [`apply_platform_fee_env`], split out so it is
+/// testable without mutating process-global env or the fee knob.
+///
+/// `None` in → `Ok(None)` (unset: keep the default). Anything else must parse
+/// as an integer the knob accepts; there is deliberately NO fallback arm.
+fn parse_platform_fee_env(raw: Option<&str>) -> anyhow::Result<Option<u8>> {
+    let Some(raw) = raw else { return Ok(None) };
+    let percent: u8 = raw.trim().parse().map_err(|e| {
+        anyhow::anyhow!(
+            "{PLATFORM_FEE_PERCENT_ENV}={raw:?} is not an integer 0..=100 ({e}); \
+             refusing to start rather than silently billing the default fee"
+        )
+    })?;
+    // Range is the knob's contract; check it here too so a bad value is
+    // rejected by the same error path as a bad parse.
+    if percent > 100 {
+        anyhow::bail!("{PLATFORM_FEE_PERCENT_ENV}={raw:?} is out of range (expected 0..=100)");
+    }
+    Ok(Some(percent))
+}
+
 use gateway::services::ServiceRegistry;
 use gateway::{
     balance_monitor::BalanceMonitor,
@@ -73,6 +123,16 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::fmt().with_env_filter(filter).init();
         }
     };
+
+    // Platform fee: set the process-global knob ONCE, before anything can quote
+    // or bill, from the ENVIRONMENT ONLY.
+    //
+    // Deliberately NOT read from `config/default.toml`: that file's parse
+    // failures are warn-and-default (see just below), which would let a money
+    // knob silently revert to 5% on a typo. Set-but-unparseable — including an
+    // empty string — is FATAL: a fee the operator asked for and did not get is
+    // a silent mis-charge on every request. Unset keeps the default (5%).
+    apply_platform_fee_env().context("invalid SOLVELA_PLATFORM_FEE_PERCENT")?;
 
     // Load configuration: TOML file as base, then env var overrides
     let mut app_config = match std::fs::read_to_string("config/default.toml") {
@@ -748,6 +808,12 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = app_config.channel.validate() {
         anyhow::bail!("invalid [channel] configuration: {e}");
     }
+    // F16: an active faucet with a 0-lamport drip is a config error — refuse
+    // to boot rather than serve drips that fund nothing (same fail-closed
+    // posture as the channel/semantic-cache validation above).
+    if let Err(e) = app_config.faucet.validate() {
+        anyhow::bail!("invalid [faucet] configuration: {e}");
+    }
     let semantic_cache = build_semantic_cache(&app_config, redis_url.as_str()).await;
 
     // Initialize provider health tracker
@@ -907,8 +973,20 @@ async fn main() -> anyhow::Result<()> {
     // The `source_key` is a DEDICATED gas wallet — never the fee-payer reserve
     // (which pays providers and is regulatory-sensitive). When unset/empty the
     // faucet stays disabled. Degradation: no DATABASE_URL ⇒ disabled with a warn.
-    let faucet = if app_config.faucet.is_active() {
-        match (&db_pool, app_config.faucet.source_key.as_deref()) {
+    // F8: move the gas key OUT of the config BEFORE `app_config` is cloned
+    // into the process-lifetime `AppState` below — the plaintext key must not
+    // persist beyond building the signer (`RpcGasSource` keeps its own
+    // zeroize-on-drop copy of the decoded keypair). The `Zeroizing` wrapper
+    // wipes the moved heap bytes when this block ends. Capture `is_active()`
+    // first: it inspects the very field we take.
+    let faucet_active = app_config.faucet.is_active();
+    let faucet_source_key = app_config
+        .faucet
+        .source_key
+        .take()
+        .map(zeroize::Zeroizing::new);
+    let faucet = if faucet_active {
+        match (&db_pool, faucet_source_key.as_deref()) {
             (Some(pool), Some(source_key)) => {
                 match gateway::routes::faucet::RpcGasSource::from_keypair_b58(
                     http_client.clone(),
@@ -960,6 +1038,9 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    // F8: zeroize the plaintext key now — main() lives for the whole process,
+    // so without this explicit drop the Zeroizing local would too.
+    drop(faucet_source_key);
 
     // Build shared state
     let state = Arc::new(AppState {
@@ -1578,6 +1659,32 @@ const STARTUP_FAILURE_REASON_REDIS_CONNECT: &str = "redis_connect";
 mod tests {
     use super::*;
     use std::sync::OnceLock;
+
+    /// The startup fee knob's full decision table. Pure — never touches the
+    /// process env or the process-global knob, so it cannot race the other
+    /// tests in this binary.
+    #[test]
+    fn platform_fee_env_is_fatal_when_set_but_unparseable() {
+        // Unset: keep the compile-time default, no error.
+        assert_eq!(parse_platform_fee_env(None).unwrap(), None);
+
+        // Valid integers, including both ends of the range and 0%.
+        assert_eq!(parse_platform_fee_env(Some("0")).unwrap(), Some(0));
+        assert_eq!(parse_platform_fee_env(Some("5")).unwrap(), Some(5));
+        assert_eq!(parse_platform_fee_env(Some("100")).unwrap(), Some(100));
+        assert_eq!(parse_platform_fee_env(Some(" 7 ")).unwrap(), Some(7));
+
+        // Set-but-unparseable is FATAL, never a silent fall back to 5%.
+        // The empty string is the one that bit us before (#757 shape).
+        for bad in ["", "   ", "abc", "5.0", "5%", "-1", "101", "255", "1e2"] {
+            let err = parse_platform_fee_env(Some(bad))
+                .expect_err("{bad:?} must abort startup, not default to 5%");
+            assert!(
+                err.to_string().contains(PLATFORM_FEE_PERCENT_ENV),
+                "error must name the variable: {err}"
+            );
+        }
+    }
 
     /// Process-wide Prometheus recorder for counter assertions. Mirrors the
     /// pattern in `cache::exact::tests` — `install_recorder` can only succeed

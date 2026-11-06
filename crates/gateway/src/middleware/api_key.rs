@@ -144,6 +144,10 @@ pub async fn extract_api_key(
 ///
 /// Returns `Err(503)` when the provider's backend is unavailable (fail closed);
 /// `Ok(())` when it authenticated (context inserted) or abstained.
+// The Err variant is an axum `Response` (Result<_, Response> is the idiomatic
+// early-return shape here); boxing it would fight the framework's
+// `IntoResponse` contract for no runtime gain.
+#[allow(clippy::result_large_err)]
 async fn apply_fallback_auth_provider(
     request: &mut Request,
     provider: &dyn AuthProvider,

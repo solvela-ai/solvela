@@ -6,7 +6,7 @@ const TICKER_ITEMS = [
   'ESCROW · 9neDHouXgEgHZDde5Sp',
   '25 paid models · 5 providers',
   'free tier · nvidia nim · $0',
-  '5% flat fee',
+  'fee suspended · exact cost only',
   'mainnet · x402 · usdc-spl',
   'a2a · agent-card · /.well-known',
 ]

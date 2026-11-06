@@ -5,13 +5,15 @@ use serde::{Deserialize, Serialize};
 pub struct CostBreakdown {
     /// Raw provider cost in USDC.
     pub provider_cost: String,
-    /// Platform fee in USDC (5%).
+    /// Platform fee in USDC (at `fee_percent`).
     pub platform_fee: String,
     /// Total cost to the agent in USDC.
     pub total: String,
     /// Always "USDC".
     pub currency: String,
-    /// Platform fee percentage (5).
+    /// Platform fee percentage. The LIVE value
+    /// ([`crate::platform_fee_percent`]), not the compile-time constant —
+    /// producers must never hard-code it.
     pub fee_percent: u8,
 }
 

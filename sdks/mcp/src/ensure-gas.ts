@@ -113,22 +113,34 @@ export async function ensureGas(opts: EnsureGasOptions): Promise<EnsureGasResult
   // 3. Poll for confirmation (bounded). A timeout is NOT an error — the drip is
   // in flight; we just proceed and let the first signed call benefit from it.
   if (txSignature) {
+    let confirmed = false;
     const deadline = Date.now() + CONFIRM_TIMEOUT_MS;
     while (Date.now() < deadline) {
       try {
         const st = await connection.getSignatureStatus(txSignature);
         const status = st?.value?.confirmationStatus;
         if (status === 'confirmed' || status === 'finalized') {
+          // F17: report the EFFECTIVE threshold (opts override included), not
+          // the module constant.
           process.stderr.write(
-            `[solvela-mcp] gas: faucet dripped ~${(GAS_THRESHOLD_LAMPORTS / LAMPORTS_PER_SOL).toFixed(3)} SOL ` +
+            `[solvela-mcp] gas: faucet dripped ~${(threshold / LAMPORTS_PER_SOL).toFixed(3)} SOL ` +
               `(tx ${txSignature}, ${status}).\n`,
           );
+          confirmed = true;
           break;
         }
       } catch {
         // transient — keep polling
       }
       await sleep(CONFIRM_POLL_MS);
+    }
+    if (!confirmed) {
+      // F13: deadline exit was silent — say so, matching the escrow path's
+      // not-confirmed-within-timeout warning style.
+      process.stderr.write(
+        `[solvela-mcp] gas: drip tx ${txSignature} not confirmed within ${CONFIRM_TIMEOUT_MS}ms; ` +
+          `continuing — it may still land.\n`,
+      );
     }
   }
 

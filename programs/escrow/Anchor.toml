@@ -5,19 +5,24 @@ anchor_version = "0.31.1"
 seeds = true
 skip-lint = false
 
-# Cluster policy: this program is mainnet-only. The on-chain program ID
-# 9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU is hardcoded in
-# src/lib.rs via declare_id! and is only deployed to mainnet-beta. Local
-# integration tests use LiteSVM (programs/escrow/tests/integration.rs),
-# not `anchor deploy` against a real localnet validator. Devnet rehearsal
-# requires fresh per-cluster keypairs and cluster-conditional declare_id!
-# — see issue #120 path A. The [programs.localnet] / [programs.devnet]
-# sections are intentionally absent so `anchor deploy --provider.cluster
-# {localnet,devnet}` fails fast with "program not found" instead of
-# silently targeting the mainnet ID on the wrong cluster.
+# Cluster policy (issue #120 path A): each cluster has its own program ID,
+# selected at compile time by declare_id! in src/lib.rs.
+# - mainnet (DEFAULT build): 9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU.
+#   Unchanged — a build without the `devnet` feature is byte-identical to
+#   the pre-#120 mainnet-only artifact.
+# - devnet (first-class rehearsal target): build with `--features devnet`
+#   to declare GyJRAC46bDoBQJNzTnbupWj8T62GipFKnizHExLXPwvo. The devnet
+#   program keypair is operator-held and never committed to this repo.
+# - localnet: intentionally absent — LiteSVM covers local testing
+#   (programs/escrow/tests/integration.rs), so `anchor deploy
+#   --provider.cluster localnet` fails fast with "program not found"
+#   instead of silently targeting a real cluster's ID.
 
 [programs.mainnet]
 solvela_escrow = "9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU"
+
+[programs.devnet]
+solvela_escrow = "GyJRAC46bDoBQJNzTnbupWj8T62GipFKnizHExLXPwvo"
 
 [registry]
 url = "https://api.apr.dev"

@@ -22,3 +22,4 @@ pub mod service_payment;
 pub mod services;
 pub mod stats;
 pub mod supported;
+pub mod tenants;

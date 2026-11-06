@@ -21,7 +21,7 @@ const LINES: Line[] = [
   {
     side: 'gateway',
     label: '402 payment required',
-    detail: 'cost 0.0042 usdc  ·  fee 0.0002 (5%)',
+    detail: 'cost 0.0040 usdc  ·  fee 0.0000 (suspended)',
     tone: 'warn',
   },
   {

@@ -2,7 +2,7 @@ use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-use crate::PLATFORM_FEE_PERCENT;
+use crate::platform_fee_percent;
 
 /// Full, gateway-internal description of a supported model.
 ///
@@ -188,7 +188,7 @@ fn default_currency() -> String {
 }
 
 fn default_fee_percent() -> u8 {
-    PLATFORM_FEE_PERCENT
+    platform_fee_percent()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -233,7 +233,7 @@ impl Serialize for ModelInfo {
                 input_per_million: self.input_cost_per_million,
                 output_per_million: self.output_cost_per_million,
                 currency: default_currency(),
-                fee_percent: PLATFORM_FEE_PERCENT,
+                fee_percent: platform_fee_percent(),
             },
         };
         wire.serialize(serializer)
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(v["pricing"]["input_per_million"], 2.5);
         assert_eq!(v["pricing"]["output_per_million"], 10.0);
         assert_eq!(v["pricing"]["currency"], "USDC");
-        assert_eq!(v["pricing"]["fee_percent"], PLATFORM_FEE_PERCENT);
+        assert_eq!(v["pricing"]["fee_percent"], crate::PLATFORM_FEE_PERCENT);
 
         // Capabilities is nested, NOT flat. Values mirror the mixed pattern
         // in `registration()` so a swapped capability would change the JSON.

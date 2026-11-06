@@ -162,7 +162,7 @@ First, send a request without any payment header. The gateway will respond with 
         {
           "scheme": "exact",
           "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-          "amount": "315",
+          "amount": "300",
           "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
           "pay_to": "<gateway-wallet>",
           "max_timeout_seconds": 300
@@ -170,10 +170,10 @@ First, send a request without any payment header. The gateway will respond with 
       ],
       "cost_breakdown": {
         "provider_cost": "0.000300",
-        "platform_fee": "0.000015",
-        "total": "0.000315",
+        "platform_fee": "0.000000",
+        "total": "0.000300",
         "currency": "USDC",
-        "fee_percent": 5
+        "fee_percent": 0
       },
       "error": "Payment required"
     }
@@ -197,7 +197,7 @@ The body **is** the `PaymentRequired` object — parse it directly to get the co
     {
       "scheme": "exact",
       "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-      "amount": "315",
+      "amount": "300",
       "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
       "pay_to": "<gateway-recipient-wallet>",
       "max_timeout_seconds": 300
@@ -205,10 +205,10 @@ The body **is** the `PaymentRequired` object — parse it directly to get the co
   ],
   "cost_breakdown": {
     "provider_cost": "0.000300",
-    "platform_fee": "0.000015",
-    "total": "0.000315",
+    "platform_fee": "0.000000",
+    "total": "0.000300",
     "currency": "USDC",
-    "fee_percent": 5
+    "fee_percent": 0
   },
   "error": "Payment required"
 }

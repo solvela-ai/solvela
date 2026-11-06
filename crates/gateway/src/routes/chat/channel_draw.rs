@@ -58,6 +58,7 @@ use crate::cache::ResponseCache;
 use crate::channels::{ChannelDrawLockGuard, ChannelRepoError, CHANNEL_SLOT_MAX_STALENESS};
 use crate::error::GatewayError;
 use crate::receipts;
+use crate::routes::service_payment::split_total_atomic;
 use crate::usage::SpendLogEntry;
 use crate::AppState;
 
@@ -638,14 +639,13 @@ async fn channel_draw_locked(
         routing_score: log_routing_score,
     });
 
-    // Receipt: the canonical integer split of the REALIZED total —
-    //   total = provider × 105/100  ⇒  provider = floor(total × 100 / 105),
-    //   fee = total − provider
-    // (the discovery-floor / A2A-record idiom), so the three atomics always
-    // reconcile and the fee is never re-applied. `amount_paid == total ==
-    // realized_advance` mirrors the spend ledger exactly.
-    let provider_cost_atomic = (realized_advance as u128 * 100 / 105) as u64;
-    let platform_fee_atomic = realized_advance - provider_cost_atomic;
+    // Receipt: the canonical integer split of the REALIZED total at the LIVE
+    // platform-fee percent (the discovery-floor / A2A-record idiom), so the
+    // three atomics always reconcile and the fee is never re-applied.
+    // `amount_paid == total == realized_advance` mirrors the spend ledger
+    // exactly. Hard-coding `× 100 / 105` here would book a phantom ~4.76% fee
+    // against a 0% knob.
+    let (provider_cost_atomic, platform_fee_atomic) = split_total_atomic(realized_advance);
     let record = receipts::ReceiptRecord {
         receipt_id: uuid::Uuid::new_v4(),
         model: ctx.req.model.clone(),

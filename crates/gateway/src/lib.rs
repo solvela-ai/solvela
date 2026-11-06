@@ -499,6 +499,14 @@ pub fn build_router(
             .route("/pricing", get(routes::pricing::pricing))
             .route("/health", get(routes::health::health))
             .route("/v1/admin/stats", get(routes::admin_stats::admin_stats))
+            // Admin tenant-budget provisioning (idempotent upsert). Param is
+            // named {address} to match /v1/wallet/{address}/stats — the router
+            // rejects two routes whose shared segment uses different param
+            // names; the handler extracts positionally.
+            .route(
+                "/v1/wallet/{address}/tenants/{tenant}",
+                axum::routing::put(routes::tenants::provision_tenant_budget),
+            )
             .route(
                 "/v1/orgs",
                 post(routes::orgs::create_org).get(routes::orgs::list_orgs),

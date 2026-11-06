@@ -280,6 +280,15 @@ function generateWallet(): WalletFields {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   const spki = publicKey.export({ type: 'spki', format: 'der' });
   const pkcs8 = privateKey.export({ type: 'pkcs8', format: 'der' });
+  // F18: guard the tail-32 slices — a short DER export would make
+  // `length - 32` negative and subarray would silently return wrong bytes,
+  // producing a corrupt keypair instead of an error.
+  if (spki.length < 32 || pkcs8.length < 32) {
+    throw new Error(
+      `malformed ed25519 DER export (spki=${spki.length}B, pkcs8=${pkcs8.length}B); ` +
+        `expected at least 32 bytes each for the raw key tails`,
+    );
+  }
   const rawPub = spki.subarray(spki.length - 32);
   const rawSeed = pkcs8.subarray(pkcs8.length - 32);
 
@@ -323,7 +332,14 @@ async function createIfAbsent(
   await fs.mkdir(baseDir, { recursive: true, mode: 0o700 });
   if (process.platform !== 'win32') {
     // mkdir({mode}) does not apply the mode to a pre-existing dir on Linux.
-    await fs.chmod(baseDir, 0o700).catch(() => {});
+    // F14: still non-fatal, but a failed tighten leaves the wallet dir with
+    // wider permissions — warn instead of swallowing.
+    await fs.chmod(baseDir, 0o700).catch((err: unknown) => {
+      process.stderr.write(
+        `[solvela-mcp] WARN: could not chmod 0700 on ${baseDir} ` +
+          `(${err instanceof Error ? err.message : String(err)}); wallet dir may have wider permissions.\n`,
+      );
+    });
   }
 
   const json = JSON.stringify(

@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Value};
 
-use solvela_protocol::PLATFORM_FEE_PERCENT;
+use solvela_protocol::{platform_fee_multiplier, platform_fee_percent};
 
 use crate::AppState;
 
@@ -13,7 +13,9 @@ use crate::AppState;
 /// Returns provider cost, platform fee, and total for each model,
 /// plus example costs for a typical 1 000-token request.
 pub async fn pricing(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let fee_multiplier = 1.0 + PLATFORM_FEE_PERCENT as f64 / 100.0;
+    // Live knob, read ONCE per response so every block below agrees.
+    let fee_percent = platform_fee_percent();
+    let fee_multiplier = platform_fee_multiplier();
 
     let models: Vec<_> = state
         .model_registry
@@ -36,7 +38,7 @@ pub async fn pricing(State(state): State<Arc<AppState>>) -> Json<Value> {
                 "pricing": {
                     "input_per_million_usdc": m.input_cost_per_million,
                     "output_per_million_usdc": m.output_cost_per_million,
-                    "platform_fee_percent": PLATFORM_FEE_PERCENT,
+                    "platform_fee_percent": fee_percent,
                     "currency": "USDC",
                 },
                 "example_1k_token_request": {
@@ -63,8 +65,8 @@ pub async fn pricing(State(state): State<Arc<AppState>>) -> Json<Value> {
             "chain": "solana",
             "token": "USDC-SPL",
             "usdc_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-            "fee_percent": PLATFORM_FEE_PERCENT,
-            "fee_description": "5% platform fee is added on top of provider cost",
+            "fee_percent": fee_percent,
+            "fee_description": format!("{fee_percent}% platform fee is added on top of provider cost"),
             "settlement": "Solana USDC-SPL TransferChecked (pre-signed versioned tx)",
             "min_tx_cost_sol": 0.000005,
         },

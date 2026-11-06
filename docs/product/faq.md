@@ -34,13 +34,13 @@ Not today. Solvela currently supports only Solana with USDC-SPL. The architectur
 
 ## How much does it cost?
 
-The cost per request depends on the model used and the number of tokens consumed. Solvela adds a **5% platform fee** on top of the provider's cost. Every response includes a cost breakdown:
+The cost per request depends on the model used and the number of tokens consumed. Every response includes a cost breakdown:
 
 - **Provider cost**: What the LLM provider charges (e.g., $0.0025)
-- **Platform fee**: 5% of the provider cost (e.g., $0.000125)
-- **Total**: What the agent pays (e.g., $0.002625)
+- **Platform fee**: The Solvela gateway software supports a configurable platform fee (default 5%); the hosted gateway at api.solvela.ai currently runs with the fee suspended, so you pay only the provider cost
+- **Total**: What the agent pays on the hosted service (e.g., $0.0025)
 
-All prices are in USDC, which is pegged 1:1 to the US dollar. There are no monthly fees, no minimum charges, and no hidden costs.
+All prices are in USDC, which is pegged 1:1 to the US dollar. There are no monthly fees, no minimum charges, and no hidden costs. Self-hosted gateways can enable a platform fee by setting `SOLVELA_PLATFORM_FEE_PERCENT=5` (or any value 0-100).
 
 ## Is the code open source?
 

@@ -94,6 +94,28 @@ jobs:
       # deposit with ConstraintAddress 2012 — see CHANGELOG 2026-05-31, #436.
       - run: cargo test --test unit --features mainnet
 
+  devnet-build:
+    name: devnet build + program-ID guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # Devnet rehearsal deploys are built with `--features devnet` (devnet
+      # program ID + devnet USDC mint). Without this job the devnet branch
+      # of the program-ID pin (`test_program_id_matches_active_feature`)
+      # never runs in CI — the same never-exercised-feature drift class as
+      # #436 that mainnet-build guards against above.
+      #
+      # Mirrors mainnet-build: run the *full* unit suite under
+      # `--features devnet` so it compiles the lib and catches any test
+      # that regresses only under that flag. The pin test asserts the
+      # devnet program ID here; the default `unit` job asserts the
+      # mainnet ID. The sbf-build/integration matrix is intentionally NOT
+      # extended to devnet (SBF build-time cost; the unit pin is the
+      # standing guard) — extend it as a follow-up only if devnet-specific
+      # on-chain behavior ever diverges.
+      - run: cargo test --test unit --features devnet
+
   sbf-build:
     name: cargo build-sbf
     runs-on: ubuntu-latest

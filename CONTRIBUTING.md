@@ -2,6 +2,8 @@
 
 Thanks for your interest. This file covers the basics for getting a change merged.
 
+Please note that this project is released with a [Contributor Covenant Code of Conduct](./CODE_OF_CONDUCT.md). By participating in this project you agree to abide by its terms.
+
 ## Reporting issues
 
 - **Security vulnerabilities** — see [`SECURITY.md`](./SECURITY.md). Email `security@solvela.ai`. Do not open public issues for security reports.

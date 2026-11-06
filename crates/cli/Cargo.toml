@@ -41,3 +41,7 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 wiremock = "0.6"
+
+# Windows-only: embeds assets/solvela.ico + VERSIONINFO into solvela.exe (build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

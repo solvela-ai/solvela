@@ -67,7 +67,7 @@ Agent Wallet ──[deposit USDC]──> PDA Escrow Account (on-chain program)
 
 ### Revenue
 
-Solvela charges a **5% platform fee** on every request. This fee is included in the payment amount the agent is asked to pay. The payment goes to the gateway operator's wallet. There is no separate fee collection mechanism -- the fee is simply part of the price.
+Solvela software applies a **configurable platform fee** (default 5%, integer 0..=100 via `SOLVELA_PLATFORM_FEE_PERCENT` env var). The fee is included in the single payment amount the agent is asked to pay. The payment goes to the gateway operator's wallet. There is no separate fee collection mechanism -- the fee is simply part of the price. The hosted gateway at api.solvela.ai currently runs with the fee suspended (`SOLVELA_PLATFORM_FEE_PERCENT=0`).
 
 ### Optional Gas Sponsorship (Fee Payer)
 
@@ -146,7 +146,7 @@ There is no data-subject-access workflow because there is no data subject under 
 - Solvela verifies that a Solana transaction has occurred. It does not initiate, execute, or settle the transaction.
 - In the direct payment flow, Solvela is a read-only observer. The agent and the blockchain handle the transfer.
 - In the escrow flow, the on-chain program (not Solvela) controls fund custody and settlement logic.
-- Solvela does charge a 5% fee, but this fee is collected as part of the payment to the operator's wallet -- there is no separate money movement.
+- Solvela software applies a configurable fee (default 5%), collected as part of the payment to the operator's wallet -- there is no separate money movement. The hosted service runs with the fee suspended.
 
 ### State Money Transmitter Licenses
 
@@ -238,7 +238,7 @@ This document describes system behavior at the date noted in the header. It is i
 
 **Re-verification checklist** (run before any of the above):
 
-1. Confirm `PLATFORM_FEE_PERCENT` in `crates/protocol/src/constants.rs` still matches the percentage stated here.
+1. Confirm `SOLVELA_PLATFORM_FEE_PERCENT` default is still 5% (check startup code); confirm the hosted gateway is running with `SOLVELA_PLATFORM_FEE_PERCENT=0`.
 2. Confirm `USDC_MINT` constant still hardcoded to mainnet USDC; confirm verifier still rejects other mints.
 3. Confirm provider list in `crates/gateway/src/providers/` matches the count and names referenced anywhere in this doc (currently: `openai.rs`, `anthropic.rs`, `google.rs`, `xai.rs`, `deepseek.rs`, `nvidia.rs` — six providers).
 4. Confirm escrow program ID in `programs/escrow/src/lib.rs` (`declare_id!()`) matches the ID quoted here.

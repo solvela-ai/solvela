@@ -232,6 +232,24 @@ impl FaucetConfig {
                 .map(|k| !k.is_empty())
                 .unwrap_or(false)
     }
+
+    /// Fail-closed startup validation (F16): an ACTIVE faucet with
+    /// `drip_lamports == 0` is a config error — every "drip" would be a
+    /// zero-lamport transfer that burns a reservation row, a network fee, and
+    /// the caller's once-per-wallet slot while never funding the wallet.
+    /// Refuse to boot instead (mirrors [`ChannelConfig::validate`]). No-op
+    /// when the faucet is inactive (nothing runs, so the bound is inert).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.is_active() && self.drip_lamports == 0 {
+            return Err(
+                "faucet.drip_lamports must be > 0 when the faucet is enabled: a 0-lamport \
+                 drip funds nothing but still consumes the wallet's once-per-wallet slot \
+                 and a network fee. Set SOLVELA_FAUCET__DRIP_LAMPORTS or disable the faucet."
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for FaucetConfig {
@@ -1153,6 +1171,38 @@ a2a_draw_serve_timeout_secs = 1
         // Enabled AND non-empty source key → active.
         f.source_key = Some("dedicated-gas-key".to_string());
         assert!(f.is_active(), "enabled + source key must be active");
+    }
+
+    #[test]
+    fn faucet_validate_rejects_zero_drip_when_active() {
+        // F16: an ACTIVE faucet with `drip_lamports == 0` is a config error —
+        // fail fast at startup instead of serving 0-lamport drips that burn a
+        // reservation + tx fee while never funding the wallet.
+        let mut f = FaucetConfig {
+            enabled: true,
+            source_key: Some("dedicated-gas-key".to_string()),
+            drip_lamports: 0,
+            ..FaucetConfig::default()
+        };
+        assert!(
+            f.validate().is_err(),
+            "active faucet with 0 drip_lamports must fail validation"
+        );
+
+        // Inactive config is inert — never blocks boot (mirrors ChannelConfig).
+        f.enabled = false;
+        assert!(
+            f.validate().is_ok(),
+            "disabled faucet must not block startup regardless of drip_lamports"
+        );
+
+        // Active with a sane drip passes.
+        f.enabled = true;
+        f.drip_lamports = default_drip_lamports();
+        assert!(
+            f.validate().is_ok(),
+            "active faucet with a >0 drip is valid"
+        );
     }
 
     #[test]

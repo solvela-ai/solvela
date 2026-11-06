@@ -4,7 +4,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use solvela_protocol::{
-    CostBreakdown, ModelRegistration, PLATFORM_FEE_MULTIPLIER, PLATFORM_FEE_PERCENT,
+    platform_fee_multiplier, platform_fee_percent, CostBreakdown, ModelRegistration,
 };
 
 /// Errors from the model registry.
@@ -204,7 +204,8 @@ impl ModelRegistry {
         let input_cost = (input_tokens as f64 / 1_000_000.0) * model.input_cost_per_million;
         let output_cost = (output_tokens as f64 / 1_000_000.0) * model.output_cost_per_million;
         let provider_cost = input_cost + output_cost;
-        let total_with_fee = provider_cost * PLATFORM_FEE_MULTIPLIER;
+        // Live multiplier: `1.0 + pct/100`, bit-exactly 1.05 at the default 5.
+        let total_with_fee = provider_cost * platform_fee_multiplier();
         let platform_fee = total_with_fee - provider_cost;
 
         Ok(CostBreakdown {
@@ -212,7 +213,7 @@ impl ModelRegistry {
             platform_fee: format!("{platform_fee:.6}"),
             total: format!("{total_with_fee:.6}"),
             currency: "USDC".to_string(),
-            fee_percent: PLATFORM_FEE_PERCENT,
+            fee_percent: platform_fee_percent(),
         })
     }
 }
