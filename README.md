@@ -47,7 +47,7 @@ flowchart LR
 
 ### x402 Payments
 
-USDC-SPL payments on Solana via the x402 protocol. Two payment schemes: direct `TransferChecked` (pre-signed) and trustless Anchor escrow with PDA vaults (deposit/claim/refund). Ed25519 signature verification, ATA derivation, replay protection via Redis `SET NX EX`.
+USDC-SPL payments on Solana via the x402 protocol. Two payment schemes: direct `TransferChecked` (pre-signed) and trustless Anchor escrow with PDA vaults (deposit/claim/refund). Ed25519 signature verification, ATA derivation, replay protection via Redis `SET NX EX`. Optionally, Nano (XNO) as a second settlement asset: `exact` over `nano:mainnet`, where the agent publishes its own feeless send block and presents the confirmed block hash as the receipt (self-hosted operators enable it with `SOLVELA_NANO__*`; see `.env.example`).
 
 ### Multi-Provider Support
 

@@ -998,6 +998,17 @@ async fn settle_paid_task(
                     data: None,
                 });
             }
+            // Fail-closed: the A2A surface offers Solana only (its stored
+            // offer never advertises `nano:mainnet`, so the offer-match above
+            // already rejects one); reject a stray receipt, never panic.
+            (_, solvela_x402::types::PayloadData::Nano(_)) => {
+                revert_working_and_release(state, task_id).await;
+                return Err(JsonRpcErrorData {
+                    code: ERR_PAYMENT_FAILED,
+                    message: "nano receipts are not accepted on the A2A surface".to_string(),
+                    data: None,
+                });
+            }
             (_, solvela_x402::types::PayloadData::Direct(p)) => &p.transaction,
             (_, solvela_x402::types::PayloadData::Escrow(p)) => &p.deposit_tx,
         };

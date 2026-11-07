@@ -110,6 +110,9 @@ pub enum FaucetError {
 }
 
 /// On-chain operations the faucet needs. Mocked in tests.
+// `async_trait` stamps `#[must_use]` on its generated shims; clippy ≥ 1.99
+// flags that as `double_must_use`. Macro-owned, not ours — allow it.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait GasSource: Send + Sync {
     /// Native SOL balance of `wallet_b58` in lamports.
@@ -127,6 +130,9 @@ pub trait GasSource: Send + Sync {
 }
 
 /// Idempotency / cap ledger backed by the `gas_drips` table. Mocked in tests.
+// `async_trait` stamps `#[must_use]` on its generated shims; clippy ≥ 1.99
+// flags that as `double_must_use`. Macro-owned, not ours — allow it.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait GasLedger: Send + Sync {
     /// Reserve `wallet_b58` for a drip of `lamports`:

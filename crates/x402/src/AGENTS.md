@@ -19,6 +19,7 @@ Implementation of the x402 payment protocol over Solana. Splits into: chain-agno
 | `facilitator.rs` | Facilitator HTTP client — off-chain verifier/settler endpoints |
 | `fee_payer.rs` | Fee-payer keypair pool; rotates keys, tracks balances |
 | `nonce_pool.rs` | Durable-nonce account pool for replay-safe unsigned transactions |
+| `nano.rs` | Nano (XNO) receipt verifier — `exact` over `nano:mainnet`; client publishes its own send block, verifier checks `block_info` on a Nano node (confirmed / send / recipient / payer / raw amount / 90 s freshness); settle is a no-op (#813) |
 
 ## Subdirectories
 | Directory | Purpose |

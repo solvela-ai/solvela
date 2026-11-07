@@ -96,7 +96,7 @@ GitHub-side DCO check will still fire on push.
   - `audit.rs` — Fire-and-forget audit log writer
   - `middleware/api_key.rs` — `OrgContext`, `RequireOrg`/`RequireOrgAdmin` extractors
   - Binary name: `solvela-gateway`
-- **x402** — Pure protocol library (no Axum dependency). Solana verification, escrow integration, fee payer pool, nonce pool. Chain-agnostic `PaymentVerifier` trait for future EVM support.
+- **x402** — Pure protocol library (no Axum dependency). Solana verification, escrow integration, fee payer pool, nonce pool, and the Nano (XNO) receipt verifier (`nano.rs`). Chain-agnostic `PaymentVerifier` trait for future EVM support.
 - **router** — 15-dimension rule-based request scorer, routing profiles (eco/auto/premium/free), and model registry (loads `config/models.toml`).
 - **protocol** (`solvela-protocol`) — Shared wire-format types. Payment protocol types, OpenAI-compatible chat types, model info, constants. Zero workspace dependencies.
 - **cli** (`solvela-cli`) — `solvela` CLI binary (clap derive): wallet, chat, models, health, stats, doctor commands.
@@ -128,7 +128,7 @@ Next.js 16 + Tailwind + Recharts. Pages: Overview, Usage, Models, Wallet, Settin
 3. **`PaymentVerifier` trait is chain-agnostic** — designed for future EVM/Base support
 4. **Provider adapters translate OpenAI <-> native format** — gateway always speaks OpenAI format, **EXCEPT the `/v1/messages` Anthropic-native relay path**: when a `POST /v1/messages` request resolves to an Anthropic-provider model, the gateway forwards the original validated Anthropic request bytes to `api.anthropic.com/v1/messages` and relays the response bytes UNTOUCHED (parsing only `usage` for billing), preserving thinking-block `signature`s, `redacted_thinking`, native `tool_use` blocks, and the cache-token usage breakdown that the OpenAI reshape cannot carry. The fork is decided after model resolution (`routes/chat/mod.rs` `WireDialect` + `run_native_relay`); an Anthropic-shaped request resolving to a NON-Anthropic provider (only via an eco/auto alias) falls through to the existing reshape path. The native relay never uses the cross-provider fallback chain — it succeeds against Anthropic or fails closed (no charge). Money path is unchanged: same 5% fee, same `cap_usage_to_request_limits` → `compute_actual_atomic_cost`, same #614-616 cache-token fold (shared `AnthropicUsage::to_billed_usage`).
 5. **Platform fee on all requests — default 5%, `SOLVELA_PLATFORM_FEE_PERCENT` (0..=100, env-only, fail-closed), read via `solvela_protocol::platform_fee_percent()`, never the constant** — always include `cost_breakdown` in payment info
-6. **Solana-first** — Base/EVM is a future feature; do not implement EVM paths now
+6. **Solana-first** — Base/EVM is a future feature; do not implement EVM paths now. The one non-Solana settlement asset is Nano (XNO, #813): `exact` over `nano:mainnet` on the chat/messages path only, opt-in via `SOLVELA_NANO__*`, modelled as a client-published **receipt** (`PayloadData::Nano { block_hash, account }`) verified against a Nano node — the gateway never holds a Nano key and never broadcasts. Quotes stay micro-USD; `solvela_protocol::nano` converts to raw at the operator-configured rate (round up) and the spend ledger records the micro-USD quote. `routes/chat/settlement_network.rs` is the single place a network's `asset`/`pay_to`/amount-unit rules live — add an arm there, never an inline `SOLANA_NETWORK` check.
 7. **Never store private keys** — wallet keys stay client-side; only signed txs reach the gateway
 8. **Payment middleware extracts, routes enforce** — `middleware/x402.rs` never returns 402; `routes/chat.rs` does
 9. **All DB writes are fire-and-forget** — `tokio::spawn`; never `.await` on the hot path
@@ -144,7 +144,7 @@ Next.js 16 + Tailwind + Recharts. Pages: Overview, Usage, Models, Wallet, Settin
 
 1. Parse request, resolve model (aliases like "sonnet" / profiles like "auto" / direct IDs)
 2. Prompt guard checks (injection, jailbreak, PII detection)
-3. If no `PAYMENT-SIGNATURE` header -> return 402 with cost breakdown + accepted payment schemes (exact + escrow if configured)
+3. If no `PAYMENT-SIGNATURE` header -> return 402 with cost breakdown + accepted payment schemes (exact + escrow if configured, plus exact over `nano:mainnet` if Nano is configured)
 4. If header present -> decode (base64 or raw JSON) -> replay protection (Redis) -> verify via Facilitator -> proxy to LLM provider
 5. Cache response (Redis), log spend (PostgreSQL), fire escrow claim if applicable
 6. Return JSON or SSE stream; fall through to stub if no provider configured
@@ -164,7 +164,7 @@ Accuracy is measured, not assumed: `crates/router/tests/golden_set.rs` pins ever
 
 ## Environment Variables
 
-Provider API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`. Gateway config uses `SOLVELA_` prefix (legacy `RCR_` accepted with deprecation warning). Nested fields use double-underscore as the Fly.io-style separator (see `crates/gateway/src/main.rs:69`). Solana keys: `SOLVELA_SOLANA__RPC_URL`, `SOLVELA_SOLANA__RECIPIENT_WALLET`, `SOLVELA_SOLANA__FEE_PAYER_KEY`, `SOLVELA_SOLANA__USDC_MINT`, `SOLVELA_SOLANA__ESCROW_PROGRAM_ID`. The legacy single-underscore form (e.g. `SOLVELA_SOLANA_RPC_URL`, as used in `.env.example` and runtime error messages) is also accepted via fallback. Optional: `DATABASE_URL`, `REDIS_URL`. `SOLVELA_PLATFORM_FEE_PERCENT` (integer 0..=100, default 5) sets the platform fee at startup — env-only, never TOML, and any set-but-unparseable value (including empty) is a fatal startup error, never a silent fallback. See `.env.example` for full list.
+Provider API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`. Gateway config uses `SOLVELA_` prefix (legacy `RCR_` accepted with deprecation warning). Nested fields use double-underscore as the Fly.io-style separator (see `crates/gateway/src/main.rs:69`). Solana keys: `SOLVELA_SOLANA__RPC_URL`, `SOLVELA_SOLANA__RECIPIENT_WALLET`, `SOLVELA_SOLANA__FEE_PAYER_KEY`, `SOLVELA_SOLANA__USDC_MINT`, `SOLVELA_SOLANA__ESCROW_PROGRAM_ID`. The legacy single-underscore form (e.g. `SOLVELA_SOLANA_RPC_URL`, as used in `.env.example` and runtime error messages) is also accepted via fallback. Optional: `DATABASE_URL`, `REDIS_URL`. `SOLVELA_PLATFORM_FEE_PERCENT` (integer 0..=100, default 5) sets the platform fee at startup — env-only, never TOML, and any set-but-unparseable value (including empty) is a fatal startup error, never a silent fallback. Nano settlement: `SOLVELA_NANO__RPC_URL`, `SOLVELA_NANO__RECIPIENT_ACCOUNT`, `SOLVELA_NANO__USD_PER_XNO` — env-only, all-or-nothing (one or two set, or a malformed value, is fatal), off by default. See `.env.example` for full list.
 
 ## Code Conventions
 

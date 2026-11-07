@@ -33,6 +33,9 @@ pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatChunk, ProviderError>
 /// Each provider translates between the OpenAI-compatible gateway format
 /// and the provider's native API format. Implementations must be Send + Sync
 /// for use in Axum's concurrent request handling.
+// `async_trait` stamps `#[must_use]` on its generated shims; clippy ≥ 1.99
+// flags that as `double_must_use`. Macro-owned, not ours — allow it.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
     /// Provider name (e.g., "openai", "anthropic").

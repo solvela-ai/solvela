@@ -21,6 +21,9 @@ solvela-x402 = { version = "0.2", features = ["postgres"] }
 ## What's inside
 
 - Solana USDC-SPL `exact`-scheme verification
+- Nano (XNO) `exact`-scheme receipt verification over `nano:mainnet`
+  (`nano::NanoVerifier` — the client publishes its own feeless send block;
+  the verifier checks the confirmed block against a Nano node)
 - Escrow-scheme integration with the Solvela escrow program
 - Fee-payer pool — pre-funded keys that sign on behalf of agents
 - Nonce pool — durable nonces for offline signing
