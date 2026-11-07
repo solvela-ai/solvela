@@ -13,7 +13,7 @@
     "@solana/web3.js": "^1.87.0",
     "tsup": "^8.0.0",
     "tsx": "^4.22.4",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "openclaw": {
     "extensions": [
