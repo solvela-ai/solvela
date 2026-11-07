@@ -1,0 +1,50 @@
+name: docs-doctest
+
+# Type-checks opt-in (```lang doctest```) code examples in the docs against the
+# in-repo SDK sources. A PR that changes an SDK's public API breaks the matching
+# doc example here, in the same PR — closing the gap where doc examples were
+# verified once by hand (#369) but never guarded in CI.
+#
+# Fires when the docs, the TypeScript SDK source, or the doctest harness change.
+
+on:
+  push:
+    paths:
+      - '**/*.md'
+      - '**/*.mdx'
+      - 'sdks/typescript/src/**'
+      - 'sdks/typescript/package.json'
+      - 'sdks/typescript/package-lock.json'
+      - 'sdks/typescript/tsconfig.json'
+      - 'scripts/audit-docs/doc_examples/**'
+      - '.github/workflows/docs-doctest.yml'
+  pull_request:
+    paths:
+      - '**/*.md'
+      - '**/*.mdx'
+      - 'sdks/typescript/src/**'
+      - 'sdks/typescript/package.json'
+      - 'sdks/typescript/package-lock.json'
+      - 'sdks/typescript/tsconfig.json'
+      - 'scripts/audit-docs/doc_examples/**'
+      - '.github/workflows/docs-doctest.yml'
+
+jobs:
+  typescript:
+    name: doctest (typescript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install TypeScript SDK deps
+        working-directory: sdks/typescript
+        run: npm ci --no-audit --no-fund
+      - name: Type-check doc examples against @solvela/sdk source
+        run: python3 scripts/audit-docs/doc_examples/run_ts.py
