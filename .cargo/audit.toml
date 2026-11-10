@@ -26,4 +26,27 @@ ignore = [
     # `sqlx-macros-core`'s deps block (or releases an `rsa` upgrade),
     # remove this ignore.
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2026-0459 — `libsqlite3-sys` via the C SQLite CVE-2026-119375
+    # (medium, CVSS 6.8).
+    #
+    # Path: libsqlite3-sys <- sqlx-sqlite <- sqlx-macros-core <- sqlx
+    #
+    # `sqlx-sqlite` is an OPTIONAL dependency of `sqlx-macros-core` gated
+    # behind the `sqlite` feature, which the workspace never enables: sqlx
+    # is configured as `default-features = false, features = ["runtime-tokio",
+    # "postgres", "chrono", "uuid", "macros", "migrate"]` (see workspace
+    # Cargo.toml), and no crate in the workspace selects `sqlite`. cargo-audit
+    # reads `Cargo.lock` without applying feature gates, so it reports the
+    # lock entry even though no compiled artifact links SQLite.
+    #
+    # Verify: `cargo tree --workspace -i libsqlite3-sys` (with and without
+    # `--all-features`) prints "nothing to print" — the crate is not in the
+    # feature-resolved graph of any workspace member. No `libsqlite3_sys` or
+    # `sqlx_sqlite` object appears under `target/`.
+    #
+    # Remove this ignore once a sqlx release requires `libsqlite3-sys >=
+    # 0.39.0` (the advisory's patched floor) and `cargo update` lifts the
+    # lock entry; as of sqlx 0.9.0 it requires `>=0.30.1, <0.38.0`.
+    "RUSTSEC-2026-0459",
 ]
