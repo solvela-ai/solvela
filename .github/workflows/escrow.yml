@@ -134,7 +134,16 @@ jobs:
         run: |
           solana --version
           cargo build-sbf --version
-      - run: cargo build-sbf
+      # Build the LiteSVM test fixture as sBPF v2 rather than the current
+      # platform-tools default (v3). The integration job loads this .so with
+      # LiteSVM 0.6.1, whose runtime only understands sBPF v0-v2; a v3
+      # artifact is rejected with `InvalidAccountData` before any test runs
+      # (all 24 tests failed this way on 2026-11-06). Production/deploy
+      # builds are produced separately with the deploy toolchain, so pinning
+      # the CI test artifact does not change what ships on chain. Drop the
+      # pin once the LiteSVM dev-dependency is upgraded and its test code is
+      # ported to the newer APIs.
+      - run: cargo build-sbf --arch v2
       - uses: actions/upload-artifact@v7
         with:
           name: solvela_escrow.so
