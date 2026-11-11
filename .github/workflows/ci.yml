@@ -5,6 +5,13 @@ on:
     branches: ["**"]
   pull_request:
     branches: [main]
+  # Bot merges from auto-approve.yml use GITHUB_TOKEN and so trigger no push
+  # run on main, and new RustSec advisories or toolchain releases turn main red
+  # without any commit. A daily run on main keeps its status current (the PR
+  # sweep reads it before acting); dispatch allows a manual re-check.
+  schedule:
+    - cron: '17 12 * * *'
+  workflow_dispatch:
 
 jobs:
   rust:
