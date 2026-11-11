@@ -2,11 +2,25 @@
 //!
 //! PostgreSQL for persistent spend logs, Redis for hot-path spend tracking.
 //! All DB writes are async (tokio::spawn) — never on the request critical path.
+//!
+//! The one exception is [`UsageTracker::reserve_nano_receipt`]: a redeeming
+//! Nano receipt must be recorded durably and atomically BEFORE the provider
+//! call, because the money has already moved and a second redemption of the
+//! same block hash is a double-spend.
+
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+/// Redis key prefix for redeemed Nano block hashes.
+///
+/// Deliberately NOT the 120 s `solvela:txn:` replay namespace: a Nano block
+/// hash never expires on-chain, so redemption must never expire either.
+const NANO_RECEIPT_KEY_PREFIX: &str = "solvela:nano:receipt:";
 
 /// Default daily limit when no per-wallet budget row exists.
 ///
@@ -414,26 +428,68 @@ pub enum UsageError {
     TenantNotProvisioned { wallet: String, tenant: String },
 }
 
+/// Result of trying to redeem a Nano block hash exactly once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NanoReceiptReservation {
+    /// This call recorded the hash; the request may proceed.
+    New,
+    /// The hash was already redeemed (or is being redeemed concurrently).
+    AlreadySpent,
+}
+
+/// Durable store for redeemed Nano block hashes.
+///
+/// A Nano send block is final on-chain and its hash never expires, so
+/// redemption must be recorded permanently — the 120 s transaction replay
+/// cache is not a replay bound for Nano. The store is also the atomic
+/// concurrency gate: the PostgreSQL primary key and Redis `SET NX` both let
+/// exactly one of two simultaneous presentations of the same hash win.
+enum NanoReceiptSink {
+    /// Permanent record in `nano_receipts` (primary key on `block_hash`).
+    Postgres(sqlx::PgPool),
+    /// Redis `SET NX` with no TTL, used only when no database is configured.
+    Redis(redis::Client),
+    /// Test-only in-memory sink. Production refuses to enable Nano without
+    /// PostgreSQL or Redis (see `main.rs`), so a real deployment cannot reach
+    /// this variant.
+    Memory(Arc<Mutex<HashSet<String>>>),
+    /// No durable store configured — redemption fails closed.
+    Unavailable,
+}
+
 /// Usage tracker with optional PostgreSQL and Redis backends.
 ///
 /// Designed for graceful degradation:
 /// - Without PostgreSQL: spend logs are logged but not persisted
 /// - Without Redis: hot-path tracking falls back to in-memory
+///
+/// Nano receipt redemption is the exception: it never falls back to
+/// per-instance memory outside tests, and refuses the payment if no durable
+/// store exists.
 pub struct UsageTracker {
     /// Optional PostgreSQL connection pool.
     db_pool: Option<sqlx::PgPool>,
     /// Optional Redis client for hot-path data.
     redis_client: Option<redis::Client>,
+    /// Durable sink for redeemed Nano block hashes.
+    nano_receipts: NanoReceiptSink,
 }
 
 impl UsageTracker {
     /// Create a new usage tracker.
     ///
     /// Both database and Redis are optional — pass None for development/testing.
+    /// When both are absent, Nano receipt redemption fails closed.
     pub fn new(db_pool: Option<sqlx::PgPool>, redis_client: Option<redis::Client>) -> Self {
+        let nano_receipts = match (&db_pool, &redis_client) {
+            (Some(pool), _) => NanoReceiptSink::Postgres(pool.clone()),
+            (None, Some(client)) => NanoReceiptSink::Redis(client.clone()),
+            (None, None) => NanoReceiptSink::Unavailable,
+        };
         Self {
             db_pool,
             redis_client,
+            nano_receipts,
         }
     }
 
@@ -449,6 +505,90 @@ impl UsageTracker {
         Self {
             db_pool: None,
             redis_client: None,
+            nano_receipts: NanoReceiptSink::Unavailable,
+        }
+    }
+
+    /// Create a tracker with an in-memory Nano receipt sink (tests only).
+    ///
+    /// This opts into per-instance memory explicitly — it is never selected by
+    /// [`Self::new`], and `main.rs` refuses to start Nano settlement without a
+    /// durable store.
+    pub fn with_memory_nano_receipts() -> Self {
+        Self {
+            db_pool: None,
+            redis_client: None,
+            nano_receipts: NanoReceiptSink::Memory(Arc::new(Mutex::new(HashSet::new()))),
+        }
+    }
+
+    /// Atomically redeem a Nano block hash exactly once.
+    ///
+    /// MUST be called only after the receipt has verified (signature + node
+    /// lookup). Recording first would burn a receipt that failed verification —
+    /// e.g. one presented a moment before confirmation — and the XNO has
+    /// already moved.
+    ///
+    /// Uses the PostgreSQL primary key or Redis `SET NX` (no TTL) so the
+    /// decision is atomic across concurrent requests and across gateway
+    /// instances. Any store error is returned to the caller, which fails the
+    /// request closed: serving without recording would allow a double-spend.
+    pub async fn reserve_nano_receipt(
+        &self,
+        block_hash: &str,
+        payer_account: &str,
+        amount_raw: &str,
+    ) -> Result<NanoReceiptReservation, UsageError> {
+        match &self.nano_receipts {
+            NanoReceiptSink::Postgres(pool) => {
+                let result = sqlx::query(
+                    "INSERT INTO nano_receipts (block_hash, payer_account, amount_raw) \
+                     VALUES ($1, $2, $3) \
+                     ON CONFLICT (block_hash) DO NOTHING",
+                )
+                .bind(block_hash)
+                .bind(payer_account)
+                .bind(amount_raw)
+                .execute(pool)
+                .await
+                .map_err(|e| UsageError::Database(e.to_string()))?;
+                Ok(if result.rows_affected() == 0 {
+                    NanoReceiptReservation::AlreadySpent
+                } else {
+                    NanoReceiptReservation::New
+                })
+            }
+            NanoReceiptSink::Redis(client) => {
+                let mut conn = client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(|e| UsageError::Redis(e.to_string()))?;
+                let key = format!("{NANO_RECEIPT_KEY_PREFIX}{block_hash}");
+                // No EX: redemption must outlive the process and the request.
+                let set: Option<String> = redis::cmd("SET")
+                    .arg(&key)
+                    .arg("1")
+                    .arg("NX")
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(|e| UsageError::Redis(e.to_string()))?;
+                Ok(if set.is_some() {
+                    NanoReceiptReservation::New
+                } else {
+                    NanoReceiptReservation::AlreadySpent
+                })
+            }
+            NanoReceiptSink::Memory(seen) => {
+                let mut seen = seen
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                Ok(if seen.insert(block_hash.to_string()) {
+                    NanoReceiptReservation::New
+                } else {
+                    NanoReceiptReservation::AlreadySpent
+                })
+            }
+            NanoReceiptSink::Unavailable => Err(UsageError::NotConfigured),
         }
     }
 
@@ -2835,5 +2975,73 @@ mod tests {
         assert_eq!(back.hourly, Some(0.50));
         assert_eq!(back.daily, Some(10.0));
         assert!(back.monthly.is_none());
+    }
+
+    const NANO_HASH_A: &str = "991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948";
+    const NANO_HASH_B: &str = "A170D51B94E00371ACE76E35AC81DC9405D5D04D4CEBC399AEACE07AE05DD293";
+    const NANO_PAYER: &str = "nano_3kdbxitaj7f6mrir6miiwtw4muhcc58e6tn5st6rfaxsdnb7gr4roudwn951";
+    const NANO_AMOUNT: &str = "2100000000000000000000000000";
+
+    #[tokio::test]
+    async fn nano_receipt_memory_sink_redeems_each_hash_once() {
+        let tracker = UsageTracker::with_memory_nano_receipts();
+        assert_eq!(
+            tracker
+                .reserve_nano_receipt(NANO_HASH_A, NANO_PAYER, NANO_AMOUNT)
+                .await
+                .unwrap(),
+            NanoReceiptReservation::New
+        );
+        assert_eq!(
+            tracker
+                .reserve_nano_receipt(NANO_HASH_A, NANO_PAYER, NANO_AMOUNT)
+                .await
+                .unwrap(),
+            NanoReceiptReservation::AlreadySpent
+        );
+        // A different block hash is an independent redemption.
+        assert_eq!(
+            tracker
+                .reserve_nano_receipt(NANO_HASH_B, NANO_PAYER, NANO_AMOUNT)
+                .await
+                .unwrap(),
+            NanoReceiptReservation::New
+        );
+    }
+
+    #[tokio::test]
+    async fn nano_receipt_concurrent_redemption_has_exactly_one_winner() {
+        let tracker = Arc::new(UsageTracker::with_memory_nano_receipts());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let tracker = Arc::clone(&tracker);
+            handles.push(tokio::spawn(async move {
+                tracker
+                    .reserve_nano_receipt(NANO_HASH_A, NANO_PAYER, NANO_AMOUNT)
+                    .await
+                    .unwrap()
+            }));
+        }
+        let mut new = 0;
+        let mut spent = 0;
+        for handle in handles {
+            match handle.await.unwrap() {
+                NanoReceiptReservation::New => new += 1,
+                NanoReceiptReservation::AlreadySpent => spent += 1,
+            }
+        }
+        assert_eq!(new, 1, "exactly one concurrent presentation may redeem");
+        assert_eq!(spent, 7);
+    }
+
+    #[tokio::test]
+    async fn nano_receipt_redemption_fails_closed_without_durable_store() {
+        let tracker = UsageTracker::noop();
+        assert!(matches!(
+            tracker
+                .reserve_nano_receipt(NANO_HASH_A, NANO_PAYER, NANO_AMOUNT)
+                .await,
+            Err(UsageError::NotConfigured)
+        ));
     }
 }

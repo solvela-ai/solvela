@@ -422,6 +422,7 @@ mod tests {
         let nano = PayloadData::Nano(NanoPayload {
             block_hash: "AB".repeat(32),
             account: PAYER.to_string(),
+            signature: "SIG".to_string(),
         });
         let direct = PayloadData::Direct(SolanaPayload {
             transaction: "dGVzdA==".to_string(),

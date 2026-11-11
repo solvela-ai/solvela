@@ -1,14 +1,17 @@
-//! Nano (XNO) settlement constants and the micro-USD → raw conversion math.
+//! Nano (XNO) settlement constants, the micro-USD → raw conversion math, and
+//! the canonical bytes a receipt signature covers.
 //!
 //! Nano is a feeless, block-lattice currency: every account has its own chain
 //! and a `send` block is final once the network confirms it (sub-second, no
 //! mempool). Solvela accepts a confirmed send block as a payment *receipt* —
-//! the client publishes the block itself and presents its hash; the gateway
-//! verifies the block against a Nano node. See
-//! `solvela_x402::nano::NanoVerifier` for the verification contract.
+//! the client publishes the block itself and presents its hash plus a
+//! signature by the paying account; the gateway verifies both against a Nano
+//! node and the account's public key. See `solvela_x402::nano::NanoVerifier`
+//! for the verification contract.
 //!
-//! Everything here is pure integer math with no I/O so the gateway, the SDKs,
-//! and the tests all share one definition of "how many raw does a quote cost".
+//! Everything here is pure integer math and byte layout with no I/O so the
+//! gateway, the SDKs, and the tests share one definition of "how many raw does
+//! a quote cost" and "what exactly did the payer sign".
 //!
 //! # Units
 //!
@@ -22,8 +25,8 @@
 //!
 //! [`usdc_atomic_to_nano_raw`] always rounds **up** to the next whole raw: a
 //! quote converted to XNO can never collect less than the micro-USD figure the
-//! spend ledger records. Because raw is 24 orders of magnitude finer than
-//! micro-USD, the rounding is immaterial to the payer (at most 1 raw).
+//! spend ledger records. The ceiling can over-collect by less than one
+//! micro-USD, i.e. up to 10^6 raw (0.000000000000000000000001 XNO).
 
 /// x402 network identifier for Nano mainnet.
 ///
@@ -51,18 +54,29 @@ const RAW_PER_XNO_OVER_MICRO: u128 = RAW_PER_XNO / MICRO_PER_USD as u128;
 /// Receipt freshness window, in seconds, measured from the moment the
 /// gateway's Nano node first saw the block (`block_info.local_timestamp`).
 ///
-/// Deliberately the SAME order of magnitude as a Solana recent-blockhash
-/// transaction's ~90 s validity so the existing gateway replay cache
-/// (120 s TTL on the Redis and in-memory paths alike) covers a Nano receipt
-/// exactly the way it covers a Solana signature. A block hash never expires
-/// on-chain, so this window — not the chain — is what bounds replay.
+/// This is a defence-in-depth bound, not the replay guarantee: the gateway
+/// records every redeemed block hash in a durable, non-expiring store (a
+/// PostgreSQL primary key, or Redis `SET NX` when no database is configured),
+/// and refuses any hash it has seen before. A block hash never expires
+/// on-chain, so freshness alone can never bound replay — a node resync can
+/// restamp `local_timestamp` on an old block. The window still rejects a
+/// receipt presented long after the payment it references, keeping the normal
+/// (never-resynced) path honest.
 pub const NANO_RECEIPT_MAX_AGE_SECS: u64 = 90;
 
 /// Exact length of a Nano block hash rendered as uppercase hex (32 bytes).
 pub const NANO_BLOCK_HASH_HEX_LEN: usize = 64;
 
+/// Exact length of a Nano signature rendered as hex (64 bytes).
+pub const NANO_SIGNATURE_HEX_LEN: usize = 128;
+
 /// Length of a `nano_` address: 5-char prefix + 52-char public key + 8-char
 /// checksum, all in Nano's base32 alphabet.
+///
+/// Only the modern `nano_` prefix is accepted. The legacy `xrb_` spelling
+/// encodes the same key; it is rejected (fail closed) rather than normalised,
+/// so one account has exactly one wire spelling on Solvela's 402/payload
+/// surfaces. Operators must configure the `nano_` form.
 pub const NANO_ADDRESS_LEN: usize = 65;
 
 /// Nano's base32 alphabet (no `0`, `2`, `l`, `v`).
@@ -179,13 +193,73 @@ pub fn is_well_formed_nano_address(addr: &str) -> bool {
 /// Syntactic check of a block hash: exactly 64 **uppercase** hex characters.
 ///
 /// Uppercase is required (not merely accepted) so one block has exactly one
-/// wire spelling — the gateway's replay cache is keyed on the string, and a
+/// wire spelling — the gateway's dedupe store is keyed on the string, and a
 /// case-variant of a used hash must not look like a fresh receipt.
 pub fn is_well_formed_block_hash(hash: &str) -> bool {
     hash.len() == NANO_BLOCK_HASH_HEX_LEN
         && hash
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
+}
+
+/// Syntactic check of a receipt signature: exactly 128 hex characters (64
+/// bytes), either case.
+///
+/// Signature bytes are not a replay key, so case does not need canonicalising;
+/// both spellings decode to the same 64 bytes.
+pub fn is_well_formed_nano_signature(sig: &str) -> bool {
+    sig.len() == NANO_SIGNATURE_HEX_LEN && sig.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Domain-separation tag prepended to every receipt signature message.
+pub const NANO_RECEIPT_SIGNING_DOMAIN: &[u8] = b"solvela-nano-receipt:v1";
+
+/// The exact bytes a Nano receipt signature must cover.
+///
+/// Layout (NUL-separated, no trailing NUL):
+///
+/// ```text
+/// solvela-nano-receipt:v1\0<block_hash>\0<amount_raw>\0<pay_to>\0<method>\0<url>
+/// ```
+///
+/// - `block_hash` — the canonical uppercase 64-hex block hash.
+/// - `amount_raw` — the **canonical decimal** raw amount the gateway quoted
+///   (no leading zeros; the verifier parses `accepted.amount` to `u128` and
+///   re-renders it, so a wire spelling like `"0021"` cannot produce a second
+///   valid message for the same payment).
+/// - `pay_to` — the `nano_` recipient exactly as advertised in `accepts[]`.
+/// - `method` / `url` — the request `resource` the 402 was issued for, from
+///   the client-echoed [`Resource`](crate::Resource).
+///
+/// NUL is not valid in any field (hex, decimal, Nano base32, HTTP method, or
+/// URL), so the encoding is unambiguous without length prefixes.
+///
+/// The signature is Nano's Ed25519-with-BLAKE2b-512 over these bytes, hex
+/// encoded. A client signs this once, publishes its send block, and presents
+/// both in `NanoPayload`.
+pub fn receipt_signing_message(
+    block_hash: &str,
+    amount_raw: &str,
+    pay_to: &str,
+    resource_method: &str,
+    resource_url: &str,
+) -> Vec<u8> {
+    let fields = [
+        block_hash,
+        amount_raw,
+        pay_to,
+        resource_method,
+        resource_url,
+    ];
+    let capacity =
+        NANO_RECEIPT_SIGNING_DOMAIN.len() + fields.iter().map(|f| f.len() + 1).sum::<usize>();
+    let mut msg = Vec::with_capacity(capacity);
+    msg.extend_from_slice(NANO_RECEIPT_SIGNING_DOMAIN);
+    for field in fields {
+        msg.push(0);
+        msg.extend_from_slice(field.as_bytes());
+    }
+    msg
 }
 
 #[cfg(test)]
@@ -307,5 +381,75 @@ mod tests {
         assert!(!is_well_formed_block_hash(&good[..63]));
         assert!(!is_well_formed_block_hash(&format!("{good}0")));
         assert!(!is_well_formed_block_hash(""));
+    }
+
+    #[test]
+    fn signature_syntax_is_128_hex_either_case() {
+        let upper = "9924E55B2FE2DEE521347541932C79A3AE6DFC27F80139AEB5894257BC94F460CDBF8F36192293B5E31185BC6B32101CC02FF7398AA590AC8706E57532E6BF07";
+        assert!(is_well_formed_nano_signature(upper));
+        assert!(is_well_formed_nano_signature(&upper.to_ascii_lowercase()));
+        assert!(!is_well_formed_nano_signature(&upper[..127]));
+        assert!(!is_well_formed_nano_signature(&format!("{upper}0")));
+        assert!(!is_well_formed_nano_signature(
+            "ZZ24E55B2FE2DEE521347541932C79A3AE6DFC27F80139AEB5894257BC94F460CDBF8F36192293B5E31185BC6B32101CC02FF7398AA590AC8706E57532E6BF07"
+        ));
+        assert!(!is_well_formed_nano_signature(""));
+    }
+
+    /// Pins the exact bytes a Nano receipt signature covers. This is a wire
+    /// contract: a field, separator or domain-tag change invalidates every
+    /// client signature, so it must fail here first.
+    #[test]
+    fn receipt_signing_message_golden_bytes() {
+        let hash = "991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948";
+        let amount = "2100000000000000000000000000";
+        let pay_to = "nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3";
+        let msg = receipt_signing_message(hash, amount, pay_to, "POST", "/v1/chat/completions");
+        // Generated from / cross-checked against Nano's Ed25519-BLAKE2b
+        // reference construction (see the x402 golden-vector tests for a
+        // signature over exactly these bytes).
+        let expected_hex = "736f6c76656c612d6e616e6f2d726563656970743a763100393931434631393030393443303046304236384532453546373546364245453935413245304244393343454141344136373334444239463139423732383934380032313030303030303030303030303030303030303030303030303030006e616e6f5f3374366b333567693935787536746572677436703639636b37366f676d69747361386d6e696a7470786d39666b636d37333678746f6e63756f68723300504f5354002f76312f636861742f636f6d706c6574696f6e73";
+        assert_eq!(hex_lower(&msg), expected_hex);
+
+        // Every bound field changes the message (so a signature over one
+        // receipt cannot validate a different request).
+        let variants = [
+            receipt_signing_message(
+                "A170D51B94E00371ACE76E35AC81DC9405D5D04D4CEBC399AEACE07AE05DD293",
+                amount,
+                pay_to,
+                "POST",
+                "/v1/chat/completions",
+            ),
+            receipt_signing_message(
+                hash,
+                "2100000000000000000000000001",
+                pay_to,
+                "POST",
+                "/v1/chat/completions",
+            ),
+            receipt_signing_message(
+                hash,
+                amount,
+                "nano_3kdbxitaj7f6mrir6miiwtw4muhcc58e6tn5st6rfaxsdnb7gr4roudwn951",
+                "POST",
+                "/v1/chat/completions",
+            ),
+            receipt_signing_message(hash, amount, pay_to, "PUT", "/v1/chat/completions"),
+            receipt_signing_message(hash, amount, pay_to, "POST", "/v1/messages"),
+        ];
+        for variant in variants {
+            assert_ne!(variant, msg);
+        }
+    }
+
+    fn hex_lower(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        out
     }
 }

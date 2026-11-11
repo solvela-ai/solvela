@@ -585,6 +585,64 @@ mod tests {
 
     // --- escrow expiry math (mirrors CLI escrow_expiry_slot) ---
 
+    /// The SDK cannot publish Nano send blocks yet (tracked follow-up), but it
+    /// depends on `solvela-protocol` by path, so the hardened receipt wire
+    /// shape — including the mandatory account signature — must round-trip
+    /// here in the same PR that changes it.
+    #[test]
+    fn nano_receipt_payload_roundtrips_with_signature() {
+        const HASH: &str = "991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948";
+        const ACCOUNT: &str = "nano_3kdbxitaj7f6mrir6miiwtw4muhcc58e6tn5st6rfaxsdnb7gr4roudwn951";
+        const SIGNATURE: &str = "9924E55B2FE2DEE521347541932C79A3AE6DFC27F80139AEB5894257BC94F460CDBF8F36192293B5E31185BC6B32101CC02FF7398AA590AC8706E57532E6BF07";
+        const RECIPIENT: &str = "nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3";
+
+        let payload = PaymentPayload {
+            x402_version: X402_VERSION,
+            resource: Resource {
+                url: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+            },
+            accepted: PaymentAccept {
+                scheme: "exact".to_string(),
+                network: solvela_protocol::NANO_NETWORK.to_string(),
+                amount: "2100000000000000000000000000".to_string(),
+                asset: solvela_protocol::NANO_ASSET.to_string(),
+                pay_to: RECIPIENT.to_string(),
+                max_timeout_seconds: 300,
+                escrow_program_id: None,
+            },
+            payload: PayloadData::Nano(solvela_protocol::NanoPayload {
+                block_hash: HASH.to_string(),
+                account: ACCOUNT.to_string(),
+                signature: SIGNATURE.to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        let parsed: PaymentPayload = serde_json::from_str(&json).unwrap();
+        let PayloadData::Nano(receipt) = parsed.payload else {
+            panic!("expected Nano payload");
+        };
+        assert_eq!(receipt.block_hash, HASH);
+        assert_eq!(receipt.account, ACCOUNT);
+        assert_eq!(receipt.signature, SIGNATURE);
+
+        // The exact bytes a Nano-paying client must sign with its account key.
+        let message = solvela_protocol::nano::receipt_signing_message(
+            HASH,
+            "2100000000000000000000000000",
+            RECIPIENT,
+            "POST",
+            "/v1/chat/completions",
+        );
+        assert!(message.starts_with(b"solvela-nano-receipt:v1\0"));
+
+        // A receipt without the signature is not a payable receipt.
+        let unsigned = json.replace(&format!(r#","signature":"{SIGNATURE}""#), "");
+        assert!(serde_json::from_str::<PaymentPayload>(&unsigned).is_err());
+    }
+
+    // --- escrow expiry math (mirrors CLI escrow_expiry_slot) ---
+
     #[test]
     fn escrow_expiry_typical_300s() {
         // 300 s × 2.5 slots/s = 750 slots ahead. NO min floor.

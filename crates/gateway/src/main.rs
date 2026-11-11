@@ -613,14 +613,12 @@ async fn main() -> anyhow::Result<()> {
     // Nano key. A constructor failure here is fatal — the config was already
     // accepted, so this can only be a programming error, never a soft-disable.
     if let Some(nano) = &app_config.nano {
-        let nano_verifier = solvela_x402::nano::NanoVerifier::new(
-            &nano.rpc_url,
-            &nano.recipient_account,
-            http_client.clone(),
-        )
-        .context("failed to initialize Nano verifier from validated config")?;
+        let nano_verifier =
+            solvela_x402::nano::NanoVerifier::new(&nano.rpc_url, &nano.recipient_account)
+                .context("failed to initialize Nano verifier from validated config")?;
         info!(
-            rpc_url = %nano.rpc_url,
+            // Host only: hosted Nano nodes embed API keys in the URL path.
+            rpc_host = %solvela_x402::nano::redacted_rpc_url(&nano.rpc_url),
             recipient = %nano.recipient_account,
             micro_usd_per_xno = nano.micro_usd_per_xno,
             "nano settlement enabled (exact over nano:mainnet)"
@@ -810,6 +808,24 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+
+    // ── Nano settlement requires a DURABLE receipt store ─────────────────────
+    //
+    // A Nano send block hash never expires on-chain, so redeemed hashes must be
+    // recorded permanently and atomically across instances (PostgreSQL primary
+    // key, or Redis SET NX). Falling back to per-instance memory would let N
+    // gateway instances each redeem the same receipt and a restart forget it —
+    // double-spending the payer's XNO. Refuse to boot rather than degrade.
+    if app_config.nano.is_some() && db_pool.is_none() && redis_client.is_none() {
+        error!(
+            "FATAL: Nano settlement is enabled but neither PostgreSQL (DATABASE_URL) nor \
+             Redis (REDIS_URL) is available; a durable Nano receipt store is required"
+        );
+        return Err(anyhow::anyhow!(
+            "Nano settlement requires DATABASE_URL or REDIS_URL: receipt redemption must be \
+             durable and cross-instance (set one, or unset SOLVELA_NANO__*)"
+        ));
+    }
 
     // ── Semantic cache (Tier 2) — opt-in via [cache.semantic].enabled ──────────
     //

@@ -1661,6 +1661,9 @@ const TEST_NANO_RECIPIENT: &str =
     "nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3";
 /// A paying `nano_` account for Nano receipt headers.
 const TEST_NANO_PAYER: &str = "nano_1ipx847tk8o46pwxt5qjdbncjqcbwcc1rrmqnkztrfjy5k7z4imsrata9est";
+/// Placeholder signature for the always-pass mock Nano verifier (the real
+/// verifier's signature tests live in `crates/x402/src/nano.rs`).
+const TEST_NANO_SIGNATURE: &str = "9924E55B2FE2DEE521347541932C79A3AE6DFC27F80139AEB5894257BC94F460CDBF8F36192293B5E31185BC6B32101CC02FF7398AA590AC8706E57532E6BF07";
 /// A canonical (64 uppercase hex) send block hash.
 const TEST_NANO_BLOCK_HASH: &str =
     "991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948";
@@ -1739,7 +1742,7 @@ fn test_app_with_mock_provider_and_nano() -> (axum::Router, Arc<AppState>) {
         search_provider: None,
         price_provider: None,
         facilitator,
-        usage: gateway::usage::UsageTracker::noop(),
+        usage: gateway::usage::UsageTracker::with_memory_nano_receipts(),
         cache: None,
         semantic_cache: None,
         provider_health: ProviderHealthTracker::new(CircuitBreakerConfig::default()),
@@ -1795,6 +1798,7 @@ fn nano_payment_header(resource_url: &str, amount_raw: &str, block_hash: &str) -
         payload: PayloadData::Nano(solvela_protocol::NanoPayload {
             block_hash: block_hash.to_string(),
             account: TEST_NANO_PAYER.to_string(),
+            signature: TEST_NANO_SIGNATURE.to_string(),
         }),
     };
     let json = serde_json::to_vec(&payload).unwrap();
@@ -5802,6 +5806,7 @@ async fn test_chat_nano_network_with_solana_payload_rejected() {
     payload.payload = PayloadData::Nano(solvela_protocol::NanoPayload {
         block_hash: TEST_NANO_BLOCK_HASH.to_string(),
         account: TEST_NANO_PAYER.to_string(),
+        signature: TEST_NANO_SIGNATURE.to_string(),
     });
     let header =
         base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap());

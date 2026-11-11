@@ -218,9 +218,25 @@ pub struct EscrowPayload {
 /// without an RPC round-trip; the verifier binds it to the block (mismatch =
 /// reject), so it is never trusted on its own.
 ///
-/// `deny_unknown_fields` + a field set (`block_hash`, `account`) disjoint from
-/// every other variant keeps the parent `untagged` [`PayloadData`] unambiguous
-/// (see its docs).
+/// # Why a signature
+///
+/// A Nano send block is public the moment it is published, so `{block_hash,
+/// account}` alone is a bearer token: anyone watching `pay_to` could submit a
+/// victim's receipt first and be served on the victim's money. `signature`
+/// closes that: it is produced by the `account`'s private key over
+/// [`solvela_protocol::nano::receipt_signing_message`], which binds the block
+/// hash to the quoted raw amount, the `pay_to` recipient and the request
+/// resource. The verifier checks it against the public key decoded from
+/// `account` BEFORE any node call (see `solvela_x402::nano`), so only the
+/// holder of the paying account's key can redeem a receipt.
+///
+/// The scheme is Nano's own: Ed25519 with BLAKE2b-512 as the hash function
+/// (not the SHA-512 Ed25519 used by Solana). Signatures are 64 bytes rendered
+/// as 128 hex characters (either case accepted on the wire).
+///
+/// `deny_unknown_fields` + a field set (`block_hash`, `account`, `signature`)
+/// disjoint from every other variant keeps the parent `untagged`
+/// [`PayloadData`] unambiguous (see its docs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NanoPayload {
@@ -228,6 +244,9 @@ pub struct NanoPayload {
     pub block_hash: String,
     /// The paying `nano_` account (the block's `account`).
     pub account: String,
+    /// Hex-encoded 64-byte Ed25519-BLAKE2b signature by `account`'s key over
+    /// [`solvela_protocol::nano::receipt_signing_message`] (128 hex chars).
+    pub signature: String,
 }
 
 /// v0 spend-down channel voucher payload (scheme = "channel").
@@ -584,22 +603,29 @@ mod tests {
 
     #[test]
     fn test_payload_data_nano_roundtrip() {
+        const SIG: &str = "9924E55B2FE2DEE521347541932C79A3AE6DFC27F80139AEB5894257BC94F460CDBF8F36192293B5E31185BC6B32101CC02FF7398AA590AC8706E57532E6BF07";
         let nano = PayloadData::Nano(NanoPayload {
             block_hash: "991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948"
                 .to_string(),
             account: "nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3"
                 .to_string(),
+            signature: SIG.to_string(),
         });
         let json = serde_json::to_string(&nano).unwrap();
-        // `untagged` serializes to exactly the inner payload shape.
+        // `untagged` serializes to exactly the inner payload shape. Golden JSON:
+        // a rename or reorder of the receipt fields is a wire break, not a
+        // silent SDK drift.
         assert_eq!(
             json,
-            r#"{"block_hash":"991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948","account":"nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3"}"#
+            format!(
+                r#"{{"block_hash":"991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948","account":"nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3","signature":"{SIG}"}}"#
+            )
         );
         match serde_json::from_str::<PayloadData>(&json).unwrap() {
             PayloadData::Nano(p) => {
                 assert!(p.block_hash.starts_with("991CF190"));
                 assert!(p.account.starts_with("nano_"));
+                assert_eq!(p.signature, SIG);
             }
             other => panic!("expected Nano variant, got {other:?}"),
         }
@@ -609,7 +635,7 @@ mod tests {
     /// payload must never decode as `Nano` — the fourth disjoint field set.
     #[test]
     fn test_payload_data_nano_disambiguates_from_other_variants() {
-        let nano_json = r#"{"block_hash":"AB","account":"nano_x"}"#;
+        let nano_json = r#"{"block_hash":"AB","account":"nano_x","signature":"SIG"}"#;
         assert!(matches!(
             serde_json::from_str::<PayloadData>(nano_json).unwrap(),
             PayloadData::Nano(_)
@@ -618,10 +644,19 @@ mod tests {
             serde_json::from_str::<PayloadData>(r#"{"transaction":"dGVzdA=="}"#).unwrap(),
             PayloadData::Direct(_)
         ));
-        // A receipt missing `account` matches no variant (fail closed).
-        assert!(serde_json::from_str::<PayloadData>(r#"{"block_hash":"AB"}"#).is_err());
+        // A receipt missing `account` or `signature` matches no variant (fail
+        // closed — an unsigned receipt must never parse).
+        assert!(
+            serde_json::from_str::<PayloadData>(r#"{"block_hash":"AB","signature":"SIG"}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<PayloadData>(r#"{"block_hash":"AB","account":"nano_x"}"#)
+                .is_err()
+        );
         // A receipt carrying Direct's field matches no variant either.
-        let hybrid = r#"{"block_hash":"AB","account":"nano_x","transaction":"x"}"#;
+        let hybrid =
+            r#"{"block_hash":"AB","account":"nano_x","signature":"SIG","transaction":"x"}"#;
         assert!(serde_json::from_str::<PayloadData>(hybrid).is_err());
     }
 

@@ -36,12 +36,16 @@ pub struct AppConfig {
 
 /// Nano (XNO) settlement configuration — see [`AppConfig::nano`].
 ///
-/// No secret fields (the gateway never holds a Nano key: it only RECEIVES at
-/// `recipient_account` and reads a node), so `Debug` is derived.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The gateway never holds a Nano *key* (it only RECEIVES at
+/// `recipient_account` and reads a node), but `rpc_url` is still redacted in
+/// `Debug`: hosted Nano nodes commonly embed an API key in the URL path or
+/// query string, so the full URL must never reach a log line or a panic
+/// message. Only `scheme://host[:port]` is printed.
+#[derive(Clone, PartialEq, Eq)]
 pub struct NanoConfig {
     /// Nano node RPC endpoint (`http(s)://host:7076`). Trusted for
-    /// `block_info` — run your own node or use one you trust.
+    /// `block_info` — run your own node or use one you trust. May contain an
+    /// API key in the path/query when using a hosted node.
     pub rpc_url: String,
     /// The gateway's receiving `nano_` address (syntax-validated at boot).
     pub recipient_account: String,
@@ -50,6 +54,19 @@ pub struct NanoConfig {
     /// The 402 quote converts its micro-USD total to raw with this rate,
     /// rounding up; the operator owns keeping it current (restart to change).
     pub micro_usd_per_xno: u64,
+}
+
+impl std::fmt::Debug for NanoConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NanoConfig")
+            .field(
+                "rpc_host",
+                &solvela_x402::nano::redacted_rpc_url(&self.rpc_url),
+            )
+            .field("recipient_account", &self.recipient_account)
+            .field("micro_usd_per_xno", &self.micro_usd_per_xno)
+            .finish()
+    }
 }
 
 /// v0 spend-down channel (`POST /v1/channel/*`) configuration.

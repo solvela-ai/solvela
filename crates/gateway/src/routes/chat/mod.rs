@@ -1014,6 +1014,18 @@ pub(crate) async fn chat_completions_inner(
             }
 
             // --- C2: Mandatory replay attack prevention ---
+            //
+            // Nano receipts are the exception to "record before verifying":
+            // the XNO has already moved, so a receipt presented just before
+            // confirmation would be burned for good if recorded first. Their
+            // block hash is therefore reserved in the durable `nano_receipts`
+            // store only AFTER `facilitator.verify` succeeds (below), and the
+            // 120 s tx-replay cache is not used for them at all (a block hash
+            // never expires on-chain — the durable store is the real gate).
+            let nano_receipt = match &payload.payload {
+                solvela_x402::types::PayloadData::Nano(p) => Some(p),
+                _ => None,
+            };
             let tx_raw = match &payload.payload {
                 solvela_x402::types::PayloadData::Direct(p) => &p.transaction,
                 solvela_x402::types::PayloadData::Escrow(p) => &p.deposit_tx,
@@ -1029,8 +1041,7 @@ pub(crate) async fn chat_completions_inner(
                 }
                 // A Nano receipt is keyed by its block hash (canonical
                 // uppercase hex, enforced by the verifier — one spelling, one
-                // cache key). The hash never expires on-chain; the verifier's
-                // 90 s freshness window is what the 120 s replay TTL covers.
+                // store key). See the deferred reservation below.
                 solvela_x402::types::PayloadData::Nano(p) => &p.block_hash,
             };
 
@@ -1040,8 +1051,11 @@ pub(crate) async fn chat_completions_inner(
                 == settlement_network::SettlementNetwork::Solana
                 && payment::uses_durable_nonce(tx_raw);
 
-            // S2 FIX: In-memory replay set uses Instant-based TTL
-            let replay_detected = if let Some(cache) = &state.cache {
+            // S2 FIX: In-memory replay set uses Instant-based TTL.
+            // Nano skips this entire block (see the comment above).
+            let replay_detected = if nano_receipt.is_some() {
+                false
+            } else if let Some(cache) = &state.cache {
                 cache
                     .check_and_record_tx(tx_raw, is_durable_nonce)
                     .await
@@ -1187,8 +1201,10 @@ pub(crate) async fn chat_completions_inner(
             //     refunds at expiry (the claim only fires in the success arm).
             //
             // `verify_payment` is non-mutating and repeatable, so verifying now
-            // for `exact` and settling later does not double-anything; replay
-            // protection above already guards against re-submission of the tx.
+            // for `exact` and settling later does not double-anything; the tx
+            // replay cache above already guards against re-submission of the
+            // Solana tx. A Nano receipt is redeemed (recorded in the durable
+            // `nano_receipts` store) right after its verification succeeds.
             match payment_scheme {
                 PaymentScheme::Exact => {
                     match state.facilitator.verify(&payload).await {
@@ -1218,6 +1234,54 @@ pub(crate) async fn chat_completions_inner(
                                 client_amount,
                                 "exact: settlement uses client_amount, not verified_amount"
                             );
+                            // Nano: redeem the block hash exactly once, AFTER the
+                            // signature + node checks passed and BEFORE the provider
+                            // call. The store is permanent and cross-instance (DB
+                            // primary key / Redis SET NX), so a receipt cannot be
+                            // burned by a failed verification or spent twice.
+                            if let Some(receipt) = nano_receipt {
+                                match state
+                                    .usage
+                                    .reserve_nano_receipt(
+                                        &receipt.block_hash,
+                                        &receipt.account,
+                                        &payload.accepted.amount,
+                                    )
+                                    .await
+                                {
+                                    Ok(crate::usage::NanoReceiptReservation::New) => {}
+                                    Ok(crate::usage::NanoReceiptReservation::AlreadySpent) => {
+                                        counter!("solvela_replay_rejections_total").increment(1);
+                                        counter!("solvela_payments_total", "status" => "failed")
+                                            .increment(1);
+                                        warn!(
+                                            block_hash = %receipt.block_hash,
+                                            "nano receipt replay detected — block hash already redeemed"
+                                        );
+                                        state.usage.release_reservation(&budget_reservation).await;
+                                        return Err(GatewayError::InvalidPayment(
+                                            "transaction has already been used; each payment signature may only be submitted once".to_string()
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        // Never serve on a store failure: without the
+                                        // redemption record a retry could double-spend
+                                        // the same block. Nothing was recorded, so the
+                                        // client may retry safely.
+                                        counter!("solvela_payments_total", "status" => "failed")
+                                            .increment(1);
+                                        warn!(
+                                            error = %e,
+                                            "nano receipt dedupe store unavailable — rejecting payment"
+                                        );
+                                        state.usage.release_reservation(&budget_reservation).await;
+                                        return Err(GatewayError::InvalidPayment(
+                                            "Payment service is temporarily degraded; please retry shortly."
+                                                .to_string(),
+                                        ));
+                                    }
+                                }
+                            }
                             escrow_deposited_amount = None;
                             payload_for_settle = Some(payload.clone());
                             counter!("solvela_payments_total", "status" => "verified").increment(1);
