@@ -26,25 +26,22 @@ ignore = [
     # `sqlx-macros-core`'s deps block (or releases an `rsa` upgrade),
     # remove this ignore.
     "RUSTSEC-2023-0071",
-    # RUSTSEC-2026-0459 — C SQLite CVE via `libsqlite3-sys 0.30.1`.
+
+    # RUSTSEC-2026-0459 — C SQLite CVE-2026-119375 in `libsqlite3-sys < 0.39`.
     #
-    # Path: libsqlite3-sys <- sqlx-sqlite <- sqlx-macros-core <- sqlx-macros
-    #       <- sqlx
+    # Path: libsqlite3-sys <- sqlx-sqlite <- sqlx-macros-core / sqlx
     #
-    # Same class as RUSTSEC-2023-0071 above: the workspace uses sqlx with
-    # `default-features = false, features = ["runtime-tokio", "postgres", ...]`
-    # (see workspace Cargo.toml), and `sqlx-sqlite` / `libsqlite3-sys` are
-    # OPTIONAL deps behind the `sqlite` feature, which nothing enables.
-    # cargo-audit reads the feature-independent `Cargo.lock`, so it sees the
-    # package even though it is never compiled. `cargo deny check` already
-    # excludes it via deny.toml's `[graph].targets` filter.
+    # Same shape as RUSTSEC-2023-0071 above: sqlx lists `sqlx-sqlite` as an
+    # OPTIONAL dependency behind the `sqlite` feature, which we do not enable
+    # (Postgres only). It sits in `Cargo.lock` but is never compiled, and
+    # `sqlx-sqlite 0.9` pins `libsqlite3-sys 0.30`, so it cannot be bumped
+    # without an sqlx release.
     #
-    # Verify: `cargo tree --workspace -i libsqlite3-sys` prints nothing and
-    # `find target/{debug,release} -name '*sqlite*'` is empty. No sqlite
-    # symbol appears in the gateway binary (the only configured database is
-    # PostgreSQL).
+    # Verify: `cargo tree -i libsqlite3-sys --workspace --all-features
+    # --target all` prints "nothing to print" (checked 2026-11-10 on 9a01bb90),
+    # while `cargo tree -i sqlx-postgres` shows the real driver.
     #
-    # Remove when sqlx's sqlite dependency moves to libsqlite3-sys >= 0.39
-    # (or stops listing it unconditionally); re-check on each sqlx bump.
+    # Remove this ignore when sqlx ships `sqlx-sqlite` on `libsqlite3-sys
+    # >= 0.39`, or if the `sqlite` feature is ever enabled.
     "RUSTSEC-2026-0459",
 ]
