@@ -11,10 +11,14 @@
 //!    for confirmation (sub-second).
 //! 2. The client presents `{ block_hash, account, signature }` as the x402
 //!    payload. `signature` is the account key's Ed25519-BLAKE2b signature over
+//!    the **BLAKE2b-256 digest** of
 //!    [`solvela_protocol::nano::receipt_signing_message`] — the block hash,
-//!    quoted raw amount, `pay_to` and request resource. It proves the
-//!    presenter holds the paying account's key (a published send block is
-//!    public, so the hash alone would be a bearer token).
+//!    quoted raw amount, `pay_to` and request resource. Signing a 32-byte hash
+//!    (rather than the variable-length message) is Nano's native signing shape,
+//!    so a standard Nano signer can produce it (`signBlock({hash})` in the JS
+//!    library, or a node's hash-signing RPC) without Solvela-specific crypto.
+//!    It proves the presenter holds the paying account's key (a published send
+//!    block is public, so the hash alone would be a bearer token).
 //! 3. [`NanoVerifier::verify_payment`] checks the signature against the public
 //!    key decoded from `account` BEFORE any network call, then asks a Nano
 //!    node for `block_info` and checks: confirmed, `subtype == "send"`, paid
@@ -312,6 +316,39 @@ fn blake2b_var(input: &[u8], out_len: usize) -> Vec<u8> {
     out
 }
 
+/// The 32-byte object a payer signs: the BLAKE2b-256 digest of
+/// [`receipt_signing_message`].
+///
+/// Nano's signing primitive signs a 32-byte hash, so signing this digest lets
+/// an ordinary Nano signer produce a receipt signature — the JS
+/// `nanocurrency` library's `signBlock({hash})` accepts it directly, as does a
+/// node's `sign` RPC where hash signing is enabled. The domain tag inside the
+/// preimage keeps this digest distinct from any real block hash.
+///
+/// Returns a zero digest if the (infallible, fixed-length) BLAKE2b-256
+/// construction ever failed; no signature verifies against zeros, so the
+/// caller fails closed rather than panicking.
+pub fn receipt_signing_hash(
+    block_hash: &str,
+    amount_raw: &str,
+    pay_to: &str,
+    resource_method: &str,
+    resource_url: &str,
+) -> [u8; 32] {
+    let message = receipt_signing_message(
+        block_hash,
+        amount_raw,
+        pay_to,
+        resource_method,
+        resource_url,
+    );
+    let digest = blake2b_var(&message, 32);
+    let mut hash = [0u8; 32];
+    let len = digest.len().min(hash.len());
+    hash[..len].copy_from_slice(&digest[..len]);
+    hash
+}
+
 /// Verify an Ed25519 signature that uses **BLAKE2b-512** as its hash — the
 /// variant Nano uses for account signatures.
 ///
@@ -557,15 +594,16 @@ impl NanoVerifier {
         let payer_public_key = decode_nano_account(&receipt.account)?;
         // Sign the CANONICAL decimal raw amount (not the client's raw wire
         // spelling) so `"0021"` and `"21"` cannot produce two valid messages
-        // for the same payment.
-        let signing_message = receipt_signing_message(
+        // for the same payment. The signed object is the BLAKE2b-256 digest of
+        // the canonical message, matching what a standard Nano signer signs.
+        let signing_hash = receipt_signing_hash(
             &receipt.block_hash,
             &min_raw.to_string(),
             &accepted.pay_to,
             &payload.resource.method,
             &payload.resource.url,
         );
-        if !verify_nano_signature(&payer_public_key, &signing_message, &signature_bytes) {
+        if !verify_nano_signature(&payer_public_key, &signing_hash, &signature_bytes) {
             return Err(Error::InvalidTransaction(
                 "nano receipt signature does not match the payer account".to_string(),
             ));
@@ -666,18 +704,27 @@ mod tests {
     const NOW: u64 = 1_700_000_100;
 
     /// Test signer for the receipt golden vectors: the public key derived from
-    /// seed `0x00…01` under Nano's Ed25519-BLAKE2b construction, rendered as
-    /// its `nano_` address (checksum valid).
+    /// the RAW 32-byte Ed25519 secret key `0x00…01` under Nano's
+    /// Ed25519-BLAKE2b construction, rendered as its `nano_` address (checksum
+    /// valid). This is NOT a Nano wallet seed: a seed derives account keys via
+    /// BLAKE2b-512(seed ‖ index), which for the same bytes gives a different
+    /// public key.
     const SIGNER: &str = "nano_3kdbxitaj7f6mrir6miiwtw4muhcc58e6tn5st6rfaxsdnb7gr4roudwn951";
     const SIGNER_PUBKEY_HEX: &str =
         "C969EC348895A49E21824E10E6B829EDEA50CCC26A83CE8986A3B95D12576058";
 
-    /// Signature by [`SIGNER`] over
+    /// BLAKE2b-256 digest of
     /// `receipt_signing_message(HASH, "2100000000000000000000000000", RECIPIENT,
-    /// "POST", "/v1/chat/completions")`. Generated with Nano's
-    /// Ed25519-BLAKE2b scheme and reproduced byte-for-byte by an independent
-    /// Python `ed25519-blake2b` implementation.
-    const RECEIPT_SIG: &str = "9924E55B2FE2DEE521347541932C79A3AE6DFC27F80139AEB5894257BC94F460CDBF8F36192293B5E31185BC6B32101CC02FF7398AA590AC8706E57532E6BF07";
+    /// "POST", "/v1/chat/completions")` — the 32-byte object the payer signs.
+    const RECEIPT_SIGNING_HASH_HEX: &str =
+        "69A6A29CB9CB573B1669A5DDFDF063BF9781C047702139479D56308E35BD650B";
+
+    /// Signature by [`SIGNER`] over [`RECEIPT_SIGNING_HASH_HEX`]. Reproduced
+    /// byte-for-byte by an independent Python `ed25519-blake2b` implementation
+    /// and by the standard Nano `nanocurrency` JS library's
+    /// `signBlock({hash: <digest>, secretKey})` — i.e. an ordinary Nano signer
+    /// produces exactly this signature, with no Solvela-specific Ed25519 code.
+    const RECEIPT_SIG: &str = "C3AE24D5D6B5ECC6866426A9EE9B4B74B14B7778C8F1956C9DE8EDF87C33C9705BF173A13FF0FBBD9685CD9E3DAB68BC91B3D183A928839186BF5F3282A5080F";
 
     /// A real confirmed on-chain Nano block (the genesis open block) and its
     /// signature by the account — an external vector for the whole
@@ -685,8 +732,13 @@ mod tests {
     const GENESIS_ACCOUNT: &str = RECIPIENT;
     const GENESIS_SIG: &str = "9F0C933C8ADE004D808EA1985FA746A7E95BA2A38F867640F53EC8F180BDFE9E2C1268DEAD7C2664F356E37ABA362BC58E46DBA03E523A7B5A19E4B6EB12BB02";
 
-    /// Signature by a DIFFERENT key (seed `0x00…02`) over the same message.
-    const WRONG_KEY_SIG: &str = "1070052486915365301F02B17D8BC4A95F1726913A31CC793C07A779194A130D13B54C61075058D74A81F560E02D094F3F7E82A9E1D088E4B17BEE0BCFD83B02";
+    /// Signature by a DIFFERENT raw secret key (`0x00…02`) over the same
+    /// digest.
+    const WRONG_KEY_SIG: &str = "D331505A885A565EA2802E9FD76FA8EEF788992DB13FA523207E6D51C84DB9A8E3A6BF48550A5B078A4A5A15919D8CD25B187BD1D25B6B569391AF1757F78907";
+
+    /// The pre-change signature over the full 209-byte message (not its
+    /// digest). It must never verify: the signed object is the 32-byte digest.
+    const OLD_FULL_MESSAGE_SIG: &str = "9924E55B2FE2DEE521347541932C79A3AE6DFC27F80139AEB5894257BC94F460CDBF8F36192293B5E31185BC6B32101CC02FF7398AA590AC8706E57532E6BF07";
 
     fn good_info() -> BlockInfo {
         BlockInfo {
@@ -961,19 +1013,51 @@ mod tests {
         let amount = "2100000000000000000000000000";
         let message =
             receipt_signing_message(HASH, amount, RECIPIENT, "POST", "/v1/chat/completions");
+
+        // The signed object is the BLAKE2b-256 digest of the canonical message
+        // (32 bytes), which is what a standard Nano signer takes.
+        let signing_hash =
+            receipt_signing_hash(HASH, amount, RECIPIENT, "POST", "/v1/chat/completions");
+        assert_eq!(
+            hex::encode_upper(signing_hash),
+            RECEIPT_SIGNING_HASH_HEX,
+            "canonical receipt digest changed — this invalidates every client signature"
+        );
+
         let mut signature = [0u8; 64];
         hex::decode_to_slice(RECEIPT_SIG, &mut signature).unwrap();
 
         // Valid vector.
-        assert!(verify_nano_signature(&public_key, &message, &signature));
+        assert!(verify_nano_signature(
+            &public_key,
+            &signing_hash,
+            &signature
+        ));
+
+        // The pre-change signature over the full 209-byte message is a valid
+        // Ed25519 signature over that byte string, but it must NOT verify as a
+        // receipt signature: the signed object is the 32-byte digest. A client
+        // still signing the raw message produces the rejected old wire form.
+        let mut old_signature = [0u8; 64];
+        hex::decode_to_slice(OLD_FULL_MESSAGE_SIG, &mut old_signature).unwrap();
+        assert!(verify_nano_signature(&public_key, &message, &old_signature));
+        assert!(!verify_nano_signature(
+            &public_key,
+            &signing_hash,
+            &old_signature
+        ));
 
         // Wrong key.
         let mut wrong_key = [0u8; 64];
         hex::decode_to_slice(WRONG_KEY_SIG, &mut wrong_key).unwrap();
-        assert!(!verify_nano_signature(&public_key, &message, &wrong_key));
+        assert!(!verify_nano_signature(
+            &public_key,
+            &signing_hash,
+            &wrong_key
+        ));
 
         // Signature over a different hash.
-        let other_hash = receipt_signing_message(
+        let other_hash = receipt_signing_hash(
             "A170D51B94E00371ACE76E35AC81DC9405D5D04D4CEBC399AEACE07AE05DD293",
             amount,
             RECIPIENT,
@@ -983,7 +1067,7 @@ mod tests {
         assert!(!verify_nano_signature(&public_key, &other_hash, &signature));
 
         // Signature over a different amount.
-        let other_amount = receipt_signing_message(
+        let other_amount = receipt_signing_hash(
             HASH,
             "2100000000000000000000000001",
             RECIPIENT,
@@ -998,14 +1082,13 @@ mod tests {
 
         // Signature over a different recipient / resource.
         let other_recipient =
-            receipt_signing_message(HASH, amount, SIGNER, "POST", "/v1/chat/completions");
+            receipt_signing_hash(HASH, amount, SIGNER, "POST", "/v1/chat/completions");
         assert!(!verify_nano_signature(
             &public_key,
             &other_recipient,
             &signature
         ));
-        let other_resource =
-            receipt_signing_message(HASH, amount, RECIPIENT, "POST", "/v1/messages");
+        let other_resource = receipt_signing_hash(HASH, amount, RECIPIENT, "POST", "/v1/messages");
         assert!(!verify_nano_signature(
             &public_key,
             &other_resource,

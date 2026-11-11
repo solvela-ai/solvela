@@ -224,9 +224,11 @@ pub struct EscrowPayload {
 /// account}` alone is a bearer token: anyone watching `pay_to` could submit a
 /// victim's receipt first and be served on the victim's money. `signature`
 /// closes that: it is produced by the `account`'s private key over
+/// the BLAKE2b-256 digest of
 /// [`solvela_protocol::nano::receipt_signing_message`], which binds the block
 /// hash to the quoted raw amount, the `pay_to` recipient and the request
-/// resource. The verifier checks it against the public key decoded from
+/// resource. Signing a 32-byte digest is Nano's native signing shape, so a
+/// standard Nano signer can produce it. The verifier checks it against the public key decoded from
 /// `account` BEFORE any node call (see `solvela_x402::nano`), so only the
 /// holder of the paying account's key can redeem a receipt.
 ///
@@ -245,6 +247,7 @@ pub struct NanoPayload {
     /// The paying `nano_` account (the block's `account`).
     pub account: String,
     /// Hex-encoded 64-byte Ed25519-BLAKE2b signature by `account`'s key over
+    /// the BLAKE2b-256 digest of
     /// [`solvela_protocol::nano::receipt_signing_message`] (128 hex chars).
     pub signature: String,
 }
@@ -603,7 +606,7 @@ mod tests {
 
     #[test]
     fn test_payload_data_nano_roundtrip() {
-        const SIG: &str = "9924E55B2FE2DEE521347541932C79A3AE6DFC27F80139AEB5894257BC94F460CDBF8F36192293B5E31185BC6B32101CC02FF7398AA590AC8706E57532E6BF07";
+        const SIG: &str = "C3AE24D5D6B5ECC6866426A9EE9B4B74B14B7778C8F1956C9DE8EDF87C33C9705BF173A13FF0FBBD9685CD9E3DAB68BC91B3D183A928839186BF5F3282A5080F";
         let nano = PayloadData::Nano(NanoPayload {
             block_hash: "991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948"
                 .to_string(),

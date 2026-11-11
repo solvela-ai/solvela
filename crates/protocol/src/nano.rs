@@ -54,6 +54,11 @@ const RAW_PER_XNO_OVER_MICRO: u128 = RAW_PER_XNO / MICRO_PER_USD as u128;
 /// Receipt freshness window, in seconds, measured from the moment the
 /// gateway's Nano node first saw the block (`block_info.local_timestamp`).
 ///
+/// Kept equal to the `max_timeout_seconds` the Nano `accepts[]` entry
+/// advertises (`MAX_TIMEOUT_SECONDS`, 300 s): a client that pays and then
+/// presents inside the advertised window must not be refused as stale after
+/// the XNO has already moved (review finding, 2026-11-11).
+///
 /// This is a defence-in-depth bound, not the replay guarantee: the gateway
 /// records every redeemed block hash in a durable, non-expiring store (a
 /// PostgreSQL primary key, or Redis `SET NX` when no database is configured),
@@ -62,7 +67,7 @@ const RAW_PER_XNO_OVER_MICRO: u128 = RAW_PER_XNO / MICRO_PER_USD as u128;
 /// restamp `local_timestamp` on an old block. The window still rejects a
 /// receipt presented long after the payment it references, keeping the normal
 /// (never-resynced) path honest.
-pub const NANO_RECEIPT_MAX_AGE_SECS: u64 = 90;
+pub const NANO_RECEIPT_MAX_AGE_SECS: u64 = 300;
 
 /// Exact length of a Nano block hash rendered as uppercase hex (32 bytes).
 pub const NANO_BLOCK_HASH_HEX_LEN: usize = 64;
@@ -234,9 +239,19 @@ pub const NANO_RECEIPT_SIGNING_DOMAIN: &[u8] = b"solvela-nano-receipt:v1";
 /// NUL is not valid in any field (hex, decimal, Nano base32, HTTP method, or
 /// URL), so the encoding is unambiguous without length prefixes.
 ///
-/// The signature is Nano's Ed25519-with-BLAKE2b-512 over these bytes, hex
-/// encoded. A client signs this once, publishes its send block, and presents
-/// both in `NanoPayload`.
+/// The signature is Nano's Ed25519-with-BLAKE2b-512 over the **BLAKE2b-256
+/// digest of these bytes** (32 bytes), hex encoded — not over the variable-
+/// length message itself. Nano's signing primitive takes a 32-byte hash, so
+/// signing the digest lets an ordinary Nano signer produce the receipt
+/// signature: the JS `nanocurrency` library's `signBlock({hash})` and a node's
+/// `sign` RPC (where hash signing is enabled) accept a 32-byte hash directly,
+/// and no Solvela-specific Ed25519 code is needed. The domain tag inside the
+/// preimage keeps it distinct from a real block hash, so the same signature
+/// can never be a block signature.
+///
+/// A client computes [`receipt_signing_message`], takes its BLAKE2b-256
+/// digest, signs that digest with the account's raw 32-byte Ed25519 secret key,
+/// publishes its send block, and presents both in `NanoPayload`.
 pub fn receipt_signing_message(
     block_hash: &str,
     amount_raw: &str,
@@ -385,7 +400,7 @@ mod tests {
 
     #[test]
     fn signature_syntax_is_128_hex_either_case() {
-        let upper = "9924E55B2FE2DEE521347541932C79A3AE6DFC27F80139AEB5894257BC94F460CDBF8F36192293B5E31185BC6B32101CC02FF7398AA590AC8706E57532E6BF07";
+        let upper = "C3AE24D5D6B5ECC6866426A9EE9B4B74B14B7778C8F1956C9DE8EDF87C33C9705BF173A13FF0FBBD9685CD9E3DAB68BC91B3D183A928839186BF5F3282A5080F";
         assert!(is_well_formed_nano_signature(upper));
         assert!(is_well_formed_nano_signature(&upper.to_ascii_lowercase()));
         assert!(!is_well_formed_nano_signature(&upper[..127]));
