@@ -1327,6 +1327,278 @@ describe('non-402 relay deadline', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 10c. Stalled client — the serve ceiling destroys the downstream response
+// ---------------------------------------------------------------------------
+
+/** Injected serve ceiling for the stall tests: long enough for the probe and
+ * draw legs to complete, short enough that the suite does not sleep. */
+const STALL_CEILING_MS = 200;
+
+/** Initial chunk of the stall stream — immediately puts data on the wire. */
+const STALL_CHUNK = Buffer.alloc(256 * 1024, 0x7a);
+
+/** Continuous pump chunk: keeps the stream full-rate so the relay parks in
+ * backpressure and STAYS parked (no socket buffer can absorb an endless
+ * stream) — the deadline must be what ends the wait, not a drain. */
+const STALL_PUMP_CHUNK = Buffer.alloc(64 * 1024, 0x7a);
+
+/** Serve a never-ending full-rate body. The sidecar's relay writes until the
+ * client socket is stuffed, parks in the backpressure wait, and stays parked
+ * until the serve ceiling destroys the connection. */
+function startStallFlood(res: ServerResponse): void {
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.write(STALL_CHUNK);
+  const pump = setInterval(() => {
+    res.write(STALL_PUMP_CHUNK);
+  }, 1);
+  res.on('close', () => clearInterval(pump));
+  // A write racing the sidecar's destroy must not crash the fake gateway.
+  res.on('error', () => {});
+}
+
+/** Reject `promise` unless it settles within `ms`; `label` names the failure. */
+function within<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} — not settled within ${ms}ms`)),
+      ms,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** Drain a response body until the connection errors. A CLEAN stream end is a
+ * failure — the regression is a response that hangs, and a clean end would
+ * mean the destroy never happened. Resolves only when a read rejects. */
+async function drainUntilDestroyed(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  try {
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) throw new Error('stream ended cleanly — expected a destroyed connection');
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message === 'stream ended cleanly — expected a destroyed connection') {
+      throw err;
+    }
+    // The read rejected: the connection was destroyed. This is the success arm.
+  }
+}
+
+/**
+ * The stall regression, shared by every served leg: POST `path`, read ONE
+ * chunk, stop reading, and assert that shortly after the injected ceiling the
+ * upstream read is stopped (the fake gateway sees its stream socket close) and
+ * the downstream connection is destroyed (draining errors, never ends
+ * cleanly) — and that the sidecar still serves `followUp` afterwards.
+ */
+async function expectStalledClientDestroyed(
+  sc: { url: string; close(): Promise<void> },
+  upstreamGone: Promise<void>,
+  path: string,
+  body: string,
+  followUp: { path: string; body: string; expected: string },
+): Promise<void> {
+  const started = Date.now();
+  const resp = await authedPost(`${sc.url}${path}`, body);
+  assert.equal(resp.status, 200, `${path} must start relaying (200)`);
+  assert.ok(resp.body, 'relayed response has a body stream');
+
+  const reader = (resp.body as ReadableStream<Uint8Array>).getReader();
+  const first = await reader.read();
+  assert.ok(!first.done, 'the relay is live — a chunk arrived');
+  assert.ok((first.value?.byteLength ?? 0) > 0, 'the relay is live — a non-empty chunk arrived');
+
+  // Stop reading. The sidecar parks in backpressure; the ceiling must stop the
+  // upstream read shortly after firing.
+  await within(upstreamGone, 3000, 'the serve ceiling never stopped the upstream read');
+  const stoppedAfter = Date.now() - started;
+  assert.ok(
+    stoppedAfter >= STALL_CEILING_MS - 25,
+    `upstream read stopped ${stoppedAfter}ms after the request — BEFORE the ${STALL_CEILING_MS}ms ceiling`,
+  );
+  assert.ok(
+    stoppedAfter < STALL_CEILING_MS + 2500,
+    `upstream read stopped ${stoppedAfter}ms after the request — not shortly after the ceiling`,
+  );
+
+  // Downstream: the destroy must surface as an abnormal termination, not a
+  // clean end and not a hang.
+  await within(
+    drainUntilDestroyed(reader),
+    3000,
+    'the downstream connection was NOT destroyed at the serve ceiling',
+  );
+
+  // The sidecar survived the stall and still serves the money path.
+  const after = await authedPost(`${sc.url}${followUp.path}`, followUp.body);
+  assert.equal(after.status, 200);
+  assert.equal(await after.text(), followUp.expected);
+}
+
+describe('stalled client — serve ceiling reaches the backpressure wait', () => {
+  it('paid leg: destroyed at the ceiling; the channel still serves afterwards', async () => {
+    let paidServes = 0;
+    let upstreamClosed!: () => void;
+    const upstreamGone = new Promise<void>((resolve) => {
+      upstreamClosed = resolve;
+    });
+    const gw = await startFakeGateway(
+      standardHandler((_req, res) => {
+        paidServes += 1;
+        res.on('close', () => upstreamClosed());
+        if (paidServes === 1) {
+          startStallFlood(res);
+          return; // never ends — the client stops reading
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"id":"msg_alive"}');
+      }),
+    );
+    const sc = await startSidecar(gw.url, { serveTimeoutMs: STALL_CEILING_MS });
+
+    await expectStalledClientDestroyed(
+      sc,
+      upstreamGone,
+      '/v1/messages',
+      '{"model":"m","messages":[]}',
+      { path: '/v1/messages', body: '{"model":"m","messages":[]}', expected: '{"id":"msg_alive"}' },
+    );
+
+    // The stalled leg DID sign a voucher — the stall must not have wedged the
+    // channel, and the follow-up ran the full probe + paid draw again.
+    assert.equal(messagesPosts(gw).length, 4, 'probe + paid per request, twice');
+    assert.equal(
+      typeof messagesPosts(gw)[3].headers['payment-signature'],
+      'string',
+      'the follow-up draw carried a voucher',
+    );
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('unpaid OpenAI 200 leg (free-tier probe): destroyed at the ceiling; sidecar keeps serving', async () => {
+    let serves = 0;
+    let upstreamClosed!: () => void;
+    const upstreamGone = new Promise<void>((resolve) => {
+      upstreamClosed = resolve;
+    });
+    const gw = await startFakeGateway((_req, res) => {
+      serves += 1;
+      res.on('close', () => upstreamClosed());
+      if (serves === 1) {
+        startStallFlood(res);
+        return; // the free-tier completion body the client stops reading
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"id":"chatcmpl-alive"}');
+    });
+    const sc = await startSidecar(gw.url, { serveTimeoutMs: STALL_CEILING_MS });
+
+    await expectStalledClientDestroyed(
+      sc,
+      upstreamGone,
+      '/v1/chat/completions',
+      '{"model":"nvidia/free","messages":[]}',
+      {
+        path: '/v1/chat/completions',
+        body: '{"model":"nvidia/free","messages":[]}',
+        expected: '{"id":"chatcmpl-alive"}',
+      },
+    );
+
+    // A free 200 is relayed as-is — no quote, no voucher, nothing signed.
+    assert.equal(chatPosts(gw).length, 2);
+    for (const p of chatPosts(gw)) {
+      assert.equal(p.headers['payment-signature'], undefined, 'a free-tier 200 is never signed');
+    }
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('unpaid Anthropic 200 leg (free-tier probe on /v1/messages): destroyed at the ceiling', async () => {
+    let serves = 0;
+    let upstreamClosed!: () => void;
+    const upstreamGone = new Promise<void>((resolve) => {
+      upstreamClosed = resolve;
+    });
+    const gw = await startFakeGateway((_req, res) => {
+      serves += 1;
+      res.on('close', () => upstreamClosed());
+      if (serves === 1) {
+        startStallFlood(res);
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"id":"msg_alive"}');
+    });
+    const sc = await startSidecar(gw.url, { serveTimeoutMs: STALL_CEILING_MS });
+
+    await expectStalledClientDestroyed(
+      sc,
+      upstreamGone,
+      '/v1/messages',
+      '{"model":"m","messages":[]}',
+      { path: '/v1/messages', body: '{"model":"m","messages":[]}', expected: '{"id":"msg_alive"}' },
+    );
+
+    assert.equal(messagesPosts(gw).length, 2);
+    for (const p of messagesPosts(gw)) {
+      assert.equal(p.headers['payment-signature'], undefined, 'a free-tier 200 is never signed');
+    }
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('count_tokens: destroyed at the ceiling; sidecar keeps serving', async () => {
+    let serves = 0;
+    let upstreamClosed!: () => void;
+    const upstreamGone = new Promise<void>((resolve) => {
+      upstreamClosed = resolve;
+    });
+    const gw = await startFakeGateway((_req, res) => {
+      serves += 1;
+      res.on('close', () => upstreamClosed());
+      if (serves === 1) {
+        startStallFlood(res);
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"input_tokens":7}');
+    });
+    const sc = await startSidecar(gw.url, { serveTimeoutMs: STALL_CEILING_MS });
+
+    await expectStalledClientDestroyed(
+      sc,
+      upstreamGone,
+      '/v1/messages/count_tokens',
+      '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}',
+      {
+        path: '/v1/messages/count_tokens',
+        body: '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}',
+        expected: '{"input_tokens":7}',
+      },
+    );
+
+    assert.equal(gw.requests.length, 2, 'the stalled forward + the follow-up');
+
+    await sc.close();
+    await gw.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 10b. A 402 with no `resource` is a malformed quote — fail closed
 // ---------------------------------------------------------------------------
 

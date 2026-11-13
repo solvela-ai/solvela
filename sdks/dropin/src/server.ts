@@ -33,7 +33,11 @@
  * metadata leg (`/v1/escrow/config`) gets a short one, and EVERY served leg —
  * the paid serve, the unpaid probe (which may itself be the gateway's
  * zero-cost free-tier 200), the count_tokens forward — gets the long 650s
- * ceiling, armed through the relayed body. See [`serveLeg`].
+ * ceiling (injectable via [`SidecarOptions.serveTimeoutMs`] for tests), armed
+ * through the relayed body INCLUDING the backpressure wait: on expiry the
+ * upstream read stops and the downstream response is destroyed, so a client
+ * that stops reading cannot pin sockets or buffered data forever. See
+ * [`serveLeg`].
  *
  * The channel is strictly serial: signer-core's `ChannelTracker` single-flight
  * gate queues concurrent Claude Code requests (parallel subagents serialize).
@@ -46,7 +50,6 @@
  */
 
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
 import {
@@ -109,6 +112,10 @@ export interface SidecarOptions {
   expiryMarginSlots?: bigint;
   /** Slot cache TTL in ms (default 30s). Past it, a fresh fetch is REQUIRED. */
   slotTtlMs?: number;
+  /** Ceiling (ms) for any leg whose response the client is served from —
+   * headers AND relayed body, including the backpressure wait. Defaults to
+   * [`PAID_SERVE_TIMEOUT_MS`]; tests inject a short ceiling. */
+  serveTimeoutMs?: number;
   /** Best-effort persist hook, called after each accepted draw. */
   onLastCumulative?: (last: bigint) => void;
 }
@@ -360,15 +367,18 @@ async function readBody(req: IncomingMessage) {
  * Relay a fetch `Response` verbatim: status + headers (minus framing;
  * `set-cookie` preserved per-value), then pipe body chunks AS THEY ARRIVE —
  * for SSE this is the byte-verbatim, incremental path thinking-block
- * signatures depend on. Honors client backpressure (`drain`). On any
- * mid-stream failure the client connection is DESTROYED (abnormal
- * termination), never cleanly ended — a truncated stream must not look
- * complete.
+ * signatures depend on. Honors client backpressure (`drain`), racing the wait
+ * against the client leaving (`close`) AND the serve deadline — a client that
+ * stops reading can no longer pin the socket and its buffered bytes past the
+ * serve ceiling. On any mid-stream failure (including the deadline) the client
+ * connection is DESTROYED (abnormal termination), never cleanly ended — a
+ * truncated stream must not look complete.
  */
 async function relay(
   upstream: Response,
   res: ServerResponse,
-  clientGone?: AbortSignal,
+  clientGone: AbortSignal,
+  deadline: AbortSignal,
 ): Promise<void> {
   const headers: Record<string, string | string[]> = {};
   upstream.headers.forEach((value, name) => {
@@ -384,9 +394,52 @@ async function relay(
   try {
     for await (const chunk of upstream.body as unknown as AsyncIterable<Uint8Array>) {
       if (!res.write(chunk)) {
-        // Backpressure: wait for the client to drain — or leave. Early return
-        // cancels the upstream iterator (ReadableStream return()).
-        await Promise.race([once(res, 'drain'), once(res, 'close')]);
+        // Backpressure: wait for the client to drain, the client to leave, or
+        // the serve deadline to fire. Every listener is removed before this
+        // wait settles, so a long-lived response cannot accumulate them.
+        // Early return cancels the upstream iterator (ReadableStream
+        // return()).
+        await new Promise<void>((resolve) => {
+          const cleanup = () => {
+            res.removeListener('drain', onDrain);
+            res.removeListener('close', onClose);
+            res.removeListener('error', onError);
+            deadline.removeEventListener('abort', onAbort);
+          };
+          const onDrain = () => {
+            cleanup();
+            resolve();
+          };
+          const onClose = () => {
+            cleanup();
+            resolve();
+          };
+          const onError = () => {
+            cleanup();
+            resolve();
+          };
+          const onAbort = () => {
+            cleanup();
+            resolve();
+          };
+          res.on('drain', onDrain);
+          res.on('close', onClose);
+          res.on('error', onError);
+          deadline.addEventListener('abort', onAbort);
+          // The deadline may have fired between the write and the listener
+          // attach — an already-aborted signal never re-emits, so settle it
+          // directly instead of waiting for an event that cannot come.
+          if (deadline.aborted) onAbort();
+        });
+        if (deadline.aborted) {
+          // The serve ceiling fired while the client sat on backpressure:
+          // stop the upstream read (the loop exit cancels the body) and
+          // DESTROY the downstream — the socket and its buffered bytes must
+          // not outlive the serve, and a truncated stream must not look
+          // complete.
+          res.destroy();
+          return;
+        }
         if (!res.writable) {
           res.destroy();
           return;
@@ -395,8 +448,10 @@ async function relay(
     }
     res.end();
   } catch (err) {
-    if (clientGone?.aborted) {
+    if (clientGone.aborted) {
       console.error('[solvela-dropin] client disconnected mid-stream; upstream read aborted');
+    } else if (deadline.aborted) {
+      console.error('[solvela-dropin] serve ceiling fired mid-relay; upstream read stopped');
     } else {
       console.error(
         `[solvela-dropin] upstream stream error mid-relay: ${sanitizeGatewayError(
@@ -409,9 +464,34 @@ async function relay(
 }
 
 /**
+ * Arm ONE serve deadline: `signal` aborts with a descriptive reason when the
+ * ceiling fires; `clear()` disarms it. Every served leg composes it with
+ * `clientGone` for its fetch AND threads it into `relay`, so the ceiling
+ * bounds headers and body — including the backpressure wait.
+ */
+function armServeDeadline(serveTimeoutMs: number): { signal: AbortSignal; clear(): void } {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () =>
+      controller.abort(
+        new Error(
+          `gateway did not complete the response within the ${serveTimeoutMs / 1000}s serve ceiling`,
+        ),
+      ),
+    serveTimeoutMs,
+  );
+  return { signal: controller.signal, clear: () => clearTimeout(timer) };
+}
+
+/**
  * Run ONE outbound leg whose response the client is served from, under a
  * single deadline that stays armed from the request until `consume` has
- * finished with the body.
+ * finished with the body. The deadline signal is composed with `clientGone`
+ * for the fetch AND handed to `consume`, which threads it into `relay` — so
+ * the ceiling bounds every wait in the leg, INCLUDING the backpressure wait.
+ * On expiry the upstream read stops (the aborted fetch/stream) and the
+ * downstream response is DESTROYED, so a client that stops reading cannot pin
+ * the socket and its buffered bytes forever.
  *
  * Why one deadline and not short-then-long: a deadline that is swapped up
  * after `await fetch(...)` settles only ever covers time-to-HEADERS, and
@@ -424,34 +504,23 @@ async function relay(
  * from a slow completion, so the only deadline that can legitimately bound a
  * relayed leg is the serve ceiling. (A gateway that never accepts the
  * connection is still bounded — undici's default `connectTimeout` is 10s.)
- *
- * `clientGone` is composed in, so a client that walks away still cancels the
- * leg immediately.
  */
 async function serveLeg<T>(
   target: string,
   init: { method: string; headers: Record<string, string>; body: Uint8Array<ArrayBuffer> },
   clientGone: AbortSignal,
-  consume: (resp: Response) => Promise<T>,
+  serveTimeoutMs: number,
+  consume: (resp: Response, deadline: AbortSignal) => Promise<T>,
 ): Promise<T> {
-  const deadline = new AbortController();
-  const timer = setTimeout(
-    () =>
-      deadline.abort(
-        new Error(
-          `gateway did not complete the response within the ${PAID_SERVE_TIMEOUT_MS / 1000}s serve ceiling`,
-        ),
-      ),
-    PAID_SERVE_TIMEOUT_MS,
-  );
+  const deadline = armServeDeadline(serveTimeoutMs);
   try {
     const resp = await fetch(target, {
       ...init,
       signal: AbortSignal.any([clientGone, deadline.signal]),
     });
-    return await consume(resp);
+    return await consume(resp, deadline.signal);
   } finally {
-    clearTimeout(timer);
+    deadline.clear();
   }
 }
 
@@ -463,6 +532,7 @@ async function serveLeg<T>(
 export function createSidecarServer(opts: SidecarOptions): Server {
   const expiryMargin = opts.expiryMarginSlots ?? DEFAULT_EXPIRY_MARGIN_SLOTS;
   const getSlot = createGatewaySlotSource(opts.gatewayUrl, opts.slotTtlMs ?? DEFAULT_SLOT_TTL_MS);
+  const serveTimeoutMs = opts.serveTimeoutMs ?? PAID_SERVE_TIMEOUT_MS;
   const tracker = new ChannelTracker(opts.channelId, {
     lastCumulative: opts.lastCumulative ?? 0n,
     ...opts.trackerOptions,
@@ -562,7 +632,8 @@ export function createSidecarServer(opts: SidecarOptions): Server {
         `${opts.gatewayUrl}${url.pathname}${url.search}`,
         { method: 'POST', headers: allowlistedHeaders(req), body },
         clientGone,
-        (upstream) => relay(upstream, res, clientGone),
+        serveTimeoutMs,
+        (upstream, deadline) => relay(upstream, res, clientGone, deadline),
       );
       return;
     }
@@ -589,9 +660,10 @@ export function createSidecarServer(opts: SidecarOptions): Server {
       target,
       { method: 'POST', headers: fwdHeaders, body: rawBody },
       clientGone,
-      async (first) => {
+      serveTimeoutMs,
+      async (first, deadline) => {
         if (first.status !== 402) {
-          await relay(first, res, clientGone);
+          await relay(first, res, clientGone, deadline);
           return null;
         }
         return first.text();
@@ -648,74 +720,81 @@ export function createSidecarServer(opts: SidecarOptions): Server {
     // The draw. `send` re-POSTs the IDENTICAL bytes + the voucher header; on a
     // 2xx it hands the raw Response back through the tracker (which advances
     // `last` and resolves with it); on a non-2xx it parses JSON so the tracker
-    // can extract the structured `error.last_cumulative` resync. The signal
-    // composes the client's lifetime with the long serve ceiling — it stays
-    // attached through the RELAYED BODY below, so 650s bounds the whole serve.
-    const send = async (header: string): Promise<DrawResponse> => {
-      const resp = await fetch(target, {
-        method: 'POST',
-        headers: { ...fwdHeaders, 'payment-signature': header },
-        body: rawBody,
-        signal: AbortSignal.any([clientGone, AbortSignal.timeout(PAID_SERVE_TIMEOUT_MS)]),
-      });
-      if (resp.status >= 200 && resp.status < 300) {
-        return { status: resp.status, body: resp };
-      }
-      let parsed: unknown;
-      try {
-        parsed = await resp.json();
-      } catch {
-        parsed = undefined;
-      }
-      return { status: resp.status, body: parsed };
-    };
-
-    let drawResult: unknown;
+    // can extract the structured `error.last_cumulative` resync. The serve
+    // deadline is armed BEFORE the first retry fetch and threaded through BOTH
+    // the fetch signal and the RELAYED BODY below — one ceiling bounds the
+    // whole paid serve, and a client that stops reading mid-body gets its
+    // connection destroyed at the ceiling instead of pinning the socket.
+    const serveDeadline = armServeDeadline(serveTimeoutMs);
     try {
-      drawResult = await tracker.draw({
-        accept,
-        resourceUrl,
-        rawBody,
-        signSeed: opts.signSeed,
-        expirySlot,
-        send,
-      });
-    } catch (err) {
-      if (err instanceof ChannelDrawError) {
-        // Tracker messages are static/gateway-status-derived — safe. Propagate
-        // the gateway status where it is a real HTTP status; 0 = local
-        // validation (e.g. malformed quote) → 502.
-        const status = err.status >= 400 && err.status <= 599 ? err.status : 502;
-        console.error(`[solvela-dropin] channel draw rejected (gateway status ${err.status}): ${err.message}`);
-        fail(status, err.message);
+      const send = async (header: string): Promise<DrawResponse> => {
+        const resp = await fetch(target, {
+          method: 'POST',
+          headers: { ...fwdHeaders, 'payment-signature': header },
+          body: rawBody,
+          signal: AbortSignal.any([clientGone, serveDeadline.signal]),
+        });
+        if (resp.status >= 200 && resp.status < 300) {
+          return { status: resp.status, body: resp };
+        }
+        let parsed: unknown;
+        try {
+          parsed = await resp.json();
+        } catch {
+          parsed = undefined;
+        }
+        return { status: resp.status, body: parsed };
+      };
+
+      let drawResult: unknown;
+      try {
+        drawResult = await tracker.draw({
+          accept,
+          resourceUrl,
+          rawBody,
+          signSeed: opts.signSeed,
+          expirySlot,
+          send,
+        });
+      } catch (err) {
+        if (err instanceof ChannelDrawError) {
+          // Tracker messages are static/gateway-status-derived — safe. Propagate
+          // the gateway status where it is a real HTTP status; 0 = local
+          // validation (e.g. malformed quote) → 502.
+          const status = err.status >= 400 && err.status <= 599 ? err.status : 502;
+          console.error(`[solvela-dropin] channel draw rejected (gateway status ${err.status}): ${err.message}`);
+          fail(status, err.message);
+          return;
+        }
+        // Anything else (e.g. the retry fetch itself rejecting) propagates to
+        // the outer catch: logged + 502, fail closed. `#last` did NOT advance.
+        throw err;
+      }
+
+      // The 2xx contract of `send` above puts the raw Response in the tracker's
+      // resolution. Narrow it — never a bare cast on the money path; a
+      // non-Response here is a refactor bug, so fail closed rather than relay
+      // garbage.
+      if (!(drawResult instanceof Response)) {
+        console.error('[solvela-dropin] draw resolved with a non-Response value — refusing to relay (fail closed)');
+        fail(502, 'internal relay error after a successful draw');
         return;
       }
-      // Anything else (e.g. the retry fetch itself rejecting) propagates to
-      // the outer catch: logged + 502, fail closed. `#last` did NOT advance.
-      throw err;
-    }
 
-    // The 2xx contract of `send` above puts the raw Response in the tracker's
-    // resolution. Narrow it — never a bare cast on the money path; a
-    // non-Response here is a refactor bug, so fail closed rather than relay
-    // garbage.
-    if (!(drawResult instanceof Response)) {
-      console.error('[solvela-dropin] draw resolved with a non-Response value — refusing to relay (fail closed)');
-      fail(502, 'internal relay error after a successful draw');
-      return;
-    }
+      // Best-effort persist of the advanced cumulative (gateway remains truth).
+      // Guards SYNC throws from the hook only — an async persist failure is the
+      // hook's own job to surface (the CLI logs it rate-limited).
+      try {
+        opts.onLastCumulative?.(tracker.lastCumulative);
+      } catch (err) {
+        console.error(
+          `[solvela-dropin] last-cumulative persist hook threw: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
 
-    // Best-effort persist of the advanced cumulative (gateway remains truth).
-    // Guards SYNC throws from the hook only — an async persist failure is the
-    // hook's own job to surface (the CLI logs it rate-limited).
-    try {
-      opts.onLastCumulative?.(tracker.lastCumulative);
-    } catch (err) {
-      console.error(
-        `[solvela-dropin] last-cumulative persist hook threw: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      await relay(drawResult, res, clientGone, serveDeadline.signal);
+    } finally {
+      serveDeadline.clear();
     }
-
-    await relay(drawResult, res, clientGone);
   }
 }
