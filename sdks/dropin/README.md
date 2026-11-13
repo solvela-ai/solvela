@@ -51,7 +51,9 @@ npx solvela-dropin close    # re-run to poll the refund status
 
 ## How a request is paid
 
-1. Claude Code POSTs `/v1/messages` to the sidecar with the local token.
+1. The client POSTs a paid path to the sidecar with the local token —
+   `/v1/messages` (Claude Code) or `/v1/chat/completions` (any
+   OpenAI-compatible client).
 2. The sidecar forwards it to the gateway unpaid; the gateway answers with an
    x402 `402` quote (the fee-inclusive estimate for **this** request).
 3. The sidecar signs a cumulative voucher for exactly that quote (it never
@@ -64,6 +66,20 @@ npx solvela-dropin close    # re-run to poll the refund status
 
 `POST /v1/messages/count_tokens` is free and forwarded verbatim — never
 signed, never charged.
+
+## Surfaces
+
+| Path | Dialect | Paid |
+|---|---|---|
+| `POST /v1/messages` | Anthropic-native | yes |
+| `POST /v1/chat/completions` | OpenAI-compatible | yes |
+| `POST /v1/messages/count_tokens` | Anthropic-native | no — free passthrough |
+
+Both paid paths run the **same** money path; only the request/response/error
+envelopes differ. Point any OpenAI-compatible tool (Cursor, Cline, aider,
+OmniRoute, or your own client) at `http://127.0.0.1:8484/v1` with the local
+token as its API key. Anything else 404s — the sidecar proxies these three
+paths only.
 
 ## Limitations
 
