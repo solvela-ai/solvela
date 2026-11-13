@@ -277,7 +277,7 @@ mod tests {
         let (address, path) =
             do_import_mnemonic(TEST_MNEMONIC, &wallet_file, false).expect("import should succeed");
 
-        assert!(!address.is_empty());
+        assert_ne!(address, "");
         assert!(path.exists());
 
         let dir2 = unique_temp_dir("import_mn_det");
@@ -298,7 +298,7 @@ mod tests {
         let padded = format!("  \t{TEST_MNEMONIC}\n");
         let (address, _) = do_import_mnemonic(&padded, &wallet_file, false)
             .expect("import should succeed with surrounding whitespace");
-        assert!(!address.is_empty());
+        assert_ne!(address, "");
 
         cleanup(&dir);
     }
