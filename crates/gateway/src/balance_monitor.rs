@@ -122,6 +122,9 @@ pub struct BalanceAlertEvent {
 /// and the Prometheus gauge for free, and external Alertmanager rules can
 /// page on those. Enterprise distributions plug in their own sink
 /// (Slack/email/dashboard) without touching this crate.
+// `async_trait` stamps `#[must_use]` on its generated shims; clippy ≥ 1.99
+// flags that as `double_must_use`. Macro-owned, not ours — allow it.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait AlertSink: Send + Sync {
     async fn dispatch(&self, event: &BalanceAlertEvent);

@@ -36,7 +36,11 @@ These are on right now and serve real traffic.
 
 ## Dormant — built, off by default
 
-**Currently empty.** Escrow, the payment channel, and the faucet all graduated to live
+| Feature | State |
+|---|---|
+| **Nano (XNO) settlement** — `exact` over `nano:mainnet` | Built ([#813](https://github.com/solvela-ai/solvela/issues/813)); **not configured on the hosted gateway**, so its 402 never advertises it. Self-hosted operators enable it by setting all three `SOLVELA_NANO__RPC_URL` / `SOLVELA_NANO__RECIPIENT_ACCOUNT` / `SOLVELA_NANO__USD_PER_XNO` (env-only, all-or-nothing, fatal on a partial or malformed set). The agent publishes its own feeless send block and presents the confirmed block hash as a receipt; the gateway verifies it against the configured Nano node. Chat/messages path only. Kill switch: unset any of the three. |
+
+Escrow, the payment channel, and the faucet all graduated to live
 (see above). Their kill switches remain one env flip away — unset
 `SOLVELA_SOLANA__ESCROW_PROGRAM_ID`, set `SOLVELA_CHANNEL__ENABLED=false`, or set
 `SOLVELA_FAUCET__ENABLED=false` — and the gateway degrades to the exact-only core with no

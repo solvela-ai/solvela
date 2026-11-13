@@ -49,6 +49,10 @@ bs58 = "0.5"
 bincode = "1"
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
 curve25519-dalek = { version = "4", default-features = false, features = ["alloc"] }
+# Nano (XNO) uses Ed25519 with BLAKE2b-512 as the hash function; RustCrypto's
+# blake2 provides the primitive, curve25519-dalek (above) the curve math.
+blake2 = "0.10"
+hex = "0.4"
 
 # Data stores
 redis = { version = "1.2", features = ["tokio-comp", "connection-manager"] }

@@ -28,6 +28,8 @@ tokio = { workspace = true }
 sha2 = { workspace = true }
 ed25519-dalek = { workspace = true }
 curve25519-dalek = { workspace = true }
+blake2 = { workspace = true }
+hex = { workspace = true }
 zeroize = { workspace = true }
 sqlx = { workspace = true, optional = true }
 

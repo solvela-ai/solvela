@@ -768,6 +768,9 @@ async fn held_stats(pool: &PgPool) -> Result<(i64, Option<i64>), sqlx::Error> {
 /// The on-chain operations the refund worker needs. A seam so the exactly-once
 /// state machine is provable in tests without a live RPC (the faucet's
 /// `GasSource` pattern).
+// `async_trait` stamps `#[must_use]` on its generated shims; clippy ≥ 1.99
+// flags that as `double_must_use`. Macro-owned, not ours — allow it.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait RefundRpc: Send + Sync {
     /// `owner`'s balance of `mint` in atomic units (via the owner's ATA —

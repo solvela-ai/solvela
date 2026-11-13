@@ -1279,7 +1279,7 @@ mod tests {
         assert_eq!(payload.accepted.scheme, "escrow");
         match payload.payload {
             PayloadData::Escrow(p) => {
-                assert!(!p.deposit_tx.is_empty());
+                assert_ne!(p.deposit_tx, "");
                 assert_eq!(p.agent_pubkey, expected_agent);
                 // service_id is base64 of 32 bytes.
                 let sid = base64::engine::general_purpose::STANDARD
@@ -1287,7 +1287,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(sid.len(), 32);
             }
-            PayloadData::Direct(_) | PayloadData::Channel(_) => {
+            PayloadData::Direct(_) | PayloadData::Channel(_) | PayloadData::Nano(_) => {
                 panic!("expected Escrow payload variant")
             }
         }
@@ -1365,7 +1365,9 @@ mod tests {
 
         let deposit_tx_b64 = match payload.payload {
             PayloadData::Escrow(p) => p.deposit_tx,
-            PayloadData::Direct(_) | PayloadData::Channel(_) => panic!("expected Escrow payload"),
+            PayloadData::Direct(_) | PayloadData::Channel(_) | PayloadData::Nano(_) => {
+                panic!("expected Escrow payload")
+            }
         };
         let tx_bytes = base64::engine::general_purpose::STANDARD
             .decode(&deposit_tx_b64)

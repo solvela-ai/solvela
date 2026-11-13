@@ -97,6 +97,35 @@ the full surface, and `ClientBuilder` in
 (escrow preference, max-payment cap, response cache, sessions, quality retries,
 free-fallback model).
 
+## Nano (XNO) receipts
+
+This SDK signs Solana USDC-SPL payments today; paying with Nano (publishing a
+send block and signing the receipt) is a tracked follow-up. The receipt wire
+shape it must eventually produce is already defined by the shared protocol
+crate, and the SDK's tests round-trip it:
+
+```json
+{
+  "block_hash": "<64 uppercase hex chars>",
+  "account": "nano_<...>",
+  "signature": "<128 hex chars>"
+}
+```
+
+`signature` is the paying account's Ed25519-BLAKE2b signature (Nano's own
+variant, **not** Solana's SHA-512 Ed25519) over the **BLAKE2b-256 digest** of
+the bytes returned by
+[`solvela_protocol::nano::receipt_signing_message`](../../crates/protocol/src/nano.rs):
+the `solvela-nano-receipt:v1` domain tag followed by the canonical block hash,
+the canonical decimal raw amount from the 402 `accepts[]` entry, the `pay_to`
+address, and the request `resource` method and URL, NUL-separated. Signing a
+32-byte digest is Nano's native signing shape — a standard Nano signer can sign
+it (`signBlock({hash})` in the JS library, or a node's hash-signing RPC) with no
+Solvela-specific Ed25519 code. The gateway
+checks that signature against the public key encoded in `account` before it
+contacts a Nano node, and records the hash permanently so a receipt can be
+redeemed exactly once.
+
 ## Workspace shape and CI
 
 This SDK is **not** a member of the monorepo's root Cargo workspace. It pins
