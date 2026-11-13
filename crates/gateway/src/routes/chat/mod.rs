@@ -2064,8 +2064,21 @@ async fn run_native_relay(
     // unbillable) the relay returns a redacted `NativeRelayError` mapped to the
     // all-providers-failed arm below (reservation released, no settle, no body
     // leak) — never a silent reshape fallback.
+    // Env-gated debug capture (off by default). READ-ONLY over the relay bytes:
+    // nothing here re-serializes, reorders, or mutates them, so the native
+    // passthrough stays byte-exact (CLAUDE.md rule #4).
+    crate::debug_bodies::log_bytes("request", "anthropic_native", &req.model, &relay_body);
+
     if req.stream {
         info!(model = %req.model, "native /v1/messages streaming passthrough to Anthropic");
+        // The upstream SSE bytes are relayed verbatim and never buffered, so the
+        // response body cannot be captured without breaking the stream.
+        crate::debug_bodies::log_omitted(
+            "response",
+            "anthropic_native",
+            &req.model,
+            "streamed (SSE relayed verbatim, not buffered)",
+        );
         // No `solvela_provider_request_duration_seconds` here: `relay_native_stream`
         // returns as soon as upstream HEADERS arrive (the body streams lazily), so
         // recording it would measure TTFB under a metric name whose other (buffered)
@@ -2157,6 +2170,10 @@ async fn run_native_relay(
             });
         }
     };
+
+    // Read-only debug capture of the upstream bytes BEFORE they are handed to the
+    // response builder — the bytes themselves are untouched.
+    crate::debug_bodies::log_bytes("response", "anthropic_native", &req.model, &raw);
 
     // Build the response from the RAW Anthropic bytes — relayed UNTOUCHED so the
     // thinking-block `signature`, `redacted_thinking`, native `tool_use` blocks,
