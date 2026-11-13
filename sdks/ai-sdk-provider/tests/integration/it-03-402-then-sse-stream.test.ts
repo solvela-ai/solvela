@@ -19,7 +19,7 @@
  *   A chunk with finish_reason produces the finishReason recorded by the SDK.
  *   The final 'data: [DONE]\n\n' terminator is appended automatically.
  *
- * fullStream part ordering (ai@6 SDK, @ai-sdk/openai-compatible):
+ * fullStream part ordering (ai@7 SDK, @ai-sdk/openai-compatible 3):
  *   start → start-step → text-start → text-delta(s) → text-end
  *   → finish-step → finish
  *   (response-metadata may appear between start-step and text-start)
