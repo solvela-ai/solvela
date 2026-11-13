@@ -1279,7 +1279,7 @@ mod tests {
         assert_eq!(payload.accepted.scheme, "escrow");
         match payload.payload {
             PayloadData::Escrow(p) => {
-                assert!(!p.deposit_tx.is_empty());
+                assert_ne!(p.deposit_tx, "");
                 assert_eq!(p.agent_pubkey, expected_agent);
                 // service_id is base64 of 32 bytes.
                 let sid = base64::engine::general_purpose::STANDARD
