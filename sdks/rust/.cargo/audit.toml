@@ -1,0 +1,35 @@
+# cargo-audit configuration for the standalone Rust client SDK workspace.
+# https://docs.rs/cargo-audit/latest/cargo_audit/
+#
+# This workspace has its own Cargo.lock (it opts out of the root workspace),
+# so the root `.cargo/audit.toml` is not applied here.
+
+[advisories]
+# Ignore advisories that are known to be unreachable in this SDK's build.
+# Each entry MUST include a notes block explaining why the advisory does not
+# affect us, and how to verify the unreachability claim.
+ignore = [
+    # RUSTSEC-2026-0387 — `crypto-bigint` 0.5.5 has timing variability in
+    # operations intended to be constant-time (subtraction, zero counting,
+    # division, Montgomery multiplication, `UintRef` equality).
+    #
+    # Path: crypto-bigint <- elliptic-curve 0.13 <- ecdsa 0.16 <- k256 0.13
+    #       <- solana-secp256k1-recover 3.1 <- solana-program <- solana-sdk
+    #
+    # `solana-secp256k1-recover` 3.1 pins `elliptic-curve ^0.13` / `k256 ^0.13`,
+    # which require `crypto-bigint ^0.5`; the patched `crypto-bigint >= 0.7.6`
+    # only arrives with the k256 0.14 family, i.e. a semver-major `solana-sdk`
+    # upgrade. No compatible fix exists for this dependency graph today.
+    #
+    # Reachability: this SDK signs Solana transactions with ed25519 (via
+    # `solana-sdk`'s keypair signer, which uses curve25519-dalek, not k256).
+    # k256 is only pulled in by the secp256k1 *signature recovery* helper,
+    # which operates on public (signature, message, pubkey) data; the SDK
+    # never feeds secret scalars through crypto-bigint, so the secret-dependent
+    # timing variability the advisory describes is not reachable here.
+    #
+    # Re-evaluate when `solana-sdk` (and the pinned secp256k1-recover) move to
+    # the k256 0.14 / crypto-bigint 0.7 family, or if this SDK starts signing
+    # secp256k1 material.
+    "RUSTSEC-2026-0387",
+]

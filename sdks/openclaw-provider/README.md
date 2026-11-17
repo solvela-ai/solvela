@@ -17,7 +17,7 @@ transparently via the x402 protocol using USDC on Solana.
 >
 > The `@solvela/signer-core` dependency (shared x402 primitives) is wired as
 > `file:../signer-core` in the lockfile during development; the manifest
-> declares `^0.1.0`, which will resolve from npm once `signer-core` ships.
+> declares `^0.2.0`, which resolves from npm now that `signer-core` has shipped.
 
 Once published, the canonical install will be:
 
