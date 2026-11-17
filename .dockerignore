@@ -1,9 +1,24 @@
-target/
-.git/
-.ruff_cache/
-sdks/
-programs/
-*.md
-.env
-.env.*
-.claude/
+# Deny everything, then allow back only what the Dockerfile actually COPYs.
+#
+# An allowlist rather than a denylist: the build context is uploaded to the
+# remote builder on EVERY deploy, and a denylist silently regrows (this repo
+# reached 4.4 GB / 48k files — .worktrees/ 3.1 GB, dashboard/ 1.1 GB,
+# .fastembed_cache/ 134 MB — none of which the image uses). If a future
+# Dockerfile COPY adds a path, the build fails loudly with a missing file
+# instead of quietly re-inflating every deploy.
+*
+
+# Builder stage (Dockerfile lines 12-17, 32-40)
+!Cargo.toml
+!Cargo.lock
+!crates/
+!config/
+!migrations/
+!docs/
+docs/*
+!docs/openapi.json
+
+# Artifacts that can appear inside the allowed paths
+**/target/
+**/*.rs.bk
+**/.DS_Store
