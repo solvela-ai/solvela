@@ -17,6 +17,9 @@ use crate::commands::solana_tx::{build_escrow_deposit, build_usdc_transfer, fetc
 /// Each mode (dev-bypass, exact, escrow) implements this trait.
 /// The worker calls `prepare_payment` after receiving a 402 response
 /// and uses the returned header value (if any) to retry the request.
+// `async_trait` stamps `#[must_use]` on its generated shims; clippy ≥ 1.99
+// flags that as `double_must_use`. Macro-owned, not ours — allow it.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 #[allow(dead_code)]
 pub trait PaymentStrategy: Send + Sync {

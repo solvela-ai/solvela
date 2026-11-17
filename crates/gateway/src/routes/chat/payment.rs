@@ -48,6 +48,8 @@ pub(crate) fn extract_payment_info(header: &str) -> (String, Option<String>) {
                 // signature. `None` is the fail-closed value (never reached on a
                 // rejected request — the chat route rejects `channel` upstream).
                 solvela_x402::types::PayloadData::Channel(_) => None,
+                // The block hash is the Nano receipt's settlement identifier.
+                solvela_x402::types::PayloadData::Nano(p) => Some(p.block_hash.clone()),
             };
             (wallet, tx_sig)
         }

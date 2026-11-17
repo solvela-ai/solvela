@@ -7,6 +7,11 @@ use crate::types::{PaymentPayload, SettlementResult, VerificationResult};
 /// This trait abstracts the chain-specific logic for verifying and settling
 /// x402 payments. The Solana implementation is the primary (and currently only)
 /// implementation. Designed for future multi-chain support (e.g., EVM/Base).
+// `async_trait` 0.1.89 stamps `#[must_use]` on the boxed-future shims it
+// generates for `Result`-returning methods; clippy ≥ 1.99 flags that as
+// `double_must_use` (stable CI runs latest). The attribute is the macro's,
+// not ours — allow it here rather than pin a toolchain or churn `syn`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PaymentVerifier: Send + Sync {
     /// Returns the network identifier (e.g., "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp").
@@ -103,6 +108,9 @@ pub enum Error {
 
     #[error("payload type mismatch: {0}")]
     PayloadMismatch(String),
+
+    #[error("invalid verifier configuration: {0}")]
+    InvalidConfig(String),
 
     #[error(
         "verifier {0} does not support per-request recipient override; \

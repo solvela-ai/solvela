@@ -91,6 +91,9 @@ pub struct SearchQuery {
 /// Each adapter translates the normalized [`SearchQuery`] into its upstream's
 /// native request and maps the native response back into [`SearchResults`].
 /// Implementations must be `Send + Sync` for use in Axum's concurrent handling.
+// `async_trait` stamps `#[must_use]` on its generated shims; clippy ≥ 1.99
+// flags that as `double_must_use`. Macro-owned, not ours — allow it.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait SearchProvider: Send + Sync {
     /// Provider name (e.g. `"tavily"`).

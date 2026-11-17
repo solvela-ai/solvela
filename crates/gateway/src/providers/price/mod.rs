@@ -104,6 +104,9 @@ pub struct PriceResults {
 ///
 /// Each adapter translates the validated mint list into its upstream's native
 /// request and maps the native response back into [`PriceResults`].
+// `async_trait` stamps `#[must_use]` on its generated shims; clippy ≥ 1.99
+// flags that as `double_must_use`. Macro-owned, not ours — allow it.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PriceProvider: Send + Sync {
     /// Provider name (e.g. `"jupiter"`).

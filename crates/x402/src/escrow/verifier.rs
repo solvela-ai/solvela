@@ -102,6 +102,14 @@ impl PaymentVerifier for EscrowVerifier {
                     "EscrowVerifier received channel payload; expected escrow".to_string(),
                 ));
             }
+            // Fail-closed: a Nano receipt is only ever handled by `NanoVerifier`
+            // (network `nano:mainnet`); the facilitator routes by network, so
+            // this is reachable only on an adversarial network/payload mismatch.
+            PayloadData::Nano(_) => {
+                return Err(Error::PayloadMismatch(
+                    "EscrowVerifier received nano payload; expected escrow".to_string(),
+                ));
+            }
         };
 
         // Decode service_id from base64
@@ -386,6 +394,14 @@ impl PaymentVerifier for EscrowVerifier {
             PayloadData::Channel(_) => {
                 return Err(Error::PayloadMismatch(
                     "EscrowVerifier received channel payload; expected escrow".to_string(),
+                ));
+            }
+            // Fail-closed: a Nano receipt is only ever handled by `NanoVerifier`
+            // (network `nano:mainnet`); the facilitator routes by network, so
+            // this is reachable only on an adversarial network/payload mismatch.
+            PayloadData::Nano(_) => {
+                return Err(Error::PayloadMismatch(
+                    "EscrowVerifier received nano payload; expected escrow".to_string(),
                 ));
             }
         };

@@ -22,7 +22,7 @@ _(none)_
 
 ### Working In This Directory
 - The 5% platform fee always applies — include the breakdown in every 402 response.
-- Replay protection keys on `(wallet, tx_signature)` in Redis with a short TTL — set it before verification.
+- Replay protection keys on `(wallet, tx_signature)` in Redis with a short TTL — set it before verification. Nano receipts are the exception: their block hash is reserved in the durable `nano_receipts` store / Redis `SET NX` only AFTER signature + node verification succeeds (a failed verification must not burn the payer's already-sent XNO).
 - If no provider API key is configured, the route falls back to a stub — keep that path intact for local dev.
 - Streaming writes SSE chunks through `axum::response::sse::Sse` + `futures::Stream`.
 - Usage logging is fire-and-forget via `tokio::spawn`; never await on a DB write while holding the request future.

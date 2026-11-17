@@ -257,6 +257,14 @@ impl SolanaVerifier {
                     "SolanaVerifier received channel payload; expected direct".to_string(),
                 ));
             }
+            // Fail-closed: a Nano receipt is only ever handled by `NanoVerifier`
+            // (network `nano:mainnet`); the facilitator routes by network, so
+            // this is reachable only on an adversarial network/payload mismatch.
+            PayloadData::Nano(_) => {
+                return Err(Error::PayloadMismatch(
+                    "SolanaVerifier received nano payload; expected direct".to_string(),
+                ));
+            }
         };
 
         // Step 1: Decode and validate transaction structure
@@ -457,6 +465,14 @@ impl PaymentVerifier for SolanaVerifier {
             PayloadData::Channel(_) => {
                 return Err(Error::PayloadMismatch(
                     "SolanaVerifier received channel payload; expected direct".to_string(),
+                ));
+            }
+            // Fail-closed: a Nano receipt is only ever handled by `NanoVerifier`
+            // (network `nano:mainnet`); the facilitator routes by network, so
+            // this is reachable only on an adversarial network/payload mismatch.
+            PayloadData::Nano(_) => {
+                return Err(Error::PayloadMismatch(
+                    "SolanaVerifier received nano payload; expected direct".to_string(),
                 ));
             }
         };

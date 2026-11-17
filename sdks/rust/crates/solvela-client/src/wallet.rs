@@ -214,7 +214,7 @@ mod tests {
             "got {word_count} words"
         );
         let addr = wallet.address();
-        assert!(!addr.is_empty());
+        assert_ne!(addr, "");
         assert!(bs58::decode(&addr).into_vec().is_ok());
     }
 

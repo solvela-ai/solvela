@@ -203,6 +203,22 @@ async fn main() -> anyhow::Result<()> {
     {
         app_config.solana.fee_payer_key = Some(val);
     }
+    // Nano (XNO) settlement config (SOLVELA_NANO__*). ENV-ONLY, all-or-nothing,
+    // fatal on a partial or malformed set: the rate is a MONEY knob (it decides
+    // how many raw a micro-USD quote costs), so a half-configured or typo'd
+    // value must refuse to boot rather than quote at the wrong price or
+    // silently stay disabled when the operator believes it is on.
+    app_config.nano = build_nano_config(
+        std::env::var("SOLVELA_NANO__RPC_URL").ok().as_deref(),
+        std::env::var("SOLVELA_NANO__RECIPIENT_ACCOUNT")
+            .ok()
+            .as_deref(),
+        std::env::var("SOLVELA_NANO__USD_PER_XNO").ok().as_deref(),
+    )
+    .map_err(|e| {
+        error!(error = %e, "FATAL: invalid Nano settlement configuration");
+        anyhow::anyhow!("invalid Nano settlement configuration (SOLVELA_NANO__*): {e}")
+    })?;
     // Gas-drip faucet config (SOLVELA_FAUCET__*). All optional; the faucet stays
     // disabled unless `SOLVELA_FAUCET__ENABLED=true` AND a `SOURCE_KEY` is set
     // AND a DB is configured (wired below).
@@ -597,6 +613,28 @@ async fn main() -> anyhow::Result<()> {
     let mut verifiers: Vec<Arc<dyn solvela_x402::traits::PaymentVerifier>> =
         vec![Arc::new(solana_verifier)];
 
+    // ── Nano (XNO) receipt verifier — `exact` over `nano:mainnet` ────────────
+    //
+    // Offered iff `SOLVELA_NANO__*` is fully configured (validated above). The
+    // verifier only READS a node (`block_info`); the gateway never holds a
+    // Nano key. A constructor failure here is fatal — the config was already
+    // accepted, so this can only be a programming error, never a soft-disable.
+    if let Some(nano) = &app_config.nano {
+        let nano_verifier =
+            solvela_x402::nano::NanoVerifier::new(&nano.rpc_url, &nano.recipient_account)
+                .context("failed to initialize Nano verifier from validated config")?;
+        info!(
+            // Host only: hosted Nano nodes embed API keys in the URL path.
+            rpc_host = %solvela_x402::nano::redacted_rpc_url(&nano.rpc_url),
+            recipient = %nano.recipient_account,
+            micro_usd_per_xno = nano.micro_usd_per_xno,
+            "nano settlement enabled (exact over nano:mainnet)"
+        );
+        verifiers.push(Arc::new(nano_verifier));
+    } else {
+        info!("nano settlement disabled (set SOLVELA_NANO__RPC_URL + SOLVELA_NANO__RECIPIENT_ACCOUNT + SOLVELA_NANO__USD_PER_XNO to enable)");
+    }
+
     // ── Fee payer pool (hot wallet rotation) ──────────────────────────────────
     //
     // Build a FeePayerPool from all configured fee payer keys.
@@ -777,6 +815,34 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+
+    // ── Nano settlement requires the authoritative PostgreSQL ledger ─────────
+    //
+    // A Nano send block hash never expires on-chain, so redeemed hashes must be
+    // recorded permanently and atomically across instances. PostgreSQL is the
+    // ONLY authoritative store: the gateway's Redis is a cache (allkeys-lru,
+    // RDB snapshots), where eviction or a restart could forget a redeemed hash
+    // and permit a second paid completion. Pin the backend by CONFIGURATION,
+    // not by whichever pool happened to connect: a fleet on PostgreSQL must
+    // never let one instance fall back to another store during a DB outage
+    // (the same receipt would be "new" in both and buy two completions).
+    // Moving databases therefore requires migrating `nano_receipts` with the
+    // rest of the data — it is redemption history, not a cache.
+    let database_url_configured = std::env::var("DATABASE_URL")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    validate_nano_receipt_store(
+        app_config.nano.is_some(),
+        database_url_configured,
+        db_pool.is_some(),
+    )
+    .map_err(|e| {
+        error!(error = %e, "FATAL: invalid Nano receipt-store configuration");
+        anyhow::anyhow!("{e}")
+    })?;
+    if app_config.nano.is_some() {
+        info!("nano receipt ledger: PostgreSQL (nano_receipts; config-pinned, fail-closed)");
+    }
 
     // ── Semantic cache (Tier 2) — opt-in via [cache.semantic].enabled ──────────
     //
@@ -1527,6 +1593,100 @@ fn validate_recipient_wallet(wallet: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether Nano settlement may run with the configured receipt store.
+///
+/// PostgreSQL is the ONLY accepted ledger: it is permanent, atomic and shared
+/// across instances. The decision is pinned by CONFIGURATION (`DATABASE_URL`
+/// set?) and then requires the pool to have actually connected — an outage must
+/// fail Nano startup rather than silently switch stores. Pure seam so the
+/// matrix is unit-testable.
+fn validate_nano_receipt_store(
+    nano_enabled: bool,
+    database_url_configured: bool,
+    db_pool_available: bool,
+) -> Result<(), String> {
+    if !nano_enabled {
+        return Ok(());
+    }
+    if !database_url_configured {
+        return Err(
+            "Nano settlement requires DATABASE_URL (PostgreSQL is the durable Nano receipt \
+             ledger; Redis is a cache and may evict redeemed hashes). Set DATABASE_URL or \
+             unset all three SOLVELA_NANO__* variables."
+                .to_string(),
+        );
+    }
+    if !db_pool_available {
+        return Err(
+            "Nano settlement is enabled and DATABASE_URL is set, but PostgreSQL did not \
+             connect at startup. Refusing to start Nano rather than fall back to a different \
+             receipt store."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Assemble the Nano settlement config from its three env values.
+///
+/// Returns `Ok(None)` when all three are absent (or empty after trimming) —
+/// Nano simply is not offered. Any OTHER combination is all-or-nothing:
+/// one or two set is an `Err` (fatal), as is a malformed recipient address or
+/// rate. Pure startup-time seam so the fail-closed matrix is unit-testable.
+fn build_nano_config(
+    rpc_url: Option<&str>,
+    recipient_account: Option<&str>,
+    usd_per_xno: Option<&str>,
+) -> Result<Option<config::NanoConfig>, String> {
+    fn nonempty(v: Option<&str>) -> Option<&str> {
+        v.map(str::trim).filter(|s| !s.is_empty())
+    }
+    let (rpc_url, recipient_account, usd_per_xno) = (
+        nonempty(rpc_url),
+        nonempty(recipient_account),
+        nonempty(usd_per_xno),
+    );
+    match (rpc_url, recipient_account, usd_per_xno) {
+        (None, None, None) => Ok(None),
+        (Some(rpc_url), Some(recipient_account), Some(usd_per_xno)) => {
+            if !(rpc_url.starts_with("http://") || rpc_url.starts_with("https://")) {
+                // Never echo the configured value: hosted-node URLs may embed
+                // an API key in the path/query, and startup errors are logged.
+                return Err("SOLVELA_NANO__RPC_URL must start with http:// or https://".to_string());
+            }
+            if !solvela_protocol::is_well_formed_nano_address(recipient_account) {
+                return Err(
+                    "SOLVELA_NANO__RECIPIENT_ACCOUNT is not a well-formed nano_ address \
+                     (nano_ + 60 base32 chars)"
+                        .to_string(),
+                );
+            }
+            let micro_usd_per_xno = solvela_protocol::parse_usd_per_xno(usd_per_xno)
+                .map_err(|e| format!("SOLVELA_NANO__USD_PER_XNO: {e}"))?;
+            Ok(Some(config::NanoConfig {
+                rpc_url: rpc_url.to_string(),
+                recipient_account: recipient_account.to_string(),
+                micro_usd_per_xno,
+            }))
+        }
+        (rpc, acct, rate) => {
+            let missing: Vec<&str> = [
+                (rpc.is_none(), "SOLVELA_NANO__RPC_URL"),
+                (acct.is_none(), "SOLVELA_NANO__RECIPIENT_ACCOUNT"),
+                (rate.is_none(), "SOLVELA_NANO__USD_PER_XNO"),
+            ]
+            .into_iter()
+            .filter_map(|(is_missing, name)| is_missing.then_some(name))
+            .collect();
+            Err(format!(
+                "Nano settlement is partially configured — set all three SOLVELA_NANO__* \
+                 variables or none; missing: {}",
+                missing.join(", ")
+            ))
+        }
+    }
+}
+
 /// Parse the `SOLVELA_CHANNEL__ENABLED` flag value.
 ///
 /// Accepts exactly "true"/"1" and "false"/"0" (case-insensitive, surrounding
@@ -1837,6 +1997,74 @@ mod tests {
 
     /// The channel flag accepts exactly "true"/"1"/"false"/"0",
     /// case-insensitive, with surrounding whitespace trimmed.
+    const NANO_ACCT: &str = "nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3";
+
+    #[test]
+    fn validate_nano_receipt_store_requires_pinned_postgres() {
+        // Disabled Nano never blocks startup.
+        assert_eq!(validate_nano_receipt_store(false, false, false), Ok(()));
+        assert_eq!(validate_nano_receipt_store(false, true, false), Ok(()));
+        // Enabled but no DATABASE_URL configured → fatal (Redis is not a ledger).
+        for db_available in [false, true] {
+            let err = validate_nano_receipt_store(true, false, db_available).unwrap_err();
+            assert!(err.contains("DATABASE_URL"), "{err}");
+            assert!(err.contains("Redis is a cache"), "{err}");
+        }
+        // Configured but the pool failed to connect → fatal, never fall back.
+        let err = validate_nano_receipt_store(true, true, false).unwrap_err();
+        assert!(err.contains("did not connect"), "{err}");
+        // Configured and connected → the only acceptable state.
+        assert_eq!(validate_nano_receipt_store(true, true, true), Ok(()));
+    }
+
+    #[test]
+    fn build_nano_config_all_absent_is_disabled() {
+        assert_eq!(build_nano_config(None, None, None), Ok(None));
+        // Empty / whitespace values count as absent.
+        assert_eq!(build_nano_config(Some(""), Some("  "), None), Ok(None));
+    }
+
+    #[test]
+    fn build_nano_config_full_set_parses() {
+        let cfg = build_nano_config(Some("http://127.0.0.1:7076"), Some(NANO_ACCT), Some("1.25"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cfg.rpc_url, "http://127.0.0.1:7076");
+        assert_eq!(cfg.recipient_account, NANO_ACCT);
+        assert_eq!(cfg.micro_usd_per_xno, 1_250_000);
+    }
+
+    #[test]
+    fn build_nano_config_partial_set_is_fatal_and_names_the_missing_vars() {
+        let err = build_nano_config(Some("http://127.0.0.1:7076"), None, Some("1.25")).unwrap_err();
+        assert!(err.contains("SOLVELA_NANO__RECIPIENT_ACCOUNT"), "{err}");
+        assert!(!err.contains("missing: SOLVELA_NANO__RPC_URL"), "{err}");
+        let err = build_nano_config(None, None, Some("1.25")).unwrap_err();
+        assert!(
+            err.contains("SOLVELA_NANO__RPC_URL") && err.contains("RECIPIENT"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn build_nano_config_rejects_malformed_values() {
+        assert!(
+            build_nano_config(Some("127.0.0.1:7076"), Some(NANO_ACCT), Some("1.25"))
+                .unwrap_err()
+                .contains("RPC_URL")
+        );
+        assert!(
+            build_nano_config(Some("http://x"), Some("xrb_abc"), Some("1.25"))
+                .unwrap_err()
+                .contains("RECIPIENT_ACCOUNT")
+        );
+        for bad_rate in ["0", "-1", "1e3", "abc", "", "1.2345678"] {
+            let r = build_nano_config(Some("http://x"), Some(NANO_ACCT), Some(bad_rate));
+            // "" is treated as absent → partial-set error; the rest are rate errors.
+            assert!(r.is_err(), "{bad_rate:?} must be rejected");
+        }
+    }
+
     #[test]
     fn parse_channel_enabled_accepts_true_false_forms() {
         for (raw, expected) in [
