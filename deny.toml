@@ -35,6 +35,14 @@ ignore = [
     # cache). RustSec's suggested replacement (`pastey`) requires upstream
     # migration in tokenizers; we'll drop this entry when that lands.
     "RUSTSEC-2024-0436",
+    # chrono v0.4.45 — RUSTSEC-2026-0543: crate marked unmaintained (no
+    # vulnerability, no safe upgrade). chrono is used for timestamping spend
+    # rows, wallet budgets and audit entries; it is load-bearing and a
+    # replacement (time/jiff) is a coordinated migration, not a lockfile bump.
+    # cargo-audit treats this as an allowed warning; cargo-deny's default
+    # unmaintained policy is deny, so it is ignored here with the same
+    # rationale. Remove when the timestamp stack migrates.
+    "RUSTSEC-2026-0543",
 ]
 
 # ----------------------------------------------------------------------
