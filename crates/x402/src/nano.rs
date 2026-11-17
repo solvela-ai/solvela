@@ -39,9 +39,9 @@
 //! A block hash never expires on-chain, and a resyncing node can restamp
 //! `local_timestamp` on an old block, so freshness alone can never bound
 //! replay. The gateway therefore records each redeemed hash in a durable,
-//! non-expiring store (PostgreSQL primary key, or Redis `SET NX` when no
-//! database is configured) BEFORE the provider call, and refuses a hash it has
-//! seen before. This verifier is consulted first; the caller only marks the
+//! non-expiring store (the PostgreSQL `nano_receipts` primary key; Redis is a
+//! cache and is not accepted as a money ledger) BEFORE the provider call, and
+//! refuses a hash it has seen before. This verifier is consulted first; the caller only marks the
 //! hash spent after it returns valid, so a receipt that fails verification
 //! (not yet confirmed, wrong amount, bad signature) is never burned.
 //! [`NANO_RECEIPT_MAX_AGE_SECS`] remains defence-in-depth against a receipt
@@ -115,6 +115,35 @@ pub struct BlockInfo {
     pub link_as_account: String,
 }
 
+/// Format a reqwest transport/read error WITHOUT its URL.
+///
+/// `reqwest::Error`'s Display includes the request URL, and hosted Nano nodes
+/// embed an API key in the path/query (`https://rpc.example/<key>`). This error
+/// is logged on the payment path, so the URL must be stripped before it is
+/// interpolated. `without_url` keeps the error category without the endpoint.
+fn transport_error(context: &str, error: reqwest::Error) -> Error {
+    Error::Rpc(format!("{context}: {}", error.without_url()))
+}
+
+/// Bound and de-control a node-provided error string before logging it.
+///
+/// The message comes from the untrusted endpoint. It is capped so a hostile or
+/// broken node cannot flood logs, and control characters are dropped so it
+/// cannot forge log lines. It cannot contain our RPC URL unless the node echoes
+/// it, which is not a secret the gateway sent in the request body.
+fn sanitize_node_message(message: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    let mut out: String = message
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_CHARS)
+        .collect();
+    if message.chars().count() > MAX_CHARS {
+        out.push('…');
+    }
+    out
+}
+
 impl BlockInfo {
     /// Pull the needed fields out of a raw `block_info` JSON response.
     ///
@@ -125,7 +154,8 @@ impl BlockInfo {
         if let Some(err) = value.get("error") {
             let msg = err.as_str().unwrap_or("unknown node error");
             return Err(Error::InvalidTransaction(format!(
-                "nano node rejected block lookup: {msg}"
+                "nano node rejected block lookup: {}",
+                sanitize_node_message(msg)
             )));
         }
         let str_field = |obj: &serde_json::Value, key: &str| -> Result<String, Error> {
@@ -480,7 +510,7 @@ impl NanoVerifier {
             .json(&body)
             .send()
             .await
-            .map_err(|e| Error::Rpc(format!("nano block_info request failed: {e}")))?;
+            .map_err(|e| transport_error("nano block_info request failed", e))?;
         if !response.status().is_success() {
             return Err(Error::Rpc(format!(
                 "nano block_info returned HTTP {}",
@@ -499,7 +529,7 @@ impl NanoVerifier {
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|e| Error::Rpc(format!("nano block_info response read failed: {e}")))?
+            .map_err(|e| transport_error("nano block_info response read failed", e))?
         {
             if buf.len().saturating_add(chunk.len()) > MAX_RPC_RESPONSE_BYTES {
                 return Err(Error::Rpc(
@@ -1116,6 +1146,39 @@ mod tests {
         assert_eq!(redacted, "http://127.0.0.1:7076");
 
         assert_eq!(redacted_rpc_url("not a url"), "<invalid nano rpc url>");
+    }
+
+    #[test]
+    fn node_error_messages_are_bounded_and_control_stripped() {
+        let raw = format!("bad\nline\u{7}{}", "x".repeat(500));
+        let clean = sanitize_node_message(&raw);
+        assert!(!clean.contains('\n'), "{clean}");
+        assert!(!clean.contains('\u{7}'), "{clean}");
+        assert!(clean.chars().count() <= 201, "{}", clean.len());
+        assert!(clean.ends_with('…'));
+
+        // Short messages survive intact.
+        assert_eq!(sanitize_node_message("Block not found"), "Block not found");
+    }
+
+    #[tokio::test]
+    async fn transport_errors_do_not_leak_the_node_url() {
+        // A hosted-node URL may carry an API key in its path/query; reqwest's
+        // Display includes it, and this error is logged on the payment path.
+        let client = Client::builder().redirect(Policy::none()).build().unwrap();
+        let err = client
+            .get("http://127.0.0.1:1/super-secret-api-key")
+            .send()
+            .await
+            .unwrap_err();
+        let message = match transport_error("nano test", err) {
+            Error::Rpc(message) => message,
+            other => panic!("expected Rpc, got {other:?}"),
+        };
+        assert!(
+            !message.contains("super-secret-api-key"),
+            "transport error leaked the configured URL: {message}"
+        );
     }
 
     #[tokio::test]

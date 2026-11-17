@@ -809,6 +809,10 @@ pub(crate) async fn chat_completions_inner(
     let mut payload_for_settle: Option<solvela_x402::types::PaymentPayload> = None;
     // Gateway-advertised amount — used as defense-in-depth cap when deposit amount is unknown
     let client_amount: u64;
+    // Network the payment settled on (Solana vs Nano); bound on the paid path
+    // and consumed by the post-provider billing/failure accounting, which runs
+    // outside the payment block.
+    let settlement_network: settlement_network::SettlementNetwork;
     // M3: budget is checked + reserved BEFORE settlement inside the arm below, so
     // an over-budget request never settles on-chain. These are bound there and
     // consumed after the match (the `None` arm diverges).
@@ -870,7 +874,7 @@ pub(crate) async fn chat_completions_inner(
             // (and, for Nano, the scheme) against the CONFIGURED values for
             // that network — the same ones its verifier enforces. An
             // unconfigured or unknown network is a fixed-string 400.
-            let settlement_network =
+            settlement_network =
                 settlement_network::resolve_settlement_network(&state.config, &payload.accepted)?;
 
             // --- v0 spend-down channel DRAW fork (PR-B) ----------------------
@@ -1236,9 +1240,11 @@ pub(crate) async fn chat_completions_inner(
                             );
                             // Nano: redeem the block hash exactly once, AFTER the
                             // signature + node checks passed and BEFORE the provider
-                            // call. The store is permanent and cross-instance (DB
-                            // primary key / Redis SET NX), so a receipt cannot be
-                            // burned by a failed verification or spent twice.
+                            // call. The store is the permanent, cross-instance
+                            // PostgreSQL ledger (`nano_receipts`), so a receipt
+                            // cannot be burned by a failed verification or spent
+                            // twice. `request_id` ties the row to this call for
+                            // paid-but-undelivered reconciliation.
                             if let Some(receipt) = nano_receipt {
                                 match state
                                     .usage
@@ -1246,6 +1252,7 @@ pub(crate) async fn chat_completions_inner(
                                         &receipt.block_hash,
                                         &receipt.account,
                                         &payload.accepted.amount,
+                                        request_id.as_deref(),
                                     )
                                     .await
                                 {
@@ -1689,8 +1696,31 @@ pub(crate) async fn chat_completions_inner(
                                 // Only the DB ledger row is skipped.
                                 return Ok(response);
                             };
-                            let billed_atomic = spend_cost_atomic(realized_discount, cost_atomic);
+                            // Nano collected the micro-USD QUOTE on-chain (the
+                            // raw amount was converted from it, rounded up), so
+                            // the ledger and receipt must record the quote — not
+                            // the realized token cost. Otherwise a request whose
+                            // actual usage is below the quoted maximum would
+                            // reconcile the wallet's budget downward while the
+                            // payer's XNO stayed with the operator. The actual
+                            // usage is preserved in the row's token columns and
+                            // the actual cost breakdown stays available to
+                            // operators (the receipt shows the quoted breakdown
+                            // that was actually charged). USDC schemes keep
+                            // billing the realized cost.
+                            let billed_atomic = nano_aware_billed_atomic(
+                                settlement_network,
+                                client_amount,
+                                cost_atomic,
+                            );
                             let billed_cost = billed_atomic as f64 / 1_000_000.0;
+                            let receipt_breakdown = if settlement_network
+                                == settlement_network::SettlementNetwork::Nano
+                            {
+                                &estimated_cost_breakdown
+                            } else {
+                                &actual_cost_breakdown
+                            };
                             // Pass the estimated_cost that was committed to Redis
                             // counters in `check_budget` so log_spend can adjust
                             // by the (billed − estimated) delta. Without this,
@@ -1734,7 +1764,7 @@ pub(crate) async fn chat_completions_inner(
                                     tx_signature: &tx_signature,
                                     payer_wallet: &wallet_address,
                                     amount_paid_atomic: billed_atomic,
-                                    breakdown: &actual_cost_breakdown,
+                                    breakdown: receipt_breakdown,
                                 },
                             );
                         }
@@ -1918,11 +1948,103 @@ pub(crate) async fn chat_completions_inner(
                 }
             }
 
+            // Nano: the receipt was redeemed BEFORE the provider call, so this
+            // successful delivery is the moment its durable row becomes
+            // "served". Fire-and-forget: a lost update leaves the row at
+            // 'consumed' (operator-reconcilable via request_id) and never
+            // changes the response or the money already collected.
+            if settlement_network == settlement_network::SettlementNetwork::Nano {
+                if let Some(hash) = tx_signature.clone() {
+                    let state = Arc::clone(&state);
+                    tokio::spawn(async move {
+                        if let Err(e) = state
+                            .usage
+                            .mark_nano_receipt_outcome(
+                                &hash,
+                                crate::usage::NanoReceiptOutcome::Served,
+                            )
+                            .await
+                        {
+                            warn!(
+                                error = %e,
+                                block_hash = %hash,
+                                "failed to record nano served outcome for reconciliation"
+                            );
+                        }
+                    });
+                }
+            }
+
             Ok(response)
         }
         Err(ProviderCallError::AllProvidersFailed {
             model, provider, ..
         }) => {
+            // Nano is the exception to the "no charge" contract below: the XNO
+            // moved before the provider call and the receipt is permanently
+            // consumed. Never claim the payment was not charged, keep the
+            // collected quote on the budget (do NOT release the reservation),
+            // record the spend, and mark the durable receipt row
+            // `provider_failed` so an operator can issue a manual credit or
+            // refund using the block hash + request id.
+            if settlement_network == settlement_network::SettlementNetwork::Nano {
+                counter!("solvela_nano_paid_but_undelivered_total").increment(1);
+                let block_hash = tx_signature.clone().unwrap_or_default();
+                if !block_hash.is_empty() {
+                    if let Err(e) = state
+                        .usage
+                        .mark_nano_receipt_outcome(
+                            &block_hash,
+                            crate::usage::NanoReceiptOutcome::ProviderFailed,
+                        )
+                        .await
+                    {
+                        warn!(
+                            error = %e,
+                            block_hash = %block_hash,
+                            "failed to record paid-but-undelivered nano outcome"
+                        );
+                    }
+                }
+                // The quote was collected: bill it. `estimated_cost_usdc` is
+                // the same quote, so the budget reconciliation delta is zero and
+                // the wallet's counters correctly stay at the amount paid.
+                state.usage.log_spend(SpendLogEntry {
+                    wallet_address: wallet_address.clone(),
+                    model: req.model.clone(),
+                    provider: provider.clone(),
+                    // The call produced no completion; keep the request-side
+                    // input estimate and zero output so the row is a payment
+                    // record, not a token-usage claim.
+                    input_tokens: estimate_input_tokens(&req),
+                    output_tokens: 0,
+                    cost_usdc: client_amount as f64 / 1_000_000.0,
+                    tx_signature: tx_signature.clone(),
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    tenant: tenant.clone(),
+                    tenant_enforced: budget_reservation.tenant_enforced(),
+                    estimated_cost_usdc: Some(estimated_cost),
+                    reserved: budget_reservation.reserved_windows(),
+                    vendor: None,
+                    routing_tier: log_routing_tier.clone(),
+                    routing_score: log_routing_score,
+                });
+                warn!(
+                    provider = %provider,
+                    model = %model,
+                    wallet = %wallet_address,
+                    block_hash = %block_hash,
+                    "Nano payment received but no provider could serve the request — \
+                     receipt consumed and recorded provider_failed for credit/refund"
+                );
+                return Err(GatewayError::UpstreamUnavailable(format!(
+                    "Your Nano payment was received, but no provider could serve the request. \
+                     The receipt cannot be reused; a retry requires a new payment. Contact the \
+                     operator with block hash {block_hash} to request a credit."
+                )));
+            }
+
             // #486: a paid request that no provider could fulfil. Because of the
             // settlement reorder above, the customer is NOT charged for this
             // undelivered completion:
@@ -1982,6 +2104,60 @@ pub(crate) async fn chat_completions_inner(
             Err(GatewayError::UpstreamUnavailable(message.to_string()))
         }
         Err(ProviderCallError::Internal(msg)) => {
+            // Nano: same paid-but-undelivered accounting as the
+            // `AllProvidersFailed` arm — the XNO moved and the receipt is
+            // consumed, so this is not a no-charge failure.
+            if settlement_network == settlement_network::SettlementNetwork::Nano {
+                counter!("solvela_nano_paid_but_undelivered_total").increment(1);
+                let block_hash = tx_signature.clone().unwrap_or_default();
+                if !block_hash.is_empty() {
+                    if let Err(e) = state
+                        .usage
+                        .mark_nano_receipt_outcome(
+                            &block_hash,
+                            crate::usage::NanoReceiptOutcome::ProviderFailed,
+                        )
+                        .await
+                    {
+                        warn!(
+                            error = %e,
+                            block_hash = %block_hash,
+                            "failed to record paid-but-undelivered nano outcome"
+                        );
+                    }
+                }
+                state.usage.log_spend(SpendLogEntry {
+                    wallet_address: wallet_address.clone(),
+                    model: req.model.clone(),
+                    provider: provider_name.to_string(),
+                    input_tokens: estimate_input_tokens(&req),
+                    output_tokens: 0,
+                    cost_usdc: client_amount as f64 / 1_000_000.0,
+                    tx_signature: tx_signature.clone(),
+                    request_id: request_id.clone(),
+                    session_id: session_id.clone(),
+                    tenant: tenant.clone(),
+                    tenant_enforced: budget_reservation.tenant_enforced(),
+                    estimated_cost_usdc: Some(estimated_cost),
+                    reserved: budget_reservation.reserved_windows(),
+                    vendor: None,
+                    routing_tier: log_routing_tier.clone(),
+                    routing_score: log_routing_score,
+                });
+                warn!(
+                    wallet = %wallet_address,
+                    provider = %provider_name,
+                    block_hash = %block_hash,
+                    "Nano payment received but the provider call failed internally — \
+                     receipt consumed and recorded provider_failed for credit/refund"
+                );
+                return Err(GatewayError::UpstreamUnavailable(format!(
+                    "Your Nano payment was received, but the request could not be completed. \
+                     The receipt cannot be reused; a retry requires a new payment. Contact the \
+                     operator with block hash {block_hash} to request a credit."
+                )));
+            }
+
             // #486: same accounting contract as the `AllProvidersFailed` arm — the
             // provider never delivered, so no `exact` transfer was broadcast and no
             // `escrow` claim was fired. The budget reservation committed pre-settlement
@@ -2621,9 +2797,52 @@ fn resolve_model_with_debug(
     Err(GatewayError::ModelNotFound(req.model.clone()))
 }
 
+/// What the chat spend ledger and receipt should record for this network.
+///
+/// Nano collected its micro-USD QUOTE on-chain (the raw amount was derived
+/// from that quote and rounded up), so the quote is the billed amount even when
+/// realized token usage is cheaper than the quoted ceiling. Recording the
+/// realized cost would reconcile the wallet budget downward while the payer's
+/// XNO stayed with the operator. Solana `exact`/`escrow` keep their existing
+/// realized-cost semantics (`client_amount` is consulted only for Nano).
+fn nano_aware_billed_atomic(
+    network: settlement_network::SettlementNetwork,
+    client_amount: u64,
+    realized_atomic: u64,
+) -> u64 {
+    match network {
+        settlement_network::SettlementNetwork::Nano => client_amount,
+        settlement_network::SettlementNetwork::Solana => realized_atomic,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nano_bills_the_quote_and_solana_bills_realized_cost() {
+        use settlement_network::SettlementNetwork;
+        // Payer sent XNO for a 2625 micro-USD quote; actual usage realized 1000.
+        assert_eq!(
+            nano_aware_billed_atomic(SettlementNetwork::Nano, 2625, 1000),
+            2625
+        );
+        // Exact quote/actual equality is unchanged.
+        assert_eq!(
+            nano_aware_billed_atomic(SettlementNetwork::Nano, 2625, 2625),
+            2625
+        );
+        // Solana keeps the realized-cost semantics (overpay is refunded/discounted).
+        assert_eq!(
+            nano_aware_billed_atomic(SettlementNetwork::Solana, 2625, 1000),
+            1000
+        );
+        assert_eq!(
+            nano_aware_billed_atomic(SettlementNetwork::Solana, 2625, 2625),
+            2625
+        );
+    }
 
     // =========================================================================
     // MAX_MESSAGES validation

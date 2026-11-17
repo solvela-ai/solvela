@@ -1718,12 +1718,33 @@ impl PaymentVerifier for AlwaysPassNanoVerifier {
 /// `AlwaysPassVerifier` and [`AlwaysPassNanoVerifier`] are registered, and
 /// `config.nano` carries the test recipient + rate.
 fn test_app_with_mock_provider_and_nano() -> (axum::Router, Arc<AppState>) {
+    test_app_with_nano_verifier(None)
+}
+
+/// Like [`test_app_with_mock_provider_and_nano`] but lets the caller install a
+/// REAL `NanoVerifier` (pointed at a local mock node) instead of the
+/// always-pass stub, so signature verification, the node RPC, redemption and
+/// replay run end-to-end through the route.
+fn test_app_with_nano_verifier(
+    nano_verifier: Option<Arc<dyn PaymentVerifier>>,
+) -> (axum::Router, Arc<AppState>) {
+    test_app_with_nano_verifier_and_providers(nano_verifier, mock_provider_registry())
+}
+
+/// Nano-enabled app with a caller-supplied provider registry (e.g. the
+/// fully-failing chain) — used to drive the paid-but-undelivered path.
+fn test_app_with_nano_verifier_and_providers(
+    nano_verifier: Option<Arc<dyn PaymentVerifier>>,
+    providers: ProviderRegistry,
+) -> (axum::Router, Arc<AppState>) {
     let model_registry = ModelRegistry::from_toml(TEST_MODELS_TOML).unwrap();
     let service_registry = ServiceRegistry::from_toml(TEST_SERVICES_TOML).unwrap();
-    let facilitator = solvela_x402::facilitator::Facilitator::new(vec![
-        Arc::new(AlwaysPassVerifier),
-        Arc::new(AlwaysPassNanoVerifier),
-    ]);
+    let mut verifiers: Vec<Arc<dyn PaymentVerifier>> = vec![Arc::new(AlwaysPassVerifier)];
+    verifiers.push(
+        nano_verifier
+            .unwrap_or_else(|| Arc::new(AlwaysPassNanoVerifier) as Arc<dyn PaymentVerifier>),
+    );
+    let facilitator = solvela_x402::facilitator::Facilitator::new(verifiers);
 
     let mut config = AppConfig::default();
     config.solana.recipient_wallet = TEST_RECIPIENT_WALLET.to_string();
@@ -1737,7 +1758,7 @@ fn test_app_with_mock_provider_and_nano() -> (axum::Router, Arc<AppState>) {
         config,
         model_registry,
         service_registry: RwLock::new(service_registry),
-        providers: mock_provider_registry(),
+        providers,
         native_anthropic: None,
         search_provider: None,
         price_provider: None,
@@ -1803,6 +1824,206 @@ fn nano_payment_header(resource_url: &str, amount_raw: &str, block_hash: &str) -
     };
     let json = serde_json::to_vec(&payload).unwrap();
     base64::engine::general_purpose::STANDARD.encode(&json)
+}
+
+// Real-verifier fixtures. The signer is the raw 32-byte Ed25519-BLAKE2b secret
+// key 0x00…01 (NOT a Nano wallet seed), and the signature is the pinned golden
+// vector over BLAKE2b-256(receipt_signing_message(HASH, QUOTE_RAW,
+// TEST_NANO_RECIPIENT, "POST", "/v1/chat/completions")) — reproduced by the
+// standard `nanocurrency.signBlock({hash})` library.
+const REAL_NANO_SIGNER: &str = "nano_3kdbxitaj7f6mrir6miiwtw4muhcc58e6tn5st6rfaxsdnb7gr4roudwn951";
+const REAL_NANO_SIGNATURE: &str = "C3AE24D5D6B5ECC6866426A9EE9B4B74B14B7778C8F1956C9DE8EDF87C33C9705BF173A13FF0FBBD9685CD9E3DAB68BC91B3D183A928839186BF5F3282A5080F";
+const REAL_NANO_QUOTE_RAW: &str = "2100000000000000000000000000";
+
+/// A body whose 402 quote is exactly 2625 micro-USD (20 input tokens at
+/// $2.50/M + a 245-token completion ceiling at $10/M, plus the 5% fee), which
+/// converts to [`REAL_NANO_QUOTE_RAW`] raw at the test rate — so the pinned
+/// golden signature can be verified by the REAL verifier.
+fn real_nano_chat_body() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "model": "openai/gpt-4o",
+        "max_tokens": 245,
+        "messages": [{"role": "user", "content": "x".repeat(80)}],
+    }))
+    .unwrap()
+}
+
+fn real_nano_payment_header(amount_raw: &str) -> String {
+    let payload = PaymentPayload {
+        x402_version: 2,
+        resource: Resource {
+            url: "/v1/chat/completions".to_string(),
+            method: "POST".to_string(),
+        },
+        accepted: PaymentAccept {
+            scheme: "exact".to_string(),
+            network: solvela_protocol::NANO_NETWORK.to_string(),
+            amount: amount_raw.to_string(),
+            asset: solvela_protocol::NANO_ASSET.to_string(),
+            pay_to: TEST_NANO_RECIPIENT.to_string(),
+            max_timeout_seconds: 300,
+            escrow_program_id: None,
+        },
+        payload: PayloadData::Nano(solvela_protocol::NanoPayload {
+            block_hash: TEST_NANO_BLOCK_HASH.to_string(),
+            account: REAL_NANO_SIGNER.to_string(),
+            signature: REAL_NANO_SIGNATURE.to_string(),
+        }),
+    };
+    base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&payload).unwrap())
+}
+
+/// Minimal HTTP/1.1 server returning a fixed JSON body — the Nano node stub.
+/// Returns its base URL.
+async fn spawn_nano_mock_node(body: String) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// A `block_info` response proving the golden send block paid the configured
+/// recipient from the golden signer, confirmed just now.
+fn nano_node_response_body() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    serde_json::json!({
+        "block_account": REAL_NANO_SIGNER,
+        "amount": REAL_NANO_QUOTE_RAW,
+        "confirmed": "true",
+        "subtype": "send",
+        "local_timestamp": now.to_string(),
+        "contents": { "link_as_account": TEST_NANO_RECIPIENT },
+    })
+    .to_string()
+}
+
+/// The REAL `NanoVerifier` path: signature verification (golden vector) then a
+/// `block_info` RPC to the mock node, then durable redemption through the
+/// route, then replay rejection. The always-pass stub is deliberately not
+/// used, so removing the production verification call would fail this test.
+#[tokio::test]
+async fn test_chat_real_nano_verifier_verifies_node_and_serves_once() {
+    let rpc_url = spawn_nano_mock_node(nano_node_response_body()).await;
+    let verifier = Arc::new(
+        solvela_x402::nano::NanoVerifier::new(&rpc_url, TEST_NANO_RECIPIENT)
+            .expect("verifier builds"),
+    );
+    let (app, _state) = test_app_with_nano_verifier(Some(verifier));
+
+    let send = |app: axum::Router, body: Vec<u8>| {
+        let header = real_nano_payment_header(REAL_NANO_QUOTE_RAW);
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("payment-signature", header)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    let served = send(app.clone(), real_nano_chat_body()).await;
+    assert_eq!(
+        served.status(),
+        StatusCode::OK,
+        "real verifier must accept the golden receipt and reach the provider"
+    );
+    let body = served.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["choices"][0]["message"]["content"], "[mock response]");
+
+    let replay = send(app, real_nano_chat_body()).await;
+    assert_ne!(replay.status(), StatusCode::OK);
+    let body = replay.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&body).contains("already been used"),
+        "re-deeming a verified receipt must be a replay rejection"
+    );
+}
+
+/// Nano's paid-but-undelivered contract: when no provider can serve, the XNO
+/// already moved and the receipt is spent, so the client must NOT be told the
+/// payment was not charged; the same receipt must then be a replay (never a
+/// second free completion).
+#[tokio::test]
+async fn test_chat_real_nano_verifier_provider_failure_is_paid_but_undelivered() {
+    let rpc_url = spawn_nano_mock_node(nano_node_response_body()).await;
+    let verifier = Arc::new(
+        solvela_x402::nano::NanoVerifier::new(&rpc_url, TEST_NANO_RECIPIENT)
+            .expect("verifier builds"),
+    );
+    let (app, _state) =
+        test_app_with_nano_verifier_and_providers(Some(verifier), failing_provider_registry());
+
+    let send = |app: axum::Router| async move {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "payment-signature",
+                    real_nano_payment_header(REAL_NANO_QUOTE_RAW),
+                )
+                .body(Body::from(real_nano_chat_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    };
+
+    let failed = send(app.clone()).await;
+    assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = failed.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("Nano payment was received"),
+        "must not claim an uncharged Nano payment: {text}"
+    );
+    assert!(
+        text.contains(TEST_NANO_BLOCK_HASH),
+        "the payer needs the consumed block hash to request a credit: {text}"
+    );
+    assert!(
+        !text.contains("NOT charged"),
+        "Nano money already moved; the generic uncharged message is false: {text}"
+    );
+
+    let replay = send(app).await;
+    assert_ne!(replay.status(), StatusCode::OK);
+    let body = replay.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        String::from_utf8_lossy(&body).contains("already been used"),
+        "a consumed receipt must not buy a second completion"
+    );
 }
 
 /// Like [`test_app_with_provider_registry_and_exact_verifier`] but lets the
@@ -5607,6 +5828,38 @@ async fn test_402_offers_nano_when_configured() {
         solvela_protocol::usdc_atomic_to_nano_raw(micro, TEST_NANO_MICRO_USD_PER_XNO).unwrap();
     assert_eq!(accepts[1]["amount"], expected_raw.to_string());
     assert!(micro > 0, "a real quote, not the discovery floor");
+}
+
+/// The canonical `PAYMENT-REQUIRED` header must stay Solana-only even when the
+/// legacy 402 advertises Nano: canonical clients are not offered a Nano entry
+/// with USDC's 6 decimals and no canonical proof shape.
+#[tokio::test]
+async fn test_nano_configured_canonical_header_excludes_nano() {
+    let (app, _state) = test_app_with_mock_provider_and_nano();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(nano_chat_body()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+    let canonical = decode_canonical_challenge(&response);
+    let accepts = canonical["accepts"].as_array().expect("accepts array");
+    assert_eq!(accepts.len(), 1, "canonical surface is Solana-only");
+    assert_eq!(accepts[0]["network"], SOLANA_NETWORK);
+    assert_eq!(accepts[0]["asset"], USDC_MINT);
+    assert_eq!(accepts[0]["extra"]["decimals"], 6);
+    let serialized = serde_json::to_string(&canonical).unwrap();
+    assert!(
+        !serialized.contains("nano:mainnet") && !serialized.contains("XNO"),
+        "Nano must never cross into the canonical header: {serialized}"
+    );
 }
 
 /// #813: an UNCONFIGURED deployment never advertises Nano — the 402 is

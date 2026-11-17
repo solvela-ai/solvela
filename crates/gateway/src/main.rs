@@ -809,22 +809,32 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // ── Nano settlement requires a DURABLE receipt store ─────────────────────
+    // ── Nano settlement requires the authoritative PostgreSQL ledger ─────────
     //
     // A Nano send block hash never expires on-chain, so redeemed hashes must be
-    // recorded permanently and atomically across instances (PostgreSQL primary
-    // key, or Redis SET NX). Falling back to per-instance memory would let N
-    // gateway instances each redeem the same receipt and a restart forget it —
-    // double-spending the payer's XNO. Refuse to boot rather than degrade.
-    if app_config.nano.is_some() && db_pool.is_none() && redis_client.is_none() {
-        error!(
-            "FATAL: Nano settlement is enabled but neither PostgreSQL (DATABASE_URL) nor \
-             Redis (REDIS_URL) is available; a durable Nano receipt store is required"
-        );
-        return Err(anyhow::anyhow!(
-            "Nano settlement requires DATABASE_URL or REDIS_URL: receipt redemption must be \
-             durable and cross-instance (set one, or unset SOLVELA_NANO__*)"
-        ));
+    // recorded permanently and atomically across instances. PostgreSQL is the
+    // ONLY authoritative store: the gateway's Redis is a cache (allkeys-lru,
+    // RDB snapshots), where eviction or a restart could forget a redeemed hash
+    // and permit a second paid completion. Pin the backend by CONFIGURATION,
+    // not by whichever pool happened to connect: a fleet on PostgreSQL must
+    // never let one instance fall back to another store during a DB outage
+    // (the same receipt would be "new" in both and buy two completions).
+    // Moving databases therefore requires migrating `nano_receipts` with the
+    // rest of the data — it is redemption history, not a cache.
+    let database_url_configured = std::env::var("DATABASE_URL")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    validate_nano_receipt_store(
+        app_config.nano.is_some(),
+        database_url_configured,
+        db_pool.is_some(),
+    )
+    .map_err(|e| {
+        error!(error = %e, "FATAL: invalid Nano receipt-store configuration");
+        anyhow::anyhow!("{e}")
+    })?;
+    if app_config.nano.is_some() {
+        info!("nano receipt ledger: PostgreSQL (nano_receipts; config-pinned, fail-closed)");
     }
 
     // ── Semantic cache (Tier 2) — opt-in via [cache.semantic].enabled ──────────
@@ -1576,6 +1586,40 @@ fn validate_recipient_wallet(wallet: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether Nano settlement may run with the configured receipt store.
+///
+/// PostgreSQL is the ONLY accepted ledger: it is permanent, atomic and shared
+/// across instances. The decision is pinned by CONFIGURATION (`DATABASE_URL`
+/// set?) and then requires the pool to have actually connected — an outage must
+/// fail Nano startup rather than silently switch stores. Pure seam so the
+/// matrix is unit-testable.
+fn validate_nano_receipt_store(
+    nano_enabled: bool,
+    database_url_configured: bool,
+    db_pool_available: bool,
+) -> Result<(), String> {
+    if !nano_enabled {
+        return Ok(());
+    }
+    if !database_url_configured {
+        return Err(
+            "Nano settlement requires DATABASE_URL (PostgreSQL is the durable Nano receipt \
+             ledger; Redis is a cache and may evict redeemed hashes). Set DATABASE_URL or \
+             unset all three SOLVELA_NANO__* variables."
+                .to_string(),
+        );
+    }
+    if !db_pool_available {
+        return Err(
+            "Nano settlement is enabled and DATABASE_URL is set, but PostgreSQL did not \
+             connect at startup. Refusing to start Nano rather than fall back to a different \
+             receipt store."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Assemble the Nano settlement config from its three env values.
 ///
 /// Returns `Ok(None)` when all three are absent (or empty after trimming) —
@@ -1599,9 +1643,9 @@ fn build_nano_config(
         (None, None, None) => Ok(None),
         (Some(rpc_url), Some(recipient_account), Some(usd_per_xno)) => {
             if !(rpc_url.starts_with("http://") || rpc_url.starts_with("https://")) {
-                return Err(format!(
-                    "SOLVELA_NANO__RPC_URL must start with http:// or https://, got {rpc_url:?}"
-                ));
+                // Never echo the configured value: hosted-node URLs may embed
+                // an API key in the path/query, and startup errors are logged.
+                return Err("SOLVELA_NANO__RPC_URL must start with http:// or https://".to_string());
             }
             if !solvela_protocol::is_well_formed_nano_address(recipient_account) {
                 return Err(
@@ -1947,6 +1991,24 @@ mod tests {
     /// The channel flag accepts exactly "true"/"1"/"false"/"0",
     /// case-insensitive, with surrounding whitespace trimmed.
     const NANO_ACCT: &str = "nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3";
+
+    #[test]
+    fn validate_nano_receipt_store_requires_pinned_postgres() {
+        // Disabled Nano never blocks startup.
+        assert_eq!(validate_nano_receipt_store(false, false, false), Ok(()));
+        assert_eq!(validate_nano_receipt_store(false, true, false), Ok(()));
+        // Enabled but no DATABASE_URL configured → fatal (Redis is not a ledger).
+        for db_available in [false, true] {
+            let err = validate_nano_receipt_store(true, false, db_available).unwrap_err();
+            assert!(err.contains("DATABASE_URL"), "{err}");
+            assert!(err.contains("Redis is a cache"), "{err}");
+        }
+        // Configured but the pool failed to connect → fatal, never fall back.
+        let err = validate_nano_receipt_store(true, true, false).unwrap_err();
+        assert!(err.contains("did not connect"), "{err}");
+        // Configured and connected → the only acceptable state.
+        assert_eq!(validate_nano_receipt_store(true, true, true), Ok(()));
+    }
 
     #[test]
     fn build_nano_config_all_absent_is_disabled() {

@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use gateway::routes::chat::{routing_telemetry, ROUTING_TIER_NOT_ROUTED};
 use gateway::usage::{
-    get_stats_by_day, get_stats_by_model, get_wallet_stats, BudgetConfig, SpendLogEntry,
-    UsageError, UsageTracker, VendorSettlement,
+    get_stats_by_day, get_stats_by_model, get_wallet_stats, BudgetConfig, NanoReceiptOutcome,
+    NanoReceiptReservation, SpendLogEntry, UsageError, UsageTracker, VendorSettlement,
 };
 
 const WALLET_A: &str = "DZNuWFpYwzEAcyaMQzqgbxA4d1f4Yq8EU2YbLPLYxNTw";
@@ -751,4 +751,53 @@ async fn log_spend_vendor_insert_failure_emits_reconcilable_loss_event(pool: PgP
         warns[0]["fields"].get("vendor_wallet").is_none(),
         "the non-vendor warn must not grow vendor fields"
     );
+}
+
+/// The Nano receipt ledger is PostgreSQL-only and exactly-once: the same block
+/// hash reserves once, and the terminal outcome + request id persist for
+/// paid-but-undelivered reconciliation.
+#[sqlx::test(migrations = "../../migrations")]
+async fn nano_receipt_ledger_is_exactly_once_and_records_outcome(pool: PgPool) {
+    const HASH: &str = "991CF190094C00F0B68E2E5F75F6BEE95A2E0BD93CEAA4A6734DB9F19B728948";
+    const PAYER: &str = "nano_3kdbxitaj7f6mrir6miiwtw4muhcc58e6tn5st6rfaxsdnb7gr4roudwn951";
+    const AMOUNT: &str = "2100000000000000000000000000";
+
+    let tracker = UsageTracker::new(Some(pool.clone()), None);
+    assert_eq!(
+        tracker
+            .reserve_nano_receipt(HASH, PAYER, AMOUNT, Some("req-1"))
+            .await
+            .unwrap(),
+        NanoReceiptReservation::New
+    );
+    assert_eq!(
+        tracker
+            .reserve_nano_receipt(HASH, PAYER, AMOUNT, Some("req-1"))
+            .await
+            .unwrap(),
+        NanoReceiptReservation::AlreadySpent,
+        "the primary key must make redemption exactly-once"
+    );
+    tracker
+        .mark_nano_receipt_outcome(HASH, NanoReceiptOutcome::ProviderFailed)
+        .await
+        .unwrap();
+
+    let (outcome, request_id): (String, Option<String>) =
+        sqlx::query_as("SELECT outcome, request_id FROM nano_receipts WHERE block_hash = $1")
+            .bind(HASH)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(outcome, "provider_failed");
+    assert_eq!(request_id.as_deref(), Some("req-1"));
+
+    // A hash that was never reserved has no row to update.
+    assert!(tracker
+        .mark_nano_receipt_outcome(
+            "A170D51B94E00371ACE76E35AC81DC9405D5D04D4CEBC399AEACE07AE05DD293",
+            NanoReceiptOutcome::Served
+        )
+        .await
+        .is_err());
 }

@@ -60,9 +60,9 @@ const RAW_PER_XNO_OVER_MICRO: u128 = RAW_PER_XNO / MICRO_PER_USD as u128;
 /// the XNO has already moved (review finding, 2026-11-11).
 ///
 /// This is a defence-in-depth bound, not the replay guarantee: the gateway
-/// records every redeemed block hash in a durable, non-expiring store (a
-/// PostgreSQL primary key, or Redis `SET NX` when no database is configured),
-/// and refuses any hash it has seen before. A block hash never expires
+/// records every redeemed block hash in a durable, non-expiring store (the
+/// PostgreSQL `nano_receipts` primary key; Redis is a cache and is not accepted
+/// as a money ledger), and refuses any hash it has seen before. A block hash never expires
 /// on-chain, so freshness alone can never bound replay — a node resync can
 /// restamp `local_timestamp` on an old block. The window still rejects a
 /// receipt presented long after the payment it references, keeping the normal

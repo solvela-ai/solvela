@@ -47,7 +47,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::constants::X402_VERSION;
+use crate::constants::{SOLANA_NETWORK, X402_VERSION};
 use crate::payment::{
     PayloadData, PaymentAccept, PaymentPayload, PaymentRequired, Resource, SolanaPayload,
 };
@@ -153,15 +153,21 @@ impl CanonicalPaymentRequired {
     /// Project the legacy 402 body onto the canonical v2 challenge.
     ///
     /// Copies the already-quoted atomic amount strings verbatim — no amount
-    /// math happens here. Only `exact` entries cross the canonical surface;
-    /// returns `None` when the legacy challenge offers no `exact` scheme, in
+    /// math happens here. The canonical surface is **Solana-only**: it includes
+    /// only Solana `exact` entries. Nano (`nano:mainnet`) is deliberately
+    /// excluded even though its legacy scheme string is also `exact`, because
+    /// (a) canonical `extra.decimals` is pinned to USDC's 6 while XNO has 30,
+    /// and (b) canonical inbound proofs only support Solana
+    /// transaction/signature shapes, not the Nano block-hash/account/signature
+    /// receipt — advertising it would offer canonical clients an unpayable,
+    /// wrong-unit option. Returns `None` when no Solana `exact` entry exists, in
     /// which case the caller must NOT emit a canonical header (fail closed —
     /// never advertise a challenge canonical clients cannot satisfy).
     pub fn from_payment_required(legacy: &PaymentRequired) -> Option<Self> {
         let accepts: Vec<CanonicalAccept> = legacy
             .accepts
             .iter()
-            .filter(|accept| accept.scheme == "exact")
+            .filter(|accept| accept.scheme == "exact" && accept.network == SOLANA_NETWORK)
             .map(|accept| CanonicalAccept {
                 scheme: accept.scheme.clone(),
                 network: accept.network.clone(),
@@ -443,6 +449,37 @@ mod tests {
         assert!(
             extra.get("feePayer").is_none(),
             "feePayer must never be advertised (verifier requires a fully-signed tx)"
+        );
+    }
+
+    /// Nano (`nano:mainnet`, also scheme "exact") must NEVER cross into the
+    /// canonical PAYMENT-REQUIRED header: its decimals are 30 (the canonical
+    /// projection hardcodes USDC's 6) and canonical inbound proofs cannot carry
+    /// a Nano receipt. A canonical client offered it would be advertised an
+    /// unpayable, wrong-unit option.
+    #[test]
+    fn canonical_challenge_excludes_nano_and_keeps_solana_only() {
+        let mut nano = exact_accept();
+        nano.network = "nano:mainnet".to_string();
+        nano.asset = "XNO".to_string();
+        nano.amount = "2100000000000000000000000000".to_string();
+
+        // Solana exact + Nano exact → only the Solana entry survives.
+        let canonical =
+            CanonicalPaymentRequired::from_payment_required(&legacy_payment_required(vec![
+                exact_accept(),
+                nano.clone(),
+            ]))
+            .expect("Solana exact accept present");
+        assert_eq!(canonical.accepts.len(), 1);
+        assert_eq!(canonical.accepts[0].network, SOLANA_NETWORK);
+        assert_eq!(canonical.accepts[0].asset, USDC_MINT);
+
+        // Nano only → no canonical header at all (fail closed).
+        assert!(
+            CanonicalPaymentRequired::from_payment_required(&legacy_payment_required(vec![nano]))
+                .is_none(),
+            "a Nano-only 402 must not emit a canonical challenge"
         );
     }
 
