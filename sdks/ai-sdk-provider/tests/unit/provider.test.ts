@@ -3,14 +3,14 @@
  *
  * Assertion groups:
  *  A. Factory shape — callable form, .chat(), .textEmbeddingModel(), .imageModel()
- *  B. specificationVersion — returned LanguageModel is V3 (v3 channel)
+ *  B. specificationVersion — returned LanguageModel is V4 (v4 channel)
  *  C. URL routing — baseFetch receives exact /v1/chat/completions URL
  *  D. Construction-time validation — missing wallet throws SolvelaInvalidConfigError
  *  E. Default singleton — solvela() throws SolvelaInvalidConfigError directing to createSolvelaProvider
  */
 
 import { UnsupportedFunctionalityError } from '@ai-sdk/provider';
-import type { LanguageModelV3, LanguageModelV3CallOptions } from '@ai-sdk/provider';
+import type { LanguageModelV4, LanguageModelV4CallOptions } from '@ai-sdk/provider';
 import { describe, expect, it, vi } from 'vitest';
 
 import { SolvelaInvalidConfigError } from '../../src/errors.js';
@@ -74,10 +74,10 @@ function makeFetchSpy() {
 }
 
 /**
- * Build the minimal LanguageModelV3CallOptions required to invoke doGenerate.
+ * Build the minimal LanguageModelV4CallOptions required to invoke doGenerate.
  * Only `prompt` is required; all other fields are optional.
  */
-function minimalCallOptions(): LanguageModelV3CallOptions {
+function minimalCallOptions(): LanguageModelV4CallOptions {
   return {
     prompt: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }],
   };
@@ -120,33 +120,33 @@ describe('A. Factory shape', () => {
 
   it('callable form and .chat() return the same model id', () => {
     const provider = createSolvelaProvider({ wallet: makeWallet() });
-    const modelA = provider('gpt-4o') as LanguageModelV3;
-    const modelB = provider.chat('gpt-4o') as LanguageModelV3;
+    const modelA = provider('gpt-4o') as LanguageModelV4;
+    const modelB = provider.chat('gpt-4o') as LanguageModelV4;
     expect(modelA.modelId).toBe(modelB.modelId);
   });
 });
 
 // ---------------------------------------------------------------------------
-// B. specificationVersion === 'v3'
+// B. specificationVersion === 'v4'
 // ---------------------------------------------------------------------------
 
 describe('B. specificationVersion', () => {
-  it('callable form returns a LanguageModel with specificationVersion === "v3"', () => {
+  it('callable form returns a LanguageModel with specificationVersion === "v4"', () => {
     const provider = createSolvelaProvider({ wallet: makeWallet() });
-    const model = provider('gpt-4o') as LanguageModelV3;
-    expect(model.specificationVersion).toBe('v3');
+    const model = provider('gpt-4o') as LanguageModelV4;
+    expect(model.specificationVersion).toBe('v4');
   });
 
-  it('.chat() returns a LanguageModel with specificationVersion === "v3"', () => {
+  it('.chat() returns a LanguageModel with specificationVersion === "v4"', () => {
     const provider = createSolvelaProvider({ wallet: makeWallet() });
-    const model = provider.chat('claude-sonnet-4-5') as LanguageModelV3;
-    expect(model.specificationVersion).toBe('v3');
+    const model = provider.chat('claude-sonnet-4-5') as LanguageModelV4;
+    expect(model.specificationVersion).toBe('v4');
   });
 
-  it('specificationVersion is "v3" for any arbitrary model id string', () => {
+  it('specificationVersion is "v4" for any arbitrary model id string', () => {
     const provider = createSolvelaProvider({ wallet: makeWallet() });
-    const model = provider('some-future-model-id') as LanguageModelV3;
-    expect(model.specificationVersion).toBe('v3');
+    const model = provider('some-future-model-id') as LanguageModelV4;
+    expect(model.specificationVersion).toBe('v4');
   });
 });
 
@@ -162,7 +162,7 @@ describe('C. URL routing via baseFetch spy', () => {
       fetch: spy as typeof globalThis.fetch,
     });
 
-    const model = provider('gpt-4o') as LanguageModelV3;
+    const model = provider('gpt-4o') as LanguageModelV4;
     // doGenerate triggers the underlying fetch. Canned 200 response is a
     // valid OpenAI chat completion envelope so the call should succeed.
     await model.doGenerate(minimalCallOptions());
@@ -180,7 +180,7 @@ describe('C. URL routing via baseFetch spy', () => {
       fetch: spy as typeof globalThis.fetch,
     });
 
-    const model = provider('gpt-4o') as LanguageModelV3;
+    const model = provider('gpt-4o') as LanguageModelV4;
     await model.doGenerate(minimalCallOptions());
 
     expect(spy).toHaveBeenCalledTimes(1);
@@ -195,7 +195,7 @@ describe('C. URL routing via baseFetch spy', () => {
       fetch: spy as typeof globalThis.fetch,
     });
 
-    const model = provider('gpt-4o') as LanguageModelV3;
+    const model = provider('gpt-4o') as LanguageModelV4;
     await model.doGenerate(minimalCallOptions());
 
     expect(spy).toHaveBeenCalledTimes(1);
@@ -209,7 +209,7 @@ describe('C. URL routing via baseFetch spy', () => {
       wallet: makeWallet(),
       fetch: spy as typeof globalThis.fetch,
     });
-    const model = provider('gpt-4o') as LanguageModelV3;
+    const model = provider('gpt-4o') as LanguageModelV4;
     await model.doGenerate(minimalCallOptions());
     expect(spy).toHaveBeenCalledTimes(1);
   });

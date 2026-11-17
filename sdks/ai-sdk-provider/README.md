@@ -20,7 +20,7 @@ Once published, the canonical install will be:
 npm install @solvela/ai-sdk-provider ai @ai-sdk/provider-utils @ai-sdk/openai-compatible
 ```
 
-Node >= 18.17 required. ESM only.
+Node >= 22 required (AI SDK 7 / `@ai-sdk/openai-compatible` 3). ESM only.
 
 ## Quick start
 
