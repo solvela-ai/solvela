@@ -10,6 +10,7 @@ pub mod cache;
 pub mod channel_refunds;
 pub mod channels;
 pub mod config;
+pub mod debug_bodies;
 pub mod error;
 pub mod middleware;
 pub mod orgs;

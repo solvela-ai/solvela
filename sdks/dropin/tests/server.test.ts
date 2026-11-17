@@ -16,9 +16,15 @@
 import { after, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http';
 import { once } from 'node:events';
-import type { AddressInfo } from 'node:net';
+import { connect as netConnect, type AddressInfo } from 'node:net';
 
 import bs58 from 'bs58';
 // Independent RFC-8032 verifier (transitive via @solana/web3.js — the same
@@ -47,12 +53,24 @@ const QUOTE_ATOMIC = '10500';
 const CURRENT_SLOT = 1_000_000;
 const EXPIRY_MARGIN = 1200n;
 
+/**
+ * A real gateway names an ABSOLUTE `resource.url` in its 402 — which is NOT
+ * the local request path. Every fixture below keeps the two DISTINCT on
+ * purpose: the sidecar must echo the GATEWAY's value into the voucher wrapper
+ * and never re-derive it from the local request, and an identical-by-accident
+ * fixture makes that assertion vacuous (deleting the echo would still pass).
+ */
+const GATEWAY_RESOURCE_ORIGIN = 'https://api.solvela.ai';
+
 /** The gateway's direct-shape x402 402 body (per signer-core's PaymentRequiredSchema). */
-function challengeBody(amount: string = QUOTE_ATOMIC): string {
+function challengeBody(
+  amount: string = QUOTE_ATOMIC,
+  resourceUrl = `${GATEWAY_RESOURCE_ORIGIN}/v1/messages`,
+): string {
   return JSON.stringify({
     x402_version: 2,
     error: 'Payment required',
-    resource: { url: '/v1/messages', method: 'POST' },
+    resource: { url: resourceUrl, method: 'POST' },
     accepts: [
       {
         scheme: 'exact',
@@ -174,7 +192,7 @@ async function startSidecar(
   };
 }
 
-/** Standard "gateway" behavior: config + 402-then-serve on /v1/messages. */
+/** Standard "gateway" behavior: config + 402-then-serve on either paid surface. */
 function standardHandler(paidResponse: (req: RecordedRequest, res: ServerResponse) => void): FakeHandler {
   return (req, res) => {
     if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
@@ -182,10 +200,15 @@ function standardHandler(paidResponse: (req: RecordedRequest, res: ServerRespons
       res.end(escrowConfigBody());
       return;
     }
-    if (req.method === 'POST' && req.url.startsWith('/v1/messages')) {
+    if (
+      req.method === 'POST' &&
+      (req.url.startsWith('/v1/messages') || req.url.startsWith('/v1/chat/completions'))
+    ) {
       if (!req.headers['payment-signature']) {
+        // A real gateway names the resource it is quoting as an ABSOLUTE url —
+        // deliberately NOT the request path, so the sidecar's echo is pinned.
         res.writeHead(402, { 'content-type': 'application/json' });
-        res.end(challengeBody());
+        res.end(challengeBody(QUOTE_ATOMIC, `${GATEWAY_RESOURCE_ORIGIN}${req.url.split('?')[0]}`));
         return;
       }
       paidResponse(req, res);
@@ -598,7 +621,7 @@ describe('count_tokens + routing', () => {
     });
     const sc = await startSidecar(gw.url);
 
-    const resp = await authedPost(`${sc.url}/v1/chat/completions`, '{}');
+    const resp = await authedPost(`${sc.url}/v1/embeddings`, '{}');
     assert.equal(resp.status, 404);
     await resp.text();
     const getResp = await fetch(`${sc.url}/v1/messages`, {
@@ -608,6 +631,120 @@ describe('count_tokens + routing', () => {
     await getResp.text();
 
     assert.equal(gw.requests.length, 0);
+
+    await sc.close();
+    await gw.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6b. OpenAI-compatible surface — the SAME money path on /v1/chat/completions
+// ---------------------------------------------------------------------------
+
+const chatPosts = (gw: FakeGateway) =>
+  gw.requests.filter((r) => r.method === 'POST' && r.url.startsWith('/v1/chat/completions'));
+
+describe('POST /v1/chat/completions — OpenAI-compatible surface', () => {
+  it('runs the identical draw: 402 → signed retry with IDENTICAL bytes → verbatim relay', async () => {
+    const gw = await startFakeGateway(
+      standardHandler((_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"id":"chatcmpl-1","object":"chat.completion"}');
+      }),
+    );
+    const sc = await startSidecar(gw.url);
+
+    const body = Buffer.from('{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}');
+    const resp = await authedPost(`${sc.url}/v1/chat/completions?stream=false`, body);
+
+    assert.equal(resp.status, 200);
+    assert.equal(await resp.text(), '{"id":"chatcmpl-1","object":"chat.completion"}');
+
+    const posts = chatPosts(gw);
+    assert.equal(posts.length, 2, 'exactly one unpaid forward + one paid retry');
+
+    // Query string preserved on BOTH legs.
+    assert.equal(posts[0].url, '/v1/chat/completions?stream=false');
+    assert.equal(posts[1].url, '/v1/chat/completions?stream=false');
+
+    // The voucher digest binds to the bytes: the retry MUST be byte-identical.
+    assert.deepEqual(posts[0].body, body);
+    assert.deepEqual(posts[1].body, posts[0].body);
+
+    // First leg unpaid; retry carries the voucher. The LOCAL token never leaves.
+    assert.equal(posts[0].headers['payment-signature'], undefined);
+    assert.equal(typeof posts[1].headers['payment-signature'], 'string');
+    for (const p of posts) {
+      assert.equal(p.headers['authorization'], undefined);
+      assert.equal(p.headers['x-api-key'], undefined);
+    }
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it("binds the voucher to the GATEWAY's 402 resource url, not the local request path", async () => {
+    const gw = await startFakeGateway(
+      standardHandler((_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
+      }),
+    );
+    const sc = await startSidecar(gw.url);
+
+    await (await authedPost(`${sc.url}/v1/chat/completions`, '{"model":"m","messages":[]}')).text();
+
+    const paid = chatPosts(gw)[1];
+    const decoded = decodeHeader(paid.headers['payment-signature'] as string);
+    // The gateway's value — which DIFFERS from the request path, so this dies
+    // if the echo is dropped and the local pathname is substituted.
+    assert.equal(decoded.resource.url, `${GATEWAY_RESOURCE_ORIGIN}/v1/chat/completions`);
+    assert.notEqual(decoded.resource.url, '/v1/chat/completions');
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('emits an OpenAI-shaped error envelope, not the Anthropic one', async () => {
+    const gw = await startFakeGateway((_req, res) => {
+      res.writeHead(200).end('should never be reached');
+    });
+    const sc = await startSidecar(gw.url);
+
+    // Bad local token → 401 before any dispatch.
+    const resp = await fetch(`${sc.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer wrong-token', 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(resp.status, 401);
+    const parsed = (await resp.json()) as { type?: string; error: { type: string; message: string } };
+
+    // OpenAI envelope: a bare `error` object, NO top-level `type: "error"`.
+    assert.ok(!('type' in parsed), 'Anthropic-only top-level `type` must not appear');
+    assert.equal(parsed.error.type, 'authentication_error');
+    assert.equal(typeof parsed.error.message, 'string');
+
+    assert.equal(gw.requests.length, 0);
+    await sc.close();
+    await gw.close();
+  });
+
+  it('leaves the Anthropic envelope on /v1/messages untouched (regression guard)', async () => {
+    const gw = await startFakeGateway((_req, res) => {
+      res.writeHead(200).end('should never be reached');
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await fetch(`${sc.url}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer wrong-token', 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(resp.status, 401);
+    const parsed = (await resp.json()) as { type: string; error: { type: string } };
+
+    assert.equal(parsed.type, 'error', 'Claude Code depends on the top-level `type: "error"`');
+    assert.equal(parsed.error.type, 'authentication_error');
 
     await sc.close();
     await gw.close();
@@ -639,7 +776,12 @@ describe('PAYMENT-SIGNATURE golden shape', () => {
 
     // Wrapper: PaymentPayload shape, scheme FORCED to channel, accept fields echoed.
     assert.equal(decoded.x402_version, 2);
-    assert.deepEqual(decoded.resource, { url: '/v1/messages', method: 'POST' });
+    // The GATEWAY's resource url, echoed verbatim (it differs from the local
+    // request path `/v1/messages` — see GATEWAY_RESOURCE_ORIGIN).
+    assert.deepEqual(decoded.resource, {
+      url: `${GATEWAY_RESOURCE_ORIGIN}/v1/messages`,
+      method: 'POST',
+    });
     assert.equal(decoded.accepted.scheme, 'channel');
     assert.equal(decoded.accepted.amount, QUOTE_ATOMIC);
     assert.equal(decoded.accepted.pay_to, PAY_TO);
@@ -816,6 +958,41 @@ describe('lifecycle + relay fidelity', () => {
     await gw.close();
   });
 
+  it('a paid-retry fetch that rejects outright answers 502 in the OpenAI envelope', async () => {
+    // The OUTER catch (the createServer listener's `.catch`) is reachable from
+    // an OpenAI client three ways — the paid-retry fetch rejecting, the serve
+    // deadline firing, `relay()`'s writeHead throwing — and every one of them
+    // was previously pinned ONLY on /v1/messages. Hardcoding `'anthropic'` on
+    // that 502 line therefore survived the whole suite.
+    const gw = await startFakeGateway((req, res, raw) => {
+      if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(escrowConfigBody());
+        return;
+      }
+      if (req.method === 'POST' && req.url.startsWith('/v1/chat/completions')) {
+        if (!req.headers['payment-signature']) {
+          res.writeHead(402, { 'content-type': 'application/json' });
+          res.end(challengeBody(QUOTE_ATOMIC, `${GATEWAY_RESOURCE_ORIGIN}/v1/chat/completions`));
+          return;
+        }
+        raw.socket.destroy(); // the retry never gets a response — fetch rejects
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(`${sc.url}/v1/chat/completions`, '{"model":"m","messages":[]}');
+    assert.equal(resp.status, 502);
+    const parsed = (await resp.json()) as { type?: string; error: { type: string } };
+    assert.ok(!('type' in parsed), 'the outer catch must answer in the CALLER\'s dialect');
+    assert.equal(parsed.error.type, 'server_error');
+
+    await sc.close();
+    await gw.close();
+  });
+
   it('maps sidecar error statuses to Anthropic error types (401/503)', async () => {
     // One slot-null fake serves both assertions: unauthenticated -> 401
     // authentication_error; authenticated draw with no slot -> 503
@@ -863,4 +1040,781 @@ describe('lifecycle + relay fidelity', () => {
     await sc.close();
     await gw.close();
   });
+});
+
+// ---------------------------------------------------------------------------
+// 9. Malformed request targets — a request LINE must never kill the sidecar
+// ---------------------------------------------------------------------------
+
+/**
+ * Send a RAW request line. `fetch` cannot express an absolute-form request
+ * target (`POST http://a:b:c/x HTTP/1.1`), and Node's HTTP parser accepts
+ * several of those that the WHATWG `URL` parser rejects with
+ * ERR_INVALID_URL — thrown SYNCHRONOUSLY inside the `createServer` listener,
+ * where (with no `uncaughtException` handler in this package) it EXITS the
+ * signing sidecar. Pre-auth, so any local process could kill it token-less.
+ */
+function rawRequest(
+  sidecarUrl: string,
+  requestLine: string,
+  headerLines: string[],
+): Promise<string> {
+  const port = Number(new URL(sidecarUrl).port);
+  return new Promise((resolve, reject) => {
+    const socket = netConnect(port, '127.0.0.1', () => {
+      socket.end([requestLine, ...headerLines, '', ''].join('\r\n'));
+    });
+    let out = '';
+    socket.setEncoding('utf-8');
+    socket.setTimeout(5000, () => {
+      socket.destroy();
+      reject(new Error(`no response to raw request line: ${requestLine}`));
+    });
+    socket.on('data', (d) => {
+      out += d;
+    });
+    socket.on('close', () => resolve(out));
+    socket.on('error', reject);
+  });
+}
+
+/** Split a raw HTTP response into its status line and parsed JSON body. Node
+ * frames these chunked (no content-length), so the JSON object is lifted out
+ * of the raw text rather than de-chunked — enough for an error envelope. */
+function parseRawResponse(raw: string): { status: number; body: unknown } {
+  const status = Number(/^HTTP\/1\.1 (\d{3}) /.exec(raw)?.[1] ?? 0);
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  return {
+    status,
+    body: start < 0 || end < start ? undefined : JSON.parse(raw.slice(start, end + 1)),
+  };
+}
+
+const MALFORMED_HEADERS = [
+  'Host: 127.0.0.1',
+  `Authorization: Bearer ${LOCAL_TOKEN}`,
+  'Content-Type: application/json',
+  'Content-Length: 0',
+  'Connection: close',
+];
+
+describe('malformed request targets', () => {
+  it('answers 400 (not a misdirecting 404) and STAYS ALIVE on targets the URL parser rejects', async () => {
+    const gw = await startFakeGateway(
+      standardHandler((_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"id":"msg_alive"}');
+      }),
+    );
+    const sc = await startSidecar(gw.url);
+
+    // Node's HTTP parser accepts every one of these as `req.url`;
+    // `new URL(target, base)` throws ERR_INVALID_URL on all of them. An
+    // unparseable request TARGET is a client protocol error (400), not a
+    // routing miss (404) — and the 404 body's "the sidecar serves
+    // POST /v1/messages, …" text actively misdirects.
+    for (const target of ['http://a:b:c/v1/messages', 'http://[::1/x', 'http://%/x', 'http://[]/x']) {
+      const raw = await rawRequest(sc.url, `POST ${target} HTTP/1.1`, MALFORMED_HEADERS);
+      const { status, body } = parseRawResponse(raw);
+      assert.equal(status, 400, `expected 400 for ${target}, got: ${raw.slice(0, 160)}`);
+      const err = body as { error: { type: string; message: string } };
+      assert.equal(err.error.type, 'invalid_request_error');
+      assert.doesNotMatch(
+        err.error.message,
+        /the sidecar serves POST/,
+        'the 404 routing text misdirects on a malformed request target',
+      );
+    }
+
+    // An unparseable target can match no PAID_PATHS/FREE_PATH entry, so the
+    // gateway is never contacted and nothing is ever signed.
+    assert.equal(gw.requests.length, 0);
+
+    // The process survived: the sidecar still serves the money path.
+    const resp = await authedPost(`${sc.url}/v1/messages`, '{"model":"m","messages":[]}');
+    assert.equal(resp.status, 200);
+    assert.equal(await resp.text(), '{"id":"msg_alive"}');
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('answers a malformed /v1/chat/ target in the OpenAI envelope, not the Anthropic one', async () => {
+    // Collapsing an unparseable target to `/` forced `dialectFor('/')` →
+    // anthropic, so an OpenAI client got `{type:"error",error:{…}}`.
+    const gw = await startFakeGateway((_req, res) => {
+      res.writeHead(200).end('should never be reached');
+    });
+    const sc = await startSidecar(gw.url);
+
+    const openai = parseRawResponse(
+      await rawRequest(sc.url, 'POST http://a:b:c/v1/chat/completions HTTP/1.1', MALFORMED_HEADERS),
+    );
+    assert.equal(openai.status, 400);
+    assert.ok(!('type' in (openai.body as object)), 'OpenAI envelope has no top-level `type`');
+    assert.equal((openai.body as { error: { type: string } }).error.type, 'invalid_request_error');
+
+    const anthropic = parseRawResponse(
+      await rawRequest(sc.url, 'POST http://a:b:c/v1/messages HTTP/1.1', MALFORMED_HEADERS),
+    );
+    assert.equal(anthropic.status, 400);
+    assert.equal((anthropic.body as { type: string }).type, 'error');
+
+    assert.equal(gw.requests.length, 0);
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('logs the raw target ONCE per burst, truncated — never one stderr write per request', async () => {
+    // Reviewer 1: unbounded malformed request lines must not become unbounded
+    // stderr writes. Silence is equally wrong — a burst against a signing-key
+    // holder has to be visible somewhere.
+    const gw = await startFakeGateway((_req, res) => {
+      res.writeHead(200).end('should never be reached');
+    });
+    const sc = await startSidecar(gw.url);
+
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    };
+    try {
+      // First one carries a 5000-char target: the log line must be truncated.
+      const targets = [
+        `http://a:b:c/${'v'.repeat(5000)}`,
+        ...Array.from({ length: 19 }, () => 'http://a:b:c/v1/messages'),
+      ];
+      for (const target of targets) {
+        const { status } = parseRawResponse(
+          await rawRequest(sc.url, `POST ${target} HTTP/1.1`, MALFORMED_HEADERS),
+        );
+        assert.equal(status, 400);
+      }
+    } finally {
+      console.error = realError;
+    }
+
+    const lines = logged.filter((l) => l.includes('unparseable request target'));
+    assert.equal(lines.length, 1, `20 malformed targets produced ${lines.length} stderr writes`);
+    assert.ok(lines[0].length < 400, `log line not truncated: ${lines[0].length} chars`);
+    assert.ok(lines[0].includes('vvvv'), 'the raw target is what an operator needs to see');
+
+    await sc.close();
+    await gw.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. Free-tier (no-402) relay must not ride the short probe deadline
+// ---------------------------------------------------------------------------
+
+describe('non-402 relay deadline', () => {
+  // >10s by construction: the bug is the 10s SHORT_TIMEOUT_MS staying attached
+  // to a relayed response, so only a stream that outlives it can prove the fix.
+  it('does not guillotine a long free-tier (no-402) stream at the probe deadline', async () => {
+    // The gateway's zero-cost bypass (`is_free_estimate`,
+    // crates/gateway/src/routes/chat/mod.rs) serves free-tier models — the
+    // 0.0/0.0-priced NVIDIA models in config/models.toml — as a full streaming
+    // 200 with NO 402 at all. Reproduced: SSE cut at 10.0s, no `[DONE]`.
+    let stopped: (() => void) | undefined;
+    const gw = await startFakeGateway((req, res) => {
+      if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(escrowConfigBody());
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"content":"tok"}}]}\n\n');
+      const timer = setTimeout(() => {
+        res.write('data: [DONE]\n\n');
+        res.end();
+      }, 11_000);
+      stopped = () => clearTimeout(timer);
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(
+      `${sc.url}/v1/chat/completions`,
+      '{"model":"nvidia/free","stream":true,"messages":[]}',
+    );
+    assert.equal(resp.status, 200);
+
+    let received = '';
+    for await (const chunk of resp.body as unknown as AsyncIterable<Uint8Array>) {
+      received += Buffer.from(chunk).toString('utf-8');
+    }
+    assert.match(received, /\[DONE\]/, 'free-tier stream was truncated before [DONE]');
+
+    // A free 200 is relayed as-is — no quote, no voucher, nothing signed.
+    assert.equal(chatPosts(gw).length, 1);
+    assert.equal(chatPosts(gw)[0].headers['payment-signature'], undefined);
+
+    stopped?.();
+    await sc.close();
+    await gw.close();
+  });
+
+  // The streaming case above CANNOT catch the real bug: a streaming gateway
+  // emits response HEADERS on the first token, so `await fetch(...)` settles
+  // early and any re-arm after it lands in time. `stream:false` is the OpenAI
+  // DEFAULT, and a non-streaming completion sends NO headers until the whole
+  // body is finished — one deadline governs the entire request, and a re-arm
+  // placed after the fetch promise is never reached. Reproduced on the
+  // pre-fix build: `status=502 after 10045ms`.
+  it('does not guillotine a slow NON-streaming free-tier (no-402) 200', async () => {
+    const completion = '{"id":"chatcmpl-slow","object":"chat.completion","choices":[]}';
+    let stopped: (() => void) | undefined;
+    const gw = await startFakeGateway((req, res) => {
+      if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(escrowConfigBody());
+        return;
+      }
+      // Headers AND body together, after the delay — exactly what a
+      // non-streaming upstream completion looks like on the wire.
+      const timer = setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(completion);
+      }, 11_000);
+      stopped = () => clearTimeout(timer);
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(
+      `${sc.url}/v1/chat/completions`,
+      '{"model":"nvidia/free","messages":[{"role":"user","content":"hi"}]}',
+    );
+    assert.equal(resp.status, 200, 'a slow non-streaming free-tier 200 must not become a 502');
+    assert.equal(await resp.text(), completion);
+
+    // A free 200 is relayed as-is — no quote, no voucher, nothing signed.
+    assert.equal(chatPosts(gw).length, 1);
+    assert.equal(chatPosts(gw)[0].headers['payment-signature'], undefined);
+
+    stopped?.();
+    await sc.close();
+    await gw.close();
+  });
+
+  // Same bug, sibling leg: count_tokens attached the short deadline and kept
+  // it through `relay()`. Claude Code calls count_tokens before large prompts.
+  it('does not guillotine a slow count_tokens forward', async () => {
+    const counted = '{"input_tokens":180000}';
+    let stopped: (() => void) | undefined;
+    const gw = await startFakeGateway((_req, res) => {
+      const timer = setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(counted);
+      }, 11_000);
+      stopped = () => clearTimeout(timer);
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(
+      `${sc.url}/v1/messages/count_tokens`,
+      '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"…big…"}]}',
+    );
+    assert.equal(resp.status, 200, 'a slow count_tokens must not become a 502');
+    assert.equal(await resp.text(), counted);
+
+    stopped?.();
+    await sc.close();
+    await gw.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10c. Stalled client — the serve ceiling destroys the downstream response
+// ---------------------------------------------------------------------------
+
+/** Injected serve ceiling for the stall tests: long enough for the probe and
+ * draw legs to complete, short enough that the suite does not sleep. */
+const STALL_CEILING_MS = 200;
+
+/** Initial chunk of the stall stream — immediately puts data on the wire. */
+const STALL_CHUNK = Buffer.alloc(256 * 1024, 0x7a);
+
+/** Continuous pump chunk: keeps the stream full-rate so the relay parks in
+ * backpressure and STAYS parked (no socket buffer can absorb an endless
+ * stream) — the deadline must be what ends the wait, not a drain. */
+const STALL_PUMP_CHUNK = Buffer.alloc(64 * 1024, 0x7a);
+
+/** Serve a never-ending full-rate body. The sidecar's relay writes until the
+ * client socket is stuffed, parks in the backpressure wait, and stays parked
+ * until the serve ceiling destroys the connection. */
+function startStallFlood(res: ServerResponse): void {
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.write(STALL_CHUNK);
+  const pump = setInterval(() => {
+    res.write(STALL_PUMP_CHUNK);
+  }, 1);
+  res.on('close', () => clearInterval(pump));
+  // A write racing the sidecar's destroy must not crash the fake gateway.
+  res.on('error', () => {});
+}
+
+/** Reject `promise` unless it settles within `ms`; `label` names the failure. */
+function within<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} — not settled within ${ms}ms`)),
+      ms,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** Drain a response body until the connection errors. A CLEAN stream end is a
+ * failure — the regression is a response that hangs, and a clean end would
+ * mean the destroy never happened. Resolves only when a read rejects. */
+async function drainUntilDestroyed(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  try {
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) throw new Error('stream ended cleanly — expected a destroyed connection');
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message === 'stream ended cleanly — expected a destroyed connection') {
+      throw err;
+    }
+    // The read rejected: the connection was destroyed. This is the success arm.
+  }
+}
+
+/**
+ * The stall regression, shared by every served leg: POST `path`, read ONE
+ * chunk, stop reading, and assert that shortly after the injected ceiling the
+ * upstream read is stopped (the fake gateway sees its stream socket close) and
+ * the downstream connection is destroyed (draining errors, never ends
+ * cleanly) — and that the sidecar still serves `followUp` afterwards.
+ */
+async function expectStalledClientDestroyed(
+  sc: { url: string; close(): Promise<void> },
+  upstreamGone: Promise<void>,
+  path: string,
+  body: string,
+  followUp: { path: string; body: string; expected: string },
+): Promise<void> {
+  const started = Date.now();
+  const resp = await authedPost(`${sc.url}${path}`, body);
+  assert.equal(resp.status, 200, `${path} must start relaying (200)`);
+  assert.ok(resp.body, 'relayed response has a body stream');
+
+  const reader = (resp.body as ReadableStream<Uint8Array>).getReader();
+  const first = await reader.read();
+  assert.ok(!first.done, 'the relay is live — a chunk arrived');
+  assert.ok((first.value?.byteLength ?? 0) > 0, 'the relay is live — a non-empty chunk arrived');
+
+  // Stop reading. The sidecar parks in backpressure; the ceiling must stop the
+  // upstream read shortly after firing.
+  await within(upstreamGone, 3000, 'the serve ceiling never stopped the upstream read');
+  const stoppedAfter = Date.now() - started;
+  assert.ok(
+    stoppedAfter >= STALL_CEILING_MS - 25,
+    `upstream read stopped ${stoppedAfter}ms after the request — BEFORE the ${STALL_CEILING_MS}ms ceiling`,
+  );
+  assert.ok(
+    stoppedAfter < STALL_CEILING_MS + 2500,
+    `upstream read stopped ${stoppedAfter}ms after the request — not shortly after the ceiling`,
+  );
+
+  // Downstream: the destroy must surface as an abnormal termination, not a
+  // clean end and not a hang.
+  await within(
+    drainUntilDestroyed(reader),
+    3000,
+    'the downstream connection was NOT destroyed at the serve ceiling',
+  );
+
+  // The sidecar survived the stall and still serves the money path.
+  const after = await authedPost(`${sc.url}${followUp.path}`, followUp.body);
+  assert.equal(after.status, 200);
+  assert.equal(await after.text(), followUp.expected);
+}
+
+describe('stalled client — serve ceiling reaches the backpressure wait', () => {
+  it('paid leg: destroyed at the ceiling; the channel still serves afterwards', async () => {
+    let paidServes = 0;
+    let upstreamClosed!: () => void;
+    const upstreamGone = new Promise<void>((resolve) => {
+      upstreamClosed = resolve;
+    });
+    const gw = await startFakeGateway(
+      standardHandler((_req, res) => {
+        paidServes += 1;
+        res.on('close', () => upstreamClosed());
+        if (paidServes === 1) {
+          startStallFlood(res);
+          return; // never ends — the client stops reading
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"id":"msg_alive"}');
+      }),
+    );
+    const sc = await startSidecar(gw.url, { serveTimeoutMs: STALL_CEILING_MS });
+
+    await expectStalledClientDestroyed(
+      sc,
+      upstreamGone,
+      '/v1/messages',
+      '{"model":"m","messages":[]}',
+      { path: '/v1/messages', body: '{"model":"m","messages":[]}', expected: '{"id":"msg_alive"}' },
+    );
+
+    // The stalled leg DID sign a voucher — the stall must not have wedged the
+    // channel, and the follow-up ran the full probe + paid draw again.
+    assert.equal(messagesPosts(gw).length, 4, 'probe + paid per request, twice');
+    assert.equal(
+      typeof messagesPosts(gw)[3].headers['payment-signature'],
+      'string',
+      'the follow-up draw carried a voucher',
+    );
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('unpaid OpenAI 200 leg (free-tier probe): destroyed at the ceiling; sidecar keeps serving', async () => {
+    let serves = 0;
+    let upstreamClosed!: () => void;
+    const upstreamGone = new Promise<void>((resolve) => {
+      upstreamClosed = resolve;
+    });
+    const gw = await startFakeGateway((_req, res) => {
+      serves += 1;
+      res.on('close', () => upstreamClosed());
+      if (serves === 1) {
+        startStallFlood(res);
+        return; // the free-tier completion body the client stops reading
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"id":"chatcmpl-alive"}');
+    });
+    const sc = await startSidecar(gw.url, { serveTimeoutMs: STALL_CEILING_MS });
+
+    await expectStalledClientDestroyed(
+      sc,
+      upstreamGone,
+      '/v1/chat/completions',
+      '{"model":"nvidia/free","messages":[]}',
+      {
+        path: '/v1/chat/completions',
+        body: '{"model":"nvidia/free","messages":[]}',
+        expected: '{"id":"chatcmpl-alive"}',
+      },
+    );
+
+    // A free 200 is relayed as-is — no quote, no voucher, nothing signed.
+    assert.equal(chatPosts(gw).length, 2);
+    for (const p of chatPosts(gw)) {
+      assert.equal(p.headers['payment-signature'], undefined, 'a free-tier 200 is never signed');
+    }
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('unpaid Anthropic 200 leg (free-tier probe on /v1/messages): destroyed at the ceiling', async () => {
+    let serves = 0;
+    let upstreamClosed!: () => void;
+    const upstreamGone = new Promise<void>((resolve) => {
+      upstreamClosed = resolve;
+    });
+    const gw = await startFakeGateway((_req, res) => {
+      serves += 1;
+      res.on('close', () => upstreamClosed());
+      if (serves === 1) {
+        startStallFlood(res);
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"id":"msg_alive"}');
+    });
+    const sc = await startSidecar(gw.url, { serveTimeoutMs: STALL_CEILING_MS });
+
+    await expectStalledClientDestroyed(
+      sc,
+      upstreamGone,
+      '/v1/messages',
+      '{"model":"m","messages":[]}',
+      { path: '/v1/messages', body: '{"model":"m","messages":[]}', expected: '{"id":"msg_alive"}' },
+    );
+
+    assert.equal(messagesPosts(gw).length, 2);
+    for (const p of messagesPosts(gw)) {
+      assert.equal(p.headers['payment-signature'], undefined, 'a free-tier 200 is never signed');
+    }
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('count_tokens: destroyed at the ceiling; sidecar keeps serving', async () => {
+    let serves = 0;
+    let upstreamClosed!: () => void;
+    const upstreamGone = new Promise<void>((resolve) => {
+      upstreamClosed = resolve;
+    });
+    const gw = await startFakeGateway((_req, res) => {
+      serves += 1;
+      res.on('close', () => upstreamClosed());
+      if (serves === 1) {
+        startStallFlood(res);
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"input_tokens":7}');
+    });
+    const sc = await startSidecar(gw.url, { serveTimeoutMs: STALL_CEILING_MS });
+
+    await expectStalledClientDestroyed(
+      sc,
+      upstreamGone,
+      '/v1/messages/count_tokens',
+      '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}',
+      {
+        path: '/v1/messages/count_tokens',
+        body: '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}',
+        expected: '{"input_tokens":7}',
+      },
+    );
+
+    assert.equal(gw.requests.length, 2, 'the stalled forward + the follow-up');
+
+    await sc.close();
+    await gw.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10b. A 402 with no `resource` is a malformed quote — fail closed
+// ---------------------------------------------------------------------------
+
+describe('402 without a resource url', () => {
+  it('refuses to sign a voucher bound to a url the gateway never named', async () => {
+    // `resource` is `optional(...)` in signer-core's PaymentRequiredSchema, so
+    // this is a LIVE branch. Substituting the local `url.pathname` would sign a
+    // draw whose wrapper declares a resource the gateway never quoted — a
+    // silent invention on the money path.
+    const gw = await startFakeGateway((req, res) => {
+      if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(escrowConfigBody());
+        return;
+      }
+      const noResource = JSON.parse(challengeBody()) as Record<string, unknown>;
+      delete noResource.resource;
+      res.writeHead(402, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(noResource));
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(`${sc.url}/v1/chat/completions`, '{"model":"m","messages":[]}');
+    assert.equal(resp.status, 502);
+    const parsed = (await resp.json()) as { type?: string; error: { type: string; message: string } };
+    assert.ok(!('type' in parsed), 'OpenAI envelope');
+    assert.match(parsed.error.message, /resource/i);
+
+    // Only the unpaid probe — NOTHING was signed against a resource-less quote.
+    assert.equal(chatPosts(gw).length, 1, 'a resource-less 402 must not produce a signed retry');
+    assert.equal(chatPosts(gw)[0].headers['payment-signature'], undefined);
+
+    await sc.close();
+    await gw.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. OpenAI error-type mapping (every arm, not just 401)
+// ---------------------------------------------------------------------------
+
+/** POST a body larger than MAX_BODY_BYTES (32 MiB) — `fetch` is unhelpful here
+ * because the sidecar answers mid-upload. */
+function oversizedPost(url: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(url, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${LOCAL_TOKEN}`, 'content-type': 'application/json' },
+    });
+    req.on('response', (res) => {
+      let body = '';
+      res.setEncoding('utf-8');
+      res.on('data', (c) => {
+        body += c;
+      });
+      res.on('end', () => {
+        req.destroy();
+        resolve({ status: res.statusCode ?? 0, body });
+      });
+    });
+    req.on('error', reject);
+    const chunk = Buffer.alloc(1024 * 1024, 0x20);
+    let written = 0;
+    const pump = () => {
+      while (written < 33) {
+        written += 1;
+        if (!req.write(chunk)) {
+          req.once('drain', pump);
+          return;
+        }
+      }
+      req.end();
+    };
+    pump();
+  });
+}
+
+describe('OpenAI error-type mapping', () => {
+  it('413 from the OUTER catch answers in the OpenAI envelope', async () => {
+    // BodyTooLargeError escapes `handle()` and is caught by the createServer
+    // listener's `.catch` — the ONLY consumer of the outer dialect derivation.
+    const gw = await startFakeGateway((_req, res) => {
+      res.writeHead(200).end('should never be reached');
+    });
+    const sc = await startSidecar(gw.url);
+
+    const { status, body } = await oversizedPost(`${sc.url}/v1/chat/completions`);
+    assert.equal(status, 413);
+    const parsed = JSON.parse(body) as { type?: string; error: { type: string; message: string } };
+    assert.ok(!('type' in parsed), 'OpenAI envelope has no top-level `type`');
+    assert.equal(parsed.error.type, 'invalid_request_error');
+    assert.equal(gw.requests.length, 0, 'an over-large body never reaches the gateway');
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('413 from the OUTER catch answers in the Anthropic envelope on /v1/messages', async () => {
+    const gw = await startFakeGateway((_req, res) => {
+      res.writeHead(200).end('should never be reached');
+    });
+    const sc = await startSidecar(gw.url);
+
+    const { status, body } = await oversizedPost(`${sc.url}/v1/messages`);
+    assert.equal(status, 413);
+    const parsed = JSON.parse(body) as { type: string; error: { type: string } };
+    assert.equal(parsed.type, 'error');
+    assert.equal(parsed.error.type, 'invalid_request_error');
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('404 on an unserved /v1/chat/ path is invalid_request_error', async () => {
+    const gw = await startFakeGateway((_req, res) => {
+      res.writeHead(200).end('should never be reached');
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(`${sc.url}/v1/chat/embeddings`, '{}');
+    assert.equal(resp.status, 404);
+    const parsed = (await resp.json()) as { type?: string; error: { type: string } };
+    assert.ok(!('type' in parsed));
+    assert.equal(parsed.error.type, 'invalid_request_error');
+    assert.equal(gw.requests.length, 0);
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('503 slot-unavailable is service_unavailable, mirroring the gateway envelope', async () => {
+    // The Anthropic arm says `overloaded_error`; the OpenAI arm previously fell
+    // through to `server_error`, mis-signalling a retryable, nothing-signed
+    // fail-closed as a permanent server fault. `service_unavailable` is the
+    // type the gateway itself emits for 503 (GatewayError::ServiceUnavailable,
+    // crates/gateway/src/error.rs), so both legs a client sees agree.
+    const gw = await startFakeGateway((req, res) => {
+      if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(escrowConfigBody(null));
+        return;
+      }
+      res.writeHead(402, { 'content-type': 'application/json' });
+      res.end(challengeBody(QUOTE_ATOMIC, `${GATEWAY_RESOURCE_ORIGIN}/v1/chat/completions`));
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(`${sc.url}/v1/chat/completions`, '{"model":"m","messages":[]}');
+    assert.equal(resp.status, 503);
+    const parsed = (await resp.json()) as { type?: string; error: { type: string } };
+    assert.ok(!('type' in parsed));
+    assert.equal(parsed.error.type, 'service_unavailable');
+
+    // Nothing signed on the fail-closed slot path.
+    assert.equal(chatPosts(gw).length, 1);
+    assert.equal(chatPosts(gw)[0].headers['payment-signature'], undefined);
+
+    await sc.close();
+    await gw.close();
+  });
+
+  it('502 (no exact quote to draw from) is server_error', async () => {
+    const gw = await startFakeGateway((req, res) => {
+      if (req.method === 'GET' && req.url.startsWith('/v1/escrow/config')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(escrowConfigBody());
+        return;
+      }
+      const noExact = JSON.parse(challengeBody()) as {
+        accepts: Array<Record<string, unknown>>;
+      };
+      noExact.accepts[0].scheme = 'escrow';
+      noExact.accepts[0].escrow_program_id = '9neDHouXgEgHZDde5SpmqqEZ9Uv35hFcjtFEPxomtHLU';
+      res.writeHead(402, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(noExact));
+    });
+    const sc = await startSidecar(gw.url);
+
+    const resp = await authedPost(`${sc.url}/v1/chat/completions`, '{"model":"m","messages":[]}');
+    assert.equal(resp.status, 502);
+    const parsed = (await resp.json()) as { type?: string; error: { type: string } };
+    assert.ok(!('type' in parsed));
+    assert.equal(parsed.error.type, 'server_error');
+    assert.equal(chatPosts(gw).length, 1, 'nothing signed against a non-exact quote');
+
+    await sc.close();
+    await gw.close();
+  });
+
+  // A hard gateway rejection of the paid retry surfaces with the GATEWAY's
+  // status (ChannelDrawError), so these exercise the remaining OpenAI arms.
+  for (const [gatewayStatus, expectedType] of [
+    [400, 'invalid_request_error'],
+    [429, 'rate_limit_error'],
+    [500, 'server_error'],
+  ] as const) {
+    it(`a ${gatewayStatus} draw rejection maps to ${expectedType}`, async () => {
+      const gw = await startFakeGateway(
+        standardHandler((_req, res) => {
+          res.writeHead(gatewayStatus, { 'content-type': 'application/json' });
+          res.end('{"error":{"message":"nope"}}');
+        }),
+      );
+      const sc = await startSidecar(gw.url);
+
+      const resp = await authedPost(`${sc.url}/v1/chat/completions`, '{"model":"m","messages":[]}');
+      assert.equal(resp.status, gatewayStatus);
+      const parsed = (await resp.json()) as { type?: string; error: { type: string } };
+      assert.ok(!('type' in parsed), 'OpenAI envelope has no top-level `type`');
+      assert.equal(parsed.error.type, expectedType);
+
+      // Hard reject: one probe + exactly one signed attempt, never a retry loop.
+      assert.equal(chatPosts(gw).length, 2);
+
+      await sc.close();
+      await gw.close();
+    });
+  }
 });

@@ -124,6 +124,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Resolve the debug-body-logging gate ONCE here, at startup — not lazily
+    // on the first provider request — so the operator warning it emits (when
+    // SOLVELA_DEBUG_BODIES is truthy) appears in the startup log before any
+    // traffic flows. The OnceLock inside keeps this idempotent with the
+    // per-request hot-path checks.
+    gateway::debug_bodies::resolve_at_startup();
+
     // Platform fee: set the process-global knob ONCE, before anything can quote
     // or bill, from the ENVIRONMENT ONLY.
     //

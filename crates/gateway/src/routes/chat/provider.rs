@@ -17,6 +17,7 @@ use tracing::{info, warn};
 
 use solvela_protocol::ChatRequest;
 
+use crate::debug_bodies;
 use crate::providers::fallback;
 use crate::providers::heartbeat::{HeartbeatConfig, HeartbeatItem, HeartbeatStream};
 use crate::routes::debug_headers::{attach_debug_headers, CacheStatus, PaymentStatus};
@@ -328,6 +329,17 @@ async fn execute_streaming_call(
 ) -> Result<Response, ProviderCallError> {
     info!(provider = provider_name, model = %ctx.req.model, "streaming to provider (with model fallback)");
 
+    // Env-gated debug capture (off by default). The SSE response is NEVER
+    // buffered to log it — that would break streaming — so only the request is
+    // captured, plus an explicit note that the response was streamed.
+    debug_bodies::log_json("request", "provider", &ctx.req.model, ctx.req);
+    debug_bodies::log_omitted(
+        "response",
+        "provider",
+        &ctx.req.model,
+        "streamed (SSE not buffered)",
+    );
+
     let provider_start = Instant::now();
     let result =
         if let Some(chain) = build_fallback_chain(provider_name, &ctx.req.model, fallback_pref) {
@@ -442,6 +454,11 @@ async fn execute_non_streaming_call(
 ) -> Result<ProviderCallResult, ProviderCallError> {
     info!(provider = provider_name, model = %ctx.req.model, "proxying to provider (with model fallback)");
 
+    // Env-gated debug capture (off by default). This is the gateway-canonical
+    // OpenAI-shaped body, i.e. what the adapter translates FROM — not the
+    // provider-native wire bytes, which differ per adapter.
+    debug_bodies::log_json("request", "provider", &ctx.req.model, ctx.req);
+
     let provider_start = Instant::now();
     let result =
         if let Some(chain) = build_fallback_chain(provider_name, &ctx.req.model, fallback_pref) {
@@ -472,6 +489,8 @@ async fn execute_non_streaming_call(
 
     match result {
         Ok(result) => {
+            debug_bodies::log_json("response", "provider", &ctx.req.model, &result.data);
+
             // Cache the response (exact tier).
             if let Some(cache) = &ctx.state.cache {
                 cache.set(ctx.req, &result.data).await;
