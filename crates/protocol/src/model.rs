@@ -104,51 +104,20 @@ pub struct LongContextPricing {
     pub output_cost_per_million: f64,
 }
 
-/// Safety factor the 402 QUOTE applies when deciding whether a tiered model's
-/// long-context rates apply, given only an ESTIMATE of the prompt length.
-///
-/// The gateway's upfront estimate is a ~4-chars-per-token heuristic that can
-/// under-count real tokens (code, non-Latin scripts, tool schemas), and the
-/// repo's money-path rule is that a quote may over-reserve but must never
-/// under-reserve relative to the bill. A tier is a price CLIFF, so an estimate
-/// just under the threshold whose real prompt lands just over it would reserve
-/// at the base rate and bill at the tier rate. The quote therefore switches to
-/// the tier once `estimate * QUOTE_TIER_SAFETY_FACTOR > threshold` — i.e. once
-/// the estimate is within a 2x margin of the cliff. Settlement always uses the
-/// exact provider-reported prompt tokens (`rates_for_prompt`), so an
-/// over-quoted request is reconciled down to the real tier at billing time.
-pub const QUOTE_TIER_SAFETY_FACTOR: u32 = 2;
-
 impl ModelRegistration {
-    /// The `(input, output)` per-million rates the 402 QUOTE should reserve
-    /// at, given an ESTIMATED prompt length.
-    ///
-    /// Identical to [`Self::rates_for_prompt`] for flat-rate models. For a
-    /// tiered model it is conservative: the tier rates apply when
-    /// `estimated_prompt_tokens * QUOTE_TIER_SAFETY_FACTOR > threshold` (see
-    /// [`QUOTE_TIER_SAFETY_FACTOR`]). Use this ONLY with an estimate; the
-    /// settlement path and any breakdown computed from provider-reported
-    /// usage must use `rates_for_prompt`.
-    pub fn rates_for_prompt_estimate(&self, estimated_prompt_tokens: u32) -> (f64, f64) {
-        match self.long_context {
-            Some(tier)
-                if estimated_prompt_tokens.saturating_mul(QUOTE_TIER_SAFETY_FACTOR)
-                    > tier.threshold_tokens =>
-            {
-                (tier.input_cost_per_million, tier.output_cost_per_million)
-            }
-            _ => (self.input_cost_per_million, self.output_cost_per_million),
-        }
-    }
-
     /// The `(input, output)` per-million rates that apply to a request whose
     /// prompt is `prompt_tokens` long.
     ///
     /// This is the SINGLE source of truth for tiered pricing: the router's
-    /// `estimate_cost` (402 quote / reservation) and the gateway's
-    /// `compute_actual_atomic_cost` (settlement) both call it, so the quote and
-    /// the bill can never disagree on which tier applies for a given prompt
-    /// length. Models without [`Self::long_context`] always return the base
+    /// `estimate_cost` (402 quote / reservation, fed the gateway's prompt-token
+    /// ESTIMATE) and the gateway's `compute_actual_atomic_cost` (settlement, fed
+    /// provider-reported usage) both call it, so quote and bill apply the same
+    /// rule; they differ only when the estimate and the real prompt fall on
+    /// opposite sides of the threshold (settlement warns when that happens).
+    /// No safety margin is applied at the quote on purpose: the `exact`
+    /// payment scheme settles the quoted amount with no refund, so a
+    /// conservative tier at quote time would be a real over-charge, not an
+    /// over-reservation. Models without [`Self::long_context`] always return the base
     /// rates.
     pub fn rates_for_prompt(&self, prompt_tokens: u32) -> (f64, f64) {
         match self.long_context {
@@ -427,30 +396,6 @@ mod tests {
         assert_eq!(r.rates_for_prompt(100_000), (0.10, 0.50));
         assert_eq!(r.rates_for_prompt(100_001), (0.50, 2.50));
         assert_eq!(r.rates_for_prompt(u32::MAX), (0.50, 2.50));
-    }
-
-    /// QUOTE SAFETY PIN: with only an estimate, the quote switches to the tier
-    /// once the estimate is within the 2x safety margin of the cliff (strictly
-    /// greater than threshold / 2), stays at base below that, and is never
-    /// LESS conservative than the exact rule for the same token count.
-    #[test]
-    fn rates_for_prompt_estimate_switches_within_safety_margin_of_threshold() {
-        let r = tiered_registration();
-        assert_eq!(QUOTE_TIER_SAFETY_FACTOR, 2);
-        assert_eq!(r.rates_for_prompt_estimate(50_000), (0.10, 0.50));
-        assert_eq!(r.rates_for_prompt_estimate(50_001), (0.50, 2.50));
-        assert_eq!(r.rates_for_prompt_estimate(100_001), (0.50, 2.50));
-        // Flat-rate models are unaffected.
-        assert_eq!(
-            registration().rates_for_prompt_estimate(u32::MAX),
-            (2.5, 10.0)
-        );
-        // Never under the exact rule: wherever exact says tier, estimate says tier.
-        for n in [0u32, 1, 50_000, 50_001, 99_999, 100_000, 100_001, u32::MAX] {
-            let exact = r.rates_for_prompt(n);
-            let quote = r.rates_for_prompt_estimate(n);
-            assert!(quote.0 >= exact.0 && quote.1 >= exact.1, "n={n}");
-        }
     }
 
     /// The tier is internal-only: `ModelInfo` (the `/v1/models` wire shape)

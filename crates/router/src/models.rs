@@ -192,22 +192,38 @@ impl ModelRegistry {
             };
 
             // Reject canonical-key collisions only when they would change
-            // the resolved pricing.
+            // the resolved pricing — base rates AND the long-context tier. Two
+            // aliases of one model that disagree on the tier (one flat, one
+            // tiered; or different thresholds / tier rates) would otherwise be
+            // picked by HashMap iteration order, i.e. nondeterministically.
             if let Some(existing) = models.get(&id) {
-                let pricing_matches =
-                    (existing.input_cost_per_million - info.input_cost_per_million).abs()
-                        < f64::EPSILON
-                        && (existing.output_cost_per_million - info.output_cost_per_million).abs()
-                            < f64::EPSILON;
-                if !pricing_matches {
+                let same = |a: f64, b: f64| (a - b).abs() < f64::EPSILON;
+                let base_matches =
+                    same(existing.input_cost_per_million, info.input_cost_per_million)
+                        && same(
+                            existing.output_cost_per_million,
+                            info.output_cost_per_million,
+                        );
+                let tier_matches = match (existing.long_context, info.long_context) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => {
+                        a.threshold_tokens == b.threshold_tokens
+                            && same(a.input_cost_per_million, b.input_cost_per_million)
+                            && same(a.output_cost_per_million, b.output_cost_per_million)
+                    }
+                    _ => false,
+                };
+                if !base_matches || !tier_matches {
                     return Err(ModelRegistryError::ParseError(format!(
                         "duplicate canonical key {id:?} with conflicting pricing: \
-                         entry {key:?} has input={}/output={} but a previous entry \
-                         registered input={}/output={}",
+                         entry {key:?} has input={}/output={} tier={:?} but a previous entry \
+                         registered input={}/output={} tier={:?}",
                         info.input_cost_per_million,
                         info.output_cost_per_million,
+                        info.long_context,
                         existing.input_cost_per_million,
-                        existing.output_cost_per_million
+                        existing.output_cost_per_million,
+                        existing.long_context
                     )));
                 }
             }
@@ -261,14 +277,13 @@ impl ModelRegistry {
             .collect()
     }
 
-    /// Cost breakdown for a request from EXACT token counts (provider-reported
-    /// usage, or a representative fixed request).
+    /// Estimate cost for a request and return a breakdown.
     ///
-    /// Tiered pricing picks the base or long-context rates from the prompt
-    /// length via the same `rates_for_prompt` the gateway's settlement path
-    /// uses, so a breakdown computed here from actual usage matches the bill.
-    /// For the upfront 402 quote / budget reservation, which only has an
-    /// ESTIMATE of the prompt length, use [`Self::quote_cost`].
+    /// Tiered pricing picks the base or long-context rates from `input_tokens`
+    /// via the same `rates_for_prompt` the gateway's settlement path uses. The
+    /// 402 quote feeds this the gateway's prompt-token ESTIMATE; a breakdown
+    /// for a receipt feeds it provider-reported usage. Deliberately no safety
+    /// margin at the quote (see `ModelRegistration::rates_for_prompt`).
     pub fn estimate_cost(
         &self,
         model_id: &str,
@@ -280,32 +295,6 @@ impl ModelRegistry {
             .ok_or_else(|| ModelRegistryError::NotFound(model_id.to_string()))?;
         let rates = model.rates_for_prompt(input_tokens);
         Ok(Self::breakdown(rates, input_tokens, output_tokens))
-    }
-
-    /// Cost breakdown for the upfront 402 QUOTE / budget reservation, from an
-    /// ESTIMATED prompt length.
-    ///
-    /// Identical to [`Self::estimate_cost`] for flat-rate models. For a model
-    /// with a long-context tier it is conservative: it reserves at the tier
-    /// rates once the estimate is within `QUOTE_TIER_SAFETY_FACTOR` of the
-    /// threshold (see `solvela_protocol::QUOTE_TIER_SAFETY_FACTOR`), because
-    /// the token estimate can under-count and a quote must never under-reserve
-    /// relative to the bill. Settlement reconciles to the exact tier.
-    pub fn quote_cost(
-        &self,
-        model_id: &str,
-        estimated_input_tokens: u32,
-        output_tokens: u32,
-    ) -> Result<CostBreakdown, ModelRegistryError> {
-        let model = self
-            .get(model_id)
-            .ok_or_else(|| ModelRegistryError::NotFound(model_id.to_string()))?;
-        let rates = model.rates_for_prompt_estimate(estimated_input_tokens);
-        Ok(Self::breakdown(
-            rates,
-            estimated_input_tokens,
-            output_tokens,
-        ))
     }
 
     fn breakdown(
@@ -483,37 +472,6 @@ long_context_output_cost_per_million = 2.50
         assert!((provider(100_002, 1_000) - (0.050001 + 0.0025)).abs() < 1e-9);
         // Tiered quote strictly exceeds what the flat base rate would charge.
         assert!(provider(100_002, 1_000) > provider(100_000, 1_000) * 4.0);
-    }
-
-    /// QUOTE SAFETY PIN: `quote_cost` reserves at the tier once the estimate
-    /// is within the 2x margin of the threshold, while `estimate_cost` (exact
-    /// usage) stays at base until the threshold is actually crossed — so the
-    /// quote is never below the bill for the same token count, and a flat-rate
-    /// model quotes identically through both.
-    #[test]
-    fn quote_cost_is_conservative_near_the_tier_threshold() {
-        let registry = ModelRegistry::from_toml(TIERED_TOML).unwrap();
-        let total = |b: CostBreakdown| -> f64 { b.total.parse().unwrap() };
-        let quote = |i, o| total(registry.quote_cost("anthropic/tiered", i, o).unwrap());
-        let exact = |i, o| total(registry.estimate_cost("anthropic/tiered", i, o).unwrap());
-        // Below the margin: identical.
-        assert_eq!(quote(50_000, 1_000), exact(50_000, 1_000));
-        // Inside the margin: quote at tier (5x input, 5x output), exact at base.
-        assert!(quote(60_000, 1_000) > exact(60_000, 1_000) * 4.0);
-        // Over the threshold: identical again (both at tier).
-        assert_eq!(quote(100_002, 1_000), exact(100_002, 1_000));
-        // Quote >= exact everywhere.
-        for i in [1u32, 49_999, 50_001, 99_999, 100_000, 100_001, 500_000] {
-            assert!(quote(i, 10) >= exact(i, 10), "i={i}");
-        }
-        // Flat-rate model: the two paths are the same function.
-        let flat = ModelRegistry::from_toml(TEST_TOML).unwrap();
-        for i in [1u32, 100_000, 10_000_000] {
-            assert_eq!(
-                flat.quote_cost("openai/gpt-4o", i, 500).unwrap().total,
-                flat.estimate_cost("openai/gpt-4o", i, 500).unwrap().total
-            );
-        }
     }
 
     /// A half-specified tier is a load error, never a silent flat rate.

@@ -363,6 +363,131 @@ mod tests {
         }
     }
 
+    /// MONEY-PATH PIN: the OpenAI GPT-6 line / GPT-5.5 and the DeepSeek V4
+    /// entries load from the production `config/models.toml` at the prices,
+    /// 272K long-context tiers, context windows and output caps verified
+    /// against the provider pages on 2026-11-18, and the three legacy DeepSeek
+    /// names at the Flash peak reprice. Deleting a tier from one of these
+    /// entries (which the SDK generators would not notice — they omit tier
+    /// fields) or fat-fingering a rate fails here.
+    #[test]
+    fn openai_and_deepseek_entries_load_with_verified_pricing() {
+        use solvela_protocol::LongContextPricing;
+        let toml_str = include_str!("../../../config/models.toml");
+        let registry = crate::models::ModelRegistry::from_toml(toml_str)
+            .expect("config/models.toml must parse");
+        let openai_tier = |input, output| {
+            Some(LongContextPricing {
+                threshold_tokens: 272_000,
+                input_cost_per_million: input,
+                output_cost_per_million: output,
+            })
+        };
+        // (id, base in, base out, tier, context_window, max_output_tokens)
+        let expected = [
+            (
+                "openai/gpt-6.2-sol",
+                2.00,
+                10.00,
+                openai_tier(4.00, 15.00),
+                1_050_000,
+                Some(128_000),
+            ),
+            (
+                "openai/gpt-6.1-sol",
+                2.00,
+                10.00,
+                openai_tier(4.00, 15.00),
+                1_050_000,
+                Some(128_000),
+            ),
+            (
+                "openai/gpt-6-luna",
+                0.10,
+                0.50,
+                openai_tier(0.20, 0.75),
+                1_050_000,
+                Some(128_000),
+            ),
+            (
+                "openai/gpt-5.5",
+                5.00,
+                30.00,
+                openai_tier(10.00, 45.00),
+                1_050_000,
+                Some(128_000),
+            ),
+            (
+                "deepseek/deepseek-flash",
+                0.30,
+                1.20,
+                None,
+                1_048_576,
+                Some(393_216),
+            ),
+            (
+                "deepseek/deepseek-v4-pro",
+                1.32,
+                3.96,
+                None,
+                1_048_576,
+                Some(393_216),
+            ),
+            ("deepseek/deepseek-chat", 0.30, 1.20, None, 1_048_576, None),
+            (
+                "deepseek/deepseek-reasoner",
+                0.30,
+                1.20,
+                None,
+                1_048_576,
+                None,
+            ),
+            ("deepseek/deepseek-coder", 0.30, 1.20, None, 1_048_576, None),
+        ];
+        for (id, input, output, tier, context_window, max_output) in expected {
+            let m = registry
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} must be registered in models.toml"));
+            assert_eq!(m.input_cost_per_million, input, "{id} input cost");
+            assert_eq!(m.output_cost_per_million, output, "{id} output cost");
+            assert_eq!(m.long_context, tier, "{id} long-context tier");
+            assert_eq!(m.context_window, context_window, "{id} context window");
+            assert_eq!(m.max_output_tokens, max_output, "{id} max output");
+            if let Some(t) = tier {
+                // Whole-request switch strictly above 272K, from the loaded entry.
+                assert_eq!(
+                    m.rates_for_prompt(272_000),
+                    (input, output),
+                    "{id} at threshold"
+                );
+                assert_eq!(
+                    m.rates_for_prompt(272_001),
+                    (t.input_cost_per_million, t.output_cost_per_million),
+                    "{id} over threshold"
+                );
+            }
+        }
+        // Tool advertisement follows the model pages: Sol 6.2 / GPT-5.5 yes,
+        // 6.1 Sol / Luna no (Responses-API-only / effort-none-only tool calling).
+        assert!(registry.get("openai/gpt-6.2-sol").unwrap().supports_tools);
+        assert!(registry.get("openai/gpt-5.5").unwrap().supports_tools);
+        assert!(!registry.get("openai/gpt-6.1-sol").unwrap().supports_tools);
+        assert!(!registry.get("openai/gpt-6-luna").unwrap().supports_tools);
+        // Vision: Flash yes, Pro no (pricing page).
+        assert!(
+            registry
+                .get("deepseek/deepseek-flash")
+                .unwrap()
+                .supports_vision
+        );
+        assert!(
+            !registry
+                .get("deepseek/deepseek-v4-pro")
+                .unwrap()
+                .supports_vision
+        );
+    }
+
     /// Haiku 5.5 is the one Claude model with a long-prompt tier: prompts over
     /// 100K tokens bill the whole request at $0.50 / $2.50. Pins the tier so
     /// the Premium/Simple target can never silently revert to a flat rate

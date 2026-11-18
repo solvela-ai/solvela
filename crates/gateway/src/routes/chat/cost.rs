@@ -456,9 +456,7 @@ pub(crate) fn estimated_atomic_cost(
     model_info: &ModelRegistration,
 ) -> Result<u64, String> {
     let f = registry
-        // An ESTIMATE of the prompt feeds this, so use the quote rule (tier
-        // within the safety margin of the threshold), never the exact rule.
-        .quote_cost(
+        .estimate_cost(
             model,
             estimate_input_tokens(req),
             // MONEY-PATH INVARIANT (#500): the estimate's completion-token bound
