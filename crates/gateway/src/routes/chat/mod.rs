@@ -570,7 +570,10 @@ pub(crate) async fn chat_completions_inner(
     // model can never take this path.
     let cost = state
         .model_registry
-        .estimate_cost(
+        // `quote_cost`, not `estimate_cost`: this is an ESTIMATE of the prompt,
+        // so a tiered model reserves at its long-context rates once the estimate
+        // is within the safety margin of the threshold (never under-reserves).
+        .quote_cost(
             &req.model,
             // `input_token_estimate` is the SINGLE estimate source (native
             // Anthropic body estimate on the native path, OpenAI-shaped estimate
@@ -980,7 +983,7 @@ pub(crate) async fn chat_completions_inner(
             // --- C1: Recompute expected cost and validate client amount ---
             let expected_cost = state
                 .model_registry
-                .estimate_cost(
+                .quote_cost(
                     &req.model,
                     // SAME single estimate source as the 402 quote above (native
                     // body estimate on the native path), so the client-amount
@@ -1540,6 +1543,19 @@ pub(crate) async fn chat_completions_inner(
                 // overflow u64. In those cases we skip the claim rather than
                 // firing for a garbage amount; the warn! inside the function
                 // surfaces the corrupt registry entry to operators.
+                // Tiered pricing: surface a bill that landed on a HIGHER tier
+                // than the (safety-margined) quote reserved at — the quote's
+                // under-reservation case the margin exists to prevent.
+                if model_info.rates_for_prompt(u.prompt_tokens)
+                    > model_info.rates_for_prompt_estimate(input_token_estimate)
+                {
+                    warn!(
+                        model = %req.model,
+                        estimated_prompt_tokens = input_token_estimate,
+                        actual_prompt_tokens = u.prompt_tokens,
+                        "long-context tier applied at settlement but not at quote — bill exceeds reservation tier"
+                    );
+                }
                 compute_actual_atomic_cost(u.prompt_tokens, u.completion_tokens, model_info)
             } else {
                 Some(

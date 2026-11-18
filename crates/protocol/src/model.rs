@@ -16,8 +16,8 @@ use crate::platform_fee_percent;
 /// To emit a model on the `GET /v1/models` wire, convert to [`ModelInfo`]
 /// via `ModelInfo::from(&registration)`. That conversion drops the
 /// internal-only fields ([`Self::model_id`], [`Self::supports_structured_output`],
-/// [`Self::supports_batch`], [`Self::max_output_tokens`]) that the gateway
-/// never emits.
+/// [`Self::supports_batch`], [`Self::max_output_tokens`], [`Self::long_context`])
+/// that the gateway never emits.
 ///
 /// # Why a separate type (the #229 follow-up)
 ///
@@ -65,6 +65,99 @@ pub struct ModelRegistration {
     /// gateway cost-cap enforcement (`crates/gateway/src/routes/chat/cost.rs`);
     /// never emitted on the wire.
     pub max_output_tokens: Option<u32>,
+    /// Optional second price tier for long prompts. **Internal-only** on the
+    /// `/v1/models` wire (the `/pricing` route discloses it separately).
+    ///
+    /// `None` means the model has a single flat rate. See
+    /// [`LongContextPricing`] for the billing rule.
+    pub long_context: Option<LongContextPricing>,
+}
+
+/// Second price tier that some providers charge once a request's prompt
+/// exceeds a token threshold (Anthropic Haiku 5.5 over 100K prompt tokens;
+/// OpenAI's GPT-6 / GPT-5.5 lines over 272K input tokens).
+///
+/// # Billing rule (whole-request, never marginal)
+///
+/// Both providers price the **entire** request at the higher tier once the
+/// prompt is strictly greater than `threshold_tokens` — not just the tokens
+/// beyond it (Anthropic: "a request whose prompt is over 100,000 tokens pays
+/// higher prices"; OpenAI's pricing page defines long context as ">272K input
+/// tokens" and lists separate input AND output prices for it). Solvela mirrors
+/// that: [`ModelRegistration::rates_for_prompt`] returns the tier's input and
+/// output rates for the whole request when `prompt_tokens > threshold_tokens`,
+/// and the base rates otherwise. Whole-request is also the conservative
+/// reading — it can never under-bill relative to a marginal interpretation.
+///
+/// Prompt tokens here are the provider-reported `prompt_tokens` (which
+/// include cache reads/writes, matching Anthropic's "all of its input tokens,
+/// including cache reads and cache writes") on the settlement path, and the
+/// gateway's input estimate on the 402-quote path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LongContextPricing {
+    /// Prompt-token threshold. Prompts **strictly greater** than this are
+    /// billed at the tier rates below.
+    pub threshold_tokens: u32,
+    /// Input price per million tokens above the threshold (USDC).
+    pub input_cost_per_million: f64,
+    /// Output price per million tokens above the threshold (USDC).
+    pub output_cost_per_million: f64,
+}
+
+/// Safety factor the 402 QUOTE applies when deciding whether a tiered model's
+/// long-context rates apply, given only an ESTIMATE of the prompt length.
+///
+/// The gateway's upfront estimate is a ~4-chars-per-token heuristic that can
+/// under-count real tokens (code, non-Latin scripts, tool schemas), and the
+/// repo's money-path rule is that a quote may over-reserve but must never
+/// under-reserve relative to the bill. A tier is a price CLIFF, so an estimate
+/// just under the threshold whose real prompt lands just over it would reserve
+/// at the base rate and bill at the tier rate. The quote therefore switches to
+/// the tier once `estimate * QUOTE_TIER_SAFETY_FACTOR > threshold` — i.e. once
+/// the estimate is within a 2x margin of the cliff. Settlement always uses the
+/// exact provider-reported prompt tokens (`rates_for_prompt`), so an
+/// over-quoted request is reconciled down to the real tier at billing time.
+pub const QUOTE_TIER_SAFETY_FACTOR: u32 = 2;
+
+impl ModelRegistration {
+    /// The `(input, output)` per-million rates the 402 QUOTE should reserve
+    /// at, given an ESTIMATED prompt length.
+    ///
+    /// Identical to [`Self::rates_for_prompt`] for flat-rate models. For a
+    /// tiered model it is conservative: the tier rates apply when
+    /// `estimated_prompt_tokens * QUOTE_TIER_SAFETY_FACTOR > threshold` (see
+    /// [`QUOTE_TIER_SAFETY_FACTOR`]). Use this ONLY with an estimate; the
+    /// settlement path and any breakdown computed from provider-reported
+    /// usage must use `rates_for_prompt`.
+    pub fn rates_for_prompt_estimate(&self, estimated_prompt_tokens: u32) -> (f64, f64) {
+        match self.long_context {
+            Some(tier)
+                if estimated_prompt_tokens.saturating_mul(QUOTE_TIER_SAFETY_FACTOR)
+                    > tier.threshold_tokens =>
+            {
+                (tier.input_cost_per_million, tier.output_cost_per_million)
+            }
+            _ => (self.input_cost_per_million, self.output_cost_per_million),
+        }
+    }
+
+    /// The `(input, output)` per-million rates that apply to a request whose
+    /// prompt is `prompt_tokens` long.
+    ///
+    /// This is the SINGLE source of truth for tiered pricing: the router's
+    /// `estimate_cost` (402 quote / reservation) and the gateway's
+    /// `compute_actual_atomic_cost` (settlement) both call it, so the quote and
+    /// the bill can never disagree on which tier applies for a given prompt
+    /// length. Models without [`Self::long_context`] always return the base
+    /// rates.
+    pub fn rates_for_prompt(&self, prompt_tokens: u32) -> (f64, f64) {
+        match self.long_context {
+            Some(tier) if prompt_tokens > tier.threshold_tokens => {
+                (tier.input_cost_per_million, tier.output_cost_per_million)
+            }
+            _ => (self.input_cost_per_million, self.output_cost_per_million),
+        }
+    }
 }
 
 /// Wire representation of a model, as emitted by `GET /v1/models` and parsed
@@ -293,11 +386,83 @@ mod tests {
             supports_structured_output: true,
             supports_batch: false,
             max_output_tokens: Some(16_384),
+            long_context: None,
         }
     }
 
     fn fixture() -> ModelInfo {
         ModelInfo::from(&registration())
+    }
+
+    fn tiered_registration() -> ModelRegistration {
+        ModelRegistration {
+            long_context: Some(LongContextPricing {
+                threshold_tokens: 100_000,
+                input_cost_per_million: 0.50,
+                output_cost_per_million: 2.50,
+            }),
+            input_cost_per_million: 0.10,
+            output_cost_per_million: 0.50,
+            ..registration()
+        }
+    }
+
+    /// A flat-rate model returns its base rates for every prompt length,
+    /// including absurdly long ones — `None` tier means no tier, ever.
+    #[test]
+    fn rates_for_prompt_flat_rate_model_ignores_prompt_length() {
+        let r = registration();
+        assert_eq!(r.rates_for_prompt(0), (2.5, 10.0));
+        assert_eq!(r.rates_for_prompt(u32::MAX), (2.5, 10.0));
+    }
+
+    /// MONEY-PATH PIN: the tier applies to prompts STRICTLY GREATER than the
+    /// threshold (Anthropic: "over 100,000 tokens"), so a prompt of exactly
+    /// the threshold is still base-rate, and threshold + 1 flips BOTH the
+    /// input and the output rate (whole-request billing, not marginal).
+    #[test]
+    fn rates_for_prompt_switches_whole_request_strictly_above_threshold() {
+        let r = tiered_registration();
+        assert_eq!(r.rates_for_prompt(0), (0.10, 0.50));
+        assert_eq!(r.rates_for_prompt(100_000), (0.10, 0.50));
+        assert_eq!(r.rates_for_prompt(100_001), (0.50, 2.50));
+        assert_eq!(r.rates_for_prompt(u32::MAX), (0.50, 2.50));
+    }
+
+    /// QUOTE SAFETY PIN: with only an estimate, the quote switches to the tier
+    /// once the estimate is within the 2x safety margin of the cliff (strictly
+    /// greater than threshold / 2), stays at base below that, and is never
+    /// LESS conservative than the exact rule for the same token count.
+    #[test]
+    fn rates_for_prompt_estimate_switches_within_safety_margin_of_threshold() {
+        let r = tiered_registration();
+        assert_eq!(QUOTE_TIER_SAFETY_FACTOR, 2);
+        assert_eq!(r.rates_for_prompt_estimate(50_000), (0.10, 0.50));
+        assert_eq!(r.rates_for_prompt_estimate(50_001), (0.50, 2.50));
+        assert_eq!(r.rates_for_prompt_estimate(100_001), (0.50, 2.50));
+        // Flat-rate models are unaffected.
+        assert_eq!(
+            registration().rates_for_prompt_estimate(u32::MAX),
+            (2.5, 10.0)
+        );
+        // Never under the exact rule: wherever exact says tier, estimate says tier.
+        for n in [0u32, 1, 50_000, 50_001, 99_999, 100_000, 100_001, u32::MAX] {
+            let exact = r.rates_for_prompt(n);
+            let quote = r.rates_for_prompt_estimate(n);
+            assert!(quote.0 >= exact.0 && quote.1 >= exact.1, "n={n}");
+        }
+    }
+
+    /// The tier is internal-only: `ModelInfo` (the `/v1/models` wire shape)
+    /// carries the BASE rates and nothing else, so the wire is byte-unchanged
+    /// for tiered and flat models alike.
+    #[test]
+    fn long_context_tier_is_not_projected_onto_the_wire() {
+        let v = serde_json::to_value(ModelInfo::from(&tiered_registration())).unwrap();
+        assert_eq!(v["pricing"]["input_per_million"], 0.10);
+        assert_eq!(v["pricing"]["output_per_million"], 0.50);
+        assert!(v["pricing"].get("long_context").is_none());
+        assert!(v.get("long_context").is_none());
     }
 
     #[test]

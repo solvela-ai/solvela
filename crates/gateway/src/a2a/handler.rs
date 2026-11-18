@@ -146,7 +146,8 @@ async fn handle_new_request(
 
     let cost = state
         .model_registry
-        .estimate_cost(&resolved_model, input_tokens, max_tokens)
+        // Quote from an ESTIMATED prompt: tiered models reserve conservatively.
+        .quote_cost(&resolved_model, input_tokens, max_tokens)
         .map_err(|e| JsonRpcErrorData {
             code: ERR_PROVIDER_ERROR,
             message: format!("Failed to estimate cost: {e}"),

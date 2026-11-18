@@ -31,7 +31,7 @@ pub async fn pricing(State(state): State<Arc<AppState>>) -> Json<Value> {
             let total_cost = provider_cost * fee_multiplier;
             let platform_fee = total_cost - provider_cost;
 
-            json!({
+            let mut entry = json!({
                 "id": m.id,
                 "display_name": m.display_name,
                 "provider": m.provider,
@@ -55,7 +55,18 @@ pub async fn pricing(State(state): State<Arc<AppState>>) -> Json<Value> {
                     "reasoning": m.reasoning,
                     "context_window": m.context_window,
                 },
-            })
+            });
+            // Disclose the long-prompt tier where one exists (additive key; flat-rate
+            // models' JSON is byte-unchanged). Prompts strictly over
+            // `threshold_tokens` bill the whole request at these rates.
+            if let Some(tier) = m.long_context {
+                entry["pricing"]["long_context"] = json!({
+                    "threshold_tokens": tier.threshold_tokens,
+                    "input_per_million_usdc": tier.input_cost_per_million,
+                    "output_per_million_usdc": tier.output_cost_per_million,
+                });
+            }
+            entry
         })
         .collect();
 
