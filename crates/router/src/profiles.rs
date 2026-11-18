@@ -58,11 +58,15 @@ impl Profile {
 /// Solana-first model catalog.
 pub fn resolve_model(profile: Profile, tier: Tier) -> &'static str {
     match (profile, tier) {
-        // ECO: cheapest capable model per tier
-        (Profile::Eco, Tier::Simple) => "deepseek/deepseek-chat",
+        // ECO: cheapest capable model per tier. DeepSeek V4.1 Flash is the
+        // documented DeepSeek name (thinking on by default, so it covers the
+        // Reasoning tier too); the legacy `deepseek-chat` / `deepseek-reasoner`
+        // names stay registered for explicit callers but are no longer
+        // listed by DeepSeek, so nothing is auto-routed to them.
+        (Profile::Eco, Tier::Simple) => "deepseek/deepseek-flash",
         (Profile::Eco, Tier::Medium) => "google/gemini-2.5-flash-lite",
-        (Profile::Eco, Tier::Complex) => "deepseek/deepseek-chat",
-        (Profile::Eco, Tier::Reasoning) => "deepseek/deepseek-reasoner",
+        (Profile::Eco, Tier::Complex) => "deepseek/deepseek-flash",
+        (Profile::Eco, Tier::Reasoning) => "deepseek/deepseek-flash",
 
         // AUTO: balanced cost/quality
         (Profile::Auto, Tier::Simple) => "google/gemini-2.5-flash",
@@ -70,11 +74,13 @@ pub fn resolve_model(profile: Profile, tier: Tier) -> &'static str {
         (Profile::Auto, Tier::Complex) => "google/gemini-3.1-pro",
         (Profile::Auto, Tier::Reasoning) => "xai/grok-4-fast-reasoning",
 
-        // PREMIUM: best quality regardless of cost
-        (Profile::Premium, Tier::Simple) => "openai/gpt-4o",
-        (Profile::Premium, Tier::Medium) => "anthropic/claude-sonnet-4-6",
-        (Profile::Premium, Tier::Complex) => "anthropic/claude-opus-4-8",
-        (Profile::Premium, Tier::Reasoning) => "openai/o3",
+        // PREMIUM: best quality regardless of cost — the Claude 5 generation,
+        // Haiku → Sonnet → Opus by complexity, Fable 5.2 (Anthropic's most
+        // capable widely released model) for the Reasoning tier.
+        (Profile::Premium, Tier::Simple) => "anthropic/claude-haiku-5-5",
+        (Profile::Premium, Tier::Medium) => "anthropic/claude-sonnet-5-5",
+        (Profile::Premium, Tier::Complex) => "anthropic/claude-opus-5-5",
+        (Profile::Premium, Tier::Reasoning) => "anthropic/claude-fable-5-2",
 
         // FREE: NVIDIA NIM free-tier Nemotron models ($0/$0), tiered by
         // complexity (nano → super → ultra). The canonical Solvela key is
@@ -97,19 +103,33 @@ pub fn resolve_model(profile: Profile, tier: Tier) -> &'static str {
 pub fn resolve_alias(alias: &str) -> Option<&'static str> {
     match alias.to_lowercase().as_str() {
         "gpt5" | "gpt-5" => Some("openai/gpt-5.2"),
-        "sonnet" | "claude-sonnet" => Some("anthropic/claude-sonnet-4-6"),
-        "opus" | "claude-opus" => Some("anthropic/claude-opus-4-8"),
-        // The canonical key here MUST match one registered by `from_toml`
-        // — see the cross-check test below. Previously this pointed at
-        // `claude-3-5-haiku-20241022`, which has never been in
-        // `config/models.toml`, so every request using the `haiku`
-        // shorthand returned a 500 (registry lookup miss).
-        "haiku" | "claude-haiku" => Some("anthropic/claude-haiku-4-5-20251001"),
+        "gpt5.5" | "gpt-5.5" => Some("openai/gpt-5.5"),
+        "gpt6" | "gpt-6" | "sol" => Some("openai/gpt-6.2-sol"),
+        "gpt6.1" | "gpt-6.1" => Some("openai/gpt-6.1-sol"),
+        "luna" | "gpt-6-luna" => Some("openai/gpt-6-luna"),
+        // Bare family names track the CURRENT Claude generation (5.5 / Fable
+        // 5.2); the previous generation stays reachable via versioned aliases
+        // below. The canonical key here MUST match one registered by
+        // `from_toml` — see the cross-check test below. Previously `haiku`
+        // pointed at `claude-3-5-haiku-20241022`, which has never been in
+        // `config/models.toml`, so every request using the `haiku` shorthand
+        // returned a 500 (registry lookup miss).
+        "fable" | "claude-fable" => Some("anthropic/claude-fable-5-2"),
+        "opus" | "claude-opus" => Some("anthropic/claude-opus-5-5"),
+        "sonnet" | "claude-sonnet" => Some("anthropic/claude-sonnet-5-5"),
+        "haiku" | "claude-haiku" => Some("anthropic/claude-haiku-5-5"),
+        "opus4.8" | "opus-4.8" => Some("anthropic/claude-opus-4-8"),
+        "sonnet4.6" | "sonnet-4.6" => Some("anthropic/claude-sonnet-4-6"),
+        "haiku4.5" | "haiku-4.5" => Some("anthropic/claude-haiku-4-5-20251001"),
         "gemini" | "gemini-pro" => Some("google/gemini-3.1-pro"),
         "flash" | "gemini-flash" => Some("google/gemini-2.5-flash"),
         "grok" | "grok-fast" => Some("xai/grok-4-fast-reasoning"),
-        "deepseek" | "ds" => Some("deepseek/deepseek-chat"),
-        "deepseek-r" | "reasoner" => Some("deepseek/deepseek-reasoner"),
+        // DeepSeek V4.1 Flash thinks by default, so `reasoner` lands there too;
+        // the retired `deepseek-chat` / `deepseek-reasoner` names are only
+        // reachable by their canonical id.
+        "deepseek" | "ds" => Some("deepseek/deepseek-flash"),
+        "deepseek-r" | "reasoner" => Some("deepseek/deepseek-flash"),
+        "deepseek-pro" | "ds-pro" => Some("deepseek/deepseek-v4-pro"),
         // Must agree with Profile::Free's Simple target (the free-tier entry
         // point) — see `free_and_oss_aliases_resolve_to_free_nemotron`.
         "free" | "oss" => Some("nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1"),
@@ -158,7 +178,7 @@ mod tests {
         );
         assert_eq!(
             resolve_model(Profile::Premium, Tier::Reasoning),
-            "openai/o3"
+            "anthropic/claude-fable-5-2"
         );
         assert_eq!(
             resolve_model(Profile::Auto, Tier::Simple),
@@ -266,19 +286,20 @@ mod tests {
     }
 
     /// The `opus` / `claude-opus` aliases and the Premium/Complex tier MUST
-    /// point at the newest registered Opus (`claude-opus-4-8`). Pins the
-    /// 2026-06 repoint off 4.6 onto 4.8 so a future drift back to an older
-    /// (or unregistered) Opus is a test failure, not a silent regression.
+    /// point at the newest registered Opus (`claude-opus-5-5`). Pins the
+    /// 2026-11 repoint off 4.8 onto 5.5 (and the 2026-06 one before it) so a
+    /// future drift back to an older (or unregistered) Opus is a test
+    /// failure, not a silent regression.
     #[test]
-    fn opus_alias_and_premium_complex_route_to_opus_4_8() {
-        assert_eq!(resolve_alias("opus"), Some("anthropic/claude-opus-4-8"));
+    fn opus_alias_and_premium_complex_route_to_opus_5_5() {
+        assert_eq!(resolve_alias("opus"), Some("anthropic/claude-opus-5-5"));
         assert_eq!(
             resolve_alias("claude-opus"),
-            Some("anthropic/claude-opus-4-8")
+            Some("anthropic/claude-opus-5-5")
         );
         assert_eq!(
             resolve_model(Profile::Premium, Tier::Complex),
-            "anthropic/claude-opus-4-8"
+            "anthropic/claude-opus-5-5"
         );
         // The alias and the Premium/Complex tier must agree on the Opus target.
         assert_eq!(
@@ -287,11 +308,12 @@ mod tests {
         );
     }
 
-    /// The two newest Opus entries MUST load from the production
-    /// `config/models.toml` with the agreed Opus-tier pricing and the repo's
-    /// uniform 200K context-window convention. A pricing typo in the TOML
-    /// would otherwise mis-bill every Opus request (the 5% fee is applied to
-    /// these per-million rates).
+    /// Opus 4.8 / 4.7 MUST load from the production `config/models.toml`
+    /// with the agreed Opus-4-tier pricing and their real 1M context window
+    /// (`context_window` is also the billing cap on prompt tokens, so the
+    /// previous 200K value under-billed prompts longer than that). A pricing
+    /// typo in the TOML would otherwise mis-bill every Opus request (the
+    /// platform fee is applied to these per-million rates).
     #[test]
     fn opus_4_8_and_4_7_load_with_correct_pricing() {
         let toml_str = include_str!("../../../config/models.toml");
@@ -304,23 +326,164 @@ mod tests {
                 .unwrap_or_else(|| panic!("{id} must be registered in models.toml"));
             assert_eq!(m.input_cost_per_million, 5.00, "{id} input cost");
             assert_eq!(m.output_cost_per_million, 25.00, "{id} output cost");
-            assert_eq!(m.context_window, 200_000, "{id} context window");
+            assert_eq!(m.context_window, 1_000_000, "{id} context window");
             assert!(m.reasoning, "{id} must be reasoning-capable");
+        }
+    }
+
+    /// MONEY-PATH PIN: the Claude 5 generation loads from the production
+    /// `config/models.toml` at the prices verified against Anthropic's pricing
+    /// page on 2026-11-18, with the 1M context window and 128K output cap. A
+    /// typo here mis-bills every Premium request.
+    #[test]
+    fn claude_5_entries_load_with_verified_pricing() {
+        let toml_str = include_str!("../../../config/models.toml");
+        let registry = crate::models::ModelRegistry::from_toml(toml_str)
+            .expect("config/models.toml must parse");
+        let expected = [
+            ("anthropic/claude-fable-5-2", 8.00, 40.00),
+            ("anthropic/claude-fable-5-1", 10.00, 50.00),
+            ("anthropic/claude-opus-5-5", 4.00, 20.00),
+            ("anthropic/claude-opus-5", 5.00, 25.00),
+            ("anthropic/claude-sonnet-5-5", 2.00, 10.00),
+            ("anthropic/claude-sonnet-5", 2.00, 10.00),
+            ("anthropic/claude-haiku-5-5", 0.10, 0.50),
+        ];
+        for (id, input, output) in expected {
+            let m = registry
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} must be registered in models.toml"));
+            assert_eq!(m.input_cost_per_million, input, "{id} input cost");
+            assert_eq!(m.output_cost_per_million, output, "{id} output cost");
+            assert_eq!(m.context_window, 1_000_000, "{id} context window");
+            assert_eq!(m.max_output_tokens, Some(128_000), "{id} max output");
+            assert!(m.reasoning, "{id} must be reasoning-capable");
+            assert!(m.supports_vision, "{id} supports image input");
+            assert!(m.supports_tools, "{id} supports tool use");
+        }
+    }
+
+    /// Haiku 5.5 is the one Claude model with a long-prompt tier: prompts over
+    /// 100K tokens bill the whole request at $0.50 / $2.50. Pins the tier so
+    /// the Premium/Simple target can never silently revert to a flat rate
+    /// (which would under-bill every long prompt 5x).
+    #[test]
+    fn haiku_5_5_has_the_100k_long_context_tier() {
+        let toml_str = include_str!("../../../config/models.toml");
+        let registry = crate::models::ModelRegistry::from_toml(toml_str)
+            .expect("config/models.toml must parse");
+        let m = registry.get("anthropic/claude-haiku-5-5").unwrap();
+        let tier = m
+            .long_context
+            .expect("haiku 5.5 must carry a long-context tier");
+        assert_eq!(tier.threshold_tokens, 100_000);
+        assert_eq!(tier.input_cost_per_million, 0.50);
+        assert_eq!(tier.output_cost_per_million, 2.50);
+        assert_eq!(m.rates_for_prompt(100_000), (0.10, 0.50));
+        assert_eq!(m.rates_for_prompt(100_001), (0.50, 2.50));
+    }
+
+    /// The Premium profile routes every tier to the Claude 5 generation and
+    /// the bare family aliases agree with it, so `premium` users and `haiku`
+    /// / `sonnet` / `opus` / `fable` alias users land on the same models.
+    #[test]
+    fn premium_profile_and_family_aliases_route_to_claude_5_generation() {
+        assert_eq!(
+            resolve_model(Profile::Premium, Tier::Simple),
+            "anthropic/claude-haiku-5-5"
+        );
+        assert_eq!(
+            resolve_model(Profile::Premium, Tier::Medium),
+            "anthropic/claude-sonnet-5-5"
+        );
+        assert_eq!(
+            resolve_model(Profile::Premium, Tier::Complex),
+            "anthropic/claude-opus-5-5"
+        );
+        assert_eq!(
+            resolve_model(Profile::Premium, Tier::Reasoning),
+            "anthropic/claude-fable-5-2"
+        );
+        assert_eq!(
+            resolve_alias("haiku"),
+            Some(resolve_model(Profile::Premium, Tier::Simple))
+        );
+        assert_eq!(
+            resolve_alias("sonnet"),
+            Some(resolve_model(Profile::Premium, Tier::Medium))
+        );
+        assert_eq!(
+            resolve_alias("fable"),
+            Some(resolve_model(Profile::Premium, Tier::Reasoning))
+        );
+        // The previous generation stays reachable by versioned alias.
+        assert_eq!(resolve_alias("opus4.8"), Some("anthropic/claude-opus-4-8"));
+        assert_eq!(
+            resolve_alias("sonnet4.6"),
+            Some("anthropic/claude-sonnet-4-6")
+        );
+        assert_eq!(
+            resolve_alias("haiku4.5"),
+            Some("anthropic/claude-haiku-4-5-20251001")
+        );
+    }
+
+    /// Nothing auto-routes to a DeepSeek name DeepSeek no longer documents:
+    /// the Eco profile and the `deepseek` / `reasoner` aliases use the
+    /// documented `deepseek-flash` (the retired `deepseek-chat` /
+    /// `deepseek-reasoner` names stay registered for explicit callers only).
+    #[test]
+    fn eco_profile_and_deepseek_aliases_use_documented_v4_names() {
+        for tier in [Tier::Simple, Tier::Complex, Tier::Reasoning] {
+            assert_eq!(
+                resolve_model(Profile::Eco, tier),
+                "deepseek/deepseek-flash",
+                "Eco {tier:?}"
+            );
+        }
+        assert_eq!(resolve_alias("deepseek"), Some("deepseek/deepseek-flash"));
+        assert_eq!(resolve_alias("reasoner"), Some("deepseek/deepseek-flash"));
+        assert_eq!(
+            resolve_alias("deepseek-pro"),
+            Some("deepseek/deepseek-v4-pro")
+        );
+        for (profile, tier) in [
+            (Profile::Eco, Tier::Simple),
+            (Profile::Eco, Tier::Medium),
+            (Profile::Eco, Tier::Complex),
+            (Profile::Eco, Tier::Reasoning),
+            (Profile::Auto, Tier::Simple),
+            (Profile::Auto, Tier::Medium),
+            (Profile::Auto, Tier::Complex),
+            (Profile::Auto, Tier::Reasoning),
+            (Profile::Premium, Tier::Simple),
+            (Profile::Premium, Tier::Medium),
+            (Profile::Premium, Tier::Complex),
+            (Profile::Premium, Tier::Reasoning),
+        ] {
+            let target = resolve_model(profile, tier);
+            assert!(
+                !matches!(
+                    target,
+                    "deepseek/deepseek-chat"
+                        | "deepseek/deepseek-reasoner"
+                        | "deepseek/deepseek-coder"
+                ),
+                "{profile:?}/{tier:?} must not auto-route to a retired DeepSeek name, got {target}"
+            );
         }
     }
 
     #[test]
     fn test_resolve_alias() {
         assert_eq!(resolve_alias("gpt5"), Some("openai/gpt-5.2"));
-        assert_eq!(resolve_alias("sonnet"), Some("anthropic/claude-sonnet-4-6"));
-        assert_eq!(resolve_alias("opus"), Some("anthropic/claude-opus-4-8"));
+        assert_eq!(resolve_alias("gpt6"), Some("openai/gpt-6.2-sol"));
+        assert_eq!(resolve_alias("sonnet"), Some("anthropic/claude-sonnet-5-5"));
+        assert_eq!(resolve_alias("opus"), Some("anthropic/claude-opus-5-5"));
         // R1 regression: this used to point at the unregistered
         // `claude-3-5-haiku-20241022`. The canonical key MUST match a
         // model registered in `config/models.toml`.
-        assert_eq!(
-            resolve_alias("haiku"),
-            Some("anthropic/claude-haiku-4-5-20251001")
-        );
+        assert_eq!(resolve_alias("haiku"), Some("anthropic/claude-haiku-5-5"));
         assert_eq!(resolve_alias("nonexistent"), None);
     }
 
@@ -342,9 +505,18 @@ mod tests {
         // Every alias the public `resolve_alias` exposes.
         let aliases = [
             "gpt5",
+            "gpt5.5",
+            "gpt6",
+            "gpt6.1",
+            "luna",
+            "fable",
             "sonnet",
             "opus",
             "haiku",
+            "opus4.8",
+            "sonnet4.6",
+            "haiku4.5",
+            "deepseek-pro",
             "gemini",
             "flash",
             "grok",

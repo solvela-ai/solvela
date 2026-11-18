@@ -604,6 +604,51 @@ input_cost_per_million = 0.0
 output_cost_per_million = 0.0
 context_window = 1000000
 supports_streaming = true
+
+# Routing targets the smart-router tests reach (mirroring config/models.toml,
+# 2026-11): `sonnet` / `haiku` aliases and Premium Simple/Medium resolve to the
+# Claude 5.5 ids; the `eco` profile's DeepSeek tiers resolve to deepseek-flash.
+[models.anthropic-claude-haiku-5-5]
+provider = "anthropic"
+model_id = "claude-haiku-5-5"
+display_name = "Claude Haiku 5.5"
+input_cost_per_million = 0.10
+output_cost_per_million = 0.50
+long_context_threshold_tokens = 100000
+long_context_input_cost_per_million = 0.50
+long_context_output_cost_per_million = 2.50
+context_window = 1000000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+max_output_tokens = 128000
+
+[models.anthropic-claude-sonnet-5-5]
+provider = "anthropic"
+model_id = "claude-sonnet-5-5"
+display_name = "Claude Sonnet 5.5"
+input_cost_per_million = 2.00
+output_cost_per_million = 10.00
+context_window = 1000000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+max_output_tokens = 128000
+
+[models.deepseek-flash]
+provider = "deepseek"
+model_id = "deepseek-flash"
+display_name = "DeepSeek V4.1 Flash"
+input_cost_per_million = 0.30
+output_cost_per_million = 1.20
+context_window = 1048576
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+max_output_tokens = 393216
 "#;
 
 /// Receipts-GET limiter for test apps: effectively unlimited so the
@@ -3268,10 +3313,12 @@ async fn test_models_endpoint() {
     assert_eq!(json["object"], "list");
 
     let data = json["data"].as_array().unwrap();
-    // 5 models in TEST_MODELS_TOML: gpt-4o, deepseek-chat, claude-sonnet,
+    // 8 models in TEST_MODELS_TOML: gpt-4o, deepseek-chat, claude-sonnet (4.6),
     // claude-haiku (the dated bare-id case Claude Code's ANTHROPIC_SMALL_FAST_MODEL
-    // exercises), and the free google/gemini-3.1-flash-lite (free-tier tests).
-    assert_eq!(data.len(), 5);
+    // exercises), the free google/gemini-3.1-flash-lite (free-tier tests), and
+    // the 2026-11 routing targets claude-haiku-5-5, claude-sonnet-5-5 and
+    // deepseek-flash (alias / Premium / Eco smart-routing tests).
+    assert_eq!(data.len(), 8);
 
     // Lock in the full wire shape. The route serializes
     // `solvela_protocol::ModelInfo`, whose nested layout is the contract the
@@ -4524,21 +4571,28 @@ async fn test_chat_smart_routing_reads_tools_from_request() {
         "function": {"name": "get_calendar", "description": "read the calendar"}
     }]);
 
+    // Premium targets (2026-11): Simple -> Haiku 5.5, Medium -> Sonnet 5.5.
     assert_eq!(
         route(serde_json::Value::Null).await,
-        ("Simple".to_string(), "openai/gpt-4o".to_string()),
+        (
+            "Simple".to_string(),
+            "anthropic/claude-haiku-5-5".to_string()
+        ),
         "no tools field -> Simple tier"
     );
     assert_eq!(
         route(serde_json::json!([])).await,
-        ("Simple".to_string(), "openai/gpt-4o".to_string()),
+        (
+            "Simple".to_string(),
+            "anthropic/claude-haiku-5-5".to_string()
+        ),
         "empty tools array is not tool usage -> still Simple"
     );
     assert_eq!(
         route(tool).await,
         (
             "Medium".to_string(),
-            "anthropic/claude-sonnet-4-6".to_string()
+            "anthropic/claude-sonnet-5-5".to_string()
         ),
         "a real tool definition fires dimension 13 -> Medium tier, costlier model"
     );
