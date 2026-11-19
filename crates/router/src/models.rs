@@ -474,6 +474,64 @@ long_context_output_cost_per_million = 2.50
         assert!(provider(100_002, 1_000) > provider(100_000, 1_000) * 4.0);
     }
 
+    /// Two aliases of one canonical model must agree on the long-context tier
+    /// too, not just the base rates — otherwise HashMap order would pick the
+    /// tier nondeterministically at boot. Each conflict is tried in both
+    /// insertion orders so the rejection cannot depend on iteration order.
+    #[test]
+    fn duplicate_canonical_key_with_conflicting_tier_is_rejected() {
+        let alias = |body: &str| {
+            body.replace(
+                "[models.anthropic-tiered]",
+                "[models.anthropic-tiered-alias]",
+            )
+        };
+        let flat_alias = alias(
+            &TIERED_TOML
+                .replace("long_context_threshold_tokens = 100000\n", "")
+                .replace("long_context_input_cost_per_million = 0.50\n", "")
+                .replace("long_context_output_cost_per_million = 2.50\n", ""),
+        );
+        let other_threshold = alias(&TIERED_TOML.replace(
+            "long_context_threshold_tokens = 100000",
+            "long_context_threshold_tokens = 200000",
+        ));
+        let other_input_rate = alias(&TIERED_TOML.replace(
+            "long_context_input_cost_per_million = 0.50",
+            "long_context_input_cost_per_million = 0.40",
+        ));
+        let other_output_rate = alias(&TIERED_TOML.replace(
+            "long_context_output_cost_per_million = 2.50",
+            "long_context_output_cost_per_million = 2.00",
+        ));
+        for (name, conflicting) in [
+            ("None vs Some tier", flat_alias),
+            ("different threshold", other_threshold),
+            ("different tier input rate", other_input_rate),
+            ("different tier output rate", other_output_rate),
+        ] {
+            for toml in [
+                format!("{TIERED_TOML}{conflicting}"),
+                format!("{conflicting}{TIERED_TOML}"),
+            ] {
+                let err = ModelRegistry::from_toml(&toml)
+                    .expect_err(&format!("{name}: conflicting tiers must be rejected"))
+                    .to_string();
+                assert!(err.contains("conflicting pricing"), "{name}: {err}");
+            }
+        }
+
+        // An identical duplicate (same base AND same tier) still loads.
+        let identical = alias(TIERED_TOML);
+        let registry = ModelRegistry::from_toml(&format!("{TIERED_TOML}{identical}"))
+            .expect("identical-pricing aliases are allowed");
+        assert!(registry
+            .get("anthropic/tiered")
+            .unwrap()
+            .long_context
+            .is_some());
+    }
+
     /// A half-specified tier is a load error, never a silent flat rate.
     #[test]
     fn partial_long_context_tier_is_rejected() {
