@@ -590,7 +590,48 @@ pub fn fallback_chain(primary: &str) -> Vec<String> {
 pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a str, &'a str)> {
     let chain: Vec<(&str, &str)> = match (provider, model) {
         // --- Premium tier (reasoning, high capability) ---
-        // Opus degrades newest -> older within Anthropic first, then falls
+        // Claude 5 generation / GPT-6 line. MONEY-PATH RULE for every arm
+        // added in 2026-11 (pinned by `new_chain_targets_never_cost_more_than
+        // _their_primary`): settlement bills from the PRIMARY model's
+        // registration whichever candidate served, so a fallback target priced
+        // above its primary is revenue the gateway eats. Each new chain lists
+        // only targets whose input AND output rates are <= the primary's AT
+        // EVERY PROMPT LENGTH, long-context tiers included — "best available
+        // at or below the price paid". That is why Opus 5.5 ($4/$20) does NOT
+        // degrade to Opus 5 / 4.8 ($5/$25), Sonnet 5.5 ($2/$10 flat) does not
+        // degrade to Sonnet 4.6 ($3/$15) NOR to GPT-6.2 Sol ($4/$15 over 272K),
+        // and GPT-6 Luna does not degrade to Haiku 5.5 (whose $0.50/$2.50 tier
+        // starts at 100K, below Luna's 272K). The pre-2026-11 arms below
+        // predate the rule and are left as they were.
+        ("anthropic", "claude-fable-5-2") => vec![
+            ("anthropic", "claude-fable-5-2"),
+            ("anthropic", "claude-opus-5-5"),
+            ("anthropic", "claude-opus-4-8"),
+            ("openai", "gpt-6.2-sol"),
+        ],
+        ("anthropic", "claude-fable-5-1") => vec![
+            ("anthropic", "claude-fable-5-1"),
+            ("anthropic", "claude-fable-5-2"),
+            ("anthropic", "claude-opus-5-5"),
+            ("openai", "gpt-6.2-sol"),
+        ],
+        ("anthropic", "claude-opus-5-5") => vec![
+            ("anthropic", "claude-opus-5-5"),
+            ("openai", "gpt-6.2-sol"),
+            ("anthropic", "claude-sonnet-5-5"),
+        ],
+        ("anthropic", "claude-opus-5") => vec![
+            ("anthropic", "claude-opus-5"),
+            ("anthropic", "claude-opus-5-5"),
+            ("anthropic", "claude-opus-4-8"),
+            ("openai", "gpt-6.2-sol"),
+        ],
+        ("openai", "gpt-5.5") => vec![
+            ("openai", "gpt-5.5"),
+            ("openai", "gpt-6.2-sol"),
+            ("anthropic", "claude-opus-5-5"),
+        ],
+        // Opus 4.x degrades newest -> older within Anthropic first, then falls
         // through to the same cross-provider tail the 4.6 chain uses.
         ("anthropic", "claude-opus-4-8") => vec![
             ("anthropic", "claude-opus-4-8"),
@@ -625,6 +666,34 @@ pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a s
         ],
 
         // --- Mid tier (strong general purpose) ---
+        // Sonnet 5.5 / Sonnet 5 are flat $2/$10; GPT-4.1 ($2/$8 flat, 1M) is
+        // the cross-provider fallback that stays <= at every prompt length
+        // (GPT-6 Sol's $4/$15 long-context tier, gemini-3.1-pro's $12 output
+        // and Sonnet 4.6's $3/$15 would exceed the primary's price). GPT-6 Sol
+        // degrades to Sonnet 5.5, whose flat $2/$10 never exceeds Sol's base or
+        // tier. `deepseek-v4-pro` ($1.32/$3.96) has no same-or-cheaper peer of
+        // its class, so like the paid NVIDIA models it keeps the primary-only
+        // `_` behavior rather than silently serving a pricier model.
+        ("anthropic", "claude-sonnet-5-5") => vec![
+            ("anthropic", "claude-sonnet-5-5"),
+            ("anthropic", "claude-sonnet-5"),
+            ("openai", "gpt-4.1"),
+        ],
+        ("anthropic", "claude-sonnet-5") => vec![
+            ("anthropic", "claude-sonnet-5"),
+            ("anthropic", "claude-sonnet-5-5"),
+            ("openai", "gpt-4.1"),
+        ],
+        ("openai", "gpt-6.2-sol") => vec![
+            ("openai", "gpt-6.2-sol"),
+            ("openai", "gpt-6.1-sol"),
+            ("anthropic", "claude-sonnet-5-5"),
+        ],
+        ("openai", "gpt-6.1-sol") => vec![
+            ("openai", "gpt-6.1-sol"),
+            ("openai", "gpt-6.2-sol"),
+            ("anthropic", "claude-sonnet-5-5"),
+        ],
         ("anthropic", "claude-sonnet-4-6") => vec![
             ("anthropic", "claude-sonnet-4-6"),
             ("openai", "gpt-4.1"),
@@ -649,6 +718,29 @@ pub fn model_fallback_chain<'a>(provider: &'a str, model: &'a str) -> Vec<(&'a s
         ],
 
         // --- Budget tier (fast, cheap) ---
+        // Haiku 5.5 ($0.10/$0.50; $0.50/$2.50 over 100K) degrades to GPT-6 Luna
+        // ($0.10/$0.50; $0.20/$0.75 over 272K — never above Haiku at any
+        // length) and Gemini 2.5 Flash-Lite ($0.10/$0.40 flat). Luna does NOT
+        // degrade to Haiku (Haiku's tier starts 172K tokens earlier); its
+        // flat-rate fallbacks are Flash-Lite and GPT-4.1 Nano ($0.10/$0.40).
+        // Gemini 2.5 Flash's $2.50 output and DeepSeek Flash's $1.20 output
+        // would exceed these primaries' price. DeepSeek Flash ($0.30/$1.20)
+        // degrades to the cheaper budget models.
+        ("anthropic", "claude-haiku-5-5") => vec![
+            ("anthropic", "claude-haiku-5-5"),
+            ("openai", "gpt-6-luna"),
+            ("google", "gemini-2.5-flash-lite"),
+        ],
+        ("openai", "gpt-6-luna") => vec![
+            ("openai", "gpt-6-luna"),
+            ("google", "gemini-2.5-flash-lite"),
+            ("openai", "gpt-4.1-nano"),
+        ],
+        ("deepseek", "deepseek-flash") => vec![
+            ("deepseek", "deepseek-flash"),
+            ("openai", "gpt-6-luna"),
+            ("google", "gemini-2.5-flash-lite"),
+        ],
         ("openai", "gpt-4o-mini") => vec![
             ("openai", "gpt-4o-mini"),
             ("anthropic", "claude-haiku-4-5-20251001"),
@@ -1636,6 +1728,120 @@ supports_streaming = true
         assert!(chain.iter().any(|(p, _)| *p != "anthropic"));
     }
 
+    /// Every `(provider, model_id)` arm added in the 2026-11 registry refresh.
+    /// Subset of `fallback_chain_keys()`; the price rule below applies to
+    /// these (the older arms predate it — e.g. gpt-4o-mini -> haiku-4-5).
+    fn chain_keys_added_2026_11() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("anthropic", "claude-fable-5-2"),
+            ("anthropic", "claude-fable-5-1"),
+            ("anthropic", "claude-opus-5-5"),
+            ("anthropic", "claude-opus-5"),
+            ("anthropic", "claude-sonnet-5-5"),
+            ("anthropic", "claude-sonnet-5"),
+            ("anthropic", "claude-haiku-5-5"),
+            ("openai", "gpt-6.2-sol"),
+            ("openai", "gpt-6.1-sol"),
+            ("openai", "gpt-6-luna"),
+            ("openai", "gpt-5.5"),
+            ("deepseek", "deepseek-flash"),
+        ]
+    }
+
+    /// MONEY-PATH GUARD: settlement bills from the PRIMARY model's registry
+    /// entry whichever chain candidate actually served the request, so a
+    /// fallback target priced above its primary is revenue the gateway eats.
+    /// Every arm added in 2026-11 therefore lists only targets whose input AND
+    /// output rates are <= the primary's AT EVERY PROMPT LENGTH — the
+    /// comparison runs `rates_for_prompt` on both sides at every long-context
+    /// boundary of either model (0, each threshold, threshold + 1, u32::MAX),
+    /// so a target whose tier kicks in earlier or higher than the primary's
+    /// (Haiku 5.5 under GPT-6 Luna; GPT-6 Sol under a flat Sonnet) is caught
+    /// even though its BASE rate matches. A future edit that adds a pricier
+    /// target to one of these chains fails here instead of silently
+    /// under-charging.
+    #[test]
+    fn new_chain_targets_never_cost_more_than_their_primary() {
+        let toml_str = include_str!("../../../../config/models.toml");
+        let registry = ModelRegistry::from_toml(toml_str).expect("config/models.toml must parse");
+        let all_keys = fallback_chain_keys();
+        for (provider, model) in chain_keys_added_2026_11() {
+            assert!(
+                all_keys.contains(&(provider, model)),
+                "{provider}/{model} must also be in fallback_chain_keys()"
+            );
+            let primary = registry
+                .get(&format!("{provider}/{model}"))
+                .unwrap_or_else(|| panic!("{provider}/{model} must be registered"));
+            for (p, m) in model_fallback_chain(provider, model) {
+                let target = registry
+                    .get(&format!("{p}/{m}"))
+                    .unwrap_or_else(|| panic!("{p}/{m} must be registered"));
+                // Every prompt length at which either side's rate can change.
+                let mut probes = vec![0u32, u32::MAX];
+                for tier in [primary.long_context, target.long_context]
+                    .into_iter()
+                    .flatten()
+                {
+                    probes.push(tier.threshold_tokens);
+                    probes.push(tier.threshold_tokens.saturating_add(1));
+                }
+                for n in probes {
+                    let (ti, to) = target.rates_for_prompt(n);
+                    let (pi, po) = primary.rates_for_prompt(n);
+                    assert!(
+                        ti <= pi && to <= po,
+                        "fallback {p}/{m} (${ti}/${to}) costs more than primary \
+                         {provider}/{model} (${pi}/${po}) at prompt length {n}"
+                    );
+                }
+            }
+        }
+        // deepseek-v4-pro deliberately has NO arm: primary-only, like the paid
+        // NVIDIA models (no same-or-cheaper peer of its class).
+        assert_eq!(
+            model_fallback_chain("deepseek", "deepseek-v4-pro"),
+            vec![("deepseek", "deepseek-v4-pro")]
+        );
+    }
+
+    /// The Claude 5 generation degrades to same-or-cheaper models: Fable ->
+    /// Opus 5.5; Opus 5.5 -> GPT-6.2 Sol / Sonnet 5.5 (NOT to the pricier
+    /// Opus 5 / 4.8); Sonnet 5.5 -> Sonnet 5 -> GPT-6.2 Sol. Every Premium
+    /// target has cross-provider failover rather than the primary-only `_` arm.
+    #[test]
+    fn test_model_fallback_chain_claude_5_generation() {
+        let chain = model_fallback_chain("anthropic", "claude-fable-5-2");
+        assert_eq!(chain[0], ("anthropic", "claude-fable-5-2"));
+        assert_eq!(chain[1], ("anthropic", "claude-opus-5-5"));
+        assert!(chain.iter().any(|(p, _)| *p != "anthropic"));
+
+        let chain = model_fallback_chain("anthropic", "claude-opus-5-5");
+        assert_eq!(chain[0], ("anthropic", "claude-opus-5-5"));
+        assert!(!chain.contains(&("anthropic", "claude-opus-5")));
+        assert!(!chain.contains(&("anthropic", "claude-opus-4-8")));
+        assert!(chain.iter().any(|(p, _)| *p != "anthropic"));
+
+        let chain = model_fallback_chain("anthropic", "claude-sonnet-5-5");
+        assert_eq!(chain[0], ("anthropic", "claude-sonnet-5-5"));
+        assert_eq!(chain[1], ("anthropic", "claude-sonnet-5"));
+        assert!(!chain.contains(&("anthropic", "claude-sonnet-4-6")));
+
+        for model in [
+            "claude-haiku-5-5",
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-fable-5-2",
+        ] {
+            let chain = model_fallback_chain("anthropic", model);
+            assert!(chain.len() > 1, "{model} must not be primary-only");
+            assert!(
+                chain.iter().any(|(p, _)| *p != "anthropic"),
+                "{model} must have a cross-provider fallback"
+            );
+        }
+    }
+
     #[test]
     fn test_model_fallback_chain_gpt4o() {
         let chain = model_fallback_chain("openai", "gpt-4o");
@@ -1683,6 +1889,18 @@ supports_streaming = true
     /// `every_fallback_chain_id_is_registered` exercises it.
     fn fallback_chain_keys() -> Vec<(&'static str, &'static str)> {
         vec![
+            ("anthropic", "claude-fable-5-2"),
+            ("anthropic", "claude-fable-5-1"),
+            ("anthropic", "claude-opus-5-5"),
+            ("anthropic", "claude-opus-5"),
+            ("anthropic", "claude-sonnet-5-5"),
+            ("anthropic", "claude-sonnet-5"),
+            ("anthropic", "claude-haiku-5-5"),
+            ("openai", "gpt-6.2-sol"),
+            ("openai", "gpt-6.1-sol"),
+            ("openai", "gpt-6-luna"),
+            ("openai", "gpt-5.5"),
+            ("deepseek", "deepseek-flash"),
             ("anthropic", "claude-opus-4-8"),
             ("anthropic", "claude-opus-4-7"),
             ("anthropic", "claude-opus-4-6"),

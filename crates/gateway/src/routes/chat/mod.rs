@@ -1540,6 +1540,23 @@ pub(crate) async fn chat_completions_inner(
                 // overflow u64. In those cases we skip the claim rather than
                 // firing for a garbage amount; the warn! inside the function
                 // surfaces the corrupt registry entry to operators.
+                // Tiered pricing: the 402 quote picked its tier from the token
+                // ESTIMATE; settlement picks it from provider-reported usage. When
+                // the estimate fell under a long-context threshold the real prompt
+                // crossed, the bill lands above what was quoted/reserved (the
+                // gateway absorbs the difference on `exact`; the escrow claim is
+                // capped at the reservation). Surface it so the frequency of this
+                // estimate-cliff case is measurable in production.
+                if model_info.rates_for_prompt(u.prompt_tokens)
+                    > model_info.rates_for_prompt(input_token_estimate)
+                {
+                    warn!(
+                        model = %req.model,
+                        estimated_prompt_tokens = input_token_estimate,
+                        actual_prompt_tokens = u.prompt_tokens,
+                        "long-context tier applied at settlement but not at quote — bill exceeds quoted tier"
+                    );
+                }
                 compute_actual_atomic_cost(u.prompt_tokens, u.completion_tokens, model_info)
             } else {
                 Some(

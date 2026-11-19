@@ -182,15 +182,15 @@ mod tests {
     fn test_apply_filter_and_sort_filter_no_match() {
         let input = vec![mi("openai/gpt-4o", "openai")];
         let out = apply_filter_and_sort(input, Some("nonexistent"));
-        assert!(out.is_empty());
+        assert_eq!(out, Vec::<solvela_protocol::ModelInfo>::new());
     }
 
     #[test]
     fn test_apply_filter_and_sort_empty_input() {
         let out = apply_filter_and_sort(vec![], Some("openai"));
-        assert!(out.is_empty());
+        assert_eq!(out, Vec::<solvela_protocol::ModelInfo>::new());
         let out = apply_filter_and_sort(vec![], None);
-        assert!(out.is_empty());
+        assert_eq!(out, Vec::<solvela_protocol::ModelInfo>::new());
     }
 
     #[test]

@@ -393,8 +393,11 @@ pub(crate) fn compute_actual_atomic_cost(
     completion_tokens: u32,
     model_info: &ModelRegistration,
 ) -> Option<u64> {
-    let input = model_info.input_cost_per_million;
-    let output = model_info.output_cost_per_million;
+    // Tiered pricing (Haiku 5.5 >100K, GPT-6 line >272K): the SAME
+    // `rates_for_prompt` the router's `estimate_cost` used for the 402 quote
+    // picks the tier here, from the provider-reported (then capped) prompt
+    // tokens, so quote and bill agree on the tier for a given prompt length.
+    let (input, output) = model_info.rates_for_prompt(prompt_tokens);
     if !input.is_finite() || !output.is_finite() || input < 0.0 || output < 0.0 {
         warn!(
             model = %model_info.model_id,
@@ -1160,6 +1163,7 @@ mod tests {
             supports_structured_output: false,
             supports_batch: false,
             max_output_tokens: None,
+            long_context: None,
         };
         // Provider reports 1200 prompt tokens (image tokens already folded in by
         // the provider) and 500 completion. The bill is a pure function of those
@@ -1191,6 +1195,7 @@ mod tests {
             supports_structured_output: false,
             supports_batch: false,
             max_output_tokens: None,
+            long_context: None,
         };
 
         let atomic = compute_actual_atomic_cost(1000, 500, &model_info);
@@ -1214,6 +1219,7 @@ mod tests {
             supports_structured_output: false,
             supports_batch: false,
             max_output_tokens: None,
+            long_context: None,
         };
 
         assert_eq!(compute_actual_atomic_cost(0, 0, &model_info), Some(0));
@@ -1253,6 +1259,50 @@ supports_vision = false
         );
     }
 
+    /// MONEY-PATH PIN (tiered pricing): settlement bills the WHOLE request at
+    /// the long-context tier once the capped prompt is strictly over the
+    /// threshold, and at the base rate at or below it — the same rule the
+    /// router's `estimate_cost` quote applies, via the shared
+    /// `rates_for_prompt`. Haiku 5.5 shape: $0.10/$0.50 base, $0.50/$2.50
+    /// over 100K prompt tokens.
+    #[test]
+    fn test_compute_actual_atomic_cost_long_context_tier_is_whole_request() {
+        let model_info = ModelRegistration {
+            id: "anthropic/claude-haiku-5-5".to_string(),
+            provider: "anthropic".to_string(),
+            model_id: "claude-haiku-5-5".to_string(),
+            display_name: "Claude Haiku 5.5".to_string(),
+            input_cost_per_million: 0.10,
+            output_cost_per_million: 0.50,
+            context_window: 1_000_000,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_vision: true,
+            reasoning: true,
+            supports_structured_output: false,
+            supports_batch: false,
+            max_output_tokens: Some(128_000),
+            long_context: Some(solvela_protocol::LongContextPricing {
+                threshold_tokens: 100_000,
+                input_cost_per_million: 0.50,
+                output_cost_per_million: 2.50,
+            }),
+        };
+        // Exactly at the threshold: base. 100_000*0.10/M = 10_000 atomic;
+        // 1_000*0.50/M = 500; sum 10_500; ×1.05 = 11_025.
+        assert_eq!(
+            compute_actual_atomic_cost(100_000, 1_000, &model_info),
+            Some(11_025)
+        );
+        // One token over: tier on BOTH sides. 100_001*0.50/M = 50_000 atomic
+        // (integer division: 50_000_500_000 / 1_000_000 = 50_000);
+        // 1_000*2.50/M = 2_500; sum 52_500; ×1.05 = 55_125.
+        assert_eq!(
+            compute_actual_atomic_cost(100_001, 1_000, &model_info),
+            Some(55_125)
+        );
+    }
+
     #[test]
     fn test_compute_actual_atomic_cost_includes_5_percent_fee() {
         let model_info = ModelRegistration {
@@ -1270,6 +1320,7 @@ supports_vision = false
             supports_structured_output: false,
             supports_batch: false,
             max_output_tokens: None,
+            long_context: None,
         };
 
         let atomic = compute_actual_atomic_cost(1, 0, &model_info);
@@ -1296,6 +1347,7 @@ supports_vision = false
             supports_structured_output: false,
             supports_batch: false,
             max_output_tokens: Some(2048),
+            long_context: None,
         }
     }
 
@@ -1317,6 +1369,7 @@ supports_vision = false
             supports_structured_output: false,
             supports_batch: false,
             max_output_tokens: Some(64_000),
+            long_context: None,
         }
     }
 
@@ -1619,6 +1672,7 @@ supports_vision = false
             supports_structured_output: false,
             supports_batch: false,
             max_output_tokens: None,
+            long_context: None,
         };
         // NaN input cost
         assert_eq!(compute_actual_atomic_cost(1000, 500, &model_info), None);

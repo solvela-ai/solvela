@@ -43,7 +43,7 @@ flowchart LR
 
 ### Smart Routing
 
-15-dimension rule-based scorer classifies requests into complexity tiers (Simple, Medium, Complex, Reasoning) and maps them to optimal models. microsecond-scale, zero external calls per scoring decision. Routing profiles: `eco`, `auto`, `premium`, `free` (with aliases like `cheap`/`budget`, `balanced`/`default`, `best`/`quality`, `oss`/`open`). Model aliases resolve shortcuts to specific models: `opus`, `sonnet`, `haiku`, `gpt5`, `gemini`, `flash`, `grok`, `deepseek`, `reasoner`, `o3-mini`.
+15-dimension rule-based scorer classifies requests into complexity tiers (Simple, Medium, Complex, Reasoning) and maps them to optimal models. microsecond-scale, zero external calls per scoring decision. Routing profiles: `eco`, `auto`, `premium`, `free` (with aliases like `cheap`/`budget`, `balanced`/`default`, `best`/`quality`, `oss`/`open`). Model aliases resolve shortcuts to specific models: `fable`, `opus`, `sonnet`, `haiku` (the current Claude generation; `opus4.8`, `sonnet4.6`, `haiku4.5` pin the previous one), `gpt6`, `gpt6.1`, `luna`, `gpt5.5`, `gpt5`, `gemini`, `flash`, `grok`, `deepseek`, `deepseek-pro`, `reasoner`, `o3-mini`. Where a provider prices long prompts at a higher rate, a request whose prompt exceeds the threshold is billed — input and output, whole request — at that rate; the thresholds and rates are in the table below and on `GET /pricing`.
 
 ### x402 Payments
 
@@ -167,6 +167,10 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 
 | Provider | Model | Input (per 1M tokens) | Output (per 1M tokens) | Context |
 |----------|-------|-----------------------|------------------------|---------|
+| OpenAI | `gpt-6.2-sol` | $2.00 ($4.00 over 272K prompt) | $10.00 ($15.00 over 272K prompt) | 1M |
+| OpenAI | `gpt-6.1-sol` | $2.00 ($4.00 over 272K prompt) | $10.00 ($15.00 over 272K prompt) | 1M |
+| OpenAI | `gpt-6-luna` | $0.10 ($0.20 over 272K prompt) | $0.50 ($0.75 over 272K prompt) | 1M |
+| OpenAI | `gpt-5.5` | $5.00 ($10.00 over 272K prompt) | $30.00 ($45.00 over 272K prompt) | 1M |
 | OpenAI | `gpt-5.2` | $1.75 | $14.00 | 400K |
 | OpenAI | `gpt-4o` | $2.50 | $10.00 | 128K |
 | OpenAI | `gpt-4o-mini` | $0.15 | $0.60 | 128K |
@@ -177,10 +181,17 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 | OpenAI | `o3-mini` | $1.10 | $4.40 | 200K |
 | OpenAI | `o4-mini` | $1.10 | $4.40 | 200K |
 | OpenAI | `gpt-oss-120b` | Free | Free | 128K |
-| Anthropic | `claude-opus-4-8` | $5.00 | $25.00 | 200K |
-| Anthropic | `claude-opus-4-7` | $5.00 | $25.00 | 200K |
-| Anthropic | `claude-opus-4-6` | $5.00 | $25.00 | 200K |
-| Anthropic | `claude-sonnet-4-6` | $3.00 | $15.00 | 200K |
+| Anthropic | `claude-fable-5-2` | $8.00 | $40.00 | 1M |
+| Anthropic | `claude-fable-5-1` | $10.00 | $50.00 | 1M |
+| Anthropic | `claude-opus-5-5` | $4.00 | $20.00 | 1M |
+| Anthropic | `claude-opus-5` | $5.00 | $25.00 | 1M |
+| Anthropic | `claude-sonnet-5-5` | $2.00 | $10.00 | 1M |
+| Anthropic | `claude-sonnet-5` | $2.00 | $10.00 | 1M |
+| Anthropic | `claude-haiku-5-5` | $0.10 ($0.50 over 100K prompt) | $0.50 ($2.50 over 100K prompt) | 1M |
+| Anthropic | `claude-opus-4-8` | $5.00 | $25.00 | 1M |
+| Anthropic | `claude-opus-4-7` | $5.00 | $25.00 | 1M |
+| Anthropic | `claude-opus-4-6` | $5.00 | $25.00 | 1M |
+| Anthropic | `claude-sonnet-4-6` | $3.00 | $15.00 | 1M |
 | Anthropic | `claude-sonnet-4-5-20250929` | $3.00 | $15.00 | 200K |
 | Anthropic | `claude-haiku-4-5-20251001` | $1.00 | $5.00 | 200K |
 | Google | `gemini-3.1-flash-lite` | Free | Free | 1M |
@@ -191,9 +202,11 @@ The 402 response includes a `cost_breakdown` with per-token pricing, estimated t
 | xAI | `grok-3-mini` | $0.30 | $0.50 | 131K |
 | xAI | `grok-4-fast-reasoning` | $0.20 | $0.50 | 2M |
 | xAI | `grok-code-fast-1` | $0.20 | $1.50 | 256K |
-| DeepSeek | `deepseek-chat` | $0.28 | $0.42 | 128K |
-| DeepSeek | `deepseek-reasoner` | $0.28 | $0.42 | 128K |
-| DeepSeek | `deepseek-coder` | $0.28 | $0.42 | 128K |
+| DeepSeek | `deepseek-flash` | $0.30 | $1.20 | 1M |
+| DeepSeek | `deepseek-v4-pro` | $1.32 | $3.96 | 1M |
+| DeepSeek | `deepseek-chat` (legacy name) | $0.30 | $1.20 | 1M |
+| DeepSeek | `deepseek-reasoner` (legacy name) | $0.30 | $1.20 | 1M |
+| DeepSeek | `deepseek-coder` (legacy name) | $0.30 | $1.20 | 1M |
 | NVIDIA | `nvidia/nvidia/llama-3.1-nemotron-nano-8b-v1` | Free | Free | 131K |
 | NVIDIA | `nvidia/nvidia/llama-3.1-nemotron-ultra-253b-v1` | Free | Free | 131K |
 | NVIDIA | `nvidia/nvidia/llama-3.3-nemotron-super-49b-v1` | Free | Free | 131K |
