@@ -38,7 +38,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@solana/spl-token": "^0.4.0",
-    "@solana/web3.js": "^1.87.0",
+    "@solana/web3.js": "^3.2.1",
     "@solvela/signer-core": "file:../signer-core",
     "async-mutex": "^0.5.0",
     "bs58": "^5.0.0"
