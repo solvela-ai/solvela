@@ -47,7 +47,7 @@
     "@anthropic-ai/mcpb": "1.1.1",
     "@types/node": "^22.0.0",
     "esbuild": "0.25.5",
-    "typescript": "^5.6.0"
+    "typescript": "^7.0.2"
   },
   "overrides": {
     "uuid": "^11.1.1",
