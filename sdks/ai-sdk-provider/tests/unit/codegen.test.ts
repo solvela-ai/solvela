@@ -52,20 +52,29 @@ const PACKAGE_ROOT = path.resolve(__dirname, "../../");
 const GENERATED_FILE = path.resolve(PACKAGE_ROOT, "src/generated/models.ts");
 
 // ---------------------------------------------------------------------------
-// The 44 known model IDs (sorted alphabetically — matches script's `sortedKeys`).
+// The 57 known model IDs (sorted alphabetically — matches script's `sortedKeys`).
 // Update this list when config/models.toml gains new entries.
 // ---------------------------------------------------------------------------
 
 const KNOWN_MODEL_IDS: readonly string[] = [
+  "anthropic-claude-fable-5-1",
+  "anthropic-claude-fable-5-2",
   "anthropic-claude-haiku-4-5",
+  "anthropic-claude-haiku-5-5",
   "anthropic-claude-opus-4-6",
   "anthropic-claude-opus-4-7",
   "anthropic-claude-opus-4-8",
+  "anthropic-claude-opus-5",
+  "anthropic-claude-opus-5-5",
   "anthropic-claude-sonnet-4-5",
   "anthropic-claude-sonnet-4-6",
+  "anthropic-claude-sonnet-5",
+  "anthropic-claude-sonnet-5-5",
   "deepseek-chat",
   "deepseek-coder",
+  "deepseek-flash",
   "deepseek-reasoner",
+  "deepseek-v4-pro",
   "google-gemini-2-5-flash",
   "google-gemini-2-5-flash-lite",
   "google-gemini-3-1-flash-lite",
@@ -76,6 +85,10 @@ const KNOWN_MODEL_IDS: readonly string[] = [
   "openai-gpt-4o",
   "openai-gpt-4o-mini",
   "openai-gpt-5-2",
+  "openai-gpt-5-5",
+  "openai-gpt-6-1-sol",
+  "openai-gpt-6-2-sol",
+  "openai-gpt-6-luna",
   "openai-gpt-oss-120b",
   "openai-o3",
   "openai-o3-mini",
@@ -105,7 +118,7 @@ const KNOWN_MODEL_IDS: readonly string[] = [
   "nvidia-qwen-qwen3-coder-480b-a35b-instruct",
 ] as const;
 
-const EXPECTED_COUNT = 44;
+const EXPECTED_COUNT = 57;
 
 // ---------------------------------------------------------------------------
 // Helpers

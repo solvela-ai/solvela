@@ -1,7 +1,96 @@
 # Model Registry — Solvela
-# Prices are provider cost per million tokens. The 5% platform fee is applied automatically.
+# Prices are provider cost per million tokens. The platform fee is applied automatically.
+#
+# `context_window` is also the billing cap on provider-reported prompt tokens
+# (crates/gateway/src/routes/chat/cost.rs `cap_usage_to_request_limits`), so it
+# must be the provider's REAL window — understating it under-bills long prompts.
+#
+# Optional long-prompt tier (set all three together, see
+# crates/router/src/models.rs `long_context_pricing`): a request whose prompt is
+# STRICTLY GREATER than `long_context_threshold_tokens` is billed — input and
+# output, whole request — at `long_context_input_cost_per_million` /
+# `long_context_output_cost_per_million` instead of the base rates. Providers
+# bill this way (Anthropic Haiku 5.5 over 100K prompt tokens; OpenAI GPT-6 /
+# GPT-5.5 over 272K input tokens), so the registry mirrors it exactly.
 
 # --- OpenAI ---
+#
+# GPT-6 line + GPT-5.5. Prices verified against developers.openai.com/api/docs/pricing
+# on 2026-11-18 (standard tier; cached-input discounts are not modelled). The long
+# context tier is the page's ">272K input tokens" row. Context window / max output
+# / modalities from each model's page (developers.openai.com/api/docs/models/<id>).
+# `supports_tools` is left unset where the model page says tool calling is NOT
+# available on Chat Completions (the endpoint providers/openai.rs speaks).
+
+[models.openai-gpt-6-2-sol]
+provider = "openai"
+model_id = "gpt-6.2-sol"
+display_name = "GPT-6.2 Sol"
+input_cost_per_million = 2.00
+output_cost_per_million = 10.00
+long_context_threshold_tokens = 272000
+long_context_input_cost_per_million = 4.00
+long_context_output_cost_per_million = 15.00
+context_window = 1050000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+supports_structured_output = true
+reasoning = true
+max_output_tokens = 128000
+
+[models.openai-gpt-6-1-sol]
+provider = "openai"
+model_id = "gpt-6.1-sol"
+display_name = "GPT-6.1 Sol"
+input_cost_per_million = 2.00
+output_cost_per_million = 10.00
+long_context_threshold_tokens = 272000
+long_context_input_cost_per_million = 4.00
+long_context_output_cost_per_million = 15.00
+context_window = 1050000
+supports_streaming = true
+# Model page (2026-11-18): tool calling requires the Responses API, which the
+# gateway does not speak — so tools are not advertised here.
+supports_vision = true
+supports_structured_output = true
+reasoning = true
+max_output_tokens = 128000
+
+[models.openai-gpt-6-luna]
+provider = "openai"
+model_id = "gpt-6-luna"
+display_name = "GPT-6 Luna"
+input_cost_per_million = 0.10
+output_cost_per_million = 0.50
+long_context_threshold_tokens = 272000
+long_context_input_cost_per_million = 0.20
+long_context_output_cost_per_million = 0.75
+context_window = 1050000
+supports_streaming = true
+# Model page (2026-11-18): on Chat Completions, function calling only works with
+# reasoning effort `none`, which the gateway does not set — not advertised.
+supports_vision = true
+supports_structured_output = true
+reasoning = true
+max_output_tokens = 128000
+
+[models.openai-gpt-5-5]
+provider = "openai"
+model_id = "gpt-5.5"
+display_name = "GPT-5.5"
+input_cost_per_million = 5.00
+output_cost_per_million = 30.00
+long_context_threshold_tokens = 272000
+long_context_input_cost_per_million = 10.00
+long_context_output_cost_per_million = 45.00
+context_window = 1050000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+supports_structured_output = true
+reasoning = true
+max_output_tokens = 128000
 
 [models.openai-gpt-5-2]
 provider = "openai"
@@ -56,6 +145,111 @@ context_window = 128000
 supports_streaming = true
 
 # --- Anthropic ---
+#
+# Claude 5 generation. Prices, 1M context and 128K max output verified against
+# platform.claude.com/docs/en/about-claude/pricing and /models/overview on
+# 2026-11-18. Every current Claude model supports vision and tool use (overview
+# page). All of these have adaptive thinking (always-on for Fable / Opus 5.5);
+# `claude-haiku-5-5` has a long-prompt tier: prompts over 100K tokens bill the
+# whole request at $0.50 / $2.50 (base $0.10 / $0.50).
+
+[models.anthropic-claude-fable-5-2]
+provider = "anthropic"
+model_id = "claude-fable-5-2"
+display_name = "Claude Fable 5.2"
+input_cost_per_million = 8.00
+output_cost_per_million = 40.00
+context_window = 1000000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+max_output_tokens = 128000
+
+[models.anthropic-claude-fable-5-1]
+provider = "anthropic"
+model_id = "claude-fable-5-1"
+display_name = "Claude Fable 5.1"
+input_cost_per_million = 10.00
+output_cost_per_million = 50.00
+context_window = 1000000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+max_output_tokens = 128000
+
+[models.anthropic-claude-opus-5-5]
+provider = "anthropic"
+model_id = "claude-opus-5-5"
+display_name = "Claude Opus 5.5"
+input_cost_per_million = 4.00
+output_cost_per_million = 20.00
+context_window = 1000000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+max_output_tokens = 128000
+
+[models.anthropic-claude-opus-5]
+provider = "anthropic"
+model_id = "claude-opus-5"
+display_name = "Claude Opus 5"
+input_cost_per_million = 5.00
+output_cost_per_million = 25.00
+context_window = 1000000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+max_output_tokens = 128000
+
+[models.anthropic-claude-sonnet-5-5]
+provider = "anthropic"
+model_id = "claude-sonnet-5-5"
+display_name = "Claude Sonnet 5.5"
+input_cost_per_million = 2.00
+output_cost_per_million = 10.00
+context_window = 1000000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+max_output_tokens = 128000
+
+[models.anthropic-claude-sonnet-5]
+provider = "anthropic"
+model_id = "claude-sonnet-5"
+display_name = "Claude Sonnet 5"
+input_cost_per_million = 2.00
+output_cost_per_million = 10.00
+context_window = 1000000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+max_output_tokens = 128000
+
+[models.anthropic-claude-haiku-5-5]
+provider = "anthropic"
+model_id = "claude-haiku-5-5"
+display_name = "Claude Haiku 5.5"
+input_cost_per_million = 0.10
+output_cost_per_million = 0.50
+long_context_threshold_tokens = 100000
+long_context_input_cost_per_million = 0.50
+long_context_output_cost_per_million = 2.50
+context_window = 1000000
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+max_output_tokens = 128000
+
+# Claude 4.x. Opus 4.8 / 4.7 / 4.6 and Sonnet 4.6 are 1M-context models
+# (models/overview, 2026-11-18); they were previously registered at 200K, which
+# capped billable prompt tokens at 200K and under-billed longer prompts.
 
 [models.anthropic-claude-opus-4-8]
 provider = "anthropic"
@@ -63,7 +257,7 @@ model_id = "claude-opus-4-8"
 display_name = "Claude Opus 4.8"
 input_cost_per_million = 5.00
 output_cost_per_million = 25.00
-context_window = 200000
+context_window = 1000000
 supports_streaming = true
 supports_tools = true
 supports_vision = true
@@ -75,7 +269,7 @@ model_id = "claude-opus-4-7"
 display_name = "Claude Opus 4.7"
 input_cost_per_million = 5.00
 output_cost_per_million = 25.00
-context_window = 200000
+context_window = 1000000
 supports_streaming = true
 supports_tools = true
 supports_vision = true
@@ -87,7 +281,7 @@ model_id = "claude-opus-4-6"
 display_name = "Claude Opus 4.6"
 input_cost_per_million = 5.00
 output_cost_per_million = 25.00
-context_window = 200000
+context_window = 1000000
 supports_streaming = true
 supports_tools = true
 supports_vision = true
@@ -99,7 +293,7 @@ model_id = "claude-sonnet-4-6"
 display_name = "Claude Sonnet 4.6"
 input_cost_per_million = 3.00
 output_cost_per_million = 15.00
-context_window = 200000
+context_window = 1000000
 supports_streaming = true
 supports_tools = true
 reasoning = true
@@ -156,23 +350,66 @@ supports_tools = true
 supports_vision = true
 
 # --- DeepSeek ---
+#
+# DeepSeek V4 generation. Verified against api-docs.deepseek.com/quick_start/pricing
+# and /api/list-models on 2026-11-18. Registered at PEAK cache-miss rates (peak =
+# 01:00–04:00 and 06:00–10:00 UTC, Mon–Fri; off-peak is 50% off and cache hits are
+# ~50x cheaper) — the registry has one flat rate per model, so the conservative
+# peak rate is used and off-peak requests are over-billed rather than any peak
+# request under-billed. Both models default to thinking mode. Context 1M
+# (1048576), max output 384K (393216). Vision: Flash only.
+
+[models.deepseek-flash]
+provider = "deepseek"
+model_id = "deepseek-flash"
+display_name = "DeepSeek V4.1 Flash"
+input_cost_per_million = 0.30
+output_cost_per_million = 1.20
+context_window = 1048576
+supports_streaming = true
+supports_tools = true
+supports_vision = true
+reasoning = true
+max_output_tokens = 393216
+
+[models.deepseek-v4-pro]
+provider = "deepseek"
+model_id = "deepseek-v4-pro"
+display_name = "DeepSeek V4 Pro"
+input_cost_per_million = 1.32
+output_cost_per_million = 3.96
+context_window = 1048576
+supports_streaming = true
+supports_tools = true
+reasoning = true
+max_output_tokens = 393216
+
+# Legacy DeepSeek names. `deepseek-chat` / `deepseek-reasoner` / `deepseek-coder`
+# are no longer listed anywhere on DeepSeek's pricing or model-list pages
+# (2026-11-18); the only legacy names the pricing page documents are
+# `deepseek-v4-flash(-vision-exp)`, which "are served by DeepSeek-V4.1-Flash-1017
+# and billed at the Flash price". These entries are kept so existing callers
+# keep resolving, but repriced to the Flash PEAK rate (they were $0.28 / $0.42 —
+# below what DeepSeek would charge for anything it serves today) and given the
+# Flash context window so a long prompt is never billing-capped short. New
+# callers should use `deepseek-flash` / `deepseek-v4-pro`.
 
 [models.deepseek-chat]
 provider = "deepseek"
 model_id = "deepseek-chat"
-display_name = "DeepSeek V3.2 Chat"
-input_cost_per_million = 0.28
-output_cost_per_million = 0.42
-context_window = 128000
+display_name = "DeepSeek Chat (legacy name)"
+input_cost_per_million = 0.30
+output_cost_per_million = 1.20
+context_window = 1048576
 supports_streaming = true
 
 [models.deepseek-reasoner]
 provider = "deepseek"
 model_id = "deepseek-reasoner"
-display_name = "DeepSeek V3.2 Reasoner"
-input_cost_per_million = 0.28
-output_cost_per_million = 0.42
-context_window = 128000
+display_name = "DeepSeek Reasoner (legacy name)"
+input_cost_per_million = 0.30
+output_cost_per_million = 1.20
+context_window = 1048576
 supports_streaming = true
 reasoning = true
 
@@ -282,10 +519,10 @@ max_output_tokens = 16384
 [models.deepseek-coder]
 provider = "deepseek"
 model_id = "deepseek-coder"
-display_name = "DeepSeek Coder V3"
-input_cost_per_million = 0.28
-output_cost_per_million = 0.42
-context_window = 128000
+display_name = "DeepSeek Coder (legacy name)"
+input_cost_per_million = 0.30
+output_cost_per_million = 1.20
+context_window = 1048576
 supports_streaming = true
 supports_tools = true
 

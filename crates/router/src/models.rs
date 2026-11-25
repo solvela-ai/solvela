@@ -4,7 +4,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use solvela_protocol::{
-    platform_fee_multiplier, platform_fee_percent, CostBreakdown, ModelRegistration,
+    platform_fee_multiplier, platform_fee_percent, CostBreakdown, LongContextPricing,
+    ModelRegistration,
 };
 
 /// Errors from the model registry.
@@ -45,6 +46,74 @@ pub struct ModelEntry {
     pub supports_batch: bool,
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
+    /// Optional long-prompt price tier. All three `long_context_*` fields must
+    /// be given together (see [`long_context_pricing`]); prompts STRICTLY
+    /// GREATER than the threshold bill the whole request at the tier rates.
+    #[serde(default)]
+    pub long_context_threshold_tokens: Option<u32>,
+    #[serde(default)]
+    pub long_context_input_cost_per_million: Option<f64>,
+    #[serde(default)]
+    pub long_context_output_cost_per_million: Option<f64>,
+}
+
+/// Validate and assemble a TOML entry's optional long-context tier.
+///
+/// Fail-closed at load time, like the base-price validation: a half-specified
+/// tier (threshold without prices, or prices without a threshold) is a config
+/// error, not a silent flat rate — otherwise a typo in one of the three field
+/// names would quietly bill every long prompt at the (cheaper) base rate. The
+/// threshold must be positive and below `context_window` (a tier that can
+/// never trigger is a typo too), and the tier prices must be finite and
+/// non-negative for the same reason the base prices must.
+fn long_context_pricing(
+    key: &str,
+    entry: &ModelEntry,
+) -> Result<Option<LongContextPricing>, ModelRegistryError> {
+    let fields = (
+        entry.long_context_threshold_tokens,
+        entry.long_context_input_cost_per_million,
+        entry.long_context_output_cost_per_million,
+    );
+    let (threshold_tokens, input_cost_per_million, output_cost_per_million) = match fields {
+        (None, None, None) => return Ok(None),
+        (Some(t), Some(i), Some(o)) => (t, i, o),
+        _ => {
+            return Err(ModelRegistryError::ParseError(format!(
+                "model {key:?}: long_context_threshold_tokens, \
+                 long_context_input_cost_per_million and \
+                 long_context_output_cost_per_million must be set together"
+            )))
+        }
+    };
+    if threshold_tokens == 0 || threshold_tokens >= entry.context_window {
+        return Err(ModelRegistryError::ParseError(format!(
+            "model {key:?}: long_context_threshold_tokens must be > 0 and < context_window \
+             ({}), got {threshold_tokens}",
+            entry.context_window
+        )));
+    }
+    for (name, value) in [
+        (
+            "long_context_input_cost_per_million",
+            input_cost_per_million,
+        ),
+        (
+            "long_context_output_cost_per_million",
+            output_cost_per_million,
+        ),
+    ] {
+        if !value.is_finite() || value < 0.0 {
+            return Err(ModelRegistryError::ParseError(format!(
+                "model {key:?}: {name} must be finite and non-negative, got {value}"
+            )));
+        }
+    }
+    Ok(Some(LongContextPricing {
+        threshold_tokens,
+        input_cost_per_million,
+        output_cost_per_million,
+    }))
 }
 
 /// TOML top-level structure: `[models.<id>]`.
@@ -103,6 +172,7 @@ impl ModelRegistry {
         let mut models: HashMap<String, ModelRegistration> = HashMap::new();
         for (key, entry) in config.models {
             let id = format!("{}/{}", entry.provider, entry.model_id);
+            let long_context = long_context_pricing(&key, &entry)?;
             let info = ModelRegistration {
                 id: id.clone(),
                 provider: entry.provider,
@@ -118,25 +188,42 @@ impl ModelRegistry {
                 supports_structured_output: entry.supports_structured_output,
                 supports_batch: entry.supports_batch,
                 max_output_tokens: entry.max_output_tokens,
+                long_context,
             };
 
             // Reject canonical-key collisions only when they would change
-            // the resolved pricing.
+            // the resolved pricing — base rates AND the long-context tier. Two
+            // aliases of one model that disagree on the tier (one flat, one
+            // tiered; or different thresholds / tier rates) would otherwise be
+            // picked by HashMap iteration order, i.e. nondeterministically.
             if let Some(existing) = models.get(&id) {
-                let pricing_matches =
-                    (existing.input_cost_per_million - info.input_cost_per_million).abs()
-                        < f64::EPSILON
-                        && (existing.output_cost_per_million - info.output_cost_per_million).abs()
-                            < f64::EPSILON;
-                if !pricing_matches {
+                let same = |a: f64, b: f64| (a - b).abs() < f64::EPSILON;
+                let base_matches =
+                    same(existing.input_cost_per_million, info.input_cost_per_million)
+                        && same(
+                            existing.output_cost_per_million,
+                            info.output_cost_per_million,
+                        );
+                let tier_matches = match (existing.long_context, info.long_context) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => {
+                        a.threshold_tokens == b.threshold_tokens
+                            && same(a.input_cost_per_million, b.input_cost_per_million)
+                            && same(a.output_cost_per_million, b.output_cost_per_million)
+                    }
+                    _ => false,
+                };
+                if !base_matches || !tier_matches {
                     return Err(ModelRegistryError::ParseError(format!(
                         "duplicate canonical key {id:?} with conflicting pricing: \
-                         entry {key:?} has input={}/output={} but a previous entry \
-                         registered input={}/output={}",
+                         entry {key:?} has input={}/output={} tier={:?} but a previous entry \
+                         registered input={}/output={} tier={:?}",
                         info.input_cost_per_million,
                         info.output_cost_per_million,
+                        info.long_context,
                         existing.input_cost_per_million,
-                        existing.output_cost_per_million
+                        existing.output_cost_per_million,
+                        existing.long_context
                     )));
                 }
             }
@@ -191,6 +278,12 @@ impl ModelRegistry {
     }
 
     /// Estimate cost for a request and return a breakdown.
+    ///
+    /// Tiered pricing picks the base or long-context rates from `input_tokens`
+    /// via the same `rates_for_prompt` the gateway's settlement path uses. The
+    /// 402 quote feeds this the gateway's prompt-token ESTIMATE; a breakdown
+    /// for a receipt feeds it provider-reported usage. Deliberately no safety
+    /// margin at the quote (see `ModelRegistration::rates_for_prompt`).
     pub fn estimate_cost(
         &self,
         model_id: &str,
@@ -200,21 +293,29 @@ impl ModelRegistry {
         let model = self
             .get(model_id)
             .ok_or_else(|| ModelRegistryError::NotFound(model_id.to_string()))?;
+        let rates = model.rates_for_prompt(input_tokens);
+        Ok(Self::breakdown(rates, input_tokens, output_tokens))
+    }
 
-        let input_cost = (input_tokens as f64 / 1_000_000.0) * model.input_cost_per_million;
-        let output_cost = (output_tokens as f64 / 1_000_000.0) * model.output_cost_per_million;
+    fn breakdown(
+        (input_rate, output_rate): (f64, f64),
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> CostBreakdown {
+        let input_cost = (input_tokens as f64 / 1_000_000.0) * input_rate;
+        let output_cost = (output_tokens as f64 / 1_000_000.0) * output_rate;
         let provider_cost = input_cost + output_cost;
         // Live multiplier: `1.0 + pct/100`, bit-exactly 1.05 at the default 5.
         let total_with_fee = provider_cost * platform_fee_multiplier();
         let platform_fee = total_with_fee - provider_cost;
 
-        Ok(CostBreakdown {
+        CostBreakdown {
             provider_cost: format!("{provider_cost:.6}"),
             platform_fee: format!("{platform_fee:.6}"),
             total: format!("{total_with_fee:.6}"),
             currency: "USDC".to_string(),
             fee_percent: platform_fee_percent(),
-        })
+        }
     }
 }
 
@@ -315,6 +416,156 @@ supports_streaming = true
         let registry = ModelRegistry::from_toml(TEST_TOML).unwrap();
         let all = registry.all();
         assert_eq!(all.len(), 2);
+    }
+
+    /// Haiku-5.5-shaped tier: $0.10/$0.50 up to 100K prompt tokens, $0.50/$2.50
+    /// for the whole request above that.
+    const TIERED_TOML: &str = r#"
+[models.anthropic-tiered]
+provider = "anthropic"
+model_id = "tiered"
+display_name = "Tiered"
+input_cost_per_million = 0.10
+output_cost_per_million = 0.50
+context_window = 1000000
+long_context_threshold_tokens = 100000
+long_context_input_cost_per_million = 0.50
+long_context_output_cost_per_million = 2.50
+"#;
+
+    #[test]
+    fn long_context_tier_loads_from_toml() {
+        let registry = ModelRegistry::from_toml(TIERED_TOML).unwrap();
+        let m = registry.get("anthropic/tiered").unwrap();
+        assert_eq!(
+            m.long_context,
+            Some(LongContextPricing {
+                threshold_tokens: 100_000,
+                input_cost_per_million: 0.50,
+                output_cost_per_million: 2.50,
+            })
+        );
+        // Flat-rate entries have no tier.
+        let flat = ModelRegistry::from_toml(TEST_TOML).unwrap();
+        assert_eq!(flat.get("openai/gpt-4o").unwrap().long_context, None);
+    }
+
+    /// MONEY-PATH PIN: the quote uses the tier for the WHOLE request once the
+    /// prompt is strictly over the threshold — input AND output — and the base
+    /// rate at or below it.
+    #[test]
+    fn estimate_cost_applies_long_context_tier_to_whole_request() {
+        let registry = ModelRegistry::from_toml(TIERED_TOML).unwrap();
+        let provider = |input: u32, output: u32| -> f64 {
+            registry
+                .estimate_cost("anthropic/tiered", input, output)
+                .unwrap()
+                .provider_cost
+                .parse()
+                .unwrap()
+        };
+        // Exactly at the threshold: base rates. 100K * 0.10/M + 1K * 0.50/M.
+        assert!((provider(100_000, 1_000) - (0.010 + 0.0005)).abs() < 1e-9);
+        // Over the threshold: tier rates on everything (input AND output).
+        // 100_002 * 0.50/M + 1K * 2.50/M = 0.050001 + 0.0025 (exact at the
+        // breakdown's 6-decimal formatting).
+        assert!((provider(100_002, 1_000) - (0.050001 + 0.0025)).abs() < 1e-9);
+        // Tiered quote strictly exceeds what the flat base rate would charge.
+        assert!(provider(100_002, 1_000) > provider(100_000, 1_000) * 4.0);
+    }
+
+    /// Two aliases of one canonical model must agree on the long-context tier
+    /// too, not just the base rates — otherwise HashMap order would pick the
+    /// tier nondeterministically at boot. Each conflict is tried in both
+    /// insertion orders so the rejection cannot depend on iteration order.
+    #[test]
+    fn duplicate_canonical_key_with_conflicting_tier_is_rejected() {
+        let alias = |body: &str| {
+            body.replace(
+                "[models.anthropic-tiered]",
+                "[models.anthropic-tiered-alias]",
+            )
+        };
+        let flat_alias = alias(
+            &TIERED_TOML
+                .replace("long_context_threshold_tokens = 100000\n", "")
+                .replace("long_context_input_cost_per_million = 0.50\n", "")
+                .replace("long_context_output_cost_per_million = 2.50\n", ""),
+        );
+        let other_threshold = alias(&TIERED_TOML.replace(
+            "long_context_threshold_tokens = 100000",
+            "long_context_threshold_tokens = 200000",
+        ));
+        let other_input_rate = alias(&TIERED_TOML.replace(
+            "long_context_input_cost_per_million = 0.50",
+            "long_context_input_cost_per_million = 0.40",
+        ));
+        let other_output_rate = alias(&TIERED_TOML.replace(
+            "long_context_output_cost_per_million = 2.50",
+            "long_context_output_cost_per_million = 2.00",
+        ));
+        for (name, conflicting) in [
+            ("None vs Some tier", flat_alias),
+            ("different threshold", other_threshold),
+            ("different tier input rate", other_input_rate),
+            ("different tier output rate", other_output_rate),
+        ] {
+            for toml in [
+                format!("{TIERED_TOML}{conflicting}"),
+                format!("{conflicting}{TIERED_TOML}"),
+            ] {
+                let err = ModelRegistry::from_toml(&toml)
+                    .expect_err(&format!("{name}: conflicting tiers must be rejected"))
+                    .to_string();
+                assert!(err.contains("conflicting pricing"), "{name}: {err}");
+            }
+        }
+
+        // An identical duplicate (same base AND same tier) still loads.
+        let identical = alias(TIERED_TOML);
+        let registry = ModelRegistry::from_toml(&format!("{TIERED_TOML}{identical}"))
+            .expect("identical-pricing aliases are allowed");
+        assert!(registry
+            .get("anthropic/tiered")
+            .unwrap()
+            .long_context
+            .is_some());
+    }
+
+    /// A half-specified tier is a load error, never a silent flat rate.
+    #[test]
+    fn partial_long_context_tier_is_rejected() {
+        let partial = TIERED_TOML.replace("long_context_output_cost_per_million = 2.50\n", "");
+        let err = ModelRegistry::from_toml(&partial).unwrap_err().to_string();
+        assert!(err.contains("must be set together"), "got: {err}");
+    }
+
+    #[test]
+    fn long_context_threshold_must_be_positive_and_below_context_window() {
+        let zero = TIERED_TOML.replace(
+            "long_context_threshold_tokens = 100000",
+            "long_context_threshold_tokens = 0",
+        );
+        assert!(ModelRegistry::from_toml(&zero).is_err());
+        let too_big = TIERED_TOML.replace(
+            "long_context_threshold_tokens = 100000",
+            "long_context_threshold_tokens = 1000000",
+        );
+        assert!(ModelRegistry::from_toml(&too_big).is_err());
+    }
+
+    #[test]
+    fn negative_or_non_finite_long_context_price_is_rejected() {
+        let negative = TIERED_TOML.replace(
+            "long_context_input_cost_per_million = 0.50",
+            "long_context_input_cost_per_million = -0.50",
+        );
+        assert!(ModelRegistry::from_toml(&negative).is_err());
+        let inf = TIERED_TOML.replace(
+            "long_context_output_cost_per_million = 2.50",
+            "long_context_output_cost_per_million = inf",
+        );
+        assert!(ModelRegistry::from_toml(&inf).is_err());
     }
 
     /// `/v1/messages` inbound-id contract: a BARE Anthropic id (the form Claude
